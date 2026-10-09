@@ -3,7 +3,7 @@
 
 import { getAudioContext } from '@/lib/audio-context'
 import { ownsAmbientCue } from '@/store/ambient'
-import { $completionSoundVariantId, resolveCompletionSoundVariantId } from '@/store/completion-sound'
+import { $completionSoundVariantId, COMPLETION_SOUND_OFF_ID, isCompletionSoundOff, resolveCompletionSoundVariantId } from '@/store/completion-sound'
 import { $hapticsMuted } from '@/store/haptics'
 
 type OscType = OscillatorType
@@ -420,7 +420,13 @@ function playVariant(variantId: number) {
 // Audition the selected variant from settings. Bypasses the haptics mute toggle so
 // sound design can be compared even when turn-end cues are silenced.
 export function previewCompletionSound(variantId?: number) {
-  playVariant(resolveCompletionSoundVariantId(variantId ?? $completionSoundVariantId.get()))
+  const resolved = resolveCompletionSoundVariantId(variantId ?? $completionSoundVariantId.get())
+
+  if (resolved === COMPLETION_SOUND_OFF_ID) {
+    return
+  }
+
+  playVariant(resolved)
 }
 
 // Plays the selected completion cue on any `message.complete`. Pass a dedupeKey
@@ -432,7 +438,17 @@ export function playCompletionSound(dedupeKey?: string) {
     return
   }
 
-  const play = () => playVariant($completionSoundVariantId.get())
+  if (isCompletionSoundOff($completionSoundVariantId.get())) {
+    return
+  }
+
+  const play = () => {
+    if (isCompletionSoundOff($completionSoundVariantId.get())) {
+      return
+    }
+
+    playVariant($completionSoundVariantId.get())
+  }
 
   if (!dedupeKey) {
     return play()

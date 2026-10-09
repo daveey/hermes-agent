@@ -8,7 +8,7 @@ import { COMPLETION_SOUND_VARIANTS, previewCompletionSound } from '@/lib/complet
 import { triggerHaptic } from '@/lib/haptics'
 import { Bell, Play } from '@/lib/icons'
 import { cn } from '@/lib/utils'
-import { $completionSoundVariantId, setCompletionSoundVariantId } from '@/store/completion-sound'
+import { $completionSoundVariantId, COMPLETION_SOUND_OFF_ID, setCompletionSoundVariantId } from '@/store/completion-sound'
 import {
   $nativeNotifyPrefs,
   NATIVE_NOTIFICATION_KINDS,
@@ -97,6 +97,7 @@ export function NotificationsSettings({ subpage }: NotificationsSettingsProps = 
                 </SelectTrigger>
 
                 <SelectContent>
+                  <SelectItem value={String(COMPLETION_SOUND_OFF_ID)}>Off</SelectItem>
                   {COMPLETION_SOUND_VARIANTS.map(variant => (
                     <SelectItem key={variant.id} value={String(variant.id)}>
                       {variant.name}
