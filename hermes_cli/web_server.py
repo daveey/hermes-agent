@@ -243,6 +243,15 @@ async def _lifespan(app: FastAPI):
     )
     hosted_room_start_thread.start()
 
+    # desktop.auto_continue.resume_on_startup: continue every turn the last backend died in the
+    # middle of, instead of waiting for the user to re-open each session (tui_gateway/startup_resume.py).
+    try:
+        from tui_gateway.startup_resume import start_startup_resume_sweep
+
+        start_startup_resume_sweep()
+    except Exception:
+        _log.warning("startup resume sweep did not start", exc_info=True)
+
     # Desktop-spawned backends fire cron jobs themselves, since the app has no
     # gateway running the scheduler. Server `hermes dashboard` is unaffected —
     # it relies on its own gateway.

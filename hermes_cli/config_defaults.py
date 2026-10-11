@@ -2671,6 +2671,9 @@ DEFAULT_CONFIG = {
             # How recent the interruption must be to auto-continue (minutes).
             "freshness_minutes": 15,
             "max_attempts": 2,  # Crash-loop breaker: max automatic re-runs of one interrupted turn.
+            # Resume every interrupted session when the backend starts (app relaunch, `hermes update`),
+            # not only the ones the user re-opens. Same freshness/attempt guards apply.
+            "resume_on_startup": False,
         },
     },
 
