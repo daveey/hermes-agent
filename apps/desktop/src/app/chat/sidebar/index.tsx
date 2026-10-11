@@ -547,6 +547,24 @@ export function ChatSidebar({
   const newSessionKbd = newSessionCombo ? comboTokens(newSessionCombo) : []
   const [searchQuery, setSearchQuery] = useState('')
   const [newSessionKbdFlash, setNewSessionKbdFlash] = useState(false)
+  const [navCollapsed, setNavCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('sidebar.nav.collapsed') === '1'
+    } catch {
+      return false
+    }
+  })
+  const toggleNavCollapsed = useCallback(() => {
+    setNavCollapsed(prev => {
+      const next = !prev
+      try {
+        localStorage.setItem('sidebar.nav.collapsed', next ? '1' : '0')
+      } catch {
+        // ignore quota / disabled storage
+      }
+      return next
+    })
+  }, [])
   const [messagingLoadMorePending, setMessagingLoadMorePending] = useState<Record<string, boolean>>({})
   const [recentsLoadMorePending, setRecentsLoadMorePending] = useState(false)
   const messagingOpenIds = useStore($sidebarMessagingOpenIds)
@@ -1577,7 +1595,7 @@ export function ChatSidebar({
         <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
           <SidebarGroupContent>
             <SidebarMenu className="gap-px">
-              {navItems.map(item => {
+              {(navCollapsed ? navItems.filter(item => item.id === 'new-session') : navItems).map(item => {
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
 
                 const active =
@@ -1669,11 +1687,30 @@ export function ChatSidebar({
                       {s.nav[item.id] ?? item.label}
                     </span>
                     {isNewSession && (
-                      <KbdGroup
-                        className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
-                        keys={newSessionKbd}
-                        size="sm"
-                      />
+                      <>
+                        <button
+                          aria-label={navCollapsed ? 'Expand nav' : 'Collapse nav'}
+                          aria-expanded={!navCollapsed}
+                          className="ml-auto flex size-5 items-center justify-center rounded text-(--ui-text-tertiary) hover:bg-(--ui-control-hover-background) hover:text-foreground [-webkit-app-region:no-drag]"
+                          onClick={event => {
+                            event.stopPropagation()
+                            event.preventDefault()
+                            toggleNavCollapsed()
+                          }}
+                          onPointerDown={event => {
+                            // Keep the new-session drag source from engaging on the chevron.
+                            event.stopPropagation()
+                          }}
+                          type="button"
+                        >
+                          <Codicon name={navCollapsed ? 'chevron-down' : 'chevron-up'} className="size-3.5" />
+                        </button>
+                        <KbdGroup
+                          className={cn('opacity-55', newSessionKbdFlash && 'opacity-100!')}
+                          keys={newSessionKbd}
+                          size="sm"
+                        />
+                      </>
                     )}
                   </SidebarMenuButton>
                 )
