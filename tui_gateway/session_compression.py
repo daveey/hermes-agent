@@ -114,6 +114,15 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     cc = getattr(agent, "context_compressor", None)
     if cc is None:
         return
+    from agent.context_compressor import ContextCompressor
+    if not isinstance(cc, ContextCompressor):
+        # A context-engine plugin (e.g. LCM) derives its own thresholds from its own config. Writing the
+        # built-in compressor's privates onto it clobbered the plugin's threshold_percent and then raised
+        # on ``_coerce_threshold_tokens_cap`` every turn. Only the agent-level context-length pin applies.
+        new_ctx = config_context_length_for_runtime(agent, cfg)
+        if new_ctx is not None:
+            agent._config_context_length = new_ctx
+        return
     # tail_mode: unknown/absent values land on the ctor default ("lean"), matching agent_init.
     default_tail = str(_compressor_ctor_default("tail_mode", "lean"))
     mode = str(compression.get("tail_mode", default_tail) or default_tail).strip().lower()

@@ -326,3 +326,48 @@ def test_apply_live_compression_config_is_self_contained():
     _apply_live_compression_config(agent, {"compression": {"enabled": True}})
     assert agent.compression_enabled is True
     assert agent.codex_responses_native_compaction is False
+
+
+class _PluginEngine:
+    """A context-engine plugin (e.g. LCM) that owns its own threshold derivation.
+
+    It deliberately lacks the built-in ContextCompressor privates (``_coerce_threshold_tokens_cap``,
+    ``_effective_threshold_percent``) that the live sync used to call unconditionally.
+    """
+
+    name = "lcm"
+
+    def __init__(self):
+        self.threshold_percent = 0.75
+        self.tail_mode = "plugin-owned"
+        self.context_length = 1_000_000
+
+
+def test_plugin_context_engine_is_not_rewritten_by_live_sync(monkeypatch):
+    engine = _PluginEngine()
+    agent = SimpleNamespace(
+        model="claude-opus-5-5",
+        provider="anthropic",
+        context_compressor=engine,
+        compression_enabled=True,
+        compression_idle_compact_after_seconds=0,
+        codex_responses_native_compaction=False,
+        codex_responses_compact_threshold=200_000,
+        _config_context_length=None,
+    )
+    session = {"agent": agent, "session_key": "session-plugin-engine"}
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"compression": {"threshold": 0.5, "tail_mode": "legacy", "idle_compact_after_seconds": 600}},
+    )
+
+    # Must not raise: the sync path used to swallow an AttributeError here and log it every turn.
+    from tui_gateway.session_compression import _apply_live_compression_config
+    _apply_live_compression_config(agent, server._load_cfg())
+    assert session["agent"] is agent
+    # Agent-level keys still adopt live config.
+    assert agent.compression_idle_compact_after_seconds == 600
+    # The plugin's own settings are untouched.
+    assert engine.threshold_percent == 0.75
+    assert engine.tail_mode == "plugin-owned"
