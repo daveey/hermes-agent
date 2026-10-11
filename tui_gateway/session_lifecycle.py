@@ -866,7 +866,14 @@ def _ws_orphan_turn_activity_is_fresh(session: dict) -> bool:
             stamp = session.get("_compute_host_activity_ns")
             return (session.get("running", False) and isinstance(stamp, int)
                     and 0 <= (time.perf_counter_ns() - stamp) / 1_000_000_000 < _WS_ORPHAN_ACTIVITY_STALE_S)
-    if not callable(summary_fn := getattr(session.get("agent"), "get_activity_summary", None)):
+    agent = session.get("agent")
+    # Awake-time first: the wall-clock summary counts host sleep as idleness, so a turn that was healthy when
+    # the lid closed looked >600s stale the instant the Mac woke and got interrupted before the Desktop could
+    # reattach (same sleep/wake class as #44183, but on the activity clock instead of the reap Timer).
+    mono = getattr(agent, "_last_activity_mono", None)
+    if isinstance(mono, (int, float)) and not isinstance(mono, bool):
+        return 0 <= time.monotonic() - float(mono) < _WS_ORPHAN_ACTIVITY_STALE_S
+    if not callable(summary_fn := getattr(agent, "get_activity_summary", None)):
         return False
     try:
         elapsed = summary_fn().get("seconds_since_activity")

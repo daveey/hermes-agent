@@ -66,6 +66,9 @@ class ActivityTrackingMixin:
                 getattr(self, "_turn_liveness_activity_generation", 0) + 1
             )
             self._last_activity_ts = time.time()
+            # Awake-time stamp: time.monotonic() stops while the host sleeps (macOS), so readers that must not
+            # count a closed lid as idleness (the WS-orphan reaper) measure against this, not the wall clock.
+            self._last_activity_mono = time.monotonic()
             self._last_activity_desc = bound_activity_description(desc)
             self._last_activity_provenance = resolved_provenance
             # Real progress invalidates a reserved abort claim; an in-flight watchdog interrupt must abandon
