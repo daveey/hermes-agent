@@ -71,10 +71,10 @@ export function SidebarWorkspaceGroup({
   // A profile previews the same handful a project does, and clicking its label
   // is how you see the rest. Workspace groups page within what's loaded unless
   // the user asked for everything.
-  const visibleSessions = isProfileGroup
-    ? sessions.slice(0, PROJECT_PREVIEW_COUNT)
-    : showAllSessions
-      ? sessions
+  const visibleSessions = showAllSessions
+    ? sessions
+    : isProfileGroup
+      ? sessions.slice(0, PROJECT_PREVIEW_COUNT)
       : lane.shown
 
   const nextCount = isProfileGroup || showAllSessions ? 0 : lane.more

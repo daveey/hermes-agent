@@ -1,8 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionInfo } from '@/hermes'
+import { $sidebarShowAllSessions } from '@/store/layout'
 import type * as ProjectsStore from '@/store/projects'
 
 import type * as Model from './model'
@@ -62,6 +63,11 @@ vi.mock('./project-menu', () => ({
 const project = { id: 'p1', label: 'Test D' } as unknown as SidebarProjectTree
 
 const session = (id: string, updated: number): SessionInfo => ({ id, updated_at: updated }) as unknown as SessionInfo
+
+// These cover the preview-capped mode ("Show all sessions" off).
+beforeEach(() => {
+  $sidebarShowAllSessions.set(false)
+})
 
 describe('ProjectOverviewRow', () => {
   afterEach(() => {

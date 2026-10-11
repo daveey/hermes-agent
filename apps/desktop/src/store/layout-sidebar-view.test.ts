@@ -25,20 +25,21 @@ beforeEach(() => {
 
 describe('the sidebar as it ships', () => {
   it('remembers expanded project previews across grouping changes and clears them on reset', () => {
-    expect($sidebarShowAllSessions.get()).toBe(false)
+    // Local default: show every session (no "..." preview cap).
+    expect($sidebarShowAllSessions.get()).toBe(true)
     setSidebarGrouping('project')
-    setSidebarShowAllSessions(true)
+    setSidebarShowAllSessions(false)
     setSidebarGrouping('date')
 
-    expect($sidebarShowAllSessions.get()).toBe(true)
+    expect($sidebarShowAllSessions.get()).toBe(false)
     expect($sidebarViewCustomized.get()).toBe(true)
-    expect(window.localStorage.getItem('hermes.desktop.sidebarShowAllSessions')).toBe('true')
+    expect(window.localStorage.getItem('hermes.desktop.sidebarShowAllSessions')).toBe('false')
 
     resetSidebarView()
 
-    expect($sidebarShowAllSessions.get()).toBe(false)
+    expect($sidebarShowAllSessions.get()).toBe(true)
     expect($sidebarViewCustomized.get()).toBe(false)
-    expect(window.localStorage.getItem('hermes.desktop.sidebarShowAllSessions')).toBe('false')
+    expect(window.localStorage.getItem('hermes.desktop.sidebarShowAllSessions')).toBe('true')
   })
 
   it('offers no reset until something actually moves off the defaults', () => {

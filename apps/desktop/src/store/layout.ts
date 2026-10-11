@@ -353,7 +353,7 @@ export const $sidebarRowMeta = modeBound('sidebarRowMeta', $sidebarRowMetaPref, 
 export const $sidebarCardRows = persistentAtom(SIDEBAR_CARD_ROWS_STORAGE_KEY, false, Codecs.bool)
 
 /** Project overview: two complete recency groups instead of three preview rows. */
-export const $sidebarShowAllSessions = persistentAtom(SIDEBAR_SHOW_ALL_SESSIONS_STORAGE_KEY, false, Codecs.bool)
+export const $sidebarShowAllSessions = persistentAtom(SIDEBAR_SHOW_ALL_SESSIONS_STORAGE_KEY, true, Codecs.bool)
 
 export function setSidebarShowAllSessions(on: boolean) {
   $sidebarShowAllSessions.set(on)
@@ -439,7 +439,7 @@ export const $sidebarViewCustomized: ReadableAtom<boolean> = computed(
     ordering !== SIDEBAR_DEFAULT_ORDERING ||
     !sameRowMeta(rowMeta, SIDEBAR_DEFAULT_ROW_META) ||
     cardRows ||
-    showAllSessions ||
+    !showAllSessions ||
     filtersActive
 )
 
@@ -947,7 +947,7 @@ export function resetSidebarView() {
   setSidebarOrdering(SIDEBAR_DEFAULT_ORDERING)
   $sidebarRowMeta.set(SIDEBAR_DEFAULT_ROW_META)
   $sidebarCardRows.set(false)
-  $sidebarShowAllSessions.set(false)
+  $sidebarShowAllSessions.set(true)
   clearSidebarFilters()
 }
 
