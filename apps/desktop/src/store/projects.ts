@@ -271,7 +271,7 @@ export function projectNameForCwd(cwd: string): null | string {
 export async function followActiveSessionCwd(cwd: string): Promise<void> {
   const target = cwd.trim()
 
-  if (!target) {
+  if (!target || consumeMoveFollowSuppression(target)) {
     return
   }
 
@@ -783,6 +783,34 @@ interface WorkspaceMovePayload {
   git_repo_root?: null | string
 }
 
+// "Move to project" relocates the session's cwd, and the backend echoes that
+// as a session.info cwd change on the selected chat — which would otherwise
+// look like an agent-driven move and yank the sidebar into the destination.
+// A move is filing, not navigation: remember the destination briefly so the
+// follow for that cwd is skipped (local fix: sidebar-move-no-follow).
+const MOVE_FOLLOW_SUPPRESS_MS = 15_000
+const moveFollowSuppressed = new Map<string, number>()
+
+function suppressMoveFollow(cwd: string): void {
+  const target = cwd.trim()
+
+  if (target) {
+    moveFollowSuppressed.set(target, Date.now() + MOVE_FOLLOW_SUPPRESS_MS)
+  }
+}
+
+function consumeMoveFollowSuppression(cwd: string): boolean {
+  const until = moveFollowSuppressed.get(cwd)
+
+  if (until === undefined) {
+    return false
+  }
+
+  moveFollowSuppressed.delete(cwd)
+
+  return until >= Date.now()
+}
+
 // Re-home a stored session into another project's root folder — the fix for a
 // chat created in the wrong directory. The backend replaces cwd + git identity
 // (so the tree's grouping follows) and re-anchors any live agent bound to the
@@ -799,6 +827,8 @@ export async function moveSessionToProject(
     throw new Error(translateNow('sidebar.projects.moveNoFolder'))
   }
 
+  suppressMoveFollow(cwd)
+
   const res = await gatewayRequest<WorkspaceMovePayload>('session.workspace.move', {
     cwd,
     session_key: sessionId,
@@ -806,6 +836,11 @@ export async function moveSessionToProject(
   })
 
   const moved = res.cwd || cwd
+
+  if (moved !== cwd) {
+    // Backend normalized the path; the session.info echo carries that form.
+    suppressMoveFollow(moved)
+  }
   setSessions(prev =>
     prev.map(s =>
       sessionMatchesStoredId(s, sessionId)

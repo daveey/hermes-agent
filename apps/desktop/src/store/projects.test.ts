@@ -3,7 +3,7 @@ import { atom } from 'nanostores'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { NO_PROJECT_ID, type SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
-import { $sidebarAgentsGrouped, setSidebarAgentsGrouped } from '@/store/layout'
+import { $sidebarAgentsGrouped, $sidebarShowAllSessions, setSidebarAgentsGrouped } from '@/store/layout'
 import { $activeGatewayProfile, $profiles, $profileScope, ALL_PROFILES, setShowAllProfiles } from '@/store/profile'
 import { $currentCwd, $selectedStoredSessionId, $sessions, applyConfiguredDefaultProjectDir } from '@/store/session'
 import { deferred } from '@/test/deferred'
@@ -22,6 +22,8 @@ import {
   deleteProject,
   enterProject,
   fetchProjectSessions,
+  followActiveSessionCwd,
+  moveSessionToProject,
   openProjectCreate,
   pickProjectFolder,
   pickProjectFolders,
@@ -94,6 +96,11 @@ const hermes = await import('@/hermes')
 const getHermesConfig = vi.mocked(hermes.getHermesConfig)
 const notifications = await import('@/store/notifications')
 const notify = vi.mocked(notifications.notify)
+
+// RPC assertions below expect the capped preview_limit ("Show all sessions" off).
+beforeEach(() => {
+  $sidebarShowAllSessions.set(false)
+})
 
 describe('project scope', () => {
   beforeEach(() => {
@@ -1293,5 +1300,58 @@ describe('tombstone pruning', () => {
     await refreshProjectTree()
 
     expect($removedSessionIds.get().has('sess-1')).toBe(false)
+  })
+})
+
+describe('moveSessionToProject keeps the sidebar scope', () => {
+  const tree: SidebarProjectTree[] = [
+    { id: 'p_src', label: 'Src', path: '/repos/src', repos: [], sessionCount: 1 },
+    { id: 'p_dest', label: 'Dest', path: '/repos/dest', repos: [], sessionCount: 0 }
+  ]
+
+  let moveHook: (() => Promise<void>) | null = null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setShowAllProfiles(false)
+    $activeGatewayProfile.set('default')
+    $projectTree.set(tree)
+    $projectScope.set('p_src')
+    moveHook = null
+    const request = vi.fn(async (method: string) => {
+      if (method === 'projects.tree') {
+        return { active_id: null, projects: tree, scoped_session_ids: [] }
+      }
+
+      if (method === 'projects.list') {
+        return { active_id: null, projects: [] }
+      }
+
+      if (method === 'session.workspace.move') {
+        await moveHook?.()
+
+        return { branch: null, cwd: '/repos/dest', git_repo_root: null }
+      }
+
+      return {}
+    })
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+  })
+
+  it('control: a live agent cwd move still follows into the new project', async () => {
+    await followActiveSessionCwd('/repos/dest')
+    expect($projectScope.get()).toBe('p_dest')
+  })
+
+  it('does not enter the destination when session.info lands during the move RPC', async () => {
+    moveHook = () => followActiveSessionCwd('/repos/dest')
+    await moveSessionToProject('s1', 'p_dest')
+    expect($projectScope.get()).toBe('p_src')
+  })
+
+  it('does not enter the destination when session.info lands after the move RPC', async () => {
+    await moveSessionToProject('s1', 'p_dest')
+    await followActiveSessionCwd('/repos/dest')
+    expect($projectScope.get()).toBe('p_src')
   })
 })
