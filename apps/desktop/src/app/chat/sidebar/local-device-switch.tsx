@@ -71,15 +71,15 @@ export function useLocalDeviceSwitch() {
       return false
     }
 
-    const freshSession = target.replaceCenter === true || target.profile == null || target.profile === 'default'
-
-    if (!bootstrapNeeded && !freshSession) {
+    // [daveey] An installed runtime switches straight through — the "fresh
+    // session" confirm was pure friction. Only a real install still confirms.
+    if (!bootstrapNeeded) {
       return true
     }
 
     return new Promise(resolve => {
       waiter.current = resolve
-      setPrompt({ ...target, kind: bootstrapNeeded ? 'install' : 'switch' })
+      setPrompt({ ...target, kind: 'install' })
     })
   }
 
