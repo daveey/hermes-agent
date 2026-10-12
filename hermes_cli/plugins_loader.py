@@ -546,10 +546,11 @@ class PluginLoaderMixin:
 
     @staticmethod
     def _is_manifest_only_language_pack(manifest: PluginManifest) -> bool:
-        """A ``provides_locales`` plugin with no ``__init__.py`` is complete without Python — like a
-        manifest-only desktop plugin, it loads from its declared files alone."""
-        return bool(manifest.provides_locales and manifest.path
-                    and not (Path(manifest.path) / "__init__.py").is_file())
+        """A plugin with no ``__init__.py`` that is complete without Python: a ``provides_locales`` pack
+        (loads from ``locales/``) or a desktop-only package (Electron loads ``desktop/plugin.js``)."""
+        if not manifest.path or (Path(manifest.path) / "__init__.py").is_file():
+            return False
+        return bool(manifest.provides_locales) or (Path(manifest.path) / "desktop" / "plugin.js").is_file()
 
     def _register_declared_locales(self, manifest: PluginManifest, ctx) -> None:
         """``provides_locales`` -> ``ctx.register_locale_dir(<plugin>/locales)``; a declared id with no file
