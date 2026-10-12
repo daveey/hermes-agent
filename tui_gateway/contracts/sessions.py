@@ -620,6 +620,28 @@ method("session.interrupt", params=SessionInterruptParams, result=SessionInterru
        doc="Stop the running turn (and streaming TTS); retires the crash-recovery marker.")
 
 
+class TakeOverStatus(WireEnum):
+    taken_over = "taken_over"
+    already_owner = "already_owner"
+
+
+class SessionPreviousOwner(Result):
+    surface: str
+    pid: int | None = None
+    started_at: float | None = None
+
+
+class SessionTakeOverResult(Result):
+    status: TakeOverStatus
+    previous_owner: SessionPreviousOwner | None = None
+    acknowledged: bool
+
+
+method("session.take_over", params=SessionParams, result=SessionTakeOverResult,
+       doc="Move this chat's active-session lease here from another Hermes window/process; the old owner "
+           "stops its turn and acknowledges (``acknowledged`` false when it did not within the timeout).")
+
+
 class CorrectionStatus(WireEnum):
     queued = "queued"
     redirected = "redirected"

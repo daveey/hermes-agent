@@ -3513,6 +3513,17 @@ export interface SessionInterruptResult {
   turn_isolation?: boolean | null
 }
 export type InterruptStatus = 'interrupted' | 'not_interrupted'
+export interface SessionTakeOverResult {
+  status: TakeOverStatus
+  previous_owner?: SessionPreviousOwner | null
+  acknowledged: boolean
+}
+export type TakeOverStatus = 'taken_over' | 'already_owner'
+export interface SessionPreviousOwner {
+  surface: string
+  pid?: number | null
+  started_at?: number | null
+}
 export interface SessionCorrectionParams {
   session_id: string
   profile?: string | null
@@ -4660,9 +4671,20 @@ export interface SetupReadyPayload {
   finished_at: number
   [key: string]: unknown
 }
-/** Every ``_emit("error", …)`` site sets exactly ``message``. */
+/** Every ``_emit("error", …)`` site sets ``message``; ``error_surface`` rides when the gateway already knows the machine code (the takeover watcher's ``SESSION_NOT_OWNED``). */
 export interface ErrorPayload {
   message: string
+  error_surface?: ErrorSurface | null
+}
+/** ``agent/error_surface.py::_surface`` — advisory {layer, code, retryable} (+ identity, + auth hint, + ``resets_at`` epoch seconds when the provider named when its limit lifts). */
+export interface ErrorSurface {
+  layer: string
+  code: string
+  retryable: boolean
+  provider?: string | null
+  model?: string | null
+  resets_at?: number | null
+  [key: string]: unknown
 }
 /** ``tui_gateway/model_switch.py`` capability-refresh notice. */
 export interface NoticePayload {
@@ -4709,16 +4731,6 @@ export interface BillingBlock {
   is_nous: boolean
   message: string
   unverified?: boolean | null
-}
-/** ``agent/error_surface.py::_surface`` — advisory {layer, code, retryable} (+ identity, + auth hint, + ``resets_at`` epoch seconds when the provider named when its limit lifts). */
-export interface ErrorSurface {
-  layer: string
-  code: string
-  retryable: boolean
-  provider?: string | null
-  model?: string | null
-  resets_at?: number | null
-  [key: string]: unknown
 }
 /** Committed SQLite row addresses for the agent's current-turn suffix. Missing ids are unproven, never negative acknowledgements. ``complete`` permits retiring the whole local turn only when the original turn boundary, every row and final body are still accounted for; compaction, redirects and partial writes conservatively leave it false. Row ids are scoped to the owning profile's store, as in ``SessionMessage.row_id``. */
 export interface PersistedTurn {
@@ -5410,6 +5422,8 @@ export interface RpcMethods {
   'session.status': { params: SessionStatusParams; result: SessionStatusResult }
   /** Inject text into the next tool result without interrupting the turn. */
   'session.steer': { params: SessionCorrectionParams; result: SessionCorrectionResult }
+  /** Move this chat's active-session lease here from another Hermes window/process; the old owner stops its turn and acknowledges (``acknowledged`` false when it did not within the timeout). */
+  'session.take_over': { params: SessionParams; result: SessionTakeOverResult }
   /** Read or set a live session's title; a title set before the row exists is queued. */
   'session.title': { params: SessionTitleParams; result: SessionTitleResult }
   /** Drop the last user turn (and everything after it) from an idle session. */
@@ -5727,6 +5741,7 @@ export const RPC_METHODS = [
   'session.start_chat',
   'session.status',
   'session.steer',
+  'session.take_over',
   'session.title',
   'session.undo',
   'session.usage',

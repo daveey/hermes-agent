@@ -3643,6 +3643,24 @@
       }
     },
     {
+      "name": "session.take_over",
+      "summary": "Move this chat's active-session lease here from another Hermes window/process; the old owner stops its turn and acknowledges (``acknowledged`` false when it did not within the timeout).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionTakeOverResult"
+        }
+      }
+    },
+    {
       "name": "session.title",
       "summary": "Read or set a live session's title; a title set before the row exists is queued.",
       "params": [
@@ -13944,11 +13962,22 @@
       },
       "ErrorPayload": {
         "additionalProperties": false,
-        "description": "Every ``_emit(\"error\", \u2026)`` site sets exactly ``message``.",
+        "description": "Every ``_emit(\"error\", \u2026)`` site sets ``message``; ``error_surface`` rides when the gateway\nalready knows the machine code (the takeover watcher's ``SESSION_NOT_OWNED``).",
         "properties": {
           "message": {
             "title": "Message",
             "type": "string"
+          },
+          "error_surface": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorSurface"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -31768,6 +31797,44 @@
         "title": "SessionParams",
         "type": "object"
       },
+      "SessionPreviousOwner": {
+        "additionalProperties": false,
+        "properties": {
+          "surface": {
+            "title": "Surface",
+            "type": "string"
+          },
+          "pid": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pid"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Started At"
+          }
+        },
+        "required": [
+          "surface"
+        ],
+        "title": "SessionPreviousOwner",
+        "type": "object"
+      },
       "SessionReclaimedPayload": {
         "additionalProperties": false,
         "description": "``session_lifecycle._announce_session_reclaimed`` (broadcast).",
@@ -32394,6 +32461,35 @@
           "output"
         ],
         "title": "SessionStatusResult",
+        "type": "object"
+      },
+      "SessionTakeOverResult": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/TakeOverStatus"
+          },
+          "previous_owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionPreviousOwner"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "acknowledged": {
+            "title": "Acknowledged",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "acknowledged"
+        ],
+        "title": "SessionTakeOverResult",
         "type": "object"
       },
       "SessionTitleParams": {
@@ -36596,6 +36692,14 @@
         ],
         "title": "SystemBatteryResult",
         "type": "object"
+      },
+      "TakeOverStatus": {
+        "enum": [
+          "taken_over",
+          "already_owner"
+        ],
+        "title": "TakeOverStatus",
+        "type": "string"
       },
       "TaskIdResult": {
         "additionalProperties": false,

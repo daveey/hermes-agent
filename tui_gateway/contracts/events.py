@@ -90,9 +90,11 @@ event("free_tier.challenge", FreeTierChallengePayload,
 
 
 class ErrorPayload(Payload):
-    """Every ``_emit("error", …)`` site sets exactly ``message``."""
+    """Every ``_emit("error", …)`` site sets ``message``; ``error_surface`` rides when the gateway
+    already knows the machine code (the takeover watcher's ``SESSION_NOT_OWNED``)."""
 
     message: str
+    error_surface: ErrorSurface | None = None
 
 
 event("error", ErrorPayload, doc="A session-level failure outside a turn (agent init, model switch, compression, resume).")
@@ -159,6 +161,9 @@ class ErrorSurface(Payload):
     model: str | None = None
     resets_at: float | None = None
     model_config = Payload.model_config | {"extra": "allow"}
+
+
+ErrorPayload.model_rebuild()  # its error_surface field names ErrorSurface, declared after it
 
 
 class BillingBlock(Payload):

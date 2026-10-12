@@ -147,3 +147,5 @@ _correction_method("session.redirect", "redirect", "redirected",
 def register(server) -> None:
     """Publish this module's helpers onto ``server`` (rebound to its globals) and install handlers."""
     bind_module(globals(), server, skip=("_",))
+    from . import methods_session_takeover  # cross-process "Take over here" + its revocation watcher
+    methods_session_takeover.register(server)

@@ -193,7 +193,7 @@ _LONG_HANDLERS = frozenset({
     "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
     "session.resume", "session.save", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
     "onboarding.ensure_setup_profile", "onboarding.ensure_setup_session", "onboarding.reset_setup_profile",
-    "session.start_chat",
+    "session.start_chat", "session.take_over",  # take_over waits for the old owner's ack
     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
     "shared_metrics.set",  # consent reconcile waits on the metrics store's write lock
 })

@@ -574,6 +574,141 @@ def try_acquire_active_session(
     return lease, None
 
 
+def take_over_active_session(
+    *, session_id: str, surface: str, metadata: Optional[dict[str, Any]] = None,
+    registry_home: str | Path | None = None, track_liveness: bool = False, config: Any = None,
+) -> tuple[Optional[ActiveSessionLease], list[dict[str, Any]], Optional[ActiveSessionRefusal]]:
+    """Explicit user takeover: ``(lease, removed_entries, None)`` or ``(None, [], refusal)``.
+
+    Same lock and same strict live read as :func:`try_acquire_active_session`, so an unreadable
+    registry still fails CLOSED. Every live entry for ``session_id`` is replaced by one for this
+    process whose metadata names the displaced leases (``took_over_from``); the displaced owners
+    notice via :func:`find_takeover_of` and stop writing. The capacity cap does not apply when an
+    entry was displaced (net slot count is unchanged); with nothing to displace this is a normal
+    acquire, cap included. A same-writer entry is re-entrant and displaces nothing.
+    """
+    key = str(session_id or "")
+    if not key:
+        lease, refusal = try_acquire_active_session(
+            session_id=key, surface=surface, config=config, metadata=metadata,
+            registry_home=registry_home, track_liveness=track_liveness)
+        return lease, [], refusal  # type: ignore[return-value]
+    lease_id = uuid.uuid4().hex
+    state_path, lock_path = _lease_paths(registry_home=registry_home)
+    lease = ActiveSessionLease(
+        lease_id=lease_id, session_id=key, surface=str(surface), state_path=state_path,
+        lock_path=lock_path, track_liveness=track_liveness,
+    )
+    with _FileLock(lock_path):
+        try:
+            loaded = _read_live_entries(
+                state_path, track_liveness=track_liveness,
+                warn="Active-session registry is unavailable; refusing the takeover rather than "
+                     "risking a concurrent writer",
+                target_session_id=key,
+            )
+        except ActiveSessionRegistryError:
+            logger.warning("Active-session registry is unavailable; refusing the takeover of %s", key)
+            loaded = None
+        if loaded is None:
+            return None, [], ActiveSessionRefusal(
+                "Hermes could not read the active-session registry at "
+                f"{state_path}, so it cannot safely move this session here. Fix or remove that "
+                "file and try again.",
+                SESSION_COORDINATION_UNAVAILABLE,
+            )
+        entries = loaded[1]
+        held = [e for e in entries if str(e.get("session_id") or "") == key]
+        # The same writer is not a previous owner (re-entrancy, exactly as in try_acquire).
+        owned = [e for e in held if not _is_same_writer(e, metadata)]
+        if held and not owned:
+            entry = _lease_entry(lease_id=lease_id, session_id=key, surface=str(surface),
+                                 metadata=metadata, track_liveness=track_liveness)
+            kept = [e for e in entries if str(e.get("session_id") or "") != key]
+            _write_entries(state_path, [*kept, entry])
+            return lease, [], None
+        if not held:
+            max_sessions = resolve_max_concurrent_sessions(config)
+            if max_sessions is not None and len(entries) >= max_sessions:
+                _write_entries(state_path, entries)
+                return None, [], ActiveSessionRefusal(
+                    active_session_limit_message(len(entries), max_sessions, entries),
+                    MAX_CONCURRENT_SESSIONS)
+        took_over_from = [str(e.get("lease_id") or "") for e in owned]
+        md = dict(metadata or {})
+        if owned:
+            md.update(took_over_from=took_over_from, took_over_at=time.time())
+        entry = _lease_entry(lease_id=lease_id, session_id=key, surface=str(surface),
+                             metadata=md or None, track_liveness=track_liveness)
+        kept = [e for e in entries if str(e.get("session_id") or "") != key]
+        kept.append(entry)
+        _write_entries(state_path, kept)
+    if owned:
+        logger.info("Session %s taken over by pid=%s from lease(s) %s", key, os.getpid(), took_over_from)
+    return lease, owned, None
+
+
+def _registry_state_path(registry_home: str | Path | None, state_path: str | Path | None) -> Path:
+    return Path(state_path) if state_path is not None else _state_path(registry_home)
+
+
+def find_takeover_of(
+    lease_id: str, *, registry_home: str | Path | None = None, state_path: str | Path | None = None,
+) -> Optional[dict[str, Any]]:
+    """The entry that displaced ``lease_id`` (its ``metadata.took_over_from`` names it), else None.
+    Lock-free, tolerant read: a polling watcher must never block writers or crash on a torn file."""
+    target = str(lease_id or "")
+    if not target:
+        return None
+    for entry in _read_entries(_registry_state_path(registry_home, state_path)):
+        taken = (entry.get("metadata") or {}).get("took_over_from") if isinstance(entry.get("metadata"), dict) else None
+        if isinstance(taken, list) and target in taken:
+            return entry
+    return None
+
+
+def acknowledge_takeover(
+    old_lease_id: str, *, registry_home: str | Path | None = None, state_path: str | Path | None = None,
+) -> bool:
+    """Record (under the registry lock) that the displaced owner of ``old_lease_id`` has stopped:
+    appends it to the new entry's ``metadata.handoff_acked``. False when no entry names it."""
+    path = _registry_state_path(registry_home, state_path)
+    target = str(old_lease_id or "")
+    with _FileLock(path.parent / "active_sessions.lock"):
+        try:
+            entries = _read_entries(path, strict=True)
+        except ActiveSessionRegistryError:
+            logger.warning("Active-session registry unreadable; cannot acknowledge takeover of %s", target)
+            return False
+        for entry in entries:
+            md = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else None
+            if md is None or target not in (md.get("took_over_from") or []):
+                continue
+            acked = [str(x) for x in (md.get("handoff_acked") or [])]
+            if target not in acked:
+                acked.append(target)
+                md["handoff_acked"] = acked
+                entry["updated_at"] = time.time()
+                _write_entries(path, entries)
+            return True
+    return False
+
+
+def takeover_acknowledged(new_lease: ActiveSessionLease, old_entries: list[dict[str, Any]]) -> bool:
+    """True when every displaced lease acked the handoff, or its owner process is gone."""
+    if not old_entries:
+        return True
+    own = next((e for e in _read_entries(_registry_state_path(None, new_lease.state_path))
+                if str(e.get("lease_id") or "") == new_lease.lease_id), None)
+    md = (own or {}).get("metadata")
+    acked = set((md.get("handoff_acked") or []) if isinstance(md, dict) else [])
+    return all(
+        str(old.get("lease_id") or "") in acked
+        or _pid_liveness(old.get("pid"), old.get("process_start_time"), lenient=True) is False
+        for old in old_entries
+    )
+
+
 def release_active_session(lease: ActiveSessionLease) -> None:
     # Prefer the registry the lease was acquired against: the caller may be
     # running under a profile HERMES_HOME override.
