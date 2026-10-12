@@ -28,11 +28,11 @@ describe('KEYBIND_ACTIONS', () => {
     expect(missing).toEqual([])
   })
 
-  it('keeps session archive registered and unbound by default', () => {
+  it('keeps session archive registered and bound to ⌘⇧A by default', () => {
     const action = keybindAction('session.archive')
 
-    expect(action).toMatchObject({ category: 'session', defaults: [] })
-    expect(defaultBindings()['session.archive']).toEqual([])
+    expect(action).toMatchObject({ category: 'session', defaults: ['mod+shift+a'] })
+    expect(defaultBindings()['session.archive']).toEqual(['mod+shift+a'])
     expect(en.keybinds.actions['session.archive']).toBe('Archive current session')
     expect(KEYBIND_ACTIONS.filter(candidate => candidate.id === 'session.archive')).toHaveLength(1)
   })

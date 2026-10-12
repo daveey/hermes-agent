@@ -134,7 +134,8 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // irreversible-feeling, mouse-only action doesn't silently claim a chord for
   // every user — surfaced in the panel for opt-in binding (the issue suggests
   // ⌘⇧⌫ / Ctrl+Shift+⌫).
-  { id: 'session.archive', category: 'session', defaults: [] },
+  // Fork default: ⌘⇧A — "a" for archive (upstream ships it unbound).
+  { id: 'session.archive', category: 'session', defaults: ['mod+shift+a'] },
   // ⌘⇧P — "p" for project: re-home the selected session into another project
   // through a typeahead palette page (same move as the row menu's submenu).
   { id: 'session.moveToProject', category: 'session', defaults: ['mod+shift+p'] },
