@@ -81,6 +81,9 @@ import {
 } from '@/store/session'
 import { $focusedStoredSessionId } from '@/store/session-focus'
 import { openSessionRename } from '@/store/session-rename'
+import { nextSidebarSessionId } from '@/store/sidebar-visible-order'
+
+const currentSessionForStep = () => $selectedStoredSessionId.get() || $focusedStoredSessionId.get()
 import { reopenLastClosedTile } from '@/store/session-states'
 import {
   $switcherOpen,
@@ -334,6 +337,11 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'session.focusSearch': requestSessionSearchFocus,
     'session.togglePin': deps.toggleSelectedPin,
     'session.archive': deps.archiveSelectedSession,
+    // ⌘] / ⌘[ (needs-you first) and ⌘⇧] / ⌘⇧[ (any) — sidebar order, wrapping.
+    'session.nextNeedsYou': () => goToSession(nextSidebarSessionId(currentSessionForStep(), 1, false)),
+    'session.prevNeedsYou': () => goToSession(nextSidebarSessionId(currentSessionForStep(), -1, false)),
+    'session.nextSession': () => goToSession(nextSidebarSessionId(currentSessionForStep(), 1, true)),
+    'session.prevSession': () => goToSession(nextSidebarSessionId(currentSessionForStep(), -1, true)),
     // ⌘⇧N: rename the selected (else focused) session, AI name pre-filled.
     'session.rename': () => {
       const sessionId = $selectedStoredSessionId.get() || $focusedStoredSessionId.get()

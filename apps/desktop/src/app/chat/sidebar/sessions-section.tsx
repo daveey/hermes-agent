@@ -1,7 +1,7 @@
 import type { useSensors } from '@dnd-kit/core'
 import { useStore } from '@nanostores/react'
 import type * as React from 'react'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { type NewSessionSplitHandler, startNewSessionDrag } from '@/app/chat/new-session-drag'
 import { SidebarPanelLabel } from '@/app/shell/sidebar-label'
@@ -29,6 +29,7 @@ import {
 } from '@/store/layout'
 import { sessionPinId } from '@/store/session'
 import { $sessionDotStateById, hasLiveTurn } from '@/store/session-dot-state'
+import { publishSidebarSection, unpublishSidebarSection } from '@/store/sidebar-visible-order'
 
 import { SidebarDateDivider, SidebarSectionMeta } from './chrome'
 import { GatewayProfileGroups } from './gateway-groups'
@@ -449,6 +450,20 @@ export function SidebarSessionsSection({
   const sortableRowIds = useMemo(() => reorderableRowIds(visibleRows), [visibleRows])
   const allSortableRowIds = useMemo(() => reorderableRowIds(flatRows), [flatRows])
 
+  // ⌘] / ⌘[ step through the sidebar in the order it's drawn: publish this
+  // section's visible rows (branches included) with an anchor for DOM order.
+  const [orderKey] = useState(() => Symbol('sidebar-section'))
+  const orderAnchorRef = useRef<HTMLSpanElement>(null)
+
+  useEffect(() => {
+    publishSidebarSection(orderKey, {
+      anchor: orderAnchorRef.current,
+      ids: sectionOpen ? visibleRows.flatMap(row => (row.kind === 'session' ? [row.entry.session.id] : [])) : []
+    })
+  }, [orderKey, sectionOpen, visibleRows])
+
+  useEffect(() => () => unpublishSidebarSection(orderKey), [orderKey])
+
   const persistSessionOrder = useCallback(
     (ids: string[]) => onReorderSessions?.(mergeVisibleReorder(allSortableRowIds, ids)),
     [allSortableRowIds, onReorderSessions]
@@ -625,6 +640,7 @@ export function SidebarSessionsSection({
 
   return (
     <SidebarGroup className={rootClassName}>
+      <span aria-hidden className="hidden" data-sidebar-order-anchor="" ref={orderAnchorRef} />
       <SidebarSectionHeader
         action={headerAction}
         collapsible={collapsible}

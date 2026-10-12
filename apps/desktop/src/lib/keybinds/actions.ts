@@ -108,8 +108,10 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   ...TAB_SLOT_ACTIONS,
   { id: 'profile.default', category: 'profiles', defaults: ['mod+d'] },
   ...PROFILE_SWITCH_ACTIONS,
-  { id: 'profile.next', category: 'profiles', defaults: ['mod+shift+]'] },
-  { id: 'profile.prev', category: 'profiles', defaults: ['mod+shift+['] },
+  // Fork: ⌘⇧] / ⌘⇧[ step sessions (session.nextSession/prevSession); the
+  // profile steppers ship unbound (rebindable).
+  { id: 'profile.next', category: 'profiles', defaults: [] },
+  { id: 'profile.prev', category: 'profiles', defaults: [] },
   { id: 'profile.toggleAll', category: 'profiles', defaults: ['mod+shift+0'] },
   { id: 'profile.create', category: 'profiles', defaults: [] },
 
@@ -128,6 +130,13 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   { id: 'session.prev', category: 'session', defaults: ['ctrl+shift+tab', 'ctrl+pageup'] },
   ...SESSION_SLOT_ACTIONS,
   { id: 'session.focusSearch', category: 'session', defaults: ['mod+shift+f'] },
+  // ⌘] / ⌘[ — next / previous sidebar session that needs you (blocking prompt
+  // or finished-unread), wrapping; falls back to the plain neighbour. ⇧ adds
+  // "any session": the plain neighbour in sidebar order.
+  { id: 'session.nextNeedsYou', category: 'session', defaults: ['mod+]'] },
+  { id: 'session.prevNeedsYou', category: 'session', defaults: ['mod+['] },
+  { id: 'session.nextSession', category: 'session', defaults: ['mod+shift+]'] },
+  { id: 'session.prevSession', category: 'session', defaults: ['mod+shift+['] },
   { id: 'session.togglePin', category: 'session', defaults: [] },
   // ⌘⇧N — "n" for name: rename the selected session, pre-filled with an
   // AI-suggested short name (`session.title.suggest`).
