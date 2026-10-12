@@ -127,6 +127,10 @@ def _stop_turns_before_exit(budget_s: float | None = None) -> None:
         running = [(sid, s) for sid, s in _sessions.items() if s.get("running")]
     threads = []
     for sid, session in running:
+        # A backend exit is not a user Stop: keep the crash marker so auto-continue resumes this turn on the
+        # next boot (the interrupted turn's terminal frame would otherwise retire it).
+        with contextlib.suppress(Exception), session["history_lock"]:
+            session["_exit_keeps_turn_marker"] = True
         with contextlib.suppress(Exception):
             _interrupt_session_turn(sid, session)
         if (t := session.get("_run_thread")) is not None and t is not threading.current_thread():
