@@ -5144,7 +5144,7 @@ export const deOverrides = {
         },
         SESSION_NOT_OWNED: {
           title: 'Dieser Chat ist woanders offen',
-          body: 'Dieser Chat ist gerade in einem anderen Hermes-Fenster oder Terminal geöffnet. Schließen Sie ihn dort und senden Sie Ihre Nachricht erneut, oder starten Sie hier einen neuen Chat.'
+          body: 'Dieser Chat ist in einem anderen Hermes-Fenster oder Terminal geöffnet. Übernehmen Sie ihn hier, oder starten Sie einen neuen Chat.'
         },
         disk_full: {
           title: 'Festplatte voll',
@@ -5198,6 +5198,9 @@ export const deOverrides = {
       errorRetryScheduled: (time: string, wait: string) => `Neuer Versuch um ${time} – in ${wait}`,
       errorRetryScheduledCancel: 'Abbrechen',
       errorStartNewSession: 'Neue Session starten',
+      errorTakeOver: 'Hier übernehmen',
+      errorTakeOverUnconfirmed: 'Das andere Fenster hat nicht bestätigt; es schließt möglicherweise noch ab.',
+      errorTakeOverFailed: 'Chat konnte nicht übernommen werden',
       errorSwitchProvider: 'Anbieter wechseln',
       errorChooseModel: 'Modell wählen',
       errorCompressConversation: 'Gespräch komprimieren',

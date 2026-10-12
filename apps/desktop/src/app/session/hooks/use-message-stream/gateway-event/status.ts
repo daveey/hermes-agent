@@ -2,7 +2,7 @@ import { isSessionNotOwnedError } from '@/app/session/hooks/use-prompt-actions/u
 import { runtimeTranslations, translateNow } from '@/i18n'
 import { textPart } from '@/lib/chat-messages'
 import { coerceGatewayText } from '@/lib/chat-runtime'
-import type { ErrorSurface } from '@/lib/error-surface'
+import { type ErrorSurface, parseErrorSurface } from '@/lib/error-surface'
 import { errorCardText } from '@/lib/error-surface-copy'
 import { isProviderSetupErrorCode, isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { type AgentNoticePayload, clearAgentNotice, nativeNoticeInput, showAgentNotice } from '@/store/agent-notices'
@@ -285,17 +285,7 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
     // sentence: a blank install must reach onboarding, not a toast it cannot act on.
     const looksLikeProviderSetup = isProviderSetupErrorCode(payload?.code) || isProviderSetupErrorMessage(errorMessage)
 
-    // The gateway's `error` event carries no error_surface (prompt_turn.py
-    // emits it for pre-turn refusals). Recover the two codes it CAN mean from
-    // the text so the card and toast get the same plain copy + button gating
-    // as a classified turn: a live-owner refusal (SESSION_NOT_OWNED, #106217)
-    // is deterministic — Retry hits the same wall, only a new chat helps —
-    // and disk-full is a machine problem, not a provider one.
-    const surface: ErrorSurface | null = isSessionNotOwnedError(new Error(errorMessage))
-      ? { code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false }
-      : isDiskFullErrorMessage(errorMessage)
-        ? { code: 'disk_full', layer: 'disk', retryable: false }
-        : null
+    const surface = gatewayErrorSurface(payload, errorMessage)
 
     // When a code was recovered, the glossed card sentence explains it better
     // than the raw refusal. When none was, the server's own text IS the plain
@@ -365,4 +355,25 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
   }
 
   return false
+}
+
+// The gateway's own verdict when the `error` event carries one (the takeover watcher's
+// SESSION_NOT_OWNED after another window took this chat over). Otherwise the event carries
+// no error_surface (prompt_turn.py emits it for pre-turn refusals): recover the two codes it
+// CAN mean from the text so the card and toast get the same plain copy + button gating as a
+// classified turn — a live-owner refusal (SESSION_NOT_OWNED, #106217) is deterministic (Retry
+// hits the same wall; take over or start a new chat), and disk-full is a machine problem, not
+// a provider one.
+function gatewayErrorSurface(payload: unknown, errorMessage: string): ErrorSurface | null {
+  const sent = parseErrorSurface((payload as { error_surface?: unknown } | undefined)?.error_surface)
+
+  if (sent) {
+    return sent
+  }
+
+  if (isSessionNotOwnedError(new Error(errorMessage))) {
+    return { code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false }
+  }
+
+  return isDiskFullErrorMessage(errorMessage) ? { code: 'disk_full', layer: 'disk', retryable: false } : null
 }

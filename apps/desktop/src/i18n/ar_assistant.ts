@@ -61,6 +61,9 @@ export const arAssistant = {
       errorRetryScheduled: (time, wait) => `ستتم إعادة المحاولة عند ${time} — بعد ${wait}`,
       errorRetryScheduledCancel: 'إلغاء',
       errorStartNewSession: 'بدء جلسة جديدة',
+      errorTakeOver: 'المتابعة هنا',
+      errorTakeOverUnconfirmed: 'لم تؤكد النافذة الأخرى؛ ربما لا تزال تُنهي عملها.',
+      errorTakeOverFailed: 'تعذّر نقل هذه المحادثة إلى هنا',
       errorSwitchProvider: 'تبديل المزوّد',
       errorSignInAgain: provider => `تسجيل الدخول إلى ${provider} مجدداً`,
       errorOauthExpired: provider =>

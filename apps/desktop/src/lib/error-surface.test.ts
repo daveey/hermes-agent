@@ -215,3 +215,29 @@ describe('limit reset (#98852)', () => {
     ).toBeUndefined()
   })
 })
+
+describe('take over (SESSION_NOT_OWNED)', () => {
+  it('offers Take over here (plus a new chat, never Retry) for a chat another window owns', () => {
+    const plan = errorRecoveryPlan({ code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false })
+    expect(plan.takeOver).toBe(true)
+    expect(plan.startNewSession).toBe(true)
+    expect(plan.retry).toBe(false)
+  })
+
+  it('offers it for no other code', () => {
+    const others: ErrorSurface[] = [
+      ...ERROR_CODE_KEYS.filter(code => code !== 'SESSION_NOT_OWNED').map(code => ({
+        code,
+        layer: 'provider' as const,
+        retryable: false
+      })),
+      { code: 'unknown', layer: 'gateway', retryable: true }
+    ]
+
+    for (const surface of others) {
+      expect(errorRecoveryPlan(surface).takeOver).toBe(false)
+    }
+
+    expect(errorRecoveryPlan(null).takeOver).toBe(false)
+  })
+})

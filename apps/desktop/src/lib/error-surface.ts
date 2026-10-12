@@ -252,6 +252,9 @@ export interface ErrorRecoveryPlan {
   signInAgain: boolean
   /** Open the free-tier sign-in dialog (free_tier_* codes): signing in is free and lifts the refusal. */
   signInFreeTier: boolean
+  /** Move this chat's lease here from the window/process holding it (session.take_over), then re-run
+   *  the refused prompt (SESSION_NOT_OWNED). */
+  takeOver: boolean
   /** Open the live session model menu (switches THIS session via
    *  model.switch); Settings → Models deep link fallback when no chat surface
    *  is on screen. */
@@ -266,7 +269,7 @@ const SWITCH_PROVIDER_LAYERS: readonly ErrorSurfaceLayer[] = ['auth', 'billing',
 // an unchanged retry is known to reproduce it for the user (too long a
 // conversation, a blocked prompt, a chat another surface owns).
 const CODE_PLANS: Partial<Record<ErrorCodeKey, Partial<ErrorRecoveryPlan>>> = {
-  SESSION_NOT_OWNED: { retry: false, startNewSession: true },
+  SESSION_NOT_OWNED: { retry: false, startNewSession: true, takeOver: true },
   content_policy_blocked: { editMessage: true, retry: false },
   context_overflow: { compress: true, retry: false, startNewSession: true },
   disk_full: { openHermesFolder: true, retry: true },
@@ -293,6 +296,7 @@ export function errorRecoveryPlan(surface: ErrorSurface | null | undefined): Err
     signInFreeTier: isFreeTierSurface(surface),
     startNewSession: false,
     switchProvider: surface != null && SWITCH_PROVIDER_LAYERS.includes(surface.layer),
+    takeOver: false,
     updateApiKey: apiKeyRejected
   }
 

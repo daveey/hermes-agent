@@ -5137,7 +5137,7 @@ export const esOverrides = {
         },
         SESSION_NOT_OWNED: {
           title: 'Este chat está abierto en otro sitio',
-          body: 'Este chat está abierto en otra ventana de Hermes o en un terminal. Ciérralo allí y vuelve a enviar el mensaje, o empieza un chat nuevo aquí.'
+          body: 'Este chat está abierto en otra ventana de Hermes o en un terminal. Continúalo aquí o empieza un chat nuevo.'
         },
         disk_full: {
           title: 'Disco lleno',
@@ -5191,6 +5191,9 @@ export const esOverrides = {
       errorRetryScheduled: (time: string, wait: string) => `Reintentando a las ${time}, dentro de ${wait}`,
       errorRetryScheduledCancel: 'Cancelar',
       errorStartNewSession: 'Iniciar sesión nueva',
+      errorTakeOver: 'Continuar aquí',
+      errorTakeOverUnconfirmed: 'La otra ventana no lo confirmó; puede que aún esté terminando.',
+      errorTakeOverFailed: 'No se pudo traer este chat aquí',
       errorSwitchProvider: 'Cambiar proveedor',
       errorChooseModel: 'Elegir un modelo',
       errorCompressConversation: 'Comprimir conversación',

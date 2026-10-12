@@ -3556,6 +3556,9 @@ export const jaOverrides = {
       errorRetryScheduled: (time, wait) => `${time} に再試行 — 残り ${wait}`,
       errorRetryScheduledCancel: 'キャンセル',
       errorStartNewSession: '新しいセッションを開始',
+      errorTakeOver: 'ここで引き継ぐ',
+      errorTakeOverUnconfirmed: 'もう一方のウィンドウから確認がありませんでした。まだ処理中の可能性があります。',
+      errorTakeOverFailed: 'このチャットを引き継げませんでした',
       errorSwitchProvider: 'プロバイダーを切り替え',
       errorSignInAgain: provider => `${provider} に再度サインイン`,
       errorOauthExpired: provider =>

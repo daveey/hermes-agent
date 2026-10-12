@@ -69,7 +69,7 @@ import { cn } from '@/lib/utils'
 import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { DESKTOP_BUTTON_ACTIONS, recordAction } from '@/store/desktop-metrics'
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
-import { notifyError } from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 import { startManualProviderOAuth } from '@/store/onboarding'
 import { $activeGatewayProfile, normalizeProfileKey, requestFreshSession } from '@/store/profile'
 import { sessionApprovalRequest } from '@/store/prompts'
@@ -739,6 +739,58 @@ const CompressConversationAction: FC<{ label: string }> = ({ label }) => {
   )
 }
 
+// "Take over here" for a chat another Hermes window/process holds (SESSION_NOT_OWNED): moves the
+// active-session lease to this window (`session.take_over` — the old owner stops its turn and
+// acknowledges), refreshes the transcript from the store (the other window may have written turns),
+// then re-runs the refused prompt through `message().reload()` — the exact call behind Retry.
+const TakeOverAction: FC<{ label: string }> = ({ label }) => {
+  const { t } = useI18n()
+  const copy = t.assistant.thread
+  const aui = useAui()
+  const view = useSessionView()
+  const sessionId = useStore(view.$runtimeId)
+  const storedSessionId = useStore(view.$storedId)
+  const [pending, setPending] = useState(false)
+
+  const takeOver = useCallback(async () => {
+    const delegate = sessionTileDelegate()
+
+    if (!sessionId || !delegate?.takeOverSession) {
+      notifyError(new Error('session delegate unavailable'), copy.errorTakeOverFailed)
+
+      return
+    }
+
+    triggerHaptic('submit')
+    setPending(true)
+
+    try {
+      const result = await delegate.takeOverSession(sessionId)
+
+      if (!result.acknowledged) {
+        notify({ kind: 'warning', message: copy.errorTakeOverUnconfirmed })
+      }
+
+      if (storedSessionId) {
+        // Best-effort: a failed refresh must not block re-running the prompt.
+        await delegate.resumeTile(storedSessionId, { refreshTranscript: true }).catch(() => undefined)
+      }
+
+      aui.message().reload()
+    } catch (error) {
+      notifyError(error, copy.errorTakeOverFailed)
+    } finally {
+      setPending(false)
+    }
+  }, [aui, copy.errorTakeOverFailed, copy.errorTakeOverUnconfirmed, sessionId, storedSessionId])
+
+  return (
+    <button className="aui-error-action" disabled={pending} onClick={() => void takeOver()} type="button">
+      {label}
+    </button>
+  )
+}
+
 // One client-side retry of THIS turn at the provider's own reset moment (#98852,
 // option B): arm → visible countdown + Cancel → fires `message().reload()` — the
 // exact call behind the Retry button — exactly once. Nothing persists: closing
@@ -817,6 +869,40 @@ const ScheduledRetryAction: FC<{ resetsAt: number }> = ({ resetsAt }) => {
       <RefreshCwIcon className="size-3" />
       {copy.errorRetryAtReset(formatResetClock(resetsAt))}
     </button>
+  )
+}
+
+// Retry (assistant-ui reload of the failed turn) plus, for a 429 that named its reset moment,
+// when the limit lifts and a one-shot retry armed for it.
+const RetryActions: FC<{ surface: ErrorSurface | undefined }> = ({ surface }) => {
+  const { t } = useI18n()
+  const copy = t.assistant.thread
+  // The provider's own reset moment (429 Retry-After / resets_at), so the user knows WHEN
+  // Retry will work instead of guessing (#98852). Informational only: no automatic retry.
+  const limitReset = formatLimitReset(surface?.resetsAt)
+
+  return (
+    <>
+      <ActionBarPrimitive.Reload asChild>
+        <button
+          className="aui-error-action"
+          onClick={() => {
+            triggerHaptic('submit')
+            recordAction(DESKTOP_BUTTON_ACTIONS.messageRetry, 'click')
+          }}
+          type="button"
+        >
+          <RefreshCwIcon className="size-3" />
+          {copy.errorRetry}
+        </button>
+      </ActionBarPrimitive.Reload>
+      {limitReset && (
+        <span className="px-1 text-xs text-muted-foreground" data-testid="error-limit-reset">
+          {copy.errorLimitResets(limitReset)}
+        </span>
+      )}
+      {surface?.resetsAt !== undefined && <ScheduledRetryAction resetsAt={surface.resetsAt} />}
+    </>
   )
 }
 
@@ -927,9 +1013,6 @@ const ErrorRecoveryActions: FC = () => {
   }, [])
 
   const localFolders = Boolean(window.hermesDesktop?.logsRoot)
-  // The provider's own reset moment (429 Retry-After / resets_at), so the user knows WHEN
-  // Retry will work instead of guessing (#98852). Informational only: no automatic retry.
-  const limitReset = formatLimitReset(surface?.resetsAt)
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -940,6 +1023,7 @@ const ErrorRecoveryActions: FC = () => {
           {copy.errorChooseModel}
         </button>
       )}
+      {plan.takeOver && <TakeOverAction label={copy.errorTakeOver} />}
       {plan.startNewSession && (
         <button className="aui-error-action" onClick={startNewSession} type="button">
           {copy.errorStartNewSession}
@@ -969,27 +1053,7 @@ const ErrorRecoveryActions: FC = () => {
           {copy.errorOpenHermesFolder}
         </button>
       )}
-      {plan.retry && (
-        <ActionBarPrimitive.Reload asChild>
-          <button
-            className="aui-error-action"
-            onClick={() => {
-              triggerHaptic('submit')
-              recordAction(DESKTOP_BUTTON_ACTIONS.messageRetry, 'click')
-            }}
-            type="button"
-          >
-            <RefreshCwIcon className="size-3" />
-            {copy.errorRetry}
-          </button>
-        </ActionBarPrimitive.Reload>
-      )}
-      {plan.retry && limitReset && (
-        <span className="px-1 text-xs text-muted-foreground" data-testid="error-limit-reset">
-          {copy.errorLimitResets(limitReset)}
-        </span>
-      )}
-      {plan.retry && surface?.resetsAt !== undefined && <ScheduledRetryAction resetsAt={surface.resetsAt} />}
+      {plan.retry && <RetryActions surface={surface} />}
       {plan.switchProvider && inRouter && <SwitchProviderAction label={copy.errorSwitchProvider} />}
       {localFolders && (
         <button className="aui-error-action" onClick={() => void openLogs()} type="button">

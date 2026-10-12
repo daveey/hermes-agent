@@ -1,3 +1,4 @@
+import type { SessionTakeOverResult } from '@hermes/shared'
 import { useEffect } from 'react'
 
 import {
@@ -318,6 +319,16 @@ export function useSessionTileDelegate({
             }
           }
         )
+      },
+      takeOverSession: async runtimeId => {
+        // Same profile routing as interrupt: the lease lives in the owning profile's registry.
+        const storedSessionId = storedSessionIdForRuntime(runtimeId)
+
+        return storedSessionId
+          ? await requestForStoredSession<SessionTakeOverResult>(storedSessionId, 'session.take_over', {
+              session_id: runtimeId
+            })
+          : await requestGateway<SessionTakeOverResult>('session.take_over', { session_id: runtimeId })
       },
       resumeTile: async (storedSessionId, options) => {
         // A retained tile can still own its runtime after the primary view drops

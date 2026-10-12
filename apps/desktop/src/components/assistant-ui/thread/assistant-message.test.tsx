@@ -12,6 +12,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { en } from '@/i18n/en'
 import type { ErrorCardCopy } from '@/i18n/types'
 import { $displayTimestamps } from '@/store/display-timestamps'
+import { $notifications } from '@/store/notifications'
+import { $activeSessionId, $selectedStoredSessionId } from '@/store/session'
+import { type SessionTileDelegate, setSessionTileDelegate } from '@/store/session-states'
 
 import { stubThreadEnvironment } from '../test-utils'
 
@@ -250,6 +253,94 @@ describe('ownership refusal recovery (#106217)', () => {
     // collapsed Details disclosure, never as the headline.
     const raw = await screen.findByText(/already has a live owner/)
     expect(raw.closest('details')).not.toBeNull()
+  })
+})
+
+describe('Take over here (SESSION_NOT_OWNED)', () => {
+  afterEach(() => {
+    $activeSessionId.set(null)
+    $selectedStoredSessionId.set(null)
+    $notifications.set([])
+  })
+
+  function installDelegate(result: { acknowledged: boolean } | Error) {
+    const takeOverSession = vi.fn(async (runtimeId: string) => {
+      void runtimeId
+
+      if (result instanceof Error) {
+        throw result
+      }
+
+      return { acknowledged: result.acknowledged, previous_owner: null, status: 'taken_over' as const }
+    })
+
+    const resumeTile = vi.fn(async (storedSessionId: string) => storedSessionId)
+    setSessionTileDelegate({ resumeTile, takeOverSession } as unknown as SessionTileDelegate)
+
+    return { resumeTile, takeOverSession }
+  }
+
+  it('sits before Start new session and takes the chat over, refreshes, then re-runs the prompt', async () => {
+    $activeSessionId.set('runtime-1')
+    $selectedStoredSessionId.set('stored-1')
+    const { resumeTile, takeOverSession } = installDelegate({ acknowledged: true })
+    const onReload = vi.fn(async () => {})
+    render(<Harness assistant={ownershipRefusalMessage()} onReload={onReload} />)
+
+    const takeOver = await screen.findByRole('button', { name: en.assistant.thread.errorTakeOver })
+    const startNew = screen.getByRole('button', { name: 'Start new session' })
+    expect(takeOver.compareDocumentPosition(startNew) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.click(takeOver)
+    })
+
+    await waitFor(() => expect(onReload).toHaveBeenCalledTimes(1))
+    expect(takeOverSession).toHaveBeenCalledWith('runtime-1')
+    expect(resumeTile).toHaveBeenCalledWith('stored-1', { refreshTranscript: true })
+    expect(takeOverSession.mock.invocationCallOrder[0]).toBeLessThan(resumeTile.mock.invocationCallOrder[0])
+    expect($notifications.get().filter(n => n.kind === 'warning')).toEqual([])
+  })
+
+  it('warns when the other window did not confirm, and still re-runs the prompt', async () => {
+    $activeSessionId.set('runtime-1')
+    installDelegate({ acknowledged: false })
+    const onReload = vi.fn(async () => {})
+    render(<Harness assistant={ownershipRefusalMessage()} onReload={onReload} />)
+
+    const takeOver = await screen.findByRole('button', { name: en.assistant.thread.errorTakeOver })
+
+    await act(async () => {
+      fireEvent.click(takeOver)
+    })
+
+    await waitFor(() => expect(onReload).toHaveBeenCalledTimes(1))
+    expect($notifications.get().map(n => [n.kind, n.message])).toContainEqual([
+      'warning',
+      en.assistant.thread.errorTakeOverUnconfirmed
+    ])
+  })
+
+  it('shows the gateway error and does not re-run the prompt when the takeover is refused', async () => {
+    $activeSessionId.set('runtime-1')
+    installDelegate(new Error('registry unreadable'))
+    const onReload = vi.fn(async () => {})
+    render(<Harness assistant={ownershipRefusalMessage()} onReload={onReload} />)
+
+    const takeOver = await screen.findByRole('button', { name: en.assistant.thread.errorTakeOver })
+
+    await act(async () => {
+      fireEvent.click(takeOver)
+    })
+
+    await waitFor(() => expect($notifications.get().some(n => n.kind === 'error')).toBe(true))
+    expect(onReload).not.toHaveBeenCalled()
+  })
+
+  it('is not offered for other failures', async () => {
+    render(<Harness assistant={oauthExpiredMessage()} />)
+    await screen.findByText(/HTTP 401/)
+    expect(screen.queryByRole('button', { name: en.assistant.thread.errorTakeOver })).toBeNull()
   })
 })
 

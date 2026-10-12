@@ -2272,6 +2272,8 @@ export interface SessionTileDelegate {
    * caller that reports delivery must prove the requested target from this.
    */
   submitToSession(runtimeId: string, text: string): Promise<AcceptedSessionIdentity>
+  /** `session.take_over` (owner-profile routed): move this chat's lease here from another window. */
+  takeOverSession?(runtimeId: string): Promise<{ acknowledged: boolean }>
   /** THE session-state write path — routes through the wiring cache so the
    *  cache, the primary view (when active), and every tile mirror agree. */
   updateSession(runtimeId: string, updater: (state: ClientSessionState) => ClientSessionState): ClientSessionState

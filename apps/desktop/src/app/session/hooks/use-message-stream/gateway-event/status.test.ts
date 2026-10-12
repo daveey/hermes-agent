@@ -51,6 +51,24 @@ afterEach(() => {
 })
 
 describe('gateway `error` event → error card + toast', () => {
+  it("uses the gateway's own error_surface when it sends one (taken over by another window)", () => {
+    const { ctx, failAssistantMessage } = errorContext('This chat was taken over by another Hermes window.')
+
+    const payload = {
+      error_surface: { code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false },
+      message: 'This chat was taken over by another Hermes window.'
+    } as unknown as GatewayEventContext['payload']
+
+    expect(handleStatusEvent({ ...ctx, payload })).toBe(true)
+
+    expect(failAssistantMessage).toHaveBeenCalledWith(
+      'sess-1',
+      'This chat was taken over by another Hermes window.',
+      1_700_000_100,
+      expect.objectContaining({ code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false })
+    )
+  })
+
   it('stamps SESSION_NOT_OWNED on a live-owner refusal so the card drops Retry', () => {
     const { ctx, failAssistantMessage } = errorContext(OWNED_REFUSAL)
 

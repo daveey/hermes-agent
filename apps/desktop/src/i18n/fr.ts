@@ -5152,7 +5152,7 @@ export const frOverrides = {
         },
         SESSION_NOT_OWNED: {
           title: 'Cette conversation est ouverte ailleurs',
-          body: 'Cette conversation est déjà ouverte dans une autre fenêtre Hermes ou un terminal. Fermez-la là-bas puis réessayez, ou démarrez-en une nouvelle ici.'
+          body: 'Cette conversation est ouverte dans une autre fenêtre Hermes ou un terminal. Reprenez-la ici, ou démarrez-en une nouvelle.'
         },
         disk_full: {
           title: 'Disque plein',
@@ -5206,6 +5206,9 @@ export const frOverrides = {
       errorRetryScheduled: (time: string, wait: string) => `Nouvel essai à ${time} — dans ${wait}`,
       errorRetryScheduledCancel: 'Annuler',
       errorStartNewSession: 'Démarrer une nouvelle session',
+      errorTakeOver: 'Reprendre ici',
+      errorTakeOverUnconfirmed: 'L’autre fenêtre n’a pas confirmé ; elle est peut-être encore en train de terminer.',
+      errorTakeOverFailed: 'Impossible de reprendre cette conversation ici',
       errorSwitchProvider: 'Changer de fournisseur',
       errorChooseModel: 'Choisir un modèle',
       errorCompressConversation: 'Compresser la conversation',

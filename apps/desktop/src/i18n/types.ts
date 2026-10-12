@@ -4043,6 +4043,9 @@ export interface Translations extends NoticeTranslations {
       errorRetryScheduledCancel: string
       /** Escape hatch when Retry would only reproduce SESSION_NOT_OWNED (#106217). */
       errorStartNewSession: string
+      errorTakeOver: string // SESSION_NOT_OWNED: session.take_over here, then re-run the refused prompt
+      errorTakeOverUnconfirmed: string // toast: the old owner did not ack within the timeout
+      errorTakeOverFailed: string // toast title: session.take_over itself failed
       errorSwitchProvider: string
       errorChooseModel: string
       errorCompressConversation: string

@@ -4698,7 +4698,7 @@ export const en: Translations = {
         },
         SESSION_NOT_OWNED: {
           title: 'This chat is open somewhere else',
-          body: 'This chat is currently open in another Hermes window or terminal. Close it there and send your message again, or start a new chat here.'
+          body: 'This chat is open in another Hermes window or terminal. Take it over here, or start a new chat.'
         },
         disk_full: {
           title: 'Disk full',
@@ -4753,6 +4753,9 @@ export const en: Translations = {
       errorRetryScheduled: (time, wait) => `Retrying at ${time} — in ${wait}`,
       errorRetryScheduledCancel: 'Cancel',
       errorStartNewSession: 'Start new session',
+      errorTakeOver: 'Take over here',
+      errorTakeOverUnconfirmed: "The other window didn't confirm; it may still be finishing.",
+      errorTakeOverFailed: 'Could not take over this chat',
       errorSwitchProvider: 'Switch provider',
       errorChooseModel: 'Choose a model',
       errorCompressConversation: 'Compress conversation',
