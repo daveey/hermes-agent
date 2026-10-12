@@ -589,9 +589,11 @@ def _kill_pids_posix(pids: list[int], killed: list[int], failed: list[tuple[int,
 def _kill_stale_dashboard_processes(
     reason: str = "the running backend no longer matches the updated frontend", *,
     restart_managed: bool = False, already_restarted_units: set[str] | None = None,
-    scope_home: str | None = None,
+    scope_home: str | None = None, exclude_pids: set[int] | None = None,
 ) -> dict[str, list]:
     """Kill running ``hermes dashboard`` / ``hermes serve`` processes (update end, ``--stop``).
+
+    *exclude_pids* are never candidates (``--stop`` passes the Desktop-owned backends here).
 
     With ``restart_managed`` (update only) systemd-owned PIDs get their unit restarted after the
     kill (systemd treats our SIGTERM as a clean stop, so ``Restart=on-failure`` never fires) and
@@ -617,7 +619,7 @@ def _kill_stale_dashboard_processes(
         _dash_unit = getattr(_dash, "_DASHBOARD_SYSTEMD_UNIT", "hermes-dashboard.service")
         already_restarted_units = set(already_restarted_units or ()) | {
             str(_dash_unit).removesuffix(".service")}
-    exclude = _exclude_pids_from_env()
+    exclude = _exclude_pids_from_env() | set(exclude_pids or ())
     if restart_managed:
         # An SSH-owned backend belongs to an attached Desktop client; killing it strands that
         # client's fixed SSH port-forward. Same ownership records as the reaper.
@@ -898,6 +900,18 @@ def _lock_owned_serve_pids(base_dir: Path | None = None) -> set[int]:
         lock = read_valid_backend_lock(entry / BACKEND_LOCK_NAME)
         if lock is not None:
             owned.add(lock["pid"])  # validated as int
+    return owned
+
+
+def _desktop_owned_backend_pids(pids) -> set[int]:
+    """The subset of *pids* a running Hermes Desktop owns: spawned by it (``HERMES_DESKTOP=1`` in the
+    process environment, incl. pool backends), marked live via ``HERMES_DESKTOP_CHILD_PID``, or claimed by
+    a valid ``desktop-ssh/<id>/backend.lock.json`` (an SSH-attached Desktop). ``hermes serve --stop`` spares
+    these: killing one SIGTERMs the app's backend and interrupts every turn it is running."""
+    owned = (_lock_owned_serve_pids() | _exclude_pids_from_env()) & set(pids)
+    for pid in pids:
+        if pid not in owned and ((_pid_environ(pid) or {}).get("HERMES_DESKTOP") == "1"):
+            owned.add(pid)
     return owned
 
 
