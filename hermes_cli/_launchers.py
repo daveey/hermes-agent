@@ -150,6 +150,30 @@ def _store_python(runtime: Path) -> Path | None:
     return None
 
 
+def signed_python_app(store_python: Path) -> Path | None:
+    """[daveey] A Developer-ID-signed twin of the store Python (``~/Applications/Hermes Python.app``,
+    built by ``~/.hermes/bin/hermes-python-app``), used when its version matches the store's.
+
+    macOS TCC keys an ad-hoc binary by path + cdhash, so grants (Full Disk Access, Automation,
+    Photos) drop on every Python upgrade; a signed bundle is keyed by bundle id + team. Running
+    processes re-exec into it; persisted launchers keep the store path (the bundle may vanish).
+    """
+    if sys.platform != "darwin":
+        return None
+    contents = Path.home() / "Applications" / "Hermes Python.app" / "Contents"
+    try:
+        import plistlib
+
+        info = plistlib.loads((contents / "Info.plist").read_bytes())
+    except (OSError, ValueError):
+        return None
+    version = str(info.get("CFBundleShortVersionString", ""))
+    exe = contents / "MacOS" / str(info.get("CFBundleExecutable", ""))
+    if version and f"python-{version}+" in str(store_python) and exe.is_file():
+        return exe
+    return None
+
+
 def _load_script_maker():
     """distlib's ScriptMaker — standalone first, then pip's vendored copy."""
     try:

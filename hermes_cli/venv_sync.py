@@ -432,6 +432,9 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     python = resolve_store_python(root)
     if python is None:
         raise RuntimeError("source update has no managed Python; run `hermes pm install`")
+    from hermes_cli._launchers import signed_python_app
+
+    python = signed_python_app(python) or python  # [daveey] stable macOS TCC identity
     # Lexical identity, never resolve(): PM spells the store path through
     # HERMES_HOME (which may carry '..') while sys.executable arrives
     # normalized, so a raw compare re-execs every child forever (#122513). A
