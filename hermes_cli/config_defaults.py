@@ -2675,6 +2675,10 @@ DEFAULT_CONFIG = {
             # not only the ones the user re-opens. Same freshness/attempt guards apply.
             "resume_on_startup": False,
         },
+        # Reopen a desktop app that `hermes update` / `hermes desktop --build-only` had to stop to
+        # swap in the rebuilt bundle (macOS/Linux). Off = upstream behaviour: a headless update
+        # (CLI, launchd, cron) leaves the app closed; only the in-app Update hand-off reopens it.
+        "relaunch_after_rebuild": False,
     },
 
     "nous": {
