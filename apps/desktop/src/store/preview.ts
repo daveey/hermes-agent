@@ -511,6 +511,14 @@ export function preferredVisibleTabId(): RightRailTabId | null {
   return isVisible(remembered) ? remembered! : (visible[0]?.id ?? null)
 }
 
+/** The tab `sessionId` last had in front (memory-only; undefined = none seen).
+ *  Lets an agent acting for a HIDDEN session drive the page it left open. */
+export function rememberedPreviewTabId(sessionId: null | string | undefined): RightRailTabId | undefined {
+  const key = currentSessionId(sessionId)
+
+  return key ? activeTabBySession.get(key) : undefined
+}
+
 /** A fresh draft has no session yet, so tabs opened there are ownerless (the
  *  drawer of every draft shows them). Called where the draft's first send
  *  assigns its stored id — beside the composer draft's own hand-over — so the

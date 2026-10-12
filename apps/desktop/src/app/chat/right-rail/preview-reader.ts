@@ -16,7 +16,7 @@
 import { type PreviewTab, previewTabsFor } from '@/store/preview'
 import type { PreviewOwner } from '@/store/preview-ownership'
 
-import { resolveActivePreviewTab } from './preview-active-tab'
+import { backgroundPreviewTabFor, resolveActivePreviewTab } from './preview-active-tab'
 import { nudgeOverlay } from './preview-nudge'
 
 export interface PreviewReadOptions {
@@ -118,7 +118,7 @@ export async function readActivePreview(
   sessionId?: PreviewOwner
 ): Promise<null | PreviewReadResult> {
   const tabs = previewTabsFor(sessionId)
-  const tab = resolveActivePreviewTab(tabs)
+  const tab = backgroundPreviewTabFor(sessionId) ?? resolveActivePreviewTab(tabs)
 
   if (!tab) {
     return null

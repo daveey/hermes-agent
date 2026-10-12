@@ -1,5 +1,6 @@
 import { JSON_RPC_INTERNAL_ERROR } from '@hermes/shared'
 
+import { backgroundPreviewTabFor } from '@/app/chat/right-rail/preview-active-tab'
 import {
   hasLivePreviewSurface,
   requestPopoutPreviewAct,
@@ -114,6 +115,21 @@ const WINDOW_OWNED_REQUESTS = new Set(['preview.act', 'preview.read', 'terminal.
  * against a backend that would take the first error as the answer.
  */
 const declineNotShown = (request: ScopedServerRequest) => request.decline?.('This window is not showing the session.')
+
+/** Window-owned requests a window may answer for a session it does NOT show,
+ *  from that session's own parked Browser page. */
+const BACKGROUND_PREVIEW_REQUESTS = new Set(['preview.act', 'preview.read'])
+
+/** This window keeps a live, off-screen page owned by `sessionId`. */
+export function windowHoldsBackgroundPreview(sessionId: string): boolean {
+  if (!sessionId) {
+    return false
+  }
+
+  const owner = previewOwnerFor(sessionId)
+
+  return Boolean(backgroundPreviewTabFor(owner)) && hasLivePreviewSurface(owner)
+}
 
 /**
  * Whether a request's `session_id` names the same conversation as the pane's
@@ -547,8 +563,14 @@ const previewAct: Handler = ({ deps, isActiveSession, request, sessionId }) => {
   // offer, don't hijack). Window ownership is settled by WINDOW_OWNED_REQUESTS
   // before this runs, so a refusal here reaches the tool instead of stalling it.
   const p = request.params
+  // The agent drives ITS session's page: with a tile focused, the primary's
+  // agent must not reach into the tile's tabs (#73890).
+  const owner = previewOwnerFor(sessionId)
 
-  if (!isActiveSession) {
+  // A hidden session may drive its OWN parked page (never a pin, never what
+  // is on screen — backgroundPreviewTabFor), so a long browser task survives
+  // the user switching chats.
+  if (!isActiveSession && !backgroundPreviewTabFor(owner)) {
     answerValue(request, {
       error: 'The in-app browser only takes actions in the session the user is looking at.',
       success: false
@@ -556,10 +578,6 @@ const previewAct: Handler = ({ deps, isActiveSession, request, sessionId }) => {
 
     return
   }
-
-  // The agent drives ITS session's page: with a tile focused, the primary's
-  // agent must not reach into the tile's tabs (#73890).
-  const owner = previewOwnerFor(sessionId)
 
   // The keystroke loop has to be able to stop when this request is withdrawn
   // (tool timeout or turn interrupt). The local interrupted flag can flip
@@ -746,6 +764,16 @@ export function handleServerRequest(
     })
 
     if (route === 'ignore') {
+      // A hidden session's own Browser page stays mounted (parked) in the
+      // window it was last shown in. That window claims the session's
+      // preview.read/preview.act so the agent keeps working while the user is
+      // in another chat; the handler only ever reaches that session's own tab.
+      if (BACKGROUND_PREVIEW_REQUESTS.has(request.method) && windowHoldsBackgroundPreview(sessionId)) {
+        handler({ deps, request, sessionId, isActiveSession: false })
+
+        return true
+      }
+
       // Silence alone lets the owner win the fanout race (#113348:
       // resolve_response keeps the FIRST response, so a fast empty or
       // wrong-geometry answer from a non-claiming window could beat the

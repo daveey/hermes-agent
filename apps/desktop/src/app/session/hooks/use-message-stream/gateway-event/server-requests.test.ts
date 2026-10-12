@@ -543,6 +543,122 @@ describe('preview requests act for the session that asked (#73890)', () => {
   })
 })
 
+describe('a hidden session keeps driving its own parked Browser page', () => {
+  // The user switched from chat A to chat B mid-task. A's Browser tab left the
+  // layout tree but stays mounted (parked), so A's agent keeps working in it.
+  beforeEach(() => {
+    hasLivePreviewSurface.mockReturnValue(true)
+    closeRightRail()
+    publishSessionState('rt-a', createClientSessionState('stored-a'))
+    setActiveSessionId('rt-b')
+    setSelectedStoredSessionId('stored-b')
+  })
+
+  afterEach(() => {
+    dropSessionState('rt-a')
+    setActiveSessionId(null)
+    setSelectedStoredSessionId(null)
+    closeRightRail()
+    hasLivePreviewSurface.mockReturnValue(false)
+  })
+
+  const openOwn = (owner: string, host: string) => {
+    openPreview({ kind: 'url', label: host, source: `https://${host}`, url: `https://${host}` }, owner)
+
+    return $previewTabs.get().find(tab => tab.target.url === `https://${host}`)!
+  }
+
+  it("acts in the hidden session's own tab, never the page on screen", async () => {
+    const a = openOwn('stored-a', 'flow.example')
+    const b = openOwn('stored-b', 'b.example')
+    const backA = vi.fn()
+    const backB = vi.fn()
+
+    const unbind = [
+      registerPreviewNav(a.id, { back: backA, forward: () => {}, reload: () => {} }),
+      registerPreviewNav(b.id, { back: backB, forward: () => {}, reload: () => {} })
+    ]
+
+    try {
+      const { decline, respond } = deliver('preview.act', { action: 'back', session_id: 'rt-a' }, 'rt-b')
+
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1), { timeout: 30_000 })
+      expect(JSON.parse(respond.mock.calls[0][0].value)).toMatchObject({ acted: 'back', success: true })
+      expect(decline).not.toHaveBeenCalled()
+      expect(backA).toHaveBeenCalledTimes(1)
+      expect(backB).not.toHaveBeenCalled()
+    } finally {
+      unbind.forEach(stop => stop())
+    }
+  })
+
+  it("reads the hidden session's own page", async () => {
+    const a = openOwn('stored-a', 'flow.example')
+    openOwn('stored-b', 'b.example')
+
+    const unbind = registerPreviewPageReader(a.id, async () => ({
+      text: 'FLOW_PAGE_TEXT',
+      title: 'flow',
+      url: 'https://flow.example'
+    }))
+
+    try {
+      const { decline, respond } = deliver('preview.read', { session_id: 'rt-a' }, 'rt-b')
+
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1), { timeout: 30_000 })
+      expect(JSON.parse(respond.mock.calls[0][0].value)).toMatchObject({ text: 'FLOW_PAGE_TEXT' })
+      expect(decline).not.toHaveBeenCalled()
+    } finally {
+      unbind()
+    }
+  })
+
+  it('still declines when the hidden session only sees a pin (the user may be looking at it)', async () => {
+    const pin = openOwn('stored-a', 'pinned.example')
+    setPreviewTabPinned(pin.id, true)
+    const back = vi.fn()
+    const unbind = registerPreviewNav(pin.id, { back, forward: () => {}, reload: () => {} })
+
+    try {
+      const { decline, respond } = deliver('preview.act', { action: 'back', session_id: 'rt-a' }, 'rt-b')
+
+      await Promise.resolve()
+      expect(decline).toHaveBeenCalledTimes(1)
+      expect(respond).not.toHaveBeenCalled()
+      expect(back).not.toHaveBeenCalled()
+    } finally {
+      unbind()
+    }
+  })
+
+  it('still declines when this window holds no live page for the hidden session', async () => {
+    hasLivePreviewSurface.mockReturnValue(false)
+    openOwn('stored-a', 'flow.example')
+
+    const { decline, respond } = deliver('preview.act', { action: 'elements', session_id: 'rt-a' }, 'rt-b')
+
+    await Promise.resolve()
+    expect(decline).toHaveBeenCalledTimes(1)
+    expect(respond).not.toHaveBeenCalled()
+  })
+
+  it('keeps tours and terminal reads on the shown-session rule', async () => {
+    openOwn('stored-a', 'flow.example')
+
+    const requests = [
+      deliver('tour', { action: 'discover', session_id: 'rt-a', surface: 'preview' }, 'rt-b'),
+      deliver('terminal.read', { session_id: 'rt-a' }, 'rt-b')
+    ]
+
+    await Promise.resolve()
+
+    for (const { decline, respond } of requests) {
+      expect(decline).toHaveBeenCalledTimes(1)
+      expect(respond).not.toHaveBeenCalled()
+    }
+  })
+})
+
 describe('tour request routing', () => {
   afterEach(() => {
     $toursEnabled.set(true)
