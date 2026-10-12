@@ -1255,6 +1255,29 @@ def _(rid, params: dict, session: dict, db) -> dict:
     return _ok(rid, result)
 
 
+@method("session.title.suggest")
+def _(rid, params: dict) -> dict:
+    """Suggest a short recognizable name (2-4 lowercase words) for a session from its transcript —
+    Desktop's ⌘⇧N rename pre-fill. Read-only; ``title`` is None when nothing could be suggested."""
+    from agent.title_generator import suggest_short_name
+    target = str(params.get("session_key") or params.get("session_id") or "")
+    if not target:
+        return _err(rid, 4006, "session_id required")
+    live = _sessions.get(str(params.get("session_id") or ""))
+    with (_profile_db(params) if live is None else _session_db(live)) as db:
+        if db is None:
+            return _db_unavailable_error(rid, code=5007)
+        try:
+            if live is not None:
+                key = live["session_key"]
+            else:
+                key = (db.resolve_session_id(target) if hasattr(db, "resolve_session_id") else None) or target
+            messages = db.get_messages(key)
+        except Exception as e:
+            return _err(rid, 5007, str(e))
+    return _ok(rid, {"session_key": key, "title": suggest_short_name(messages)})
+
+
 @method("session.archive")
 def _(rid, params: dict) -> dict:
     """Set/clear ``archived`` (out of the default list, messages kept — the Desktop PATCH parity flag)

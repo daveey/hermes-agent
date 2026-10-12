@@ -2393,6 +2393,7 @@ export const jaOverrides = {
       renameTitle: 'セッションの名前を変更',
       renameDesc: '空欄にするとクリアされます。',
       untitledPlaceholder: '無題のセッション',
+      suggestingName: '名前を提案中…',
       deleteTitle: 'セッションを削除しますか？',
       deleteDesc: title => `「${title}」を完全に削除します。この操作は元に戻せません。`,
       deleting: '削除中…',

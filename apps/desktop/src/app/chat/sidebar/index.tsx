@@ -187,6 +187,7 @@ import {
   SidebarSessionSkeletons,
   SidebarStorageCorruptNotice
 } from './section-states'
+import { GlobalSessionRenameDialog } from './session-actions-menu'
 import { buildSessionByAnyId, resolvePinnedSessions } from './session-index'
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
@@ -547,6 +548,7 @@ export function ChatSidebar({
   const newSessionKbd = newSessionCombo ? comboTokens(newSessionCombo) : []
   const [searchQuery, setSearchQuery] = useState('')
   const [newSessionKbdFlash, setNewSessionKbdFlash] = useState(false)
+
   const [navCollapsed, setNavCollapsed] = useState(() => {
     try {
       return localStorage.getItem('sidebar.nav.collapsed') === '1'
@@ -554,17 +556,21 @@ export function ChatSidebar({
       return false
     }
   })
+
   const toggleNavCollapsed = useCallback(() => {
     setNavCollapsed(prev => {
       const next = !prev
+
       try {
         localStorage.setItem('sidebar.nav.collapsed', next ? '1' : '0')
       } catch {
         // ignore quota / disabled storage
       }
+
       return next
     })
   }, [])
+
   const [messagingLoadMorePending, setMessagingLoadMorePending] = useState<Record<string, boolean>>({})
   const [recentsLoadMorePending, setRecentsLoadMorePending] = useState(false)
   const messagingOpenIds = useStore($sidebarMessagingOpenIds)
@@ -1689,8 +1695,8 @@ export function ChatSidebar({
                     {isNewSession && (
                       <>
                         <button
-                          aria-label={navCollapsed ? 'Expand nav' : 'Collapse nav'}
                           aria-expanded={!navCollapsed}
+                          aria-label={navCollapsed ? 'Expand nav' : 'Collapse nav'}
                           className="ml-auto flex size-5 items-center justify-center rounded text-(--ui-text-tertiary) hover:bg-(--ui-control-hover-background) hover:text-foreground [-webkit-app-region:no-drag]"
                           onClick={event => {
                             event.stopPropagation()
@@ -1703,7 +1709,7 @@ export function ChatSidebar({
                           }}
                           type="button"
                         >
-                          <Codicon name={navCollapsed ? 'chevron-down' : 'chevron-up'} className="size-3.5" />
+                          <Codicon className="size-3.5" name={navCollapsed ? 'chevron-down' : 'chevron-up'} />
                         </button>
                         <KbdGroup
                           className={cn('opacity-55', newSessionKbdFlash && 'opacity-100!')}
@@ -2105,6 +2111,7 @@ export function ChatSidebar({
         )}
       </SidebarContent>
       <ProjectDialog />
+      <GlobalSessionRenameDialog />
       {/* One mount for the whole app. The header of WorktreeDialog tells why. */}
       <WorktreeDialog />
     </Sidebar>

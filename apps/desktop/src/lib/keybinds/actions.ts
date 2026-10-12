@@ -120,7 +120,8 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // stays; users who liked ⇧N can rebind it in the panel.
   { id: 'session.new', category: 'session', defaults: ['mod+n'] },
   { id: 'session.newTab', category: 'session', defaults: ['mod+t'] },
-  { id: 'session.newWindow', category: 'session', defaults: ['mod+shift+n'] },
+  // Fork: ⌘⇧N belongs to `session.rename`; new window ships unbound (rebindable).
+  { id: 'session.newWindow', category: 'session', defaults: [] },
   // ⌃Tab / ⌃⇧Tab — the universal tab-cycle chord. Literally Control, not Cmd
   // (macOS reserves Cmd+Tab for app switching); see `ctrl` in combo.ts.
   { id: 'session.next', category: 'session', defaults: ['ctrl+tab', 'ctrl+pagedown'] },
@@ -128,6 +129,9 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   ...SESSION_SLOT_ACTIONS,
   { id: 'session.focusSearch', category: 'session', defaults: ['mod+shift+f'] },
   { id: 'session.togglePin', category: 'session', defaults: [] },
+  // ⌘⇧N — "n" for name: rename the selected session, pre-filled with an
+  // AI-suggested short name (`session.title.suggest`).
+  { id: 'session.rename', category: 'session', defaults: ['mod+shift+n'] },
   { id: 'conversation.scrollPageUp', category: 'session', defaults: ['pageup'] },
   { id: 'conversation.scrollPageDown', category: 'session', defaults: ['pagedown'] },
   // Archive the active session. Ships unbound (like `session.togglePin`) so an

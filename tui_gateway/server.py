@@ -196,6 +196,7 @@ _LONG_HANDLERS = frozenset({
     "session.start_chat", "session.take_over",  # take_over waits for the old owner's ack
     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
     "shared_metrics.set",  # consent reconcile waits on the metrics store's write lock
+    "session.title.suggest",  # aux-model call (⌘⇧N rename pre-fill)
 })
 
 _rpc_pool_workers = max(2, env_int("HERMES_TUI_RPC_POOL_WORKERS", 8))

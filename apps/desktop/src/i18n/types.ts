@@ -2924,6 +2924,7 @@ export interface Translations extends NoticeTranslations {
       renameTitle: string
       renameDesc: string
       untitledPlaceholder: string
+      suggestingName: string
       deleteTitle: string
       deleteDesc: (title: string) => string
       deleting: string

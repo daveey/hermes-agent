@@ -221,6 +221,7 @@ export const zhHantChrome = {
       renameTitle: '重新命名工作階段',
       renameDesc: '留空則清除。',
       untitledPlaceholder: '未命名工作階段',
+      suggestingName: '正在建議名稱…',
       deleteTitle: '刪除會話？',
       deleteDesc: title => `這將永久刪除「${title}」，且無法復原。`,
       deleting: '正在刪除…',

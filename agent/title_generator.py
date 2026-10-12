@@ -798,3 +798,59 @@ def maybe_auto_title(
         return upgrade
     start_title_upgrade(upgrade)
     return upgrade
+
+
+
+# ── Short rename suggestion (Desktop ⌘⇧N) ──────────────────────────────────
+_SHORT_NAME_PROMPT = (
+    "You name chat sessions so the user can find them again in a sidebar. Read the conversation and "
+    "reply with ONLY a short, recognizable name of 2-4 lowercase words naming its subject (e.g. "
+    "\"hermes shortcuts\", \"vast gpu cleanup\", \"tax return review\"). No quotes, no punctuation, "
+    "no explanation. Prefer concrete nouns (project, tool, topic) over verbs. "
+    'Return JSON: {"title": "..."}'
+)
+_SHORT_NAME_MAX_CHARS = 6000
+_SHORT_NAME_PER_MESSAGE = 600
+
+
+def build_short_name_input(messages: list) -> str:
+    """Transcript excerpt for :func:`suggest_short_name`: the opening exchanges plus the latest ones
+    (the subject often drifts), user/assistant text only, each message clipped."""
+    turns = []
+    for msg in messages or []:
+        role = (msg.get("role") if isinstance(msg, dict) else None) or ""
+        if role not in ("user", "assistant"):
+            continue
+        try:
+            text = flatten_message_text(msg.get("content"))
+        except Exception:
+            text = msg.get("content") if isinstance(msg.get("content"), str) else ""
+        text = " ".join(strip_control_wrappers(text or "").split())
+        if text:
+            turns.append(f"{role}: {text[:_SHORT_NAME_PER_MESSAGE]}")
+    picked = turns if len(turns) <= 10 else turns[:4] + ["…"] + turns[-6:]
+    return "\n".join(picked)[:_SHORT_NAME_MAX_CHARS]
+
+
+def suggest_short_name(messages: list, *, timeout: float = 30.0, llm: Callable[..., Any] | None = None) -> Optional[str]:
+    """A 2-4 word lowercase name for a whole session, or None (empty transcript / model failure).
+    Uses the ``title_generation`` aux task so the user's cheap title model serves it. Fails open."""
+    excerpt = build_short_name_input(messages)
+    if not excerpt.strip():
+        return None
+    try:
+        response = (llm or call_llm)(
+            task="title_generation",
+            messages=[{"role": "system", "content": _SHORT_NAME_PROMPT}, {"role": "user", "content": excerpt}],
+            max_tokens=TITLE_MAX_TOKENS, temperature=None, timeout=timeout,
+            extra_body={"response_format": _TITLE_RESPONSE_FORMAT}, reasoning_config={"enabled": False},
+        )
+        message = response.choices[0].message
+        title = _clean_title(_extract_title_text(message.content or "") or _title_from_reasoning(message))
+    except Exception:
+        logger.debug("Short-name suggestion failed", exc_info=True)
+        return None
+    if not title:
+        return None
+    words = title.lower().split()
+    return " ".join(words[:5]) or None

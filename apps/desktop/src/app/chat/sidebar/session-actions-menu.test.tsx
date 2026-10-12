@@ -2,9 +2,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { activeGateway } from '@/store/gateway'
 import { refreshProjectTree } from '@/store/projects'
 
-import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
+import { RenameSessionDialog, SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 
 afterEach(cleanup)
 
@@ -66,6 +67,7 @@ vi.mock('@/i18n', () => ({
           sessionActions: 'Session actions',
           unarchive: 'Unarchive',
           unpin: 'Unpin',
+          suggestingName: 'Suggesting…',
           untitledPlaceholder: 'Untitled'
         }
       },
@@ -396,5 +398,44 @@ describe('SessionActionsMenu', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Move to project' }))
 
     await waitFor(() => expect(refreshProjectTree).toHaveBeenCalledTimes(1))
+  })
+
+  it('pre-fills an AI-suggested name when opened with suggest (⌘⇧N)', async () => {
+    const request = vi.fn(async () => ({ title: 'hermes shortcuts' }))
+    vi.mocked(activeGateway).mockReturnValue({ request } as never)
+
+    render(
+      <RenameSessionDialog currentTitle="Old title" onOpenChange={vi.fn()} open profile="work" sessionId="s1" suggest />
+    )
+
+    await waitFor(() => expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('hermes shortcuts'))
+    expect(request).toHaveBeenCalledWith('session.title.suggest', { profile: 'work', session_key: 's1' }, 45_000)
+    vi.mocked(activeGateway).mockReturnValue(null)
+  })
+
+  it('keeps what the user typed when the suggestion lands late', async () => {
+    let resolve: (v: { title: string }) => void = () => {}
+    const request = vi.fn(() => new Promise<{ title: string }>(r => (resolve = r)))
+    vi.mocked(activeGateway).mockReturnValue({ request } as never)
+
+    render(<RenameSessionDialog currentTitle="Old" onOpenChange={vi.fn()} open sessionId="s1" suggest />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'my name' } })
+    resolve({ title: 'hermes shortcuts' })
+
+    await waitFor(() => expect(request).toHaveBeenCalled())
+    await new Promise(r => setTimeout(r, 10))
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('my name')
+    vi.mocked(activeGateway).mockReturnValue(null)
+  })
+
+  it('does not ask for a suggestion from the row menu rename', async () => {
+    const request = vi.fn()
+    vi.mocked(activeGateway).mockReturnValue({ request } as never)
+
+    render(<RenameSessionDialog currentTitle="Old" onOpenChange={vi.fn()} open sessionId="s1" />)
+
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('Old')
+    expect(request).not.toHaveBeenCalled()
+    vi.mocked(activeGateway).mockReturnValue(null)
   })
 })

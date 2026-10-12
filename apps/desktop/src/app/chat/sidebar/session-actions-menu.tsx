@@ -52,6 +52,7 @@ import {
   sessionPinId
 } from '@/store/session'
 import { $sessionColorOverrides, setSessionColorOverride } from '@/store/session-color'
+import { $sessionRenameTarget, closeSessionRename } from '@/store/session-rename'
 import { $sessionStates, $sessionTiles, closeAllOpenSessionTiles } from '@/store/session-states'
 import { ackStoredSessionId } from '@/store/session-unread'
 import { canOpenSessionInTerminal, canOpenSessionWindow, openSessionInTerminal } from '@/store/windows'
@@ -718,13 +719,30 @@ interface RenameSessionDialogProps {
   sessionId: string
   currentTitle: string
   profile?: string
+  /** Pre-fill with an AI-suggested short name (`session.title.suggest`) — ⌘⇧N. */
+  suggest?: boolean
 }
 
-function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle, profile }: RenameSessionDialogProps) {
+interface SessionTitleSuggestResponse {
+  title?: null | string
+}
+
+export function RenameSessionDialog({
+  open,
+  onOpenChange,
+  sessionId,
+  currentTitle,
+  profile,
+  suggest = false
+}: RenameSessionDialogProps) {
   const { t } = useI18n()
   const r = t.sidebar.row
   const [value, setValue] = useState(currentTitle)
   const [submitting, setSubmitting] = useState(false)
+  const [suggesting, setSuggesting] = useState(false)
+  // Once the user types, a late suggestion must not clobber their edit. Fresh
+  // per mount: the ⌘⇧N host unmounts the dialog on close.
+  const touchedRef = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -733,6 +751,46 @@ function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle, prof
       window.setTimeout(() => inputRef.current?.select(), 0)
     }
   }, [currentTitle, open])
+
+  useEffect(() => {
+    const gateway = activeGateway()
+
+    if (!open || !suggest || !sessionId || !gateway) {
+      return
+    }
+
+    let cancelled = false
+
+    const targetProfile =
+      (profile ?? '').trim() || $sessions.get().find(s => sessionMatchesStoredId(s, sessionId))?.profile || undefined
+
+    setSuggesting(true)
+    gateway
+      .request<SessionTitleSuggestResponse>(
+        'session.title.suggest',
+        { session_key: sessionId, ...(targetProfile ? { profile: targetProfile } : {}) },
+        45_000
+      )
+      .then(result => {
+        const title = result?.title?.trim()
+
+        if (!cancelled && title && !touchedRef.current) {
+          setValue(title)
+          window.setTimeout(() => inputRef.current?.select(), 0)
+        }
+      })
+      .catch(err => console.warn('session.title.suggest failed', err))
+      .finally(() => {
+        if (!cancelled) {
+          setSuggesting(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+      setSuggesting(false)
+    }
+  }, [open, profile, sessionId, suggest])
 
   const submit = async () => {
     const next = value.trim()
@@ -779,7 +837,10 @@ function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle, prof
         <Input
           autoFocus
           disabled={submitting}
-          onChange={event => setValue(event.target.value)}
+          onChange={event => {
+            touchedRef.current = true
+            setValue(event.target.value)
+          }}
           onKeyDown={event => {
             if (isSubmitEnter(event)) {
               event.preventDefault()
@@ -792,6 +853,7 @@ function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle, prof
           ref={inputRef}
           value={value}
         />
+        {suggesting && <p className="text-xs text-muted-foreground">{r.suggestingName}</p>}
         <DialogFooter>
           <Button disabled={submitting} onClick={() => onOpenChange(false)} type="button" variant="ghost">
             {t.common.cancel}
@@ -802,5 +864,34 @@ function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle, prof
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// The ⌘⇧N rename dialog: one app-wide instance driven by `$sessionRenameTarget`
+// (the per-row dialogs above only exist while their row's menu is mounted).
+export function GlobalSessionRenameDialog() {
+  const target = useStore($sessionRenameTarget)
+  const sessions = useStore($sessions)
+
+  if (!target) {
+    return null
+  }
+
+  const session = sessions.find(s => sessionMatchesStoredId(s, target.sessionId))
+
+  return (
+    <RenameSessionDialog
+      currentTitle={session?.title ?? ''}
+      key={target.sessionId}
+      onOpenChange={open => {
+        if (!open) {
+          closeSessionRename()
+        }
+      }}
+      open
+      profile={target.profile}
+      sessionId={target.sessionId}
+      suggest
+    />
   )
 }

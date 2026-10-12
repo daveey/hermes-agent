@@ -80,6 +80,7 @@ import {
   setModelPickerOpen
 } from '@/store/session'
 import { $focusedStoredSessionId } from '@/store/session-focus'
+import { openSessionRename } from '@/store/session-rename'
 import { reopenLastClosedTile } from '@/store/session-states'
 import {
   $switcherOpen,
@@ -333,6 +334,17 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'session.focusSearch': requestSessionSearchFocus,
     'session.togglePin': deps.toggleSelectedPin,
     'session.archive': deps.archiveSelectedSession,
+    // ⌘⇧N: rename the selected (else focused) session, AI name pre-filled.
+    'session.rename': () => {
+      const sessionId = $selectedStoredSessionId.get() || $focusedStoredSessionId.get()
+
+      if (!sessionId) {
+        return false
+      }
+
+      const profile = $sessions.get().find(s => sessionMatchesStoredId(s, sessionId))?.profile || undefined
+      openSessionRename({ profile, sessionId })
+    },
     // ⌘⇧P: typeahead over projects for the selected (else focused) session.
     'session.moveToProject': () => {
       const sessionId = $selectedStoredSessionId.get() || $focusedStoredSessionId.get()
