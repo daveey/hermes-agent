@@ -68,16 +68,26 @@ import {
   $commandPaletteOpen,
   $commandPalettePage,
   $commandPaletteSeed,
+  $moveToProjectTarget,
   closeCommandPalette,
   setCommandPaletteOpen
 } from '@/store/command-palette'
 import { completeFlow, recordAction } from '@/store/desktop-metrics'
 import { $bindings, bindingsFor } from '@/store/keybinds'
 import { $dismissedAutoProjectIds, $pinnedSessionIds, filterVisibleProjects } from '@/store/layout'
+import { notify, notifyError } from '@/store/notifications'
 import { openPetGenerate } from '@/store/pet-generate'
 import { toggleBrowserTab } from '@/store/preview'
-import { $projectTree, goToProject, openFolderAsProject, requestStartWorkSession } from '@/store/projects'
-import { $connection, $cronSessions, $messagingSessions, $sessions } from '@/store/session'
+import {
+  $projectTree,
+  goToProject,
+  moveSessionToProject,
+  moveToProjectTargets,
+  openFolderAsProject,
+  refreshProjectTree,
+  requestStartWorkSession
+} from '@/store/projects'
+import { $connection, $cronSessions, $messagingSessions, $sessions, sessionMatchesStoredId } from '@/store/session'
 import { $unconfirmedPinWrites } from '@/store/session-pin-sync'
 import { $removedSessionIds } from '@/store/session-removal'
 import { runGatewayRestart } from '@/store/system-actions'
@@ -164,6 +174,10 @@ interface PaletteGroup {
 // Nested page → its parent, so Back / Esc step up one level instead of closing
 // the palette. Pages absent here go straight back to the root list.
 const PAGE_PARENTS: Record<string, string> = { 'install-theme': 'theme' }
+
+// Pages opened straight from a hotkey as a standalone picker (⌘⇧P move to
+// project): Esc / Back closes the palette instead of landing on the root list.
+const STANDALONE_PAGES = new Set(['move-to-project'])
 
 /** A nested page reachable from a root item via `to`. */
 interface PalettePage {
@@ -684,6 +698,45 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
   const pinnedSessionIds = useStore($pinnedSessionIds)
   const unconfirmedPinWrites = useStore($unconfirmedPinWrites)
   const removedSessionIds = useStore($removedSessionIds)
+  const moveTarget = useStore($moveToProjectTarget)
+
+  // ⌘⇧P page: the projects the target session can move into. The tree only
+  // warms on a timer in the flat sidebar view, so refresh when the page opens.
+  useEffect(() => {
+    if (page === 'move-to-project') {
+      void refreshProjectTree()
+    }
+  }, [page])
+
+  const movePage = useMemo<PalettePage>(() => {
+    const p = t.sidebar.projects
+    const target = moveTarget
+    const session = target ? liveSessions.find(s => sessionMatchesStoredId(s, target.sessionId)) : undefined
+    const title = session ? sessionTitle(session) : p.moveToProject
+
+    return {
+      title: p.moveToProject,
+      placeholder: p.movePlaceholder(title),
+      groups: target
+        ? [
+            {
+              heading: t.commandCenter.projects,
+              items: moveToProjectTargets(projectTree, liveSessions, target.sessionId).map(node => ({
+                icon: codiconIcon(node.icon || 'folder-library'),
+                id: `move-to-project-${node.id}`,
+                keywords: ['project', 'move', node.label, ...(node.path ? [node.path] : [])],
+                label: node.label,
+                run: () => {
+                  moveSessionToProject(target.sessionId, node.id, target.profile)
+                    .then(() => notify({ durationMs: 2_000, kind: 'success', message: p.movedTo(node.label) }))
+                    .catch(err => notifyError(err, p.moveFailed))
+                }
+              }))
+            }
+          ]
+        : []
+    }
+  }, [liveSessions, moveTarget, projectTree, t])
 
   // getServers is the shared choke point that also drops malformed (null/
   // scalar) entries, so the palette never lists a server the MCP tab dropped.
@@ -768,9 +821,15 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
   // Step up one nested page (or back to the root list), clearing the filter so
   // the parent page doesn't reopen mid-search.
   const goBack = useCallback(() => {
+    if (page && STANDALONE_PAGES.has(page)) {
+      closeCommandPalette()
+
+      return
+    }
+
     setSearch('')
     setPage(prev => (prev ? (PAGE_PARENTS[prev] ?? null) : null))
-  }, [])
+  }, [page])
 
   const settingsSectionLabel = useCallback(
     (section: (typeof SECTIONS)[number]) => t.settings.sections[section.id] ?? section.label,
@@ -1484,6 +1543,7 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
           }
         ]
       },
+      'move-to-project': movePage,
       // Server-driven page: browse petdex gallery, adopt/switch, toggle off.
       pets: {
         title: t.commandCenter.pets.title,
@@ -1508,6 +1568,7 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
     [
       availableThemes,
       mode,
+      movePage,
       previewTheme,
       resolvedMode,
       resolveThemeMode,

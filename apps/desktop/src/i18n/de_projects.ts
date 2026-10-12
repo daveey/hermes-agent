@@ -34,6 +34,7 @@ export const deProjects: NonNullable<TranslationOverrides['sidebar']>['projects'
   moveFailed: 'Session konnte nicht verschoben werden',
   moveNoFolder: 'Dieses Projekt hat keinen Ordner, in den verschoben werden kann',
   moveNoProjects: 'Keine anderen Projekte',
+  movePlaceholder: title => `„${title}“ verschieben nach…`,
   reveal: 'Im Ordner anzeigen',
   copyPath: 'Pfad kopieren',
   removeFromSidebar: 'Aus der Sidebar ausblenden',

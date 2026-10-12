@@ -851,6 +851,21 @@ export async function moveSessionToProject(
   void refreshProjectTree()
 }
 
+// Projects a stored session can be moved into: every project with a folder
+// except the one that already owns the session and the folderless Home bucket.
+// Shared by the row menu's submenu and the ⌘⇧P palette page.
+export function moveToProjectTargets(
+  tree: readonly SidebarProjectTree[],
+  sessions: readonly SessionInfo[],
+  sessionId: string
+): SidebarProjectTree[] {
+  const session = sessions.find(s => sessionMatchesStoredId(s, sessionId))
+  const cwd = session?.cwd?.trim() || ''
+  const currentProjectId = cwd ? projectIdForCwd(cwd) : null
+
+  return tree.filter(node => node.id !== currentProjectId && !node.isNoProject && Boolean(projectRootCwd(node)))
+}
+
 export interface RepoDiscoveryPolicy {
   enabled: boolean
   roots: string[]

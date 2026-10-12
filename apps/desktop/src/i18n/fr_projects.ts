@@ -34,6 +34,7 @@ export const frProjects: NonNullable<TranslationOverrides['sidebar']>['projects'
   moveFailed: 'Impossible de déplacer la session',
   moveNoFolder: "Ce projet n'a aucun dossier vers lequel effectuer le déplacement",
   moveNoProjects: 'Aucun autre projet',
+  movePlaceholder: title => `Déplacer « ${title} » vers…`,
   reveal: 'Afficher dans le dossier',
   copyPath: 'Copier le chemin',
   removeFromSidebar: 'Masquer de la barre latérale',

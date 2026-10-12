@@ -12,6 +12,20 @@ export const $commandPalettePage = atom<string | null>(null)
  *  from a surface: the keystroke that opened the palette must not be lost). */
 export const $commandPaletteSeed = atom<string | null>(null)
 
+/** Session the `move-to-project` palette page re-homes (set by ⌘⇧P). */
+export interface MoveToProjectTarget {
+  profile?: string
+  sessionId: string
+}
+
+export const $moveToProjectTarget = atom<MoveToProjectTarget | null>(null)
+
+/** Open the palette on the project typeahead for one stored session. */
+export function openMoveToProjectPalette(target: MoveToProjectTarget): void {
+  $moveToProjectTarget.set(target)
+  openCommandPalettePage('move-to-project')
+}
+
 export function openCommandPalette(): void {
   $commandPaletteOpen.set(true)
 }
@@ -39,6 +53,7 @@ function setOpen(open: boolean): void {
   if (!open) {
     $commandPalettePage.set(null)
     $commandPaletteSeed.set(null)
+    $moveToProjectTarget.set(null)
 
     if (wasOpen) {
       releaseTypingFocus()

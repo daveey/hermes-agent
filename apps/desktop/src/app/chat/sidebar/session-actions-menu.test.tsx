@@ -81,6 +81,7 @@ vi.mock('@/store/notifications', () => ({ notify: vi.fn(), notifyError: vi.fn() 
 vi.mock('@/store/projects', () => ({
   $projectTree: atom<unknown[]>([]),
   moveSessionToProject: vi.fn(),
+  moveToProjectTargets: vi.fn(() => []),
   projectIdForCwd: vi.fn(() => null),
   projectRootCwd: vi.fn(() => ''),
   refreshProjectTree: vi.fn(() => Promise.resolve())

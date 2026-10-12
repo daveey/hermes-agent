@@ -30,7 +30,12 @@ import { composerFocusKeysAllowed, isComposerFocusSoftCombo, typeToFocusChar } f
 import { registerBuiltinActionRunner } from '@/lib/keybinds/plugin-actions'
 import { stepReasoningEffort, writeSessionReasoningEffort } from '@/lib/reasoning-step'
 import { openWorktreeDialog } from '@/store/coding-status'
-import { $commandPaletteOpen, openCommandPalettePage, toggleCommandPalette } from '@/store/command-palette'
+import {
+  $commandPaletteOpen,
+  openCommandPalettePage,
+  openMoveToProjectPalette,
+  toggleCommandPalette
+} from '@/store/command-palette'
 import { recordAction, recordDislike } from '@/store/desktop-metrics'
 import {
   $findInPage,
@@ -68,7 +73,9 @@ import {
   $currentReasoningEffort,
   $defaultReasoningEffort,
   $selectedStoredSessionId,
+  $sessions,
   markComposerSelectionManual,
+  sessionMatchesStoredId,
   setCurrentReasoningEffort,
   setModelPickerOpen
 } from '@/store/session'
@@ -326,6 +333,17 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'session.focusSearch': requestSessionSearchFocus,
     'session.togglePin': deps.toggleSelectedPin,
     'session.archive': deps.archiveSelectedSession,
+    // ⌘⇧P: typeahead over projects for the selected (else focused) session.
+    'session.moveToProject': () => {
+      const sessionId = $selectedStoredSessionId.get() || $focusedStoredSessionId.get()
+
+      if (!sessionId) {
+        return false
+      }
+
+      const profile = $sessions.get().find(s => sessionMatchesStoredId(s, sessionId))?.profile || undefined
+      openMoveToProjectPalette({ profile, sessionId })
+    },
     'conversation.scrollPageUp': () => requestThreadPageScroll(-1, $focusedStoredSessionId.get()),
     'conversation.scrollPageDown': () => requestThreadPageScroll(1, $focusedStoredSessionId.get()),
     // openWorktreeDialog resolves the target. There is no test for a repo

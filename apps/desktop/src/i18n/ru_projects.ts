@@ -33,6 +33,7 @@ export const ruProjects: NonNullable<TranslationOverrides['sidebar']>['projects'
   moveFailed: 'Не удалось переместить сеанс',
   moveNoFolder: 'У этого проекта нет папки для перемещения',
   moveNoProjects: 'Нет других проектов',
+  movePlaceholder: title => `Переместить «${title}» в…`,
   reveal: 'Показать в папке',
   copyPath: 'Копировать путь',
   removeFromSidebar: 'Скрыть из боковой панели',

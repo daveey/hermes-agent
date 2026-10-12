@@ -135,6 +135,9 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // every user — surfaced in the panel for opt-in binding (the issue suggests
   // ⌘⇧⌫ / Ctrl+Shift+⌫).
   { id: 'session.archive', category: 'session', defaults: [] },
+  // ⌘⇧P — "p" for project: re-home the selected session into another project
+  // through a typeahead palette page (same move as the row menu's submenu).
+  { id: 'session.moveToProject', category: 'session', defaults: ['mod+shift+p'] },
   // ⌘⇧B — "b" for branch: spin up a new git worktree from the active repo.
   { id: 'workspace.newWorktree', category: 'session', defaults: ['mod+shift+b'] },
   // ⌘O — the editor-standard "open folder" chord (VS Code ⌘O, Zed's

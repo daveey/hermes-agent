@@ -583,6 +583,7 @@ export const deOverrides = {
       'session.slot.9': 'Zu letzter Session 9 wechseln',
       'session.focusSearch': 'Sessions durchsuchen',
       'session.togglePin': 'Aktuelle Session anheften / lösen',
+      'session.moveToProject': 'Aktuelle Session in Projekt verschieben…',
       'session.archive': 'Aktuelle Session archivieren',
       'workspace.newWorktree': 'Neues Worktree',
       'workspace.openFolder': 'Ordner als Projekt öffnen',

@@ -583,6 +583,7 @@ export const frOverrides = {
       'session.slot.9': 'Basculer vers la session récente 9',
       'session.focusSearch': 'Rechercher des sessions',
       'session.togglePin': 'Épingler / désépingler la session actuelle',
+      'session.moveToProject': 'Déplacer la session actuelle vers un projet…',
       'session.archive': 'Archiver la session actuelle',
       'workspace.newWorktree': 'Nouveau worktree',
       'workspace.openFolder': 'Ouvrir le dossier comme projet',

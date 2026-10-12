@@ -33,6 +33,7 @@ export interface SidebarProjectsTranslations {
   moveFailed: string
   moveNoFolder: string
   moveNoProjects: string
+  movePlaceholder: (title: string) => string
   reveal: string
   copyPath: string
   removeFromSidebar: string

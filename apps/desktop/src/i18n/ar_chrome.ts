@@ -89,6 +89,7 @@ export const arChrome = {
       'session.slot.9': 'الانتقال إلى الجلسة الأخيرة 9',
       'session.focusSearch': 'البحث في الجلسات',
       'session.togglePin': 'تثبيت / إلغاء تثبيت الجلسة الحالية',
+      'session.moveToProject': 'نقل الجلسة الحالية إلى مشروع…',
       'conversation.scrollPageUp': 'تمرير المحادثة صفحة إلى الأعلى',
       'conversation.scrollPageDown': 'تمرير المحادثة صفحة إلى الأسفل',
       'workspace.newWorktree': 'worktree جديد',

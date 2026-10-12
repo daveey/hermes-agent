@@ -37,8 +37,7 @@ import {
   $projectTree,
   applyRenamedSessionTitle,
   moveSessionToProject,
-  projectIdForCwd,
-  projectRootCwd,
+  moveToProjectTargets,
   refreshProjectTree
 } from '@/store/projects'
 import {
@@ -210,10 +209,8 @@ function MoveToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; session
   const { t } = useI18n()
   const p = t.sidebar.projects
   const tree = useStore($projectTree)
-  const session = useStore($sessions).find(s => sessionMatchesStoredId(s, sessionId))
-  const cwd = session?.cwd?.trim() || ''
-  const currentProjectId = cwd ? projectIdForCwd(cwd) : null
-  const targets = tree.filter(node => node.id !== currentProjectId && !node.isNoProject && projectRootCwd(node))
+  const sessions = useStore($sessions)
+  const targets = moveToProjectTargets(tree, sessions, sessionId)
 
   // The flat (non-grouped) sidebar view only warms $projectTree on a
   // background timer (PROJECT_TREE_WARM_MS in sidebar/index.tsx), so opening

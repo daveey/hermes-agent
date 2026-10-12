@@ -24,6 +24,7 @@ import {
   fetchProjectSessions,
   followActiveSessionCwd,
   moveSessionToProject,
+  moveToProjectTargets,
   openProjectCreate,
   pickProjectFolder,
   pickProjectFolders,
@@ -1300,6 +1301,31 @@ describe('tombstone pruning', () => {
     await refreshProjectTree()
 
     expect($removedSessionIds.get().has('sess-1')).toBe(false)
+  })
+})
+
+describe('moveToProjectTargets', () => {
+  const tree: SidebarProjectTree[] = [
+    { id: NO_PROJECT_ID, isNoProject: true, label: 'Home', path: null, repos: [], sessionCount: 3 },
+    { id: 'p_src', label: 'Src', path: '/repos/src', repos: [], sessionCount: 1 },
+    { id: 'p_dest', label: 'Dest', path: '/repos/dest', repos: [], sessionCount: 0 },
+    { id: 'p_nofolder', label: 'Empty', path: null, repos: [], sessionCount: 0 }
+  ]
+
+  beforeEach(() => {
+    $projectTree.set(tree)
+  })
+
+  it('offers every foldered project except the current owner and Home', () => {
+    const sessions = [{ cwd: '/repos/src/sub', id: 's1' }] as never
+
+    expect(moveToProjectTargets(tree, sessions, 's1').map(n => n.id)).toEqual(['p_dest'])
+  })
+
+  it('offers all foldered projects for a session outside any project', () => {
+    const sessions = [{ cwd: '/tmp/elsewhere', id: 's2' }] as never
+
+    expect(moveToProjectTargets(tree, sessions, 's2').map(n => n.id)).toEqual(['p_src', 'p_dest'])
   })
 })
 

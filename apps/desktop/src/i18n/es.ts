@@ -586,6 +586,7 @@ export const esOverrides = {
       'session.slot.9': 'Cambiar a la sesión reciente 9',
       'session.focusSearch': 'Buscar sesiones',
       'session.togglePin': 'Fijar / desfijar sesión actual',
+      'session.moveToProject': 'Mover la sesión actual a un proyecto…',
       'session.archive': 'Archivar la sesión actual',
       'workspace.newWorktree': 'Nuevo worktree',
       'workspace.openFolder': 'Abrir carpeta como proyecto',
