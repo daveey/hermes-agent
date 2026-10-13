@@ -2809,6 +2809,9 @@ export interface Translations extends NoticeTranslations {
 
   sidebar: {
     filter: {
+      gateways: string
+      gatewayColor: (name: string) => string
+      noColor: string
       grouping: string
       ordering: string
       show: string

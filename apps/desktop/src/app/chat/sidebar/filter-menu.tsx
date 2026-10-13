@@ -21,6 +21,17 @@ import {
 import { useI18n } from '@/i18n'
 import { desktopGit } from '@/lib/desktop-git'
 import { cn } from '@/lib/utils'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
+import {
+  $gatewayColorOverrides,
+  $gatewayColors,
+  $hiddenGatewayIds,
+  GATEWAY_COLOR_NONE,
+  GATEWAY_PALETTE,
+  resolveGatewayColorIds,
+  setGatewayColor,
+  toggleGatewayHidden
+} from '@/store/gateway-visibility'
 import { $showsAdvancedChrome } from '@/store/interface-mode'
 import {
   $sidebarCardRows,
@@ -101,6 +112,87 @@ function OptionCheckbox({ checked, onCheck, option }: { checked: boolean; onChec
       <OptionGlyph option={option} />
       {option.label}
     </DropdownMenuCheckboxItem>
+  )
+}
+
+function GatewaySwatch({ color }: { color: null | string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="size-2.5 shrink-0 rounded-full border border-(--ui-text-quaternary)"
+      style={color ? { backgroundColor: color, borderColor: color } : undefined}
+    />
+  )
+}
+
+/** [daveey] Show/hide and color each registry gateway's sessions. */
+function GatewaysSubmenu({
+  colorLabel,
+  label,
+  noColorLabel
+}: {
+  colorLabel: (name: string) => string
+  label: string
+  noColorLabel: string
+}) {
+  const registry = useStore($connectionsRegistry)
+  const hidden = useStore($hiddenGatewayIds)
+  const colors = useStore($gatewayColors)
+  const overrides = useStore($gatewayColorOverrides)
+  const connections = registry?.connections ?? []
+
+  if (connections.length < 2) {
+    return null
+  }
+
+  const picks = resolveGatewayColorIds(registry, overrides)
+
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>{label}</DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="max-h-96 overflow-y-auto">
+        {connections.map(connection => (
+          <DropdownMenuCheckboxItem
+            checked={!hidden.includes(connection.id)}
+            data-gateway-toggle={connection.id}
+            key={connection.id}
+            onSelect={event => {
+              keepOpen(event)
+              toggleGatewayHidden(connection.id)
+            }}
+          >
+            <GatewaySwatch color={colors[connection.id] ?? null} />
+            {connection.label || connection.id}
+          </DropdownMenuCheckboxItem>
+        ))}
+        <DropdownMenuSeparator />
+        {connections.map(connection => (
+          <DropdownMenuSub key={connection.id}>
+            <DropdownMenuSubTrigger>
+              <GatewaySwatch color={colors[connection.id] ?? null} />
+              {colorLabel(connection.label || connection.id)}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownMenuRadioGroup
+                onValueChange={value => setGatewayColor(connection.id, value)}
+                value={picks[connection.id] ?? GATEWAY_COLOR_NONE}
+              >
+                <DropdownMenuRadioItem onSelect={keepOpen} value={GATEWAY_COLOR_NONE}>
+                  <GatewaySwatch color={null} />
+                  {noColorLabel}
+                </DropdownMenuRadioItem>
+                {GATEWAY_PALETTE.map(entry => (
+                  <DropdownMenuRadioItem key={entry.id} onSelect={keepOpen} value={entry.id}>
+                    <GatewaySwatch color={entry.color} />
+                    {entry.id}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ))}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
   )
 }
 
@@ -350,6 +442,8 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
               ))}
             </DropdownMenuSubContent>
           </DropdownMenuSub>
+
+          <GatewaysSubmenu colorLabel={f.gatewayColor} label={f.gateways} noColorLabel={f.noColor} />
 
           {/* `gh` only exists where the checkout does, so on a remote backend
               this submenu never appears rather than filtering everything out. */}

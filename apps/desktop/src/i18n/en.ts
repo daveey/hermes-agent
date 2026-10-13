@@ -3226,6 +3226,9 @@ export const en: Translations = {
 
   sidebar: {
     filter: {
+      gateways: 'Gateways',
+      gatewayColor: (name: string) => `${name} color`,
+      noColor: 'No color',
       grouping: 'Grouping',
       ordering: 'Ordering',
       show: 'Show',

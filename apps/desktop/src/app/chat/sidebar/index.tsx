@@ -33,6 +33,7 @@ import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $activeConnectionId } from '@/store/connections'
 import { $cronJobs } from '@/store/cron'
 import { recordAction } from '@/store/desktop-metrics'
+import { $hiddenGatewayIds, sessionOnHiddenGateway } from '@/store/gateway-visibility'
 import { $interfaceMode, $showsAdvancedChrome, shownInMode } from '@/store/interface-mode'
 import { $bindings } from '@/store/keybinds'
 import {
@@ -636,8 +637,16 @@ export function ChatSidebar({
   // page may not, so it has to be answerable per session rather than by
   // membership in the filtered set. Detached rows file under the Home bucket id
   // (same rule as the overview overlay), so filtering to Home keeps Home's rows.
+  const hiddenGatewayIds = useStore($hiddenGatewayIds)
+  const gatewayRegistry = useStore($connectionsRegistry)
+
   const sessionMatchesFilters = useCallback(
     (session: SessionInfo) => {
+      // [daveey] A hidden gateway's rows leave every list and lane.
+      if (sessionOnHiddenGateway(session, hiddenGatewayIds, gatewayRegistry)) {
+        return false
+      }
+
       if (statusFilter.length && !statusFilter.includes(sessionStatusBucket(dotStates[session.id]))) {
         return false
       }
@@ -662,6 +671,8 @@ export function ChatSidebar({
       return sessionMatchesProjectFilter(session, projectFilter, projects, projectOwners)
     },
     [
+      hiddenGatewayIds,
+      gatewayRegistry,
       statusFilter,
       projectFilter,
       profileFilter,
@@ -675,6 +686,7 @@ export function ChatSidebar({
   )
 
   const filtersNarrow =
+    hiddenGatewayIds.length > 0 ||
     statusFilter.length > 0 ||
     projectFilter.length > 0 ||
     prFilter.length > 0 ||

@@ -23,7 +23,8 @@ import {
   activeGateway,
   activeGatewayConnectionId,
   ensureActiveGatewayOpen,
-  isActivePrimary
+  isActivePrimary,
+  requestGatewayForAgent
 } from '@/store/gateway'
 import { $sidebarShowAllSessions, setSidebarAgentsGrouped } from '@/store/layout'
 import { notify } from '@/store/notifications'
@@ -55,7 +56,15 @@ import {
 } from '@/store/session-removal'
 import type { ProjectInfo, ProjectsPayload } from '@/types/hermes'
 
+import { $connectionsRegistry } from './connection-registry-state'
 import { recordFeatureUse } from './desktop-metrics'
+import {
+  type GatewayProjectTree,
+  isRemoteProjectId,
+  mergeGatewayProjectTrees,
+  remoteScopedSessionIds
+} from './gateway-project-merge'
+import { $hiddenGatewayIds } from './gateway-visibility'
 
 // First-class, per-profile Projects (named, multi-folder workspaces). State is
 // served by the live gateway's `projects.*` JSON-RPC methods, which wrap the
@@ -489,15 +498,126 @@ function tagProjectSessionConnection(project: SidebarProjectTree, owner: Project
   }
 }
 
+// ── Other gateways' trees [daveey] ─────────────────────────────────────────
+// The overview folds in every connected gateway's `projects.tree`, fetched in
+// the background (never blocking the active gateway's paint) and cached per
+// connection. A refresh storm (sessions.changed fires per turn) is throttled
+// per gateway; an unreachable gateway backs off and contributes nothing.
+const REMOTE_TREE_FRESH_MS = 30_000
+const REMOTE_TREE_FAILURE_BACKOFF_MS = 120_000
+const REMOTE_TREE_TIMEOUT_MS = 20_000
+
+interface RemoteTreeEntry {
+  projects: SidebarProjectTree[]
+  fetchedAt: number
+  failedAt: number
+  inFlight: boolean
+}
+
+const remoteTrees = new Map<string, RemoteTreeEntry>()
+let lastLocalTree: { res: ProjectTreePayload; owner: ProjectRowOwner } | null = null
+
+function ownerGatewayId(owner: ProjectRowOwner): string {
+  return owner.connectionId || $connectionsRegistry.get()?.primary || 'local'
+}
+
+function visibleRemoteTrees(owner: ProjectRowOwner): GatewayProjectTree[] {
+  const hidden = $hiddenGatewayIds.get()
+  const self = ownerGatewayId(owner)
+  const registry = $connectionsRegistry.get()
+  const out: GatewayProjectTree[] = []
+
+  for (const connection of registry?.connections ?? []) {
+    const entry = remoteTrees.get(connection.id)
+
+    if (connection.id === self || hidden.includes(connection.id) || !entry?.projects.length) {
+      continue
+    }
+
+    out.push({ connectionId: connection.id, projects: entry.projects })
+  }
+
+  return out
+}
+
+function reapplyLastProjectTree(): void {
+  if (lastLocalTree && activeGatewayConnectionId() === lastLocalTree.owner.connectionId) {
+    applyProjectTreePayload(lastLocalTree.res, lastLocalTree.owner)
+  }
+}
+
+async function refreshRemoteProjectTree(connectionId: string, profile: string): Promise<void> {
+  const now = Date.now()
+  const entry = remoteTrees.get(connectionId) ?? { projects: [], fetchedAt: 0, failedAt: 0, inFlight: false }
+
+  if (
+    entry.inFlight ||
+    now - entry.fetchedAt < REMOTE_TREE_FRESH_MS ||
+    now - entry.failedAt < REMOTE_TREE_FAILURE_BACKOFF_MS
+  ) {
+    return
+  }
+
+  entry.inFlight = true
+  remoteTrees.set(connectionId, entry)
+
+  try {
+    const res = await requestGatewayForAgent<ProjectTreePayload>(
+      connectionId,
+      profile,
+      'projects.tree',
+      { preview_limit: projectTreePreviewLimit() },
+      REMOTE_TREE_TIMEOUT_MS
+    )
+
+    entry.projects = res.projects ?? []
+    entry.fetchedAt = Date.now()
+    reapplyLastProjectTree()
+  } catch {
+    entry.failedAt = Date.now()
+  } finally {
+    entry.inFlight = false
+  }
+}
+
+/** Kick background tree fetches for every visible gateway but the active one. */
+function refreshRemoteProjectTrees(owner: ProjectRowOwner): void {
+  const hidden = $hiddenGatewayIds.get()
+  const self = ownerGatewayId(owner)
+
+  for (const connection of $connectionsRegistry.get()?.connections ?? []) {
+    if (connection.id === self || hidden.includes(connection.id)) {
+      continue
+    }
+
+    void refreshRemoteProjectTree(connection.id, normalizeProfileKey(connection.remoteProfile || 'default'))
+  }
+}
+
+// Toggling a gateway repaints from cache at once, then fetches a newly shown one.
+$hiddenGatewayIds.listen(() => {
+  reapplyLastProjectTree()
+
+  if (lastLocalTree) {
+    refreshRemoteProjectTrees(lastLocalTree.owner)
+  }
+})
+
 function applyProjectTreePayload(res: ProjectTreePayload, owner: ProjectRowOwner): void {
-  const scoped = new Set(res.scoped_session_ids ?? [])
+  lastLocalTree = { res, owner }
+  const remotes = visibleRemoteTrees(owner)
+  const scoped = new Set([...(res.scoped_session_ids ?? []), ...remoteScopedSessionIds(remotes)])
   // The tree refreshes on every sessions.changed and window focus, and most of
   // those answers are unchanged. Keep unchanged nodes by reference so the
   // entered project doesn't refetch and rebuild on a no-op (#77591).
   $projectTree.set(
     replaceEqualDeep(
       $projectTree.get(),
-      (res.projects ?? []).map(project => tagProjectSessionConnection(project, owner))
+      mergeGatewayProjectTrees(
+        (res.projects ?? []).map(project => tagProjectSessionConnection(project, owner)),
+        remotes,
+        projectTreePreviewLimit()
+      )
     )
   )
   $activeProjectId.set(res.active_id ?? null)
@@ -555,6 +675,7 @@ async function refreshProjectTreeOn(context: ActiveProjectsContext): Promise<voi
 
     applyProjectTreePayload(res, context)
     markProjectsRpcSuccess()
+    refreshRemoteProjectTrees(context)
   } catch (err) {
     if (generation === projectTreeRefreshGeneration && stillOnProjectsContext(context)) {
       markProjectsRpcFailure(err)
@@ -610,6 +731,7 @@ async function refreshProjectTreeAcrossProfiles(): Promise<void> {
 
     applyProjectTreePayload(res, owner)
     markProjectsRpcSuccess()
+    refreshRemoteProjectTrees(owner)
   } catch (err) {
     markProjectsRpcFailure(err)
   } finally {
@@ -654,6 +776,12 @@ export async function fetchProjectSessions(
   projectId: string,
   { supersedable = true }: { supersedable?: boolean } = {}
 ): Promise<SidebarProjectTree | null> {
+  // A lane only another gateway has: its tree node already carries the rows
+  // that gateway sent; the active backend has no such project to hydrate.
+  if (isRemoteProjectId(projectId)) {
+    return $projectTree.get().find(node => node.id === projectId) ?? null
+  }
+
   const generation = supersedable ? ++projectSessionsRefreshGeneration : null
   const profile = projectProfile()
 
@@ -841,6 +969,7 @@ export async function moveSessionToProject(
     // Backend normalized the path; the session.info echo carries that form.
     suppressMoveFollow(moved)
   }
+
   setSessions(prev =>
     prev.map(s =>
       sessionMatchesStoredId(s, sessionId)

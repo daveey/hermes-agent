@@ -26,6 +26,8 @@ import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
 import { coarseElapsed } from '@/lib/time'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
+import { $gatewayColors, $gatewayColorsActive, sessionGatewayId } from '@/store/gateway-visibility'
 import { $sidebarRowMeta } from '@/store/layout'
 import { normalizeProfileKey } from '@/store/profile'
 import { $projects } from '@/store/projects'
@@ -168,6 +170,12 @@ function SidebarSessionRowImpl({
   // rather than threaded as props: the subscription re-renders past the memo
   // below, and a toggle should repaint every row at once anyway.
   const rowMeta = useStore($sidebarRowMeta)
+  // [daveey] Which gateway owns this row, as a colored left stripe.
+  const gatewayColors = useStore($gatewayColors)
+  const gatewayColorsActive = useStore($gatewayColorsActive)
+  const gatewayRegistry = useStore($connectionsRegistry)
+  const gatewayId = sessionGatewayId(session, gatewayRegistry)
+  const gatewayColor = gatewayColorsActive ? (gatewayColors[gatewayId] ?? null) : null
   // Pinned metadata occupies the actions slot and swaps out for the kebab on
   // hover, so the row reserves the same width either way and never reflows.
   const pinnedAge = rowMeta.includes('updated')
@@ -431,6 +439,15 @@ function SidebarSessionRowImpl({
         {...rest}
       >
         {showsRunningArc(dotState) && <span aria-hidden="true" className="arc-border arc-row" />}
+        {gatewayColor && (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute top-1 bottom-1 left-0 w-[3px] rounded-full"
+            data-gateway-id={gatewayId}
+            data-slot="session-gateway-stripe"
+            style={{ backgroundColor: gatewayColor }}
+          />
+        )}
         {/* #38072 finding 3: the row's body is a DIV, not a button — the
             reorder grabber (dnd-kit role="button" + tabIndex, kept for
             keyboard reorder, #83617) and the ⋯ trigger must be SIBLINGS of
