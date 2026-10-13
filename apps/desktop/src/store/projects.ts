@@ -944,7 +944,8 @@ function consumeMoveFollowSuppression(cwd: string): boolean {
 // run on the gateway that OWNS the session (asking the active one answers
 // "session not found"), with a folder that exists THERE. When the owning
 // gateway has no such project yet, it gets one: same name, the same
-// home-relative folder, cloned from the source's git origin when missing.
+// home-relative folder (created empty if missing — projects only organize the
+// sidebar).
 
 interface MoveTarget {
   connectionId: string
@@ -1046,27 +1047,6 @@ function projectSourceFor(node: SidebarProjectTree | undefined): null | { connec
   return null
 }
 
-async function sourceGitOrigin(source: { connectionId: string; path: string }): Promise<string> {
-  const self = ownerGatewayId(projectRowOwner())
-  const target: MoveTarget = { connectionId: source.connectionId, profile: null, remote: source.connectionId !== self }
-
-  if (target.remote) {
-    target.profile = normalizeProfileKey(
-      $connectionsRegistry.get()?.connections.find(c => c.id === source.connectionId)?.remoteProfile || 'default'
-    )
-  }
-
-  try {
-    const res = await moveTargetRequest<ShellResult>(target, 'shell.exec', {
-      command: `git -C ${shellPath(source.path)} remote get-url origin`
-    })
-
-    return res.code === 0 ? res.stdout.trim().split('\n')[0]?.trim() || '' : ''
-  } catch {
-    return ''
-  }
-}
-
 /**
  * The destination project's root folder ON `target`, creating the project
  * (and its folder) there when that gateway doesn't have it yet.
@@ -1099,24 +1079,14 @@ async function ensureProjectRootOn(target: MoveTarget, node: SidebarProjectTree 
   }
 
   const path = homeRelativePath(source.path)
-  const word = shellPath(path)
 
-  const probe = await moveTargetRequest<ShellResult>(target, 'shell.exec', {
-    command: `test -d ${word} && echo present || echo missing`
+  // Projects only organize the sidebar here, so the folder just has to exist.
+  const make = await moveTargetRequest<ShellResult>(target, 'shell.exec', {
+    command: `mkdir -p ${shellPath(path)}`
   })
 
-  if (probe.stdout.trim() !== 'present') {
-    const origin = await sourceGitOrigin(source)
-
-    const make = await moveTargetRequest<ShellResult>(target, 'shell.exec', {
-      command: origin
-        ? `mkdir -p "$(dirname ${word})" && git clone --quiet ${shellPath(origin)} ${word}`
-        : `mkdir -p ${word}`
-    })
-
-    if (make.code !== 0) {
-      throw new Error(`Could not create ${path} on ${target.connectionId}: ${(make.stderr || make.stdout).trim()}`)
-    }
+  if (make.code !== 0) {
+    throw new Error(`Could not create ${path} on ${target.connectionId}: ${(make.stderr || make.stdout).trim()}`)
   }
 
   const created = await moveTargetRequest<{ project: null | ProjectInfo }>(target, 'projects.create', {

@@ -68,9 +68,7 @@ const localDefault: Handler = method =>
       ? { active_id: null, projects: [] }
       : method === 'session.workspace.move'
         ? { branch: 'main', cwd: LOCAL_PATH, git_repo_root: LOCAL_PATH }
-        : method === 'shell.exec'
-          ? { code: 0, stderr: '', stdout: 'git@github.com:daveey/babybear.git\n' }
-          : {}
+        : {}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -110,7 +108,7 @@ describe('moveSessionToProject across gateways', () => {
       method === 'projects.list'
         ? { active_id: null, projects: [] }
         : method === 'shell.exec'
-          ? { code: 0, stderr: '', stdout: 'present\n' }
+          ? { code: 0, stderr: '', stdout: '' }
           : method === 'projects.create'
             ? { project: { id: 'p_new', name: 'babybear', primary_path: '/Users/daveey/code/babybear' } }
             : method === 'session.workspace.move'
@@ -149,14 +147,12 @@ describe('moveSessionToProject across gateways', () => {
     expect(remoteCalls[1][2]).toMatchObject({ cwd: '/srv/bb' })
   })
 
-  it("clones the source repo's origin when the folder is missing on the remote", async () => {
-    setup(localDefault, (method, params) =>
+  it('creates an empty folder on the remote (no clone) before creating the project', async () => {
+    setup(localDefault, method =>
       method === 'projects.list'
         ? { active_id: null, projects: [] }
         : method === 'shell.exec'
-          ? String(params.command).startsWith('test -d')
-            ? { code: 0, stderr: '', stdout: 'missing\n' }
-            : { code: 0, stderr: '', stdout: '' }
+          ? { code: 0, stderr: '', stdout: '' }
           : method === 'projects.create'
             ? { project: { primary_path: '/home/me/code/babybear' } }
             : method === 'session.workspace.move'
@@ -166,22 +162,18 @@ describe('moveSessionToProject across gateways', () => {
 
     await moveSessionToProject('remote-s', 'p_local')
 
-    const clone = remoteCalls.find(([, m, p]) => m === 'shell.exec' && String(p.command).includes('git clone'))
-    expect(clone?.[2].command).toContain(`'git@github.com:daveey/babybear.git'`)
-    expect(clone?.[2].command).toContain(`"$HOME"/'code/babybear'`)
-    // The origin came from the gateway that has the project (the active one).
-    expect(localCalls.find(([m]) => m === 'shell.exec')?.[1].command).toContain('remote get-url origin')
+    const shells = remoteCalls.filter(([, m]) => m === 'shell.exec').map(([, , p]) => String(p.command))
+    expect(shells).toEqual([`mkdir -p "$HOME"/'code/babybear'`])
+    expect(localCalls.some(([m]) => m === 'shell.exec')).toBe(false)
     expect(remoteCalls.at(-1)?.[2]).toMatchObject({ cwd: '/home/me/code/babybear' })
   })
 
-  it('surfaces a failed clone instead of moving', async () => {
-    setup(localDefault, (method, params) =>
+  it('surfaces a failed mkdir instead of moving', async () => {
+    setup(localDefault, method =>
       method === 'projects.list'
         ? { active_id: null, projects: [] }
         : method === 'shell.exec'
-          ? String(params.command).startsWith('test -d')
-            ? { code: 0, stderr: '', stdout: 'missing\n' }
-            : { code: 128, stderr: 'Permission denied (publickey).', stdout: '' }
+          ? { code: 1, stderr: 'Permission denied', stdout: '' }
           : {}
     )
 
