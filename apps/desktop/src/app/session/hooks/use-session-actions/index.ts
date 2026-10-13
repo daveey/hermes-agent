@@ -3332,7 +3332,9 @@ export function useSessionActions({
   )
 
   const archiveSession = useCallback(
-    async (storedSessionId: string) => {
+    // `onDeselect` replaces the fresh-draft fallback when the archived session
+    // was the open one (the ⌘⇧A hotkey steps to the next sidebar session).
+    async (storedSessionId: string, options?: { onDeselect?: () => void }) => {
       clearNotifications()
 
       const listed = findListedSession(storedSessionId)
@@ -3365,7 +3367,11 @@ export function useSessionActions({
       $pinnedSessionIds.set(previousPinned.filter(id => id !== storedSessionId && id !== archivedPinId))
 
       if (wasSelected) {
-        startFreshSessionDraft(true)
+        if (options?.onDeselect) {
+          options.onDeselect()
+        } else {
+          startFreshSessionDraft(true)
+        }
       }
 
       try {

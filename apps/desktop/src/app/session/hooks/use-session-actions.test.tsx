@@ -6638,6 +6638,53 @@ describe('removeSession / archiveSession profile routing (#78836)', () => {
     expect($messagingSessions.get()).toEqual([])
   })
 
+  it('archiving the open session hands off to onDeselect instead of a fresh draft', async () => {
+    mockSetSessionArchived.mockResolvedValue({ ok: true })
+    setMessagingSessions([storedSession({ id: 'tg-open', profile: 'winefox', source: 'telegram' })])
+    const navigate = vi.fn()
+    const onDeselect = vi.fn()
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        navigate={navigate}
+        onReady={value => (handle = value)}
+        requestGateway={vi.fn(async () => ({}) as never)}
+        selectedStoredSessionId="tg-open"
+      />
+    )
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    await act(async () => {
+      await handle!.archiveSession('tg-open', { onDeselect })
+    })
+
+    expect(onDeselect).toHaveBeenCalledTimes(1)
+    expect(navigate).not.toHaveBeenCalled()
+    expect(mockSetSessionArchived).toHaveBeenCalledWith('tg-open', true, 'winefox')
+  })
+
+  it('archiving the open session without onDeselect still drops to a fresh draft', async () => {
+    mockSetSessionArchived.mockResolvedValue({ ok: true })
+    setMessagingSessions([storedSession({ id: 'tg-open-2', profile: 'winefox', source: 'telegram' })])
+    const navigate = vi.fn()
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        navigate={navigate}
+        onReady={value => (handle = value)}
+        requestGateway={vi.fn(async () => ({}) as never)}
+        selectedStoredSessionId="tg-open-2"
+      />
+    )
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    await act(async () => {
+      await handle!.archiveSession('tg-open-2')
+    })
+
+    expect(navigate).toHaveBeenCalled()
+  })
+
   it('restores a failed archive to the messaging slice', async () => {
     setMessagingSessions([storedSession({ id: 'tg-arch-fail', profile: 'winefox', source: 'telegram' })])
     mockSetSessionArchived.mockRejectedValue(new Error('archive failed'))

@@ -89,6 +89,7 @@ import {
 import { $focusedStoredSessionId } from '@/store/session-focus'
 import { reportPendingUpdateRun } from '@/store/shared-metrics'
 import { $archivedSessions } from '@/store/sidebar-archive'
+import { nextSidebarSessionId } from '@/store/sidebar-visible-order'
 import { $titlebarAppActionsSide, titlebarAppActionsClusterCounts } from '@/store/titlebar-app-actions'
 import { armWakeWord, stopClientCapture } from '@/store/wake-word'
 import { isAuxiliaryWindow, isBrowserWindow, isHudWindow, isMainWindow } from '@/store/windows'
@@ -1003,7 +1004,10 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     void openNewSessionTile('center', { listed: false })
   }, [openNewSessionTile])
 
-  // Archive the selected session (rebindable `session.archive` hotkey).
+  // Archive the selected session (rebindable `session.archive` hotkey), then
+  // step to the next sidebar session exactly like ⌘] (needs-you first, else
+  // the plain neighbour) instead of dropping to a fresh draft. The target is
+  // computed BEFORE the row leaves the sidebar so its position is still known.
   const archiveSelectedSession = useCallback(() => {
     // The clicked row, else the chat that's open.
     const sessionId = $selectedStoredSessionId.get() || $focusedStoredSessionId.get()
@@ -1012,8 +1016,11 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       return
     }
 
-    void archiveSession(sessionId)
-  }, [archiveSession])
+    const next = nextSidebarSessionId(sessionId, 1, false)
+    const onDeselect = next && next !== sessionId ? () => openSession(next, navigate) : undefined
+
+    void archiveSession(sessionId, { onDeselect })
+  }, [archiveSession, navigate])
 
   // Single global listener for every rebindable hotkey plus the on-screen
   // keybind editor's capture mode (same as DesktopController).
