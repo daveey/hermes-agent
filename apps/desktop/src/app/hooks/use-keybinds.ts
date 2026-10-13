@@ -104,6 +104,7 @@ import { useTheme } from '@/themes/context'
 import {
   requestComposerDictation,
   requestComposerFocus,
+  requestComposerSubmit,
   requestModelMenuToggle,
   requestVoiceToggle
 } from '../chat/composer/focus'
@@ -353,6 +354,9 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       const profile = $sessions.get().find(s => sessionMatchesStoredId(s, sessionId))?.profile || undefined
       openSessionRename({ profile, sessionId })
     },
+    // Fork ⌘R: send "resume" to the active chat as if typed (queues behind a
+    // live turn like any submit).
+    'session.resume': () => requestComposerSubmit('resume', { target: 'active' }),
     // ⌘⇧P: typeahead over projects for the selected (else focused) session.
     'session.moveToProject': () => {
       const sessionId = $selectedStoredSessionId.get() || $focusedStoredSessionId.get()

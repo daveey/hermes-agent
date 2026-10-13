@@ -339,6 +339,7 @@ export const ruOverrides = {
       'session.slot.9': 'Переключить на недавний сеанс 9',
       'session.focusSearch': 'Поиск по сеансам',
       'session.togglePin': 'Закрепить / открепить текущий сеанс',
+      'session.resume': 'Отправить «resume» в текущий чат',
       'session.nextNeedsYou': 'Следующий сеанс, ждущий вас',
       'session.prevNeedsYou': 'Предыдущий сеанс, ждущий вас',
       'session.nextSession': 'Следующий сеанс',

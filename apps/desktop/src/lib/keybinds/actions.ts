@@ -141,6 +141,12 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // ⌘⇧N — "n" for name: rename the selected session, pre-filled with an
   // AI-suggested short name (`session.title.suggest`).
   { id: 'session.rename', category: 'session', defaults: ['mod+shift+n'] },
+  // Fork: ⌘R sends "resume" to the active chat (upstream ⌘R reloads the
+  // window; ⇧⌘R `forceReload` still does). Main claims ⌘R before the renderer
+  // sees it (window-accelerator), so the preview-nav fallback in
+  // use-desktop-integrations dispatches whatever is bound to mod+r; a focused
+  // browser pane / terminal still gets ⌘R first.
+  { id: 'session.resume', category: 'session', defaults: ['mod+r'], editableTargetPolicy: 'modified' },
   { id: 'conversation.scrollPageUp', category: 'session', defaults: ['pageup'] },
   { id: 'conversation.scrollPageDown', category: 'session', defaults: ['pagedown'] },
   // Archive the active session. Ships unbound (like `session.togglePin`) so an

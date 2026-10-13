@@ -583,6 +583,7 @@ export const frOverrides = {
       'session.slot.9': 'Basculer vers la session récente 9',
       'session.focusSearch': 'Rechercher des sessions',
       'session.togglePin': 'Épingler / désépingler la session actuelle',
+      'session.resume': 'Envoyer « resume » au chat actuel',
       'session.nextNeedsYou': 'Session suivante qui vous attend',
       'session.prevNeedsYou': 'Session précédente qui vous attend',
       'session.nextSession': 'Session suivante',

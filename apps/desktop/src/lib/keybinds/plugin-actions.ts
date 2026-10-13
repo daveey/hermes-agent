@@ -64,6 +64,12 @@ export function registerBuiltinActionRunner(next: BuiltinActionRunner): () => vo
   }
 }
 
+/** Run a built-in action's handler by id (no plugin allowlist — app-internal
+ *  callers only). False when the keybind shell isn't mounted or has no handler. */
+export function runBuiltinAction(id: string): boolean {
+  return runner ? runner(id) : false
+}
+
 export function listPluginAppActions(): PluginAppActionInfo[] {
   // Action ids contain dots, so read the block rather than a dot-path key.
   const labels: Record<string, string | undefined> = runtimeTranslations().keybinds.actions

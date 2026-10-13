@@ -10,10 +10,13 @@ import { openConnectionDoneLink } from '@/components/assistant-ui/connector-tool
 import { $diskPluginsScanPending } from '@/contrib/runtime-loader'
 import { getSession } from '@/hermes'
 import { resolveDeepLinkAction } from '@/lib/deeplink-routes'
+import { canonicalizeCombo } from '@/lib/keybinds/combo'
+import { runBuiltinAction } from '@/lib/keybinds/plugin-actions'
 import { pathFromHermesDeepLink, resolveHermesOpenPath } from '@/lib/hermes-open-target'
 import { storedSessionIdForNotification } from '@/lib/session-ids'
 import { announceNewSessionDraftKey } from '@/store/composer'
 import { recordAction } from '@/store/desktop-metrics'
+import { $comboIndex } from '@/store/keybinds'
 import { requestMcpInstallFromDeepLink } from '@/store/mcp-deeplink-install'
 import { startMcpHealthChecker, stopMcpHealthChecker } from '@/store/mcp-health'
 import {
@@ -536,6 +539,15 @@ export function useDesktopIntegrations({
       }
 
       if (!commandFocusedPreview(command) && command === 'reload') {
+        // Fork: ⌘R runs whatever action is bound to mod+r (`session.resume`
+        // by default); only an unbound ⌘R reloads the window. ⇧⌘R
+        // (forceReload) is the unconditional reload.
+        const bound = $comboIndex.get().get(canonicalizeCombo('mod+r')) ?? []
+
+        if (bound.some(id => runBuiltinAction(id))) {
+          return
+        }
+
         window.location.reload()
       }
     })

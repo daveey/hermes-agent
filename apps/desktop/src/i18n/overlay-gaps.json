@@ -788,6 +788,7 @@
   "keybinds.actions.session.slot.7": ["ja","zh-hant"],
   "keybinds.actions.session.slot.8": ["ja","zh-hant"],
   "keybinds.actions.session.slot.9": ["ja","zh-hant"],
+  "keybinds.actions.session.resume": ["ja","zh-hant"],
   "keybinds.actions.session.togglePin": ["ja","zh-hant"],
   "keybinds.actions.view.closeTab": ["ja","zh-hant"],
   "keybinds.actions.view.closeTerminal": ["ar","ja","zh","zh-hant"],
