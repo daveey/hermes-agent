@@ -523,7 +523,13 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
         import psutil  # type: ignore
         cmdline_parts = psutil.Process(pid).cmdline()
         if cmdline_parts:
-            return " ".join(cmdline_parts)
+            # [daveey] Quote whitespace-bearing args (``~/Applications/Hermes Python.app/...``) so
+            # the quote-aware tokenizer in ``_gateway_command_subcommand`` keeps them one token.
+            # Args that already carry a double quote (an inline ``-c`` source) stay as-is.
+            return " ".join(
+                f'"{part}"' if any(c.isspace() for c in part) and '"' not in part else part
+                for part in cmdline_parts
+            )
     if not _IS_WINDOWS:
         with contextlib.suppress(OSError, subprocess.TimeoutExpired):
             result = subprocess.run(
