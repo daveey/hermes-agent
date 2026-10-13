@@ -22,6 +22,22 @@ describe('parseSessionRefValue', () => {
   it('treats bare values as session ids', () => {
     expect(parseSessionRefValue('20260101_abc123')).toEqual({ sessionId: '20260101_abc123' })
   })
+
+  it('splits a gateway qualifier off the profile (`<profile>@<gateway>/<id>`)', () => {
+    expect(parseSessionRefValue('default@mac-mini/20261012_154823_4069d7')).toEqual({
+      gateway: 'mac-mini',
+      profile: 'default',
+      sessionId: '20261012_154823_4069d7'
+    })
+  })
+
+  it('reads a stacked qualifier as one gateway, never a profile containing `@`', () => {
+    expect(parseSessionRefValue('default@mac-mini@mac-mini/20261012_154823_4069d7')).toEqual({
+      gateway: 'mac-mini',
+      profile: 'default',
+      sessionId: '20261012_154823_4069d7'
+    })
+  })
 })
 
 describe('sessionRefFallbackLabel', () => {

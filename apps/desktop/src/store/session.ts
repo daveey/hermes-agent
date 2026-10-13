@@ -1211,7 +1211,10 @@ function rememberSessionOwnerHint(sessionId: string, route: SessionOwnerRoute): 
   const id = sessionId.trim()
   const normalized = normalizeOwnerRoute(route)
 
-  if (!id || !normalized.connectionId) {
+  // Profile names never contain `@`: a `profile@gateway` head is a qualified
+  // session ref leaking into routing, and a hint carrying it re-dials a backend
+  // that cannot exist ("Profile 'default@mac-mini' does not exist.").
+  if (!id || !normalized.connectionId || normalized.profile.includes('@') || normalized.targetProfile?.includes('@')) {
     return false
   }
 

@@ -11072,6 +11072,16 @@ async function ensureRegistryBackend(
   }
 
   const profileKey = String(profile ?? '').trim() || 'default'
+
+  // Never pool a backend under a name no profile can have. A gateway-qualified
+  // session ref (`default@mac-mini/<id>`) once leaked its `profile@gateway` head
+  // here as a profile: the phantom `conn:mac-mini::default@mac-mini` entry then
+  // relabelled every mac-mini sidebar row with that profile, so resume/move/
+  // archive on them all failed with "Profile 'default@mac-mini' does not exist."
+  if (!PROFILE_NAME_RE.test(profileKey)) {
+    throw new Error(`Profile '${profileKey}' does not exist.`)
+  }
+
   let resolvedRegistrySshConfig
   let registryEffectiveFingerprintPromise: null | Promise<string> = null
 
@@ -17443,6 +17453,12 @@ async function pooledRegistrySessionSources(includeLocal = false): Promise<Regis
     const perProfile = connection.kind === 'ssh' || (includeLocal && connection.kind === 'local')
 
     for (const [key, entry] of perProfile ? pooled : pooled.slice(0, 1)) {
+      // A pool key whose profile part is not a valid profile name would stamp
+      // that bogus label onto every row this backend serves.
+      if (perProfile && !PROFILE_NAME_RE.test(key.slice(prefix.length) || 'default')) {
+        continue
+      }
+
       try {
         // Already-resolved for a connected backend; a still-dialing entry is
         // skipped via the timeout guard rather than blocking the sidebar.

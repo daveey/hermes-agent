@@ -1303,7 +1303,12 @@ function parseTileList(value: unknown): StoredTile[] {
             ownerRoute:
               raw.ownerRoute &&
               typeof raw.ownerRoute.connectionId === 'string' &&
-              typeof raw.ownerRoute.profile === 'string'
+              typeof raw.ownerRoute.profile === 'string' &&
+              // A `profile@gateway` head from a qualified session ref is not a
+              // profile (names can't hold `@`); persisted routes carrying one
+              // re-dial a backend that cannot exist. Drop and re-resolve.
+              !raw.ownerRoute.profile.includes('@') &&
+              !(typeof raw.ownerRoute.targetProfile === 'string' && raw.ownerRoute.targetProfile.includes('@'))
                 ? {
                     connectionId: raw.ownerRoute.connectionId,
                     mode: raw.ownerRoute.mode,

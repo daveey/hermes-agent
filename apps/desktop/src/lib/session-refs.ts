@@ -44,8 +44,14 @@ export function splitSessionRefValue(raw: string): { trailing: string; value: st
 }
 
 /** Session ids never contain a slash, so a slash unambiguously means
- *  `<profile>/<id>` — same split as `tools/session_search_tool.py`. */
-export function parseSessionRefValue(value: string): { profile?: string; sessionId: string } {
+ *  `<profile>/<id>` — same split as `tools/session_search_tool.py`.
+ *
+ *  The head may carry a gateway qualifier, `<profile>@<gateway>/<id>` (the
+ *  cross-gateway form the session-mentions plugin inserts). Profile names can
+ *  never contain `@` (backend rule: `[a-z0-9][a-z0-9_-]*`), so everything from
+ *  the first `@` is routing, not profile — treating `default@mac-mini` as a
+ *  profile name dialed a phantom backend and poisoned sidebar rows. */
+export function parseSessionRefValue(value: string): { gateway?: string; profile?: string; sessionId: string } {
   const trimmed = value.trim()
   const slash = trimmed.indexOf('/')
 
@@ -53,16 +59,26 @@ export function parseSessionRefValue(value: string): { profile?: string; session
     return { sessionId: trimmed }
   }
 
-  const profile = trimmed.slice(0, slash).trim()
+  const head = trimmed.slice(0, slash).trim()
   const sessionId = trimmed.slice(slash + 1).trim()
 
-  return sessionId ? { profile: profile || undefined, sessionId } : { sessionId: trimmed }
+  if (!sessionId) {
+    return { sessionId: trimmed }
+  }
+
+  const at = head.indexOf('@')
+  const profile = (at === -1 ? head : head.slice(0, at)).trim()
+  // `default@mac-mini@mac-mini` (a qualifier stacked on an already-qualified
+  // profile) still names one gateway: the last segment.
+  const gateway = at === -1 ? '' : head.slice(head.lastIndexOf('@') + 1).trim()
+
+  return { ...(gateway ? { gateway } : {}), profile: profile || undefined, sessionId }
 }
 
 export function sessionRefCacheKey(value: string): string {
-  const { profile, sessionId } = parseSessionRefValue(value)
+  const { gateway, profile, sessionId } = parseSessionRefValue(value)
 
-  return sessionId ? `${profile ?? ''}/${sessionId}` : ''
+  return sessionId ? `${profile ?? ''}${gateway ? `@${gateway}` : ''}/${sessionId}` : ''
 }
 
 /** Chip label before (or without) a resolved title — a short, still-identifying id. */
