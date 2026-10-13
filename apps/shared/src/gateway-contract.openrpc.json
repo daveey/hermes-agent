@@ -3697,6 +3697,24 @@
       }
     },
     {
+      "name": "session.title.suggest",
+      "summary": "Suggest a short (2-4 lowercase words) name from the transcript; read-only (Desktop rename pre-fill).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionTitleSuggestParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionTitleSuggestResult"
+        }
+      }
+    },
+    {
       "name": "session.undo",
       "summary": "Drop the last user turn (and everything after it) from an idle session.",
       "params": [
@@ -32724,6 +32742,76 @@
           "title"
         ],
         "title": "SessionTitleResult",
+        "type": "object"
+      },
+      "SessionTitleSuggestParams": {
+        "additionalProperties": false,
+        "description": "``session_key`` (stored) or ``session_id`` (live runtime id first, else stored id / key).",
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "session_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Key"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          }
+        },
+        "title": "SessionTitleSuggestParams",
+        "type": "object"
+      },
+      "SessionTitleSuggestResult": {
+        "additionalProperties": false,
+        "properties": {
+          "session_key": {
+            "title": "Session Key",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
+          }
+        },
+        "required": [
+          "session_key"
+        ],
+        "title": "SessionTitleSuggestResult",
         "type": "object"
       },
       "SessionUndoParams": {

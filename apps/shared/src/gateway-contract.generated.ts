@@ -3268,6 +3268,16 @@ export interface SessionTitleResult {
   session_key?: string | null
   pending?: boolean | null
 }
+/** ``session_key`` (stored) or ``session_id`` (live runtime id first, else stored id / key). */
+export interface SessionTitleSuggestParams {
+  session_id?: string | null
+  session_key?: string | null
+  profile?: string | null
+}
+export interface SessionTitleSuggestResult {
+  session_key: string
+  title?: string | null
+}
 /** ``session_id`` is a live runtime id first, else a stored id / key / title. */
 export interface SessionSetHiddenParams {
   session_id: string
@@ -5450,6 +5460,8 @@ export interface RpcMethods {
   'session.take_over': { params: SessionParams; result: SessionTakeOverResult }
   /** Read or set a live session's title; a title set before the row exists is queued. */
   'session.title': { params: SessionTitleParams; result: SessionTitleResult }
+  /** Suggest a short (2-4 lowercase words) name from the transcript; read-only (Desktop rename pre-fill). */
+  'session.title.suggest': { params: SessionTitleSuggestParams; result: SessionTitleSuggestResult }
   /** Drop the last user turn (and everything after it) from an idle session. */
   'session.undo': { params: SessionUndoParams; result: SessionUndoResult }
   /** Token / context / cost counters for the session (+ Nous credit lines when available). */
@@ -5768,6 +5780,7 @@ export const RPC_METHODS = [
   'session.steer',
   'session.take_over',
   'session.title',
+  'session.title.suggest',
   'session.undo',
   'session.usage',
   'session.workspace.move',

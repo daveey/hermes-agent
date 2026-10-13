@@ -321,6 +321,23 @@ method("session.title", params=SessionTitleParams, result=SessionTitleResult,
        doc="Read or set a live session's title; a title set before the row exists is queued.")
 
 
+class SessionTitleSuggestParams(Params):
+    """``session_key`` (stored) or ``session_id`` (live runtime id first, else stored id / key)."""
+
+    session_id: str | None = None
+    session_key: str | None = None
+    profile: str | None = None
+
+
+class SessionTitleSuggestResult(Result):
+    session_key: str
+    title: str | None = None  # None: nothing could be suggested
+
+
+method("session.title.suggest", params=SessionTitleSuggestParams, result=SessionTitleSuggestResult,
+       doc="Suggest a short (2-4 lowercase words) name from the transcript; read-only (Desktop rename pre-fill).")
+
+
 class SessionSetHiddenParams(Params):
     """``session_id`` is a live runtime id first, else a stored id / key / title."""
 
