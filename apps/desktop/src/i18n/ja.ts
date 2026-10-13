@@ -2252,6 +2252,9 @@ export const jaOverrides = {
     profileRail: 'プロファイルバー',
     markAllRead: 'すべて既読にする',
     filter: {
+      gateways: 'ゲートウェイ',
+      gatewayColor: (name: string) => `${name} の色`,
+      noColor: '色なし',
       grouping: 'グループ化',
       ordering: '並び替え',
       show: '表示',

@@ -3125,6 +3125,9 @@ export const zhOverrides = {
 
   sidebar: {
     filter: {
+      gateways: '网关',
+      gatewayColor: (name: string) => `${name} 颜色`,
+      noColor: '无颜色',
       grouping: '分组',
       ordering: '排序',
       show: '显示',

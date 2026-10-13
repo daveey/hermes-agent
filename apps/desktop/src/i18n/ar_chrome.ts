@@ -157,6 +157,9 @@ export const arChrome = {
     profileRail: 'شريط الملفات الشخصية',
     markAllRead: 'وضع علامة مقروء على الكل',
     filter: {
+      gateways: 'البوابات',
+      gatewayColor: (name: string) => `لون ${name}`,
+      noColor: 'بلا لون',
       grouping: 'تجميع',
       ordering: 'ترتيب',
       show: 'إظهار',

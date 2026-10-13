@@ -2522,6 +2522,9 @@ export const ruOverrides = {
   sidebar: {
     profileRail: 'Панель профилей',
     filter: {
+      gateways: 'Шлюзы',
+      gatewayColor: (name: string) => `Цвет для ${name}`,
+      noColor: 'Без цвета',
       grouping: 'Группировка',
       ordering: 'Сортировка',
       show: 'Показывать',

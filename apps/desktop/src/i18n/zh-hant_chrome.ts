@@ -41,6 +41,9 @@ export const zhHantChrome = {
     profileRail: '設定檔列',
     markAllRead: '全部標示為已讀',
     filter: {
+      gateways: '閘道',
+      gatewayColor: (name: string) => `${name} 顏色`,
+      noColor: '無顏色',
       grouping: '分組',
       ordering: '排序',
       show: '顯示',

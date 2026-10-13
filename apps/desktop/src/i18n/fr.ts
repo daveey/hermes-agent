@@ -3673,6 +3673,9 @@ export const frOverrides = {
   },
   sidebar: {
     filter: {
+      gateways: 'Passerelles',
+      gatewayColor: (name: string) => `Couleur de ${name}`,
+      noColor: 'Aucune couleur',
       grouping: 'Regroupement',
       ordering: 'Tri',
       show: 'Afficher',

@@ -3664,6 +3664,9 @@ export const deOverrides = {
   },
   sidebar: {
     filter: {
+      gateways: 'Gateways',
+      gatewayColor: (name: string) => `Farbe für ${name}`,
+      noColor: 'Keine Farbe',
       grouping: 'Gruppierung',
       ordering: 'Sortierung',
       show: 'Anzeigen',

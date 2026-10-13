@@ -3658,6 +3658,9 @@ export const esOverrides = {
   },
   sidebar: {
     filter: {
+      gateways: 'Gateways',
+      gatewayColor: (name: string) => `Color de ${name}`,
+      noColor: 'Sin color',
       grouping: 'Agrupación',
       ordering: 'Orden',
       show: 'Mostrar',
