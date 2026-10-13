@@ -3369,7 +3369,12 @@ export function useSessionActions({
       }
 
       try {
-        await setSessionArchived(storedSessionId, true, profile)
+        // Route to the row's OWN gateway (mirrors deleteSession's removedOwner):
+        // an All-Gateways row archived via the active connection 404s there.
+        const archiveOwner: SessionOwnerScope = archived?.connection_id
+          ? { connectionId: archived.connection_id, profile: archived.profile || 'default' }
+          : profile
+        await setSessionArchived(storedSessionId, true, archiveOwner)
         // Archived rows never reach the sidebar, so their persisted unread can
         // only rot. Dropped after the RPC so a failed archive keeps it.
         forgetSessionUnread(archivedIds, profile)
@@ -3418,7 +3423,10 @@ export function useSessionActions({
       const profile = archived?.profile?.trim() || undefined
 
       try {
-        await setSessionArchived(storedSessionId, false, profile)
+        const restoreOwner: SessionOwnerScope = archived?.connection_id
+          ? { connectionId: archived.connection_id, profile: archived.profile || 'default' }
+          : profile
+        await setSessionArchived(storedSessionId, false, restoreOwner)
 
         // Drop the archived-view row first so the view reflects the restore
         // even when the session cannot be re-listed below (e.g. it belongs to

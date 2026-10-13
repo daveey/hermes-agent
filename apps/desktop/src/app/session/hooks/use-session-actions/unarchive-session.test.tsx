@@ -53,7 +53,7 @@ function archivedSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   } as SessionInfo
 }
 
-type Handle = Pick<ReturnType<typeof useSessionActions>, 'unarchiveSession'>
+type Handle = Pick<ReturnType<typeof useSessionActions>, 'archiveSession' | 'unarchiveSession'>
 
 function Harness({ onReady }: { onReady: (handle: Handle) => void }) {
   const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
@@ -79,7 +79,7 @@ function Harness({ onReady }: { onReady: (handle: Handle) => void }) {
   })
 
   useEffect(() => {
-    onReady({ unarchiveSession: actions.unarchiveSession })
+    onReady({ archiveSession: actions.archiveSession, unarchiveSession: actions.unarchiveSession })
   }, [actions, onReady])
 
   return null
@@ -130,6 +130,38 @@ describe('unarchiveSession', () => {
 
     // restoreListedSession keys off the session's own source.
     expect($sessions.get().map(session => session.id)).toEqual([])
+  })
+
+  it('restores a row from ANOTHER gateway on that gateway (connection-scoped owner)', async () => {
+    $archivedSessions.set([archivedSession({ connection_id: 'mac-mini', profile: 'default' } as Partial<SessionInfo>)])
+    vi.mocked(setSessionArchived).mockResolvedValue({ ok: true })
+
+    const handle = await mountHarness()
+
+    await act(() => handle.unarchiveSession('arch-1'))
+
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('arch-1', false, {
+      connectionId: 'mac-mini',
+      profile: 'default'
+    })
+  })
+
+  it('archives a row from ANOTHER gateway on that gateway, not the active one', async () => {
+    // Regression: an All-Gateways sidebar row (connection_id=mac-mini) was
+    // archived via the active local backend, which 404'd; the row came back.
+    setSessions([
+      archivedSession({ archived: false, connection_id: 'mac-mini', id: 'remote-1', profile: 'default' } as Partial<SessionInfo>)
+    ])
+    vi.mocked(setSessionArchived).mockResolvedValue({ ok: true })
+
+    const handle = await mountHarness()
+
+    await act(() => handle.archiveSession('remote-1'))
+
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('remote-1', true, {
+      connectionId: 'mac-mini',
+      profile: 'default'
+    })
   })
 
   it('passes the archived row profile to setSessionArchived', async () => {
