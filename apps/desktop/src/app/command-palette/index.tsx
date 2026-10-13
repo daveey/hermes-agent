@@ -81,6 +81,7 @@ import { openPetGenerate } from '@/store/pet-generate'
 import { toggleBrowserTab } from '@/store/preview'
 import {
   $projectTree,
+  createProjectAndMoveSession,
   goToProject,
   moveSessionToProject,
   moveToProjectTargets,
@@ -717,6 +718,28 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
     const target = moveTarget
     const session = target ? liveSessions.find(s => sessionMatchesStoredId(s, target.sessionId)) : undefined
     const title = session ? sessionTitle(session) : p.moveToProject
+    // [daveey] Typed a name no project has → offer to create it (empty
+    // ~/code/<slug> folder on the session's gateway) and move there.
+    const typed = search.trim()
+    const typedKey = typed.toLowerCase()
+    const typedIsNew = Boolean(typed) && !projectTree.some(node => node.label.trim().toLowerCase() === typedKey)
+
+    const createItems: PaletteItem[] =
+      target && typedIsNew
+        ? [
+            {
+              icon: Plus,
+              id: 'move-to-project-create',
+              keywords: ['create', 'new', 'project', typed],
+              label: p.createAndMove(typed),
+              run: () => {
+                createProjectAndMoveSession(target.sessionId, typed, target.profile)
+                  .then(() => notify({ durationMs: 2_000, kind: 'success', message: p.movedTo(typed) }))
+                  .catch(err => notifyError(err, p.moveFailed))
+              }
+            }
+          ]
+        : []
 
     return {
       title: p.moveToProject,
@@ -736,11 +759,12 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
                     .catch(err => notifyError(err, p.moveFailed))
                 }
               }))
-            }
+            },
+            ...(createItems.length ? [{ items: createItems }] : [])
           ]
         : []
     }
-  }, [liveSessions, moveTarget, projectTree, t])
+  }, [liveSessions, moveTarget, projectTree, search, t])
 
   // getServers is the shared choke point that also drops malformed (null/
   // scalar) entries, so the palette never lists a server the MCP tab dropped.

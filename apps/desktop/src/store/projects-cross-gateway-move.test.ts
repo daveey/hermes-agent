@@ -7,7 +7,14 @@ import { $activeGatewayProfile, setShowAllProfiles } from '@/store/profile'
 import { $sessions } from '@/store/session'
 
 import { $connectionsRegistry } from './connection-registry-state'
-import { $projectTree, homeRelativePath, moveSessionToProject, moveToProjectTargets } from './projects'
+import {
+  $projectTree,
+  createProjectAndMoveSession,
+  homeRelativePath,
+  moveSessionToProject,
+  moveToProjectTargets,
+  newProjectFolder
+} from './projects'
 
 vi.mock('@/store/gateway', () => ({
   $gateway: atom(null),
@@ -179,6 +186,63 @@ describe('moveSessionToProject across gateways', () => {
 
     await expect(moveSessionToProject('remote-s', 'p_local')).rejects.toThrow(/Permission denied/)
     expect(remoteCalls.some(([, m]) => m === 'session.workspace.move')).toBe(false)
+  })
+})
+
+describe('createProjectAndMoveSession', () => {
+  it('creates an empty ~/code/<slug> folder + project, then moves the session', async () => {
+    setup(
+      method =>
+        method === 'projects.list'
+          ? { active_id: null, projects: [] }
+          : method === 'shell.exec'
+            ? { code: 0, stderr: '', stdout: '' }
+            : method === 'projects.create'
+              ? { project: { id: 'p_n', name: 'My Thing', primary_path: '/Users/daveey/code/my-thing' } }
+              : method === 'session.workspace.move'
+                ? { branch: null, cwd: '/Users/daveey/code/my-thing', git_repo_root: null }
+                : {},
+      () => {
+        throw new Error('no remote call expected')
+      }
+    )
+
+    await createProjectAndMoveSession('local-s', ' My Thing ', 'default')
+
+    // (refreshProjects/refreshProjectTree fire background list/tree reads too.)
+    const methods = localCalls.map(([m]) => m).filter(m => m !== 'projects.tree' && m !== 'projects.list')
+    expect(localCalls[0][0]).toBe('projects.list')
+    expect(methods).toEqual(['shell.exec', 'projects.create', 'session.workspace.move'])
+    expect(localCalls.find(([m]) => m === 'shell.exec')?.[1]).toEqual({ command: `mkdir -p "$HOME"/'code/my-thing'` })
+    expect(localCalls.find(([m]) => m === 'projects.create')?.[1]).toMatchObject({
+      name: 'My Thing',
+      primary_path: '~/code/my-thing'
+    })
+    expect(localCalls.find(([m]) => m === 'session.workspace.move')?.[1]).toMatchObject({
+      cwd: '/Users/daveey/code/my-thing',
+      session_key: 'local-s'
+    })
+  })
+
+  it('reuses a same-named project on the gateway instead of creating one', async () => {
+    setup(
+      method =>
+        method === 'projects.list'
+          ? { active_id: null, projects: [{ id: 'p', name: 'Thing', slug: 'thing', primary_path: '/x/thing' }] }
+          : method === 'session.workspace.move'
+            ? { branch: null, cwd: '/x/thing', git_repo_root: null }
+            : {},
+      () => ({})
+    )
+
+    await createProjectAndMoveSession('local-s', 'thing', 'default')
+    expect(localCalls.some(([m]) => m === 'shell.exec' || m === 'projects.create')).toBe(false)
+  })
+
+  it('slugs names into ~/code', () => {
+    expect(newProjectFolder('My Cool Project!')).toBe('~/code/my-cool-project')
+    expect(newProjectFolder('../x')).toBe('~/code/x')
+    expect(newProjectFolder('  ')).toBe('~/code/project')
   })
 })
 

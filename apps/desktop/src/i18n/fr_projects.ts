@@ -35,6 +35,7 @@ export const frProjects: NonNullable<TranslationOverrides['sidebar']>['projects'
   moveNoFolder: "Ce projet n'a aucun dossier vers lequel effectuer le déplacement",
   moveNoProjects: 'Aucun autre projet',
   movePlaceholder: title => `Déplacer « ${title} » vers…`,
+  createAndMove: name => `Créer le projet « ${name} »`,
   reveal: 'Afficher dans le dossier',
   copyPath: 'Copier le chemin',
   removeFromSidebar: 'Masquer de la barre latérale',

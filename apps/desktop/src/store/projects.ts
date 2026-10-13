@@ -1078,8 +1078,11 @@ async function ensureProjectRootOn(target: MoveTarget, node: SidebarProjectTree 
     return ''
   }
 
-  const path = homeRelativePath(source.path)
+  return createProjectFolderOn(target, node.label, homeRelativePath(source.path), profile)
+}
 
+/** `mkdir -p` the folder ON `target`, then register a project named `name` there. */
+async function createProjectFolderOn(target: MoveTarget, name: string, path: string, profile: string): Promise<string> {
   // Projects only organize the sidebar here, so the folder just has to exist.
   const make = await moveTargetRequest<ShellResult>(target, 'shell.exec', {
     command: `mkdir -p ${shellPath(path)}`
@@ -1090,7 +1093,7 @@ async function ensureProjectRootOn(target: MoveTarget, node: SidebarProjectTree 
   }
 
   const created = await moveTargetRequest<{ project: null | ProjectInfo }>(target, 'projects.create', {
-    name: node.label,
+    name,
     primary_path: path,
     profile
   })
@@ -1131,6 +1134,53 @@ export async function moveSessionToProject(
     throw new Error(translateNow('sidebar.projects.moveNoFolder'))
   }
 
+  await moveSessionToCwd(target, sessionId, cwd)
+}
+
+/** Default folder for a project created by name alone: `~/code/<slug>`. */
+export function newProjectFolder(name: string): string {
+  const slug =
+    name
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+      .replace(/^[-.]+|-+$/g, '') || 'project'
+
+  return `~/code/${slug}`
+}
+
+// [daveey] ⌘⇧P "+ Create project": a new project named `name` with an empty
+// `~/code/<slug>` folder, on the session's own gateway, then the move into it.
+// A same-named project already on that gateway is reused instead.
+export async function createProjectAndMoveSession(
+  sessionId: string,
+  name: string,
+  profile?: null | string,
+  connectionId?: null | string
+): Promise<void> {
+  const label = name.trim()
+
+  if (!label) {
+    throw new Error(translateNow('sidebar.projects.moveNoFolder'))
+  }
+
+  const target = moveTargetGateway(sessionId, profile, connectionId)
+  const projectProfile = target.profile || (target.remote ? 'default' : writableProjectProfile())
+  const listed = await moveTargetRequest<ProjectsPayload>(target, 'projects.list', { profile: projectProfile })
+
+  const existing = (listed.projects ?? []).find(
+    p => !p.archived && (labelKey(p.name) === labelKey(label) || labelKey(p.slug) === labelKey(label))
+  )
+
+  const cwd =
+    existing?.primary_path ||
+    existing?.folders?.[0]?.path ||
+    (await createProjectFolderOn(target, label, newProjectFolder(label), projectProfile))
+
+  await moveSessionToCwd(target, sessionId, cwd)
+}
+
+async function moveSessionToCwd(target: MoveTarget, sessionId: string, cwd: string): Promise<void> {
   suppressMoveFollow(cwd)
 
   const res = await moveTargetRequest<WorkspaceMovePayload>(target, 'session.workspace.move', {

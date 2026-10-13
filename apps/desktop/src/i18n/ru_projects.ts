@@ -34,6 +34,7 @@ export const ruProjects: NonNullable<TranslationOverrides['sidebar']>['projects'
   moveNoFolder: 'У этого проекта нет папки для перемещения',
   moveNoProjects: 'Нет других проектов',
   movePlaceholder: title => `Переместить «${title}» в…`,
+  createAndMove: name => `Создать проект «${name}»`,
   reveal: 'Показать в папке',
   copyPath: 'Копировать путь',
   removeFromSidebar: 'Скрыть из боковой панели',

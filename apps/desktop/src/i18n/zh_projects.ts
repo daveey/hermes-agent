@@ -35,6 +35,7 @@ export const zhProjects: NonNullable<TranslationOverrides['sidebar']>['projects'
   moveNoFolder: '该项目没有可移入的文件夹',
   moveNoProjects: '没有其他项目',
   movePlaceholder: title => `将“${title}”移至…`,
+  createAndMove: name => `创建项目“${name}”`,
   reveal: '在文件夹中显示',
   copyPath: '复制路径',
   removeFromSidebar: '从侧边栏移除',

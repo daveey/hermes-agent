@@ -35,6 +35,7 @@ export const deProjects: NonNullable<TranslationOverrides['sidebar']>['projects'
   moveNoFolder: 'Dieses Projekt hat keinen Ordner, in den verschoben werden kann',
   moveNoProjects: 'Keine anderen Projekte',
   movePlaceholder: title => `„${title}“ verschieben nach…`,
+  createAndMove: name => `Projekt „${name}“ erstellen`,
   reveal: 'Im Ordner anzeigen',
   copyPath: 'Pfad kopieren',
   removeFromSidebar: 'Aus der Sidebar ausblenden',

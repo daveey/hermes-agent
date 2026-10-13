@@ -35,6 +35,7 @@ export const enProjects: Translations['sidebar']['projects'] = {
   moveNoFolder: 'That project has no folder to move into',
   moveNoProjects: 'No other projects',
   movePlaceholder: title => `Move “${title}” to…`,
+  createAndMove: name => `Create project “${name}”`,
   reveal: 'Reveal in folder',
   copyPath: 'Copy path',
   removeFromSidebar: 'Hide from sidebar',
