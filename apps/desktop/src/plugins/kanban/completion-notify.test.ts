@@ -483,6 +483,26 @@ describe('terminal kinds beyond completed', () => {
   })
 })
 
+describe('status icon', () => {
+  it.each([
+    ['completed', 'pass-filled', 'var(--ui-green)', '\u2705'],
+    ['blocked', 'question', 'var(--ui-yellow)', '\u2753'],
+    ['timed_out', 'question', 'var(--ui-yellow)', '\u2753'],
+    ['block_loop_detected', 'error', 'var(--ui-red)', '\u274C'],
+    ['crashed', 'error', 'var(--ui-red)', '\u274C'],
+    ['gave_up', 'error', 'var(--ui-red)', '\u274C']
+  ])('%s → %s icon tinted %s, OS title prefixed %s', async (kind, icon, accentColor, glyph) => {
+    const os = { notify: vi.fn() }
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never, undefined, os)
+
+    await m.onKanbanEventsFrame('smoke', [ev(101, kind)])
+
+    expect(hostMock.notify.mock.calls[0][0]).toMatchObject({ icon, accentColor })
+    expect((os.notify.mock.calls[0][0] as { title: string }).title.startsWith(`${glyph} `)).toBe(true)
+  })
+})
+
 describe('native OS door', () => {
   it('forwards title and body through the bound ctx.os door', async () => {
     const os = { notify: vi.fn() }

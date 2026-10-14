@@ -43,16 +43,33 @@ export interface CompletionEvent {
 
 type ToastKind = 'error' | 'success' | 'warning'
 
-/** Terminal kinds → toast severity + i18n title key. Mirrors the gateway
- *  watcher's ping set (gateway/kanban_watchers.py) minus the intentionally
- *  silent kinds (status/archived/unblocked, which only advance the cursor). */
-const TERMINAL_NOTIFY = new Map<string, { titleKey: string; toast: ToastKind }>([
-  ['blocked', { titleKey: 'notify.blockedTitle', toast: 'warning' }],
-  ['block_loop_detected', { titleKey: 'notify.blockLoopTitle', toast: 'warning' }],
-  ['completed', { titleKey: 'notify.completedTitle', toast: 'success' }],
-  ['crashed', { titleKey: 'notify.crashedTitle', toast: 'error' }],
-  ['gave_up', { titleKey: 'notify.gaveUpTitle', toast: 'error' }],
-  ['timed_out', { titleKey: 'notify.timedOutTitle', toast: 'warning' }]
+interface NotifySpec {
+  titleKey: string
+  toast: ToastKind
+  /** Codicon + tint for the toast's leading icon, so the task's state reads at a
+   *  glance: green check = done, yellow ? = blocked / waiting on someone,
+   *  red X = routed to triage or failed. */
+  icon: string
+  accentColor: string
+  /** Same glyph for the native OS notification title (no custom icon there). */
+  glyph: string
+}
+
+const DONE = { accentColor: 'var(--ui-green)', glyph: '\u2705', icon: 'pass-filled' } as const
+const WAITING = { accentColor: 'var(--ui-yellow)', glyph: '\u2753', icon: 'question' } as const
+const TRIAGE = { accentColor: 'var(--ui-red)', glyph: '\u274C', icon: 'error' } as const
+
+/** Terminal kinds → toast severity + i18n title key + status icon. Mirrors the
+ *  gateway watcher's ping set (gateway/kanban_watchers.py) minus the
+ *  intentionally silent kinds (status/archived/unblocked, which only advance
+ *  the cursor). `block_loop_detected` is the routed-to-triage handoff. */
+const TERMINAL_NOTIFY = new Map<string, NotifySpec>([
+  ['blocked', { titleKey: 'notify.blockedTitle', toast: 'warning', ...WAITING }],
+  ['block_loop_detected', { titleKey: 'notify.blockLoopTitle', toast: 'warning', ...TRIAGE }],
+  ['completed', { titleKey: 'notify.completedTitle', toast: 'success', ...DONE }],
+  ['crashed', { titleKey: 'notify.crashedTitle', toast: 'error', ...TRIAGE }],
+  ['gave_up', { titleKey: 'notify.gaveUpTitle', toast: 'error', ...TRIAGE }],
+  ['timed_out', { titleKey: 'notify.timedOutTitle', toast: 'warning', ...WAITING }]
 ])
 
 const seenEventIdByBoard = new Map<string, number>()
@@ -146,7 +163,7 @@ function rawErrorFor(kind: string, ev: CompletionEvent): string {
 function notifyOne(
   slug: string,
   kind: string,
-  spec: { titleKey: string; toast: ToastKind },
+  spec: NotifySpec,
   ev: CompletionEvent
 ): void {
   const taskId = (ev.task_id ?? '').trim()
@@ -171,6 +188,8 @@ function notifyOne(
   const message = body || taskId || title
   host.notify({
     kind: spec.toast,
+    icon: spec.icon,
+    accentColor: spec.accentColor,
     title,
     message,
     ...(detail ? { detail } : {}),
@@ -192,7 +211,7 @@ function notifyOne(
   // is away from Hermes (the toast above covers the foreground case). Isolated:
   // a missing/broken shell must not mark the toast as unfired.
   try {
-    osDoor?.notify({ title, body: [message, detail].filter(Boolean).join('\n') })
+    osDoor?.notify({ title: `${spec.glyph} ${title}`, body: [message, detail].filter(Boolean).join('\n') })
   } catch {
     /* swallowed */
   }
