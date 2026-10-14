@@ -168,7 +168,8 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
     expect(toggleSessionBlocked('d')).toBe(true)
     expect(nextSidebarSessionId('a', 1, false)).toBe('e') // d is blocked (grey)
     expect(nextSidebarSessionId('e', -1, false)).toBe('a')
-    expect(nextSidebarSessionId('a', 1, true)).toBe('b') // ⇧ still steps to anything
+    expect(nextSidebarSessionId('c', 1, true)).toBe('e') // ⇧ skips it too
+    expect(nextSidebarSessionId('e', -1, true)).toBe('c')
     expect(toggleSessionBlocked('d')).toBe(false)
     expect(nextSidebarSessionId('a', 1, false)).toBe('d')
   })

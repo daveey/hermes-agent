@@ -136,7 +136,8 @@ export function stepSessionId(
 
 /** ⌘] / ⌘[: next session with a status stripe (green / red); null when none
  *  has one. ⇧ (`anySession`) steps to the plain neighbour. `fallbackToAny`
- *  (archive → next) takes the plain neighbour when no row has a stripe. */
+ *  (archive → next) takes the plain neighbour when no row has a stripe.
+ *  Sessions blocked with ⌘B are skipped by every variant. */
 export function nextSidebarSessionId(
   currentId: null | string,
   direction: 1 | -1,
@@ -145,11 +146,13 @@ export function nextSidebarSessionId(
 ): null | string {
   const order = sidebarSessionOrder()
 
+  const notBlocked = (id: string) => !isSessionBlocked(id)
+
   if (anySession) {
-    return stepSessionId(order, currentId, direction)
+    return stepSessionId(order, currentId, direction, notBlocked)
   }
 
   const striped = stepSessionId(order, currentId, direction, sessionHasStatusStripe)
 
-  return striped ?? (fallbackToAny ? stepSessionId(order, currentId, direction) : null)
+  return striped ?? (fallbackToAny ? stepSessionId(order, currentId, direction, notBlocked) : null)
 }
