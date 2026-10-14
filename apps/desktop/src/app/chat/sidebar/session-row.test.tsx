@@ -34,6 +34,7 @@ vi.mock('@/i18n', () => ({
         row: {
           ageMin: 'm',
           ageNow: 'now',
+          kanbanTasks: (open: number, blocked: number) => `${open} open, ${blocked} blocked`,
           backgroundRunning: 'Running in background',
           finishedUnread: 'Finished',
           handoffOrigin: (platform: string) => `Started on ${platform}`,
@@ -459,5 +460,41 @@ describe('SidebarSessionRow continuation badge', () => {
     const branch = renderRow(makeSession({ parent_session_id: 'parent', title: 'A real branch' }))
 
     expect(continuationGlyph(branch.container)).toBeNull()
+  })
+})
+
+// [daveey] A session waiting on kanban work shows its open and blocked task
+// counts after the age (and before the gateway glyph).
+describe('SidebarSessionRow kanban counts', () => {
+  it('shows open and blocked counts right after the age', () => {
+    const { container } = renderRow(
+      makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Waiting' } as Partial<SessionInfo> & {
+        title: string
+      }),
+      { card: true }
+    )
+
+    const counts = screen.getByTestId('session-row-kanban-counts')
+    expect(counts.getAttribute('aria-label')).toBe('3 open, 1 blocked')
+    expect(counts.querySelector('[data-kanban-count="open"]')?.textContent).toBe('3')
+    expect(counts.querySelector('[data-kanban-count="blocked"]')?.textContent).toBe('1')
+
+    const time = container.querySelector('time')!
+    // The counts follow the age in document order.
+    expect(time.compareDocumentPosition(counts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('shows blocked-only work and hides the zero side', () => {
+    renderRow(makeSession({ kanban_blocked: 2, title: 'Stuck' } as Partial<SessionInfo> & { title: string }))
+
+    const counts = screen.getByTestId('session-row-kanban-counts')
+    expect(counts.querySelector('[data-kanban-count="open"]')).toBeNull()
+    expect(counts.querySelector('[data-kanban-count="blocked"]')?.textContent).toBe('2')
+  })
+
+  it('renders nothing when the session has no kanban work', () => {
+    renderRow(makeSession({ title: 'Idle' }))
+
+    expect(screen.queryByTestId('session-row-kanban-counts')).toBeNull()
   })
 })

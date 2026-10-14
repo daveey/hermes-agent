@@ -181,6 +181,36 @@ function SidebarSessionRowImpl({
       <GatewayDeviceIcon className="ml-1 align-[-2px]" gatewayId={gatewayId} />
     ) : null
 
+  // [daveey] Kanban work this session is waiting on: open (queued/running)
+  // and blocked task counts, after the age and before the gateway glyph.
+  const kanbanOpen = session.kanban_active ?? 0
+  const kanbanBlocked = session.kanban_blocked ?? 0
+
+  const kanbanCounts =
+    kanbanOpen > 0 || kanbanBlocked > 0 ? (
+      <Tip label={r.kanbanTasks(kanbanOpen, kanbanBlocked)} side="top">
+        <span
+          aria-label={r.kanbanTasks(kanbanOpen, kanbanBlocked)}
+          className="pointer-events-auto ml-1 inline-flex items-center gap-1 align-[-1px] tabular-nums"
+          data-testid="session-row-kanban-counts"
+          role="img"
+        >
+          {kanbanOpen > 0 && (
+            <span className="inline-flex items-center gap-px" data-kanban-count="open">
+              <Codicon name="project" size="0.625rem" />
+              {kanbanOpen}
+            </span>
+          )}
+          {kanbanBlocked > 0 && (
+            <span className="inline-flex items-center gap-px text-amber-500" data-kanban-count="blocked">
+              <Codicon name="question" size="0.625rem" />
+              {kanbanBlocked}
+            </span>
+          )}
+        </span>
+      </Tip>
+    ) : null
+
   // Pinned metadata occupies the actions slot and swaps out for the kebab on
   // hover, so the row reserves the same width either way and never reflows.
   const pinnedAge = rowMeta.includes('updated')
@@ -257,13 +287,22 @@ function SidebarSessionRowImpl({
             ) : (
               figures.at(-1)
             )}
+            {kanbanCounts}
             {gatewayIcon}
           </span>
         </span>
       )
     })
-  } else if (gatewayIcon) {
-    trailing.push({ key: 'gateway', node: gatewayIcon })
+  } else if (kanbanCounts || gatewayIcon) {
+    trailing.push({
+      key: 'gateway',
+      node: (
+        <span className="pointer-events-none whitespace-nowrap text-[0.625rem] leading-none text-(--ui-text-tertiary)">
+          {kanbanCounts}
+          {gatewayIcon}
+        </span>
+      )
+    })
   }
 
   // A chip that ends the slot hides whole; the figures handle their own tail.

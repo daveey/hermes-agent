@@ -2939,6 +2939,7 @@ export interface Translations extends NoticeTranslations {
       ageDay: string
       ageHour: string
       ageMin: string
+      kanbanTasks: (open: number, blocked: number) => string
     }
     dateDivider: {
       today: string

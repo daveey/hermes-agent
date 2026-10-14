@@ -27,10 +27,13 @@ _log = logging.getLogger(__name__)
 # wait on a human and ``done``/``archived`` are finished, so neither keeps the
 # creating session busy.
 ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled")
+# Waiting on a human. These don't keep the session busy, but the sidebar row
+# shows how many there are next to the open count (``kanban_blocked``). [daveey]
+BLOCKED_STATUSES = ("blocked",)
 
 _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
-_cache: tuple[float, dict[str, int]] | None = None
+_cache: tuple[float, dict[str, int], dict[str, int]] | None = None
 
 
 def _board_db_paths() -> list[Path]:
@@ -50,19 +53,19 @@ def _board_db_paths() -> list[Path]:
     return paths
 
 
-def _read_counts(path: Path) -> dict[str, int]:
-    """Active tasks per session: tasks the session created, plus tasks it is a
-    ``tui`` notify subscriber of (a session asked to shepherd someone else's
-    card subscribes to it, and is just as "still working" until it lands).
-    Each (session, task) pair counts once."""
-    placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
+    """Tasks per session in ``statuses``: tasks the session created, plus tasks
+    it is a ``tui`` notify subscriber of (a session asked to shepherd someone
+    else's card subscribes to it, and is just as "still working" until it
+    lands). Each (session, task) pair counts once."""
+    placeholders = ",".join("?" for _ in statuses)
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
     try:
         pairs: set[tuple[str, str]] = {
             (str(sid), str(tid)) for sid, tid in conn.execute(
                 f"SELECT session_id, id FROM tasks WHERE session_id IS NOT NULL "
                 f"AND session_id != '' AND status IN ({placeholders})",
-                ACTIVE_STATUSES,
+                statuses,
             )
         }
         try:
@@ -70,7 +73,7 @@ def _read_counts(path: Path) -> dict[str, int]:
                 (str(sid), str(tid)) for sid, tid in conn.execute(
                     f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
                     f"WHERE s.platform = 'tui' AND s.chat_id != '' AND t.status IN ({placeholders})",
-                    ACTIVE_STATUSES,
+                    statuses,
                 )
             )
         except sqlite3.Error:  # board predates notify subscriptions
@@ -83,23 +86,35 @@ def _read_counts(path: Path) -> dict[str, int]:
     return counts
 
 
-def active_task_counts() -> dict[str, int]:
-    """``{session_id: active task count}`` across every kanban board."""
+def _all_counts() -> tuple[dict[str, int], dict[str, int]]:
+    """``(active, blocked)`` per-session task counts across every board, cached."""
     global _cache
     now = time.monotonic()
     with _cache_lock:
         if _cache is not None and now < _cache[0]:
-            return _cache[1]
-    counts: dict[str, int] = {}
+            return _cache[1], _cache[2]
+    active: dict[str, int] = {}
+    blocked: dict[str, int] = {}
     for path in _board_db_paths():
-        try:
-            for sid, n in _read_counts(path).items():
-                counts[sid] = counts.get(sid, 0) + n
-        except sqlite3.Error as exc:  # an old schema without session_id, a locked file
-            _log.debug("kanban activity read failed for %s: %s", path, exc)
+        for statuses, into in ((ACTIVE_STATUSES, active), (BLOCKED_STATUSES, blocked)):
+            try:
+                for sid, n in _read_counts(path, statuses).items():
+                    into[sid] = into.get(sid, 0) + n
+            except sqlite3.Error as exc:  # an old schema without session_id, a locked file
+                _log.debug("kanban activity read failed for %s: %s", path, exc)
     with _cache_lock:
-        _cache = (now + _CACHE_TTL_S, counts)
-    return counts
+        _cache = (now + _CACHE_TTL_S, active, blocked)
+    return active, blocked
+
+
+def active_task_counts() -> dict[str, int]:
+    """``{session_id: active task count}`` across every kanban board."""
+    return _all_counts()[0]
+
+
+def blocked_task_counts() -> dict[str, int]:
+    """``{session_id: blocked task count}`` across every kanban board."""
+    return _all_counts()[1]
 
 
 def _row_ids(row: dict[str, Any]) -> Iterable[str]:
@@ -111,21 +126,24 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
 
 
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stamp ``kanban_active`` on each session row (summed over its whole
-    compression lineage). Never raises: the list must render without it."""
+    """Stamp ``kanban_active`` and ``kanban_blocked`` on each session row
+    (summed over its whole compression lineage). Never raises: the list must
+    render without them."""
     if not rows:
         return rows
     try:
-        counts = active_task_counts()
+        active, blocked = _all_counts()
     except Exception:
         _log.debug("kanban activity unavailable", exc_info=True)
         return rows
     for row in rows:
-        n = sum(counts.get(sid, 0) for sid in _row_ids(row))
-        if n:
-            row["kanban_active"] = n
-        else:
-            row.pop("kanban_active", None)
+        ids = list(_row_ids(row))
+        for key, counts in (("kanban_active", active), ("kanban_blocked", blocked)):
+            n = sum(counts.get(sid, 0) for sid in ids)
+            if n:
+                row[key] = n
+            else:
+                row.pop(key, None)
     return rows
 
 

@@ -93,3 +93,22 @@ def test_counts_tasks_a_session_subscribed_to_but_did_not_create(kanban_root):
     conn.close()
 
     assert ksa.active_task_counts() == {"s_creator": 1, "s_watcher": 2}
+
+
+def test_stamps_blocked_count_separately_from_active(kanban_root):
+    """The sidebar shows open and blocked kanban counts after the age. [daveey]"""
+    _make_board(kanban_root / "kanban.db", [
+        ("t1", "running", "s1"),
+        ("t2", "blocked", "s1"),
+        ("t3", "blocked", "s1"),
+        ("t4", "blocked", "s_only_blocked"),
+        ("t5", "done", "s_done"),
+    ])
+    rows = [{"id": "s1"}, {"id": "s_only_blocked"}, {"id": "s_done", "kanban_blocked": 4}]
+
+    ksa.annotate_kanban_activity(rows)
+
+    assert rows[0]["kanban_active"] == 1 and rows[0]["kanban_blocked"] == 2
+    assert "kanban_active" not in rows[1] and rows[1]["kanban_blocked"] == 1
+    assert "kanban_blocked" not in rows[2]
+    assert ksa.blocked_task_counts() == {"s1": 2, "s_only_blocked": 1}

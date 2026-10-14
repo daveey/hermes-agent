@@ -3364,7 +3364,11 @@ export const en: Translations = {
       ageNow: 'now',
       ageDay: 'd',
       ageHour: 'h',
-      ageMin: 'm'
+      ageMin: 'm',
+      kanbanTasks: (open, blocked) =>
+        [open > 0 ? `${open} kanban ${open === 1 ? 'task' : 'tasks'} open` : '', blocked > 0 ? `${blocked} blocked` : '']
+          .filter(Boolean)
+          .join(', ')
     },
     dateDivider: {
       today: 'Earlier today',
