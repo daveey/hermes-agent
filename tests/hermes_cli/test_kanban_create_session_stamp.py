@@ -30,6 +30,10 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    for var in ("HERMES_SESSION_KEY", "HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID"):
+        monkeypatch.delenv(var, raising=False)
+    from hermes_cli import kanban_session_activity as ksa
+    ksa._reset_cache_for_tests()
     kb.init_db()
     return home
 
@@ -72,3 +76,53 @@ def test_cli_create_in_worker_does_not_stamp_worker_session(kanban_home, monkeyp
     monkeypatch.setenv("HERMES_SESSION_ID", "worker_sess")
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_doesnotexist")
     assert _create("worker child") is None
+
+
+def _create_args(*argv: str) -> str:
+    root = argparse.ArgumentParser(prog="hermes")
+    kc.build_parser(root.add_subparsers())
+    assert kc._cmd_create(root.parse_args(["kanban", "create", *argv])) == 0
+    with kbc.connect_closing() as conn:
+        return next(t for t in kb.list_tasks(conn) if t.title == argv[0]).id
+
+
+def _subs(task_id: str) -> list[tuple[str, str]]:
+    from hermes_cli import kanban_db_notify as kbn
+
+    with kbc.connect_closing() as conn:
+        return [(s["platform"], s["chat_id"]) for s in kbn.list_notify_subs(conn, task_id)]
+
+
+def test_cli_create_with_session_key_stamps_and_subscribes(kanban_home, monkeypatch, capsys):
+    """Desktop/TUI terminals carry HERMES_SESSION_KEY: the card is owned by that chat,
+    gets the same ``tui`` completion subscription the kanban_create tool adds, and
+    keeps the chat's sidebar row busy (kanban_active). [daveey]"""
+    from hermes_cli import kanban_session_activity as ksa
+
+    _seed_session(kanban_home, "20261014_152627_e39461")
+    monkeypatch.setenv("HERMES_SESSION_KEY", "20261014_152627_e39461")
+    tid = _create_args("cli card from desktop terminal")
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).session_id == "20261014_152627_e39461"
+    assert ("tui", "20261014_152627_e39461") in _subs(tid)
+    ksa._reset_cache_for_tests()
+    assert ksa.active_task_counts().get("20261014_152627_e39461") == 1
+
+
+def test_cli_create_without_session_key_adds_no_subscription(kanban_home, capsys):
+    from hermes_cli import kanban_session_activity as ksa
+
+    tid = _create_args("plain user shell")
+    assert _subs(tid) == []
+    ksa._reset_cache_for_tests()
+    assert ksa.active_task_counts() == {}
+
+
+def test_cli_create_idempotency_hit_does_not_restamp(kanban_home, monkeypatch, capsys):
+    tid = _create_args("idem card", "--idempotency-key", "k1")
+    _seed_session(kanban_home, "sess_later")
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess_later")
+    assert _create_args("idem card", "--idempotency-key", "k1") == tid
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).session_id is None
+    assert _subs(tid) == []

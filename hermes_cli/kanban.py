@@ -364,18 +364,27 @@ def _cmd_create(args: argparse.Namespace) -> int:
     # An agent shelling out to the CLI from a chat (terminal / execute_code) owns the
     # card just like the kanban_create tool would: stamp its session so the Desktop
     # session's task list shows it. Workers' cards inherit their creator task's session.
+    # The desktop/TUI key (HERMES_SESSION_KEY) is what the session's notify poller
+    # listens on, so it wins over HERMES_SESSION_ID; plain shells have neither. [daveey]
     session_id = None
+    session_key = "" if in_worker else os.environ.get("HERMES_SESSION_KEY", "").strip()
     if not in_worker:
         from tools.kanban_tools import _persisted_session_id
-        session_id = _persisted_session_id(os.environ.get("HERMES_SESSION_ID"))
+        session_id = (_persisted_session_id(session_key)
+                      or _persisted_session_id(os.environ.get("HERMES_SESSION_ID")))
+    idem_key = getattr(args, "idempotency_key", None)
     with kbc.connect_closing() as conn:
+        # An --idempotency-key hit returns an existing card: never re-stamp/re-subscribe it.
+        idem_hit = bool(idem_key) and conn.execute(
+            "SELECT 1 FROM tasks WHERE idempotency_key = ? AND status != 'archived' LIMIT 1",
+            (idem_key,)).fetchone() is not None
         task_id = kb.create_task(
             conn, title=args.title, body=body, assignee=args.assignee, session_id=session_id,
             created_by=args.created_by or _profile_author(),
             workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
             project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
             parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
-            idempotency_key=getattr(args, "idempotency_key", None),
+            idempotency_key=idem_key,
             max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
             max_retries=max_retries, model_override=getattr(args, "model_override", None),
             provider_override=getattr(args, "provider_override", None),
@@ -386,6 +395,11 @@ def _cmd_create(args: argparse.Namespace) -> int:
             creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                              if in_worker else None),
         )
+        if session_key and not idem_hit:
+            # Same completion subscription the kanban_create tool adds, so the chat
+            # that shelled out hears when the card lands (and its row stays busy).
+            from tools.kanban_tools import _maybe_auto_subscribe
+            _maybe_auto_subscribe(conn, task_id)
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
         _print_json(_task_to_dict(task))
