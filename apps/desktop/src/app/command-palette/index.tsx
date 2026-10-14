@@ -89,7 +89,15 @@ import {
   refreshProjectTree,
   requestStartWorkSession
 } from '@/store/projects'
-import { $connection, $cronSessions, $messagingSessions, $sessions, sessionMatchesStoredId } from '@/store/session'
+import {
+  $connection,
+  $cronSessions,
+  $messagingSessions,
+  $selectedStoredSessionId,
+  $sessions,
+  sessionMatchesStoredId
+} from '@/store/session'
+import { $focusedStoredSessionId } from '@/store/session-focus'
 import { $unconfirmedPinWrites } from '@/store/session-pin-sync'
 import { $removedSessionIds } from '@/store/session-removal'
 import { runGatewayRestart } from '@/store/system-actions'
@@ -704,6 +712,11 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
   const unconfirmedPinWrites = useStore($unconfirmedPinWrites)
   const removedSessionIds = useStore($removedSessionIds)
   const moveTarget = useStore($moveToProjectTarget)
+  const selectedStoredSessionId = useStore($selectedStoredSessionId)
+  const focusedStoredSessionId = useStore($focusedStoredSessionId)
+  // [daveey] The chat the palette was opened over: root-level "Move to
+  // project: X" rows act on it (same target resolution as ⌘⇧P).
+  const currentSessionId = selectedStoredSessionId || focusedStoredSessionId || null
 
   // ⌘⇧P page: the projects the target session can move into. The tree only
   // warms on a timer in the flat sidebar view, so refresh when the page opens.
@@ -1195,6 +1208,49 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
 
     const result: PaletteGroup[] = []
 
+    // [daveey] Typing a project name in ⌘P lists "Move to project: <name>"
+    // next to the plain "go to project" row, so assigning the current chat
+    // doesn't require knowing ⌘⇧P. Typed-only, so the idle list stays short.
+    if (currentSessionId) {
+      const session = liveSessions.find(s => sessionMatchesStoredId(s, currentSessionId))
+      const p = t.sidebar.projects
+      const targets = moveToProjectTargets(projectTree, liveSessions, currentSessionId)
+
+      const profile = session?.profile || undefined
+
+      result.push({
+        heading: p.moveToProject,
+        items: [
+          // Opens the ⌘⇧P picker (shows its hotkey) — also the "+ Create
+          // project" path for names no project has yet.
+          {
+            action: 'session.moveToProject',
+            icon: codiconIcon('folder-library'),
+            id: 'move-current-to-project-picker',
+            keywords: ['move', 'assign', 'project', 'session'],
+            label: t.keybinds.actions['session.moveToProject'],
+            keepOpen: true,
+            run: () => {
+              $moveToProjectTarget.set({ profile, sessionId: currentSessionId })
+              setPage('move-to-project')
+              setSearch('')
+            }
+          },
+          ...targets.map(node => ({
+            icon: codiconIcon(node.icon || 'folder-library'),
+            id: `move-current-to-project-${node.id}`,
+            keywords: ['move', 'assign', 'project', node.label, ...(node.path ? [node.path] : [])],
+            label: `${p.moveToProject}: ${node.label}`,
+            run: () => {
+              moveSessionToProject(currentSessionId, node.id, profile)
+                .then(() => notify({ durationMs: 2_000, kind: 'success', message: p.movedTo(node.label) }))
+                .catch(err => notifyError(err, p.moveFailed))
+            }
+          }))
+        ]
+      })
+    }
+
     // Paste a raw session id → jump straight to it, even if it predates the
     // recent-200 window the lists below are built from.
     const directId = search.trim()
@@ -1415,6 +1471,9 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
     previewTheme,
     resolvedMode,
     resolveThemeMode,
+    currentSessionId,
+    liveSessions,
+    projectTree,
     search,
     sessions,
     setMode,
