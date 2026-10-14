@@ -488,6 +488,11 @@ export function SidebarSessionsSection({
     publishSidebarSection(orderKey, {
       anchor: orderAnchorRef.current,
       ids: sectionOpen ? visibleRows.flatMap(row => (row.kind === 'session' ? [row.entry.session.id] : [])) : [],
+      turnIds: sectionOpen
+        ? visibleRows.flatMap(row =>
+            row.kind === 'session' && row.entry.session.message_count > 0 ? [row.entry.session.id] : []
+          )
+        : [],
       virtualized: flatVirtualized
     })
   }, [flatVirtualized, orderKey, sectionOpen, visibleRows])

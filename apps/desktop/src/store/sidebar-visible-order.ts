@@ -1,5 +1,5 @@
 import { $sessions } from '@/store/session'
-import { $sessionDotStateById, type SessionDotState } from '@/store/session-dot-state'
+import { $sessionDotStateById, sessionStatusStripe } from '@/store/session-dot-state'
 
 // The sidebar's session order as the user sees it, for ⌘] / ⌘[ stepping.
 // Each rendered SessionsSection (pinned, recents, …) publishes the ids of its
@@ -13,6 +13,9 @@ import { $sessionDotStateById, type SessionDotState } from '@/store/session-dot-
 interface SectionEntry {
   anchor: HTMLElement | null
   ids: readonly string[]
+  /** Ids of this section's rows that have at least one message (the status
+   *  stripe's `hasTurns`), so stepping can match the stripe the row draws. */
+  turnIds?: readonly string[]
   virtualized?: boolean
 }
 
@@ -73,9 +76,26 @@ export function sidebarSessionOrder(): string[] {
   return ids.length ? ids : $sessions.get().map(session => session.id)
 }
 
-/** The sidebar dot states that mean "waiting on you": a blocking prompt
- *  (amber) or a finished, unread turn. */
-export const NEEDS_YOU_STATES: ReadonlySet<SessionDotState> = new Set(['needs-input', 'unread'])
+/** Whether a sidebar row shows a status stripe — green (finished, waiting on
+ *  you) or red (blocked / stalled). ⌘] / ⌘[ step only to these, so they land
+ *  exactly where the sidebar shows a coloured bar. */
+export function sessionHasStatusStripe(id: string): boolean {
+  let hasTurns = false
+
+  for (const entry of sections.values()) {
+    if (entry.turnIds?.includes(id)) {
+      hasTurns = true
+
+      break
+    }
+  }
+
+  if (!hasTurns) {
+    hasTurns = ($sessions.get().find(session => session.id === id)?.message_count ?? 0) > 0
+  }
+
+  return sessionStatusStripe($sessionDotStateById.get()[id] ?? 'idle', hasTurns) !== null
+}
 
 /**
  * The session `direction` steps from `currentId` in `order`, wrapping. With
@@ -108,19 +128,22 @@ export function stepSessionId(
   return null
 }
 
-/** ⌘] / ⌘[: next session that needs you, else the plain next one. ⇧ skips
- *  the needs-you filter. */
-export function nextSidebarSessionId(currentId: null | string, direction: 1 | -1, anySession: boolean): null | string {
+/** ⌘] / ⌘[: next session with a status stripe (green / red); null when none
+ *  has one. ⇧ (`anySession`) steps to the plain neighbour. `fallbackToAny`
+ *  (archive → next) takes the plain neighbour when no row has a stripe. */
+export function nextSidebarSessionId(
+  currentId: null | string,
+  direction: 1 | -1,
+  anySession: boolean,
+  fallbackToAny = false
+): null | string {
   const order = sidebarSessionOrder()
 
-  if (!anySession) {
-    const dots = $sessionDotStateById.get()
-    const needing = stepSessionId(order, currentId, direction, id => NEEDS_YOU_STATES.has(dots[id] ?? 'idle'))
-
-    if (needing) {
-      return needing
-    }
+  if (anySession) {
+    return stepSessionId(order, currentId, direction)
   }
 
-  return stepSessionId(order, currentId, direction)
+  const striped = stepSessionId(order, currentId, direction, sessionHasStatusStripe)
+
+  return striped ?? (fallbackToAny ? stepSessionId(order, currentId, direction) : null)
 }

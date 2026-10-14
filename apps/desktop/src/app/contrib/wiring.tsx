@@ -1005,7 +1005,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   }, [openNewSessionTile])
 
   // Archive the selected session (rebindable `session.archive` hotkey), then
-  // step to the next sidebar session exactly like ⌘] (needs-you first, else
+  // step to the next sidebar session like ⌘] (status-striped first, else
   // the plain neighbour) instead of dropping to a fresh draft. The target is
   // computed BEFORE the row leaves the sidebar so its position is still known.
   const archiveSelectedSession = useCallback(() => {
@@ -1016,7 +1016,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       return
     }
 
-    const next = nextSidebarSessionId(sessionId, 1, false)
+    const next = nextSidebarSessionId(sessionId, 1, false, true)
     const onDeselect = next && next !== sessionId ? () => openSession(next, navigate) : undefined
 
     void archiveSession(sessionId, { onDeselect })

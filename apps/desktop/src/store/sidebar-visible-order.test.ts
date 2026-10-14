@@ -1,6 +1,21 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import type * as DotStateModule from './session-dot-state'
+import type { SessionDotState } from './session-dot-state'
+
+const dots = vi.hoisted(() => ({ value: {} as Record<string, SessionDotState> }))
+
+vi.mock('@/store/session-dot-state', async importOriginal => {
+  const real = await importOriginal<typeof DotStateModule>()
+  const { atom: mkAtom } = await import('nanostores')
+  const $dots = mkAtom<Record<string, SessionDotState>>({})
+  $dots.get = () => dots.value
+
+  return { ...real, $sessionDotStateById: $dots }
+})
 
 import {
+  nextSidebarSessionId,
   publishSidebarSection,
   sidebarSessionOrder,
   stepSessionId,
@@ -98,5 +113,51 @@ describe('sidebarSessionOrder', () => {
     publishSidebarSection(gone, { anchor: document.createElement('span'), ids: ['x'] })
 
     expect(sidebarSessionOrder()).not.toContain('x')
+  })
+})
+
+describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
+  const key = Symbol('recents')
+
+  afterEach(() => {
+    unpublishSidebarSection(key)
+    dots.value = {}
+    document.body.innerHTML = ''
+  })
+
+  // a: green (read, finished turn)  b: no stripe (no turns)  c: working
+  // d: red (blocked)  e: green (unread)
+  function setup() {
+    const anchor = document.createElement('span')
+    document.body.append(anchor)
+    publishSidebarSection(key, {
+      anchor,
+      ids: ['a', 'b', 'c', 'd', 'e'],
+      turnIds: ['a', 'c', 'd', 'e'],
+      virtualized: true
+    })
+    dots.value = { a: 'idle', b: 'idle', c: 'working', d: 'needs-input', e: 'unread' }
+  }
+
+  it('lands only on rows with a status stripe, including read-but-finished (green) ones', () => {
+    setup()
+    expect(nextSidebarSessionId('e', 1, false)).toBe('a') // wraps; idle + turns = green
+    expect(nextSidebarSessionId('a', 1, false)).toBe('d') // skips b (no turns) and c (working)
+    expect(nextSidebarSessionId('d', -1, false)).toBe('a')
+    expect(nextSidebarSessionId('a', -1, false)).toBe('e')
+  })
+
+  it('does not fall back to an unstriped neighbour when nothing else has a stripe', () => {
+    setup()
+    dots.value = { a: 'idle', b: 'idle', c: 'working', d: 'working', e: 'working' }
+    expect(nextSidebarSessionId('a', 1, false)).toBeNull()
+    expect(nextSidebarSessionId('a', -1, false)).toBeNull()
+  })
+
+  it('archive fallback and ⇧ still take the plain neighbour', () => {
+    setup()
+    dots.value = { a: 'idle', b: 'idle', c: 'working', d: 'working', e: 'working' }
+    expect(nextSidebarSessionId('a', 1, false, true)).toBe('b')
+    expect(nextSidebarSessionId('a', 1, true)).toBe('b')
   })
 })
