@@ -84,7 +84,10 @@ import { $focusedStoredSessionId } from '@/store/session-focus'
 import { openSessionRename } from '@/store/session-rename'
 import { nextSidebarSessionId } from '@/store/sidebar-visible-order'
 
-const currentSessionForStep = () => $selectedStoredSessionId.get() || $focusedStoredSessionId.get()
+// The session on screen: a focused tile/tab, else the main session
+// ($focusedStoredSessionId falls back to $selectedStoredSessionId). Preferring
+// the main session made ⌘] / ⌘[ step from the chat behind an open tab.
+const currentSessionForStep = () => $focusedStoredSessionId.get()
 import { reloadAppAndBackend } from '@/store/reload-all'
 import { toggleSessionBlocked } from '@/store/session-blocked'
 import { reopenLastClosedTile } from '@/store/session-states'
