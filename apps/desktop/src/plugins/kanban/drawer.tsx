@@ -53,9 +53,9 @@ import {
   reclaimTask,
   routedToScope,
   taskKey,
-  uploadAttachment,
   useKanbanScope
 } from './api'
+import { uploadFiles, useFileDrop } from './attach-drop'
 import { ModelOverrideField, overridePatch } from './model-override'
 import {
   type Diagnostic,
@@ -925,15 +925,15 @@ export function TaskDrawer({
   })
 
   const uploadMut = useMutation({
-    mutationFn: async (file: File) =>
-      uploadAttachment(id!, {
-        bytes: await file.arrayBuffer(),
-        contentType: file.type || undefined,
-        filename: file.name
-      }),
+    mutationFn: (files: File[]) => uploadFiles(id!, files),
     onError: err => host.notify({ kind: 'error', message: errText(err) }),
-    onSuccess: invalidate
+    onSettled: invalidate
   })
+
+  // The whole dialog is a file drop target once the backend supports
+  // attachments (older backends omit the list and have no upload route).
+  const canAttach = Array.isArray(detail?.attachments)
+  const drop = useFileDrop(files => uploadMut.mutate(files), canAttach && !uploadMut.isPending)
 
   if (!id) {
     return null
@@ -970,8 +970,20 @@ export function TaskDrawer({
       <DialogContent
         aria-describedby={undefined}
         bodyClassName="flex max-h-[min(84vh,54rem)] flex-col gap-0 overflow-hidden p-0"
+        chrome={
+          drop.over ? (
+            <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-[inherit] border-2 border-dashed border-(--dt-composer-ring) bg-[color-mix(in_srgb,var(--ui-bg-elevated)_80%,transparent)] text-sm font-medium text-foreground">
+              <span className="inline-flex items-center gap-2">
+                <Codicon name="cloud-upload" size="1rem" />
+                {k.dropToAttach}
+              </span>
+            </div>
+          ) : null
+        }
         className="w-[min(62rem,94vw)] max-w-none"
+        data-file-over={drop.over || undefined}
         showCloseButton={false}
+        {...drop.handlers}
       >
         <header className="flex flex-col gap-2 px-5 pt-4 pb-3">
           <div className="flex items-center gap-2">
@@ -1170,7 +1182,7 @@ export function TaskDrawer({
                   <AttachmentsSection
                     attachments={detail.attachments}
                     onDownload={detail.downloadAttachment}
-                    onUpload={file => uploadMut.mutate(file)}
+                    onUpload={file => uploadMut.mutate([file])}
                     pending={uploadMut.isPending}
                   />
                 )}

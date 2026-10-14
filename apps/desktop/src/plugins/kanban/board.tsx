@@ -81,6 +81,7 @@ import {
   taskKey,
   useKanbanScope
 } from './api'
+import { isFileDrag, uploadFiles, useFileDrop } from './attach-drop'
 import { BoardSwitcher } from './board-switcher'
 import { TaskDrawer } from './drawer'
 import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
@@ -265,11 +266,28 @@ function Card({
   task: KanbanTask
 }) {
   const k = useKanban()
+  const qc = useQueryClient()
+  const scope = useKanbanScope()
   const [dragging, setDragging] = useState(false)
   const meta = columnMeta(task.status)
   const summary = task.latest_summary || task.body
   const fallback = useDefaultAssignee()
   const arc = arcState(task, fallback)
+
+  // OS files dropped on the card attach to this task (lane moves carry no
+  // `Files`, so the two drags never collide — see ./attach-drop).
+  const attach = useMutation({
+    mutationFn: (files: File[]) => uploadFiles(task.id, files),
+    onError: err => host.notify({ kind: 'error', message: errText(err) }),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['kanban', 'task', scope] })
+      void qc.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
+    },
+    onSuccess: n => host.notify({ kind: 'success', message: k.attachedFiles(n, task.title || task.id) })
+  })
+
+  const drop = useFileDrop(files => attach.mutate(files), !attach.isPending)
+  const fileOver = drop.over || attach.isPending
 
   return (
     <ContextMenu>
@@ -281,8 +299,10 @@ function Card({
             // selected = the theme's focus color (same as a focused input).
             'transition-colors hover:bg-primary/[0.06] active:cursor-grabbing',
             selected && 'border-(--dt-composer-ring) bg-[color-mix(in_srgb,var(--dt-composer-ring)_7%,transparent)]',
-            dragging && 'opacity-40'
+            dragging && 'opacity-40',
+            fileOver && 'border-(--dt-composer-ring) bg-[color-mix(in_srgb,var(--dt-composer-ring)_7%,transparent)]'
           )}
+          data-file-over={drop.over || undefined}
           draggable
           onClick={event => (event.metaKey || event.ctrlKey ? onToggleSelect(task.id) : onOpen(task.id))}
           onDragEnd={() => setDragging(false)}
@@ -295,7 +315,20 @@ function Card({
             setDragging(true)
           }}
           style={{ '--kanban-tone': meta.tone, borderLeftColor: meta.tone } as CSSProperties}
+          {...drop.handlers}
         >
+          {fileOver && (
+            <span className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-md border border-dashed border-(--dt-composer-ring) bg-[color-mix(in_srgb,var(--ui-bg-elevated)_82%,transparent)] text-[0.75rem] font-medium text-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <Codicon
+                  name={attach.isPending ? 'sync' : 'cloud-upload'}
+                  size="0.85rem"
+                  spinning={attach.isPending}
+                />
+                {k.dropToAttach}
+              </span>
+            </span>
+          )}
           {/* Machine-activity arc: animates ONLY while an agent is actually on
               the card (claimed + working; amber when the heartbeat is gone).
               Queued attachment is the footer's named-agent chip — a moving
@@ -395,6 +428,12 @@ function Column({
   const dragHandlers = {
     onDragLeave: () => setOver(false),
     onDragOver: (event: ReactDragEvent<HTMLElement>) => {
+      // OS files only land on a card (which stops propagation); the lane
+      // itself is no file target, so it neither lights up nor accepts them.
+      if (isFileDrag(event.dataTransfer)) {
+        return
+      }
+
       // Locked lanes don't preventDefault → the OS shows the no-drop cursor
       // and the drop event never fires. The lane is honest about itself.
       if (locked) {
@@ -408,6 +447,10 @@ function Column({
       setOver(true)
     },
     onDrop: (event: ReactDragEvent<HTMLElement>) => {
+      if (isFileDrag(event.dataTransfer)) {
+        return
+      }
+
       event.preventDefault()
       setOver(false)
       const id = event.dataTransfer.getData('text/plain')

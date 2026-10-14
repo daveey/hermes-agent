@@ -237,6 +237,31 @@ describe('task attachment compatibility', () => {
     expect(await screen.findByText(file.name)).toBeTruthy()
     expect(screen.queryByText(en.noAttachments)).toBeNull()
   })
+
+  it('attaches files dropped anywhere on the task dialog', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    openDrawer()
+    await screen.findByRole('button', { name: en.uploadAttachment })
+    const dialog = screen.getByRole('dialog')
+
+    const file = new File(['example'], 'dropped.txt', { type: 'text/plain' })
+    const bytes = new ArrayBuffer(7)
+    Object.defineProperty(file, 'arrayBuffer', { value: async () => bytes })
+    const dataTransfer = { types: ['Files'], files: [file], dropEffect: 'none' }
+
+    fireEvent.dragEnter(dialog, { dataTransfer })
+    expect(await screen.findByText(en.dropToAttach)).toBeTruthy()
+    fireEvent.drop(dialog, { dataTransfer })
+
+    await waitFor(() =>
+      expect(rest).toHaveBeenCalledWith('/tasks/t_example/attachments', {
+        method: 'POST',
+        upload: { filename: 'dropped.txt', contentType: 'text/plain', bytes }
+      })
+    )
+    expect(await screen.findByText('dropped.txt')).toBeTruthy()
+    expect(screen.queryByText(en.dropToAttach)).toBeNull()
+  })
 })
 
 describe('task modal dialog', () => {
