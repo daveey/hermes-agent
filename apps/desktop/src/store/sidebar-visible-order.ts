@@ -86,6 +86,19 @@ export function sessionHasStatusStripe(id: string): boolean {
     return false
   }
 
+  // A drawn row is the authority: step exactly where the sidebar paints a
+  // green / red stripe. The projects overview draws lane rows the sections'
+  // flat row model doesn't carry, so the model below had no message count
+  // for them and skipped green rows there.
+  const row = document.querySelector<HTMLElement>(`[data-sidebar-session-id="${CSS.escape(id)}"]`)
+
+  if (row) {
+    const stripe = row.dataset.sidebarStripe
+
+    return stripe === 'done' || stripe === 'stuck'
+  }
+
+  // Not drawn (virtualized off-screen row): derive it from the row model.
   let hasTurns = false
 
   for (const entry of sections.values()) {

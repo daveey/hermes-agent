@@ -173,4 +173,39 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
     expect(toggleSessionBlocked('d')).toBe(false)
     expect(nextSidebarSessionId('a', 1, false)).toBe('d')
   })
+
+  it('trusts the stripe a drawn row paints over the section row model (projects view)', () => {
+    // The projects overview draws lane rows the section's flat model doesn't
+    // carry, so the model has no `message_count` for them: a green row there
+    // used to be skipped. The drawn row's own stripe is the authority.
+    const group = document.createElement('div')
+    const anchor = document.createElement('span')
+    group.append(anchor)
+
+    for (const [id, stripe] of [
+      ['p1', 'done'],
+      ['p2', ''],
+      ['p3', 'done'],
+      ['p4', 'blocked'],
+      ['p5', 'stuck']
+    ] as const) {
+      const row = document.createElement('div')
+      row.dataset.sidebarSessionId = id
+
+      if (stripe) {
+        row.dataset.sidebarStripe = stripe
+      }
+
+      group.append(row)
+    }
+
+    document.body.append(group)
+    publishSidebarSection(key, { anchor, ids: ['other'], turnIds: [] })
+    dots.value = { p1: 'idle', p2: 'idle', p3: 'idle', p4: 'idle', p5: 'needs-input' }
+
+    expect(nextSidebarSessionId('p1', 1, false)).toBe('p3')
+    expect(nextSidebarSessionId('p3', 1, false)).toBe('p5') // p4 is grey (⌘B)
+    expect(nextSidebarSessionId('p5', 1, false)).toBe('p1') // wraps
+    expect(nextSidebarSessionId('p1', -1, false)).toBe('p5')
+  })
 })
