@@ -22,8 +22,8 @@ import { getLatestSessionMessages, getSession, type SessionInfo } from '@/hermes
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $activeConnectionId } from '@/store/connections'
-import { requestGatewayForAgent, requestGatewayForProfile } from '@/store/gateway'
-import { ensureGatewayAgent, ensureGatewayProfile } from '@/store/profile'
+import { openGatewayForAgent, requestGatewayForAgent, requestGatewayForProfile } from '@/store/gateway'
+import { $showAllProfiles, ensureGatewayAgent, ensureGatewayProfile } from '@/store/profile'
 import {
   $messages,
   $resumeFailedSessionId,
@@ -60,6 +60,8 @@ vi.mock('@/store/profile', async importOriginal => ({
 
 vi.mock('@/store/gateway', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
+  openGatewayForAgent: vi.fn(async () => undefined),
+  openGatewayForProfile: vi.fn(async () => undefined),
   requestGatewayForAgent: vi.fn(),
   requestGatewayForProfile: vi.fn(),
   retainGatewayForAgent: vi.fn(async () => () => undefined)
@@ -245,6 +247,7 @@ describe('resume routes by the session owner, not the selected gateway', () => {
     setSessions([])
     setConnection(null)
     $connectionsRegistry.set(null)
+    $showAllProfiles.set(false)
     _resetSessionOwnerHintsForTests({ storage: true })
     vi.mocked(requestGatewayForAgent).mockReset()
     vi.mocked(ensureGatewayAgent).mockReset()
@@ -428,6 +431,63 @@ describe('resume routes by the session owner, not the selected gateway', () => {
     expect(gateways.resumesOn(MACBOOK)).toHaveLength(0)
     expect(gateways.calls.filter(call => call.method === 'session.resume')).toHaveLength(1)
     expect(gateways.calls.find(call => call.method === 'session.resume')?.connection).toBe('local')
+    expect($activeConnectionId.get()).toBe('local')
+  })
+
+  // The statusbar gateway switcher (use-statusbar-items.tsx StatusbarGatewaySwitcher
+  // → connection-switcher.tsx) and the fleet profile rail ("All profiles on this
+  // gateway") show the selected gateway in All-profiles mode too, so opening a
+  // foreign gateway's session there must move it like the normal view does.
+  it('(all-profiles) opening a foreign-gateway session switches the selected gateway, view stays All', async () => {
+    $showAllProfiles.set(true)
+    $connectionsRegistry.set({
+      connections: [
+        { id: 'local', kind: 'local', label: 'This device' },
+        { id: MACBOOK, kind: 'ssh', label: 'macbook' }
+      ],
+      primary: 'local',
+      version: 2
+    } as never)
+    setSessions([storedSession({ connection_id: MACBOOK, profile: 'default' })])
+
+    const gateways = mockGateways({
+      local: owningGateway([LOCAL_SESSION], 'rt-local'),
+      [MACBOOK]: owningGateway([MACBOOK_SESSION], 'rt-macbook')
+    })
+
+    const resume = await mountResume(gateways.ambient)
+    await resume(MACBOOK_SESSION, true)
+
+    expect(gateways.resumesOn('local')).toHaveLength(0)
+    expect(gateways.resumesOn(MACBOOK)).toHaveLength(1)
+    expect($activeConnectionId.get()).toBe(MACBOOK)
+    expect($showAllProfiles.get()).toBe(true)
+  })
+
+  it('(all-profiles) control: keeps the selected gateway for another profile on the same gateway', async () => {
+    $showAllProfiles.set(true)
+    $connectionsRegistry.set({
+      connections: [
+        { id: 'local', kind: 'local', label: 'This device' },
+        { id: MACBOOK, kind: 'ssh', label: 'macbook' }
+      ],
+      primary: 'local',
+      version: 2
+    } as never)
+    setSessions([storedSession({ connection_id: 'local', id: LOCAL_SESSION, profile: 'omar' })])
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({ ...TRANSCRIPT, session_id: LOCAL_SESSION } as never)
+
+    const gateways = mockGateways({
+      local: owningGateway([LOCAL_SESSION], 'rt-local'),
+      [MACBOOK]: owningGateway([MACBOOK_SESSION], 'rt-macbook')
+    })
+
+    const resume = await mountResume(gateways.ambient)
+    await resume(LOCAL_SESSION, true)
+
+    expect(gateways.resumesOn(MACBOOK)).toHaveLength(0)
+    expect(vi.mocked(ensureGatewayAgent)).not.toHaveBeenCalled()
+    expect(vi.mocked(openGatewayForAgent)).toHaveBeenCalledWith('local', 'omar', expect.anything())
     expect($activeConnectionId.get()).toBe('local')
   })
 })

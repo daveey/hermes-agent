@@ -44,6 +44,7 @@ import {
 } from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
 import { resetSessionBackground } from '@/store/composer-status'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $connectionRequests } from '@/store/connection-request'
 import {
   isActivePrimary,
@@ -1516,7 +1517,18 @@ export function useSessionActions({
 
       // All-profiles / plugin navigation must not steal chrome API-home:
       // dial the owning backend without moving $activeGatewayProfile.
-      if ($showAllProfiles.get()) {
+      //
+      // Except across gateways [daveey]: the selected gateway stays visible in
+      // All-profiles mode (statusbar gateway switcher; the fleet rail's "All
+      // profiles on this gateway"), so a session owned by ANOTHER registry
+      // gateway switches it exactly like the normal view. ensureGatewayAgent
+      // leaves $showAllProfiles alone, so the view stays All profiles.
+      const switchesGateway =
+        Boolean(resolvedConnectionId) &&
+        resolvedConnectionId !== ($connection.get()?.connectionId?.trim() || '') &&
+        ($connectionsRegistry.get()?.connections.length ?? 0) > 1
+
+      if ($showAllProfiles.get() && !switchesGateway) {
         if (resolvedConnectionId) {
           await openGatewayForAgent(resolvedConnectionId, ownerRoute?.profile || sessionProfile || 'default', {
             spawnPriority: 'foreground'
