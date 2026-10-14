@@ -399,6 +399,8 @@ function SidebarSessionRowImpl({
           className
         )}
         data-glass-opaque={dragging ? '' : undefined}
+        // ⌘⇧] / ⌘⇧[ read the drawn row order from this (sidebar-visible-order).
+        data-sidebar-session-id={session.id}
         data-working={liveTurn ? 'true' : undefined}
         // The row runs BOTH drags off one press, and each declines outside its
         // own region — so no timing/arbitration rule is needed and neither can

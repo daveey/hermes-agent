@@ -4,12 +4,36 @@ import { $sessionDotStateById, type SessionDotState } from '@/store/session-dot-
 // The sidebar's session order as the user sees it, for ⌘] / ⌘[ stepping.
 // Each rendered SessionsSection (pinned, recents, …) publishes the ids of its
 // visible rows plus an anchor element; sections are concatenated in DOM order
-// at read time. The virtualized list renders only on-screen rows, so the DOM
-// can't be read directly — the section's row model is the authority.
+// at read time. A section reads its rows straight from the DOM (rows carry
+// `data-sidebar-session-id`), because project / profile / messaging groupings
+// draw sessions in a different order than the flat row model. Only the
+// virtualized flat list renders just its on-screen rows, so there the
+// section's row model is the authority.
 
 interface SectionEntry {
   anchor: HTMLElement | null
   ids: readonly string[]
+  virtualized?: boolean
+}
+
+const ROW_SELECTOR = '[data-sidebar-session-id]'
+
+function sectionIds(entry: SectionEntry): readonly string[] {
+  const root = entry.anchor?.parentElement
+
+  if (entry.virtualized || !root) {
+    return entry.ids
+  }
+
+  const drawn = [...root.querySelectorAll<HTMLElement>(ROW_SELECTOR)].flatMap(row => {
+    const id = row.dataset.sidebarSessionId
+
+    return id ? [id] : []
+  })
+
+  // Nothing drawn yet (first paint, or rows still mounting): the model is the
+  // best guess. A collapsed section publishes no ids, so this stays empty.
+  return drawn.length ? drawn : entry.ids
 }
 
 const sections = new Map<symbol, SectionEntry>()
@@ -38,7 +62,7 @@ export function sidebarSessionOrder(): string[] {
   const ids: string[] = []
 
   for (const entry of ordered) {
-    for (const id of entry.ids) {
+    for (const id of sectionIds(entry)) {
       if (!seen.has(id)) {
         seen.add(id)
         ids.push(id)

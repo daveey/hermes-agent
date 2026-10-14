@@ -58,6 +58,40 @@ describe('sidebarSessionOrder', () => {
     expect(sidebarSessionOrder()).toEqual(['p1', 'p2', 'r1', 'r2'])
   })
 
+  it('reads drawn row order from the DOM, not the flat row model', () => {
+    // Projects / grouped views draw rows in a different order than `ids`.
+    const group = document.createElement('div')
+    const anchor = document.createElement('span')
+    group.append(anchor)
+
+    for (const id of ['g2', 'g1', 'g3']) {
+      const row = document.createElement('div')
+      row.dataset.sidebarSessionId = id
+      group.append(row)
+    }
+
+    document.body.append(group)
+    const recents = Symbol('recents')
+    keys.push(recents)
+    publishSidebarSection(recents, { anchor, ids: ['g1', 'g2', 'g3'] })
+
+    expect(sidebarSessionOrder()).toEqual(['g2', 'g1', 'g3'])
+  })
+
+  it('trusts the row model for the virtualized list (off-screen rows unmounted)', () => {
+    const group = document.createElement('div')
+    const anchor = document.createElement('span')
+    const row = document.createElement('div')
+    row.dataset.sidebarSessionId = 'v2'
+    group.append(anchor, row)
+    document.body.append(group)
+    const recents = Symbol('recents')
+    keys.push(recents)
+    publishSidebarSection(recents, { anchor, ids: ['v1', 'v2', 'v3'], virtualized: true })
+
+    expect(sidebarSessionOrder()).toEqual(['v1', 'v2', 'v3'])
+  })
+
   it('ignores sections whose anchor left the document', () => {
     const gone = Symbol('gone')
     keys.push(gone)

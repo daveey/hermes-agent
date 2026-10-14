@@ -455,14 +455,6 @@ export function SidebarSessionsSection({
   const [orderKey] = useState(() => Symbol('sidebar-section'))
   const orderAnchorRef = useRef<HTMLSpanElement>(null)
 
-  useEffect(() => {
-    publishSidebarSection(orderKey, {
-      anchor: orderAnchorRef.current,
-      ids: sectionOpen ? visibleRows.flatMap(row => (row.kind === 'session' ? [row.entry.session.id] : [])) : []
-    })
-  }, [orderKey, sectionOpen, visibleRows])
-
-  useEffect(() => () => unpublishSidebarSection(orderKey), [orderKey])
 
   const persistSessionOrder = useCallback(
     (ids: string[]) => onReorderSessions?.(mergeVisibleReorder(allSortableRowIds, ids)),
@@ -491,6 +483,16 @@ export function SidebarSessionsSection({
     !projectOverview?.length &&
     !projectContent &&
     sessions.length >= VIRTUALIZE_THRESHOLD
+
+  useEffect(() => {
+    publishSidebarSection(orderKey, {
+      anchor: orderAnchorRef.current,
+      ids: sectionOpen ? visibleRows.flatMap(row => (row.kind === 'session' ? [row.entry.session.id] : [])) : [],
+      virtualized: flatVirtualized
+    })
+  }, [flatVirtualized, orderKey, sectionOpen, visibleRows])
+
+  useEffect(() => () => unpublishSidebarSection(orderKey), [orderKey])
 
   // First paint into the grouped view (e.g. the app restoring the Projects tab)
   // has flat recents in `sessions` but no tree yet. Show skeletons rather than
