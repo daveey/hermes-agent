@@ -1,0 +1,145 @@
+"""processes.json is shared by every Hermes process on the host. [daveey]
+
+The Desktop backend, the messaging gateway, CLI runs and kanban workers each keep
+their own in-memory registry but write the same checkpoint file. A plain overwrite
+erased every other process's live children: a Desktop session's notify_on_complete
+job vanished as soon as a kanban worker spawned something, so after a Desktop
+restart nothing could re-adopt it. A write now keeps foreign entries whose child is
+still alive, and recovery only adopts orphans (writer process gone), never a child
+another live process still supervises.
+"""
+
+import json
+import subprocess
+import sys
+import time
+from unittest.mock import patch
+
+import pytest
+
+from tools.process_registry import ProcessRegistry, ProcessSession
+
+
+def _sleeper() -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL)
+
+
+def _dead_pid() -> int:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def _entry(sid: str, pid: int, *, writer_pid=None, writer_start=None) -> dict:
+    entry = {
+        "session_id": sid, "command": "bash watch_onit.sh", "pid": pid, "pid_scope": "host",
+        "host_start_time": ProcessRegistry._safe_host_start_time(pid), "started_at": time.time(),
+        "task_id": "default", "owner_task_id": "20261014_152627_e39461",
+        "session_key": "20261014_152627_e39461", "notify_on_complete": True,
+    }
+    if writer_pid is not None:
+        entry.update(writer_pid=writer_pid, writer_start_time=writer_start)
+    return entry
+
+
+@pytest.fixture()
+def procs():
+    started: list[subprocess.Popen] = []
+
+    def spawn() -> subprocess.Popen:
+        proc = _sleeper()
+        started.append(proc)
+        return proc
+
+    yield spawn
+    for proc in started:
+        proc.kill()
+        proc.wait()
+
+
+def _own_session(registry: ProcessRegistry, proc: subprocess.Popen, sid: str = "proc_own") -> None:
+    registry._running[sid] = ProcessSession(
+        id=sid, command="own", task_id="t", pid=proc.pid, pid_scope="host", detached=True,
+        host_start_time=ProcessRegistry._safe_host_start_time(proc.pid), started_at=time.time())
+
+
+def test_write_keeps_another_processes_live_child(tmp_path, procs):
+    checkpoint = tmp_path / "processes.json"
+    child, writer = procs(), procs()
+    checkpoint.write_text(json.dumps([_entry(
+        "proc_4fa0a87e0e10", child.pid, writer_pid=writer.pid,
+        writer_start=ProcessRegistry._safe_host_start_time(writer.pid))]))
+    registry = ProcessRegistry()
+    _own_session(registry, procs())
+    with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        registry._write_checkpoint()
+    ids = {e["session_id"] for e in json.loads(checkpoint.read_text())}
+    assert ids == {"proc_own", "proc_4fa0a87e0e10"}
+
+
+def test_write_keeps_orphaned_live_child_from_dead_writer(tmp_path, procs):
+    """The Desktop restart case: the writer backend is gone, the child lives on."""
+    checkpoint = tmp_path / "processes.json"
+    child = procs()
+    checkpoint.write_text(json.dumps([_entry("proc_orphan", child.pid, writer_pid=_dead_pid())]))
+    registry = ProcessRegistry()
+    with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        registry._write_checkpoint()
+    assert [e["session_id"] for e in json.loads(checkpoint.read_text())] == ["proc_orphan"]
+
+
+def test_write_drops_foreign_entry_whose_child_exited(tmp_path, procs):
+    checkpoint = tmp_path / "processes.json"
+    checkpoint.write_text(json.dumps([_entry("proc_gone", _dead_pid(), writer_pid=procs().pid)]))
+    registry = ProcessRegistry()
+    with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        registry._write_checkpoint()
+    assert json.loads(checkpoint.read_text()) == []
+
+
+def test_write_drops_own_finished_session(tmp_path, procs):
+    checkpoint = tmp_path / "processes.json"
+    child = procs()
+    registry = ProcessRegistry()
+    _own_session(registry, child, "proc_mine")
+    with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        registry._write_checkpoint()
+        registry._finished["proc_mine"] = registry._running.pop("proc_mine")
+        registry._write_checkpoint()
+    assert json.loads(checkpoint.read_text()) == []
+
+
+def test_entries_carry_writer_identity(tmp_path, procs):
+    import os
+
+    checkpoint = tmp_path / "processes.json"
+    registry = ProcessRegistry()
+    _own_session(registry, procs())
+    with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        registry._write_checkpoint()
+    (entry,) = json.loads(checkpoint.read_text())
+    assert entry["writer_pid"] == os.getpid()
+
+
+def test_recover_skips_child_supervised_by_live_writer(tmp_path, procs):
+    checkpoint = tmp_path / "processes.json"
+    child, writer = procs(), procs()
+    checkpoint.write_text(json.dumps([_entry(
+        "proc_supervised", child.pid, writer_pid=writer.pid,
+        writer_start=ProcessRegistry._safe_host_start_time(writer.pid))]))
+    registry = ProcessRegistry()
+    with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        assert registry.recover_from_checkpoint() == 0
+    assert "proc_supervised" not in registry._running
+    # ...and the entry survives for its live owner.
+    assert [e["session_id"] for e in json.loads(checkpoint.read_text())] == ["proc_supervised"]
+
+
+def test_recover_adopts_orphan_of_dead_writer(tmp_path, procs):
+    checkpoint = tmp_path / "processes.json"
+    child = procs()
+    checkpoint.write_text(json.dumps([_entry("proc_orphan", child.pid, writer_pid=_dead_pid())]))
+    registry = ProcessRegistry()
+    with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        assert registry.recover_from_checkpoint() == 1
+    assert registry._running["proc_orphan"].detached
