@@ -539,8 +539,8 @@ export function useDesktopIntegrations({
       }
 
       if (!commandFocusedPreview(command) && command === 'reload') {
-        // Fork: ⌘R runs whatever action is bound to mod+r (`app.reloadAll`
-        // by default); only an unbound ⌘R reloads the window. ⇧⌘R
+        // Fork: ⌘R runs whatever action is bound to mod+r (`session.resume`
+        // by default); only an unbound ⌘R reloads the window. ⌥⇧⌘R
         // (forceReload) is the unconditional reload.
         const bound = $comboIndex.get().get(canonicalizeCombo('mod+r')) ?? []
 

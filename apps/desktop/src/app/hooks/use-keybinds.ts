@@ -384,7 +384,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // Fork ⌘R: send "resume" to the active chat as if typed (queues behind a
     // live turn like any submit).
     'session.resume': () => requestComposerSubmit('resume', { target: 'active' }),
-    // Fork ⌘R: restart the backend, then reload the window.
+    // Fork ⇧⌘R: restart the backend, then reload the window.
     'app.reloadAll': () => void reloadAppAndBackend(),
     // ⌘⇧P: typeahead over projects for the selected (else focused) session.
     'session.moveToProject': () => {

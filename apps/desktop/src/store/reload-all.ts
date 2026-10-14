@@ -7,7 +7,7 @@ import { $connection } from '@/store/session'
 let reloading = false
 
 /**
- * Fork (`app.reloadAll`, ⌘R): restart the Python backend for the profile in
+ * Fork (`app.reloadAll`, ⇧⌘R): restart the Python backend for the profile in
  * view, then reload the window — so a core or plugin edit is picked up without
  * quitting the app. Remote gateways aren't ours to restart, so they only get a
  * reconnect before the reload. Restarting the backend interrupts every turn it

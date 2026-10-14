@@ -135,11 +135,11 @@ describe('view.tabSlot.N layers over profile.switch.N on ⌘1…⌘9 (#92569)', 
     expect(firstProfileSwitch).toBeGreaterThan(firstTabSlot)
   })
 
-  it('fork: ⌘R is app.reloadAll, ⌥⌘R is session.resume, both work from the composer (⇧⌘R stays the window reload)', () => {
-    expect(KEYBIND_ACTIONS.filter(a => a.defaults.includes('mod+r')).map(a => a.id)).toEqual(['app.reloadAll'])
-    expect(keybindActionAllowedInEditableTarget('app.reloadAll', 'mod+r')).toBe(true)
-    expect(keybindAction('session.resume')?.defaults).toEqual(['mod+alt+r'])
-    expect(keybindActionAllowedInEditableTarget('session.resume', 'mod+alt+r')).toBe(true)
-    expect(KEYBIND_ACTIONS.filter(a => a.defaults.includes('mod+shift+r'))).toEqual([])
+  it('fork: ⌘R is session.resume, ⇧⌘R is app.reloadAll, both work from the composer', () => {
+    expect(KEYBIND_ACTIONS.filter(a => a.defaults.includes('mod+r')).map(a => a.id)).toEqual(['session.resume'])
+    expect(keybindActionAllowedInEditableTarget('session.resume', 'mod+r')).toBe(true)
+    expect(KEYBIND_ACTIONS.filter(a => a.defaults.includes('mod+shift+r')).map(a => a.id)).toEqual(['app.reloadAll'])
+    expect(keybindActionAllowedInEditableTarget('app.reloadAll', 'mod+shift+r')).toBe(true)
+    expect(KEYBIND_ACTIONS.filter(a => a.defaults.includes('mod+alt+r'))).toEqual([])
   })
 })

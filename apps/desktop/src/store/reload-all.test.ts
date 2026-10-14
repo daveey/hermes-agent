@@ -19,7 +19,7 @@ vi.mock('@/store/notifications', async importOriginal => ({
   notifyError: mocks.notifyError
 }))
 
-describe('reloadAppAndBackend (⌘R)', () => {
+describe('reloadAppAndBackend (⇧⌘R)', () => {
   const recycleBackend = vi.fn()
 
   beforeEach(() => {
@@ -71,7 +71,7 @@ describe('reloadAppAndBackend (⌘R)', () => {
     expect(reload).toHaveBeenCalledOnce()
   })
 
-  it('ignores a second ⌘R while the first restart is still running', async () => {
+  it('ignores a second ⇧⌘R while the first restart is still running', async () => {
     let finish: () => void = () => {}
     recycleBackend.mockImplementation(() => new Promise(resolve => (finish = () => resolve({ ok: true }))))
     const reload = vi.fn()

@@ -150,16 +150,15 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // AI-suggested short name (`session.title.suggest`). (⌘⇧N moved to
   // `session.newSameGateway`.)
   { id: 'session.rename', category: 'session', defaults: ['mod+shift+e'] },
-  // Fork: ⌥⌘R sends "resume" to the active chat (it had ⌘R until
-  // `app.reloadAll` took that chord).
-  { id: 'session.resume', category: 'session', defaults: ['mod+alt+r'], editableTargetPolicy: 'modified' },
-  // Fork: ⌘R restarts the backend and reloads the window, so core and plugin
-  // edits land without quitting the app (upstream ⌘R reloads only the window;
-  // ⇧⌘R `forceReload` still does that). Main claims ⌘R before the renderer
-  // sees it (window-accelerator), so the preview-nav fallback in
-  // use-desktop-integrations dispatches whatever is bound to mod+r; a focused
-  // browser pane / terminal still gets ⌘R first.
-  { id: 'app.reloadAll', category: 'view', defaults: ['mod+r'], editableTargetPolicy: 'modified' },
+  // Fork: ⌘R sends "resume" to the active chat (stalled turn). Main claims ⌘R
+  // before the renderer sees it (window-accelerator), so the preview-nav
+  // fallback in use-desktop-integrations dispatches whatever is bound to
+  // mod+r; a focused browser pane / terminal still gets ⌘R first.
+  { id: 'session.resume', category: 'session', defaults: ['mod+r'], editableTargetPolicy: 'modified' },
+  // Fork: ⇧⌘R restarts the backend and reloads the window, so core and plugin
+  // edits land without quitting the app. The View menu's `forceReload` (plain
+  // window reload, the escape hatch) moves to ⌥⇧⌘R so ⇧⌘R reaches here.
+  { id: 'app.reloadAll', category: 'view', defaults: ['mod+shift+r'], editableTargetPolicy: 'modified' },
   { id: 'conversation.scrollPageUp', category: 'session', defaults: ['pageup'] },
   { id: 'conversation.scrollPageDown', category: 'session', defaults: ['pagedown'] },
   // Archive the active session. Ships unbound (like `session.togglePin`) so an
