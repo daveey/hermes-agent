@@ -73,6 +73,89 @@ def _reset_background_review_read_marks() -> None:
     _background_review_read_paths.set(_BackgroundReviewReadMarks())
 
 
+def _transcript_skill_views(messages: list) -> list[tuple[str, Optional[str], str, Optional[str]]]:
+    """``(name, file_path, content, source_path)`` for every full skill_view result in ``messages``.
+
+    Dedup stubs (``content_returned: False``), failures and non-JSON (pruned/summarised) results
+    are skipped; the tool name comes from the assistant tool_call the result answers."""
+    import json
+
+    call_names: dict[str, str] = {}
+    views: list[tuple[str, Optional[str], str, Optional[str]]] = []
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if isinstance(tc, dict) and tc.get("id"):
+                call_names[tc["id"]] = str((tc.get("function") or {}).get("name") or "")
+        if msg.get("role") != "tool" or not isinstance(content := msg.get("content"), str):
+            continue
+        tool = msg.get("tool_name") or msg.get("name") or call_names.get(msg.get("tool_call_id") or "")
+        if tool != "skill_view":
+            continue
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            continue
+        if (isinstance(payload, dict) and payload.get("success") is True and payload.get("name")
+                and isinstance(payload.get("content"), str) and not payload.get("is_binary")):
+            views.append((str(payload["name"]), payload.get("file"), payload["content"],
+                          payload.get("_source_path")))
+    return views
+
+
+def seed_background_review_reads_from_history(messages: list, session_id: Optional[str] = None) -> int:
+    """Treat skill_view results the review fork replays verbatim as reads of the current file.
+
+    The fork resumes the parent's transcript, so a skill the parent loaded is already in the fork's
+    context. When that copy is byte-identical to what skill_view serves NOW, the fork holds the exact
+    current content, which is what the read-before-write guard demands; refusing its first patch only
+    forced a redundant re-view (a 90 KB SKILL.md reloaded per review). A stale, pruned or stubbed copy
+    does not match and stays unmarked, so the guard still fires for it. Call after
+    ``_reset_background_review_read_marks()`` in the context the fork's tool workers copy. Returns the
+    number of files marked."""
+    if (marks := _background_review_read_paths.get()) is None:
+        _background_review_read_paths.set(marks := _BackgroundReviewReadMarks())
+    seen: set[tuple[str, Optional[str]]] = set()
+    marked = 0
+    for name, file_path, content, source in reversed(_transcript_skill_views(messages)):
+        if (name, file_path) in seen:  # newest copy wins: an older one may predate a patch
+            continue
+        seen.add((name, file_path))
+        try:
+            current = _current_skill_view(name, file_path, session_id)
+        except Exception:
+            logger.debug("review read seeding failed for %s/%s", name, file_path, exc_info=True)
+            continue
+        if current is None or current[1] != content:
+            continue
+        resolved = _resolved_str(current[0])
+        # Same name but a different file (a shadowing copy appeared since): not a read of the target.
+        if source and _resolved_str(Path(source)) != resolved:
+            continue
+        marks.add(resolved)
+        marked += 1
+    return marked
+
+
+def _current_skill_view(name: str, file_path: Optional[str], session_id: Optional[str]):
+    """``(source path, content)`` skill_view would serve now, or None. Runs in a throwaway context
+    so skill_view's own read-mark side effect cannot leak into the fork's marks."""
+    import contextvars
+    import json
+
+    def _view():
+        _background_review_read_paths.set(_BackgroundReviewReadMarks())
+        from tools.skills_tool import skill_view
+        return skill_view(name, file_path=file_path, task_id=session_id)
+
+    payload = json.loads(contextvars.copy_context().run(_view))
+    if not (isinstance(payload, dict) and payload.get("success") is True and payload.get("_source_path")
+            and isinstance(payload.get("content"), str)):
+        return None
+    return Path(payload["_source_path"]), payload["content"]
+
+
 def _resolved_roots(skill_path: Path):
     """``(resolved skill_path, [(root, resolved_root), ...])`` over every resolvable skills root."""
     from agent.skill_utils import get_all_skills_dirs

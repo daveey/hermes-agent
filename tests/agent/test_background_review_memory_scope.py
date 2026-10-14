@@ -114,6 +114,37 @@ class TestExplicitRefineOrigin:
         assert fork._memory_write_origin == "background_review"
         assert fork._review_attended is explicit
 
+    @pytest.mark.parametrize("routed", [False, True])
+    def test_fork_seeds_read_marks_from_the_history_it_replays(self, routed):
+        """Read-before-write: the fork seeds marks from exactly the history it will see (full
+        snapshot, or the digest when routed), after resetting and in its own context."""
+        seeded, replayed = [], []
+        snapshot = [{"role": "user", "content": "hi"}]
+
+        def fake_build(agent, task_cfg=None, *, max_iterations, write_origin="background_review"):
+            fork = SimpleNamespace(
+                _memory_enabled=True, _user_profile_enabled=False, _memory_write_origin=write_origin,
+                run_conversation=lambda **kw: replayed.append(kw["conversation_history"]),
+                _session_messages=[])
+            return fork, {}, routed
+
+        noop = lambda *a, **k: None
+        digest = [{"role": "user", "content": "digest"}]
+        with patch.object(bg, "build_cache_parity_fork", fake_build), \
+                patch.object(bg, "_digest_history", lambda m: digest), \
+                patch.object(bg, "_track_review_fork", noop), \
+                patch.object(bg, "_snapshot_review_usage", lambda a: {}), \
+                patch.object(bg, "_record_review_usage_to_parent", noop), \
+                patch.object(bg, "finish_background_review_run", noop), \
+                patch.object(bg, "_release_fork_clients", noop), \
+                patch("tools.skill_manager_guards.seed_background_review_reads_from_history",
+                      lambda history, session_id=None: seeded.append((history, session_id)) or 0):
+            bg._run_review_fork(SimpleNamespace(session_id="s1"), snapshot, "p", None, None,
+                                bg._ReviewForkState())
+        expected = digest if routed else snapshot
+        assert seeded == [(expected, "s1")]
+        assert replayed == [expected]
+
 
 class TestConsolidationProposalSurfaces:
     """The fork's own review summary is never published back, so a consolidation the delete

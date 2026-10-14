@@ -1168,20 +1168,27 @@ def _run_review_fork(
             + memory_phrase_deny + "." + deny_extra + " Do not retry {tool_name}."
         ),
     )
+    # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
+    review_history = _digest_history(messages_snapshot) if _routed else messages_snapshot
     with suppress(Exception):
-        from tools.skill_manager_guards import _reset_background_review_read_marks
+        from tools.skill_manager_guards import (
+            _reset_background_review_read_marks, seed_background_review_reads_from_history)
 
         _reset_background_review_read_marks()
+        # A skill_view result the fork replays byte-identical to the file on disk IS a read of the
+        # current content; without this every review re-viewed the parent's loaded skill (or got
+        # refused patching it) just to satisfy read-before-write. Stale copies stay unmarked.
+        seed_background_review_reads_from_history(
+            review_history, session_id=getattr(agent, "session_id", None))
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
-            # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
             st.review_agent.run_conversation(
                 user_message=(
                     prompt + "\n\nYou can only call " + memory_phrase_prompt +
                     "management tools. Other tools will be denied "
                     "at runtime — do not attempt them." + prompt_extra
                 ),
-                conversation_history=_digest_history(messages_snapshot) if _routed else messages_snapshot,
+                conversation_history=review_history,
             )
     finally:
         clear_thread_tool_whitelist()

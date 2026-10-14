@@ -1344,3 +1344,110 @@ class TestCuratorConsolidationDeleteGuard:
             assert allowed["success"] is True, allowed
 
         _reset_background_review_read_marks()
+
+    @staticmethod
+    def _replayed_view(call_id: str, view_json: str) -> list[dict]:
+        """The parent turn that loaded a skill, as the review fork replays it."""
+        return [
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": call_id, "type": "function",
+                "function": {"name": "skill_view", "arguments": '{"name": "reviewed"}'}}]},
+            {"role": "tool", "tool_call_id": call_id, "content": view_json},
+        ]
+
+    def test_review_patch_allowed_when_replayed_view_is_current(self, tmp_path, monkeypatch):
+        """The parent loaded the skill and nothing changed since: the fork already holds the
+        exact current content, so its first patch must not be refused (coach bug: every review
+        of a session that loaded babybear-development was refused, then re-viewed 90 KB)."""
+        from tools.skills_tool import skill_view
+        from tools.skill_manager_guards import (
+            _reset_background_review_read_marks, seed_background_review_reads_from_history)
+
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch):
+            _create_curator_skill("reviewed", _skill_content("reviewed"))
+            history = self._replayed_view("call_1", skill_view("reviewed"))  # parent's view
+            _reset_background_review_read_marks()  # fork start
+
+            assert seed_background_review_reads_from_history(history) == 1
+            result = json.loads(skill_manage(
+                action="patch", name="reviewed",
+                old_string="Step 1: Do the thing.", new_string="Step 1: Do the thing safely."))
+            assert result["success"] is True, result
+
+        _reset_background_review_read_marks()
+
+    def test_review_patch_still_refused_when_replayed_view_is_stale(self, tmp_path, monkeypatch):
+        """Another session patched the skill after the parent loaded it: the fork's copy is
+        stale, so read-before-write must still refuse until it views the current file."""
+        from tools.skills_tool import skill_view
+        from tools.skill_manager_guards import (
+            _reset_background_review_read_marks, seed_background_review_reads_from_history)
+
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch):
+            _create_curator_skill("reviewed", _skill_content("reviewed"))
+            history = self._replayed_view("call_1", skill_view("reviewed"))
+            skill_md = tmp_path / ".hermes" / "skills" / "reviewed" / "SKILL.md"
+            skill_md.write_text(skill_md.read_text() + "Step 2: Added elsewhere.\n")
+            _reset_background_review_read_marks()
+
+            # Seeding compares via skill_view, whose own read-mark must not leak in.
+            assert seed_background_review_reads_from_history(history) == 0
+            blocked = json.loads(skill_manage(
+                action="patch", name="reviewed",
+                old_string="Step 1: Do the thing.", new_string="Step 1: Do the thing safely."))
+            assert blocked["success"] is False
+            assert blocked.get("_read_before_write_required") is True
+
+        _reset_background_review_read_marks()
+
+    def test_review_seeding_ignores_stubs_failures_and_other_tools(self, tmp_path, monkeypatch):
+        from tools.skill_manager_guards import (
+            _reset_background_review_read_marks, seed_background_review_reads_from_history)
+
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch):
+            _create_curator_skill("reviewed", _skill_content("reviewed"))
+            current = (tmp_path / ".hermes" / "skills" / "reviewed" / "SKILL.md").read_text()
+            stub = json.dumps({"success": True, "name": "reviewed", "dedup": True,
+                               "content_returned": False})
+            not_skill_view = json.dumps({"success": True, "name": "reviewed", "content": current})
+            history = (
+                self._replayed_view("c1", stub)
+                + self._replayed_view("c2", "[pruned: tool output summarised]")
+                + [{"role": "assistant", "content": "", "tool_calls": [{
+                    "id": "c3", "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"}}]},
+                   {"role": "tool", "tool_call_id": "c3", "content": not_skill_view}])
+            _reset_background_review_read_marks()
+
+            assert seed_background_review_reads_from_history(history) == 0
+            blocked = json.loads(skill_manage(
+                action="patch", name="reviewed",
+                old_string="Step 1: Do the thing.", new_string="Step 1: Do the thing safely."))
+            assert blocked.get("_read_before_write_required") is True
+
+        _reset_background_review_read_marks()
+
+    def test_review_seeding_supporting_file_marks_only_that_file(self, tmp_path, monkeypatch):
+        from tools.skills_tool import skill_view
+        from tools.skill_manager_guards import (
+            _reset_background_review_read_marks, seed_background_review_reads_from_history)
+
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch):
+            _create_curator_skill("reviewed", _skill_content("reviewed"))
+            ref = tmp_path / ".hermes" / "skills" / "reviewed" / "references"
+            ref.mkdir()
+            (ref / "workflow.md").write_text("old workflow\n", encoding="utf-8")
+            history = self._replayed_view("c1", skill_view("reviewed", "references/workflow.md"))
+            _reset_background_review_read_marks()
+
+            assert seed_background_review_reads_from_history(history) == 1
+            allowed = json.loads(skill_manage(
+                action="write_file", name="reviewed",
+                file_path="references/workflow.md", file_content="new workflow\n"))
+            assert allowed["success"] is True, allowed
+            blocked = json.loads(skill_manage(
+                action="patch", name="reviewed",
+                old_string="Step 1: Do the thing.", new_string="Step 1: Do the thing safely."))
+            assert blocked.get("_read_before_write_required") is True
+
+        _reset_background_review_read_marks()
