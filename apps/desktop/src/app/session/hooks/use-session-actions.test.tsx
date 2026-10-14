@@ -23,7 +23,7 @@ import {
 } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $clarifyRequests, clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
-import { clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
+import { clearSessionDraft, type ComposerAttachment, stashSessionDraft, takeSessionDraft } from '@/store/composer'
 import { $backgroundStatusBySession, type ComposerStatusItem } from '@/store/composer-status'
 import {
   activeGatewayConnectionId,
@@ -6935,6 +6935,29 @@ describe('routed fresh chat keeps its exact owner across turns', () => {
     const before = $freshDraftKey.get()
     await handle!.startFreshSessionDraft({ replaceRoute: true, rotateFreshDraftKey: false })
     expect($freshDraftKey.get()).toBe(before)
+  })
+
+  it('returns to the pending new-session draft (text + attachments) instead of rotating it away', async () => {
+    let handle: HarnessHandle | null = null
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    render(<Harness onReady={h => (handle = h)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    await handle!.startFreshSessionDraft()
+    const pendingKey = $freshDraftKey.get()
+    const image: ComposerAttachment = { id: 'img-1', kind: 'image', label: 'shot.png' }
+    stashSessionDraft(null, 'half-written prompt', [image])
+
+    await handle!.startFreshSessionDraft()
+    expect($freshDraftKey.get()).toBe(pendingKey)
+    expect(takeSessionDraft(null)).toEqual({ attachments: [image], text: 'half-written prompt' })
+
+    // Once the pending draft is emptied (sent / cleared), New Chat rotates again.
+    clearSessionDraft(null)
+    await handle!.startFreshSessionDraft()
+    expect($freshDraftKey.get()).not.toBe(pendingKey)
+    expect(takeSessionDraft(null)).toEqual({ attachments: [], text: '' })
   })
 })
 

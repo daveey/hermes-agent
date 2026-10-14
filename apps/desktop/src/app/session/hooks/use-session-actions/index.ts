@@ -35,7 +35,13 @@ import { purgeInFlightTurnJournals, recoverInFlightTurnJournal } from '@/lib/inf
 import { latestSessionTodoSnapshot } from '@/lib/todos'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { $clarifyRequests, clearClarifyRequest } from '@/store/clarify'
-import { announceGoneSessionDraft, announceNewSessionDraftKey, migrateSessionDraft } from '@/store/composer'
+import {
+  announceGoneSessionDraft,
+  announceNewSessionDraftKey,
+  migrateSessionDraft,
+  requestComposerDraftSync,
+  rotateFreshDraftKeyUnlessPending
+} from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
 import { resetSessionBackground } from '@/store/composer-status'
 import { $connectionRequests } from '@/store/connection-request'
@@ -81,7 +87,6 @@ import {
   idsShareLineage,
   type NewChatWorkspaceTarget,
   resolveComposerSessionKey,
-  rotateFreshDraftKey,
   sessionPinId,
   setActiveSessionId,
   setActiveSessionStoredIdRotation,
@@ -568,7 +573,15 @@ export function useSessionActions({
         : undefined
 
       if (draftOptions.rotateFreshDraftKey !== false) {
-        rotateFreshDraftKey()
+        // Already on the new-session screen: push keystrokes still inside the
+        // persist debounce into the fresh bucket first, so the pending check
+        // below sees them instead of rotating them into an orphaned key.
+        if (!selectedStoredSessionIdRef.current && !activeSessionIdRef.current) {
+          requestComposerDraftSync('flush')
+        }
+
+        // Keep the unsent new-session draft (text + attachments) across ⌘N.
+        rotateFreshDraftKeyUnlessPending()
       }
 
       resetViewSync()

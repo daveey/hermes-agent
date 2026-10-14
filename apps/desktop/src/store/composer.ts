@@ -269,6 +269,23 @@ export const rotateFreshDraftKey = (): string => {
   return key
 }
 
+/** Whether the current fresh-chat lifecycle holds unsent text or attachments. */
+export const freshDraftHasContent = (): boolean => {
+  const draft = draftsBySession.get(freshDraftScope())
+
+  return Boolean(draft && (draft.text.trim() || draft.attachments.length > 0))
+}
+
+/**
+ * New Chat entry point: the new-session screen is a place, not a lifecycle.
+ * While the pending fresh draft still holds content (text or attachments),
+ * ⌘N returns to it instead of rotating to an empty bucket; the key only
+ * rotates once that draft was sent (re-homed onto its session) or emptied.
+ * Returns the fresh key now in effect.
+ */
+export const rotateFreshDraftKeyUnlessPending = (): string =>
+  freshDraftHasContent() ? freshDraftScope() : rotateFreshDraftKey()
+
 // A draft key belongs to a fresh-chat lifecycle when it is the legacy shared
 // bucket or one of its per-instance successors (`__new__:<uuid>`, #66662).
 export const isFreshDraftScope = (key: string | null | undefined): boolean =>
