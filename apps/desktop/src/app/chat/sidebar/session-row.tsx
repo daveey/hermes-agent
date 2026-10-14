@@ -27,13 +27,13 @@ import { coarseElapsed } from '@/lib/time'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
-import { $gatewayColors, $gatewayColorsActive, sessionGatewayId } from '@/store/gateway-visibility'
+import { sessionGatewayId } from '@/store/gateway-visibility'
 import { $sidebarRowMeta } from '@/store/layout'
 import { normalizeProfileKey } from '@/store/profile'
 import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
-import { $sessionDotStateById, hasLiveTurn, showsRunningArc } from '@/store/session-dot-state'
+import { $sessionDotStateById, hasLiveTurn, sessionStatusStripe, showsRunningArc } from '@/store/session-dot-state'
 import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
 import { sessionCostUsd } from '@/store/sidebar-archive'
@@ -51,6 +51,7 @@ import {
   SidebarRowLeadGlyph,
   SidebarRowShell
 } from './chrome'
+import { GatewayDeviceIcon } from './gateway-device-icon'
 import { shellOwnsPress } from './reorderable-list'
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 import { sessionRowDetails } from './session-row-details'
@@ -170,12 +171,15 @@ function SidebarSessionRowImpl({
   // rather than threaded as props: the subscription re-renders past the memo
   // below, and a toggle should repaint every row at once anyway.
   const rowMeta = useStore($sidebarRowMeta)
-  // [daveey] Which gateway owns this row, as a colored left stripe.
-  const gatewayColors = useStore($gatewayColors)
-  const gatewayColorsActive = useStore($gatewayColorsActive)
+  // [daveey] Which gateway owns this row, as a device glyph after the age.
   const gatewayRegistry = useStore($connectionsRegistry)
   const gatewayId = sessionGatewayId(session, gatewayRegistry)
-  const gatewayColor = gatewayColorsActive ? (gatewayColors[gatewayId] ?? null) : null
+
+  const gatewayIcon =
+    (gatewayRegistry?.connections.length ?? 0) > 1 ? (
+      <GatewayDeviceIcon className="ml-1 align-[-2px]" gatewayId={gatewayId} />
+    ) : null
+
   // Pinned metadata occupies the actions slot and swaps out for the kebab on
   // hover, so the row reserves the same width either way and never reflows.
   const pinnedAge = rowMeta.includes('updated')
@@ -252,10 +256,13 @@ function SidebarSessionRowImpl({
             ) : (
               figures.at(-1)
             )}
+            {gatewayIcon}
           </span>
         </span>
       )
     })
+  } else if (gatewayIcon) {
+    trailing.push({ key: 'gateway', node: gatewayIcon })
   }
 
   // A chip that ends the slot hides whole; the figures handle their own tail.
@@ -270,6 +277,10 @@ function SidebarSessionRowImpl({
   // whenever any session's status changes, but a row only repaints on its own.
   const dotState = useStoreSelector($sessionDotStateById, states => states[session.id] ?? 'idle')
   const liveTurn = hasLiveTurn(dotState)
+  // [daveey] The left stripe is the session's status: green = its turn is done
+  // and waiting on you (finished, not yet opened); red = not done but stuck
+  // (blocked on a prompt, or gone quiet mid-turn). Working and idle: no stripe.
+  const statusStripe = sessionStatusStripe(dotState)
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
@@ -441,13 +452,15 @@ function SidebarSessionRowImpl({
         {...rest}
       >
         {showsRunningArc(dotState) && <span aria-hidden="true" className="arc-border arc-row" />}
-        {gatewayColor && (
+        {statusStripe && (
           <span
             aria-hidden="true"
-            className="pointer-events-none absolute top-1 bottom-1 left-0 w-[3px] rounded-full"
-            data-gateway-id={gatewayId}
-            data-slot="session-gateway-stripe"
-            style={{ backgroundColor: gatewayColor }}
+            className={cn(
+              'pointer-events-none absolute top-1 bottom-1 left-0 w-[3px] rounded-full',
+              statusStripe === 'done' ? 'bg-emerald-500' : 'bg-red-500'
+            )}
+            data-slot="session-status-stripe"
+            data-status-stripe={statusStripe}
           />
         )}
         {/* #38072 finding 3: the row's body is a DIV, not a button — the

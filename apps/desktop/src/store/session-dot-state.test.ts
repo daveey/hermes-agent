@@ -18,6 +18,7 @@ import {
   $sessionDotStateById,
   $unreadSessionCount,
   hasLiveTurn,
+  sessionStatusStripe,
   showsRunningArc,
   unreadSessionCount
 } from './session-dot-state'
@@ -39,6 +40,23 @@ describe('showsRunningArc', () => {
     expect(showsRunningArc('background')).toBe(false)
     expect(showsRunningArc('idle')).toBe(false)
     expect(showsRunningArc('unread')).toBe(false)
+  })
+})
+
+describe('sessionStatusStripe', () => {
+  it('paints done (green) when a finished turn waits on the user', () => {
+    expect(sessionStatusStripe('unread')).toBe('done')
+  })
+
+  it('paints stuck (red) when an unfinished turn needs help', () => {
+    expect(sessionStatusStripe('needs-input')).toBe('stuck')
+    expect(sessionStatusStripe('stalled')).toBe('stuck')
+  })
+
+  it('paints nothing while working, idle, or drafting', () => {
+    for (const state of ['working', 'background', 'idle', 'draft'] as const) {
+      expect(sessionStatusStripe(state)).toBeNull()
+    }
   })
 })
 
