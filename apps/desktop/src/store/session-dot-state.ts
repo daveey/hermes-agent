@@ -74,13 +74,19 @@ export type SessionDotState = 'background' | 'draft' | 'idle' | 'needs-input' | 
  *  louder cue and two treatments at once fight each other. */
 export const showsRunningArc = (state: SessionDotState): boolean => state === 'stalled' || state === 'working'
 
-/** [daveey] The sidebar row's status stripe: `done` (green) when a finished
- *  turn waits on the user, `stuck` (red) when an unfinished one needs help —
- *  blocked on a prompt or gone quiet. Working, idle and drafts get none. */
+/** [daveey] The sidebar row's status stripe: `done` (green) when the agent
+ *  finished its turn and is waiting on the user — read or not, so it stays
+ *  after the row is opened; `stuck` (red) when an unfinished turn needs help —
+ *  blocked on a prompt or gone quiet. Working, background and drafts (no turn
+ *  yet) get none. */
 export type SessionStatusStripe = 'done' | 'stuck'
 
-export const sessionStatusStripe = (state: SessionDotState): null | SessionStatusStripe =>
-  state === 'unread' ? 'done' : state === 'needs-input' || state === 'stalled' ? 'stuck' : null
+export const sessionStatusStripe = (state: SessionDotState, hasTurns: boolean): null | SessionStatusStripe =>
+  state === 'needs-input' || state === 'stalled'
+    ? 'stuck'
+    : state === 'unread' || (state === 'idle' && hasTurns)
+      ? 'done'
+      : null
 
 /** Whether this turn is the session's own, live: brighter title, and the row's
  *  age yields to the actions menu. Wider than the arc — a turn waiting on an

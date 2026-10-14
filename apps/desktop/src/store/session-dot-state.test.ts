@@ -44,19 +44,22 @@ describe('showsRunningArc', () => {
 })
 
 describe('sessionStatusStripe', () => {
-  it('paints done (green) when a finished turn waits on the user', () => {
-    expect(sessionStatusStripe('unread')).toBe('done')
+  it('paints done (green) when a finished turn waits on the user, read or not', () => {
+    expect(sessionStatusStripe('unread', true)).toBe('done')
+    expect(sessionStatusStripe('idle', true)).toBe('done')
   })
 
   it('paints stuck (red) when an unfinished turn needs help', () => {
-    expect(sessionStatusStripe('needs-input')).toBe('stuck')
-    expect(sessionStatusStripe('stalled')).toBe('stuck')
+    expect(sessionStatusStripe('needs-input', true)).toBe('stuck')
+    expect(sessionStatusStripe('stalled', true)).toBe('stuck')
   })
 
-  it('paints nothing while working, idle, or drafting', () => {
-    for (const state of ['working', 'background', 'idle', 'draft'] as const) {
-      expect(sessionStatusStripe(state)).toBeNull()
+  it('paints nothing while working, or before any turn', () => {
+    for (const state of ['working', 'background', 'draft'] as const) {
+      expect(sessionStatusStripe(state, true)).toBeNull()
     }
+
+    expect(sessionStatusStripe('idle', false)).toBeNull()
   })
 })
 

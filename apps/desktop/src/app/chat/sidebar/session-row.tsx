@@ -278,9 +278,9 @@ function SidebarSessionRowImpl({
   const dotState = useStoreSelector($sessionDotStateById, states => states[session.id] ?? 'idle')
   const liveTurn = hasLiveTurn(dotState)
   // [daveey] The left stripe is the session's status: green = its turn is done
-  // and waiting on you (finished, not yet opened); red = not done but stuck
-  // (blocked on a prompt, or gone quiet mid-turn). Working and idle: no stripe.
-  const statusStripe = sessionStatusStripe(dotState)
+  // and waiting on you (stays after you open it); red = not done but stuck
+  // (blocked on a prompt, or gone quiet mid-turn). Working: no stripe.
+  const statusStripe = session.archived ? null : sessionStatusStripe(dotState, session.message_count > 0)
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
