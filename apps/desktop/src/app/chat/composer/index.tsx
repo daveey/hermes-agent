@@ -752,9 +752,11 @@ export function ChatBar({
       return
     }
 
-    // Cmd/Ctrl+Shift+K drains the next queued message. Plain Cmd/Ctrl+K is
-    // reserved for the global command palette.
-    if ((event.metaKey || event.ctrlKey) && !event.altKey && event.shiftKey && event.key.toLowerCase() === 'k') {
+    // Cmd/Ctrl+Alt+K drains the next queued message. Plain Cmd/Ctrl+K is
+    // reserved for the global command palette, and Cmd/Ctrl+Shift+K opens the
+    // kanban board ([daveey] fork; upstream used Shift here). `code`, not
+    // `key`: macOS Option turns K into "˚".
+    if ((event.metaKey || event.ctrlKey) && event.altKey && !event.shiftKey && event.code === 'KeyK') {
       event.preventDefault()
 
       if (!busy) {

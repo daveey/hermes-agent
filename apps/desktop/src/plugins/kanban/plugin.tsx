@@ -132,6 +132,7 @@ const plugin: HermesPlugin = {
           area: PALETTE_AREA,
           data: {
             id: 'kanban.open',
+            action: 'kanban.open',
             label: ctx.i18n.t('openBoard'),
             keywords: ['kanban', 'board', 'tasks', 'agents'],
             run: () => host.navigate('/kanban')
@@ -147,6 +148,20 @@ const plugin: HermesPlugin = {
             keywords: ['kanban', 'task', 'new', 'create', 'triage'],
             run: newTask
           } satisfies PaletteContribution
+        },
+        // [daveey] ⌘⇧K / Ctrl+Shift+K opens the board from anywhere. Fork:
+        // upstream's composer used this chord for "send next queued", which
+        // moved to ⌘⌥K so the board gets the shorter chord.
+        {
+          id: 'open',
+          area: KEYBINDS_AREA,
+          data: {
+            id: 'kanban.open',
+            category: 'navigation',
+            defaults: ['mod+shift+k'],
+            label: ctx.i18n.t('openBoard'),
+            run: () => host.navigate('/kanban')
+          } satisfies KeybindContribution
         },
         {
           id: 'new-task',
