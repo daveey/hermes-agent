@@ -84,6 +84,7 @@ import {
   $newChatWorkspaceTarget,
   $sessions,
   $yoloActive,
+  getSessionOwnerHints,
   idsShareLineage,
   type NewChatWorkspaceTarget,
   resolveComposerSessionKey,
@@ -170,6 +171,12 @@ import { branchCreateKey } from './branch-create-key'
 import { sessionCreateOverrideParams, type SessionCreateOverrides, type SessionSeedMessage } from './create-overrides'
 import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this-run'
 import { captureDisplayHydration } from './display-hydration'
+import {
+  dispatchedConnectionId,
+  findForeignSessionOwner,
+  isStoredSessionNotFound,
+  pinSessionOwner
+} from './owner-follow'
 import { reconcilePersistedLiveTurn } from './persisted-live-turn'
 import { provisionalTranscriptPaint, transcriptRestScope } from './provisional-transcript'
 import { rememberedOwnerForResume } from './remembered-owner'
@@ -374,6 +381,19 @@ export function useSessionActions({
   const { t } = useI18n()
   const copy = t.desktop
   const resumeRequestRef = useRef(0)
+
+  // resumeSession follows a session to its owning gateway by re-entering
+  // itself; the ref breaks the useCallback self-reference.
+  const resumeSessionRef = useRef<
+    | ((
+        storedSessionId: string,
+        replaceRoute?: boolean,
+        capturedOwner?: SessionProfileRoute,
+        followedFrom?: readonly string[]
+      ) => Promise<void>)
+    | null
+  >(null)
+
   const transcriptHydrationByRuntimeRef = useRef(new Map<string, symbol>())
   const coldDisplayReadsRef = useRef(new Map<string, symbol>())
   const branchCreateFlightsRef = useRef(new Map<string, Promise<SessionCreateResponse>>())
@@ -1224,7 +1244,15 @@ export function useSessionActions({
   }, [navigate, selectedStoredSessionId])
 
   const resumeSession = useCallback(
-    async (storedSessionId: string, replaceRoute = false, capturedOwner?: SessionProfileRoute) => {
+    async (
+      storedSessionId: string,
+      replaceRoute = false,
+      capturedOwner?: SessionProfileRoute,
+      // Connections this open already proved wrong (they answered 4007 or
+      // never had the id) while following the session to its owner. Bounds
+      // the follow: a connection is never retried within one open.
+      followedFrom: readonly string[] = []
+    ) => {
       // Delete/archive tombstones the durable id before the route flips, and
       // requestSessionResume already refuses to queue for a doomed id. This is
       // the actuator-side half of the same rule: a resume that was queued
@@ -1442,6 +1470,45 @@ export function useSessionActions({
         typeof sessionOwner === 'object'
       ) {
         setSessionOwnerHint(storedSessionId, sessionOwner)
+      }
+
+      // A connection-tagged row (the unified list's foreign-gateway rows) is
+      // the exact owner. Remember it too, so a later resume that runs while
+      // that row is momentarily absent — the owning gateway's pooled backend
+      // still dialing at boot or after its reconnect, when the unified list
+      // carries none of its rows — still routes there instead of falling
+      // through to the selected gateway, which never minted the id.
+      const taggedOwner = ownerRoute ? undefined : sessionOwnerRouteFromRow(storedForProfile)
+
+      if (taggedOwner && getSessionOwnerHints(storedSessionId).length === 0) {
+        setSessionOwnerHint(storedSessionId, taggedOwner)
+      }
+
+      // No exact owner and the selected gateway's store does not have the id:
+      // it lives on another connection (or nowhere). Look it up across every
+      // connection BEFORE dispatching, so the resume is never sent to a
+      // gateway that would answer 4007 — or, on older backends, fabricate an
+      // empty session for an id it never minted.
+      if (!ownerRoute && !storedForProfile) {
+        const foreignOwner = await findForeignSessionOwner(storedSessionId, [
+          ...followedFrom,
+          dispatchedConnectionId(sessionOwner)
+        ])
+
+        if (!isCurrentResume()) {
+          return
+        }
+
+        if (foreignOwner) {
+          pinSessionOwner(storedSessionId, foreignOwner)
+
+          await resumeSessionRef.current?.(storedSessionId, replaceRoute, foreignOwner, [
+            ...followedFrom,
+            dispatchedConnectionId(sessionOwner)
+          ])
+
+          return
+        }
       }
 
       const sessionRestScope = transcriptRestScope(ownerRoute, storedForProfile, ambientConnectionId)
@@ -2484,6 +2551,27 @@ export function useSessionActions({
           return
         }
 
+        // 4007 from the gateway this resume was dispatched on: that gateway
+        // never minted the id, which proves the ROUTE wrong, not the session
+        // gone. If another connection owns it (the unified list, a hint, or a
+        // by-id probe), resume there — which also switches the selected
+        // gateway — instead of painting an empty chat or a not-found draft.
+        if (isStoredSessionNotFound(err)) {
+          const failedOn = dispatchedConnectionId(sessionOwner)
+          const foreignOwner = await findForeignSessionOwner(storedSessionId, [...followedFrom, failedOn])
+
+          if (!isCurrentResume()) {
+            return
+          }
+
+          if (foreignOwner) {
+            pinSessionOwner(storedSessionId, foreignOwner)
+            await resumeSessionRef.current?.(storedSessionId, replaceRoute, foreignOwner, [...followedFrom, failedOn])
+
+            return
+          }
+        }
+
         // The gateway resume RPC failed. Try the REST transcript as a fallback
         // so the window at least shows history. CRITICAL: this fallback must be
         // wrapped in its own try — if it ALSO throws (wedged/unreachable backend,
@@ -2666,6 +2754,11 @@ export function useSessionActions({
       updateSessionState
     ]
   )
+
+  // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
+  useEffect(() => {
+    resumeSessionRef.current = resumeSession
+  }, [resumeSession])
 
   // Shared fork: create a child session seeded with `branchMessages`, linked to
   // `parentStoredId` so it nests under its parent, then open it as its own tab
@@ -3393,6 +3486,7 @@ export function useSessionActions({
         const archiveOwner: SessionOwnerScope = archived?.connection_id
           ? { connectionId: archived.connection_id, profile: archived.profile || 'default' }
           : profile
+
         await setSessionArchived(storedSessionId, true, archiveOwner)
         // Archived rows never reach the sidebar, so their persisted unread can
         // only rot. Dropped after the RPC so a failed archive keeps it.
@@ -3445,6 +3539,7 @@ export function useSessionActions({
         const restoreOwner: SessionOwnerScope = archived?.connection_id
           ? { connectionId: archived.connection_id, profile: archived.profile || 'default' }
           : profile
+
         await setSessionArchived(storedSessionId, false, restoreOwner)
 
         // Drop the archived-view row first so the view reflects the restore

@@ -65,6 +65,7 @@ import {
   $turnStartedAt,
   _resetSessionOwnerHintsForTests,
   getSessionOwnerHint,
+  getSessionOwnerHints,
   knownSessionOwner,
   ownerLookupSessionRows,
   sessionMatchesStoredId,
@@ -2723,7 +2724,10 @@ describe('resumeSession failure recovery', () => {
 
     await runResume(requestGateway)
 
-    expect(getSessionOwnerHint('stored-1')).toBeUndefined()
+    // The stale route is gone; what remains is the row's own owner, recorded
+    // so a later resume while the row is momentarily unlisted still routes
+    // to the connection that owns it.
+    expect(getSessionOwnerHints('stored-1')).toEqual([{ connectionId: 'ssh-vps', profile: 'default' }])
   })
 })
 
