@@ -1760,6 +1760,7 @@
     "keybinds.actions.session.slot.7",
     "keybinds.actions.session.slot.8",
     "keybinds.actions.session.slot.9",
+    "keybinds.actions.session.toggleBlocked",
     "keybinds.actions.session.togglePin",
     "keybinds.actions.view.closeTab",
     "keybinds.actions.view.closeTerminal",

@@ -50,6 +50,12 @@ describe('sessionStatusStripe', () => {
     expect(sessionStatusStripe('idle', true)).toBe('done')
   })
 
+  it('paints blocked (grey) for a user-parked session, over any live state', () => {
+    for (const state of ['idle', 'unread', 'needs-input', 'working', 'draft'] as const) {
+      expect(sessionStatusStripe(state, true, true)).toBe('blocked')
+    }
+  })
+
   it('paints stuck (red) when an unfinished turn needs help', () => {
     expect(sessionStatusStripe('needs-input', true)).toBe('stuck')
     expect(sessionStatusStripe('stalled', true)).toBe('stuck')

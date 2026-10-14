@@ -14,6 +14,7 @@ vi.mock('@/store/session-dot-state', async importOriginal => {
   return { ...real, $sessionDotStateById: $dots }
 })
 
+import { $blockedSessionIds, toggleSessionBlocked } from './session-blocked'
 import {
   nextSidebarSessionId,
   publishSidebarSection,
@@ -122,6 +123,7 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
   afterEach(() => {
     unpublishSidebarSection(key)
     dots.value = {}
+    $blockedSessionIds.set([])
     document.body.innerHTML = ''
   })
 
@@ -159,5 +161,15 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
     dots.value = { a: 'idle', b: 'idle', c: 'working', d: 'working', e: 'working' }
     expect(nextSidebarSessionId('a', 1, false, true)).toBe('b')
     expect(nextSidebarSessionId('a', 1, true)).toBe('b')
+  })
+
+  it('skips sessions marked blocked (⌘B), and finds them again once unblocked', () => {
+    setup()
+    expect(toggleSessionBlocked('d')).toBe(true)
+    expect(nextSidebarSessionId('a', 1, false)).toBe('e') // d is blocked (grey)
+    expect(nextSidebarSessionId('e', -1, false)).toBe('a')
+    expect(nextSidebarSessionId('a', 1, true)).toBe('b') // ⇧ still steps to anything
+    expect(toggleSessionBlocked('d')).toBe(false)
+    expect(nextSidebarSessionId('a', 1, false)).toBe('d')
   })
 })

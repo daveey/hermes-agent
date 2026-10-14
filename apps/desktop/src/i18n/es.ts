@@ -587,6 +587,7 @@ export const esOverrides = {
       'session.slot.9': 'Cambiar a la sesión reciente 9',
       'session.focusSearch': 'Buscar sesiones',
       'session.togglePin': 'Fijar / desfijar sesión actual',
+      'session.toggleBlocked': 'Marcar sesión como bloqueada / desbloqueada',
       'session.resume': 'Enviar «resume» al chat actual',
       'session.nextNeedsYou': 'Siguiente sesión que te necesita',
       'session.prevNeedsYou': 'Sesión anterior que te necesita',

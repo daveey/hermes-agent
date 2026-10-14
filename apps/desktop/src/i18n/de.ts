@@ -584,6 +584,7 @@ export const deOverrides = {
       'session.slot.9': 'Zu letzter Session 9 wechseln',
       'session.focusSearch': 'Sessions durchsuchen',
       'session.togglePin': 'Aktuelle Session anheften / lösen',
+      'session.toggleBlocked': 'Session als blockiert markieren / freigeben',
       'session.resume': '„resume“ an aktuellen Chat senden',
       'session.nextNeedsYou': 'Nächste Session, die dich braucht',
       'session.prevNeedsYou': 'Vorherige Session, die dich braucht',

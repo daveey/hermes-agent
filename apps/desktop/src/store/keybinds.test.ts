@@ -59,20 +59,20 @@ describe('keybinds store persist vs late-registered contributed actions', () => 
     expect(bindingsFor('demo.late')).toEqual(['mod+alt+l'])
   })
 
-  it('keeps an explicitly cleared sidebar binding empty so mod+b can be unbound', async () => {
+  it('keeps an explicitly cleared sidebar binding empty so its shipped chord (fork: mod+alt+b) can be unbound', async () => {
     const { $comboIndex, bindingsFor, setBinding } = await import('./keybinds')
 
     setBinding('view.toggleSidebar', [])
 
     expect(bindingsFor('view.toggleSidebar')).toEqual([])
-    expect($comboIndex.get().get('mod+b')).toBeUndefined()
+    expect($comboIndex.get().get('mod+alt+b')).toBeUndefined()
     expect(storedDiff()['view.toggleSidebar']).toEqual([])
 
     vi.resetModules()
     const reloaded = await import('./keybinds')
 
     expect(reloaded.bindingsFor('view.toggleSidebar')).toEqual([])
-    expect(reloaded.$comboIndex.get().get('mod+b')).toBeUndefined()
+    expect(reloaded.$comboIndex.get().get('mod+alt+b')).toBeUndefined()
   })
 
   it('indexes every action on a shared chord in order, tab slot ahead of profile switch', async () => {

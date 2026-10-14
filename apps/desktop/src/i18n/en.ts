@@ -577,6 +577,7 @@ export const en: Translations = {
       'session.slot.9': 'Switch to recent session 9',
       'session.focusSearch': 'Search sessions',
       'session.togglePin': 'Pin / unpin current session',
+      'session.toggleBlocked': 'Mark current session blocked / unblocked',
       'session.resume': 'Send "resume" to current chat',
       'session.nextNeedsYou': 'Next session that needs you',
       'session.prevNeedsYou': 'Previous session that needs you',

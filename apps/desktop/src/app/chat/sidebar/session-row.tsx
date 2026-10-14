@@ -33,6 +33,7 @@ import { normalizeProfileKey } from '@/store/profile'
 import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
+import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
 import { $sessionDotStateById, hasLiveTurn, sessionStatusStripe, showsRunningArc } from '@/store/session-dot-state'
 import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
@@ -280,7 +281,12 @@ function SidebarSessionRowImpl({
   // [daveey] The left stripe is the session's status: green = its turn is done
   // and waiting on you (stays after you open it); red = not done but stuck
   // (blocked on a prompt, or gone quiet mid-turn). Working: no stripe.
-  const statusStripe = session.archived ? null : sessionStatusStripe(dotState, session.message_count > 0)
+  // ⌘B parks a session as blocked: grey stripe, skipped by ⌘] / ⌘[.
+  const userBlocked = useStoreSelector($blockedSessionIds, ids => isSessionBlocked(session.id, ids))
+
+  const statusStripe = session.archived
+    ? null
+    : sessionStatusStripe(dotState, session.message_count > 0, userBlocked)
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
@@ -457,7 +463,11 @@ function SidebarSessionRowImpl({
             aria-hidden="true"
             className={cn(
               'pointer-events-none absolute top-1 bottom-1 left-0 w-[3px] rounded-full',
-              statusStripe === 'done' ? 'bg-emerald-500' : 'bg-red-500'
+              statusStripe === 'done'
+                ? 'bg-emerald-500'
+                : statusStripe === 'blocked'
+                  ? 'bg-zinc-400 dark:bg-zinc-500'
+                  : 'bg-red-500'
             )}
             data-slot="session-status-stripe"
             data-status-stripe={statusStripe}

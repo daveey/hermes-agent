@@ -142,6 +142,10 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   { id: 'session.nextSession', category: 'session', defaults: ['mod+shift+]'] },
   { id: 'session.prevSession', category: 'session', defaults: ['mod+shift+['] },
   { id: 'session.togglePin', category: 'session', defaults: [] },
+  // Fork ⌘B — "b" for blocked: park the selected (else focused) session.
+  // Grey stripe, skipped by ⌘] / ⌘[; press again to unblock. Takes ⌘B from
+  // the sidebar toggle, which moves to ⌥⌘B.
+  { id: 'session.toggleBlocked', category: 'session', defaults: ['mod+b'] },
   // ⌘⇧E — "e" for edit name: rename the selected session, pre-filled with an
   // AI-suggested short name (`session.title.suggest`). (⌘⇧N moved to
   // `session.newSameGateway`.)
@@ -183,7 +187,8 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   { id: 'nav.agents', category: 'navigation', defaults: [] },
 
   // ── View (layout + appearance + the shortcuts panel itself) ───────────────
-  { id: 'view.toggleSidebar', category: 'view', defaults: ['mod+b'] },
+  // Fork: ⌥⌘B — ⌘B marks a session blocked (session.toggleBlocked).
+  { id: 'view.toggleSidebar', category: 'view', defaults: ['mod+alt+b'] },
   // Expose the sidebar's mouse-only grouping control to keyboard-first users.
   // Ships unbound so it is opt-in and cannot claim another global chord.
   { id: 'view.cycleSidebarGrouping', category: 'view', defaults: [] },

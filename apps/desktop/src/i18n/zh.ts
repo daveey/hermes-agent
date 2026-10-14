@@ -365,6 +365,7 @@ export const zhOverrides = {
       'session.slot.9': '切换到最近会话 9',
       'session.focusSearch': '搜索会话',
       'session.togglePin': '固定/取消固定当前会话',
+      'session.toggleBlocked': '标记/取消标记会话为阻塞',
       'session.resume': '向当前聊天发送“resume”',
       'session.nextNeedsYou': '下一个需要你的会话',
       'session.prevNeedsYou': '上一个需要你的会话',

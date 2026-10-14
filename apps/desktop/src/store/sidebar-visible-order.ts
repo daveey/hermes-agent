@@ -1,4 +1,5 @@
 import { $sessions } from '@/store/session'
+import { isSessionBlocked } from '@/store/session-blocked'
 import { $sessionDotStateById, sessionStatusStripe } from '@/store/session-dot-state'
 
 // The sidebar's session order as the user sees it, for ⌘] / ⌘[ stepping.
@@ -76,10 +77,15 @@ export function sidebarSessionOrder(): string[] {
   return ids.length ? ids : $sessions.get().map(session => session.id)
 }
 
-/** Whether a sidebar row shows a status stripe — green (finished, waiting on
- *  you) or red (blocked / stalled). ⌘] / ⌘[ step only to these, so they land
- *  exactly where the sidebar shows a coloured bar. */
+/** Whether a sidebar row shows a coloured status stripe — green (finished,
+ *  waiting on you) or red (needs input / stalled). ⌘] / ⌘[ step only to
+ *  these, so they land exactly where the sidebar shows a coloured bar. A
+ *  session the user parked with ⌘B (grey stripe) is skipped. */
 export function sessionHasStatusStripe(id: string): boolean {
+  if (isSessionBlocked(id)) {
+    return false
+  }
+
   let hasTurns = false
 
   for (const entry of sections.values()) {

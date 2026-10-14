@@ -85,6 +85,7 @@ import { openSessionRename } from '@/store/session-rename'
 import { nextSidebarSessionId } from '@/store/sidebar-visible-order'
 
 const currentSessionForStep = () => $selectedStoredSessionId.get() || $focusedStoredSessionId.get()
+import { toggleSessionBlocked } from '@/store/session-blocked'
 import { reopenLastClosedTile } from '@/store/session-states'
 import {
   $switcherOpen,
@@ -350,6 +351,16 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'session.focusSearch': requestSessionSearchFocus,
     'session.togglePin': deps.toggleSelectedPin,
     'session.archive': deps.archiveSelectedSession,
+    // Fork ⌘B: toggle the selected (else focused) session's blocked flag.
+    'session.toggleBlocked': () => {
+      const sessionId = currentSessionForStep()
+
+      if (!sessionId) {
+        return false
+      }
+
+      toggleSessionBlocked(sessionId)
+    },
     // ⌘] / ⌘[ (needs-you first) and ⌘⇧] / ⌘⇧[ (any) — sidebar order, wrapping.
     'session.nextNeedsYou': () => goToSession(nextSidebarSessionId(currentSessionForStep(), 1, false)),
     'session.prevNeedsYou': () => goToSession(nextSidebarSessionId(currentSessionForStep(), -1, false)),

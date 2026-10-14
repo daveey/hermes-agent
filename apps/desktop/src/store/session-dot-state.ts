@@ -97,12 +97,19 @@ export const showsRunningArc = (state: SessionDotState): boolean => state === 's
 /** [daveey] The sidebar row's status stripe: `done` (green) when the agent
  *  finished its turn and is waiting on the user — read or not, so it stays
  *  after the row is opened; `stuck` (red) when an unfinished turn needs help —
- *  blocked on a prompt or gone quiet. Working, background and drafts (no turn
- *  yet) get none. */
-export type SessionStatusStripe = 'done' | 'stuck'
+ *  blocked on a prompt or gone quiet; `blocked` (grey) when the user parked
+ *  it with ⌘B, which wins over everything. Working, background and drafts (no
+ *  turn yet) get none. */
+export type SessionStatusStripe = 'blocked' | 'done' | 'stuck'
 
-export const sessionStatusStripe = (state: SessionDotState, hasTurns: boolean): null | SessionStatusStripe =>
-  state === 'needs-input' || state === 'stalled'
+export const sessionStatusStripe = (
+  state: SessionDotState,
+  hasTurns: boolean,
+  userBlocked = false
+): null | SessionStatusStripe =>
+  userBlocked
+    ? 'blocked'
+    : state === 'needs-input' || state === 'stalled'
     ? 'stuck'
     : state === 'unread' || (state === 'idle' && hasTurns)
       ? 'done'
