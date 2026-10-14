@@ -1,0 +1,188 @@
+/**
+ * A tile whose SAVED owner is the wrong gateway (it answers 4007 for the id)
+ * follows the session to its owner — the unified list shows it on the
+ * MacBook — instead of opening an empty or read-only tile.
+ */
+import { JsonRpcGatewayError } from '@hermes/shared'
+import { renderHook } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type * as HermesModule from '@/hermes'
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
+import {
+  _resetSessionOwnerHintsForTests,
+  getSessionOwnerHint,
+  setConnection,
+  setSessionOwnerHint,
+  setSessions
+} from '@/store/session'
+import { $sessionTiles, sessionTileDelegate, sessionTileOwnerRoute } from '@/store/session-states'
+import { makeSessionInfo } from '@/test/session-info'
+
+import { _resetSessionOwnerFollowForTests } from '../../session/hooks/use-session-actions/owner-follow'
+
+import { useSessionTileDelegate } from './use-session-tile-delegate'
+
+vi.mock('@/hermes', async importActual => ({
+  ...(await importActual<typeof HermesModule>()),
+  fetchStoredTranscriptAcrossBackends: vi.fn(async () => null),
+  getLatestSessionMessages: vi.fn(),
+  getSession: vi.fn()
+}))
+vi.mock('@/store/gateway', async importActual => ({
+  ...(await importActual<Record<string, unknown>>()),
+  requestGatewayForAgent: vi.fn(),
+  requestGatewayForProfile: vi.fn()
+}))
+
+const { getLatestSessionMessages, getSession } = await import('@/hermes')
+const { requestGatewayForAgent, requestGatewayForProfile } = await import('@/store/gateway')
+
+const MACBOOK = 'macbook'
+const MACBOOK_SESSION = '20261013_184022_b1a59f'
+
+const TRANSCRIPT = [
+  { content: 'hello from the macbook', role: 'user', timestamp: 1 },
+  { content: 'hi', role: 'assistant', timestamp: 2 }
+]
+
+function mockGateways() {
+  const calls: { connection: string; method: string }[] = []
+
+  const dispatch = async (connection: string, method: string, params: Record<string, unknown>) => {
+    calls.push({ connection, method })
+
+    if (method === 'session.resume') {
+      if (connection !== MACBOOK || params.session_id !== MACBOOK_SESSION) {
+        throw new JsonRpcGatewayError('session not found', { code: 4007 })
+      }
+
+      return { info: {}, messages: [], messages_omitted: true, session_id: 'rt-mb', session_key: MACBOOK_SESSION }
+    }
+
+    return {}
+  }
+
+  vi.mocked(requestGatewayForAgent).mockImplementation(async (connectionId, _profile, method, params) =>
+    dispatch(connectionId ?? 'local', method, params ?? {})
+  )
+  vi.mocked(requestGatewayForProfile).mockImplementation(async (_profile, method, params) =>
+    dispatch('local', method, params ?? {})
+  )
+
+  const ambient = vi.fn(async (method: string, params?: Record<string, unknown>) =>
+    dispatch('local', method, params ?? {})
+  )
+
+  return { ambient, resumesOn: (c: string) => calls.filter(x => x.connection === c && x.method === 'session.resume') }
+}
+
+describe('tile resume follows the owning gateway on 4007', () => {
+  beforeEach(() => {
+    _resetSessionOwnerFollowForTests()
+    _resetSessionOwnerHintsForTests({ storage: true })
+    $connectionsRegistry.set({
+      connections: [
+        { id: 'local', kind: 'local', label: 'This device' },
+        { id: MACBOOK, kind: 'ssh', label: 'macbook' }
+      ],
+      primary: 'local',
+      version: 2
+    } as never)
+    setConnection({ connectionId: 'local', mode: 'local', registryScoped: true } as never)
+    vi.mocked(getSession).mockRejectedValue(new Error('404: Session not found'))
+    // Only the owner serves the transcript.
+    vi.mocked(getLatestSessionMessages).mockImplementation(async (_id, scope) =>
+      typeof scope === 'object' && scope?.connectionId === MACBOOK
+        ? ({ messages: TRANSCRIPT, session_id: MACBOOK_SESSION } as never)
+        : Promise.reject(new Error('404: Session not found'))
+    )
+  })
+
+  afterEach(() => {
+    _resetSessionOwnerFollowForTests()
+    $connectionsRegistry.set(null)
+    setConnection(null)
+    setSessions([])
+    $sessionTiles.set([])
+    _resetSessionOwnerHintsForTests({ storage: true })
+    vi.mocked(requestGatewayForAgent).mockReset()
+    vi.mocked(requestGatewayForProfile).mockReset()
+    vi.mocked(getLatestSessionMessages).mockReset()
+    vi.mocked(getSession).mockReset()
+  })
+
+  it('(a) saved owner 4007s while the unified list shows the id on the MacBook: retried there, not empty', async () => {
+    $sessionTiles.set([
+      { ownerRoute: { connectionId: 'local', profile: 'default' }, storedSessionId: MACBOOK_SESSION }
+    ] as never)
+    setSessions([makeSessionInfo({ connection_id: MACBOOK, id: MACBOOK_SESSION, profile: 'default' })])
+
+    const gateways = mockGateways()
+    const states = new Map<string, ReturnType<typeof createClientSessionState>>()
+
+    const updateSessionState = vi.fn(
+      (id: string, updater: (s: ReturnType<typeof createClientSessionState>) => unknown, stored?: string) => {
+        const next = updater(states.get(id) ?? createClientSessionState(stored ?? null)) as ReturnType<
+          typeof createClientSessionState
+        >
+
+        states.set(id, next)
+
+        return next
+      }
+    )
+
+    renderHook(() =>
+      useSessionTileDelegate({
+        archiveSession: vi.fn(async () => undefined),
+        branchLoadedSession: vi.fn(async () => false) as never,
+        branchStoredSession: vi.fn(async () => undefined),
+        executeSlashCommand: vi.fn(async () => undefined) as never,
+        removeSession: vi.fn(async () => undefined),
+        requestGateway: gateways.ambient as never,
+        runtimeIdByStoredSessionIdRef: { current: new Map() } as never,
+        sessionStateByRuntimeIdRef: { current: new Map() } as never,
+        updateSessionState: updateSessionState as never
+      })
+    )
+
+    const runtimeId = await sessionTileDelegate()!.resumeTile(MACBOOK_SESSION)
+
+    expect(runtimeId).toBe('rt-mb')
+    expect(gateways.resumesOn('local')).toHaveLength(1)
+    expect(gateways.resumesOn(MACBOOK)).toHaveLength(1)
+    expect(states.get('rt-mb')?.messages.length).toBeGreaterThan(0)
+    // The tile and the hint now name the owner, so the next resume goes there first.
+    expect(sessionTileOwnerRoute(MACBOOK_SESSION)).toMatchObject({ connectionId: MACBOOK })
+    expect(getSessionOwnerHint(MACBOOK_SESSION)).toMatchObject({ connectionId: MACBOOK })
+  })
+
+  it('control: a tile whose saved owner holds the session resumes there once', async () => {
+    $sessionTiles.set([
+      { ownerRoute: { connectionId: MACBOOK, profile: 'default' }, storedSessionId: MACBOOK_SESSION }
+    ] as never)
+    setSessionOwnerHint(MACBOOK_SESSION, { connectionId: MACBOOK, profile: 'default' })
+
+    const gateways = mockGateways()
+
+    renderHook(() =>
+      useSessionTileDelegate({
+        archiveSession: vi.fn(async () => undefined),
+        branchLoadedSession: vi.fn(async () => false) as never,
+        branchStoredSession: vi.fn(async () => undefined),
+        executeSlashCommand: vi.fn(async () => undefined) as never,
+        removeSession: vi.fn(async () => undefined),
+        requestGateway: gateways.ambient as never,
+        runtimeIdByStoredSessionIdRef: { current: new Map() } as never,
+        sessionStateByRuntimeIdRef: { current: new Map() } as never,
+        updateSessionState: vi.fn() as never
+      })
+    )
+
+    await expect(sessionTileDelegate()!.resumeTile(MACBOOK_SESSION)).resolves.toBe('rt-mb')
+    expect(gateways.resumesOn('local')).toHaveLength(0)
+    expect(gateways.resumesOn(MACBOOK)).toHaveLength(1)
+  })
+})

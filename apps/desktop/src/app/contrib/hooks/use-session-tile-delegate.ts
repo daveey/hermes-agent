@@ -26,6 +26,7 @@ import {
 import { knownSessionOwner, ownerLookupSessionRows } from '@/store/session'
 import { assertSessionOwnerResolved } from '@/store/session-owner-resolution'
 import {
+  isSessionOwnerRoute,
   profileScopeForSessionOwner,
   requestForSessionProfile,
   type SessionOwnerScope
@@ -43,6 +44,13 @@ import type { usePromptActions } from '../../session/hooks/use-prompt-actions'
 import { singleFlightSessionResume } from '../../session/hooks/use-prompt-actions/single-flight-resume'
 import { markSessionRecentlyInterrupted, withSessionNotFoundResume } from '../../session/hooks/use-prompt-actions/utils'
 import type { useSessionActions } from '../../session/hooks/use-session-actions'
+import {
+  findForeignSessionOwner,
+  isStoredSessionNotFound,
+  pinSessionOwner,
+  repointSessionTileOwner,
+  routedConnectionId
+} from '../../session/hooks/use-session-actions/owner-follow'
 import {
   chatMessageArraysEquivalent,
   preserveLocalPendingTurnMessages,
@@ -367,14 +375,16 @@ export function useSessionTileDelegate({
         // reading messages) without a profile lets the gateway fall back to the
         // launch-profile DB and fork the conversation into the wrong profile —
         // the same cross-profile bleed the recovery resumes had (#67603).
-        const owner = await ownerForStoredSession(storedSessionId)
+        let owner = await ownerForStoredSession(storedSessionId)
 
-        const restScope =
-          owner && typeof owner === 'object'
-            ? { connectionId: owner.connectionId, profile: owner.targetProfile || owner.profile }
-            : owner
+        const restScopeFor = (scope: SessionOwnerScope) =>
+          isSessionOwnerRoute(scope)
+            ? { connectionId: scope.connectionId, profile: scope.targetProfile || scope.profile }
+            : scope
 
-        const prefetchPromise = getLatestSessionMessages(storedSessionId, restScope).catch(() => null)
+        const restScope = restScopeFor(owner)
+
+        let prefetchPromise = getLatestSessionMessages(storedSessionId, restScope).catch(() => null)
 
         if (existing && cached?.storedSessionId === storedSessionId && (cached.busy || cached.messages.length > 0)) {
           const prefetch = await prefetchPromise
@@ -416,14 +426,45 @@ export function useSessionTileDelegate({
           () => {
             assertSessionOwnerResolved(owner, { method: 'session.resume', sessionId: storedSessionId })
 
-            return singleFlightSessionResume(storedSessionId, () =>
-              requestForSessionProfile<SessionResumeResult>(owner, requestGateway, 'session.resume', {
+            const resumeOn = (scope: SessionOwnerScope) =>
+              requestForSessionProfile<SessionResumeResult>(scope, requestGateway, 'session.resume', {
                 session_id: storedSessionId,
                 cols: 96,
                 omit_messages: true,
-                ...(owner ? { profile: typeof owner === 'string' ? owner : owner.profile } : {})
+                ...(scope ? { profile: typeof scope === 'string' ? scope : scope.profile } : {})
               })
-            )
+
+            return singleFlightSessionResume(storedSessionId, async () => {
+              try {
+                return await resumeOn(owner)
+              } catch (error) {
+                // 4007: the tile's saved owner never minted this id — the route
+                // is wrong, not the session gone. Follow it to the gateway that
+                // owns it (unified list, hints, by-id probe), once, and repoint
+                // the tile so the next resume and its RPCs go there first.
+                if (!isStoredSessionNotFound(error)) {
+                  throw error
+                }
+
+                const foreignOwner = await findForeignSessionOwner(storedSessionId, [routedConnectionId(owner)])
+
+                if (!foreignOwner) {
+                  throw error
+                }
+
+                const resumed = await resumeOn(foreignOwner)
+
+                owner = foreignOwner
+                pinSessionOwner(storedSessionId, foreignOwner)
+                repointSessionTileOwner(storedSessionId, foreignOwner)
+                // The first prefetch read the wrong gateway's store.
+                prefetchPromise = getLatestSessionMessages(storedSessionId, restScopeFor(foreignOwner)).catch(
+                  () => null
+                )
+
+                return resumed
+              }
+            })
           },
           async () => {
             const stored = (await prefetchPromise) ?? (await fetchStoredTranscriptAcrossBackends(storedSessionId))
