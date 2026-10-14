@@ -970,7 +970,8 @@ def _handle_comment(args: dict, **kw) -> str:
     author = _persisted_identity()
     with _board(args.get("board")) as (kb, conn):
         cid = kb.add_comment(conn, tid, author=author, body=str(body))
-        return _ok(task_id=tid, comment_id=cid)
+        subscribed = _maybe_subscribe_on_touch(conn, str(tid))
+        return _ok(task_id=tid, comment_id=cid, **({"subscribed": True} if subscribed else {}))
 
 
 def _store_attachment(board, tid, filename, data, content_type) -> str:
@@ -1226,13 +1227,14 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
         delivery_metadata=delivery_metadata or None)
 
 
-def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
+def _maybe_auto_subscribe(conn: Any, task_id: str, *, gate: str = "auto_subscribe_on_create",
+                          gate_default: bool = True) -> bool:
     """Subscribe the calling session to completion/block events; True iff a row was
     written (surfaced as ``subscribed`` so an orchestrator can fall back to explicit
-    ``kanban_notify-subscribe``). Gated by ``kanban.auto_subscribe_on_create`` (default
-    True). Failures are logged and swallowed: bookkeeping must never fail kanban_create."""
+    ``kanban_notify-subscribe``). Gated by ``kanban.<gate>`` (``auto_subscribe_on_create``,
+    default True). Failures are logged and swallowed: bookkeeping must never fail the tool."""
     try:
-        if not cfg_get(load_config(), "kanban", "auto_subscribe_on_create", default=True):
+        if not cfg_get(load_config(), "kanban", gate, default=gate_default):
             return False
     except Exception:
         pass  # unreadable config keeps the user-friendly default (True)
@@ -1257,6 +1259,18 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
         return False
 
 
+def _maybe_subscribe_on_touch(conn: Any, task_id: str) -> bool:
+    """A chat session that comments on, unblocks or links an existing card is
+    shepherding it, so subscribe it like ``kanban_create`` does: it then wakes when
+    the card completes or blocks, and the sidebar shows it busy (``kanban_active``)
+    instead of "done" while the card still runs. Dispatcher workers
+    (``HERMES_KANBAN_TASK`` set) never subscribe this way. Gated by
+    ``kanban.auto_subscribe_on_touch`` (default False). [daveey]"""
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return False
+    return _maybe_auto_subscribe(conn, task_id, gate="auto_subscribe_on_touch", gate_default=False)
+
+
 @_kanban_handler("kanban_unblock")
 def _handle_unblock(args: dict, **kw) -> str:
     """Transition a blocked task to ready, or todo while parents remain open."""
@@ -1268,7 +1282,9 @@ def _handle_unblock(args: dict, **kw) -> str:
     _enforce_worker_task_ownership(tid)
     with _board(args.get("board")) as (kb, conn):
         _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
-        return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
+        subscribed = _maybe_subscribe_on_touch(conn, tid)
+        return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)),
+                   **({"subscribed": True} if subscribed else {}))
 
 
 @_kanban_handler("kanban_link")
@@ -1284,6 +1300,7 @@ def _handle_link(args: dict, **kw) -> str:
         gated = kb.link_tasks(
             conn, parent_id=parent_id, child_id=child_id,
             expected_child_run_id=_worker_run_id(str(child_id)))
+        _maybe_subscribe_on_touch(conn, str(child_id))
         return _ok(parent_id=parent_id, child_id=child_id, gated=gated,
                    **({"gated_by": parent_id} if gated else {}))
 

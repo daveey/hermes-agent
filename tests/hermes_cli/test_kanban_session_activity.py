@@ -69,3 +69,27 @@ def test_missing_or_old_board_never_breaks_the_list(kanban_root):
     rows = [{"id": "s1"}]
 
     assert ksa.annotate_kanban_activity(rows) == [{"id": "s1"}]
+
+
+def test_counts_tasks_a_session_subscribed_to_but_did_not_create(kanban_root):
+    """A session asked to shepherd someone else's card subscribes to it (tui notify
+    sub); it must stay busy until the card lands, not paint "done". [daveey]"""
+    path = kanban_root / "kanban.db"
+    _make_board(path, [
+        ("t1", "running", "s_creator"),
+        ("t2", "done", "s_creator"),
+        ("t3", "ready", None),
+    ])
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT)")
+    conn.executemany("INSERT INTO kanban_notify_subs VALUES (?, ?, ?)", [
+        ("t1", "tui", "s_creator"),    # creator's own auto-sub: counted once, not twice
+        ("t1", "tui", "s_watcher"),
+        ("t3", "tui", "s_watcher"),
+        ("t2", "tui", "s_late"),       # finished card keeps nobody busy
+        ("t1", "telegram", "chat-9"),  # gateway chats are not sidebar sessions
+    ])
+    conn.commit()
+    conn.close()
+
+    assert ksa.active_task_counts() == {"s_creator": 1, "s_watcher": 2}

@@ -1483,3 +1483,54 @@ class TestDefaultTaskId:
         assert kt._default_task_id("") == worker_env
         assert kt._default_task_id("   ") == worker_env
         assert kt._default_task_id(None) == worker_env
+
+
+def _orchestrator_tui(monkeypatch, tmp_path, *, touch_gate: bool):
+    """Chat-session caller (no dispatcher task) with a TUI session key."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    for k in ("HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "tui-shepherd")
+    (tmp_path / ".hermes" / "config.yaml").write_text(
+        f"kanban:\n  auto_subscribe_on_touch: {'true' if touch_gate else 'false'}\n")
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kt, "_live_tui_session_key", lambda key, profile: key)
+
+
+def test_comment_on_existing_card_subscribes_shepherding_session(monkeypatch, worker_env, tmp_path):
+    """[daveey] A session told to "make sure t_x finishes" comments on a card it did not
+    create; it must be subscribed so it wakes on completion and its row stays busy."""
+    from tools import kanban_tools as kt
+    _orchestrator_tui(monkeypatch, tmp_path, touch_gate=True)
+
+    d = json.loads(kt._handle_comment({"task_id": worker_env, "body": "watching this"}))
+
+    assert d["ok"] is True and d.get("subscribed") is True, d
+    subs = _list_subs_for_task(worker_env)
+    assert [(s["platform"], s["chat_id"]) for s in subs] == [("tui", "tui-shepherd")]
+    # Commenting again does not duplicate the subscription.
+    kt._handle_comment({"task_id": worker_env, "body": "still watching"})
+    assert len(_list_subs_for_task(worker_env)) == 1
+
+
+def test_comment_does_not_subscribe_when_touch_gate_off(monkeypatch, worker_env, tmp_path):
+    from tools import kanban_tools as kt
+    _orchestrator_tui(monkeypatch, tmp_path, touch_gate=False)
+
+    d = json.loads(kt._handle_comment({"task_id": worker_env, "body": "fyi"}))
+
+    assert d["ok"] is True and "subscribed" not in d
+    assert _list_subs_for_task(worker_env) == []
+
+
+def test_worker_comment_never_subscribes(monkeypatch, worker_env, tmp_path):
+    """Dispatcher workers (HERMES_KANBAN_TASK set) comment as a handoff channel; no sub."""
+    from tools import kanban_tools as kt
+    _orchestrator_tui(monkeypatch, tmp_path, touch_gate=True)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", worker_env)
+
+    d = json.loads(kt._handle_comment({"task_id": worker_env, "body": "progress"}))
+
+    assert d["ok"] is True and "subscribed" not in d
+    assert _list_subs_for_task(worker_env) == []

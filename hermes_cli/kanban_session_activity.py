@@ -51,17 +51,36 @@ def _board_db_paths() -> list[Path]:
 
 
 def _read_counts(path: Path) -> dict[str, int]:
+    """Active tasks per session: tasks the session created, plus tasks it is a
+    ``tui`` notify subscriber of (a session asked to shepherd someone else's
+    card subscribes to it, and is just as "still working" until it lands).
+    Each (session, task) pair counts once."""
     placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
     try:
-        rows = conn.execute(
-            f"SELECT session_id, COUNT(*) FROM tasks WHERE session_id IS NOT NULL "
-            f"AND session_id != '' AND status IN ({placeholders}) GROUP BY session_id",
-            ACTIVE_STATUSES,
-        ).fetchall()
+        pairs: set[tuple[str, str]] = {
+            (str(sid), str(tid)) for sid, tid in conn.execute(
+                f"SELECT session_id, id FROM tasks WHERE session_id IS NOT NULL "
+                f"AND session_id != '' AND status IN ({placeholders})",
+                ACTIVE_STATUSES,
+            )
+        }
+        try:
+            pairs.update(
+                (str(sid), str(tid)) for sid, tid in conn.execute(
+                    f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND t.status IN ({placeholders})",
+                    ACTIVE_STATUSES,
+                )
+            )
+        except sqlite3.Error:  # board predates notify subscriptions
+            pass
     finally:
         conn.close()
-    return {str(sid): int(n) for sid, n in rows}
+    counts: dict[str, int] = {}
+    for sid, _tid in pairs:
+        counts[sid] = counts.get(sid, 0) + 1
+    return counts
 
 
 def active_task_counts() -> dict[str, int]:

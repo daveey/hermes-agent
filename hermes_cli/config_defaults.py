@@ -1891,6 +1891,10 @@ DEFAULT_CONFIG = {
         # kanban_create is called from a session with a persistent delivery channel. Disable for
         # profiles that prefer explicit kanban_notify-subscribe calls per task.
         "auto_subscribe_on_create": True,
+        # Also subscribe a chat session that comments on, unblocks or links an EXISTING card
+        # (it is shepherding that card): it wakes on completion/block and its sidebar row stays
+        # busy until the card lands. Off upstream; dispatcher workers never subscribe. [daveey]
+        "auto_subscribe_on_touch": False,
         # Poll and deliver Kanban subscriptions from this gateway. Disable on profiles that do
         # not own notification subscriptions to avoid an idle five-second board probe.
         "notify_in_gateway": True,
