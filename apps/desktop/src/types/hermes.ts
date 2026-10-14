@@ -639,6 +639,11 @@ export interface SessionInfo {
    *  workers, so the sidebar paints it like a background job, not "done".
    *  Absent when zero or against a backend predating the field. */
   kanban_active?: number
+  /** [daveey] True while this conversation's standing `/goal` is still
+   *  active (running between turns or parked on a judge `wait` timer). The
+   *  goal loop resumes it unasked, so the sidebar paints it like a background
+   *  job, not "done". Absent otherwise or against an older backend. */
+  goal_active?: boolean
   preview: null | string
   source: null | string
   started_at: number

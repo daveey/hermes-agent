@@ -15,6 +15,7 @@ import {
 } from './session'
 import {
   $delegatingSessionIds,
+  $goalActiveSessionIds,
   $kanbanBusySessionIds,
   $sessionDotStateById,
   $unreadSessionCount,
@@ -303,6 +304,46 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
 
   it('yields to a live turn', () => {
     setSessions([storedRow('s1', { kanban_active: 1 })])
+    publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
+
+    expect($sessionDotStateById.get()['s1']).toBe('working')
+  })
+})
+
+describe('standing goal in flight ($goalActiveSessionIds)', () => {
+  beforeEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $unreadFinishedSessionIds.set([])
+    $unreadWriteGuard.set(new Map())
+  })
+
+  afterEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $unreadFinishedSessionIds.set([])
+  })
+
+  it('reads a finished turn with an active goal as background, not done', () => {
+    setSessions([storedRow('s1', { goal_active: true, unread: true }), storedRow('s2')])
+
+    expect($goalActiveSessionIds.get()).toEqual(['s1'])
+    expect($sessionDotStateById.get()['s1']).toBe('background')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    // Control: a plain finished session still gets its green stripe.
+    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('done')
+  })
+
+  it('goes back to done once the goal ends', () => {
+    setSessions([storedRow('s1', { goal_active: true })])
+    setSessions([storedRow('s1')])
+
+    expect($goalActiveSessionIds.get()).toEqual([])
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+  })
+
+  it('yields to a live turn', () => {
+    setSessions([storedRow('s1', { goal_active: true })])
     publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
 
     expect($sessionDotStateById.get()['s1']).toBe('working')

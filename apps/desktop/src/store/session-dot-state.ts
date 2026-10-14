@@ -87,6 +87,26 @@ export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions], (
   return (kanbanBusyIds = stableArray(kanbanBusyIds, ids))
 })
 
+// [daveey] Sessions with a standing `/goal` still active. Between goal turns —
+// especially while the judge has parked it on a `wait` timer — no turn is live,
+// so the sidebar read the session as done (green stripe) although the goal loop
+// will resume it on its own. The backend stamps `goal_active` on every list row
+// (over the lineage); paused/done goals don't count.
+let goalActiveIds: readonly string[] = []
+export const $goalActiveSessionIds = computed([$sessions, $messagingSessions], (sessions, messaging) => {
+  const ids: string[] = []
+
+  for (const rows of [sessions, messaging]) {
+    for (const row of rows) {
+      if (row.goal_active === true) {
+        ids.push(row.id)
+      }
+    }
+  }
+
+  return (goalActiveIds = stableArray(goalActiveIds, ids))
+})
+
 export type SessionDotState = 'background' | 'draft' | 'idle' | 'needs-input' | 'stalled' | 'unread' | 'working'
 
 /** The sidebar row's arc. A quiet turn is still authoritatively running, so
@@ -148,12 +168,25 @@ export const $sessionDotStateById = computed(
     $backgroundRunningSessionIds,
     $delegatingSessionIds,
     $kanbanBusySessionIds,
+    $goalActiveSessionIds,
     $unreadFinishedSessionIds,
     $draftSessionIds,
     $sessions,
     $unreadWriteGuard
   ],
-  (attention, working, stalled, background, delegating, kanbanBusy, unread, draft, sessions, unreadWriteGuard) => {
+  (
+    attention,
+    working,
+    stalled,
+    background,
+    delegating,
+    kanbanBusy,
+    goalActive,
+    unread,
+    draft,
+    sessions,
+    unreadWriteGuard
+  ) => {
     const next: Record<string, SessionDotState> = {}
 
     const claim = (ids: readonly string[], state: SessionDotState) => {
@@ -207,6 +240,8 @@ export const $sessionDotStateById = computed(
     claim(delegating, 'background')
     // Kanban tasks it created are still queued or running: same claim.
     claim(kanbanBusy, 'background')
+    // A standing goal will start its next turn by itself: same claim.
+    claim(goalActive, 'background')
     claim(working, 'working')
 
     // Stalled REFINES working rather than rivalling it — the turn is still
