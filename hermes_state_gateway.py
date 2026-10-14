@@ -874,6 +874,31 @@ class SessionGatewayMixin:
             return [str(r[0]) for r in cur.fetchall()]
         return list(self._execute_write(_do) or [])
 
+    # Minted-key records outlive the restart window that strands an unprompted draft; 30 days bounds the table.
+    MINTED_SESSION_KEY_TTL_S = 30 * 86400
+
+    def record_minted_session_key(self, session_id: str) -> None:
+        """Record a stored session key minted by this backend's ``session.create`` (no sessions row yet).
+
+        ``session.resume`` only materializes a row for an unknown key recorded here, so another
+        gateway's key 4007s and the client routes to its owner. Idempotent; prunes stale records."""
+        if not session_id:
+            return
+        now = time.time()
+
+        def _do(conn):
+            conn.execute("INSERT OR IGNORE INTO minted_session_keys (id, minted_at) VALUES (?, ?)",
+                         (str(session_id), now))
+            conn.execute("DELETE FROM minted_session_keys WHERE minted_at < ?",
+                         (now - self.MINTED_SESSION_KEY_TTL_S,))
+        self._execute_write(_do)
+
+    def was_session_key_minted(self, session_id: str) -> bool:
+        """True iff ``record_minted_session_key`` recorded *session_id* in this store."""
+        if not session_id:
+            return False
+        return self._read_one("SELECT 1 FROM minted_session_keys WHERE id = ?", (str(session_id),)) is not None
+
     def list_backend_heartbeats(self) -> list[dict[str, Any]]:
         """Snapshot of every backend heartbeat (diagnostics/tests); fields mirror the table."""
         rows = self._read_all(

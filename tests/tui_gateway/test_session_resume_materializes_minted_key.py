@@ -13,6 +13,12 @@ materialize the row and continue the normal empty resume instead of failing.
 Abandoned drafts still leave no row — nothing is written until a client
 explicitly resumes the exact key. Fail-closed: garbage, 8-hex runtime ids,
 and titles still 4007, and lazy subagent watch windows are excluded.
+
+Multi-gateway rule: the key shape alone is not proof of ownership — every
+gateway mints the same shape. Only a key THIS backend's store recorded at
+``session.create`` (``minted_session_keys``) is materialized; a foreign
+gateway's key must 4007 so the client routes the resume to its owner instead
+of opening an empty, runtime-less phantom row here.
 """
 
 from __future__ import annotations
@@ -58,8 +64,38 @@ def _assert_resumed_ok(resp, target):
     assert resp["result"]["session_id"], "a live runtime must be registered"
 
 
+def _create_then_restart() -> str:
+    """``session.create`` on this backend, never prompted, then drop the live record
+    (what a backend restart does to the in-memory registry). Returns the stored key."""
+    created = server.handle_request({"id": "c", "method": "session.create", "params": {}})
+    assert "error" not in created, created
+    sid, key = created["result"]["session_id"], created["result"]["stored_session_id"]
+    with server._sessions_lock:
+        server._sessions.pop(sid, None)
+    return key
+
+
 def test_resume_materializes_row_for_minted_key(real_db):
-    """The core fix: a minted-but-never-persisted key resumes, row now exists."""
+    """The core fix: a key minted by THIS backend but never persisted resumes after a
+    restart with empty history, and the row now exists."""
+    key = _create_then_restart()
+    assert server._is_server_minted_key(key)
+    assert real_db.get_session(key) is None, "session.create must not write a sessions row"
+    assert real_db.was_session_key_minted(key)
+
+    resp = _resume(session_id=key)
+
+    _assert_resumed_ok(resp, key)
+    assert resp["result"]["message_count"] == 0
+    row = real_db.get_session(key)
+    assert row is not None, "resume must materialize the DB row"
+    assert row["source"] == "tui"
+    assert row["model"] == "test-model"
+
+
+def test_resume_materializes_recorded_key(real_db):
+    """A recorded minted key resumes; materialized row carries the launch profile."""
+    real_db.record_minted_session_key(MINTED_KEY)
     resp = _resume(session_id=MINTED_KEY)
 
     _assert_resumed_ok(resp, MINTED_KEY)
@@ -88,6 +124,20 @@ def test_resume_existing_row_unaffected(real_db):
     assert real_db.get_session(EXISTING_KEY)["message_count"] == 1
 
 
+def test_resume_foreign_gateway_key_4007_without_phantom_row(real_db):
+    """A well-formed server-style key this backend never minted (another gateway's
+    session) must 4007 — the client then routes to the owning gateway — and must NOT
+    leave a sessions row behind."""
+    foreign = "20261013_184022_b1a59f"
+    assert server._is_server_minted_key(foreign)
+
+    resp = _resume(session_id=foreign)
+
+    assert resp.get("error", {}).get("code") == 4007, resp
+    assert real_db.get_session(foreign) is None
+    assert len(real_db.list_sessions_rich(source="tui")) == 0
+
+
 def test_resume_garbage_id_still_4007(real_db):
     """Non-key garbage stays fail-closed: same error, no write."""
     resp = _resume(session_id="not-a-session")
@@ -107,6 +157,7 @@ def test_resume_8hex_runtime_id_still_4007(real_db):
 
 def test_resume_lazy_watch_missing_key_still_4007(real_db):
     """Lazy subagent watch windows must not mint phantom rows for dead children."""
+    real_db.record_minted_session_key(MINTED_KEY)  # isolate the lazy gate
     resp = _resume(session_id=MINTED_KEY, lazy=True)
 
     assert resp["error"]["code"] == 4007
@@ -132,6 +183,7 @@ def test_resume_minted_key_claimed_by_other_profile_fails_closed(real_db):
         "source": "desktop",
     }
     server._sessions["live-other-profile"] = record
+    real_db.record_minted_session_key(MINTED_KEY)  # isolate the live-claim gate
     try:
         resp = _resume(session_id=MINTED_KEY)
         assert resp["error"]["code"] == 4007

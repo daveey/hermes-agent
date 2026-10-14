@@ -466,6 +466,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
     # The same holds for a seeded session WITHOUT a parent (a client opening a chat with its first turns
     # already written): the transcript exists only in memory, so a restart before the first prompt lost it
     # and the post-create resume 404'd. Persist it up front too; only empty drafts stay lazy.
+    _record_minted_key(_sessions[sid], key)
     if parent_session_id and history:
         _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
     elif history:
@@ -487,6 +488,18 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
         "info": {**_lazy_info_route(_sessions[sid], override), "tools": {}, "skills": {}, "cwd": cwd, "branch": git_probe.branch(cwd),
                  "project": _project_info_for_cwd(cwd), "lazy": True, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
                  "profile_name": _response_profile_name(profile)}})
+
+
+def _record_minted_key(session: dict, key: str) -> None:
+    """Record *key* as minted by this backend in the session's own store (the one a later
+    ``session.resume`` reads), so a restart before the first prompt can still materialize it
+    (#96793) while a foreign gateway's key 4007s. Never breaks ``session.create``."""
+    try:
+        with _session_db(session) as db:
+            if db is not None:
+                db.record_minted_session_key(key)
+    except Exception:
+        logger.warning("failed to record minted session key %s", key, exc_info=True)
 
 
 @method("session.create")
@@ -777,6 +790,12 @@ def _resume_adopt_stranded(ctx: _Resume) -> None:
 def _resume_materialize_minted(ctx: _Resume) -> None:
     """Row for a minted-but-never-persisted key (#96793): adopt the id, not 4007.
 
+    Only for keys THIS backend's store recorded at ``session.create``
+    (``was_session_key_minted``). The key shape is not proof of ownership: with
+    several gateways (e.g. two Macs) every one mints the same shape, and a client
+    probing this backend for another gateway's key must get 4007 so it routes the
+    resume to the owner — materializing here fabricated empty, runtime-less rows.
+
     ``session.create`` mints the stored key but intentionally writes no state.db row
     until the first prompt (no "Untitled" litter). If the backend dies in that window,
     the key exists client-side (pinned tile, stored id) but has no row anywhere — and
@@ -803,6 +822,14 @@ def _resume_materialize_minted(ctx: _Resume) -> None:
         logger.warning("failed to materialize session row for %s", ctx.target, exc_info=True)
 
 
+def _was_minted_here(ctx: _Resume) -> bool:
+    try:
+        return bool(ctx.db.was_session_key_minted(ctx.target))
+    except Exception:
+        logger.warning("minted-key lookup failed for %s; not materializing", ctx.target, exc_info=True)
+        return False
+
+
 def _resume_locate(ctx: _Resume) -> dict | None:
     """Resolve ``ctx.target`` to a stored row (``ctx.found``); a dict is an early response."""
     ctx.found = ctx.db.get_session(ctx.target)
@@ -822,8 +849,9 @@ def _resume_locate(ctx: _Resume) -> dict | None:
         return _resume_live_unpersisted(ctx, live_sid, live)
     if ctx.owns_db:
         _resume_adopt_stranded(ctx)
+    # Materialize only a key this store minted: a foreign gateway's key must 4007 so the client routes to its owner.
     if not ctx.found and not ctx.lazy and _is_server_minted_key(ctx.target) \
-            and not _any_live_session_claims_key(ctx.target):
+            and not _any_live_session_claims_key(ctx.target) and _was_minted_here(ctx):
         _resume_materialize_minted(ctx)
     return None if ctx.found else _err(ctx.rid, 4007, "session not found")
 

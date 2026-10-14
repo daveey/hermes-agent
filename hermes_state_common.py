@@ -565,6 +565,18 @@ CREATE TABLE IF NOT EXISTS gateway_heartbeats (
     host TEXT NOT NULL DEFAULT ''
 );
 
+-- Stored session keys minted by THIS backend's ``session.create`` (which writes
+-- no sessions row until the first prompt). ``session.resume`` materializes a row
+-- for an unknown key only when it is recorded here: the key shape alone is not
+-- proof of ownership, since every gateway mints the same shape, and a foreign
+-- gateway's key must 4007 so the client routes the resume to its owner instead
+-- of opening an empty phantom row here. Rows older than 30 days are pruned on
+-- write (SessionDB.record_minted_session_key).
+CREATE TABLE IF NOT EXISTS minted_session_keys (
+    id TEXT PRIMARY KEY,
+    minted_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS compression_locks (
     session_id TEXT PRIMARY KEY,
     holder TEXT NOT NULL,
