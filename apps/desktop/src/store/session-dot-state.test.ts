@@ -15,6 +15,7 @@ import {
 } from './session'
 import {
   $delegatingSessionIds,
+  $kanbanBusySessionIds,
   $sessionDotStateById,
   $unreadSessionCount,
   hasLiveTurn,
@@ -259,5 +260,45 @@ describe('$unreadSessionCount (titlebar badge)', () => {
 
     expect($unreadSessionCount.get()).toBe(0)
     expect($sessionDotStateById.get()['cron-1']).not.toBe('unread')
+  })
+})
+
+describe('kanban work in flight ($kanbanBusySessionIds)', () => {
+  beforeEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $unreadFinishedSessionIds.set([])
+    $unreadWriteGuard.set(new Map())
+  })
+
+  afterEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $unreadFinishedSessionIds.set([])
+  })
+
+  it('reads a finished turn with running kanban tasks as background, not done', () => {
+    setSessions([storedRow('s1', { kanban_active: 2, unread: true }), storedRow('s2')])
+
+    expect($kanbanBusySessionIds.get()).toEqual(['s1'])
+    expect($sessionDotStateById.get()['s1']).toBe('background')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    // Control: a plain finished session still gets its green stripe.
+    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('done')
+  })
+
+  it('goes back to done once the tasks finish', () => {
+    setSessions([storedRow('s1', { kanban_active: 1 })])
+    setSessions([storedRow('s1', { kanban_active: 0 })])
+
+    expect($kanbanBusySessionIds.get()).toEqual([])
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+  })
+
+  it('yields to a live turn', () => {
+    setSessions([storedRow('s1', { kanban_active: 1 })])
+    publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
+
+    expect($sessionDotStateById.get()['s1']).toBe('working')
   })
 })

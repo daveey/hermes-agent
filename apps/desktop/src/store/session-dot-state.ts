@@ -67,6 +67,26 @@ export const $delegatingSessionIds = computed(
   }
 )
 
+// [daveey] Sessions whose kanban tasks are still queued or running. Same story
+// as async delegation, but the work lives in kanban worker processes for hours:
+// `kanban_create` returns at once, the creating turn ends, and the sidebar read
+// the session as done (green stripe) while its workers were still going. The
+// backend stamps `kanban_active` on every list row (summed over the lineage).
+let kanbanBusyIds: readonly string[] = []
+export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions], (sessions, messaging) => {
+  const ids: string[] = []
+
+  for (const rows of [sessions, messaging]) {
+    for (const row of rows) {
+      if ((row.kanban_active ?? 0) > 0) {
+        ids.push(row.id)
+      }
+    }
+  }
+
+  return (kanbanBusyIds = stableArray(kanbanBusyIds, ids))
+})
+
 export type SessionDotState = 'background' | 'draft' | 'idle' | 'needs-input' | 'stalled' | 'unread' | 'working'
 
 /** The sidebar row's arc. A quiet turn is still authoritatively running, so
@@ -120,12 +140,13 @@ export const $sessionDotStateById = computed(
     $stalledSessionIds,
     $backgroundRunningSessionIds,
     $delegatingSessionIds,
+    $kanbanBusySessionIds,
     $unreadFinishedSessionIds,
     $draftSessionIds,
     $sessions,
     $unreadWriteGuard
   ],
-  (attention, working, stalled, background, delegating, unread, draft, sessions, unreadWriteGuard) => {
+  (attention, working, stalled, background, delegating, kanbanBusy, unread, draft, sessions, unreadWriteGuard) => {
     const next: Record<string, SessionDotState> = {}
 
     const claim = (ids: readonly string[], state: SessionDotState) => {
@@ -177,6 +198,8 @@ export const $sessionDotStateById = computed(
     // claim as background processes — and it yields to `working` below the
     // moment the parent turn itself is live (synchronous orchestrator children).
     claim(delegating, 'background')
+    // Kanban tasks it created are still queued or running: same claim.
+    claim(kanbanBusy, 'background')
     claim(working, 'working')
 
     // Stalled REFINES working rather than rivalling it — the turn is still

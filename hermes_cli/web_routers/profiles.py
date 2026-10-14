@@ -35,6 +35,7 @@ from hermes_cli.profiles import ProfileIdentitySettlementPending
 from hermes_cli.web_server_config import (
     _apply_main_model_assignment, _normalize_main_model_assignment, _validated_main_model_selection,
 )
+from hermes_cli.kanban_session_activity import annotate_kanban_activity
 from hermes_cli.web_server_gateway import _strip_session_list_rows
 from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK
 from hermes_cli.web_server_profiles import (
@@ -506,6 +507,7 @@ def get_profiles_sessions(
     window = _pinned_window(merged, offset, limit)
     if not full:
         _strip_session_list_rows(window)
+    annotate_kanban_activity(window)
     return {"sessions": window, "total": sum(totals.values()), "profile_totals": totals,
             "limit": limit, "offset": offset, "errors": errors,
             "storage": _corrupt_profile_stores(targets)}
@@ -609,7 +611,7 @@ def get_profiles_sessions_sidebar(
         rows[key].sort(key=_recency, reverse=True)
         win = _pinned_window(rows[key], 0, cap[key])
         _strip_session_list_rows(win)
-        return win
+        return annotate_kanban_activity(win)
 
     storage = _corrupt_profile_stores(scanned)
     retryable = _retryable_profile_errors(errors, scanned)

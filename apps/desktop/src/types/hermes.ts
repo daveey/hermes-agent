@@ -633,6 +633,12 @@ export interface SessionInfo {
    *  explicitly marked unread or a response arrived after it was last read.
    *  Undefined against a backend predating the flag; treat as read. */
   unread?: boolean
+  /** [daveey] Kanban tasks this conversation created (`kanban_create`) that
+   *  are still queued or running, summed over its compression lineage. The
+   *  turn that created them has ended, but the session's work goes on in the
+   *  workers, so the sidebar paints it like a background job, not "done".
+   *  Absent when zero or against a backend predating the field. */
+  kanban_active?: number
   preview: null | string
   source: null | string
   started_at: number
