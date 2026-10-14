@@ -589,6 +589,7 @@ export const esOverrides = {
       'session.togglePin': 'Fijar / desfijar sesión actual',
       'session.toggleBlocked': 'Marcar sesión como bloqueada / desbloqueada',
       'session.resume': 'Enviar «resume» al chat actual',
+      'app.reloadAll': 'Reiniciar backend y recargar ventana',
       'session.nextNeedsYou': 'Siguiente sesión que te necesita',
       'session.prevNeedsYou': 'Sesión anterior que te necesita',
       'session.nextSession': 'Siguiente sesión',

@@ -586,6 +586,7 @@ export const frOverrides = {
       'session.togglePin': 'Épingler / désépingler la session actuelle',
       'session.toggleBlocked': 'Marquer la session bloquée / débloquée',
       'session.resume': 'Envoyer « resume » au chat actuel',
+      'app.reloadAll': 'Redémarrer le backend et recharger la fenêtre',
       'session.nextNeedsYou': 'Session suivante qui vous attend',
       'session.prevNeedsYou': 'Session précédente qui vous attend',
       'session.nextSession': 'Session suivante',

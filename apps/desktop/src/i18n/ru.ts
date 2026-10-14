@@ -311,6 +311,7 @@ export const ruOverrides = {
       'session.togglePin': 'Закрепить / открепить текущий сеанс',
       'session.toggleBlocked': 'Пометить сеанс заблокированным / снять',
       'session.resume': 'Отправить «resume» в текущий чат',
+      'app.reloadAll': 'Перезапустить бэкенд и перезагрузить окно',
       'session.nextNeedsYou': 'Следующий сеанс, ждущий вас',
       'session.prevNeedsYou': 'Предыдущий сеанс, ждущий вас',
       'session.nextSession': 'Следующий сеанс',

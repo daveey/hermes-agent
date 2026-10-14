@@ -92,6 +92,7 @@ export const arChrome = {
       'session.togglePin': 'تثبيت / إلغاء تثبيت الجلسة الحالية',
       'session.toggleBlocked': 'وضع علامة محظورة على الجلسة / إزالتها',
       'session.resume': 'إرسال "resume" إلى الدردشة الحالية',
+      'app.reloadAll': 'إعادة تشغيل الخادم وإعادة تحميل النافذة',
       'session.nextNeedsYou': 'الجلسة التالية التي تحتاجك',
       'session.prevNeedsYou': 'الجلسة السابقة التي تحتاجك',
       'session.nextSession': 'الجلسة التالية',

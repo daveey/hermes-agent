@@ -791,6 +791,7 @@
   "keybinds.actions.session.slot.8": ["ja","zh-hant"],
   "keybinds.actions.session.slot.9": ["ja","zh-hant"],
   "keybinds.actions.session.resume": ["ja","zh-hant"],
+  "keybinds.actions.app.reloadAll": ["ja","zh-hant"],
   "keybinds.actions.session.toggleBlocked": ["ja","zh-hant"],
   "keybinds.actions.session.togglePin": ["ja","zh-hant"],
   "keybinds.actions.view.closeTab": ["ja","zh-hant"],

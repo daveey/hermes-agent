@@ -579,6 +579,7 @@ export const en: Translations = {
       'session.togglePin': 'Pin / unpin current session',
       'session.toggleBlocked': 'Mark current session blocked / unblocked',
       'session.resume': 'Send "resume" to current chat',
+      'app.reloadAll': 'Restart backend and reload window',
       'session.nextNeedsYou': 'Next session that needs you',
       'session.prevNeedsYou': 'Previous session that needs you',
       'session.nextSession': 'Next session',
