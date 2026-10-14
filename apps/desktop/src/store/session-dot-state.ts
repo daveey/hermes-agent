@@ -87,6 +87,27 @@ export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions], (
   return (kanbanBusyIds = stableArray(kanbanBusyIds, ids))
 })
 
+// [daveey] Sessions owning a live background process, per the backend. The
+// renderer's own $backgroundRunningSessionIds only knows sessions it polled
+// after one of their tool events streamed into this window, so a turn the
+// backend resumed after a restart (or a process another Hermes process
+// registered) left the row green while e.g. `gh pr checks --watch` still ran.
+// The backend stamps `background_active` (live pids, over the lineage).
+let backgroundActiveIds: readonly string[] = []
+export const $backgroundActiveSessionIds = computed([$sessions, $messagingSessions], (sessions, messaging) => {
+  const ids: string[] = []
+
+  for (const rows of [sessions, messaging]) {
+    for (const row of rows) {
+      if ((row.background_active ?? 0) > 0) {
+        ids.push(row.id)
+      }
+    }
+  }
+
+  return (backgroundActiveIds = stableArray(backgroundActiveIds, ids))
+})
+
 // [daveey] Sessions with a standing `/goal` still active. Between goal turns —
 // especially while the judge has parked it on a `wait` timer — no turn is live,
 // so the sidebar read the session as done (green stripe) although the goal loop
@@ -166,6 +187,7 @@ export const $sessionDotStateById = computed(
     $workingSessionIds,
     $stalledSessionIds,
     $backgroundRunningSessionIds,
+    $backgroundActiveSessionIds,
     $delegatingSessionIds,
     $kanbanBusySessionIds,
     $goalActiveSessionIds,
@@ -179,6 +201,7 @@ export const $sessionDotStateById = computed(
     working,
     stalled,
     background,
+    backgroundActive,
     delegating,
     kanbanBusy,
     goalActive,
@@ -233,6 +256,8 @@ export const $sessionDotStateById = computed(
     claim(persistedUnread, 'unread')
 
     claim(background, 'background')
+    // Same claim from the backend's process registry (survives restarts).
+    claim(backgroundActive, 'background')
     // Async delegation: the parent turn has ended but its subagents are still
     // running, so the session's work continues in child sessions. Same visual
     // claim as background processes — and it yields to `working` below the

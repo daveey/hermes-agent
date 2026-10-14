@@ -14,6 +14,7 @@ import {
   setSessions
 } from './session'
 import {
+  $backgroundActiveSessionIds,
   $delegatingSessionIds,
   $goalActiveSessionIds,
   $kanbanBusySessionIds,
@@ -304,6 +305,46 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
 
   it('yields to a live turn', () => {
     setSessions([storedRow('s1', { kanban_active: 1 })])
+    publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
+
+    expect($sessionDotStateById.get()['s1']).toBe('working')
+  })
+})
+
+describe('backend-registered background process ($backgroundActiveSessionIds)', () => {
+  beforeEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $unreadFinishedSessionIds.set([])
+    $unreadWriteGuard.set(new Map())
+  })
+
+  afterEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $unreadFinishedSessionIds.set([])
+  })
+
+  it('reads a finished turn with a live background process as background, not done', () => {
+    setSessions([storedRow('s1', { background_active: 1, unread: true }), storedRow('s2')])
+
+    expect($backgroundActiveSessionIds.get()).toEqual(['s1'])
+    expect($sessionDotStateById.get()['s1']).toBe('background')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    // Control: a plain finished session still gets its green stripe.
+    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('done')
+  })
+
+  it('goes back to done once the process exits', () => {
+    setSessions([storedRow('s1', { background_active: 1 })])
+    setSessions([storedRow('s1')])
+
+    expect($backgroundActiveSessionIds.get()).toEqual([])
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+  })
+
+  it('yields to a live turn', () => {
+    setSessions([storedRow('s1', { background_active: 2 })])
     publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
 
     expect($sessionDotStateById.get()['s1']).toBe('working')

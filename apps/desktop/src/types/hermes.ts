@@ -648,6 +648,12 @@ export interface SessionInfo {
    *  goal loop resumes it unasked, so the sidebar paints it like a background
    *  job, not "done". Absent otherwise or against an older backend. */
   goal_active?: boolean
+  /** [daveey] Live background processes (terminal background=true) this
+   *  conversation owns, per the backend's process registry and the shared
+   *  processes.json, summed over its compression lineage. Keeps the sidebar
+   *  row off "done" even when this window never polled the session. Absent
+   *  when zero or against an older backend. */
+  background_active?: number
   preview: null | string
   source: null | string
   started_at: number
