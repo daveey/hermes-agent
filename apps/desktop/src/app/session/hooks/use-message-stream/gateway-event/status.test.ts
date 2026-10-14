@@ -69,6 +69,25 @@ describe('gateway `error` event → error card + toast', () => {
     )
   })
 
+  it('carries the taker\'s machine on a takeover error so the card can name it', () => {
+    const message = 'This chat was taken over by another Hermes window.\nDetails: session s1 opened by desktop on MacBook-Pro-177 0m ago.'
+    const { ctx, failAssistantMessage } = errorContext(message)
+
+    const payload = {
+      error_surface: { code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false },
+      message
+    } as unknown as GatewayEventContext['payload']
+
+    handleStatusEvent({ ...ctx, payload })
+
+    expect(failAssistantMessage).toHaveBeenCalledWith(
+      'sess-1',
+      message,
+      1_700_000_100,
+      expect.objectContaining({ code: 'SESSION_NOT_OWNED', owner: { age: '0m', host: 'MacBook-Pro-177', surface: 'desktop' } })
+    )
+  })
+
   it('stamps SESSION_NOT_OWNED on a live-owner refusal so the card drops Retry', () => {
     const { ctx, failAssistantMessage } = errorContext(OWNED_REFUSAL)
 

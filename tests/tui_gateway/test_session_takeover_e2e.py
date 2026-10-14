@@ -150,7 +150,8 @@ def test_take_over_between_two_real_gateway_processes(tmp_path):
         errors = [f["params"] for f in frames if f.get("method") == "event" and f["params"].get("type") == "error"]
         print("A error events:", json.dumps(errors))
         assert any(e.get("session_id") == "window-a"
-                   and e["payload"]["message"] == "This chat was taken over by another Hermes window."
+                   and e["payload"]["message"].startswith("This chat was taken over by another Hermes window.\n"
+                                                          "Details: session e2e-takeover-session opened by desktop")
                    and e["payload"]["error_surface"]["code"] == "SESSION_NOT_OWNED" for e in errors)
     finally:
         (out / "stop").touch()

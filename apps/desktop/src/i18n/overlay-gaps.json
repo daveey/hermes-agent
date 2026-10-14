@@ -137,6 +137,7 @@
   "assistant.thread.errorLayers.streaming": ["ru"],
   "assistant.thread.errorLimitResets": ["ru"],
   "assistant.thread.errorOauthExpired": ["ru"],
+  "assistant.thread.errorSessionOwnedElsewhere": ["ru"],
   "assistant.thread.errorOpenDesktopLogs": ["ru"],
   "assistant.thread.errorOpenHermesFolder": ["ar","ja","ru","zh","zh-hant"],
   "assistant.thread.errorOpenHermesFolderFailed": ["ar","ja","ru","zh","zh-hant"],

@@ -3535,6 +3535,8 @@ export const jaOverrides = {
       errorTakeOverFailed: 'このチャットを引き継げませんでした',
       errorSwitchProvider: 'プロバイダーを切り替え',
       errorSignInAgain: provider => `${provider} に再度サインイン`,
+      errorSessionOwnedElsewhere: (surface, host, age) =>
+        `このチャットは ${host} の Hermes ${surface} で開かれています${age ? `（${age} 前から）` : ''}。そちらで使うか、ここで引き継ぐか、新しいチャットを始めてください。`,
       errorOauthExpired: provider =>
         `${provider} のサインインが期限切れか取り消されました。続けるには再度サインインしてください。`,
       errorOpenLogs: 'ログを開く',

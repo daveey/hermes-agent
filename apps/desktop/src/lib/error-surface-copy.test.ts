@@ -2,7 +2,7 @@ import { expect, it } from 'vitest'
 
 import { TRANSLATIONS } from '@/i18n'
 
-import { parseErrorSurface } from './error-surface'
+import { parseErrorSurface, sessionNotOwnedSurface } from './error-surface'
 import { errorCardText } from './error-surface-copy'
 
 const codes = [
@@ -67,4 +67,28 @@ it('does not blame a slow reply when the provider could not be reached', () => {
 
   expect(copy.title).toBe('Could not reach the AI service')
   expect(copy.body).toContain('OpenCode Go could not be reached')
+})
+
+it('names the machine holding a chat that is open somewhere else', () => {
+  const surface = sessionNotOwnedSurface(
+    'This chat is open in another Hermes window/terminal. Use it there, or start a new chat here.\n' +
+      'Details: session 20261013_205237_240fcc opened by desktop on davids-mac-mini-1 4m ago.'
+  )
+
+  expect(surface.owner).toEqual({ age: '4m', host: 'davids-mac-mini-1', surface: 'desktop' })
+
+  const copy = errorCardText(TRANSLATIONS.en.assistant.thread, surface)
+
+  expect(copy.title).toBe('This chat is open somewhere else')
+  expect(copy.body).toContain('Hermes desktop on davids-mac-mini-1 (opened 4m ago)')
+})
+
+it('keeps the generic owner copy for an older backend that names no machine', () => {
+  const surface = sessionNotOwnedSurface('x\nDetails: session s1 opened by cli 2h10m ago.')
+
+  expect(surface.owner).toEqual({ age: '2h10m', surface: 'cli' })
+  expect(errorCardText(TRANSLATIONS.en.assistant.thread, surface).body).toBe(
+    TRANSLATIONS.en.assistant.thread.errorCodes.SESSION_NOT_OWNED.body
+  )
+  expect(sessionNotOwnedSurface('no details at all').owner).toBeUndefined()
 })

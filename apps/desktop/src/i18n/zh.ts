@@ -4517,6 +4517,8 @@ export const zhOverrides = {
       errorTakeOverFailed: '无法接管此对话',
       errorSwitchProvider: '切换服务商',
       errorSignInAgain: provider => `重新登录 ${provider}`,
+      errorSessionOwnedElsewhere: (surface, host, age) =>
+        `此对话已在 ${host} 上的 Hermes ${surface} 中打开${age ? `（${age} 前）` : ''}。请在那里继续，或在此处接管，或开始新对话。`,
       errorOauthExpired: provider => `您的 ${provider} 登录已过期或被撤销。请重新登录以继续对话。`,
       errorOpenLogs: '打开日志',
       errorOpenLogsFailed: '无法打开日志文件夹',

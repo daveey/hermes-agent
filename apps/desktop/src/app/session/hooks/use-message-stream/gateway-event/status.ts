@@ -2,7 +2,7 @@ import { isSessionNotOwnedError } from '@/app/session/hooks/use-prompt-actions/u
 import { runtimeTranslations, translateNow } from '@/i18n'
 import { textPart } from '@/lib/chat-messages'
 import { coerceGatewayText } from '@/lib/chat-runtime'
-import { type ErrorSurface, parseErrorSurface } from '@/lib/error-surface'
+import { type ErrorSurface, parseErrorSurface, sessionNotOwnedSurface } from '@/lib/error-surface'
 import { errorCardText } from '@/lib/error-surface-copy'
 import { isProviderSetupErrorCode, isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { type AgentNoticePayload, clearAgentNotice, nativeNoticeInput, showAgentNotice } from '@/store/agent-notices'
@@ -368,11 +368,11 @@ function gatewayErrorSurface(payload: unknown, errorMessage: string): ErrorSurfa
   const sent = parseErrorSurface((payload as { error_surface?: unknown } | undefined)?.error_surface)
 
   if (sent) {
-    return sent
+    return sent.code === 'SESSION_NOT_OWNED' ? sessionNotOwnedSurface(errorMessage, sent) : sent
   }
 
   if (isSessionNotOwnedError(new Error(errorMessage))) {
-    return { code: 'SESSION_NOT_OWNED', layer: 'gateway', retryable: false }
+    return sessionNotOwnedSurface(errorMessage)
   }
 
   return isDiskFullErrorMessage(errorMessage) ? { code: 'disk_full', layer: 'disk', retryable: false } : null

@@ -109,8 +109,12 @@ def test_watcher_revokes_an_idle_session_taken_over_by_another_process(env, slee
     assert "active_session_lease" not in session
     assert session["_lease_taken_over"] is True
     errors = [p for e, s, p in env.emitted if e == "error" and s == SID]
-    assert errors == [{"message": "This chat was taken over by another Hermes window.",
-                       "error_surface": {"layer": "gateway", "code": "SESSION_NOT_OWNED", "retryable": False}}]
+    assert [e["error_surface"] for e in errors] == [
+        {"layer": "gateway", "code": "SESSION_NOT_OWNED", "retryable": False}]
+    first, details = errors[0]["message"].split("\n")
+    assert first == "This chat was taken over by another Hermes window."
+    # The Details line names the taker so the displaced window's card can say where the chat went.
+    assert details.startswith("Details: session takeover-session-key opened by desktop")
     (entry,) = _entries()
     assert entry["lease_id"] == "new-owner-lease"  # the new owner's entry is untouched
     assert entry["metadata"]["handoff_acked"] == [lease.lease_id]

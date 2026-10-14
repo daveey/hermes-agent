@@ -4065,6 +4065,9 @@ export interface Translations extends NoticeTranslations {
       /** Explains WHY the turn failed for an OAuth 401 — the raw body
        *  ("HTTP 401: User not found.") doesn't say "sign in again". */
       errorOauthExpired: (provider: string) => string
+      /** SESSION_NOT_OWNED card body when the backend named the holder's machine.
+       *  `surface` is the backend's own label (desktop, cli, telegram…); `age` may be ''. */
+      errorSessionOwnedElsewhere: (surface: string, host: string, age: string) => string
       errorOpenLogs: string
       errorOpenLogsFailed: string
       errorOpenDesktopLogs: string

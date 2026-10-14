@@ -959,6 +959,27 @@ test('buildSpawnCommand is headless serve, detached, token not in argv', () => {
   assert.ok(!cmd.includes('HERMES_DASHBOARD_SESSION_TOKEN'), 'token env var must not appear')
 })
 
+test('buildSpawnCommand tells the remote backend which Mac drives it, shell-safe', () => {
+  const cmd = buildSpawnCommand('/x/hermes', 'work', {
+    clientHost: 'MacBook-Pro-177.local',
+    logPath: spawnLogPath(OWNERSHIP_ID, SPAWN_NONCE)
+  })
+
+  assert.match(cmd, /HERMES_DESKTOP=1 HERMES_DESKTOP_CLIENT_HOST=MacBook-Pro-177\.local /)
+
+  const hostile = buildSpawnCommand('/x/hermes', 'work', {
+    clientHost: "evil'; touch /tmp/pwned #",
+    logPath: spawnLogPath(OWNERSHIP_ID, SPAWN_NONCE)
+  })
+
+  assert.match(hostile, /HERMES_DESKTOP_CLIENT_HOST=eviltouchtmppwned /)
+  assert.ok(!hostile.includes('touch /tmp'))
+
+  const none = buildSpawnCommand('/x/hermes', 'work', { clientHost: '', logPath: spawnLogPath(OWNERSHIP_ID, SPAWN_NONCE) })
+
+  assert.doesNotMatch(none, /HERMES_DESKTOP_CLIENT_HOST/)
+})
+
 test('buildSpawnCommand never pins a non-slug profile into the remote argv', () => {
   // The roster/SSH bridge hands the profile verbatim; a numeric id or display
   // label must never cross into the remote serve argv, where the CLI used to

@@ -12,6 +12,7 @@ import logging
 import collections
 import math
 import os
+import socket
 import time
 import uuid
 from contextlib import contextmanager, suppress
@@ -148,12 +149,37 @@ def _is_same_writer(entry: dict[str, Any], metadata: Optional[dict[str, Any]]) -
     return bool(existing_live and incoming_live) and existing_live == incoming_live
 
 
+# Set by the Desktop on the backends it launches over SSH: the Mac whose window drives this
+# process, which is not the machine the process runs on.
+DESKTOP_CLIENT_HOST_ENV = "HERMES_DESKTOP_CLIENT_HOST"
+
+
+def _short_host(name: str) -> str:
+    name = name.strip()
+    return name[: -len(".local")] if name.lower().endswith(".local") else name
+
+
+def owner_host() -> str:
+    """The machine a person would walk to in order to use this process's chat window: the
+    Desktop client for an SSH-launched backend, else this machine. Recorded on every lease so a
+    refusal can say WHERE the chat is open, not just that it is."""
+    client = os.environ.get(DESKTOP_CLIENT_HOST_ENV, "")
+    if client.strip():
+        return _short_host(client)
+    with suppress(OSError):
+        return _short_host(socket.gethostname())
+    return ""
+
+
 def session_owner_details(session_id: str, entry: dict[str, Any]) -> str:
-    """The ``Details:`` line shared by every owner-refusal message."""
+    """The ``Details:`` line shared by every owner-refusal message. Its shape
+    (``opened by <surface>[ on <host>][ <age> ago].``) is parsed by the Desktop error card."""
     surface = str(entry.get("surface") or "another surface")
+    host = str(entry.get("host") or "").strip()
+    where = f" on {host}" if host else ""
     started = _optional_float(entry.get("started_at"))
     age = f" {format_age(time.time() - started)} ago" if started else ""
-    return f"Details: session {session_id} opened by {surface}{age}."
+    return f"Details: session {session_id} opened by {surface}{where}{age}."
 
 
 def session_already_owned_message(session_id: str, entry: dict[str, Any]) -> str:
@@ -259,6 +285,7 @@ def _read_entries(path: Path, *, strict: bool = False) -> list[dict[str, Any]]:
             (lambda: not _nonblank_str(entry.get("session_id")), "an invalid session id"),
             (lambda: _registry_pid(entry.get("pid")) <= 0, "an invalid pid"),
             (lambda: not _optional_isinstance(entry.get("surface"), str), "an invalid surface"),
+            (lambda: not _optional_isinstance(entry.get("host"), str), "an invalid host"),
             (lambda: not _optional_isinstance(entry.get("track_liveness"), bool), "an invalid liveness marker"),
             (lambda: not _optional_isinstance(entry.get("metadata"), dict), "invalid metadata"),
             (lambda: not _valid_process_start(entry.get("process_start_time")), "an invalid process start time"),
@@ -469,6 +496,7 @@ def _lease_entry(
         "surface": str(surface),
         "pid": os.getpid(),
         "process_start_time": _own_start_time(),
+        "host": owner_host(),
         "started_at": now,
         "updated_at": now,
     }

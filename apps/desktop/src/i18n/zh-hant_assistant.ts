@@ -119,6 +119,8 @@ export const zhHantAssistant = {
       errorTakeOverFailed: '無法接手此對話',
       errorSwitchProvider: '切換服務商',
       errorSignInAgain: provider => `重新登入 ${provider}`,
+      errorSessionOwnedElsewhere: (surface, host, age) =>
+        `此對話已在 ${host} 上的 Hermes ${surface} 中開啟${age ? `（${age} 前）` : ''}。請在那裡繼續，或在此接管，或開始新對話。`,
       errorOauthExpired: provider => `您的 ${provider} 登入已過期或被撤銷。請重新登入以繼續對話。`,
       errorOpenLogs: '開啟日誌',
       errorOpenLogsFailed: '無法開啟日誌資料夾',

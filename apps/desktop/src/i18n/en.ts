@@ -4780,6 +4780,8 @@ export const en: Translations = {
       errorSignInFreeTier: 'Sign in with a Nous account',
       errorOauthExpired: provider =>
         `Your ${provider} sign-in has expired or was revoked. Sign in again to keep chatting.`,
+      errorSessionOwnedElsewhere: (surface, host, age) =>
+        `This chat is open in Hermes ${surface} on ${host}${age ? ` (opened ${age} ago)` : ''}. Use it there, take it over here, or start a new chat.`,
       errorOpenLogs: 'Open logs',
       errorOpenLogsFailed: 'Could not open the logs folder',
       errorOpenDesktopLogs: 'Open Desktop logs',

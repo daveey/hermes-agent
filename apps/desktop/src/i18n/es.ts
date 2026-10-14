@@ -5216,6 +5216,8 @@ export const esOverrides = {
       errorUpdateApiKey: 'Actualizar clave API',
       errorSignInAgain: (provider: string) => `Volver a iniciar sesión en ${provider}`,
       errorSignInFreeTier: 'Iniciar sesión con una cuenta de Nous',
+      errorSessionOwnedElsewhere: (surface: string, host: string, age: string) =>
+        `Este chat está abierto en Hermes ${surface} en ${host}${age ? ` (desde hace ${age})` : ''}. Úsalo allí, tómalo aquí o inicia un chat nuevo.`,
       errorOauthExpired: (provider: string) =>
         `Tu sesión de ${provider} caducó o se revocó. Vuelve a iniciar sesión para seguir chateando.`,
       errorOpenLogs: 'Abrir registros',

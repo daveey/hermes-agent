@@ -6,6 +6,7 @@ import { translateNow, type Translations } from '@/i18n'
 import { type ChatMessage, finalizeInterruptedMessages, textPart } from '@/lib/chat-messages'
 import { optimisticAttachmentRef } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
+import { sessionNotOwnedSurface } from '@/lib/error-surface'
 import { setMutableRef } from '@/lib/mutable-ref'
 import {
   isVoicePlaybackActive,
@@ -1051,7 +1052,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 role: 'assistant',
                 parts: [],
                 error: message || copy.promptFailed,
-                ...(notOwned && { errorSurface: { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false } }),
+                ...(notOwned && { errorSurface: sessionNotOwnedSurface(err instanceof Error ? err.message : message) }),
                 branchGroupId: state.pendingBranchGroup ?? undefined,
                 completedAt: occurredAt,
                 timestamp: occurredAt

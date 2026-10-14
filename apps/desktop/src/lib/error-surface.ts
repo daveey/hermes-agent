@@ -94,6 +94,42 @@ export interface ErrorSurface {
    *  `resets_at` body field on a 429). Rendered as "Limit resets at HH:mm" next
    *  to Retry. Absent when the provider named no reset or on older backends. */
   resetsAt?: number
+  /** SESSION_NOT_OWNED only: where the chat is open, parsed from the backend's
+   *  `Details: session … opened by <surface> on <host> <age> ago.` line. */
+  owner?: SessionOwner
+}
+
+export interface SessionOwner {
+  /** The holding surface as the backend names it (`desktop`, `cli`, `telegram`, …). */
+  surface: string
+  /** The machine whose window/terminal holds it. Absent from older backends. */
+  host?: string
+  /** How long ago it opened the chat (`4m`, `2h10m`). */
+  age?: string
+}
+
+// hermes_cli/active_sessions.py session_owner_details(): keep the two in step.
+const SESSION_OWNER_DETAILS_RE = /Details: session \S+ opened by (.+?)(?: on (\S+?))?(?: (\d+h(?:\d+m)?|\d+m) ago)?\.\s*$/m
+
+/** Where a SESSION_NOT_OWNED refusal says the chat is open, or null when the text has no Details line. */
+export function parseSessionOwner(text: string | null | undefined): SessionOwner | null {
+  const match = SESSION_OWNER_DETAILS_RE.exec(text || '')
+
+  if (!match) {
+    return null
+  }
+
+  return { surface: match[1], ...(match[2] ? { host: match[2] } : {}), ...(match[3] ? { age: match[3] } : {}) }
+}
+
+/** The SESSION_NOT_OWNED surface for a refusal, carrying the owner its text names. */
+export function sessionNotOwnedSurface(text: string | null | undefined, base?: ErrorSurface | null): ErrorSurface {
+  const owner = parseSessionOwner(text)
+
+  return {
+    ...(base ?? { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false }),
+    ...(owner ? { owner } : {})
+  }
 }
 
 /** Validate a wire payload into an ErrorSurface, or null when absent/garbled. */

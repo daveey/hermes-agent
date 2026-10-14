@@ -5223,6 +5223,8 @@ export const deOverrides = {
       errorUpdateApiKey: 'API-Key aktualisieren',
       errorSignInAgain: provider => `Erneut bei ${provider} anmelden`,
       errorSignInFreeTier: 'Mit einem Nous-Konto anmelden',
+      errorSessionOwnedElsewhere: (surface, host, age) =>
+        `Dieser Chat ist in Hermes ${surface} auf ${host} geöffnet${age ? ` (seit ${age})` : ''}. Nutze ihn dort, übernimm ihn hier oder starte einen neuen Chat.`,
       errorOauthExpired: provider =>
         `Ihre Anmeldung bei ${provider} ist abgelaufen oder wurde widerrufen. Melden Sie sich erneut an, um weiterzuchatten.`,
       errorOpenLogs: 'Logs öffnen',

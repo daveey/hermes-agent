@@ -26,6 +26,7 @@
  */
 
 import crypto from 'node:crypto'
+import os from 'node:os'
 
 import { READY_IN_MERGED_OUTPUT_RE } from './backend-ready'
 import { parseRemoteProfileListing } from './connection-registry'
@@ -1107,6 +1108,15 @@ async function terminateOwnedDashboardForUpdate(ssh, expected) {
 // Detach so the backend survives the SSH channel closing: setsid (Linux)
 // starts a new session; macOS has no setsid, so fall back to nohup (HUP-immune;
 // fd-detachment is already handled by </dev/null + redirect + &).
+// This Mac's name, handed to the remote backend so the session leases it takes say where the
+// chat's window is ("open in Hermes desktop on <this Mac>"), not the remote machine's name.
+// Hostname charset only: it is interpolated unquoted into the remote shell command.
+function desktopClientHostEnv(host: unknown): string {
+  const clean = typeof host === 'string' ? host.replace(/[^A-Za-z0-9._-]/g, '').slice(0, 64) : ''
+
+  return clean ? ` HERMES_DESKTOP_CLIENT_HOST=${clean}` : ''
+}
+
 function buildSpawnCommand(hermesPath, profile, opts: any = {}) {
   const hermes = expandRemotePath(hermesPath)
   // The roster/SSH bridge hands us the profile verbatim: a non-slug value must never
@@ -1141,7 +1151,8 @@ function buildSpawnCommand(hermesPath, profile, opts: any = {}) {
 
   const dashCmd =
     `ulimit -n ${REMOTE_NOFILE_SOFT_LIMIT} 2>/dev/null || true; ` +
-    `exec env HERMES_DESKTOP=1${opts.guestOnboarding === true ? ' HERMES_GUEST_ONBOARDING=1' : ''} ${hermes} ${profileArgs}${subCmd}`
+    `exec env HERMES_DESKTOP=1${desktopClientHostEnv(opts.clientHost ?? os.hostname())}` +
+    `${opts.guestOnboarding === true ? ' HERMES_GUEST_ONBOARDING=1' : ''} ${hermes} ${profileArgs}${subCmd}`
 
   const detachedShell: string = `eval "exec $1>&-"; ${dashCmd} </dev/null >> ${logPath} 2>&1 & echo $!`
   // The inner shell backgrounds Hermes and reports its PID; backgrounding the

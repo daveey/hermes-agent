@@ -44,6 +44,16 @@ export function errorCardText(
 
   if ('code' in key) {
     const copy = thread.errorCodes[key.code]
+    const owner = key.code === 'SESSION_NOT_OWNED' ? surface?.owner : undefined
+
+    // Say WHERE the chat is open when the backend recorded the machine: "another window"
+    // alone sends people hunting through windows on the wrong computer.
+    if (owner?.host) {
+      return {
+        body: thread.errorSessionOwnedElsewhere(owner.surface, owner.host, owner.age ?? ''),
+        title: render(copy.title, provider)
+      }
+    }
 
     // A free-tier refusal arrives with the backend's own sentence (the wait, the
     // model, the way forward); the table body is only the fallback for an older backend.

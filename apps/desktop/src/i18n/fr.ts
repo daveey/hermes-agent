@@ -5231,6 +5231,8 @@ export const frOverrides = {
       errorUpdateApiKey: 'Mettre à jour la clé API',
       errorSignInAgain: provider => `Se reconnecter à ${provider}`,
       errorSignInFreeTier: 'Se connecter avec un compte Nous',
+      errorSessionOwnedElsewhere: (surface, host, age) =>
+        `Cette conversation est ouverte dans Hermes ${surface} sur ${host}${age ? ` (depuis ${age})` : ''}. Utilisez-la là-bas, reprenez-la ici ou démarrez une nouvelle conversation.`,
       errorOauthExpired: provider =>
         `Votre connexion à ${provider} a expiré ou a été révoquée. Reconnectez-vous pour continuer la conversation.`,
       errorOpenLogs: 'Ouvrir les journaux',

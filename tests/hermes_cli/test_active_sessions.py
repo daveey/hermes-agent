@@ -775,3 +775,32 @@ def test_snapshot_prunes_after_lock_release_and_keeps_concurrent_lease(tmp_path,
     assert [e["lease_id"] for e in live] == ["live-1"]
     persisted = active_sessions._read_entries(state_path, strict=True)
     assert sorted(e["lease_id"] for e in persisted) == ["live-1", "new-1"]
+
+
+def test_owner_refusal_names_the_holding_machine(tmp_path, monkeypatch):
+    """A refusal says WHERE the chat is open: the SSH Desktop client when one launched this backend."""
+    from hermes_cli import active_sessions as a
+
+    monkeypatch.setenv(a.DESKTOP_CLIENT_HOST_ENV, "MacBook-Pro-177.local")
+    lease, refusal = a.try_acquire_active_session(
+        session_id="s-host", surface="desktop", config={}, registry_home=tmp_path)
+    assert lease is not None and refusal is None
+    entry = a.active_session_registry_snapshot(tmp_path)[0]
+    assert entry["host"] == "MacBook-Pro-177"
+    details = a.session_owner_details("s-host", entry)
+    assert details.startswith("Details: session s-host opened by desktop on MacBook-Pro-177 ")
+    assert details.endswith(" ago.")
+
+
+def test_owner_host_defaults_to_this_machine(monkeypatch):
+    from hermes_cli import active_sessions as a
+
+    monkeypatch.delenv(a.DESKTOP_CLIENT_HOST_ENV, raising=False)
+    monkeypatch.setattr(a.socket, "gethostname", lambda: "davids-mac-mini-1.local")
+    assert a.owner_host() == "davids-mac-mini-1"
+
+
+def test_owner_details_without_host_keeps_old_shape():
+    from hermes_cli import active_sessions as a
+
+    assert a.session_owner_details("s1", {"surface": "cli"}) == "Details: session s1 opened by cli."

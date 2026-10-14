@@ -103,7 +103,9 @@ def _revoke_taken_over_lease(sid: str, session: dict, lease, taker: dict) -> boo
         from tui_gateway import server_requests
         server_requests.cancel(sid, reason="taken_over")  # unblock an agent parked on clarify/approval/sudo
     with contextlib.suppress(Exception):
-        _emit("error", sid, {"message": _TAKEOVER_MESSAGE, "error_surface": dict(_TAKEOVER_ERROR_SURFACE)})
+        from hermes_cli.active_sessions import session_owner_details
+        message = f"{_TAKEOVER_MESSAGE}\n{session_owner_details(lease.session_id, taker)}"
+        _emit("error", sid, {"message": message, "error_surface": dict(_TAKEOVER_ERROR_SURFACE)})
     try:
         acknowledge_takeover(lease.lease_id, state_path=lease.state_path)
     except Exception:

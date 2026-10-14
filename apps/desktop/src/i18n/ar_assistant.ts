@@ -66,6 +66,8 @@ export const arAssistant = {
       errorTakeOverFailed: 'تعذّر نقل هذه المحادثة إلى هنا',
       errorSwitchProvider: 'تبديل المزوّد',
       errorSignInAgain: provider => `تسجيل الدخول إلى ${provider} مجدداً`,
+      errorSessionOwnedElsewhere: (surface, host, age) =>
+        `هذه المحادثة مفتوحة في Hermes ${surface} على ${host}${age ? ` (منذ ${age})` : ''}. استخدمها هناك، أو تولَّها هنا، أو ابدأ محادثة جديدة.`,
       errorOauthExpired: provider =>
         `انتهت صلاحية تسجيل دخولك إلى ${provider} أو تم إلغاؤه. سجّل الدخول مجدداً لمتابعة المحادثة.`,
       errorOpenLogs: 'فتح السجلات',
