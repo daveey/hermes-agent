@@ -120,9 +120,13 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // hijacked normal typing — pressing uppercase N outside an input (or via an
   // IME) created a new session unexpectedly. The deliberate ⌘/Ctrl+N chord
   // stays; users who liked ⇧N can rebind it in the panel.
+  // Fork: ⌘N starts the new chat on This device (switching the gateway to the
+  // local connection when another one is selected); ⌘⇧N keeps the selected
+  // gateway (`session.newSameGateway`).
   { id: 'session.new', category: 'session', defaults: ['mod+n'] },
+  { id: 'session.newSameGateway', category: 'session', defaults: ['mod+shift+n'] },
   { id: 'session.newTab', category: 'session', defaults: ['mod+t'] },
-  // Fork: ⌘⇧N belongs to `session.rename`; new window ships unbound (rebindable).
+  // Fork: ⌘⇧N belongs to `session.newSameGateway`; new window ships unbound (rebindable).
   { id: 'session.newWindow', category: 'session', defaults: [] },
   // ⌃Tab / ⌃⇧Tab — the universal tab-cycle chord. Literally Control, not Cmd
   // (macOS reserves Cmd+Tab for app switching); see `ctrl` in combo.ts.
@@ -138,9 +142,10 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   { id: 'session.nextSession', category: 'session', defaults: ['mod+shift+]'] },
   { id: 'session.prevSession', category: 'session', defaults: ['mod+shift+['] },
   { id: 'session.togglePin', category: 'session', defaults: [] },
-  // ⌘⇧N — "n" for name: rename the selected session, pre-filled with an
-  // AI-suggested short name (`session.title.suggest`).
-  { id: 'session.rename', category: 'session', defaults: ['mod+shift+n'] },
+  // ⌘⇧E — "e" for edit name: rename the selected session, pre-filled with an
+  // AI-suggested short name (`session.title.suggest`). (⌘⇧N moved to
+  // `session.newSameGateway`.)
+  { id: 'session.rename', category: 'session', defaults: ['mod+shift+e'] },
   // Fork: ⌘R sends "resume" to the active chat (upstream ⌘R reloads the
   // window; ⇧⌘R `forceReload` still does). Main claims ⌘R before the renderer
   // sees it (window-accelerator), so the preview-nav fallback in

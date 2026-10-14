@@ -75,6 +75,7 @@ export const arChrome = {
       'nav.agents': 'فتح الوكلاء',
       'session.new': 'جلسة جديدة',
       'session.newTab': 'علامة تبويب جلسة جديدة',
+      'session.newSameGateway': 'جلسة جديدة على البوابة الحالية',
       'session.newWindow': 'جلسة جديدة في نافذة',
       'session.next': 'الجلسة التالية',
       'session.prev': 'الجلسة السابقة',

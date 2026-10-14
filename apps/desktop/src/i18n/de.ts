@@ -569,6 +569,7 @@ export const deOverrides = {
       'nav.agents': 'Agenten öffnen',
       'session.new': 'Neue Session',
       'session.newTab': 'Neuer Session-Tab',
+      'session.newSameGateway': 'Neue Session auf aktuellem Gateway',
       'session.newWindow': 'Neues Fenster',
       'session.next': 'Nächste Session',
       'session.prev': 'Vorherige Session',

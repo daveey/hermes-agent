@@ -1,3 +1,4 @@
+import { LOCAL_CONNECTION_ID } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
 import { getProfiles } from '@/api/profiles'
@@ -358,6 +359,43 @@ export interface SelectConnectionOptions {
   /** Land on this profile of the target source instead of the one last used
    *  there. The fleet profile rail passes the exact square the user clicked. */
   profile?: null | string
+}
+
+/** Registry label of This device (the `local` connection). */
+export function thisDeviceLabel(): string {
+  const local = $connectionsRegistry.get()?.connections.find(connection => connection.id === LOCAL_CONNECTION_ID)
+
+  return local?.label || LOCAL_CONNECTION_ID
+}
+
+/**
+ * [daveey] ⌘N: land the new chat on This device. When another registered
+ * source is selected, switch to the `local` connection (its last profile) —
+ * the switch itself re-homes the fresh draft. No-op when This device is
+ * already selected, when there is no registry / local entry, or when the local
+ * runtime is not installed (a hotkey must never start the installer; the
+ * switcher's confirm flow owns that).
+ */
+export async function selectThisDeviceForNewChat(): Promise<void> {
+  const registry = $connectionsRegistry.get()
+
+  if (!registry?.connections.some(connection => connection.id === LOCAL_CONNECTION_ID)) {
+    return
+  }
+
+  const active = $activeConnectionId.get()
+
+  if (active === null || active === LOCAL_CONNECTION_ID) {
+    return
+  }
+
+  const probe = window.hermesDesktop?.probeLocalBackend
+
+  if (!probe || (await probe()).bootstrapNeeded === true) {
+    return
+  }
+
+  await selectConnection(LOCAL_CONNECTION_ID)
 }
 
 export async function selectConnection(connectionId: string, options: SelectConnectionOptions = {}): Promise<void> {

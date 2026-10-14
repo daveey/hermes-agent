@@ -569,6 +569,7 @@ export const frOverrides = {
       'nav.agents': 'Ouvrir les agents',
       'session.new': 'Nouvelle session',
       'session.newTab': 'Nouvel onglet de session',
+      'session.newSameGateway': 'Nouvelle session sur la passerelle actuelle',
       'session.newWindow': 'Nouvelle fenêtre',
       'session.next': 'Session suivante',
       'session.prev': 'Session précédente',

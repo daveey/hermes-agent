@@ -92,6 +92,7 @@ const {
   refreshConnectionsRegistry,
   _resetConnectionsForTests,
   selectConnection,
+  selectThisDeviceForNewChat,
   setConnectionsRegistry
 } = await import('./connections')
 
@@ -267,6 +268,53 @@ describe('connection registry cache', () => {
 
     $connection.set({ connectionId: 'work-vps', mode: 'remote' })
     expect($activeConnectionId.get()).toBe('work-vps')
+  })
+})
+
+describe('selectThisDeviceForNewChat (⌘N)', () => {
+  const stubProbe = (bootstrapNeeded: boolean) => {
+    const probeLocalBackend = vi.fn(async () => ({ bootstrapNeeded }))
+    vi.stubGlobal('window', {
+      hermesDesktop: { api, connections: { list, setLastUsed }, probeLocalBackend },
+      localStorage,
+      location: window.location
+    })
+
+    return probeLocalBackend
+  }
+
+  it('switches a remote selection to This device', async () => {
+    stubProbe(false)
+    setConnectionsRegistry(registry)
+    $connection.set({ connectionId: 'homelab', mode: 'remote', profile: 'default' })
+
+    await selectThisDeviceForNewChat()
+
+    expect(ensureGatewayAgent).toHaveBeenCalledWith('local', 'default', expect.anything())
+    expect($activeConnectionId.get()).toBe('local')
+    expect(requestFreshSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('does nothing when This device is already selected', async () => {
+    const probe = stubProbe(false)
+    setConnectionsRegistry(registry)
+    $connection.set({ connectionId: 'local', mode: 'local' })
+
+    await selectThisDeviceForNewChat()
+
+    expect(probe).not.toHaveBeenCalled()
+    expect(ensureGatewayAgent).not.toHaveBeenCalled()
+  })
+
+  it('never starts the installer: an uninstalled local runtime keeps the remote selection', async () => {
+    stubProbe(true)
+    setConnectionsRegistry(registry)
+    $connection.set({ connectionId: 'homelab', mode: 'remote', profile: 'default' })
+
+    await selectThisDeviceForNewChat()
+
+    expect(ensureGatewayAgent).not.toHaveBeenCalled()
+    expect($activeConnectionId.get()).toBe('homelab')
   })
 })
 

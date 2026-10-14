@@ -294,6 +294,7 @@ export const ruOverrides = {
       'nav.agents': 'Открыть агенты',
       'session.new': 'Новый сеанс',
       'session.newTab': 'Новая вкладка сеанса',
+      'session.newSameGateway': 'Новый сеанс на текущем шлюзе',
       'session.newWindow': 'Новое окно',
       'session.next': 'Следующий сеанс',
       'session.prev': 'Предыдущий сеанс',

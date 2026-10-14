@@ -36,6 +36,7 @@ import {
   openMoveToProjectPalette,
   toggleCommandPalette
 } from '@/store/command-palette'
+import { selectThisDeviceForNewChat, thisDeviceLabel } from '@/store/connections'
 import { recordAction, recordDislike } from '@/store/desktop-metrics'
 import {
   $findInPage,
@@ -181,6 +182,16 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     }
   }
 
+  // Match the sidebar New Session button. A plain keyboard new chat should
+  // target the current live profile, not a stale per-profile quick-create
+  // selection from a prior action.
+  const startNewSessionHere = () => {
+    setWorkspaceScope('sessions')
+    $newChatProfile.set(null)
+    deps.startFreshSession()
+    window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
+  }
+
   const goToSession = (sessionId: null | string) => {
     if (sessionId) {
       openSession(sessionId, navigate)
@@ -320,15 +331,16 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'nav.cron': () => navigate(CRON_ROUTE),
     'nav.agents': () => navigate(AGENTS_ROUTE),
 
+    // Fork ⌘N: new chat on This device — re-homes onto the local gateway when
+    // another one is selected (the switch re-homes the fresh draft).
     'session.new': () => {
-      // Match the sidebar New Session button. A plain keyboard new chat should
-      // target the current live profile, not a stale per-profile quick-create
-      // selection from a prior action.
-      setWorkspaceScope('sessions')
-      $newChatProfile.set(null)
-      deps.startFreshSession()
-      window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
+      startNewSessionHere()
+      void selectThisDeviceForNewChat().catch((error: unknown) =>
+        notifyError(error, translateNow('profiles.switchConnectionFailed', thisDeviceLabel()))
+      )
     },
+    // Fork ⌘⇧N: new chat on the currently selected gateway.
+    'session.newSameGateway': () => startNewSessionHere(),
     'session.newTab': () => deps.openNewSessionTab(),
     'session.newWindow': () => void openNewWindow(),
     'session.next': () => cycleTab(1),
@@ -343,7 +355,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'session.prevNeedsYou': () => goToSession(nextSidebarSessionId(currentSessionForStep(), -1, false)),
     'session.nextSession': () => goToSession(nextSidebarSessionId(currentSessionForStep(), 1, true)),
     'session.prevSession': () => goToSession(nextSidebarSessionId(currentSessionForStep(), -1, true)),
-    // ⌘⇧N: rename the selected (else focused) session, AI name pre-filled.
+    // ⌘⇧E: rename the selected (else focused) session, AI name pre-filled.
     'session.rename': () => {
       const sessionId = $selectedStoredSessionId.get() || $focusedStoredSessionId.get()
 

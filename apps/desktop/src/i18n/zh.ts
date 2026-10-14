@@ -350,6 +350,7 @@ export const zhOverrides = {
       'nav.agents': '打开智能体',
       'session.new': '新建会话',
       'session.newTab': '新建会话标签',
+      'session.newSameGateway': '在当前网关新建会话',
       'session.newWindow': '新建窗口',
       'session.next': '下一个会话',
       'session.prev': '上一个会话',

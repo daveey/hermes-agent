@@ -572,6 +572,7 @@ export const esOverrides = {
       'nav.agents': 'Abrir agentes',
       'session.new': 'Nueva sesión',
       'session.newTab': 'Nueva pestaña de sesión',
+      'session.newSameGateway': 'Nueva sesión en el gateway actual',
       'session.newWindow': 'Nueva ventana',
       'session.next': 'Siguiente sesión',
       'session.prev': 'Sesión anterior',
