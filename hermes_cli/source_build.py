@@ -231,7 +231,8 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
 
 def _build_desktop_product(project_root: Path, env: dict, publish_stage) -> None:
     from hermes_cli.main_desktop import (
-        _packaged_desktop_current_for_head, _refresh_installed_desktop_apps, build_prepared_desktop)
+        DESKTOP_PREBUILT_APP_ENV, _packaged_desktop_current_for_head, _refresh_installed_desktop_apps,
+        build_prepared_desktop, install_prebuilt_desktop_app)
 
     desktop_dir = project_root / "apps/desktop"
     if _packaged_desktop_current_for_head(desktop_dir, project_root):
@@ -248,10 +249,15 @@ def _build_desktop_product(project_root: Path, env: dict, publish_stage) -> None
         build_lock = DesktopBuildLock(project_root)
         build_lock.acquire(wait=True)
         try:
-            build_prepared_desktop(
-                desktop_dir, source_mode=False,
-                npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root,
-            )
+            # [daveey] A bundle prebuilt from this HEAD (hermes-sync's background stage) is swapped
+            # in instead of packing; any mismatch falls through to the normal build.
+            prebuilt = os.environ.get(DESKTOP_PREBUILT_APP_ENV, "").strip()
+            if not (prebuilt and install_prebuilt_desktop_app(
+                    desktop_dir, project_root, Path(prebuilt).expanduser())):
+                build_prepared_desktop(
+                    desktop_dir, source_mode=False,
+                    npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root,
+                )
         finally:
             build_lock.release()
     # A current release/ can still sit beside a stale installed copy (an earlier

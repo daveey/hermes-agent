@@ -418,3 +418,97 @@ def test_packaged_desktop_is_reused_only_while_it_names_head(tmp_path, monkeypat
     receipt_current["value"] = True
     subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "two"], check=True)
     assert not reused()
+
+
+def _prebuilt_fixture(tmp_path, monkeypatch, *, stamp_commit=None):
+    """A checkout at HEAD with a live packaged app, plus a prebuilt app staged elsewhere
+    (HERMES_DESKTOP_PREBUILT_APP). Records whether the normal desktop build ran."""
+    from hermes_cli import main_desktop, source_build
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    root = tmp_path / "checkout"
+    root.mkdir()
+    git = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run([*git[:3], "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "one"], check=True)
+    head = subprocess.run([*git[:3], "rev-parse", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+    def app_at(base, marker, commit):
+        app = base / "mac-arm64/Hermes.app"
+        (app / "Contents/MacOS").mkdir(parents=True)
+        (app / "Contents/MacOS/Hermes").write_text(marker)
+        dist = app / "Contents/Resources/app.asar.unpacked/dist"
+        dist.mkdir(parents=True)
+        (app / "Contents/Resources/install-stamp.json").write_text(json.dumps({"commit": commit}))
+        return app
+
+    desktop_dir = root / "apps/desktop"
+    app_at(desktop_dir / "release", "previous app", "0" * 40)
+    prebuilt = app_at(tmp_path / "stage-release", "prebuilt app", stamp_commit or head)
+    monkeypatch.setenv("HERMES_DESKTOP_PREBUILT_APP", str(prebuilt))
+
+    # Receipt/signature/bundle-shape checks are covered by their own tests; here they pass.
+    monkeypatch.setattr(source_build, "source_product_current", lambda *_a, **_k: True)
+    monkeypatch.setattr(main_desktop, "_renderer_bundle_torn", lambda _d: False)
+    monkeypatch.setattr(main_desktop, "_packaged_node_pty_missing", lambda _d: False)
+    monkeypatch.setattr(main_desktop, "_prebuilt_signature_error", lambda _app: None, raising=False)
+    monkeypatch.setattr(main_desktop, "_stage_macos_bundle_copy",
+                        lambda src, dst: shutil.copytree(src, dst, symlinks=True))
+    monkeypatch.setattr(main_desktop, "_refresh_installed_desktop_apps", lambda _d: None)
+    monkeypatch.setattr(main_desktop, "_packaged_desktop_current_for_head", lambda *_a: False)
+    built = []
+    monkeypatch.setattr(main_desktop, "build_prepared_desktop", lambda *a, **k: built.append(a))
+    return root, desktop_dir, built
+
+
+@pytest.mark.platforms("posix")
+def test_update_swaps_in_a_prebuilt_desktop_app_that_names_head(tmp_path, monkeypatch, capsys):
+    """HERMES_DESKTOP_PREBUILT_APP built from HEAD (hermes-sync's background stage) is swapped in
+    through the stage-and-swap path instead of running npm."""
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, desktop_dir, built = _prebuilt_fixture(tmp_path, monkeypatch)
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert built == []
+    live = desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes"
+    assert live.read_text() == "prebuilt app"
+    assert not list(desktop_dir.glob(".staging-*"))
+    assert not (desktop_dir / "release/mac-arm64.previous").exists()
+    # The prebuilt stays where it was: a failed apply can retry with it.
+    assert Path(os.environ["HERMES_DESKTOP_PREBUILT_APP"], "Contents/MacOS/Hermes").read_text() == "prebuilt app"
+    assert "prebuilt desktop app" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.platforms("posix")
+def test_update_builds_when_the_prebuilt_desktop_app_names_another_commit(tmp_path, monkeypatch, capsys):
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, desktop_dir, built = _prebuilt_fixture(tmp_path, monkeypatch, stamp_commit="f" * 40)
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert len(built) == 1
+    live = desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes"
+    assert live.read_text() == "previous app"
+    assert "not used" in capsys.readouterr().out
+
+
+@pytest.mark.platforms("posix")
+def test_update_builds_when_the_prebuilt_desktop_app_fails_its_signature(tmp_path, monkeypatch):
+    from hermes_cli import main_desktop
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, desktop_dir, built = _prebuilt_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(main_desktop, "_prebuilt_signature_error", lambda _app: "signature does not verify")
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert len(built) == 1
+    assert (desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes").read_text() == "previous app"
+
+
+@pytest.mark.platforms("posix")
+def test_update_builds_without_a_prebuilt_desktop_app(tmp_path, monkeypatch):
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, _desktop_dir, built = _prebuilt_fixture(tmp_path, monkeypatch)
+    monkeypatch.delenv("HERMES_DESKTOP_PREBUILT_APP")
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert len(built) == 1

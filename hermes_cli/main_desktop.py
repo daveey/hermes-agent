@@ -147,6 +147,91 @@ def _packaged_desktop_current_for_head(desktop_dir: Path, project_root: Path) ->
     return not _desktop_build_needed(desktop_dir, project_root, source_mode=False)
 
 
+# [daveey] A bundle packed off to the side (hermes-sync stages the next origin/main while Desktop turns
+# keep the update deferred) stands in for the update's own pack when it was built from the new HEAD.
+DESKTOP_PREBUILT_APP_ENV = "HERMES_DESKTOP_PREBUILT_APP"
+
+
+def _prebuilt_signature_error(app: Path) -> Optional[str]:
+    """Why ``app``'s signature fails strict verification, or None."""
+    codesign = shutil.which("codesign")
+    if not codesign:
+        return "codesign not found"
+    if _codesign_verify(codesign, app, check=False).returncode != 0:
+        return "signature does not verify (codesign --verify --deep --strict)"
+    return None
+
+
+def _prebuilt_desktop_app_mismatch(app: Path, desktop_dir: Path, project_root: Path) -> Optional[str]:
+    """Why the prebuilt ``Hermes.app`` can't stand in for packing HEAD, or None when it can.
+
+    Same bar as ``_packaged_desktop_current_for_head`` (baked commit == HEAD, intact renderer,
+    node-pty present, receipt current for THIS checkout's inputs) plus a verifying signature
+    that does not downgrade the live app's signing team."""
+    if sys.platform != "darwin":
+        return "prebuilt desktop apps are only supported on macOS"
+    if not (app / "Contents" / "MacOS" / "Hermes").is_file():
+        return f"no app at {app}"
+    from hermes_cli.steward import read_install_stamp
+    from hermes_cli.version_info import _run_git
+
+    resources = app / "Contents" / "Resources"
+    commit = read_install_stamp(resources).get("commit")
+    head = _run_git(project_root, "rev-parse", "HEAD")
+    if not isinstance(commit, str) or commit != head:
+        return f"built from {str(commit)[:10]}, HEAD is {str(head)[:10]}"
+    dist = resources / "app.asar.unpacked" / "dist"
+    if not dist.is_dir() or _renderer_bundle_torn(dist):
+        return "renderer bundle missing or incomplete"
+    if _packaged_node_pty_missing(dist):
+        return "no node-pty native binary"
+    from hermes_cli import source_build
+
+    if not source_build.source_product_current(project_root, "desktop", dist):
+        return "its build receipt does not match this checkout's desktop inputs"
+    error = _prebuilt_signature_error(app)
+    if error:
+        return error
+    live_exe = _desktop_packaged_executable(desktop_dir)
+    codesign = shutil.which("codesign")
+    if live_exe is not None and codesign:
+        installed = _macos_signature_summary(codesign, live_exe.parents[2])
+        if installed is not None:
+            downgrade = _macos_signing_downgrade_error(installed, _macos_signature_summary(codesign, app))
+            if downgrade:
+                return downgrade
+    return None
+
+
+def install_prebuilt_desktop_app(desktop_dir: Path, project_root: Path, app: Path) -> Optional[Path]:
+    """Swap a verified prebuilt bundle in through the stage-and-swap path; the live exe, or None
+    (any mismatch or failure: the caller builds as usual, live app untouched). Never raises.
+    The prebuilt is copied, not moved, so a failed apply can retry with it."""
+    try:
+        reason = _prebuilt_desktop_app_mismatch(app, desktop_dir, project_root)
+    except Exception as exc:  # health: allow BLE001 -- optional fast path: any surprise means "build as usual"
+        reason = f"check failed: {exc}"
+    if reason:
+        print(f"  ⚠ Prebuilt desktop app not used ({reason}); building it instead")
+        return None
+    live_exe = _desktop_packaged_executable(desktop_dir)
+    root_name = (_desktop_unpacked_root(live_exe, desktop_dir / "release").name if live_exe is not None
+                 else (app.parent.name if app.parent.name.startswith("mac") else "mac-arm64"))
+    staging_dir = _desktop_staging_dir(desktop_dir)
+    try:
+        _stage_macos_bundle_copy(app, staging_dir / root_name / app.name)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _discard_desktop_staging(staging_dir)
+        print(f"  ⚠ Could not stage the prebuilt desktop app ({exc}); building it instead")
+        return None
+    exe = _swap_staged_desktop_app(desktop_dir, staging_dir)
+    if exe is None:
+        print("  ⚠ Could not swap in the prebuilt desktop app; building it instead")
+        return None
+    print(f"  ✓ Installed the prebuilt desktop app ({app})")
+    return exe
+
+
 def _desktop_packaged_executable(desktop_dir: Path) -> Optional[Path]:
     """Return the current platform's unpacked Electron app executable."""
     return _desktop_packaged_executable_in(desktop_dir / "release")
