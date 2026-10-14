@@ -360,9 +360,17 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if max_retries is not None and max_retries < 1:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
                     "use 1 to trip on the first failure.", 2)
+    in_worker = bool(os.environ.get("HERMES_KANBAN_TASK")) and is_dispatcher_owned_worker_context()
+    # An agent shelling out to the CLI from a chat (terminal / execute_code) owns the
+    # card just like the kanban_create tool would: stamp its session so the Desktop
+    # session's task list shows it. Workers' cards inherit their creator task's session.
+    session_id = None
+    if not in_worker:
+        from tools.kanban_tools import _persisted_session_id
+        session_id = _persisted_session_id(os.environ.get("HERMES_SESSION_ID"))
     with kbc.connect_closing() as conn:
         task_id = kb.create_task(
-            conn, title=args.title, body=body, assignee=args.assignee,
+            conn, title=args.title, body=body, assignee=args.assignee, session_id=session_id,
             created_by=args.created_by or _profile_author(),
             workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
             project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
@@ -376,7 +384,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             completion_contract=getattr(args, "completion_contract", None),
             initial_status=getattr(args, "initial_status", "running"),
             creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
-                             if is_dispatcher_owned_worker_context() else None),
+                             if in_worker else None),
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
