@@ -85,6 +85,7 @@ import { isFileDrag, uploadFiles, useFileDrop } from './attach-drop'
 import { BoardSwitcher } from './board-switcher'
 import { TaskDrawer } from './drawer'
 import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
+import { $openTaskRequest } from './open-task'
 import { OrchestrationPanel } from './orchestration'
 import { columnMeta, type KanbanBoard, type KanbanTask, type TaskEstimate } from './types'
 import {
@@ -1171,6 +1172,23 @@ export function KanbanBoardPage() {
     setAddStatus(requestedLane)
     $newTaskLane.set(null)
   }, [requestedLane])
+
+  // An open-task request from outside the page (the completion toast's Open
+  // action): switch to the event's board, open the drawer, clear the request.
+  const requestedTask = useValue($openTaskRequest)
+
+  useEffect(() => {
+    if (requestedTask === null) {
+      return
+    }
+
+    if (requestedTask.board && requestedTask.board !== $boardSlug.get()) {
+      $boardSlug.set(requestedTask.board)
+    }
+
+    setOpenId(requestedTask.taskId)
+    $openTaskRequest.set(null)
+  }, [requestedTask])
 
   const toggleSelect = (id: string) => {
     setSelected(prev => {

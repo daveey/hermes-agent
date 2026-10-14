@@ -28,7 +28,8 @@ const { hostMock } = vi.hoisted(() => ({
   hostMock: { notify: vi.fn(), navigate: vi.fn() }
 }))
 
-vi.mock('@hermes/plugin-sdk', () => ({
+vi.mock('@hermes/plugin-sdk', async () => ({
+  atom: (await import('nanostores')).atom,
   host: hostMock,
   // Pulled in transitively via ./i18n (the module reads its `en` bundle for
   // fallback titles); never called in these tests.
@@ -373,6 +374,19 @@ describe('notification content', () => {
     await m.onKanbanEventsFrame('smoke', [ev(101, 'completed', { summary: 'Done' })])
 
     lastNotify().action?.onClick()
+    expect(hostMock.navigate).toHaveBeenCalledWith('/kanban')
+  })
+
+  it('Open action parks the event board + task so the page opens its drawer', async () => {
+    const m = await loadModule()
+    const { $openTaskRequest } = await import('./open-task')
+    m.bindCompletionNotify(makeRest(() => 100) as never)
+
+    await m.onKanbanEventsFrame('smoke', [ev(101, 'block_loop_detected', { reason: 'needs a decision' })])
+
+    expect($openTaskRequest.get()).toBeNull()
+    lastNotify().action?.onClick()
+    expect($openTaskRequest.get()).toEqual({ board: 'smoke', taskId: 't101' })
     expect(hostMock.navigate).toHaveBeenCalledWith('/kanban')
   })
 })

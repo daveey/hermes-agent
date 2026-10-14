@@ -30,6 +30,7 @@
 import { host, type PluginOs, type PluginRestOptions, type PluginTranslate } from '@hermes/plugin-sdk'
 
 import { en } from './i18n'
+import { $openTaskRequest } from './open-task'
 
 type Rest = <T>(path: string, opts?: PluginRestOptions) => Promise<T>
 
@@ -142,7 +143,12 @@ function rawErrorFor(kind: string, ev: CompletionEvent): string {
   return kind === 'gave_up' ? trimmed(ev.payload?.error) : ''
 }
 
-function notifyOne(kind: string, spec: { titleKey: string; toast: ToastKind }, ev: CompletionEvent): void {
+function notifyOne(
+  slug: string,
+  kind: string,
+  spec: { titleKey: string; toast: ToastKind },
+  ev: CompletionEvent
+): void {
   const taskId = (ev.task_id ?? '').trim()
   const body = bodyFor(kind, ev)
 
@@ -168,7 +174,18 @@ function notifyOne(kind: string, spec: { titleKey: string; toast: ToastKind }, e
     title,
     message,
     ...(detail ? { detail } : {}),
-    action: { label: t('notify.openKanban'), onClick: () => host.navigate('/kanban') }
+    action: {
+      label: t('notify.openKanban'),
+      onClick: () => {
+        // Land on the event's board with the task's drawer open, not just
+        // whatever board the page last showed.
+        if (taskId) {
+          $openTaskRequest.set({ board: slug, taskId })
+        }
+
+        host.navigate('/kanban')
+      }
+    }
   })
 
   // Native OS notification — the desktop shell fires it only while the user
@@ -210,7 +227,7 @@ export async function onKanbanEventsFrame(slug: string, events?: CompletionEvent
 
     if (spec) {
       try {
-        notifyOne(ev.kind!, spec, ev)
+        notifyOne(slug, ev.kind!, spec, ev)
         fired = true
       } catch {
         /* swallowed */
