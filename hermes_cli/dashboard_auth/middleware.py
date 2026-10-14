@@ -20,6 +20,8 @@ from starlette.concurrency import run_in_threadpool
 from hermes_cli.dashboard_auth import list_session_providers
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
 from hermes_cli.dashboard_auth.base import ProviderError
+from hermes_cli.dashboard_auth.cf_access import HEADER as CF_ACCESS_HEADER
+from hermes_cli.dashboard_auth.cf_access import session_from_request as cf_access_session
 from hermes_cli.dashboard_auth.cookies import (
     clear_session_cookies, clear_sso_attempt_cookie, detect_https, read_session_cookies,
     read_session_provider, read_sso_attempt_cookie, set_session_cookies,
@@ -164,7 +166,22 @@ async def gated_auth_middleware(
         return await call_next(request)
     # Already authenticated by the token-auth seam (service caller on a registered token
     # route): not a cookie session, must not bounce to /login.
-    if getattr(request.state, "token_authenticated", False) or _path_is_public(request.url.path):
+    if getattr(request.state, "token_authenticated", False):
+        return await call_next(request)
+    path = request.url.path
+    # Opt-in Cloudflare Access trust: a verified, allowlisted Access login IS the session, so
+    # the user isn't asked to log in twice. ``/login`` is checked too so a stray bounce there
+    # goes straight back to the app instead of rendering the form.
+    if (path == "/login" or not _path_is_public(path)) and request.headers.get(CF_ACCESS_HEADER):
+        cf_session = await run_in_threadpool(cf_access_session, request)
+        if cf_session is not None:
+            if path == "/login":
+                nxt = request.query_params.get("next", "")
+                target = nxt if nxt and is_safe_next_path(nxt) else f"{prefix_from_request(request)}/"
+                return RedirectResponse(url=target, status_code=302)
+            request.state.session = cf_session
+            return await call_next(request)
+    if _path_is_public(path):
         return await call_next(request)
     # RFC 8252 native-app bearer path: the same provider-minted access token the cookie flow
     # stores, verified with the same provider stack, no cookie read or set. A presented-but-
