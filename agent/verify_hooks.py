@@ -41,6 +41,12 @@ def coding_verify_guidance(config: Optional[dict[str, Any]] = None) -> Optional[
     return CODING_VERIFY_GUIDANCE
 
 
+def pre_verify_every_turn(config: Optional[dict[str, Any]] = None) -> bool:
+    """``agent.pre_verify_every_turn``: also fire ``pre_verify`` on turns with no file edits (with
+    ``changed_paths=[]``), so plugins can check any final answer. Default off (upstream behavior)."""
+    return is_truthy_value(_agent_cfg(config).get("pre_verify_every_turn", False), default=False)
+
+
 def _agent_cfg(config: Optional[dict[str, Any]]) -> dict[str, Any]:
     if config is None:
         try:
@@ -53,4 +59,5 @@ def _agent_cfg(config: Optional[dict[str, Any]]) -> dict[str, Any]:
     return agent_cfg if isinstance(agent_cfg, dict) else {}
 
 
-__all__ = ["CODING_VERIFY_GUIDANCE", "DEFAULT_MAX_VERIFY_NUDGES", "coding_verify_guidance", "max_verify_nudges"]
+__all__ = ["CODING_VERIFY_GUIDANCE", "DEFAULT_MAX_VERIFY_NUDGES", "coding_verify_guidance", "max_verify_nudges",
+           "pre_verify_every_turn"]
