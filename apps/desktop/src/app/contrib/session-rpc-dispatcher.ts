@@ -33,6 +33,7 @@
  */
 import type { MutableRefObject } from 'react'
 
+import { noteRpcStoredSessionId } from '@/app/session/hooks/use-session-actions/owner-follow'
 import { resolveSessionOwner } from '@/app/session/hooks/use-session-actions/utils'
 import type { ClientSessionState } from '@/app/types'
 import { isSessionGoneForBackgroundPolling } from '@/store/runtime-gone'
@@ -106,6 +107,10 @@ export function createSessionRpcDispatcher(deps: SessionRpcDispatcherDeps): Ambi
     // ride the ambient socket: that turns missing metadata into a misleading
     // backend "session not found" on a backend that never held the runtime.
     assertSessionOwnerResolved(owner, { method, sessionId: paramSessionId ? routingSessionId : null })
+
+    // A misroute is followed by the stored id (the owner records key on it);
+    // the shared router only sees the runtime id in params.
+    noteRpcStoredSessionId(paramSessionId, routingSessionId)
 
     try {
       return await requestForSessionProfile<T>(owner, ambientRequest, method, params ?? {}, timeoutMs, signal)

@@ -179,13 +179,99 @@ export function sessionRpcNeedsProfileRoute(ownerProfile: SessionOwnerScope | un
   return ownerProfile != null && Boolean(String(ownerProfile).trim())
 }
 
+// ── Following a session to its owning gateway [daveey] ──────────────────────
+// With several registry gateways in one window, an owner record can name the
+// wrong gateway (a stale hint or tile route from before the session's owner was
+// known). That gateway answers the RPC "session not found" — 4007 for a stored
+// id, 4001 ("not in memory") for a runtime id — and background pollers then hit
+// it every few seconds. The follower (registered by the session layer, which
+// owns the unified list, the hints and the registry probe) corrects the route
+// before dispatch when the unified list proves another owner, and after such a
+// not-found answer resolves the owner and retries ONCE there. session.resume is
+// never followed here: its callers rebind the runtime to the owner themselves.
+
+type SessionRpcParams = Record<string, unknown>
+
+export interface SessionOwnerFollower {
+  /** Sync, pre-dispatch: a proven better owner than `owner`, else undefined. */
+  redirect: (owner: SessionOwnerScope, method: string, params: SessionRpcParams) => SessionOwnerRoute | undefined
+  /** After `owner` failed with `error`: the one owner to retry on, else undefined. */
+  follow: (
+    owner: SessionOwnerScope,
+    method: string,
+    params: SessionRpcParams,
+    error: unknown
+  ) => Promise<SessionOwnerRoute | undefined>
+  /** The retry on `route` answered: record it so the wrong owner is not tried again. */
+  confirm: (owner: SessionOwnerScope, route: SessionOwnerRoute, method: string, params: SessionRpcParams) => void
+  /** The retry on `route` failed too: stop following for this session/owner pair. */
+  reject: (owner: SessionOwnerScope, route: SessionOwnerRoute, method: string, params: SessionRpcParams) => void
+}
+
+let sessionOwnerFollower: SessionOwnerFollower | null = null
+
+export function setSessionOwnerFollower(next: SessionOwnerFollower | null): void {
+  sessionOwnerFollower = next
+}
+
+function followableSessionRpc(method: string, params: SessionRpcParams): boolean {
+  return method !== 'session.resume' && typeof params.session_id === 'string' && Boolean(params.session_id.trim())
+}
+
 /**
  * Dispatch a session-scoped RPC on the socket that owns `ownerProfile`,
  * falling back to the ambient dispatcher when the active gateway already
  * serves that profile (keeps the primary's reauth-aware reconnect path).
- * The route is decided at CALL time, not at swap time.
+ * The route is decided at CALL time, not at swap time. With a follower
+ * registered (multi-gateway), the route is corrected / followed once — see
+ * SessionOwnerFollower.
  */
 export function requestForSessionProfile<T>(
+  ownerProfile: SessionOwnerScope | undefined,
+  ambientRequest: <R>(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ) => Promise<R>,
+  method: string,
+  params: Record<string, unknown> = {},
+  timeoutMs?: number,
+  signal?: AbortSignal
+): Promise<T> {
+  const follower = sessionOwnerFollower
+
+  if (!follower || !followableSessionRpc(method, params)) {
+    return dispatchForSessionOwner<T>(ownerProfile, ambientRequest, method, params, timeoutMs, signal)
+  }
+
+  const owner: SessionOwnerScope = follower.redirect(ownerProfile, method, params) ?? ownerProfile
+
+  return dispatchForSessionOwner<T>(owner, ambientRequest, method, params, timeoutMs, signal).catch(
+    async (error: unknown) => {
+      const route = signal?.aborted ? undefined : await follower.follow(owner, method, params, error)
+
+      if (!route) {
+        throw error
+      }
+
+      try {
+        const result = await dispatchForSessionOwner<T>(route, ambientRequest, method, params, timeoutMs, signal)
+        follower.confirm(owner, route, method, params)
+
+        return result
+      } catch {
+        follower.reject(owner, route, method, params)
+
+        // The caller's error handling (gone-latch, not-found recovery) keys on
+        // the answer from the route it chose.
+        throw error
+      }
+    }
+  )
+}
+
+function dispatchForSessionOwner<T>(
   ownerProfile: SessionOwnerScope | undefined,
   ambientRequest: <R>(
     method: string,
