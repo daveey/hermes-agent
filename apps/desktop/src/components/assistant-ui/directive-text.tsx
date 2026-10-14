@@ -2,10 +2,13 @@
 
 import type { Unstable_DirectiveFormatter, Unstable_DirectiveSegment, Unstable_TriggerItem } from '@assistant-ui/core'
 import type { TextMessagePartComponent, TextMessagePartProps } from '@assistant-ui/react'
+import { useStore } from '@nanostores/react'
+import { atom } from 'nanostores'
 import type { FC } from 'react'
 import { Fragment, useEffect, useMemo, useState } from 'react'
 
 import { isPastedContentPath } from '@/app/chat/composer/large-paste'
+import { useTileSessionView } from '@/app/chat/session-view-context'
 import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { type I18nContextValue, useI18n } from '@/i18n'
 import { isReadFileErrorResult } from '@/lib/desktop-fs'
@@ -489,7 +492,7 @@ const DirectiveImage: FC<{ id: string; label: string }> = ({ id, label }) => {
  *  it's already a tile/main, otherwise open a stacked tab (never steals main
  *  from under the chat you're reading). Lazy-imports so the composer's rich
  *  editor can pull this module in without booting the profile/REST stack. */
-export function openSessionRef(value: string) {
+export function openSessionRef(value: string, originStoredId?: null | string) {
   const { sessionId } = parseSessionRefValue(value)
 
   if (!sessionId) {
@@ -497,8 +500,21 @@ export function openSessionRef(value: string) {
   }
 
   triggerHaptic('selection')
+  // Route to the backend that OWNS the referenced session (gateway qualifier,
+  // tagged row, hint, or the chat the link sits in) — opening the bare id on
+  // the active gateway left a blank tab whenever another gateway was selected.
   // navigate is unused for the `tab` intent (focus-or-tile only).
-  void import('@/app/open-session').then(({ openSession }) => openSession(sessionId, () => undefined, 'tab'))
+  void Promise.all([import('@/app/open-session'), import('@/app/chat/session-ref-owner')]).then(
+    ([{ openSession }, { resolveSessionRefOwner }]) => {
+      const ownerRoute = resolveSessionRefOwner(value, originStoredId)
+
+      if (ownerRoute) {
+        openSession(sessionId, () => undefined, 'tab', { ownerRoute, workspaceMode: 'sessions' })
+      } else {
+        openSession(sessionId, () => undefined, 'tab')
+      }
+    }
+  )
 }
 
 /** What activating a directive of a given kind does. The single source of truth
@@ -525,7 +541,8 @@ export const DIRECTIVE_ACTIONS: Record<string, DirectiveAction> = {
   session: {
     icon: 'link-external',
     label: t => t.composer.openDirective,
-    run: openSessionRef
+    // The pill passes `{ native }` as its 2nd arg — never an origin id.
+    run: value => openSessionRef(value)
   },
   url: {
     href: value => value,
@@ -533,6 +550,14 @@ export const DIRECTIVE_ACTIONS: Record<string, DirectiveAction> = {
     label: t => t.composer.openDirective,
     run: openLink
   }
+}
+
+const NO_STORED_ID = atom<null | string>(null)
+
+/** Stored id of the tile chat this ref renders in; null in the main chat,
+ *  whose owner is the active gateway (the ambient fallback). */
+function useOriginStoredId(): null | string {
+  return useStore(useTileSessionView()?.$storedId ?? NO_STORED_ID)
 }
 
 /** A `@session:<profile>/<id>` reference in the user transcript (directive
@@ -543,8 +568,11 @@ export const SessionRefChip: FC<{
   value: string
 }> = ({ label, value }) => {
   const resolved = useSessionLinkTitle(value, label)
+  const originStoredId = useOriginStoredId()
 
-  return <DirectiveChip id={value} label={resolved} onClick={() => openSessionRef(value)} type="session" />
+  return (
+    <DirectiveChip id={value} label={resolved} onClick={() => openSessionRef(value, originStoredId)} type="session" />
+  )
 }
 
 /** A `@session:` reference in assistant markdown (`#session/` links rewritten
@@ -555,6 +583,7 @@ export const SessionRefLink: FC<{
   value: string
 }> = ({ label, value }) => {
   const resolved = useSessionLinkTitle(value, label)
+  const originStoredId = useOriginStoredId()
 
   return (
     <a
@@ -563,7 +592,7 @@ export const SessionRefLink: FC<{
       onClick={event => {
         event.preventDefault()
         event.stopPropagation()
-        openSessionRef(value)
+        openSessionRef(value, originStoredId)
       }}
       title={value}
     >

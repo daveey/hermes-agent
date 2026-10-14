@@ -1,5 +1,5 @@
 import { computed, type ReadableAtom } from 'nanostores'
-import { createContext, useContext } from 'react'
+import { useContext } from 'react'
 
 import type { ClientSessionState } from '@/app/types'
 import type { ChatMessage } from '@/lib/chat-messages'
@@ -20,6 +20,7 @@ import {
 } from '@/store/session'
 import { $sessionStates } from '@/store/session-states'
 
+import { SessionViewContext } from './session-view-context'
 import { lastVisibleMessageIsUser } from './thread-loading'
 
 /**
@@ -136,8 +137,6 @@ export const PRIMARY_SESSION_VIEW: SessionView = {
   $turnStartedAt: primaryField<number | null>(state => state.turnStartedAt, $turnStartedAt)
 }
 
-const SessionViewContext = createContext<SessionView>(PRIMARY_SESSION_VIEW)
-
 export const SessionViewProvider = SessionViewContext.Provider
 
-export const useSessionView = (): SessionView => useContext(SessionViewContext)
+export const useSessionView = (): SessionView => useContext(SessionViewContext) ?? PRIMARY_SESSION_VIEW

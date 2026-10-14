@@ -159,6 +159,19 @@ describe('openSession', () => {
     expect(navigate).not.toHaveBeenCalled()
   })
 
+  it('pins a known owner route on a new sessions-mode tile (cross-gateway @session ref)', () => {
+    const scope = {
+      ownerRoute: { connectionId: 'local', profile: 'default', targetProfile: 'default' },
+      workspaceMode: 'sessions' as const
+    }
+
+    focusOpenSession.mockReturnValue(null)
+
+    openSession('s1', navigate, 'tab', scope)
+
+    expect(openSessionTile).toHaveBeenCalledWith('s1', 'center', undefined, undefined, scope)
+  })
+
   it('threads an exact Bot owner into a new session tile', () => {
     const scope = { workspaceMode: 'bots' as const, workspaceOwnerKey: 'connection-a::default' }
     focusOpenSession.mockReturnValue(null)

@@ -196,6 +196,11 @@ export function openSession(
 
     if (botWorkspaceScope) {
       openSessionTile(storedSessionId, 'center', undefined, undefined, botWorkspaceScope)
+    } else if (workspaceScope.ownerRoute) {
+      // A caller that knows the exact owner (a `@session:` ref on another
+      // gateway) pins it on the tile, so the tile resolves and resumes on that
+      // backend instead of probing whichever gateway is active.
+      openSessionTile(storedSessionId, 'center', undefined, undefined, workspaceScope)
     } else {
       openSessionTile(storedSessionId, 'center')
     }
