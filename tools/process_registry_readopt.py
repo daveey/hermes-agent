@@ -154,6 +154,34 @@ class ProcessReadoptMixin:
                         return
 
 
+CHECKPOINT_KEEPER_SECONDS = 30.0
+_keeper_lock = threading.Lock()
+_keeper_thread: Optional[threading.Thread] = None
+
+
+def start_checkpoint_keeper(registry=None, interval: float = CHECKPOINT_KEEPER_SECONDS) -> bool:
+    """Desktop backend: every *interval* s, put back any live entry another writer dropped from
+    processes.json (``reassert_checkpoint``). Idempotent; one file read per tick. [daveey]"""
+    global _keeper_thread
+    if registry is None:
+        from tools.process_registry import process_registry as registry
+
+    def _loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                registry.reassert_checkpoint()
+            except Exception:
+                logger.debug("checkpoint keeper tick failed", exc_info=True)
+
+    with _keeper_lock:
+        if _keeper_thread is not None and _keeper_thread.is_alive():
+            return False
+        _keeper_thread = threading.Thread(target=_loop, name="process-checkpoint-keeper", daemon=True)
+        _keeper_thread.start()
+    return True
+
+
 def _safe_owns(owns: Callable[[dict[str, Any]], bool], evt: dict[str, Any]) -> bool:
     try:
         return bool(owns(evt))

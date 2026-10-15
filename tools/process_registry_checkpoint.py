@@ -128,6 +128,36 @@ class ProcessCheckpointMixin:
         from utils import atomic_json_write
         atomic_json_write(_checkpoint_path(), entries)
 
+    def reassert_checkpoint(self) -> bool:
+        """Rewrite processes.json when it lacks one of this registry's live sessions; True if
+        it rewrote. Another Hermes process still on pre-merge code (a kanban worker or CLI
+        started before an update) overwrites the file with only its own entries, which drops
+        this backend's watchers: the sidebar's restart view and the next backend's re-adoption
+        both lose them, so the chat paints green and never wakes. [daveey]"""
+        from tools.process_registry import _checkpoint_path
+
+        with self._lock:
+            own = {s.id for s in self._running.values() if not s.exited}
+        if not own:
+            return False
+        try:
+            with self._checkpoint_file_lock():
+                try:
+                    existing = json.loads(_checkpoint_path().read_text(encoding="utf-8-sig"))
+                except Exception:
+                    existing = []
+                present = {e.get("session_id") for e in existing if isinstance(e, dict)} \
+                    if isinstance(existing, list) else set()
+                if own <= present:
+                    return False
+                self._write_checkpoint_locked()
+                logger.info("Re-wrote process checkpoint: another writer dropped %d live entr%s",
+                            len(own - present), "y" if len(own - present) == 1 else "ies")
+                return True
+        except Exception:
+            logger.debug("Checkpoint reassert failed", exc_info=True)
+            return False
+
     def recover_from_checkpoint(self, owner: Optional[str] = None) -> int:
         """On startup, probe PIDs from the checkpoint file; returns how many were
         recovered as detached sessions.

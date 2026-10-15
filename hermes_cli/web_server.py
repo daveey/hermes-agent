@@ -255,9 +255,10 @@ async def _lifespan(app: FastAPI):
     # Re-adopt background jobs a previous backend's chats left running (orphans of a Desktop
     # restart) and wake each chat when its job exits (tools/process_registry_readopt.py). [daveey]
     try:
-        from tools.process_registry_readopt import start_tui_orphan_recovery
+        from tools.process_registry_readopt import start_checkpoint_keeper, start_tui_orphan_recovery
 
         start_tui_orphan_recovery()
+        start_checkpoint_keeper()
     except Exception:
         _log.warning("background process re-adoption did not start", exc_info=True)
 

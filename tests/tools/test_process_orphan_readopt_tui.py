@@ -247,3 +247,22 @@ def test_messaging_gateway_and_desktop_backend_recover_with_their_owner_filter()
     assert "recover_from_checkpoint()" not in gw
     assert gw.count('recover_from_checkpoint(owner="gateway")') == 2
     assert "start_tui_orphan_recovery()" in inspect.getsource(web_server)
+
+
+def test_reassert_checkpoint_restores_entries_a_foreign_writer_dropped(checkpoint, procs):
+    """A pre-update Hermes process overwrites processes.json with only its own entries; the
+    Desktop backend's keeper must put its live watcher back so a later restart re-adopts it. [daveey]"""
+    checkpoint.write_text(json.dumps([_entry("proc_tui", procs().pid, TUI_KEY)]))
+    registry = ProcessRegistry()
+    assert registry.recover_from_checkpoint(owner="tui") == 1
+    assert registry.reassert_checkpoint() is False  # nothing missing: no rewrite
+    checkpoint.write_text(json.dumps([{"session_id": "proc_foreign", "pid": 1, "pid_scope": "host"}]))
+    assert registry.reassert_checkpoint() is True
+    assert "proc_tui" in {e["session_id"] for e in json.loads(checkpoint.read_text())}
+    assert registry.reassert_checkpoint() is False
+
+
+def test_reassert_checkpoint_noop_without_live_sessions(checkpoint):
+    checkpoint.write_text("[]")
+    assert ProcessRegistry().reassert_checkpoint() is False
+    assert checkpoint.read_text() == "[]"
