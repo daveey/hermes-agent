@@ -2,7 +2,7 @@
 
 Each record carries a ``level`` so log shippers grade it by intent rather than by its words: a
 supervised restart (exit 75 back to launchd/systemd after a SIGUSR1 drain, ``hermes update`` or
-``/restart``) is routine, while a crash or a non-zero exit is an error.
+``/restart``) is routine, a non-zero return a warning, and a crash or failing exit code an error.
 """
 
 from __future__ import annotations
@@ -13,12 +13,14 @@ import os
 import sys
 from datetime import UTC, datetime
 
-_ERROR_TAGS = frozenset({"asyncio.run.exception", "gateway.exit_nonzero"})
+# start_gateway() also returns False for a SIGTERM stop (launchctl bootout, systemctl stop), so a
+# non-zero return is a warning; only an escaped exception or a failing SystemExit is an error.
+_TAG_LEVELS = {"asyncio.run.exception": "error", "gateway.exit_nonzero": "warning"}
 
 
 def _record_level(tag: str, extra: dict[str, object]) -> str:
-    if tag in _ERROR_TAGS:
-        return "error"
+    if tag in _TAG_LEVELS:
+        return _TAG_LEVELS[tag]
     if tag == "asyncio.run.SystemExit":
         from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
         return "info" if extra.get("code") in (None, 0, GATEWAY_SERVICE_RESTART_EXIT_CODE) else "error"
