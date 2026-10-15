@@ -196,6 +196,63 @@ class DurableTurnLease:
         self._interrupt_turn("Session turn lease could not be refreshed; stopping to protect the transcript.")
         return False
 
+    def _renew_after_lapse(self, started: float):
+        """[daveey] The tick ran only after the row's expiry had passed, so this process was not
+        running for longer than the lease TTL. In practice that is macOS sleep: the scheduler waits
+        on the monotonic clock, which stops during sleep, while the row's wall-clock expiry keeps
+        running. Every logged "stayed locked through its lifetime" lined up with a wake from
+        clamshell or maintenance sleep. Killing the turn on wake throws away work that nobody else
+        claimed.
+
+        Expiry only makes the row reclaimable. The holder-qualified UPDATE is a compare-and-swap,
+        serialised with acquisition by BEGIN IMMEDIATE. If a successor reclaimed the row (or claimed
+        and released it), the holder no longer matches and the renewal misses, so the lease is
+        really lost and the turn stops. Otherwise this turn still owns the session and keeps
+        running. The transcript-write fence (``hermes_state_messages``) already renews a lapsed row
+        that still names its holder; this brings the refresher into line with it. A lock error here
+        is a missed tick, retried next interval: the row is already reclaimable, so stopping would
+        not protect anything, and holder fencing still refuses the transcript writes of a turn
+        whose row a successor takes."""
+        session_id = self._current_session_id()
+        lapsed_s = max(0.0, started - self._authority_deadline)
+        try:
+            renewed = self.db.refresh_session_turn_lease(
+                session_id, self.holder, ttl_seconds=LEASE_TTL_SECONDS, patience_s=_REFRESH_WRITE_PATIENCE_S,
+            )
+        except Exception as exc:
+            if self.stop.is_set():
+                return False
+            from hermes_state_errors import is_sqlite_lock_error
+
+            if is_sqlite_lock_error(exc):
+                if started < self._authority_deadline:
+                    # Not lapsed yet (a tick inside the expiry margin): same rule as a locked
+                    # renewal near expiry, stop before the row becomes reclaimable.
+                    return self._stop_on_exhausted_authority()
+                logger.warning(
+                    "Session turn lease lapsed %.0fs ago and its renewal hit a SQLite lock; will retry: %s",
+                    lapsed_s, session_id,
+                )
+                return None
+            logger.warning("Failed to renew lapsed session turn lease: %s", session_id, exc_info=True)
+            self._interrupt_turn("Session turn lease could not be refreshed; stopping to protect the transcript.")
+            return False
+        if renewed:
+            self._authority_deadline = started + LEASE_TTL_SECONDS
+            logger.warning(
+                "Session turn lease renewed %.0fs after it lapsed (process suspended or starved; "
+                "no other owner claimed the session): %s", lapsed_s, session_id,
+            )
+            return None
+        if self.stop.is_set():
+            return False
+        logger.error(
+            "Lost session turn lease while turn is active (another owner claimed it during a %.0fs lapse): %s",
+            lapsed_s, session_id,
+        )
+        self._interrupt_turn("Session turn lease lost; stopping to protect the transcript.")
+        return False
+
     def refresh_tick(self):
         """One periodic renewal (every ``refresh_interval`` via the shared scheduler). A real
         miss (rowcount 0) or a non-lock error interrupts the turn. A SQLite lock is a missed
@@ -218,7 +275,7 @@ class DurableTurnLease:
         # margin covers one BEGIN IMMEDIATE that blocks in SQLite's busy handler past the patience.
         patience = self._authority_deadline - _REFRESH_EXPIRY_MARGIN_S - started
         if patience <= 0:
-            return self._stop_on_exhausted_authority()
+            return self._renew_after_lapse(started)
         try:
             if self.db.refresh_session_turn_lease(
                 self._current_session_id(), self.holder, ttl_seconds=LEASE_TTL_SECONDS,
