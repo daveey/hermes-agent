@@ -641,7 +641,11 @@ def _kill_stale_dashboard_processes(
     launchd_jobs = _dash._loaded_launchd_backend_jobs() if sys.platform != "win32" else []
 
     def _launchd_owner(pid: int, cmdline: list[str] | None):
-        return _dash._launchd_job_owning_backend(pid, cmdline, launchd_jobs, ancestors=_process_ancestors(pid))
+        if sys.platform == "win32":
+            return None
+        ancestors = _process_ancestors(pid)
+        return (_dash._launchd_job_owning_backend(pid, cmdline, launchd_jobs, ancestors=ancestors)
+                if launchd_jobs else None) or _dash._launchd_job_from_launch_env(pid, ancestors)
 
     if restart_managed and sys.platform != "win32":
         for pid in pids:
@@ -650,7 +654,7 @@ def _kill_stale_dashboard_processes(
             if pid_service[pid]:
                 continue
             cmdline = _dash._dashboard_cmdline_for_pid(pid)
-            if launchd_jobs and (job := _launchd_owner(pid, cmdline)):
+            if job := _launchd_owner(pid, cmdline):
                 pid_launchd[pid] = job
             elif cmdline:
                 # Manual process: exact argv + HERMES_HOME for the respawn and its profile cap.
@@ -664,7 +668,7 @@ def _kill_stale_dashboard_processes(
                     not in already_restarted_units]
             if not pids:
                 return _empty_result()
-    elif launchd_jobs:
+    elif sys.platform != "win32":
         for pid in pids:
             if job := _launchd_owner(pid, _dash._dashboard_cmdline_for_pid(pid)):
                 pid_launchd[pid] = job

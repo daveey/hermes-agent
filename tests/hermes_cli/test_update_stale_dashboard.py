@@ -52,7 +52,8 @@ def _refresh_bindings_against_live_module():
 def _no_real_launchd_jobs():
     """The kill path now scans the host's launchd jobs on macOS; a developer's own LaunchAgents
     must never leak into these tests. Tests that need jobs patch the scan themselves."""
-    with patch.object(main_dashboard, "_loaded_launchd_backend_jobs", return_value=[]):
+    with patch.object(main_dashboard, "_loaded_launchd_backend_jobs", return_value=[]), \
+         patch.object(main_dashboard, "_launchd_job_from_launch_env", return_value=None):
         yield
 
 
@@ -813,6 +814,7 @@ class TestCmdlineCapture:
             return MagicMock(returncode=0, stdout="hermes serve --port 8300\n", stderr="")
 
         with patch.object(live.os.path, "exists", return_value=False), \
+             patch.dict(sys.modules, {"psutil": None}), \
              patch("subprocess.run", side_effect=fake_run):
             argv = main_dashboard._dashboard_cmdline_for_pid(888)
 

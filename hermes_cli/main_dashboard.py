@@ -335,6 +335,40 @@ def _launchd_job_owning_backend(
     return None
 
 
+def _launchd_job_from_launch_env(
+    pid: int, ancestors: list[int] | tuple[int, ...] = (),
+) -> tuple[str, str, int | None] | None:
+    """[daveey] ``(domain, label, live_pid)`` of the launchd job that spawned *pid*, read from the
+    process's own launch environment, or None.
+
+    ``_loaded_launchd_backend_jobs`` only collects plists whose ``ProgramArguments`` parse as a
+    ``hermes dashboard``/``serve`` command line, so a job running a wrapper script that ``exec``s the
+    backend (``ProgramArguments = [~/.bb-hermes/bin/redde-serve]``) was never seen: the update then
+    replayed the argv as a detached copy, raced the job's KeepAlive respawn and reported the
+    dashboard as not restarted. launchd stamps ``XPC_SERVICE_NAME=<label>`` on the job process; the
+    label counts only when ``launchctl print`` confirms the job is loaded with *pid* (or one of its
+    *ancestors*) as its live process, so an inherited or stale name never claims a process."""
+    if sys.platform != "darwin" or pid <= 1:
+        return None
+    from hermes_cli.dashboard_procs import _pid_environ
+    from hermes_cli.gateway import _launchd_print_service_pid
+
+    label = str((_pid_environ(pid) or {}).get("XPC_SERVICE_NAME") or "").strip()
+    if not label or label == "0":
+        return None
+    uid = os.getuid()  # windows-footgun: ok — darwin-only branch
+    for domain in (f"gui/{uid}", f"user/{uid}"):
+        try:
+            loaded, live_pid = _launchd_print_service_pid(domain, label)
+        except _SYSTEMCTL_ERRORS:
+            return None
+        if loaded:
+            if live_pid is not None and (live_pid == pid or live_pid in ancestors):
+                return (domain, label, live_pid)
+            return None
+    return None
+
+
 def _restart_launchd_job(domain: str, label: str, old_pid: int | None, *, timeout: float = 15.0) -> bool:
     """Bring a launchd-supervised backend back after its process was stopped: ``launchctl kickstart
     <domain>/<label>`` (no ``-k`` — a KeepAlive job may already have respawned it, and a kill would
@@ -362,6 +396,16 @@ def _dashboard_cmdline_for_pid(pid: int) -> list[str] | None:
                 raw = f.read()
             argv = [part.decode("utf-8", errors="replace") for part in raw.split(b"\x00") if part]
             return argv or None
+        # [daveey] psutil first: it returns the exact argv. ``ps -o command=`` + shlex re-splits a
+        # space-joined line, so a ``Hermes Python.app`` runpy bootstrap came back as
+        # ``['…/Hermes', 'Python.app/…', '-I', '-c', 'import', 'sys,', …]`` and its respawn died
+        # with a SyntaxError. ``ps`` stays for processes psutil may not read (another user's).
+        with contextlib.suppress(Exception):
+            import psutil  # type: ignore
+
+            exact = [str(part) for part in psutil.Process(pid).cmdline()]
+            if exact:
+                return exact
         result = _run_probe(["ps", "-p", str(pid), "-o", "command="], timeout=10)
         if result.returncode != 0:
             return None
