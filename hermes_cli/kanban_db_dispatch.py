@@ -398,19 +398,35 @@ def _pid_recycled(pid: Optional[int], started_at) -> bool:
     """True when a live ``pid`` is NOT the process fingerprinted at spawn (or the fingerprint can no
     longer be read). Signalling it would hit a stranger. ``None`` fingerprint = legacy row, never
     recycled; the UNVERIFIED marker is always foreign. An integer fingerprint (rows written before the
-    boot witness was added) compares the start time only."""
+    boot witness was added) compares the start time only.
+
+    [daveey] The start times are compared within ``START_TIME_DRIFT_TOLERANCE`` (2 s), not exactly. On
+    macOS the psutil start time follows ``kern.boottime``, which moves on sleep/wake and clock sync. A
+    restarted gateway read every live worker 1.00 s off its spawn stamp, booked all of them crashed in
+    one tick, blocked their cards as a "systemic" failure, and respawned duplicates beside them. The
+    instantiation epoch is still compared exactly, so a row that survived a reboot stays foreign."""
     if started_at is None or not pid:
         return False
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         return True
+    from gateway.status import get_process_start_time, start_time_fingerprints_match
     if isinstance(started_at, str) and "|" in started_at:
-        return _process_fingerprint(int(pid)) != started_at
-    from gateway.status import _start_times_agree, get_process_start_time
+        current_fp = _process_fingerprint(int(pid))
+        if current_fp is None:
+            return True
+        rec_epoch, _, rec_start = started_at.partition("|")
+        cur_epoch, _, cur_start = current_fp.partition("|")
+        if rec_epoch != cur_epoch:
+            return True
+        try:
+            return not start_time_fingerprints_match(rec_start, cur_start)
+        except (TypeError, ValueError):
+            return current_fp != started_at
     current = get_process_start_time(int(pid))
     if current is None:
         return True
     try:
-        return not _start_times_agree(current, started_at)
+        return not start_time_fingerprints_match(started_at, current)
     except (TypeError, ValueError):
         return True
 
