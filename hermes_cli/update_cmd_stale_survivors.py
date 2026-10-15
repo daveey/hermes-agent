@@ -41,6 +41,8 @@ def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> l
         service_pids = set(_get_service_pids(all_profiles=True))
     except Exception:
         service_pids = set()
+    from hermes_cli import gateway_supervised_restart
+
     labels = {row.get("pid"): str(row.get("profile") or "gateway") for row in fleet if isinstance(row, dict)}
     print()
     print(f"  ⚠ {len(pids)} gateway process(es) still run the pre-update code — requesting a restart")
@@ -49,10 +51,17 @@ def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> l
     for pid in pids:
         label = f"{labels.get(pid, 'gateway')} (PID {pid})"
         try:
+            # Read before the signal: the declaration comes from the live process.
+            external = pid not in service_pids and gateway_supervised_restart.gateway_declares_external_supervisor(pid)
             if _drain_or_signal_gateway_for_update(pid, drain_budget, label):
                 signalled.append(pid)
                 restart.killed_pids.add(pid)
-                if pid not in service_pids:
+                if external:
+                    # `gateway run --external-supervisor`: its own KeepAlive manager relaunches it,
+                    # so it is handed back, not owed a manual restart.
+                    restart.externally_supervised_profiles.append(labels.get(pid, "default"))
+                    print(f"  ✓ {label}: handed back to its external supervisor")
+                elif pid not in service_pids:
                     manual.append(pid)
         except Exception as exc:
             logger.warning("Could not signal stale gateway PID %s: %s", pid, exc)

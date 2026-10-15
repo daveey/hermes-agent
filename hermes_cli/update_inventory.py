@@ -86,6 +86,8 @@ _RESTART_MECHANISMS = {
     "systemd": "systemd", "launchd": "launchd", "desktop": "desktop",
     "windows-service": "windows-service", "manual-serve": "respawn-argv",
     "desktop-ssh": "desktop-ssh",
+    # Self-declared by `gateway run --external-supervisor` (control-socket identify).
+    "external": "external-supervisor",
 }
 
 _MECHANISM_DESCRIPTIONS = {
@@ -95,6 +97,7 @@ _MECHANISM_DESCRIPTIONS = {
     "windows-service": "sc.exe stop before venv mutation, sc.exe start after update",
     "respawn-argv": "stop before code swap, relaunch with recorded launch args",
     "desktop-ssh": "the remote Desktop that spawned it over SSH respawns it when it reconnects",
+    "external-supervisor": "SIGUSR1 drain, exits 75 back to its own supervisor (custom launchd/systemd), which relaunches it",
 }
 
 _SERVE_KINDS = ("serve", "dashboard")
