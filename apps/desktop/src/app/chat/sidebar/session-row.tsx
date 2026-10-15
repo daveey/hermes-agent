@@ -34,7 +34,7 @@ import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
 import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
-import { $sessionDotStateById, hasLiveTurn, sessionStatusStripe, showsRunningArc } from '@/store/session-dot-state'
+import { $sessionDotStateById, hasLiveTurn, sessionStatusStripe } from '@/store/session-dot-state'
 import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
 import { sessionCostUsd } from '@/store/sidebar-archive'
@@ -498,7 +498,10 @@ function SidebarSessionRowImpl({
         style={style}
         {...rest}
       >
-        {showsRunningArc(dotState) && <span aria-hidden="true" className="arc-border arc-row" />}
+        {/* The travelling arc marks the SELECTED row (what the pane shows),
+            not a working one: with several sessions busy the arcs drowned out
+            the current task. Working state stays on the status dot [daveey]. */}
+        {isSelected && <span aria-hidden="true" className="arc-border arc-row" />}
         {statusStripe && (
           <span
             aria-hidden="true"

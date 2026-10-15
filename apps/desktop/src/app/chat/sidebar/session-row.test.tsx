@@ -162,12 +162,12 @@ function makeSession(overrides: Partial<SessionInfo> & { title: string }): Sessi
 
 const noop = vi.fn()
 
-const renderRow = (session: SessionInfo, extra?: { card?: boolean }) =>
+const renderRow = (session: SessionInfo, extra?: { card?: boolean; selected?: boolean }) =>
   render(
     <SidebarSessionRow
       card={extra?.card}
       isPinned={false}
-      isSelected={false}
+      isSelected={extra?.selected ?? false}
       onArchive={noop}
       onDelete={noop}
       onPin={noop}
@@ -178,27 +178,32 @@ const renderRow = (session: SessionInfo, extra?: { card?: boolean }) =>
     />
   )
 
-// The row no longer takes its running state as a prop, so this drives the real
-// store the way the app does. $workingSessionIds is the actual computed here
-// (the mock above only overrides its siblings), which is what makes this cover
-// the wiring rather than the predicate — the arc has gone missing before.
-describe('SidebarSessionRow running arc', () => {
+// The arc marks the SELECTED row — the one the pane shows — not a working
+// one. Working state stays on the status dot; the sidebar's busiest rows used
+// to wear the arc and the current task got lost among them.
+describe('SidebarSessionRow selection arc', () => {
   afterEach(() => {
     clearAllSessionStates()
   })
 
   const arc = (container: HTMLElement) => container.querySelector('.arc-row')
 
-  it('paints no arc for a settled session', () => {
+  it('paints no arc on an unselected settled session', () => {
     const { container } = renderRow(makeSession({ title: 'Settled' }))
 
     expect(arc(container)).toBeNull()
   })
 
-  it('paints the arc while the session is running', () => {
+  it('paints no arc on an unselected running session', () => {
     publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
 
     const { container } = renderRow(makeSession({ title: 'Running' }))
+
+    expect(arc(container)).toBeNull()
+  })
+
+  it('paints the arc on the selected session, idle or not', () => {
+    const { container } = renderRow(makeSession({ title: 'Current' }), { selected: true })
 
     expect(arc(container)).toBeTruthy()
   })
