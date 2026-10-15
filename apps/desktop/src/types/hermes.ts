@@ -648,6 +648,11 @@ export interface SessionInfo {
    *  goal loop resumes it unasked, so the sidebar paints it like a background
    *  job, not "done". Absent otherwise or against an older backend. */
   goal_active?: boolean
+  /** [daveey] True while this conversation (over its lineage) owns an enabled,
+   *  scheduled cron job: it does its work periodically, so the sidebar shows a
+   *  loop glyph and treats the row like a parked (grey) one instead of "done".
+   *  Absent otherwise or against an older backend. */
+  cron_active?: boolean
   /** [daveey] Live background processes (terminal background=true) this
    *  conversation owns, per the backend's process registry and the shared
    *  processes.json, summed over its compression lineage. Keeps the sidebar

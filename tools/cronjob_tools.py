@@ -489,6 +489,19 @@ def _reap_stale_executions(job_name: str) -> None:
         logger.debug("Stale execution reclaim failed: %s", _reap_exc)
 
 
+def _owner_session_id(session_id: Optional[str]) -> Optional[str]:
+    """[daveey] The session creating a job: the tool's own session id, else the session env a
+    terminal subprocess (``hermes cron create``) inherits."""
+    if session_id:
+        return str(session_id)
+    try:
+        from gateway.session_context import get_session_env
+        return get_session_env("HERMES_SESSION_ID", "") or None
+    except Exception:
+        import os
+        return os.environ.get("HERMES_SESSION_ID") or None
+
+
 def _background_session_key(session_id: Optional[str]) -> str:
     """Routing key for a detached completion, captured on THIS thread (contextvars don't
     cross the pool). Empty string = no durable consumer."""
@@ -698,6 +711,9 @@ def _action_create(a: dict[str, Any]) -> str:
             reasoning_effort=a["reasoning_effort"], interpreter=a["interpreter"],
             pinned=bool(a["pinned"]),
             failure_deliver=_resolve_cron_context_deliver(_normalize_deliver_param(a["failure_deliver"])),
+            # [daveey] The creating session (agent tool call, or `hermes cron create` run from an
+            # agent's terminal, which inherits HERMES_SESSION_ID): the sidebar marks it periodic.
+            owner_session_id=_owner_session_id(a["session_id"]),
             **({"paused": a["paused"], "paused_reason": a["paused_reason"]}
                if a["paused"] is not False or a["paused_reason"] is not None else {}))
     except CronSchedulerRegistrationError as exc:

@@ -242,6 +242,19 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["name"] == "Server Check"
         assert listing["jobs"][0]["state"] == "scheduled"
 
+    def test_create_records_owner_session(self, monkeypatch):
+        # [daveey] The creating session is stored so the sidebar can mark it periodic: the tool's
+        # own session id wins, else the HERMES_SESSION_ID a `hermes cron create` subprocess inherits.
+        from cron.jobs import load_jobs
+        monkeypatch.setenv("HERMES_SESSION_ID", "s_env")
+        json.loads(cronjob(action="create", prompt="a", schedule="every 1h", session_id="s_tool"))
+        json.loads(cronjob(action="create", prompt="b", schedule="every 1h"))
+        monkeypatch.delenv("HERMES_SESSION_ID")
+        json.loads(cronjob(action="create", prompt="c", schedule="every 1h"))
+        owners = {j["prompt"]: j.get("owner_session_id") for j in load_jobs()}
+        assert owners == {"a": "s_tool", "b": "s_env", "c": None}
+        assert "owner_session_id" not in next(j for j in load_jobs() if j["prompt"] == "c")
+
     def test_create_with_natural_weekday_schedule(self):
         # The documented "every monday 9am" form must create a real cron job
         # through the tool path, not error out (issue: parser rejected it).

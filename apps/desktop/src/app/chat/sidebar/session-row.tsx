@@ -326,7 +326,13 @@ function SidebarSessionRowImpl({
 
   const statusStripe = session.archived
     ? null
-    : sessionStatusStripe(dotState, session.message_count > 0, userBlocked, kanbanBlocked)
+    : sessionStatusStripe(
+        dotState,
+        session.message_count > 0,
+        userBlocked,
+        kanbanBlocked,
+        session.cron_active === true
+      )
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
@@ -503,7 +509,19 @@ function SidebarSessionRowImpl({
             not a working one: with several sessions busy the arcs drowned out
             the current task. Working state stays on the status dot [daveey]. */}
         {isSelected && <span aria-hidden="true" className="arc-border arc-row" />}
-        {statusStripe && (
+        {/* [daveey] A session that owns a live cron job: a tiny grey loop
+            glyph in the stripe's place — it recurs, so it is never "done". */}
+        {statusStripe === 'periodic' && (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute top-1/2 -left-0.5 flex -translate-y-1/2 text-zinc-400 dark:text-zinc-500"
+            data-slot="session-status-stripe"
+            data-status-stripe={statusStripe}
+          >
+            <Codicon name="sync" size="0.5625rem" />
+          </span>
+        )}
+        {statusStripe && statusStripe !== 'periodic' && (
           <span
             aria-hidden="true"
             className={cn(

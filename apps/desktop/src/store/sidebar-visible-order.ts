@@ -81,6 +81,10 @@ export function sidebarSessionOrder(): string[] {
  *  waiting on you) or red (needs input / stalled). ⌘] / ⌘[ step only to
  *  these, so they land exactly where the sidebar shows a coloured bar. A
  *  session the user parked with ⌘B (grey stripe) is skipped. */
+// Only green / red stripes are stops; grey (parked) and the periodic loop
+// glyph are skipped like a parked session.
+const sessionHasStepStripe = (stripe: null | string | undefined): boolean => stripe === 'done' || stripe === 'stuck'
+
 export function sessionHasStatusStripe(id: string): boolean {
   if (isSessionBlocked(id)) {
     return false
@@ -93,9 +97,7 @@ export function sessionHasStatusStripe(id: string): boolean {
   const row = document.querySelector<HTMLElement>(`[data-sidebar-session-id="${CSS.escape(id)}"]`)
 
   if (row) {
-    const stripe = row.dataset.sidebarStripe
-
-    return stripe === 'done' || stripe === 'stuck'
+    return sessionHasStepStripe(row.dataset.sidebarStripe)
   }
 
   // Not drawn (virtualized off-screen row): derive it from the row model.
@@ -116,8 +118,15 @@ export function sessionHasStatusStripe(id: string): boolean {
   }
 
   return (
-    sessionStatusStripe($sessionDotStateById.get()[id] ?? 'idle', hasTurns, false, session?.kanban_blocked ?? 0) !==
-    null
+    sessionHasStepStripe(
+      sessionStatusStripe(
+        $sessionDotStateById.get()[id] ?? 'idle',
+        hasTurns,
+        false,
+        session?.kanban_blocked ?? 0,
+        session?.cron_active === true
+      )
+    )
   )
 }
 

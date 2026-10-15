@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from hermes_cli.session_listing import subagent_listing_scope
 from hermes_cli.web_deps import late
 from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
+from hermes_cli.cron_session_activity import annotate_cron_activity
 from hermes_cli.goal_session_activity import annotate_goal_activity
 from hermes_cli.process_session_activity import annotate_background_activity
 from hermes_cli.web_server_gateway import _strip_session_list_rows
@@ -248,6 +249,7 @@ def get_sessions(
                 _strip_session_list_rows(sessions)
             annotate_kanban_activity(sessions)
             annotate_goal_activity(sessions)
+            annotate_cron_activity(sessions)
             annotate_background_activity(sessions)
             # ``storage`` tells an empty page apart from an unreadable store (#72046); same
             # ``{profile: "corrupt"}`` shape as the /api/profiles/sessions* lists.

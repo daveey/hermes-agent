@@ -80,6 +80,16 @@ describe('sessionStatusStripe', () => {
     expect(sessionStatusStripe('idle', true, true, 1)).toBe('blocked')
     expect(sessionStatusStripe('idle', true, false, 0)).toBe('done')
   })
+
+  it('paints periodic (grey loop) for a session owning a live cron job, unless a prompt waits', () => {
+    for (const state of ['idle', 'unread', 'working', 'background', 'stalled'] as const) {
+      expect(sessionStatusStripe(state, true, false, 0, true)).toBe('periodic')
+    }
+
+    expect(sessionStatusStripe('idle', true, false, 3, true)).toBe('periodic')
+    expect(sessionStatusStripe('needs-input', true, false, 0, true)).toBe('stuck')
+    expect(sessionStatusStripe('idle', true, true, 0, true)).toBe('blocked')
+  })
 })
 
 describe('hasLiveTurn', () => {
