@@ -30,7 +30,7 @@ from agent.credential_pool import (
     credential_pool_matches_provider, resolve_runtime_pool_key,
 )
 from agent.error_classifier import FailoverReason
-from agent.retry_utils import parse_retry_after_seconds, reset_delay_from_message
+from agent.retry_utils import LIVE_RETRY_WAIT_CAP_S, parse_retry_after_seconds, reset_delay_from_message
 from agent.message_metadata import MERGED_TURN_PREFIX
 from agent.turn_context import drop_stale_api_content
 from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
@@ -999,8 +999,30 @@ def _recover_rate_limit(pool, *, has_retried_429, error_context, api_key_hint, c
             t in context_message for t in _USAGE_LIMIT_MESSAGE_TOKENS
         )
     if not has_retried_429 and not usage_limit_reached:
-        return False, True
+        # "Retry once, then rotate" assumes the retry is cheap. A provider window longer than a
+        # live wait (Anthropic sends Retry-After: 600) would park the turn on a throttled key
+        # while a sibling entry is healthy, so rotate on the first 429 instead.
+        wait_s = _rate_limit_wait_seconds(error_context)
+        if wait_s is None or wait_s <= LIVE_RETRY_WAIT_CAP_S:
+            return False, True
+        _ra().logger.info(
+            "Rate limit window %.0fs exceeds live wait cap %.0fs — rotating on first 429",
+            wait_s, LIVE_RETRY_WAIT_CAP_S,
+        )
+        return (True, False) if rotate_and_swap(429, "rate limit, long window") else (False, True)
     return (True, False) if rotate_and_swap(429, "rate limit") else (False, True)
+
+
+def _rate_limit_wait_seconds(error_context: Optional[dict[str, Any]]) -> Optional[float]:
+    """Seconds until the provider says the limit lifts (``reset_at`` from Retry-After / body /
+    vendor headers), or None when the error carries no usable window."""
+    if not error_context:
+        return None
+    reset_at = _parse_absolute_timestamp(error_context.get("reset_at"))
+    if reset_at is None:
+        return None
+    wait = reset_at - time.time()
+    return wait if wait > 0 else None
 
 
 def recover_with_credential_pool(
@@ -1009,7 +1031,7 @@ def recover_with_credential_pool(
     error_context: Optional[dict[str, Any]] = None, billing_unverified: bool = False,
 ) -> tuple[bool, bool]:
     """Attempt credential recovery via pool rotation; returns (recovered, has_retried_429).
-    Rate limits: retry once, then rotate. Billing: rotate immediately. Auth: refresh before
+    Rate limits: retry once, then rotate (at once when the provider window exceeds a live wait). Billing: rotate immediately. Auth: refresh before
     rotating. ``classified_reason`` beats raw HTTP codes (e.g. Anthropic 400 "out of extra
     usage"); ``billing_unverified`` gives the entry a short cooldown, not the one-hour bench."""
     pool = agent._credential_pool
