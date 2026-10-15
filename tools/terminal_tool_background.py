@@ -213,6 +213,11 @@ def spawn_background_process(
         if watch_patterns:
             proc_session.watch_patterns = list(watch_patterns)
             result_data["watch_patterns"] = proc_session.watch_patterns
+        # The spawn already checkpointed the session, before the flags above were set. Rewrite it
+        # now: a restart before the next unrelated write would re-adopt the job as non-notifying,
+        # prune its exit silently, and the chat would never wake. [daveey]
+        if notify_on_complete or watch_patterns or completion_output_chars or heartbeat_seconds:
+            process_registry._write_checkpoint()
         return json.dumps(result_data, ensure_ascii=False)
     except Exception as e:
         return json.dumps({

@@ -826,6 +826,14 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
             sink(session, chunk)
 
     def _check_watch_patterns(self, session: ProcessSession, new_text: str) -> None:
+        """Scan a chunk (``_scan_watch_patterns``); checkpoint a promotion to notify_on_complete.
+        Outside the session lock: a re-adopted job must keep its promised exit notice. [daveey]"""
+        was_notifying = session.notify_on_complete
+        self._scan_watch_patterns(session, new_text)
+        if session.notify_on_complete and not was_notifying:
+            self._write_checkpoint()
+
+    def _scan_watch_patterns(self, session: ProcessSession, new_text: str) -> None:
         """Scan a freshly-read chunk for watch patterns and queue notifications.
         Per-session rate limiting (see WATCH_* constants): one match per cooldown
         window, a match inside the window is one strike, WATCH_STRIKE_LIMIT consecutive
