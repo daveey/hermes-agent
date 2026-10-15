@@ -16,8 +16,10 @@ gateway's shutdown ``kill_all`` cannot kill a Desktop chat's job.
 A re-adopted process has no pipe, so its exit status is never collected. When the
 PID disappears, a ``completion`` with ``completion_reason="unknown"`` is queued
 for the owning session ("exited (status unknown — re-adopted after restart)").
-If that chat is not open in this backend, the poller parks the event instead of
-dropping it, and the chat's own poller picks it up once the chat is resumed.
+The Desktop host (tui_gateway ``_readopted_exit_deliver``) parks the event for the
+chat's own poller and, when the chat is not open in this backend, resumes it in-process
+(like the startup-resume sweep) so the exit runs a turn without the user opening it.
+Only a Desktop-owned backend adopts: a ``hermes dashboard`` has no chats to deliver to.
 """
 
 from __future__ import annotations
@@ -66,6 +68,9 @@ class ProcessReadoptMixin:
 
     _detached_sweep_thread: Optional[threading.Thread] = None
     _parked_events: Optional[list] = None
+    # Desktop host delivery for an unknown exit (tui_gateway ``_readopted_exit_deliver``): park it for the owner
+    # chat and wake that chat when it is not open. None = the bare completion queue (CLI/tests). [daveey]
+    on_unknown_exit: Optional[Callable[[dict[str, Any]], Any]] = None
 
     # ----- unknown-exit completion -----
 
@@ -90,7 +95,15 @@ class ProcessReadoptMixin:
         from tools.process_registry import _redact_process_result
         event = self._unknown_exit_event(session)
         _redact_process_result(event)
-        self.completion_queue.put(event)
+        sink = self.on_unknown_exit
+        if sink is None:
+            self.completion_queue.put(event)
+        else:
+            try:
+                sink(event)
+            except Exception:
+                logger.warning("unknown-exit delivery hook failed; queueing %s instead", session.id, exc_info=True)
+                self.completion_queue.put(event)
         logger.info("Re-adopted process %s (pid=%s) exited; status unknown — notifying %s",
                     session.id, session.pid, session.session_key)
 
@@ -192,6 +205,13 @@ def _safe_owns(owns: Callable[[dict[str, Any]], bool], evt: dict[str, Any]) -> b
 def recover_tui_orphaned_processes(registry=None, *, sweep_interval: float = DETACHED_SWEEP_SECONDS) -> int:
     """Desktop/TUI backend startup: adopt this host's orphaned Desktop-chat processes and
     supervise them until they exit. Never raises."""
+    # Only the backend Desktop spawned hosts chats. A launchd ``hermes dashboard`` runs the same web_server
+    # lifespan and, booting first, won the checkpoint lock: the exit then landed in a process with no chat and
+    # no poller and was lost (18:31 PDT 2026-10-14, session 20261014_142820_ff330a). [daveey]
+    from hermes_cli.process_identity import is_desktop_owned_backend
+    if not is_desktop_owned_backend():
+        logger.debug("not a Desktop-owned backend: leaving orphaned chat processes for the Desktop backend")
+        return 0
     if registry is None:
         from tools.process_registry import process_registry as registry
     try:
