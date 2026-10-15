@@ -561,7 +561,9 @@ def _iter_proc_cmdlines(exclude_pids: set[int]):
                 cmdline = _f.read().decode("utf-8", errors="replace")
         except (OSError, PermissionError):
             continue
-        yield pid, cmdline.replace("\x00", " ")
+        # [daveey] Keep argv boundaries: a whitespace-bearing arg must stay one token for the matcher.
+        from gateway.status import argv_to_command_line
+        yield pid, argv_to_command_line(cmdline.split("\x00"))
 
 
 def _scan_gateway_pids(
@@ -621,10 +623,21 @@ def _scan_gateway_pids(
         # wmic/CIM listing): only the native default home keeps the legacy bare-argv claim.
         return current_home_is_native
 
-    def _consider(pid: int, command: str) -> None:
-        matches_runtime = looks_like_gateway_command_line(command) or (
+    def _matches_runtime(command: str) -> bool:
+        return looks_like_gateway_command_line(command) or (
             include_restart_managers and looks_like_gateway_runtime_command_line(command)
         )
+
+    def _consider(pid: int, command: str) -> None:
+        matches_runtime = _matches_runtime(command)
+        if not matches_runtime and "gateway" in command.lower() and pid not in exclude_pids:
+            # [daveey] ``ps -o command=`` joins argv with spaces, so a whitespace-bearing argv (the
+            # ``Hermes Python.app`` interpreter running Hermes' runpy bootstrap) loses its token
+            # boundaries and fails the matcher. Re-read the exact argv for candidate rows only.
+            from gateway.status import _read_process_cmdline
+            exact = _read_process_cmdline(pid)
+            if exact and exact != command and _matches_runtime(exact):
+                matches_runtime, command = True, exact
         if matches_runtime and not pid_is_other_users(pid) and (all_profiles or _matches_current_profile(pid, command)):
             _append_unique_pid(pids, pid, exclude_pids)
 
