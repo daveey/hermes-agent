@@ -541,6 +541,11 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
         return True
     if not owned and _notification_event_requires_owner(evt) and not _session_owns_notification_event(sid, session, evt):
         origin, key = str(evt.get("origin_ui_session_id") or ""), str(evt.get("session_key") or "")
+        if evt.get("park_if_unowned") and hasattr(registry, "park_unowned_event"):
+            # A re-adopted orphan's exit: its chat may simply not be open in this backend yet. Park it
+            # for that chat's own poller (take_parked_events) instead of dropping it. [daveey]
+            registry.park_unowned_event(evt)
+            return True
         if deferred is None:
             # A durable replay stays pending: hand it back so the orphan sweep re-offers it once its owner
             # is live (#97202), and keep that retry out of WARNING.
@@ -729,6 +734,24 @@ def _poll_bot_live_delivery_guarded(sid: str, session: dict, now: float) -> None
     session["_bot_poll_warn_suppressed"] = 0
 
 
+_PARKED_POLL_SECONDS = 2.0
+
+
+def _notif_take_parked(sid, session, registry, handle) -> int:
+    """Deliver the parked events (re-adopted orphans' exits whose chat was not open) this session owns. [daveey]"""
+    take = getattr(registry, "take_parked_events", None)
+    if take is None:
+        return 0
+    try:
+        events = take(lambda evt: _session_owns_notification_event(sid, session, evt))
+        if events:
+            handle(events, None)
+        return len(events)
+    except Exception as exc:
+        _notif_log_failure("parked notification dispatch failed", exc)
+        return 0
+
+
 def _notification_poller_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
     with _session_profile_runtime_scope(session):
         _notification_poller_scoped_loop(stop_event, sid, session)
@@ -751,7 +774,7 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     emitted = session.setdefault("_notification_emitted", set())
     handle = lambda events, deferred: _notif_handle_ready(
         sid, session, events, emitted, process_registry, format_process_notification, deferred)
-    last_kanban_poll = last_loop_poll = last_bot_poll = 0.0
+    last_kanban_poll = last_loop_poll = last_bot_poll = last_parked_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
         now = time.monotonic()
         # Completions whose owner process died after this one started (#97202); throttled per profile home.
@@ -771,6 +794,9 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
         if now - last_kanban_poll >= _KANBAN_POLL_SECONDS:
             last_kanban_poll = now
             _notif_poll_kanban(sid, session)
+        if now - last_parked_poll >= _PARKED_POLL_SECONDS:
+            last_parked_poll = now
+            _notif_take_parked(sid, session, process_registry, handle)
         try:
             evt = queue.get(timeout=0.5)
         except Exception:

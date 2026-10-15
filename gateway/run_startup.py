@@ -1131,7 +1131,8 @@ class GatewayStartupMixin:
                 continue
             try:
                 with _profile_runtime_scope(Path(profile_home), {}):
-                    recovered += process_registry.recover_from_checkpoint()
+                    # Desktop/TUI chats' jobs belong to the Desktop backend, which re-adopts them itself. [daveey]
+                    recovered += process_registry.recover_from_checkpoint(owner="gateway")
             except Exception:
                 logger.warning("Process checkpoint recovery for profile %r failed", profile_name, exc_info=True)
         return recovered
@@ -1150,7 +1151,9 @@ class GatewayStartupMixin:
         # served profile's file under its scope or those processes are never re-adopted.
         with _log_suppressed(logging.WARNING, "Process checkpoint recovery: %s"):
             from tools.process_registry import process_registry
-            recovered = process_registry.recover_from_checkpoint()
+            # owner="gateway": leave Desktop/TUI chats' orphans to the Desktop backend, so this gateway's
+            # shutdown kill_all can never kill a job it does not own. [daveey]
+            recovered = process_registry.recover_from_checkpoint(owner="gateway")
             recovered += self._recover_secondary_process_checkpoints(process_registry)
             if recovered:
                 logger.info("Recovered %s background process(es) from previous run", recovered)

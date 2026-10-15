@@ -252,6 +252,15 @@ async def _lifespan(app: FastAPI):
     except Exception:
         _log.warning("startup resume sweep did not start", exc_info=True)
 
+    # Re-adopt background jobs a previous backend's chats left running (orphans of a Desktop
+    # restart) and wake each chat when its job exits (tools/process_registry_readopt.py). [daveey]
+    try:
+        from tools.process_registry_readopt import start_tui_orphan_recovery
+
+        start_tui_orphan_recovery()
+    except Exception:
+        _log.warning("background process re-adoption did not start", exc_info=True)
+
     # Desktop-spawned backends fire cron jobs themselves, since the app has no
     # gateway running the scheduler. Server `hermes dashboard` is unaffected —
     # it relies on its own gateway.

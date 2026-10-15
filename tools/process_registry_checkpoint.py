@@ -128,13 +128,28 @@ class ProcessCheckpointMixin:
         from utils import atomic_json_write
         atomic_json_write(_checkpoint_path(), entries)
 
-    def recover_from_checkpoint(self) -> int:
-        """On gateway startup, probe PIDs from the checkpoint file; returns how many
-        were recovered as detached sessions."""
+    def recover_from_checkpoint(self, owner: Optional[str] = None) -> int:
+        """On startup, probe PIDs from the checkpoint file; returns how many were
+        recovered as detached sessions.
+
+        ``owner`` limits adoption to one kind of entry (see
+        ``tools.process_registry_readopt``): ``"gateway"`` (messaging session keys and
+        legacy keyless entries) or ``"tui"`` (Desktop/TUI session ids). ``None`` adopts
+        every orphan. The whole read-decide-write runs under the checkpoint file lock,
+        so two backends starting together adopt an orphan once. [daveey]"""
+        try:
+            with self._checkpoint_file_lock():
+                return self._recover_from_checkpoint_locked(owner)
+        except Exception as e:
+            logger.warning("Process checkpoint recovery failed: %s", e, exc_info=True)
+            return 0
+
+    def _recover_from_checkpoint_locked(self, owner: Optional[str]) -> int:
         from tools.process_registry import (
             ProcessSession, _CHECKPOINT_FIELDS, _checkpoint_path,
             _CHECKPOINT_DEFAULTS, _WATCHER_ROUTE_KEYS, _stop_systemd_unit,
         )
+        from tools.process_registry_readopt import OWNER_TUI, owner_accepts
 
         checkpoint_path = _checkpoint_path()
         if not checkpoint_path.exists():
@@ -160,6 +175,8 @@ class ProcessCheckpointMixin:
             # kill it. Only orphans (writer gone) are recovered. [daveey]
             if entry.get("writer_pid") != os.getpid() and self._writer_alive(entry):
                 continue
+            if not owner_accepts(owner, entry):
+                continue
             if pid_scope != "host":  # in-sandbox PIDs mean nothing once the env handle is gone
                 logger.info(
                     "Skipping recovery for non-host process: %s (pid=%s, scope=%s)",
@@ -179,6 +196,9 @@ class ProcessCheckpointMixin:
                     entry.get("session_id", "?"), pid)
                 continue
             if fate != "running":
+                if owner == OWNER_TUI and entry.get("notify_on_complete"):
+                    # Exited while no backend watched it: the chat still gets its wake.
+                    self._queue_unknown_exit(self._session_from_entry(entry))
                 systemd_unit = entry.get("systemd_unit", "")
                 if systemd_unit and not _stop_systemd_unit(systemd_unit):
                     logger.warning(
@@ -187,13 +207,10 @@ class ProcessCheckpointMixin:
                         systemd_unit, pid)
                     unresolved_scope_entries.append(entry)
                 continue
-            fields = {f: entry.get(f, _CHECKPOINT_DEFAULTS[f]) for f in _CHECKPOINT_FIELDS}
-            fields.update(
-                command=entry.get("command", "unknown"),
-                owner_task_id=entry.get("owner_task_id", "") or entry.get("task_id", ""),
-                started_at=entry.get("started_at", time.time()))
             # detached: can't read output, but can report status + kill
-            session = ProcessSession(id=entry["session_id"], detached=True, **fields)
+            session = self._session_from_entry(entry)
+            # A TUI backend reports the eventual exit (status unknown) to the owning chat.
+            session._report_lost_exit = owner == OWNER_TUI
             with self._lock:
                 self._running[session.id] = session
             recovered += 1
@@ -208,5 +225,16 @@ class ProcessCheckpointMixin:
                     "notify_on_complete": session.notify_on_complete,
                     "parent_session_id": session.parent_session_id,
                 })
-        self._write_checkpoint(extra_entries=unresolved_scope_entries)
+        self._write_checkpoint_locked(extra_entries=unresolved_scope_entries)
         return recovered
+
+    @staticmethod
+    def _session_from_entry(entry: dict[str, Any]):
+        from tools.process_registry import ProcessSession, _CHECKPOINT_DEFAULTS, _CHECKPOINT_FIELDS
+
+        fields = {f: entry.get(f, _CHECKPOINT_DEFAULTS[f]) for f in _CHECKPOINT_FIELDS}
+        fields.update(
+            command=entry.get("command", "unknown"),
+            owner_task_id=entry.get("owner_task_id", "") or entry.get("task_id", ""),
+            started_at=entry.get("started_at", time.time()))
+        return ProcessSession(id=entry["session_id"], detached=True, **fields)

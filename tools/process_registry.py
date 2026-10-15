@@ -34,6 +34,7 @@ from hermes_cli.config import get_hermes_home
 
 from tools.process_registry_notifications import format_process_notification, is_child_process_notification, should_surface_notification
 from tools.process_registry_checkpoint import ProcessCheckpointMixin
+from tools.process_registry_readopt import ProcessReadoptMixin
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
 from tools.process_registry_env_log import log_delta_command
@@ -555,7 +556,7 @@ class ProcessSession:
     exited: bool = False
     exited_at: float = 0.0                      # time.time() of the FIRST move to finished (0 = unknown)
     exit_code: Optional[int] = None             # None while running
-    completion_reason: str = "exited"           # exited|killed|lost|failed_start|already_exited
+    completion_reason: str = "exited"           # exited|killed|lost|failed_start|already_exited|unknown
     termination_source: str = ""                # process.kill|kill_all|backend_lost|failed_start
     output_buffer: str = ""                     # Rolling tail (last max_output_chars)
     max_output_chars: int = MAX_OUTPUT_CHARS
@@ -607,6 +608,8 @@ class ProcessSession:
     _reader_finish_requested: threading.Event = field(default_factory=threading.Event, repr=False)
     _reader_selectable: bool = field(default=False, repr=False)
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (use_pty=True)
+    # Re-adopted by a Desktop/TUI backend: queue a status-unknown completion when the PID goes. [daveey]
+    _report_lost_exit: bool = field(default=False, repr=False)
 
     def __post_init__(self):
         # A session built without an explicit owner is owned by its own task, so ownership checks compare
@@ -698,7 +701,7 @@ def _is_wsl_launcher_command(command: str) -> bool:
     return False
 
 
-class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
+class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessReadoptMixin):
     """In-memory registry of running and finished background processes.
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
@@ -1063,12 +1066,14 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
         with session._lock:
             session.exited = True
         with self._lock:
-            self._running.pop(session.id, None)
+            was_running = self._running.pop(session.id, None) is not None
             if session.systemd_unit:
                 self._finished[session.id] = session
             else:
                 self._finished.pop(session.id, None)
         self._write_checkpoint()
+        if was_running and session._report_lost_exit and session.notify_on_complete:
+            self._queue_unknown_exit(session)
         session._completion_event.set()
         return session if session.systemd_unit else None
 

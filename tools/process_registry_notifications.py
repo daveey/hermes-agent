@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from contextlib import suppress
 
 _DONE = ("completed", "success")
-_REASON_STATUS = {"lost": "marked lost because the process backend disappeared", "failed_start": "failed to start"}
+_REASON_STATUS = {"lost": "marked lost because the process backend disappeared", "failed_start": "failed to start",
+                  # A re-adopted orphan (no pipe after a restart) exited; its status was never collected. [daveey]
+                  "unknown": "exited (status unknown — re-adopted after restart)"}
+_REASON_OUTCOME = {"lost": "Lost", "failed_start": "Failed to Start", "unknown": "Exited (status unknown)"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,7 +361,7 @@ def process_completion_display_text(events: list) -> str:
     if reason == "killed":
         outcome = "Terminated"
     elif reason in _REASON_STATUS:
-        outcome = "Lost" if reason == "lost" else "Failed to Start"
+        outcome = _REASON_OUTCOME[reason]
     else:
         outcome = "Finished" if exit_code == 0 else "Failed"
     cmd = _short_command(evt.get("command"))
@@ -453,6 +456,8 @@ def format_process_notification(evt: dict) -> str | None:
             f"{attribution}Command: {_cmd}\nMatched output:\n{evt.get('output', '')}"
             + (f"\n({_sup} earlier matches were suppressed by rate limit)" if _sup else "") + "]")
     _exit = evt.get("exit_code", "?")
+    if _exit is None:
+        _exit = "?"
     _out = evt.get("output", "")
     _signal = ", SIGTERM" if _exit in {-15, 143, "-15", "143"} else ""
     # A subagent-owned process's full output belongs in the child's transcript, not as
