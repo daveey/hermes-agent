@@ -117,6 +117,66 @@ def blocked_task_counts() -> dict[str, int]:
     return _all_counts()[1]
 
 
+# What a session's task strip lists: the sidebar's open + blocked sets, plus
+# ``review`` (also waiting on a human). [daveey]
+LISTED_STATUSES = ACTIVE_STATUSES + BLOCKED_STATUSES + ("review",)
+_TASK_FIELDS = ("id", "title", "status", "assignee", "session_id", "created_at", "started_at")
+
+
+def _board_slug(path: Path) -> str:
+    return path.parent.name if path.parent.parent.name == "boards" else "default"
+
+
+def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Tasks on one board that any of ``ids`` created or is a ``tui`` subscriber
+    of, in ``statuses`` — the same pairs ``_read_counts`` counts."""
+    sid_ph = ",".join("?" for _ in ids)
+    st_ph = ",".join("?" for _ in statuses)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+    conn.row_factory = sqlite3.Row
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        select = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in _TASK_FIELDS)
+        run_start = "NULL"
+        if "current_run_id" in cols and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'").fetchone():
+            run_start = "(SELECT r.started_at FROM task_runs r WHERE r.id = t.current_run_id)"
+        found: dict[str, dict[str, Any]] = {}
+        for row in conn.execute(
+                f"SELECT {select}, {run_start} AS current_run_started_at FROM tasks t "
+                f"WHERE t.session_id IN ({sid_ph}) AND t.status IN ({st_ph})", (*ids, *statuses)):
+            found[row["id"]] = {**dict(row), "via": "created"}
+        try:
+            for row in conn.execute(
+                    f"SELECT {select}, {run_start} AS current_run_started_at FROM kanban_notify_subs s "
+                    f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' "
+                    f"AND s.chat_id IN ({sid_ph}) AND t.status IN ({st_ph})", (*ids, *statuses)):
+                found.setdefault(row["id"], {**dict(row), "via": "subscribed"})
+        except sqlite3.Error:  # board predates notify subscriptions
+            pass
+    finally:
+        conn.close()
+    board = _board_slug(path)
+    return [{**t, "board": board} for t in found.values()]
+
+
+def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED_STATUSES) -> list[dict[str, Any]]:
+    """Every open/blocked/review task across all boards that the given session
+    ids (one compression lineage) created or shepherd — exactly the cards the
+    sidebar row's ``kanban_active``/``kanban_blocked`` counts cover. Never
+    raises on a bad board; skips it."""
+    ids = [s for s in dict.fromkeys(str(s) for s in session_ids if s)]
+    if not ids:
+        return []
+    out: list[dict[str, Any]] = []
+    for path in _board_db_paths():
+        try:
+            out.extend(_read_session_tasks(path, ids, statuses))
+        except sqlite3.Error as exc:
+            _log.debug("kanban session tasks read failed for %s: %s", path, exc)
+    return out
+
+
 def _row_ids(row: dict[str, Any]) -> Iterable[str]:
     seen: set[str] = set()
     for sid in (row.get("id"), row.get("_lineage_root_id"), *(row.get("_lineage_ids") or ())):

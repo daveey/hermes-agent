@@ -20,7 +20,7 @@ from fastapi.responses import StreamingResponse
 
 from hermes_cli.session_listing import subagent_listing_scope
 from hermes_cli.web_deps import late
-from hermes_cli.kanban_session_activity import annotate_kanban_activity
+from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
 from hermes_cli.goal_session_activity import annotate_goal_activity
 from hermes_cli.process_session_activity import annotate_background_activity
 from hermes_cli.web_server_gateway import _strip_session_list_rows
@@ -173,6 +173,16 @@ def _resolve_session_id(db, session_id: str) -> Optional[str]:
         # RuntimeError family, not sqlite3: same 503 payload as the analytics reads (#110054).
         with corrupt_store_as_status(db.db_path):
             raise
+
+
+@list_router.get("/api/session-kanban-tasks")
+def get_session_kanban_tasks(ids: str = Query(..., max_length=4000)):
+    """Open, blocked and review kanban cards that any of the comma-separated
+    session ``ids`` (one compression lineage) created or shepherds, across every
+    board — the cards behind the sidebar row's kanban counts. Lets the desktop
+    list them for the open chat without loading the whole board. [daveey]"""
+    wanted = [s.strip() for s in ids.split(",") if s.strip()][:50]
+    return {"tasks": session_kanban_tasks(wanted)}
 
 
 # ``le=100`` on limit: an unbounded limit lets one request drag every session

@@ -112,3 +112,75 @@ def test_stamps_blocked_count_separately_from_active(kanban_root):
     assert "kanban_active" not in rows[1] and rows[1]["kanban_blocked"] == 1
     assert "kanban_blocked" not in rows[2]
     assert ksa.blocked_task_counts() == {"s1": 2, "s_only_blocked": 1}
+
+
+def _make_full_board(path: Path, tasks: list[tuple], subs: list[tuple[str, str, str]] = ()) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, status TEXT NOT NULL, assignee TEXT, "
+        "session_id TEXT, created_at INTEGER, started_at INTEGER, current_run_id INTEGER)")
+    conn.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, started_at INTEGER)")
+    conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT)")
+    conn.executemany("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?)", tasks)
+    conn.executemany("INSERT INTO task_runs VALUES (?, ?, ?)", [(t[7], t[0], 500) for t in tasks if t[7]])
+    conn.executemany("INSERT INTO kanban_notify_subs VALUES (?, ?, ?)", subs)
+    conn.commit()
+    conn.close()
+
+
+def test_session_tasks_lists_created_and_shepherded_cards_the_sidebar_counts(kanban_root):
+    _make_full_board(kanban_root / "kanban.db", [
+        ("t_run", "Run", "running", "default", "s_me", 100, 200, 7),
+        ("t_done", "Done", "done", "default", "s_me", 100, 200, None),
+        ("t_other", "Theirs", "blocked", "default", "s_them", 100, None, None),
+        ("t_unrel", "Unrelated", "running", "default", "s_them", 100, None, None),
+    ], subs=[
+        ("t_other", "tui", "s_me"),   # shepherded card created by another chat
+        ("t_done", "tui", "s_me"),    # finished: not listed
+        ("t_unrel", "slack", "s_me"),  # non-tui subscription: not a chat shepherding it
+    ])
+    _make_full_board(kanban_root / "kanban" / "boards" / "bb" / "kanban.db", [
+        ("t_root", "Before compression", "todo", "bob", "s_root", 100, None, None),
+    ])
+
+    got = {t["id"]: t for t in ksa.session_tasks(["s_me", "s_root"])}
+
+    assert set(got) == {"t_run", "t_other", "t_root"}
+    assert got["t_run"]["via"] == "created" and got["t_run"]["current_run_started_at"] == 500
+    assert got["t_run"]["board"] == "default" and got["t_run"]["title"] == "Run"
+    assert got["t_other"]["via"] == "subscribed" and got["t_other"]["status"] == "blocked"
+    assert got["t_root"]["board"] == "bb"
+    # Same cards the sidebar badge counts (open + blocked).
+    ksa._reset_cache_for_tests()
+    active, blocked = ksa.active_task_counts(), ksa.blocked_task_counts()
+    assert active.get("s_me", 0) + active.get("s_root", 0) == 2
+    assert blocked.get("s_me") == 1
+
+
+def test_session_tasks_empty_ids_and_old_schema(kanban_root):
+    _make_board(kanban_root / "kanban.db", [("t1", "running", "s_a")])  # no title/subs columns
+    assert ksa.session_tasks([]) == []
+    rows = ksa.session_tasks(["s_a"])
+    assert [(r["id"], r["title"], r["via"]) for r in rows] == [("t1", None, "created")]
+
+
+def test_session_kanban_tasks_endpoint(kanban_root, _isolate_hermes_home):
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+    _make_full_board(kanban_root / "kanban.db", [
+        ("t_run", "Run", "running", "default", "s_me", 100, 200, None),
+        ("t_x", "Theirs", "running", "default", "s_them", 100, 200, None),
+    ])
+    client = TestClient(app)
+    client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+
+    res = client.get("/api/session-kanban-tasks", params={"ids": "s_me, s_root"})
+
+    assert res.status_code == 200
+    assert [t["id"] for t in res.json()["tasks"]] == ["t_run"]
+    assert client.get("/api/session-kanban-tasks").status_code == 422
