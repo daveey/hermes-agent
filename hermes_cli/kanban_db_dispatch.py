@@ -376,7 +376,42 @@ def _process_fingerprint(pid: int) -> Optional[str]:
     start = get_process_start_time(int(pid))
     if start is None:
         return None
-    return f"{current_instantiation_epoch()}|{start}"
+    epoch = current_instantiation_epoch()
+    # [daveey] macOS: psutil's start time is ``kern.boottime`` + the process's uptime offset, so it
+    # moves whenever the kernel re-anchors boottime (sleep/wake, NTP step). Stamp the boottime read
+    # beside it ("<start>@<boottime>") so ``_pid_recycled`` can compare the boot-relative offset, which
+    # those adjustments leave unchanged. Linux ticks are already boot-relative (epoch is non-empty).
+    boot = None if epoch else _darwin_boottime_centis()
+    return f"{epoch}|{start}" if boot is None else f"{epoch}|{start}@{boot}"
+
+
+def _darwin_boottime_centis() -> Optional[int]:
+    """``kern.boottime`` in centiseconds (macOS only), or ``None`` when unavailable."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+
+        class _Timeval(ctypes.Structure):
+            _fields_ = [("tv_sec", ctypes.c_long), ("tv_usec", ctypes.c_int32)]
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        tv = _Timeval()
+        size = ctypes.c_size_t(ctypes.sizeof(tv))
+        if libc.sysctlbyname(b"kern.boottime", ctypes.byref(tv), ctypes.byref(size), None, 0) != 0:
+            return None
+        if tv.tv_sec <= 0:
+            return None
+        return int(tv.tv_sec) * 100 + int(tv.tv_usec) // 10_000
+    except Exception:
+        return None
+
+
+def _start_components(start: str) -> tuple[int, Optional[int]]:
+    """``"<start>[@<boottime>]"`` -> ``(start, boottime | None)``; raises ``ValueError`` on junk."""
+    abs_part, sep, boot_part = start.partition("@")
+    return int(abs_part), (int(boot_part) if sep else None)
 
 
 def _worker_alive(pid: Optional[int], started_at) -> bool:
@@ -419,9 +454,19 @@ def _pid_recycled(pid: Optional[int], started_at) -> bool:
         if rec_epoch != cur_epoch:
             return True
         try:
-            return not start_time_fingerprints_match(rec_start, cur_start)
+            rec_abs, rec_boot = _start_components(rec_start)
+            cur_abs, cur_boot = _start_components(cur_start)
         except (TypeError, ValueError):
             return current_fp != started_at
+        # Same process when the absolute start agrees within drift tolerance (legacy rows, small NTP
+        # slews) OR, when both sides carry a boottime stamp, the boot-relative start agrees (any size of
+        # boottime re-anchor). A recycled PID started after ours died: both offsets are off by at least
+        # our worker's lifetime, so neither branch matches it.
+        if start_time_fingerprints_match(rec_abs, cur_abs):
+            return False
+        if rec_boot is not None and cur_boot is not None:
+            return not start_time_fingerprints_match(rec_abs - rec_boot, cur_abs - cur_boot)
+        return True
     current = get_process_start_time(int(pid))
     if current is None:
         return True

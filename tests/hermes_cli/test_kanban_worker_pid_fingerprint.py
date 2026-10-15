@@ -89,7 +89,8 @@ def test_same_pid_and_start_tick_on_another_boot_is_foreign(board, monkeypatch):
     conn = board
     killed = []
     live_fingerprint = kbd._process_fingerprint(os.getpid())
-    assert live_fingerprint is not None and live_fingerprint.split("|", 1)[1] == str(
+    # macOS appends "@<kern.boottime>" to the start time (boot-relative drift check).
+    assert live_fingerprint is not None and live_fingerprint.split("|", 1)[1].split("@")[0] == str(
         __import__("gateway.status", fromlist=["x"]).get_process_start_time(os.getpid()))
     tid = _claimed_running(conn, pid=os.getpid(), started_at=live_fingerprint, max_runtime=1)
     assert kbd._worker_alive(os.getpid(), live_fingerprint) is True
