@@ -49,6 +49,7 @@ import type { WorkspaceMode } from '@/contrib/types'
 import { deleteProfile, getLogs, getStatus, hermesApi, type HermesGateway } from '@/hermes'
 import { traceIdentityChange } from '@/lib/identity-trace'
 import { completeMcpDesktopOAuth } from '@/lib/mcp-dashboard-oauth'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
 import {
   $gateway,
   activeGatewayConnectionId,
@@ -347,6 +348,19 @@ if (typeof window !== 'undefined') {
 /** Live usage of the FOCUSED session, projected out of the streamed session
  *  state — the same readout the core statusbar's context chip paints. */
 const $focusedUsage = computed($focusedSessionState, state => state?.usage ?? null)
+
+/** [daveey] Every registered gateway (id, kind, label), registry order. Token
+ *  bytes and ssh details never cross into plugins. Empty on legacy
+ *  profile-only Desktop builds. */
+export interface PluginGateway {
+  id: string
+  kind: string
+  label: string
+}
+
+const $gateways = computed($connectionsRegistry, (registry): PluginGateway[] =>
+  (registry?.connections ?? []).map(({ id, kind, label }) => ({ id, kind, label }))
+)
 
 const $activeConnectionId = computed($connection, connection => {
   if (!connection) {
@@ -708,6 +722,9 @@ export const host = {
     focusedUsage: readonlyAtom<null | UsageStats>($focusedUsage),
     /** Gateway socket state: 'idle' | 'connecting' | 'open' | …. Not turn-busy. */
     gateway: readonlyAtom<string>($gatewayState),
+    /** [daveey] Every registered gateway — read them all with
+     *  `ctx.rest(path, { connectionId })`. */
+    gateways: readonlyAtom<PluginGateway[]>($gateways),
     /** Current main model slug. */
     model: readonlyAtom<string>($currentModel),
     /** Profile the live gateway is routed to. */
@@ -1702,6 +1719,10 @@ export { SidebarRowLead } from '@/app/chat/sidebar/chrome'
  *  switcher, the fleet profile rail and any plugin rail listing gateways share
  *  it, so a connection looks the same wherever it is named. */
 export { ConnectionGlyph } from '@/app/chat/sidebar/connection-glyph'
+/** [daveey] The sidebar session row's "which machine" glyph (laptop / Mac
+ *  mini / cloud) for a registry connection id. Renders nothing with fewer
+ *  than two gateways, so single-gateway users see no change. */
+export { GatewayDeviceIcon } from '@/app/chat/sidebar/gateway-device-icon'
 export { SIDEBAR_ROW_LEAD, SIDEBAR_TRUNCATED_LEADING } from '@/app/chat/sidebar/row-geometry'
 export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
 /** Page-owned header control (the kanban board switcher): projected into the

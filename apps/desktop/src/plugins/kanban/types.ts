@@ -34,6 +34,11 @@ export interface KanbanTask {
   /** Unblock-loop counter — how many times this task re-blocked for the same
    *  reason after a human unblock. 0/absent on legacy payloads. */
   block_recurrences?: number
+  /** Done-lane sort key (the backend orders history newest-completed-first). */
+  completed_at?: null | number
+  /** [daveey] Registry connection id of the gateway that owns this card —
+   *  stamped client-side by the merged board read (api.ts `mergeBoards`). */
+  gateway?: string
 }
 
 export interface KanbanColumn {
@@ -47,6 +52,8 @@ export interface KanbanBoard {
   assignees: string[]
   latest_event_id: number
   now: number
+  /** [daveey] Gateways that failed to answer the merged read (id → message). */
+  gateway_errors?: Record<string, string>
 }
 
 /** A structured recovery action attached to a diagnostic. */
@@ -162,6 +169,8 @@ export interface BoardMeta {
   /** First-class Project the board is scoped to (id) + resolved name. */
   project_id?: null | string
   project_name?: null | string
+  /** [daveey] Registry ids of the gateways that have this board (merged list). */
+  gateways?: string[]
 }
 
 /** POST /boards/{slug}/export — the archive the backend wrote. */

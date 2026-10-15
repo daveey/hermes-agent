@@ -31,6 +31,7 @@ import {
   DropdownMenuTrigger,
   ErrorState,
   formatModifierToken,
+  GatewayDeviceIcon,
   host,
   Input,
   isSubmitEnter,
@@ -64,6 +65,7 @@ import {
 import {
   $boardSlug,
   $collapsedLanes,
+  $gatewayFilter,
   $introDismissed,
   $lanesByProfile,
   boardKey,
@@ -75,7 +77,9 @@ import {
   estimateNew,
   fetchBoard,
   fetchBoards,
+  fetchGatewayProfiles,
   fetchProfiles,
+  multiGateway,
   patchTask,
   profilesKey,
   taskKey,
@@ -244,6 +248,8 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
           <span className="text-(--ui-text-quaternary)">{created}</span>
         ) : null}
         <span className="min-w-0 truncate font-mono text-(--ui-text-quaternary)">{shortId(task.id)}</span>
+        {/* [daveey] Which gateway owns the card — the sidebar session row's glyph. */}
+        {task.gateway && <GatewayDeviceIcon gatewayId={task.gateway} />}
       </div>
     </div>
   )
@@ -321,11 +327,7 @@ function Card({
           {fileOver && (
             <span className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-md border border-dashed border-(--dt-composer-ring) bg-[color-mix(in_srgb,var(--ui-bg-elevated)_82%,transparent)] text-[0.75rem] font-medium text-foreground">
               <span className="inline-flex items-center gap-1.5">
-                <Codicon
-                  name={attach.isPending ? 'sync' : 'cloud-upload'}
-                  size="0.85rem"
-                  spinning={attach.isPending}
-                />
+                <Codicon name={attach.isPending ? 'sync' : 'cloud-upload'} size="0.85rem" spinning={attach.isPending} />
                 {k.dropToAttach}
               </span>
             </span>
@@ -589,22 +591,36 @@ function Field({ children, label }: { children: ReactNode; label: string }) {
 }
 
 function NewTaskDialog({
+  gateway,
   onClose,
   parents,
   target
 }: {
+  /** [daveey] Gateway the task is created on (registry id). */
+  gateway: string
   onClose: () => void
-  parents: Array<{ id: string; title: string }>
+  parents: Array<{ gateway?: string; id: string; title: string }>
   target: null | string
 }) {
   const k = useKanban()
   const qc = useQueryClient()
   const scope = useKanbanScope()
-  const { data: roster } = useQuery({ queryKey: profilesKey(scope), queryFn: fetchProfiles, staleTime: 60_000 })
+  // [daveey] Another gateway has its own profiles and orchestration defaults.
+  const remote = gateway !== scope
+  const gatewayLabel = useValue(host.state.gateways).find(entry => entry.id === gateway)?.label ?? gateway
+
+  const { data: roster } = useQuery({
+    queryKey: remote ? [...profilesKey(scope), gateway] : profilesKey(scope),
+    queryFn: () => (remote ? fetchGatewayProfiles(gateway) : fetchProfiles()),
+    staleTime: 60_000
+  })
+
   // Title-only creates must RUN: "auto" resolves to the orchestration default
   // (ultimately the active profile), applied at create time. Never silently
   // unassigned — parking a card is the explicit choice, not the default.
-  const resolvedDefault = useOrchestration()?.resolved_default_assignee || 'default'
+  const localDefault = useOrchestration()?.resolved_default_assignee || 'default'
+  const resolvedDefault = remote ? 'default' : localDefault
+  const parentChoices = parents.filter(entry => !entry.gateway || entry.gateway === gateway)
 
   // Board-level workspace default: a task inherits the current board's
   // configured project dir (scratch when unset, worktree in a git repo, else
@@ -686,20 +702,23 @@ function NewTaskDialog({
 
       // create() derives status (triage flag → 'triage', else 'ready'); move to
       // the requested column when they differ, so a per-column add lands right.
-      const { task, warning } = await createTask({
-        assignee: assignee === PARKED ? undefined : assignee || resolvedDefault,
-        body: bodyText.trim() || undefined,
-        goal_mode: goalMode,
-        parents: parent ? [parent] : undefined,
-        priority: Number(priority) || 0,
-        skills: skillList.length ? skillList : undefined,
-        title: trimmed,
-        triage: isTriage,
-        workspace_kind: workspaceKind,
-        ...overrideCreateFields(modelOverride),
-        // Empty → backend inherits the board's default project dir.
-        workspace_path: workspaceKind !== 'scratch' && workspacePath.trim() ? workspacePath.trim() : undefined
-      })
+      const { task, warning } = await createTask(
+        {
+          assignee: assignee === PARKED ? undefined : assignee || resolvedDefault,
+          body: bodyText.trim() || undefined,
+          goal_mode: goalMode,
+          parents: parent ? [parent] : undefined,
+          priority: Number(priority) || 0,
+          skills: skillList.length ? skillList : undefined,
+          title: trimmed,
+          triage: isTriage,
+          workspace_kind: workspaceKind,
+          ...overrideCreateFields(modelOverride),
+          // Empty → backend inherits the board's default project dir.
+          workspace_path: workspaceKind !== 'scratch' && workspacePath.trim() ? workspacePath.trim() : undefined
+        },
+        gateway
+      )
 
       if (task && task.status !== target) {
         await patchTask(task.id, { status: target })
@@ -732,6 +751,17 @@ function NewTaskDialog({
       <DialogContent className="w-[min(42rem,94vw)] max-w-none overflow-visible">
         <DialogHeader>
           <DialogTitle>{target ? k.newTaskIn(columnLabel(k, target)) : k.newTask}</DialogTitle>
+          {multiGateway() && (
+            // [daveey] Where the card will live (and run): the gateway filter's
+            // pick, else the active gateway.
+            <span
+              className="inline-flex items-center gap-1 text-[0.6875rem] text-(--ui-text-tertiary)"
+              data-slot="kanban-create-gateway"
+            >
+              <GatewayDeviceIcon gatewayId={gateway} />
+              {k.createOn(gatewayLabel)}
+            </span>
+          )}
         </DialogHeader>
         <div className="flex max-h-[min(72vh,44rem)] flex-col gap-3 overflow-y-auto pr-0.5">
           <Input
@@ -815,7 +845,7 @@ function NewTaskDialog({
             <span className="text-[0.625rem] text-(--ui-text-quaternary)">{k.modelHint}</span>
           </Field>
 
-          {parents.length > 0 && (
+          {parentChoices.length > 0 && (
             <Field label={k.parent}>
               <Select onValueChange={v => setParent(v === NO_PARENT ? '' : v)} value={parent || NO_PARENT}>
                 <SelectTrigger>
@@ -823,7 +853,7 @@ function NewTaskDialog({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={NO_PARENT}>{k.noParent}</SelectItem>
-                  {parents.map(option => (
+                  {parentChoices.map(option => (
                     <SelectItem key={option.id} value={option.id}>
                       {option.title || option.id}
                     </SelectItem>
@@ -939,7 +969,9 @@ function FilterMenu({
   tenant: string
 }) {
   const k = useKanban()
-  const active = Boolean(assignee || tenant || archived)
+  const gatewayFilter = useValue($gatewayFilter)
+  const gateways = useValue(host.state.gateways)
+  const active = Boolean(assignee || tenant || archived || gatewayFilter)
   const lanesByProfile = useValue($lanesByProfile)
 
   const check = (on: boolean) => (on ? <Codicon className="ml-auto" name="check" size="0.8rem" /> : null)
@@ -957,6 +989,26 @@ function FilterMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
+        {gateways.length > 1 && (
+          // [daveey] One board spans every gateway; narrow it to one machine.
+          <>
+            <DropdownMenuItem onSelect={() => $gatewayFilter.set('')}>
+              {k.allGateways}
+              {check(!gatewayFilter)}
+            </DropdownMenuItem>
+            {gateways.map(gateway => (
+              <DropdownMenuItem key={gateway.id} onSelect={() => $gatewayFilter.set(gateway.id)}>
+                <GatewayDeviceIcon gatewayId={gateway.id} />
+                {gateway.label}
+                {board.gateway_errors?.[gateway.id] && (
+                  <Codicon className="text-amber-500" name="warning" size="0.75rem" />
+                )}
+                {check(gatewayFilter === gateway.id)}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+          </>
+        )}
         <DropdownMenuItem onSelect={() => onAssignee('')}>
           {k.allProfiles}
           {check(!assignee)}
@@ -1144,11 +1196,20 @@ export function KanbanBoardPage() {
 
   // Live updates ride the events socket (bindApi); this interval is only the
   // slow heartbeat for socketless paths (OAuth remotes, dropped connections).
+  // [daveey] Other gateways have no socket here — poll them faster.
+  const gateways = useValue(host.state.gateways)
+  const spansGateways = gateways.length > 1
+
   const { data: board, error } = useQuery({
     queryFn: () => fetchBoard(archived),
     queryKey: boardKey(scope, slug, archived),
-    refetchInterval: 60_000
+    refetchInterval: spansGateways ? 15_000 : 60_000
   })
+
+  // A filter naming a gateway that left the registry shows everything.
+  const pickedGateway = useValue($gatewayFilter)
+  const gatewayFilter = gateways.some(gateway => gateway.id === pickedGateway) ? pickedGateway : ''
+  const createGateway = gatewayFilter || scope
 
   const [openId, setOpenId] = useState<null | string>(null)
   const [addStatus, setAddStatus] = useState<null | string>(null)
@@ -1237,7 +1298,10 @@ export function KanbanBoardPage() {
   const columnNames = board?.columns.map(col => col.name) ?? []
 
   const parentOptions = useMemo(
-    () => board?.columns.flatMap(col => col.tasks).map(task => ({ id: task.id, title: task.title })) ?? [],
+    () =>
+      board?.columns
+        .flatMap(col => col.tasks)
+        .map(task => ({ gateway: task.gateway, id: task.id, title: task.title })) ?? [],
     [board]
   )
 
@@ -1252,10 +1316,11 @@ export function KanbanBoardPage() {
     const keep = (task: KanbanTask) =>
       (!q || `${task.title} ${task.body ?? ''} ${task.id}`.toLowerCase().includes(q)) &&
       (!tenant || task.tenant === tenant) &&
-      (!assignee || task.assignee === assignee)
+      (!assignee || task.assignee === assignee) &&
+      (!gatewayFilter || (task.gateway ?? scope) === gatewayFilter)
 
     return { ...board, columns: board.columns.map(col => ({ ...col, tasks: col.tasks.filter(keep) })) }
-  }, [board, search, tenant, assignee])
+  }, [board, search, tenant, assignee, gatewayFilter, scope])
 
   const total = filtered?.columns.reduce((sum, col) => sum + col.tasks.length, 0) ?? 0
 
@@ -1418,6 +1483,22 @@ export function KanbanBoardPage() {
           />
         )}
         <SearchField aria-label={k.filterCards} onChange={setSearch} placeholder={k.filterCards} value={search} />
+        {board?.gateway_errors && (
+          // [daveey] A gateway that didn't answer: its cards are missing, say so.
+          <Tip
+            label={Object.entries(board.gateway_errors)
+              .map(([id, message]) => k.gatewayUnreachable(gateways.find(g => g.id === id)?.label ?? id, message))
+              .join('\n')}
+          >
+            <span
+              className="inline-flex cursor-help items-center gap-1 text-[0.6875rem] text-amber-500"
+              data-slot="kanban-gateway-errors"
+            >
+              <Codicon name="warning" size="0.75rem" />
+              {Object.keys(board.gateway_errors).length}
+            </span>
+          </Tip>
+        )}
         <div className="ml-auto flex items-center gap-1">
           <Tip label={k.orchestrationSettings}>
             <Button
@@ -1498,7 +1579,12 @@ export function KanbanBoardPage() {
         />
       )}
 
-      <NewTaskDialog onClose={() => setAddStatus(null)} parents={parentOptions} target={addStatus} />
+      <NewTaskDialog
+        gateway={createGateway}
+        onClose={() => setAddStatus(null)}
+        parents={parentOptions}
+        target={addStatus}
+      />
       <TaskDrawer columns={columnNames} id={openId} onClose={() => setOpenId(null)} onOpen={setOpenId} />
     </div>
   )

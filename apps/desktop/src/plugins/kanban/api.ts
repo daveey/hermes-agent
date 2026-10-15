@@ -35,6 +35,7 @@ import type {
   BoardMeta,
   BoardsResponse,
   KanbanBoard,
+  KanbanColumn,
   KanbanProfile,
   KanbanProject,
   KanbanTask,
@@ -70,6 +71,7 @@ const LOCAL_SCOPE = 'local'
 const KANBAN_KEY_ROOT = ['kanban'] as const
 
 const BOARD_SLUG_KEY = 'boardSlug'
+const GATEWAY_FILTER_KEY = 'gatewayFilter'
 const INTRO_KEY = 'introDismissed'
 const LANES_KEY = 'lanesByProfile'
 const COLLAPSED_KEY = 'collapsedLanes'
@@ -225,6 +227,7 @@ export function bindApi(
   persist($introDismissed, INTRO_KEY, false)
   persist($lanesByProfile, LANES_KEY, false)
   persist($collapsedLanes, COLLAPSED_KEY, {})
+  persist($gatewayFilter, GATEWAY_FILTER_KEY, '')
 
   eventCursorByBoard.clear()
 
@@ -268,7 +271,10 @@ export function bindApi(
       // with no since — the server starts at the tail rather than replaying.
       void queryClient
         .fetchQuery({
-          queryFn: () => r<KanbanBoard>(boardSnapshotPath(slug)),
+          // [daveey] The same (merged, gateway-tagged) fetch the page runs —
+          // a raw single-gateway snapshot under this key would briefly drop
+          // every other gateway's cards.
+          queryFn: () => (slug === $boardSlug.get() ? fetchBoard(false) : r<KanbanBoard>(boardSnapshotPath(slug))),
           queryKey: boardKey(scope, slug, false)
         })
         .then(board => {
@@ -383,24 +389,337 @@ export const profilesKey = (scope: string) => ['kanban', 'profiles', scope] as c
 export const projectsKey = (scope: string) => ['kanban', 'projects', scope] as const
 export const orchestrationKey = (scope: string) => ['kanban', 'orchestration', scope] as const
 
+// ── gateways [daveey] ────────────────────────────────────────────────────────
+//
+// One board across EVERY registered gateway: the board read fans out to each
+// connection's own kanban API and merges the columns, tagging every card with
+// its owner. Each gateway keeps its own kanban.db and dispatcher — nothing is
+// replicated — so every write about a task is routed back to the gateway that
+// owns it (`taskOwners`, filled by each merged read). With one gateway (or a
+// Desktop without the registry) every path below is the old single-gateway
+// call, byte for byte.
+
+/** Gateway filter: '' = every gateway, else one registry connection id. Persisted. */
+export const $gatewayFilter = atom<string>('')
+
+/** Remote gateways get a shorter leash than the active one: a dead ssh tunnel
+ *  or a cloud gateway waiting on an OAuth login must not hold the whole board
+ *  hostage. The bridge's own `timeoutMs` does not cover a pending login, so
+ *  the deadline is enforced here too. */
+const REMOTE_BOARD_TIMEOUT_MS = 6_000
+
+/** After a remote gateway fails, skip it for this long (its error stays on
+ *  the board) instead of making every poll wait out the deadline again. */
+const REMOTE_COOLDOWN_MS = 60_000
+
+const gatewayCooldown = new Map<string, { message: string; until: number }>()
+
+/** Test seam: forget remembered gateway failures. */
+export function resetGatewayCooldowns(): void {
+  gatewayCooldown.clear()
+}
+
+/** One read from a remote gateway: hard deadline, failures cooled down. */
+function remoteRead<T>(gateway: string, path: string): Promise<T> {
+  const cooling = gatewayCooldown.get(gateway)
+
+  if (cooling && cooling.until > Date.now()) {
+    return Promise.reject(new Error(cooling.message))
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const fail = (err: unknown) => {
+      clearTimeout(timer)
+
+      // A missing board is an answer, not an outage.
+      if (!isMissingBoard(err)) {
+        gatewayCooldown.set(gateway, {
+          message: err instanceof Error ? err.message : String(err),
+          until: Date.now() + REMOTE_COOLDOWN_MS
+        })
+      }
+
+      reject(err)
+    }
+
+    const timer = setTimeout(
+      () => fail(new Error(`no answer in ${REMOTE_BOARD_TIMEOUT_MS / 1000}s`)),
+      REMOTE_BOARD_TIMEOUT_MS
+    )
+
+    call<T>(path, { ...via(gateway), timeoutMs: REMOTE_BOARD_TIMEOUT_MS }).then(value => {
+      clearTimeout(timer)
+      gatewayCooldown.delete(gateway)
+      resolve(value)
+    }, fail)
+  })
+}
+
+interface TaskOwner {
+  gateway: string
+  board: string
+}
+
+const taskOwners = new Map<string, TaskOwner>()
+
+/** Registry ids of every gateway, the routed (active) one first. A single
+ *  gateway, or a legacy profile-only Desktop, yields just the routed scope. */
+export function boardGateways(): string[] {
+  const active = routedScope()
+  // Optional chain: a host SDK older than the gateways atom reads as one gateway.
+  const ids = (host.state.gateways?.get() ?? []).map(gateway => gateway.id)
+
+  if (ids.length < 2) {
+    return [active]
+  }
+
+  return [active, ...ids.filter(id => id !== active)]
+}
+
+export const multiGateway = (): boolean => boardGateways().length > 1
+
+/** REST options that send a call to `gateway` — none for the routed one, so
+ *  its calls keep the ambient profile exactly as before. */
+function via(gateway: string | undefined): PluginRestOptions {
+  return gateway && gateway !== routedScope() ? { connectionId: gateway } : {}
+}
+
+/** Owning gateway of a task (the routed one when unknown — e.g. a task id
+ *  typed before the board loaded, or a single-gateway setup). */
+export function taskGateway(id: string): string {
+  return taskOwners.get(id)?.gateway ?? routedScope()
+}
+
+function withSlug(path: string, slug: string, params: Record<string, string> = {}): string {
+  const search = new URLSearchParams(params)
+
+  if (slug) {
+    search.set('board', slug)
+  }
+
+  const qs = search.toString()
+
+  return qs ? `${path}?${qs}` : path
+}
+
+/** `withBoard` for a task: its own board slug on its own gateway. */
+function forTask(id: string, path: string, params: Record<string, string> = {}): [string, PluginRestOptions] {
+  const owner = taskOwners.get(id)
+
+  return owner && owner.gateway !== routedScope()
+    ? [withSlug(path, owner.board, params), via(owner.gateway)]
+    : [withBoard(path, params), {}]
+}
+
+/** The selected slug, with the '' (server-current) alias resolved against the
+ *  ROUTED gateway — remote gateways must show that same board, not their own
+ *  current one. */
+async function resolvedSlug(): Promise<string> {
+  const slug = $boardSlug.get()
+
+  if (slug) {
+    return slug
+  }
+
+  try {
+    const boards = await call<BoardsResponse>('/boards')
+
+    return typeof boards.current === 'string' ? boards.current : ''
+  } catch {
+    return ''
+  }
+}
+
+const isMissingBoard = (err: unknown): boolean => {
+  const message = err instanceof Error ? err.message : String(err)
+
+  return /^\s*404\b/.test(message) || /does not exist|is archived/.test(message)
+}
+
+export interface GatewayBoardPart {
+  gateway: string
+  board?: KanbanBoard
+  error?: unknown
+}
+
+const TERMINAL_ORDER = new Set(['done', 'archived'])
+
+/** Merge per-gateway boards into one: columns in first-seen order, every task
+ *  tagged with its `gateway`, queue lanes re-sorted by the backend's dispatch
+ *  key (priority DESC, created_at ASC) and history lanes newest-first. The
+ *  FIRST part is the routed gateway: its `latest_event_id`/`now` drive the
+ *  events socket. A gateway that lacks the board contributes nothing; any
+ *  other failure is reported in `gateway_errors`. Throws only when no
+ *  gateway answered. */
+export function mergeBoards(parts: GatewayBoardPart[]): KanbanBoard {
+  const answered = parts.filter(part => part.board)
+
+  if (answered.length === 0) {
+    const failed = parts.find(part => part.error && !isMissingBoard(part.error)) ?? parts[0]
+
+    throw failed?.error ?? new Error('kanban board unavailable')
+  }
+
+  const columns = new Map<string, KanbanColumn>()
+  const tenants = new Set<string>()
+  const assignees = new Set<string>()
+  const gatewayErrors: Record<string, string> = {}
+
+  for (const part of parts) {
+    if (!part.board) {
+      if (part.error && !isMissingBoard(part.error)) {
+        gatewayErrors[part.gateway] = part.error instanceof Error ? part.error.message : String(part.error)
+      }
+
+      continue
+    }
+
+    for (const col of part.board.columns ?? []) {
+      const merged = columns.get(col.name) ?? { name: col.name, tasks: [] }
+      merged.tasks.push(...col.tasks.map(task => ({ ...task, gateway: part.gateway })))
+      columns.set(col.name, merged)
+    }
+
+    part.board.tenants?.forEach(name => tenants.add(name))
+    part.board.assignees?.forEach(name => assignees.add(name))
+  }
+
+  if (answered.length > 1) {
+    for (const col of columns.values()) {
+      if (TERMINAL_ORDER.has(col.name)) {
+        col.tasks.sort(
+          (a, b) =>
+            Number(a.completed_at == null) - Number(b.completed_at == null) ||
+            (b.completed_at ?? 0) - (a.completed_at ?? 0) ||
+            (b.created_at ?? 0) - (a.created_at ?? 0)
+        )
+      } else {
+        col.tasks.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || (a.created_at ?? 0) - (b.created_at ?? 0))
+      }
+    }
+  }
+
+  const primary = parts[0]?.board
+
+  return {
+    assignees: [...assignees].sort(),
+    columns: [...columns.values()],
+    gateway_errors: Object.keys(gatewayErrors).length ? gatewayErrors : undefined,
+    latest_event_id: primary?.latest_event_id ?? 0,
+    now: primary?.now ?? answered[0].board!.now,
+    tenants: [...tenants].sort()
+  }
+}
+
+function rememberOwners(board: KanbanBoard, slug: string): KanbanBoard {
+  for (const col of board.columns) {
+    for (const task of col.tasks) {
+      if (task.gateway) {
+        taskOwners.set(task.id, { board: slug, gateway: task.gateway })
+      }
+    }
+  }
+
+  return board
+}
+
 // ── reads ─────────────────────────────────────────────────────────────────────
 
-export const fetchBoard = (archived: boolean) =>
-  call<KanbanBoard>(withBoard('/board', archived ? { include_archived: 'true' } : {}))
+export async function fetchBoard(archived: boolean): Promise<KanbanBoard> {
+  const params: Record<string, string> = archived ? { include_archived: 'true' } : {}
+  const gateways = boardGateways()
+
+  if (gateways.length < 2) {
+    return call<KanbanBoard>(withBoard('/board', params))
+  }
+
+  const slug = await resolvedSlug()
+
+  const settled = await Promise.allSettled(
+    gateways.map((gateway, index) =>
+      index === 0
+        ? call<KanbanBoard>(withBoard('/board', params))
+        : remoteRead<KanbanBoard>(gateway, withSlug('/board', slug, params))
+    )
+  )
+
+  const board = mergeBoards(
+    settled.map((result, index) => ({
+      gateway: gateways[index],
+      ...(result.status === 'fulfilled' ? { board: result.value } : { error: result.reason })
+    }))
+  )
+
+  return rememberOwners(board, slug)
+}
 
 export const fetchTask = async (id: string) => {
   const downloadAttachment = captureGatewayFileDownload()
-  const detail = await call<KanbanTaskDetail>(withBoard(`/tasks/${id}`))
+  const detail = await call<KanbanTaskDetail>(...forTask(id, `/tasks/${id}`))
 
   return { ...detail, downloadAttachment }
 }
 
 /** Worker stdout/stderr tail (last 16 KiB — plenty for the drawer). */
-export const fetchLog = (id: string) => call<WorkerLog>(withBoard(`/tasks/${id}/log`, { tail: '16384' }))
+export const fetchLog = (id: string) => call<WorkerLog>(...forTask(id, `/tasks/${id}/log`, { tail: '16384' }))
 
-export const fetchBoards = () => call<BoardsResponse>('/boards')
+/** Every gateway's boards as one list: union by slug, card totals summed,
+ *  `current` = the routed gateway's. A remote-only board is listed too, so
+ *  picking it shows its cards. */
+export async function fetchBoards(): Promise<BoardsResponse> {
+  const gateways = boardGateways()
 
+  if (gateways.length < 2) {
+    return call<BoardsResponse>('/boards')
+  }
+
+  const settled = await Promise.allSettled(
+    gateways.map((gateway, index) =>
+      index === 0 ? call<BoardsResponse>('/boards') : remoteRead<BoardsResponse>(gateway, '/boards')
+    )
+  )
+
+  const primary = settled[0]
+
+  if (primary.status === 'rejected' && settled.every(result => result.status === 'rejected')) {
+    throw primary.reason
+  }
+
+  return mergeBoardLists(
+    settled.map((result, index) => ({
+      gateway: gateways[index],
+      boards: result.status === 'fulfilled' ? result.value : null
+    }))
+  )
+}
+
+export function mergeBoardLists(parts: Array<{ gateway: string; boards: BoardsResponse | null }>): BoardsResponse {
+  const bySlug = new Map<string, BoardMeta>()
+  const current = parts[0]?.boards?.current ?? parts.find(part => part.boards)?.boards?.current ?? 'default'
+
+  for (const part of parts) {
+    for (const meta of part.boards?.boards ?? []) {
+      const seen = bySlug.get(meta.slug)
+
+      if (!seen) {
+        bySlug.set(meta.slug, { ...meta, gateways: [part.gateway], is_current: meta.slug === current })
+
+        continue
+      }
+
+      seen.total = (seen.total ?? 0) + (meta.total ?? 0)
+      seen.gateways = [...(seen.gateways ?? []), part.gateway]
+    }
+  }
+
+  return { boards: [...bySlug.values()], current }
+}
+
+/** The assignee roster of `gateway` (default: the routed one) — profiles are
+ *  per gateway, so a create aimed at another gateway lists ITS profiles. */
 export const fetchProfiles = () => call<{ profiles: KanbanProfile[] }>('/profiles')
+
+export const fetchGatewayProfiles = (gateway: string) => remoteRead<{ profiles: KanbanProfile[] }>(gateway, '/profiles')
 
 /** First-class Hermes projects, for scoping a board's default workspace. */
 export const fetchProjects = () => call<{ projects: KanbanProject[] }>('/projects')
@@ -413,59 +732,142 @@ export const fetchOrchestration = () => call<OrchestrationSettings>('/orchestrat
 // change takes effect NOW instead of on the next 60s tick — create a ready
 // task and the worker spawns immediately, no manual "nudge" ritual. The tick
 // is lock-guarded and ~1ms when there's nothing to do, so over-nudging is
-// free; failures are non-events (the periodic tick still exists).
-let nudgeTimer: null | ReturnType<typeof setTimeout> = null
+// free; failures are non-events (the periodic tick still exists). [daveey]
+// The nudge goes to the gateway the write landed on — one timer per gateway.
+const nudgeTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function autoNudge(): void {
-  if (nudgeTimer != null) {
-    clearTimeout(nudgeTimer)
+function autoNudge(gateway: string = routedScope()): void {
+  const pending = nudgeTimers.get(gateway)
+
+  if (pending != null) {
+    clearTimeout(pending)
   }
 
-  nudgeTimer = setTimeout(() => {
-    nudgeTimer = null
-    nudgeDispatcher().catch(() => undefined)
-  }, 400)
+  nudgeTimers.set(
+    gateway,
+    setTimeout(() => {
+      nudgeTimers.delete(gateway)
+      nudgeDispatcher(gateway).catch(() => undefined)
+    }, 400)
+  )
 }
 
-/** Resolve the write, then kick the dispatcher. Rejections pass through. */
-function nudged<T>(write: Promise<T>): Promise<T> {
+/** Resolve the write, then kick the owning gateway's dispatcher. Rejections pass through. */
+function nudged<T>(write: Promise<T>, gateway?: string): Promise<T> {
   return write.then(value => {
-    autoNudge()
+    autoNudge(gateway)
 
     return value
   })
 }
 
-export const patchTask = (id: string, patch: Record<string, unknown>) =>
-  nudged(call(withBoard(`/tasks/${id}`), { method: 'PATCH', body: patch }))
+export const patchTask = (id: string, patch: Record<string, unknown>) => {
+  const [path, opts] = forTask(id, `/tasks/${id}`)
 
-export const createTask = (body: Record<string, unknown>) =>
-  nudged(call<{ task: KanbanTask | null; warning?: string }>(withBoard('/tasks'), { method: 'POST', body }))
+  return nudged(call(path, { ...opts, method: 'PATCH', body: patch }), taskGateway(id))
+}
+
+/** Create on `gateway` (default: the routed one). The board slug is the
+ *  selected one, resolved — a remote gateway must not fall back to its own
+ *  current board. */
+export const createTask = async (body: Record<string, unknown>, gateway?: string) => {
+  if (!gateway || gateway === routedScope()) {
+    return nudged(call<{ task: KanbanTask | null; warning?: string }>(withBoard('/tasks'), { method: 'POST', body }))
+  }
+
+  const slug = await resolvedSlug()
+
+  const created = await nudged(
+    call<{ task: KanbanTask | null; warning?: string }>(withSlug('/tasks', slug), {
+      ...via(gateway),
+      method: 'POST',
+      body
+    }),
+    gateway
+  )
+
+  // Route the follow-up writes (the dialog's lane move) before any board read
+  // has seen the new card.
+  if (created.task?.id) {
+    taskOwners.set(created.task.id, { board: slug, gateway })
+  }
+
+  return created
+}
 
 // Deleting can unblock dependants (a gone parent no longer gates), so it
 // nudges too.
-export const deleteTask = (id: string) => nudged(call(withBoard(`/tasks/${id}`), { method: 'DELETE' }))
+export const deleteTask = (id: string) => {
+  const [path, opts] = forTask(id, `/tasks/${id}`)
+
+  return nudged(call(path, { ...opts, method: 'DELETE' }), taskGateway(id))
+}
+
+type BulkResult = { results: Array<{ id: string; ok: boolean; error?: string }> }
 
 /** One patch, many ids — independent per-id application; returns per-id
- *  outcomes so the UI can toast partial failures. */
-export const bulkTasks = (ids: string[], patch: Record<string, unknown>) =>
-  nudged(
-    call<{ results: Array<{ id: string; ok: boolean; error?: string }> }>(withBoard('/tasks/bulk'), {
-      method: 'POST',
-      body: { ids, ...patch }
+ *  outcomes so the UI can toast partial failures. [daveey] Split per owning
+ *  gateway (and board); a whole gateway failing reports each of its ids. */
+export async function bulkTasks(ids: string[], patch: Record<string, unknown>): Promise<BulkResult> {
+  const groups = new Map<string, string[]>()
+
+  for (const id of ids) {
+    const owner = taskOwners.get(id)
+    const key = owner && owner.gateway !== routedScope() ? `${owner.gateway}\0${owner.board}` : ''
+    groups.set(key, [...(groups.get(key) ?? []), id])
+  }
+
+  const outcomes = await Promise.all(
+    [...groups.entries()].map(async ([key, group]) => {
+      const [gateway, board] = key ? key.split('\0') : [routedScope(), '']
+      const path = key ? withSlug('/tasks/bulk', board) : withBoard('/tasks/bulk')
+
+      try {
+        return await nudged(
+          call<BulkResult>(path, { ...(key ? via(gateway) : {}), method: 'POST', body: { ids: group, ...patch } }),
+          gateway
+        )
+      } catch (err) {
+        if (groups.size === 1) {
+          throw err
+        }
+
+        const error = err instanceof Error ? err.message : String(err)
+
+        return { results: group.map(id => ({ error, id, ok: false })) }
+      }
     })
   )
 
-export const addComment = (id: string, body: string) =>
-  call(withBoard(`/tasks/${id}/comments`), { method: 'POST', body: { author: 'desktop', body } })
+  return { results: outcomes.flatMap(outcome => outcome.results) }
+}
 
-export const reassignTask = (id: string, profile: string) =>
-  nudged(call(withBoard(`/tasks/${id}/reassign`), { method: 'POST', body: { profile, reclaim_first: true } }))
+export const addComment = (id: string, body: string) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/comments`)
 
-export const reclaimTask = (id: string) => nudged(call(withBoard(`/tasks/${id}/reclaim`), { method: 'POST', body: {} }))
+  return call(path, { ...opts, method: 'POST', body: { author: 'desktop', body } })
+}
 
-export const uploadAttachment = (id: string, upload: { filename: string; contentType?: string; bytes: ArrayBuffer }) =>
-  call(withBoard(`/tasks/${id}/attachments`), { method: 'POST', upload })
+export const reassignTask = (id: string, profile: string) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/reassign`)
+
+  return nudged(call(path, { ...opts, method: 'POST', body: { profile, reclaim_first: true } }), taskGateway(id))
+}
+
+export const reclaimTask = (id: string) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/reclaim`)
+
+  return nudged(call(path, { ...opts, method: 'POST', body: {} }), taskGateway(id))
+}
+
+export const uploadAttachment = (
+  id: string,
+  upload: { filename: string; contentType?: string; bytes: ArrayBuffer }
+) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/attachments`)
+
+  return call(path, { ...opts, method: 'POST', upload })
+}
 
 export const createBoard = (slug: string, name: string, projectId?: string) =>
   call<{ board: { slug: string } }>('/boards', {
@@ -475,8 +877,11 @@ export const createBoard = (slug: string, name: string, projectId?: string) =>
 
 /** Rough auxiliary-model estimate for a task (tokens + complexity). Makes a
  *  model call — gate behind an explicit user action + disclaimer. */
-export const estimateTask = (id: string) =>
-  call<TaskEstimate>(withBoard(`/tasks/${id}/estimate`), { method: 'POST', body: {} })
+export const estimateTask = (id: string) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/estimate`)
+
+  return call<TaskEstimate>(path, { ...opts, method: 'POST', body: {} })
+}
 
 /** Estimate from typed title/body before a task exists (create dialog). */
 export const estimateNew = (title: string, body: string) =>
@@ -503,7 +908,12 @@ export const exportBoard = (slug: string, output: string) =>
 export const importBoard = (archive: string) =>
   call<BoardImportResult>('/boards/import', { method: 'POST', body: { archive } })
 
-export const nudgeDispatcher = () => call<{ spawned?: unknown[] }>(withBoard('/dispatch'), { method: 'POST', body: {} })
+export const nudgeDispatcher = (gateway?: string) =>
+  !gateway || gateway === routedScope()
+    ? call<{ spawned?: unknown[] }>(withBoard('/dispatch'), { method: 'POST', body: {} })
+    : resolvedSlug().then(slug =>
+        call<{ spawned?: unknown[] }>(withSlug('/dispatch', slug), { ...via(gateway), method: 'POST', body: {} })
+      )
 
 export const saveOrchestration = (patch: Record<string, unknown>) =>
   call<OrchestrationSettings>('/orchestration', { method: 'PUT', body: patch })

@@ -47,6 +47,10 @@ type KanbanMessages = {
   unassigned: string
   filters: string
   allProfiles: string
+  /** [daveey] Gateway filter + create target (board spans every gateway). */
+  allGateways: string
+  createOn: (gateway: string) => string
+  gatewayUnreachable: (gateway: string, error: string) => string
   allTenants: string
   showArchived: string
   groupRunning: string
@@ -275,6 +279,9 @@ export const en: KanbanMessages = {
   unassigned: 'unassigned',
   filters: 'Filters',
   allProfiles: 'All profiles',
+  allGateways: 'All gateways',
+  createOn: gateway => `On ${gateway}`,
+  gatewayUnreachable: (gateway, error) => `${gateway} didn't answer, so its cards are missing: ${error}`,
   allTenants: 'All tenants',
   showArchived: 'Show archived',
   groupRunning: 'Group Running by profile',
@@ -505,6 +512,9 @@ const ja: KanbanMessages = {
   unassigned: '未割り当て',
   filters: 'フィルタ',
   allProfiles: 'すべてのプロフィール',
+  allGateways: 'すべてのゲートウェイ',
+  createOn: gateway => `${gateway} に作成`,
+  gatewayUnreachable: (gateway, error) => `${gateway} が応答しないため、そのカードは表示されていません: ${error}`,
   allTenants: 'すべてのテナント',
   showArchived: 'アーカイブを表示',
   groupRunning: '実行中をプロフィールでグループ化',
@@ -733,6 +743,9 @@ const zh: KanbanMessages = {
   unassigned: '未分配',
   filters: '筛选',
   allProfiles: '所有配置档',
+  allGateways: '所有网关',
+  createOn: gateway => `创建于 ${gateway}`,
+  gatewayUnreachable: (gateway, error) => `${gateway} 未响应，其卡片未显示：${error}`,
   allTenants: '所有租户',
   showArchived: '显示已归档',
   groupRunning: '按配置档分组运行中',
@@ -959,6 +972,9 @@ const zhHant: KanbanMessages = {
   unassigned: '未指派',
   filters: '篩選',
   allProfiles: '所有設定檔',
+  allGateways: '所有閘道',
+  createOn: gateway => `建立於 ${gateway}`,
+  gatewayUnreachable: (gateway, error) => `${gateway} 未回應，其卡片未顯示：${error}`,
   allTenants: '所有租戶',
   showArchived: '顯示已封存',
   groupRunning: '依設定檔分組執行中',
