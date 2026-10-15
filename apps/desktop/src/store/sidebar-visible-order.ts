@@ -109,11 +109,16 @@ export function sessionHasStatusStripe(id: string): boolean {
     }
   }
 
+  const session = $sessions.get().find(s => s.id === id)
+
   if (!hasTurns) {
-    hasTurns = ($sessions.get().find(session => session.id === id)?.message_count ?? 0) > 0
+    hasTurns = (session?.message_count ?? 0) > 0
   }
 
-  return sessionStatusStripe($sessionDotStateById.get()[id] ?? 'idle', hasTurns) !== null
+  return (
+    sessionStatusStripe($sessionDotStateById.get()[id] ?? 'idle', hasTurns, false, session?.kanban_blocked ?? 0) !==
+    null
+  )
 }
 
 /**

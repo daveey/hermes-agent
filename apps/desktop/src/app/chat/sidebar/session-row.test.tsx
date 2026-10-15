@@ -497,6 +497,16 @@ describe('SidebarSessionRow kanban counts', () => {
     expect(counts.querySelector('[data-kanban-count="blocked"]')?.textContent).toBe('2')
   })
 
+  it('paints the red (stuck) stripe while a kanban card it created is blocked', () => {
+    const { container } = renderRow(
+      makeSession({ kanban_blocked: 1, message_count: 4, title: 'Blocked' } as Partial<SessionInfo> & {
+        title: string
+      })
+    )
+
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stuck')
+  })
+
   it('renders nothing when the session has no kanban work', () => {
     renderRow(makeSession({ title: 'Idle' }))
 

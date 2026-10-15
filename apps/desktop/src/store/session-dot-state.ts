@@ -140,17 +140,20 @@ export const showsRunningArc = (state: SessionDotState): boolean => state === 's
  *  after the row is opened; `stuck` (red) when an unfinished turn needs help —
  *  blocked on a prompt or gone quiet; `blocked` (grey) when the user parked
  *  it with ⌘B, which wins over everything. Working, background and drafts (no
- *  turn yet) get none. */
+ *  turn yet) get none — except that a session with kanban cards it created
+ *  sitting `blocked` (waiting on a human) is `stuck` too unless a turn is
+ *  actively working: it can't finish until someone unblocks them. */
 export type SessionStatusStripe = 'blocked' | 'done' | 'stuck'
 
 export const sessionStatusStripe = (
   state: SessionDotState,
   hasTurns: boolean,
-  userBlocked = false
+  userBlocked = false,
+  kanbanBlocked = 0
 ): null | SessionStatusStripe =>
   userBlocked
     ? 'blocked'
-    : state === 'needs-input' || state === 'stalled'
+    : state === 'needs-input' || state === 'stalled' || (kanbanBlocked > 0 && state !== 'working')
     ? 'stuck'
     : state === 'unread' || (state === 'idle' && hasTurns)
       ? 'done'

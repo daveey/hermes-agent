@@ -70,6 +70,16 @@ describe('sessionStatusStripe', () => {
 
     expect(sessionStatusStripe('idle', false)).toBeNull()
   })
+
+  it('paints stuck (red) when kanban cards the session created are blocked, unless a turn is working', () => {
+    for (const state of ['idle', 'unread', 'background', 'draft'] as const) {
+      expect(sessionStatusStripe(state, true, false, 2)).toBe('stuck')
+    }
+
+    expect(sessionStatusStripe('working', true, false, 1)).toBeNull()
+    expect(sessionStatusStripe('idle', true, true, 1)).toBe('blocked')
+    expect(sessionStatusStripe('idle', true, false, 0)).toBe('done')
+  })
 })
 
 describe('hasLiveTurn', () => {

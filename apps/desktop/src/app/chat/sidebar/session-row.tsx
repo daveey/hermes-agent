@@ -319,13 +319,14 @@ function SidebarSessionRowImpl({
   const liveTurn = hasLiveTurn(dotState)
   // [daveey] The left stripe is the session's status: green = its turn is done
   // and waiting on you (stays after you open it); red = not done but stuck
-  // (blocked on a prompt, or gone quiet mid-turn). Working: no stripe.
+  // (blocked on a prompt, or gone quiet mid-turn, or kanban cards it made are
+  // blocked on a human). Working: no stripe.
   // ⌘B parks a session as blocked: grey stripe, skipped by ⌘] / ⌘[.
   const userBlocked = useStoreSelector($blockedSessionIds, ids => isSessionBlocked(session.id, ids))
 
   const statusStripe = session.archived
     ? null
-    : sessionStatusStripe(dotState, session.message_count > 0, userBlocked)
+    : sessionStatusStripe(dotState, session.message_count > 0, userBlocked, kanbanBlocked)
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
