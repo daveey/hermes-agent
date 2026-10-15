@@ -243,11 +243,36 @@ def _sessions_quiescent(exclude: str | None = None) -> bool:
     return all(_session_is_lru_evictable(sid, s) for sid, s in others)
 
 
+def _session_owns_running_process(session: dict) -> bool:
+    """True while a ``terminal(background=true)`` job this session's agent spawned is still running.
+
+    Closing the session runs ``AIAgent.close()``, which SIGTERMs every non-persisted job the agent owns and
+    consumes its output, so a ``notify_on_complete`` watcher the chat promised to wake on dies silently
+    and the row paints done. Bounded by the job's own lifetime. Fail-open to False: an unreadable registry
+    must not make a session unreapable."""
+    agent = session.get("agent")
+    owners = {str(o) for o in (getattr(agent, "_process_owner_task_ids", None) or ()) if o}
+    if key := str(session.get("session_key") or ""):
+        owners.add(key)
+    if not owners:
+        return False
+    try:
+        from tools.process_registry import process_registry
+        return any(process_registry.running_owned_by(owner) for owner in owners)
+    except Exception:
+        logger.debug("running-process check failed for %s", session.get("session_key"), exc_info=True)
+        return False
+
+
 def _session_is_reapable(sid: str, session: dict) -> bool:
     """Reaper eligibility: the LRU exemptions, and not the sole driver of an active /loop or /heartbeat
     (closing the session stops the notification poller that fires it, freezing the schedule until a client
-    reattaches). Kept out of ``_sessions_quiescent``: an idle looping session does not block a memory trim."""
-    return _session_is_lru_evictable(sid, session) and not _session_owns_live_wakeup_schedule(session)
+    reattaches), and not the owner of a running background job (closing would kill it — see
+    ``_session_owns_running_process``). Kept out of ``_sessions_quiescent``: an idle session with a schedule
+    or a background job does not block a memory trim."""
+    return (_session_is_lru_evictable(sid, session)
+            and not _session_owns_live_wakeup_schedule(session)
+            and not _session_owns_running_process(session))
 
 
 def _session_is_evictable(sid: str, session: dict, now: float) -> bool:

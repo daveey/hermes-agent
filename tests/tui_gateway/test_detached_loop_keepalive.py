@@ -189,3 +189,65 @@ def test_gateway_owned_heartbeat_does_not_pin_detached_session(server, detached,
     _fire_orphan_reap(server, sid)
 
     assert sid not in server._sessions and popped == [session]
+
+
+class _Agent:
+    def __init__(self, *owners):
+        self._process_owner_task_ids = set(owners)
+
+
+def _fake_running(monkeypatch, owners_running: set[str]):
+    from tools.process_registry import process_registry
+
+    monkeypatch.setattr(process_registry, "running_owned_by",
+                        lambda owner: [object()] if owner in owners_running else [])
+
+
+def test_orphan_reap_keeps_detached_session_with_running_background_job(server, detached, monkeypatch):
+    """A notify_on_complete watcher dies with the agent on close (agent_close SIGTERM, output consumed), so the
+    chat that promised to wake on it would stay green forever. The reaper must keep its session until the job ends."""
+    sid, session, popped = detached
+    session["agent"] = _Agent("turn-owner-id")
+    _fake_running(monkeypatch, {"turn-owner-id"})
+
+    _fire_orphan_reap(server, sid)
+
+    assert server._sessions.get(sid) is session and not popped
+    assert server._pending_ws_reaps[sid] is _Timer.created[-1]
+
+
+def test_orphan_reap_collects_session_once_background_job_exits(server, detached, monkeypatch):
+    sid, session, popped = detached
+    session["agent"] = _Agent("turn-owner-id")
+    _fake_running(monkeypatch, set())
+
+    _fire_orphan_reap(server, sid)
+
+    assert sid not in server._sessions and popped == [session]
+
+
+def test_ttl_and_cap_reapers_spare_session_with_running_background_job(server, detached, monkeypatch):
+    sid, session, _ = detached
+    monkeypatch.setattr(server, "_SESSION_TTL_S", 1)
+    now = time.time()
+    _fake_running(monkeypatch, set())
+    assert server._session_is_evictable(sid, session, now)
+
+    _fake_running(monkeypatch, {session["session_key"]})  # owned by the session key, no agent built yet
+
+    assert not server._session_is_evictable(sid, session, now)
+    assert not server._session_is_reapable(sid, session)
+    assert server._session_is_lru_evictable(sid, session)  # does not block a memory trim
+
+
+def test_lru_cap_skips_session_with_running_background_job(server, detached, monkeypatch):
+    sid, session, popped = detached
+    monkeypatch.setattr(server, "_max_live_sessions", lambda: 1)
+    other = dict(session, session_key="other-idle", last_active=1.0)
+    server._sessions["sid-other"] = other
+    _fake_running(monkeypatch, {session["session_key"]})
+
+    server._enforce_session_cap()
+
+    assert server._sessions.get(sid) is session
+    assert "sid-other" not in server._sessions and popped == [other]
