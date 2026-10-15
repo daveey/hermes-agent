@@ -3062,6 +3062,27 @@ def _session_live_title(session: dict, key: str) -> str:
     return title
 
 
+def _session_live_last_active(session: dict, now: float) -> float:
+    """[daveey] ``last_active`` for a live-list row. ``session["last_active"]`` is stamped only when a
+    turn starts or ends, so for a RUNNING turn fold in the agent's activity clock (stamped by API waits,
+    stream tokens and tool heartbeats; isolated turns mirror it as ``_compute_host_activity_ns``).
+    Desktop reads a running row whose ``last_active`` is 5+ min old as stalled (red sidebar stripe), so
+    without this every turn longer than 5 min painted stuck while its tools were still running."""
+    stamp = float(session.get("last_active") or session.get("created_at") or now)
+    if not session.get("running"):
+        return stamp
+    candidates = [stamp]
+    with contextlib.suppress(Exception):
+        ts = getattr(session.get("agent"), "_last_activity_ts", None)
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+            candidates.append(float(ts))
+    with contextlib.suppress(Exception):
+        ns = session.get("_compute_host_activity_ns")
+        if session.get("_compute_host_turn_id") and isinstance(ns, int) and not isinstance(ns, bool):
+            candidates.append(now - max(0.0, (time.perf_counter_ns() - ns) / 1_000_000_000))
+    return min(max(candidates), now)
+
+
 def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
     key = _session_lookup_key(session, fallback=sid)
     agent = session.get("agent")
@@ -3078,7 +3099,7 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
     now = time.time()
     return {
         "current": sid == current_sid, "id": sid,
-        "last_active": float(session.get("last_active") or session.get("created_at") or now),
+        "last_active": _session_live_last_active(session, now),
         "message_count": len(history),
         "model": str(getattr(agent, "model", "") or _resolve_model()), "preview": preview,
         "session_key": key, "started_at": float(session.get("created_at") or now), "status": status,

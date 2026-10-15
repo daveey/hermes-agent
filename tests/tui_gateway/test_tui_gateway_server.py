@@ -17715,6 +17715,51 @@ def test_session_active_list_reports_live_sessions(monkeypatch):
     assert rows["sid-b"]["preview"] == "writing code"
 
 
+def test_session_active_list_last_active_follows_running_turn_activity(monkeypatch):
+    """[daveey] A running turn's ``last_active`` must track the agent's activity clock, not the
+    prompt's start: Desktop paints a turn whose ``last_active`` is 5+ min old as stalled (red
+    sidebar stripe), so every turn longer than 5 min read as stuck while its tools ran."""
+    import time as _time
+
+    previous_sessions = dict(server._sessions)
+    server._sessions.clear()
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    now = _time.time()
+    server._sessions["busy"] = _session(
+        agent=types.SimpleNamespace(model="m", _last_activity_ts=now - 3.0),
+        running=True, session_key="k-busy", created_at=now - 900, last_active=now - 900,
+    )
+    # Isolated (compute-host) turn: activity arrives as a perf_counter_ns stamp.
+    server._sessions["iso"] = _session(
+        agent=types.SimpleNamespace(model="m"),
+        running=True, session_key="k-iso", created_at=now - 900, last_active=now - 900,
+        _compute_host_turn_id="t1", _compute_host_activity_ns=_time.perf_counter_ns() - 2_000_000_000,
+    )
+    # Control: an idle session keeps its stored stamp even if the agent clock is newer
+    # (idle rows sort/read by their last turn, not background bookkeeping).
+    server._sessions["idle"] = _session(
+        agent=types.SimpleNamespace(model="m", _last_activity_ts=now - 1.0),
+        session_key="k-idle", created_at=now - 900, last_active=now - 600,
+    )
+    # Control: a running turn that really went quiet stays old.
+    server._sessions["quiet"] = _session(
+        agent=types.SimpleNamespace(model="m", _last_activity_ts=now - 800),
+        running=True, session_key="k-quiet", created_at=now - 900, last_active=now - 900,
+    )
+    try:
+        resp = server.handle_request({"id": "1", "method": "session.active_list", "params": {}})
+    finally:
+        server._sessions.clear()
+        server._sessions.update(previous_sessions)
+
+    rows = {row["id"]: row for row in resp["result"]["sessions"]}
+    assert now - rows["busy"]["last_active"] < 30
+    assert now - rows["iso"]["last_active"] < 30
+    assert rows["idle"]["last_active"] == pytest.approx(now - 600)
+    assert rows["quiet"]["last_active"] == pytest.approx(now - 800)
+    assert all(row["last_active"] <= _time.time() + 1 for row in rows.values())
+
+
 def test_session_active_list_excludes_finalized_sessions(monkeypatch):
     """#38950: a finalized-but-not-yet-popped session must not inflate the count.
 
