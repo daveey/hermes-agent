@@ -34,7 +34,7 @@ def gateway_declares_external_supervisor(pid: int, home: Path | None = None) -> 
         return False
     from gateway.control_socket import identify_gateway
     from gateway.status import _get_process_hermes_home, read_runtime_status
-    from hermes_cli.gateway import _capture_gateway_argv
+    from hermes_cli.gateway import _capture_gateway_argv, argv_declares_external_supervisor
 
     home = home or _get_process_hermes_home()
     identity = identify_gateway(home) or {}
@@ -44,7 +44,7 @@ def gateway_declares_external_supervisor(pid: int, home: Path | None = None) -> 
     if argv is None:
         record = read_runtime_status(home / "gateway_state.json") or {}
         argv = record.get("argv") if record.get("pid") == pid else None
-    return bool(argv) and "--external-supervisor" in argv
+    return argv_declares_external_supervisor(argv)
 
 
 def _wait_for_supervised_gateway_replacement(

@@ -962,12 +962,36 @@ def _capture_gateway_argv(pid: int) -> list[str] | None:
         return None
     # Never respawn an unrelated process the scan happened to report.
     try:
-        from gateway.status import looks_like_gateway_command_line
-        if not looks_like_gateway_command_line(" ".join(argv)):
+        from gateway.status import argv_to_command_line, looks_like_gateway_command_line
+        # [daveey] argv_to_command_line, not " ".join: a space-joined ``Hermes Python.app`` runpy
+        # bootstrap fails the matcher, so the gateway's argv came back None and update never saw
+        # its ``--external-supervisor`` marker.
+        if not looks_like_gateway_command_line(argv_to_command_line(argv)):
             return None
     except Exception:
         pass
     return argv
+
+
+def argv_declares_external_supervisor(argv: list[str] | None) -> bool:
+    """[daveey] True when a gateway argv carries ``--external-supervisor``, including inside a Hermes
+    inline bootstrap (``python -I -c "…; sys.argv = [… 'gateway', 'run', '--external-supervisor']; runpy…"``),
+    where the flag is part of the ``-c`` source token rather than its own argv element."""
+    if not argv:
+        return False
+    if "--external-supervisor" in argv:
+        return True
+    try:
+        from gateway.status_inline_source import command_line_runs_inline_source, inline_bootstrap_argv
+        cased = [str(t) for t in argv]
+        if not command_line_runs_inline_source(cased):
+            return False
+        # The source arrives as ONE argv element here; the parser expects it split on spaces. The
+        # interpreter path (argv[0], may contain spaces) stays one token.
+        effective = inline_bootstrap_argv([cased[0], *(tok for part in cased[1:] for tok in part.split(" ") if tok)])
+    except Exception:
+        return False
+    return bool(effective) and "--external-supervisor" in effective
 
 
 def _prepare_profile_gateway_update_restart(profile: str, pid: int) -> str | None:
@@ -983,7 +1007,7 @@ def _prepare_profile_gateway_update_restart(profile: str, pid: int) -> str | Non
     disk. ``argv`` is already captured above, so the fallback costs nothing extra.
     """
     argv = _capture_gateway_argv(pid)
-    if argv and "--external-supervisor" in argv:
+    if argv_declares_external_supervisor(argv):
         return "external-supervisor"
     if launch_detached_profile_gateway_restart(profile, pid):
         return "detached"

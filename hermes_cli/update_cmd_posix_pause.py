@@ -182,8 +182,8 @@ def _home_of(pid: int) -> str | None:
 def _supervisor_markers(pid: int) -> str | None:
     """Why *pid* answers to a supervisor other than a hermes unit/job (it would respawn it on old
     code), or ``None``."""
-    from hermes_cli.gateway import _capture_gateway_argv
-    if "--external-supervisor" in (_capture_gateway_argv(pid) or []):
+    from hermes_cli.gateway import _capture_gateway_argv, argv_declares_external_supervisor
+    if argv_declares_external_supervisor(_capture_gateway_argv(pid)):
         return "--external-supervisor"
     try:
         import psutil  # type: ignore
