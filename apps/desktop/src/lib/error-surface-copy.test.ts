@@ -92,3 +92,15 @@ it('keeps the generic owner copy for an older backend that names no machine', ()
   )
   expect(sessionNotOwnedSurface('no details at all').owner).toBeUndefined()
 })
+
+// [daveey] A turn the backend stopped because another owner claimed its session lease gets its own
+// card (not the generic "internal problem" gateway copy), and Retry stays on.
+it('renders a lease-lost turn with its own card and a retry', async () => {
+  const { errorRecoveryPlan } = await import('./error-surface')
+  const surface = parseErrorSurface({ layer: 'gateway', code: 'session_turn_lease_lost', retryable: true })
+  const copy = errorCardText(TRANSLATIONS.en.assistant.thread, surface)
+  expect(copy.title).toBe('Hermes stopped this reply')
+  expect(copy.body).toContain('took over this chat')
+  expect(copy.title).not.toBe(TRANSLATIONS.en.assistant.thread.errorLayers.gateway)
+  expect(errorRecoveryPlan(surface).retry).toBe(true)
+})

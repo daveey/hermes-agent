@@ -48,6 +48,9 @@ export const ERROR_CODE_KEYS = [
   'invalid_response',
   'empty_response',
   'loop_error',
+  // [daveey] The backend stopped the turn because another owner claimed its session lease
+  // (tui_gateway/prompt_turn._surface_system_interrupt). Retry re-runs it once the session is free.
+  'session_turn_lease_lost',
   'SESSION_NOT_OWNED',
   'disk_full',
   // Raised by the desktop, never by the backend: the backend reported a turn

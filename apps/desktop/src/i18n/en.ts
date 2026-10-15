@@ -4714,6 +4714,10 @@ export const en: Translations = {
           title: 'Hermes got stuck in a loop',
           body: 'The reply kept repeating the same steps, so Hermes stopped it. Retry, or start a new chat if it happens again.'
         },
+        session_turn_lease_lost: {
+          title: 'Hermes stopped this reply',
+          body: 'Another Hermes process took over this chat while the reply was running, so Hermes stopped it to protect the transcript. Work done before the stop is kept. Retry to run it again.'
+        },
         SESSION_NOT_OWNED: {
           title: 'This chat is open somewhere else',
           body: 'This chat is open in another Hermes window or terminal. Take it over here, or start a new chat.'

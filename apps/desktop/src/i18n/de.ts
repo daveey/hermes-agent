@@ -5156,6 +5156,10 @@ export const deOverrides = {
           title: 'Hermes ist in einer Schleife hängen geblieben',
           body: 'Die Antwort hat dieselben Schritte wiederholt, daher hat Hermes sie gestoppt. Versuchen Sie es erneut oder starten Sie einen neuen Chat, wenn es wieder passiert.'
         },
+        session_turn_lease_lost: {
+          title: 'Hermes hat diese Antwort angehalten',
+          body: 'Ein anderer Hermes-Prozess hat diesen Chat übernommen, während die Antwort lief. Hermes hat sie angehalten, um das Protokoll zu schützen. Bereits erledigte Arbeit bleibt erhalten. Wiederhole den Vorgang, um sie erneut auszuführen.'
+        },
         SESSION_NOT_OWNED: {
           title: 'Dieser Chat ist woanders offen',
           body: 'Dieser Chat ist in einem anderen Hermes-Fenster oder Terminal geöffnet. Übernehmen Sie ihn hier, oder starten Sie einen neuen Chat.'

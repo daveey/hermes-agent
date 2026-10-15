@@ -5149,6 +5149,10 @@ export const esOverrides = {
           title: 'Hermes se quedó atascado en un bucle',
           body: 'La respuesta repetía los mismos pasos, así que Hermes la detuvo. Reinténtalo o empieza un chat nuevo si vuelve a ocurrir.'
         },
+        session_turn_lease_lost: {
+          title: 'Hermes detuvo esta respuesta',
+          body: 'Otro proceso de Hermes tomó este chat mientras la respuesta estaba en curso, así que Hermes la detuvo para proteger la transcripción. El trabajo hecho antes de la detención se conserva. Reintenta para ejecutarla de nuevo.'
+        },
         SESSION_NOT_OWNED: {
           title: 'Este chat está abierto en otro sitio',
           body: 'Este chat está abierto en otra ventana de Hermes o en un terminal. Continúalo aquí o empieza un chat nuevo.'

@@ -5164,6 +5164,10 @@ export const frOverrides = {
           title: 'Hermes est resté bloqué dans une boucle',
           body: 'La réponse répétait les mêmes étapes ; Hermes l’a donc arrêtée. Réessayez ou démarrez une nouvelle conversation.'
         },
+        session_turn_lease_lost: {
+          title: 'Hermes a arrêté cette réponse',
+          body: 'Un autre processus Hermes a repris cette conversation pendant la réponse, donc Hermes l\'a arrêtée pour protéger la transcription. Le travail fait avant l\'arrêt est conservé. Réessayez pour la relancer.'
+        },
         SESSION_NOT_OWNED: {
           title: 'Cette conversation est ouverte ailleurs',
           body: 'Cette conversation est ouverte dans une autre fenêtre Hermes ou un terminal. Reprenez-la ici, ou démarrez-en une nouvelle.'

@@ -262,6 +262,8 @@
     "assistant.thread.errorCodes.rate_limit.title",
     "assistant.thread.errorCodes.server_error.body",
     "assistant.thread.errorCodes.server_error.title",
+    "assistant.thread.errorCodes.session_turn_lease_lost.body",
+    "assistant.thread.errorCodes.session_turn_lease_lost.title",
     "assistant.thread.errorCodes.ssl_cert_verification.body",
     "assistant.thread.errorCodes.ssl_cert_verification.title",
     "assistant.thread.errorCodes.stream_drop.body",

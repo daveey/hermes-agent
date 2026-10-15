@@ -86,6 +86,8 @@
   "assistant.thread.errorCodes.invalid_response.title": ["ar","ru"],
   "assistant.thread.errorCodes.loop_error.body": ["ar","ja","ru","zh","zh-hant"],
   "assistant.thread.errorCodes.loop_error.title": ["ar","ja","ru","zh","zh-hant"],
+  "assistant.thread.errorCodes.session_turn_lease_lost.body": ["ar","ja","ru","zh","zh-hant"],
+  "assistant.thread.errorCodes.session_turn_lease_lost.title": ["ar","ja","ru","zh","zh-hant"],
   "assistant.thread.errorCodes.model_not_found.body": ["ar","ja","ru","zh","zh-hant"],
   "assistant.thread.errorCodes.model_not_found.title": ["ar","ja","ru","zh","zh-hant"],
   "assistant.thread.errorCodes.no_reply.body": ["ar","ja","ru","zh","zh-hant"],
