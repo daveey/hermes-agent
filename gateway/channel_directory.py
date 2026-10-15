@@ -255,7 +255,10 @@ async def _slack_team_channels(team_id: str, client, seen_ids: set) -> list[dict
             if not cursor:
                 break
     except Exception as e:
-        _report_slack_failure(team_id, _slack_api_error_code(e), str(e))
+        # SlackApiError's str() spans two lines; a log line must stay one record for line-based shippers.
+        error_code = _slack_api_error_code(e)
+        detail = f"users.conversations failed: {error_code}" if error_code else " ".join(str(e).split())
+        _report_slack_failure(team_id, error_code, detail)
     return channels
 
 

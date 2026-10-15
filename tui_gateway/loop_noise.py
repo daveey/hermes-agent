@@ -5,7 +5,8 @@ operations, asyncio logs a traceback per pending ``_call_connection_lost`` callb
 ``ConnectionResetError`` (WinError 10054), ``ConnectionAbortedError`` (10053) or ``BrokenPipeError``
 (POSIX); one disconnect can emit 50+. They are the expected side effect of the peer hanging up
 before our writes drained, so the handler here collapses exactly that class to one debug line and
-forwards everything else to the previous handler unchanged.
+forwards everything else to the previous handler unchanged. The same goes for a websocket closing
+while the keepalive ping awaits its pong ("ConnectionClosedOK exception in shielded future").
 """
 
 from __future__ import annotations
@@ -33,6 +34,23 @@ def _is_benign_teardown(context: dict[str, Any]) -> bool:
     return marker in repr(context.get("callback")) or marker in repr(context.get("handle"))
 
 
+def _is_closed_websocket_in_shield(context: dict[str, Any]) -> bool:
+    """True for asyncio's "<exc> exception in shielded future" when <exc> is a closed websocket.
+
+    websockets' legacy keepalive awaits ``asyncio.shield(pong_waiter)``; on close the keepalive task
+    is cancelled first and ``abort_pings`` then fails the waiter with ``ConnectionClosed`` — the
+    normal end of a pinged connection (SSH-tunnel Desktop backends), not a loop error. Gated on the
+    shield message so a ConnectionClosed escaping anywhere else still reaches the default handler.
+    """
+    if "exception in shielded future" not in str(context.get("message") or ""):
+        return False
+    try:
+        from websockets.exceptions import ConnectionClosed
+    except ImportError:
+        return False
+    return isinstance(context.get("exception"), ConnectionClosed)
+
+
 def install_loop_noise_filter(loop: asyncio.AbstractEventLoop) -> None:
     """Chain a teardown-noise filter ahead of the loop's existing handler.
 
@@ -46,6 +64,9 @@ def install_loop_noise_filter(loop: asyncio.AbstractEventLoop) -> None:
     def _handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
         if _is_benign_teardown(context):
             _log.debug("ws peer hangup during teardown (suppressed): %s", context.get("exception"))
+            return
+        if _is_closed_websocket_in_shield(context):
+            _log.debug("ws closed while keepalive awaited a pong (suppressed): %s", context.get("exception"))
             return
         if previous is not None:
             previous(loop, context)

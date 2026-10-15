@@ -4018,7 +4018,6 @@ from hermes_cli.gateway_launchd import (
     wait_for_launchd_gateway_supervision,
     launchd_status,
 )
-from datetime import UTC
 
 
 # Cached launchd domain — probe once per process invocation.
@@ -4531,30 +4530,6 @@ def _absorb_windows_console_controls() -> None:
         pass
 
 
-def _make_exit_diag():
-    """``_exit_diag(tag, **extra)`` recorder writing ``logs/gateway-exit-diag.log`` — captures every way
-    ``asyncio.run()`` can return, for chasing silent Windows gateway deaths. HERMES_GATEWAY_EXIT_DIAG=0 opts out."""
-    from datetime import datetime as _dt, timezone as _tz
-
-    def _exit_diag(tag: str, **extra: object) -> None:
-        if os.environ.get("HERMES_GATEWAY_EXIT_DIAG", "1") != "1":
-            return
-        try:
-            from hermes_constants import get_hermes_home as _ghh
-            log_dir = _ghh() / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            line = {
-                "ts": _dt.now(UTC).isoformat(), "tag": tag, "pid": os.getpid(),
-                "python": sys.version.split()[0], "platform": sys.platform, **extra,
-            }
-            with open(log_dir / "gateway-exit-diag.log", "a", encoding="utf-8") as f:
-                f.write(json.dumps(line, default=str) + "\n")
-        except Exception:
-            pass  # never let the diagnostic itself crash the gateway
-
-    return _exit_diag
-
-
 def _respawn_storm_backoff() -> None:
     """Portable app-level respawn-storm breaker (for supervisors without a floor). Defaults mirror
     DEFAULT_CONFIG ``gateway.respawn_storm``; HERMES_GATEWAY_MAX_STARTS / HERMES_GATEWAY_START_WINDOW_S
@@ -4648,7 +4623,8 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
 
     import atexit as _atexit
     import traceback as _traceback
-    _exit_diag = _make_exit_diag()
+    from hermes_cli.gateway_exit_diag import make_exit_diag
+    _exit_diag = make_exit_diag()
     _exit_diag(
         "gateway.start", replace=replace, argv=sys.argv, stdin_is_tty=stdin_is_tty,
         console_window_attached=_console_window_attached, detached=_gateway_detached_env(),
