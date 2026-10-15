@@ -2547,9 +2547,49 @@ class TestHandleMaxIterations:
         assert result["interrupt_message"] == "follow-up message"
         assert result["turn_exit_reason"].startswith("interrupted_during_api_call")
         assert result["final_response"].startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX)
+        # A new user message is a human stop: no system issuer is stamped.
+        assert "interrupt_issuer" not in result
         assert "couldn't produce a summary" not in result["final_response"]
         assert all(m.get("content") != MAX_ITERATIONS_SUMMARY_REQUEST for m in result["messages"])
 
+
+    def test_lease_lost_interrupt_stamps_its_system_issuer(self, agent, monkeypatch):
+        """[daveey] A lease-lost stop carries ``interrupt_issuer`` so the TUI gateway can show the
+        user why the turn ended instead of a silent cancel (tui_gateway/prompt_turn)."""
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        release = threading.Event()
+
+        def provider(*args, **kwargs):
+            agent.interrupt(
+                "Session turn lease lost; stopping to protect the transcript.",
+                hard_cancel=True, tool_reason="session turn lease lost",
+            )
+            release.wait(10)
+            raise OSError("fixture request stopped")
+
+        request_client = MagicMock()
+        request_client.chat.completions.create.side_effect = provider
+        agent.client.chat.completions.create.side_effect = provider
+        monkeypatch.setattr(agent, "_create_request_openai_client", lambda **kw: request_client)
+        monkeypatch.setattr(agent, "_abort_request_openai_client", lambda *a, **kw: release.set())
+        monkeypatch.setattr(agent, "_close_request_openai_client", lambda *a, **kw: None)
+        try:
+            with (
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("do the work")
+        finally:
+            release.set()
+
+        assert result["interrupted"] is True
+        assert result["interrupt_issuer"] == "session_turn_lease_lost"
+        assert result["interrupt_message"].startswith("Session turn lease lost")
+        assert result["turn_exit_reason"] == "interrupted_during_api_call(session_turn_lease_lost)"
     def test_summary_notice_uses_safe_print(self, agent):
         agent._print_fn = lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("closed"))
         agent.client.chat.completions.create.return_value = _mock_response(content="Summary")

@@ -37,6 +37,7 @@ LAYER_DISK = "disk"
 _REASON_TO_LAYER = {
     "auth": LAYER_AUTH, "auth_permanent": LAYER_AUTH, "billing": LAYER_BILLING, "billing_unverified": LAYER_BILLING,
     "loop_error": LAYER_GATEWAY, "interpreter_shutdown": LAYER_GATEWAY, "session_busy": LAYER_GATEWAY,
+    "session_turn_lease_lost": LAYER_GATEWAY,  # [daveey] tui_gateway/prompt_turn._surface_system_interrupt
     "truncated": LAYER_PROVIDER, "empty_response": LAYER_PROVIDER, "invalid_response": LAYER_PROVIDER,
     "context_overflow": LAYER_PROVIDER,  # a bigger-window model IS the fix, so Switch provider applies
 }

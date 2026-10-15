@@ -751,6 +751,12 @@ def finalize_turn(
     agent._reused_response_text = None
     if interrupted and agent._interrupt_message:
         result["interrupt_message"] = agent._interrupt_message
+    if interrupted:
+        # [daveey] Which system producer stopped the turn (None for a human stop), so clients can
+        # tell "you pressed Stop" from "Hermes stopped this" (tui_gateway/prompt_turn surfaces it).
+        from agent.interrupt_control import interrupt_issuer as _interrupt_issuer
+        if _issuer_slug := _interrupt_issuer(agent):
+            result["interrupt_issuer"] = _issuer_slug
     agent.clear_interrupt()
     agent._stream_callback = None  # don't leak into future calls
 

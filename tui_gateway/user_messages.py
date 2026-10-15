@@ -33,6 +33,9 @@ _TURN_ERROR_CODE_COPY: dict[str, tuple[str, str]] = {
     "format_error": ("The model provider rejected the request format", "Try /retry; if it persists, switch with /model."),
     "ssl_cert_verification": ("The connection to the model provider could not be verified (TLS)",
                               "Check the endpoint's certificate, then /retry."),
+    # [daveey] Not a provider verdict: the turn's session lease was lost (another owner claimed it).
+    "session_turn_lease_lost": ("Hermes stopped this turn because it lost ownership of the session",
+                                "Send /retry to run it again."),
 }
 
 _TURN_ERROR_LAYER_COPY: dict[str, tuple[str, str]] = {

@@ -313,6 +313,31 @@ def _result_status(result: dict) -> str:
         else "error" if result.get("error") else "complete")
 
 
+# [daveey] System interrupts that must reach the user as a visible, retryable failure rather than a
+# silent "cancelled" turn: issuer slug (agent.interrupt_control.interrupt_issuer) -> failure_reason.
+_SURFACED_SYSTEM_INTERRUPTS = {"session_turn_lease_lost": "session_turn_lease_lost"}
+
+
+def _surface_system_interrupt(result: Any) -> None:
+    """Turn a lease-lost interrupt into a failed result, in place. Desktop renders an
+    ``interrupted`` turn with no text as nothing at all, so the user saw the agent simply stop. As a
+    failure, the turn gets the error card in the transcript, a retained inflight snapshot for
+    resume, and the row's error state. Text already produced is kept as a partial."""
+    if not isinstance(result, dict) or not result.get("interrupted") or result.get("error"):
+        return
+    reason = _SURFACED_SYSTEM_INTERRUPTS.get(str(result.get("interrupt_issuer") or ""))
+    if reason is None:
+        return
+    result["interrupted"] = False
+    result["failed"] = True
+    result["error"] = str(result.get("interrupt_message") or "Session turn lease lost.")
+    result["failure_reason"] = reason
+    result["failure_retryable"] = True
+    final_text = result.get("final_response")
+    if isinstance(final_text, str) and final_text.strip():
+        result["partial"] = True
+
+
 def _turn_outcome(result: Any, error_surface: dict | None = None) -> tuple[Any, str, str | None]:
     """Reduce a run_conversation result to ``(raw_text, status, last_reasoning)``."""
     if not isinstance(result, dict):
@@ -930,6 +955,7 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     """``(payload, raw, status)`` for message.complete; retains/clears the inflight turn and
     settles the hosted-room terminal receipt."""
     result, agent = st.result, st.agent
+    _surface_system_interrupt(result)
     # Advisory {layer, code, retryable} descriptor; computed before the retain so resume
     # replay carries the same one, and before the text so the fallback copy can use it.
     _error_surface = None
