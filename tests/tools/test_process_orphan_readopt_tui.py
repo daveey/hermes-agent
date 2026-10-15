@@ -40,6 +40,12 @@ def _entry(sid: str, pid: int, key: str, *, notify=True, platform="") -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _desktop_backend(monkeypatch):
+    """These tests play the Desktop-owned backend; only it adopts (a `hermes dashboard` never does)."""
+    monkeypatch.setattr("hermes_cli.process_identity.is_desktop_owned_backend", lambda argv=None: True)
+
+
 @pytest.fixture()
 def procs():
     started: list[subprocess.Popen] = []
