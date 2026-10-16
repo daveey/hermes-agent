@@ -88,3 +88,4 @@ def test_session_labels_follow_compression_to_the_tip(client):
     assert sessions["tip"]["tip_id"] == "tip"
     # The tip has no title of its own yet: fall back to the id we were handed.
     assert sessions["root"]["title"] == "Ship the thing"
+    assert r.json()["profile"] == "default"

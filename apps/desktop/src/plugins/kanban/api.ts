@@ -731,10 +731,12 @@ export interface BlockedTask extends KanbanTask {
   board: string
   /** The chat managing the card, resolved to its live compression tip and
    *  title on the card's own gateway; null when no session owns it. */
-  manager: null | { id: string; title: null | string }
+  manager: null | { id: string; profile: null | string; title: null | string }
 }
 
 interface SessionLabels {
+  /** The answering backend's Hermes profile (where these sessions live). */
+  profile?: string
   sessions?: Record<string, { tip_id?: string; title?: null | string }>
 }
 
@@ -778,10 +780,13 @@ export async function fetchBlockedTasks(): Promise<BlockedTask[]> {
       const found = parts.flatMap(part => (part.status === 'fulfilled' ? part.value : []))
       const ids = [...new Set(found.map(managerId).filter((id): id is string => Boolean(id)))]
       let labels: SessionLabels['sessions'] = {}
+      let profile: null | string = null
 
       if (ids.length) {
         try {
-          labels = (await read<SessionLabels>(`/session-labels?ids=${encodeURIComponent(ids.join(','))}`)).sessions ?? {}
+          const answer = await read<SessionLabels>(`/session-labels?ids=${encodeURIComponent(ids.join(','))}`)
+          labels = answer.sessions ?? {}
+          profile = answer.profile?.trim() || null
         } catch {
           // Older backend without the endpoint: group by the raw id, untitled.
         }
@@ -791,7 +796,11 @@ export async function fetchBlockedTasks(): Promise<BlockedTask[]> {
         const id = managerId(task)
         const label = id ? labels?.[id] : undefined
 
-        return { ...task, manager: id ? { id: label?.tip_id || id, title: label?.title?.trim() || null } : null }
+        return {
+          ...task,
+          gateway: task.gateway ?? (gateways.length > 1 ? gateway : undefined),
+          manager: id ? { id: label?.tip_id || id, profile, title: label?.title?.trim() || null } : null
+        }
       })
     })
   )

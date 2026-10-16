@@ -3,11 +3,21 @@
  * gateway, between Pinned and Projects (core's `sidebar.sections` area). This
  * replaces the in-app "task blocked" toast — the card stays visible here until
  * someone unblocks it, instead of a popup that vanishes. Cards are grouped
- * under the chat managing them (header click opens that chat); a card row
+ * under the chat managing them (header click opens that chat on its own
+ * gateway); a card row
  * opens the task's drawer on its own board. Hidden while nothing is blocked.
  */
 
-import { atom, host, SidebarSection, SidebarSectionRow, useQuery, useValue } from '@hermes/plugin-sdk'
+import {
+  atom,
+  host,
+  type PluginGateway,
+  type PluginProfileRoute,
+  SidebarSection,
+  SidebarSectionRow,
+  useQuery,
+  useValue
+} from '@hermes/plugin-sdk'
 import { Fragment, useState } from 'react'
 
 import { blockedKey, type BlockedTask, boardGateways, fetchBlockedTasks, useKanbanScope } from './api'
@@ -27,7 +37,28 @@ export interface BlockedGroup {
   sessionId: null | string
   title: null | string
   gateway?: string
+  /** Hermes profile the session lives in on its gateway. */
+  profile: null | string
   tasks: BlockedTask[]
+}
+
+/** How to open a group's chat: null = on the routed gateway (plain open),
+ *  else the owner route that dials the session's own gateway + profile — the
+ *  same owner a cross-gateway sidebar row resumes through. */
+export function managingSessionRoute(
+  group: Pick<BlockedGroup, 'gateway' | 'profile'>,
+  routedGateway: string,
+  gateways: readonly PluginGateway[]
+): null | PluginProfileRoute {
+  if (!group.gateway || group.gateway === routedGateway) {
+    return null
+  }
+
+  const profile = group.profile || 'default'
+  const kind = gateways.find(gateway => gateway.id === group.gateway)?.kind
+  const mode = kind === 'local' ? ('local' as const) : ('remote' as const)
+
+  return { connectionId: group.gateway, mode, profile, targetProfile: profile }
 }
 
 /** Cards grouped by the chat managing them, in the order the fetch ranked
@@ -41,7 +72,14 @@ export function groupBlockedTasks(tasks: readonly BlockedTask[]): BlockedGroup[]
     let group = groups.get(key)
 
     if (!group) {
-      group = { gateway: task.gateway, key, sessionId, tasks: [], title: task.manager?.title ?? null }
+      group = {
+        gateway: task.gateway,
+        key,
+        profile: task.manager?.profile ?? null,
+        sessionId,
+        tasks: [],
+        title: task.manager?.title ?? null
+      }
       groups.set(key, group)
     }
 
@@ -73,7 +111,7 @@ export function BlockedTasksSection() {
   }
 
   const groups = groupBlockedTasks(tasks)
-  const localGateway = boardGateways()[0]
+  const routedGateway = boardGateways()[0]
   let budget = visible
 
   const openTask = (task: BlockedTask) => {
@@ -99,9 +137,7 @@ export function BlockedTasksSection() {
         const shown = group.tasks.slice(0, budget)
         budget -= shown.length
         const title = group.sessionId ? group.title || k.sidebar.untitledSession : k.sidebar.noSession
-        // Sessions on another gateway open from that gateway's own sidebar.
         const sessionId = group.sessionId
-        const canOpen = Boolean(sessionId) && (!group.gateway || group.gateway === localGateway)
 
         return (
           <Fragment key={group.key}>
@@ -111,13 +147,16 @@ export function BlockedTasksSection() {
               meta={group.tasks.length}
               muted
               onSelect={() => {
-                if (canOpen && sessionId) {
-                  void host.openSession(sessionId)
-                } else {
+                if (!sessionId) {
                   openTask(group.tasks[0])
+
+                  return
                 }
+
+                const route = managingSessionRoute(group, routedGateway, host.state.gateways?.get() ?? [])
+                void host.openSession(sessionId, route ? { route } : {})
               }}
-              tip={canOpen ? k.sidebar.openSession(title) : title}
+              tip={sessionId ? k.sidebar.openSession(title) : title}
             />
             {shown.map(task => (
               <SidebarSectionRow

@@ -157,7 +157,10 @@ describe('fetchBlockedTasks', () => {
       }
 
       if (call.path.startsWith('/session-labels?')) {
-        return { sessions: { creator: { tip_id: 'creator', title: '' }, 'old-id': { tip_id: 'new-id', title: 'Ship it' } } }
+        return {
+          profile: 'bb',
+          sessions: { creator: { tip_id: 'creator', title: '' }, 'old-id': { tip_id: 'new-id', title: 'Ship it' } }
+        }
       }
 
       return new Error(`unexpected ${call.path}`)
@@ -167,8 +170,8 @@ describe('fetchBlockedTasks', () => {
 
     expect(calls.map(c => c.path)).toContain(`/session-labels?ids=${encodeURIComponent('old-id,creator')}`)
     expect(Object.fromEntries(tasks.map(t => [t.id, t.manager]))).toEqual({
-      a: { id: 'new-id', title: 'Ship it' },
-      b: { id: 'creator', title: null },
+      a: { id: 'new-id', profile: 'bb', title: 'Ship it' },
+      b: { id: 'creator', profile: 'bb', title: null },
       c: null
     })
   })
@@ -189,7 +192,7 @@ describe('fetchBlockedTasks', () => {
 
     const [only] = await fetchBlockedTasks()
 
-    expect(only.manager).toEqual({ id: 'creator', title: null })
+    expect(only.manager).toEqual({ id: 'creator', profile: null, title: null })
   })
 
   it('throws when no gateway answers', async () => {

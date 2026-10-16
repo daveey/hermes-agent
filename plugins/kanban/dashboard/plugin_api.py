@@ -380,13 +380,16 @@ def get_session_labels(ids: str = Query(..., max_length=4000)):
     """Title and live compression tip of each chat session id — the sidebar's
     Blocked section groups cards by the session managing them, and a card keeps
     the id it was subscribed under while compression rotates the chat onto a
-    fresh one. Unknown ids are omitted. [daveey]"""
+    fresh one. Unknown ids are omitted. ``profile`` names this backend's Hermes
+    profile, so a Desktop on another gateway can route the open to it. [daveey]"""
+    from hermes_cli.profiles import current_profile_name
     from hermes_cli.web_server_sessions import _open_session_db_for_profile
 
     wanted = list(dict.fromkeys(s.strip() for s in ids.split(",") if s.strip()))[:100]
     out: dict[str, dict[str, Any]] = {}
+    profile = current_profile_name("default") or "default"
     if not wanted:
-        return {"sessions": out}
+        return {"sessions": out, "profile": profile}
     db = _open_session_db_for_profile(None, read_only=True)
     try:
         for sid in wanted:
@@ -402,7 +405,7 @@ def get_session_labels(ids: str = Query(..., max_length=4000)):
                 log.debug("session label lookup failed for %s: %s", sid, exc)
     finally:
         db.close()
-    return {"sessions": out}
+    return {"sessions": out, "profile": profile}
 
 
 @router.get("/board")
