@@ -81,6 +81,33 @@ export function externalOpenErrorMessage(error: unknown): string {
  * so fire-and-forget callers can `void` the result safely.
  */
 export async function openExternalUrl(rawUrl: string, deps: ExternalOpenDeps): Promise<ExternalOpenResult> {
+  // VNC is an authority-only capability, not a general external scheme.
+  // Validate BEFORE trim/URL parsing, which otherwise erase hostile controls.
+  if (/^vnc:/i.test(String(rawUrl || '').trim())) {
+    const match = /^vnc:\/\/([a-zA-Z0-9.-]+)(?::([0-9]{1,5}))?$/.exec(rawUrl)
+    const host = match?.[1] || ''
+    const labels = host.split('.')
+
+    const validHost = host.length <= 253 && labels.every(label =>
+      /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(label))
+
+    const validIp = !/^[0-9.]+$/.test(host) || (labels.length === 4 && labels.every(label =>
+      /^(0|[1-9][0-9]{0,2})$/.test(label) && Number(label) <= 255))
+
+    // IPv6 is deliberately unsupported; never pass a partially parsed address.
+    if (!match || match[0] !== rawUrl || !validHost || !validIp || (match[2] && (Number(match[2]) < 1 || Number(match[2]) > 65535))) {
+      return { ok: false, reason: 'invalid' }
+    }
+
+    try {
+      await deps.openExternal(rawUrl)
+
+      return { ok: true }
+    } catch (error) {
+      return failOpen(deps, rawUrl, error)
+    }
+  }
+
   const raw = absolutizeProtocolRelativeUrl(String(rawUrl || '').trim())
 
   if (!raw) {

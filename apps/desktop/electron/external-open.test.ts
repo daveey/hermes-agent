@@ -46,6 +46,33 @@ function makeDeps(overrides: Partial<ExternalOpenDeps> = {}) {
   return { deps, calls }
 }
 
+test('VNC opens only strict host authorities through the client OS, never WSL shell', async () => {
+  const { deps, calls } = makeDeps({ isWsl: true })
+
+  for (const host of ['computer.local', '192.0.2.1', 'computer.local:5901']) {
+    assert.deepEqual(await openExternalUrl(`vnc://${host}`, deps), { ok: true })
+  }
+
+  assert.deepEqual(calls.opened, ['vnc://computer.local', 'vnc://192.0.2.1', 'vnc://computer.local:5901'])
+})
+
+test('VNC rejects credentials, paths, controls, ambiguous IPs and shell syntax', async () => {
+  const { deps, calls } = makeDeps()
+
+  for (const host of ['user@host', 'host/', 'host?x', 'host#x', 'host\\n', ' host', '[::1]', '::1', 'host:0', 'host:65536', 'host:abc', '-host', 'host..local', '999.1.1.1', '127.1', 'host;open', 'host%20', 'host\\\\path']) {
+    assert.deepEqual(await openExternalUrl(`vnc://${host}`, deps), { ok: false, reason: 'invalid' }, host)
+  }
+
+  assert.deepEqual(calls.opened, [])
+})
+
+test('VNC launch failures are surfaced', async () => {
+  const { deps, calls } = makeDeps({ openExternal: async () => { throw new Error('No VNC handler') } })
+
+  assert.deepEqual(await openExternalUrl('vnc://computer.local', deps), { ok: false, reason: 'failed', message: 'No VNC handler' })
+  assert.deepEqual(calls.notified, [['vnc://computer.local', 'No VNC handler']])
+})
+
 test('resolves ok and opens when openExternal succeeds', async () => {
   const { deps, calls } = makeDeps()
 
