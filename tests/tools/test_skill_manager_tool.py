@@ -786,7 +786,9 @@ Step 2: Do the other thing.
     @pytest.mark.parametrize("kwargs", [
         {"old_string": None, "new_string": "x"},
         {"old_string": "", "new_string": "x"},
-        {"old_string": "Step 1: Do the thing.", "new_string": "Step 1: Do the thing."},
+        # Identical strings present in the file are a no_change success
+        # (test_skill_patch_no_change.py); absent ones are still rejected.
+        {"old_string": "Step 9: Not in the skill.", "new_string": "Step 9: Not in the skill."},
     ])
     def test_rejected_patch_leaves_file_byte_identical(self, tmp_path, kwargs):
         """A rejected patch must not partially mutate the skill."""

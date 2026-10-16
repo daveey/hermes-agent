@@ -658,6 +658,8 @@ def _prior_tool_keys(prior_snapshot: list[dict]) -> tuple[set, set]:
 
 def _action_lines(data: dict, detail: dict, verbose: bool) -> list[str]:
     """Summary line(s) for one successful notify-tool result (``[]`` when nothing to report)."""
+    if data.get("no_change"):
+        return []
     if data.get("staged"):
         # The fork's own review summary is never published back, so an unattended-review
         # consolidation proposal must surface here or it is silently lost (#105921).
@@ -675,7 +677,7 @@ def _action_lines(data: dict, detail: dict, verbose: bool) -> list[str]:
             return []
         lines = []
         for result in results:
-            if not isinstance(result, dict) or result.get("success") is not True:
+            if not isinstance(result, dict) or result.get("success") is not True or result.get("no_change"):
                 continue
             verb_key = verbs.get(result.get("action"))
             if verb_key and result.get("name"):

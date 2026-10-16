@@ -564,6 +564,28 @@ def _edit_skill(name: str, content: str) -> dict[str, Any]:
     return _attach_size_warning(_add_description_prompt_preview(result, content), before, content)
 
 
+def _already_applied_patch(name: str, label: str, content: str, old_string: str,
+                           new_string: str) -> dict[str, Any] | None:
+    """Success-shaped no-op for a patch that would leave the file unchanged, else None.
+
+    Agents send old_string == new_string on purpose to probe that a skill is patchable after a
+    fix or split, and re-send edits that already landed. Both are not failures; an error here
+    aborts the whole batch and rolls back its other ops. Same contract as the file patch tool.
+    """
+    from tools.fuzzy_match import is_already_applied
+    if old_string == new_string and old_string.strip() and old_string in content:
+        note = (f"old_string and new_string are identical and old_string is present in {label}, so "
+                f"there is nothing to change; no write performed. To edit the text, send the changed "
+                f"text in new_string.")
+    elif is_already_applied(content, old_string, new_string):
+        note = (f"{label} already contains new_string and old_string is gone: the edit appears to be "
+                f"already applied. No write performed; do not re-send this patch.")
+    else:
+        return None
+    return {"success": True, "no_change": True,
+            "message": f"No change to {label} in skill '{name}'.", "note": note}
+
+
 def _patch_skill(name: str, old_string: str, new_string: str, file_path: str | None = None,
                  replace_all: bool = False) -> dict[str, Any]:
     """Targeted find-and-replace in SKILL.md (default) or a supporting file; unique match unless replace_all."""
@@ -595,6 +617,8 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str | N
     new_content, match_count, _strategy, match_error = fuzzy_find_and_replace(
         content, old_string, new_string, replace_all, correction_notes=correction_notes)
     if match_error:
+        if noop := _already_applied_patch(name, target_label, content, old_string, new_string):
+            return noop
         with suppress(Exception):
             from tools.fuzzy_match import format_no_match_hint
             match_error += format_no_match_hint(match_error, match_count, old_string, content)
