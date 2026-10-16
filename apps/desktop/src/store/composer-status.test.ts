@@ -8,6 +8,7 @@ import {
   reconcileBackgroundProcesses,
   refreshBackgroundProcesses,
   resetBackgroundPollingGuard,
+  RUNNING_SWEEP_MS,
   stopBackgroundProcess
 } from './composer-status'
 import { $gateway } from './gateway'
@@ -411,5 +412,83 @@ describe('refreshBackgroundProcesses dead-session guard hardenings', () => {
     await refreshBackgroundProcesses('sess-2')
 
     expect(request).toHaveBeenCalledTimes(4)
+  })
+})
+
+// [daveey] A hidden session's running row went stale: the status stack only
+// polls a visible pane, and a watch_patterns-only process exits without a
+// `status.update kind=process` event. The sidebar then read "Background task
+// running" for hours with nothing alive.
+describe('stale running rows', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    $backgroundStatusBySession.set({})
+    resetBackgroundPollingGuard()
+  })
+
+  afterEach(() => {
+    $backgroundStatusBySession.set({})
+    $gateway.set(null as never)
+    resetBackgroundPollingGuard()
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  })
+
+  it('re-polls a session with a running row even when no pane polls it', async () => {
+    const request = vi.fn(async () => ({ processes: [exited('w', 1)] }))
+    $gateway.set({ request } as never)
+
+    reconcileBackgroundProcesses(SID, [running('w')])
+    expect(items()[0]!.state).toBe('running')
+
+    await vi.advanceTimersByTimeAsync(RUNNING_SWEEP_MS)
+
+    expect(request).toHaveBeenCalledWith('process.list', { session_id: SID })
+    expect(items()[0]!.state).toBe('failed')
+  })
+
+  it('stops sweeping once no running rows remain', async () => {
+    const request = vi.fn(async () => ({ processes: [] }))
+    $gateway.set({ request } as never)
+
+    reconcileBackgroundProcesses(SID, [exited('done', 0)])
+    await vi.advanceTimersByTimeAsync(RUNNING_SWEEP_MS * 3)
+
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('drops running rows once the runtime is reported gone', async () => {
+    const request = vi.fn(async () => {
+      throw new Error('session not found')
+    })
+
+    $gateway.set({ request } as never)
+
+    reconcileBackgroundProcesses(SID, [running('w')])
+    await refreshBackgroundProcesses(SID)
+
+    expect(items()).toEqual([])
+  })
+
+  it('drops running rows of a session another poller already latched gone', async () => {
+    reconcileBackgroundProcesses(SID, [running('w')])
+    markSessionGone(SID)
+
+    await refreshBackgroundProcesses(SID)
+
+    expect(items()).toEqual([])
+  })
+
+  it('keeps running rows across a transient failure', async () => {
+    const request = vi.fn(async () => {
+      throw new Error('request timed out after 30s: process.list')
+    })
+
+    $gateway.set({ request } as never)
+
+    reconcileBackgroundProcesses(SID, [running('w')])
+    await refreshBackgroundProcesses(SID)
+
+    expect(items().map(i => i.state)).toEqual(['running'])
   })
 })

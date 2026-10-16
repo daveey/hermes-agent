@@ -120,18 +120,20 @@ describe('ComposerStatusStack hidden-pane poll', () => {
   })
 
   it('hidden tile skips the 5s poll; visible tile polls; reveal resumes', async () => {
+    // Both windows together stay under the store's 30s stale-row sweep
+    // (RUNNING_SWEEP_MS), so only the pane's own 5s poll is counted here.
     const hidden = renderStackBg(false)
     await vi.advanceTimersByTimeAsync(0)
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(12_000)
     // Mount seed only — the interval never armed while hidden.
     expect(processListCalls()).toBe(1)
     hidden.unmount()
 
     const shown = renderStackBg(true)
     await vi.advanceTimersByTimeAsync(0)
-    await vi.advanceTimersByTimeAsync(15_000)
-    // Mount seed + three 5s ticks.
-    expect(processListCalls()).toBe(1 + 1 + 3)
+    await vi.advanceTimersByTimeAsync(12_000)
+    // Mount seed + two 5s ticks.
+    expect(processListCalls()).toBe(1 + 1 + 2)
     shown.unmount()
   })
 

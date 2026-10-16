@@ -285,6 +285,59 @@ const writeBackground = (sid: string, items: ComposerStatusItem[]) => {
   }
 
   $backgroundStatusBySession.set(next)
+  syncRunningSweep()
+}
+
+// [daveey] Running rows go stale when nobody re-polls them. The status stack
+// polls only while its pane is visible, and a process started without
+// `notify_on_complete` (e.g. watch_patterns only) exits with no
+// `status.update kind=process` event, so a hidden session kept a `running` row
+// forever and its sidebar row read "Background task running" (no stripe) with
+// nothing left alive. This low-rate sweep re-polls every session that still
+// has a running row, visible or not; it stops itself once none remain.
+export const RUNNING_SWEEP_MS = 30_000
+let runningSweep: null | ReturnType<typeof setInterval> = null
+
+const sessionsWithRunningRows = () =>
+  Object.entries($backgroundStatusBySession.get())
+    .filter(([, items]) => items.some(item => item.state === 'running'))
+    .map(([sid]) => sid)
+
+function syncRunningSweep() {
+  const active = sessionsWithRunningRows().length > 0
+
+  if (active && runningSweep === null) {
+    runningSweep = setInterval(() => {
+      const sids = sessionsWithRunningRows()
+
+      for (const sid of sids) {
+        void refreshBackgroundProcesses(sid)
+      }
+
+      if (sids.length === 0) {
+        syncRunningSweep()
+      }
+    }, RUNNING_SWEEP_MS)
+  } else if (!active && runningSweep !== null) {
+    clearInterval(runningSweep)
+    runningSweep = null
+  }
+}
+
+/** [daveey] A gone runtime can never report its processes again, so its
+ *  `running` rows would claim the session forever. Drop them; the backend's
+ *  `background_active` row stamp (live pids from every processes.json) still
+ *  keeps the sidebar busy for anything really alive. Finished rows stay for
+ *  their linger/Stop handling. */
+function dropRunningRows(sid: string) {
+  const list = $backgroundStatusBySession.get()[sid] ?? []
+
+  if (list.some(item => item.state === 'running')) {
+    writeBackground(
+      sid,
+      list.filter(item => item.state !== 'running')
+    )
+  }
 }
 
 // `tui_gateway` process.list entry (tools/process_registry.list_sessions + output_tail).
@@ -411,7 +464,13 @@ export function reconcileBackgroundProcesses(sid: string, procs: GatewayProcessE
 export async function refreshBackgroundProcesses(sid: string): Promise<void> {
   const gateway = $gateway.get()
 
-  if (!sid || !gateway || isSessionGone(sid)) {
+  if (sid && isSessionGone(sid)) {
+    dropRunningRows(sid)
+
+    return
+  }
+
+  if (!sid || !gateway) {
     return
   }
 
@@ -432,6 +491,7 @@ export async function refreshBackgroundProcesses(sid: string): Promise<void> {
     // or the 5s timer hammers the gateway with 4001s for the window's lifetime.
     if (isSessionGoneForBackgroundPolling(error)) {
       markSessionGone(sid)
+      dropRunningRows(sid)
 
       return
     }
