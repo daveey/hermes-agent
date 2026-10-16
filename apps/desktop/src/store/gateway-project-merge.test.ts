@@ -111,6 +111,66 @@ describe('mergeGatewayProjectTrees', () => {
     expect(merged[1].previewSessions?.[0].connection_id).toBe('mac-mini')
   })
 
+  it('drops a remote copy of a session the active gateway already places (no duplicate row)', () => {
+    // nous-1 also reports a MacBook session; with no /Users/... folder there it
+    // lands in nous-1's Home, while the MacBook files it under its project.
+    const local = row('s', 100, { cwd: '/Users/x/code/watch', kanban_active: 1 })
+
+    const merged = mergeGatewayProjectTrees(
+      [
+        project({ id: '__home__', label: 'Home', isNoProject: true, path: null, previewSessions: [row('l', 1)] }),
+        project({ id: 'p_watch', label: 'watch', previewSessions: [local], sessionIds: ['s'] })
+      ],
+      [
+        {
+          connectionId: 'nous-1',
+          projects: [
+            project({
+              id: '__home__',
+              label: 'Home',
+              isNoProject: true,
+              previewSessions: [row('s', 100, { cwd: '/Users/x/code/watch' }), row('n', 2)],
+              sessionIds: ['s', 'n'],
+              sessionCount: 2,
+              repos: [
+                {
+                  id: '__home__',
+                  label: 'Home',
+                  path: null,
+                  groups: [{ id: '__home__', label: 'Home', sessions: [row('s', 100), row('n', 2)] }]
+                } as never
+              ]
+            })
+          ]
+        }
+      ],
+      3
+    )
+
+    const home = merged.find(p => p.isNoProject)!
+
+    expect(home.previewSessions?.map(s => s.id)).toEqual(['n', 'l'])
+    expect(home.sessionIds).toEqual(['n'])
+    // Local 'l' + remote 'n'; the remote's copy of 's' no longer counts.
+    expect(home.sessionCount).toBe(2)
+    expect(merged.find(p => p.id === 'p_watch')?.previewSessions).toEqual([local])
+  })
+
+  it('drops a remote-only project whose every row the active gateway already has', () => {
+    const merged = mergeGatewayProjectTrees(
+      [project({ id: 'p', label: 'babybear', previewSessions: [row('s', 5)], sessionIds: ['s'] })],
+      [
+        {
+          connectionId: 'nous-1',
+          projects: [project({ id: 'q', label: 'mirror', previewSessions: [row('s', 5)], sessionIds: ['s'] })]
+        }
+      ],
+      3
+    )
+
+    expect(merged.map(p => p.id)).toEqual(['p'])
+  })
+
   it('skips archived remote projects', () => {
     const merged = mergeGatewayProjectTrees(
       [],

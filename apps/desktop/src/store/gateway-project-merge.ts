@@ -76,10 +76,64 @@ function mergeInto(base: SidebarProjectTree, remote: SidebarProjectTree, preview
   }
 }
 
+/** Every session id a project subtree claims (ids, previews, lane rows). */
+function claimedIds(project: SidebarProjectTree): string[] {
+  return [
+    ...(project.sessionIds ?? []),
+    ...(project.previewSessions ?? []).map(session => session.id),
+    ...(project.repos ?? []).flatMap(repo => repo.groups.flatMap(group => group.sessions.map(session => session.id)))
+  ]
+}
+
+/**
+ * Strip rows an earlier tree (the active gateway first) already placed. A
+ * gateway can report another host's session — nous-1 lists MacBook chats, and
+ * with no `/Users/...` folder there they land in its Home — so without this the
+ * same chat renders twice: the local, live row (kanban badge, stripe) plus a
+ * frozen remote copy in Home. Returns null when nothing of the project is left.
+ * [daveey]
+ */
+function withoutClaimed(project: SidebarProjectTree, claimed: ReadonlySet<string>): null | SidebarProjectTree {
+  const ids = claimedIds(project)
+
+  if (!ids.some(id => claimed.has(id))) {
+    return project
+  }
+
+  const keep = (session: SessionInfo): boolean => !claimed.has(session.id)
+  const sessionIds = project.sessionIds?.filter(id => !claimed.has(id))
+  const previewSessions = project.previewSessions?.filter(keep)
+
+  const repos = (project.repos ?? []).map(repo => {
+    const groups = repo.groups.map(group => ({ ...group, sessions: group.sessions.filter(keep) }))
+
+    return { ...repo, groups, sessionCount: groups.reduce((n, group) => n + group.sessions.length, 0) }
+  })
+
+  const dropped = project.sessionIds
+    ? project.sessionIds.length - (sessionIds?.length ?? 0)
+    : (project.previewSessions?.length ?? 0) - (previewSessions?.length ?? 0)
+
+  const sessionCount = Math.max(0, (project.sessionCount ?? 0) - dropped)
+
+  if (sessionCount === 0 && !previewSessions?.length) {
+    return null
+  }
+
+  return {
+    ...project,
+    sessionCount,
+    repos,
+    ...(previewSessions ? { previewSessions } : {}),
+    ...(sessionIds ? { sessionIds } : {})
+  }
+}
+
 /**
  * Fold remote gateway trees into the active gateway's tree. The base keeps
  * its ids, order and structure; remote rows are stamped with their owning
- * connection so clicks resume them on the right gateway.
+ * connection so clicks resume them on the right gateway. A session already
+ * placed by the base (or an earlier remote) is not repeated.
  */
 export function mergeGatewayProjectTrees(
   base: SidebarProjectTree[],
@@ -99,13 +153,28 @@ export function mergeGatewayProjectTrees(
     }
   })
 
-  for (const { connectionId, projects } of remotes) {
-    for (const raw of projects) {
-      if (raw.archived) {
-        continue
-      }
+  const claimed = new Set(base.flatMap(claimedIds))
 
-      const remote = stampTree(raw, connectionId)
+  for (const { connectionId, projects } of remotes) {
+    const fresh: SidebarProjectTree[] = []
+
+    for (const raw of projects) {
+      const unique = raw.archived ? null : withoutClaimed(raw, claimed)
+
+      if (unique) {
+        fresh.push(unique)
+      }
+    }
+
+    // Claim after the whole gateway: its own rows never shadow each other.
+    for (const project of fresh) {
+      for (const id of claimedIds(project)) {
+        claimed.add(id)
+      }
+    }
+
+    for (const unique of fresh) {
+      const remote = stampTree(unique, connectionId)
       const key = projectKey(remote)
       const at = indexByKey.get(key)
 
