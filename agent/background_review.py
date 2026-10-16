@@ -1170,23 +1170,29 @@ def _run_review_fork(
     )
     # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
     review_history = _digest_history(messages_snapshot) if _routed else messages_snapshot
+    stale_note = ""
     with suppress(Exception):
         from tools.skill_manager_guards import (
-            _reset_background_review_read_marks, seed_background_review_reads_from_history)
+            _reset_background_review_read_marks, seed_background_review_reads_from_history,
+            stale_skill_views_note)
 
         _reset_background_review_read_marks()
         # A skill_view result the fork replays byte-identical to the file on disk IS a read of the
         # current content; without this every review re-viewed the parent's loaded skill (or got
-        # refused patching it) just to satisfy read-before-write. Stale copies stay unmarked.
+        # refused patching it) just to satisfy read-before-write. Stale copies stay unmarked, and
+        # the prompt names them so the fork re-views first instead of patching blind and being
+        # refused (long-lived sessions whose loaded skill other sessions' reviews keep editing).
+        stale: list = []
         seed_background_review_reads_from_history(
-            review_history, session_id=getattr(agent, "session_id", None))
+            review_history, session_id=getattr(agent, "session_id", None), stale=stale)
+        stale_note = stale_skill_views_note(stale)
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
             st.review_agent.run_conversation(
                 user_message=(
                     prompt + "\n\nYou can only call " + memory_phrase_prompt +
                     "management tools. Other tools will be denied "
-                    "at runtime — do not attempt them." + prompt_extra
+                    "at runtime — do not attempt them." + prompt_extra + stale_note
                 ),
                 conversation_history=review_history,
             )

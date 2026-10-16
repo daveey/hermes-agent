@@ -1391,7 +1391,9 @@ class TestCuratorConsolidationDeleteGuard:
             _reset_background_review_read_marks()
 
             # Seeding compares via skill_view, whose own read-mark must not leak in.
-            assert seed_background_review_reads_from_history(history) == 0
+            stale = []
+            assert seed_background_review_reads_from_history(history, stale=stale) == 0
+            assert stale == [("reviewed", None)]  # reported so the fork prompt can name it
             blocked = json.loads(skill_manage(
                 action="patch", name="reviewed",
                 old_string="Step 1: Do the thing.", new_string="Step 1: Do the thing safely."))
@@ -1449,5 +1451,27 @@ class TestCuratorConsolidationDeleteGuard:
                 action="patch", name="reviewed",
                 old_string="Step 1: Do the thing.", new_string="Step 1: Do the thing safely."))
             assert blocked.get("_read_before_write_required") is True
+
+        _reset_background_review_read_marks()
+
+    def test_review_seeding_reports_no_stale_for_current_or_unviewable_copies(self, tmp_path, monkeypatch):
+        """Only a replayed copy that differs from the live file is stale: current copies, stubs
+        and pruned results are not (the note must not nag about skills the fork can patch)."""
+        from tools.skills_tool import skill_view
+        from tools.skill_manager_guards import (
+            _reset_background_review_read_marks, seed_background_review_reads_from_history,
+            stale_skill_views_note)
+
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch):
+            _create_curator_skill("reviewed", _skill_content("reviewed"))
+            history = (self._replayed_view("c1", "[pruned: tool output summarised]")
+                       + self._replayed_view("c2", skill_view("reviewed")))
+            _reset_background_review_read_marks()
+            stale = []
+            assert seed_background_review_reads_from_history(history, stale=stale) == 1
+            assert stale == []
+            assert stale_skill_views_note(stale) == ""
+            note = stale_skill_views_note([("reviewed", None), ("reviewed", "references/a.md")])
+            assert "reviewed (SKILL.md)" in note and "reviewed (references/a.md)" in note
 
         _reset_background_review_read_marks()

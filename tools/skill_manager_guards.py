@@ -104,7 +104,8 @@ def _transcript_skill_views(messages: list) -> list[tuple[str, Optional[str], st
     return views
 
 
-def seed_background_review_reads_from_history(messages: list, session_id: Optional[str] = None) -> int:
+def seed_background_review_reads_from_history(messages: list, session_id: Optional[str] = None,
+                                              stale: Optional[list] = None) -> int:
     """Treat skill_view results the review fork replays verbatim as reads of the current file.
 
     The fork resumes the parent's transcript, so a skill the parent loaded is already in the fork's
@@ -113,7 +114,9 @@ def seed_background_review_reads_from_history(messages: list, session_id: Option
     forced a redundant re-view (a 90 KB SKILL.md reloaded per review). A stale, pruned or stubbed copy
     does not match and stays unmarked, so the guard still fires for it. Call after
     ``_reset_background_review_read_marks()`` in the context the fork's tool workers copy. Returns the
-    number of files marked."""
+    number of files marked. When ``stale`` is a list, ``(name, file_path)`` is appended for every
+    replayed copy that no longer matches the file (edited by another session since it was loaded), so
+    the fork can be told to re-view those before writing instead of being refused first."""
     if (marks := _background_review_read_paths.get()) is None:
         _background_review_read_paths.set(marks := _BackgroundReviewReadMarks())
     seen: set[tuple[str, Optional[str]]] = set()
@@ -127,15 +130,30 @@ def seed_background_review_reads_from_history(messages: list, session_id: Option
         except Exception:
             logger.debug("review read seeding failed for %s/%s", name, file_path, exc_info=True)
             continue
-        if current is None or current[1] != content:
+        if current is None:  # deleted/renamed since: nothing to re-view
             continue
         resolved = _resolved_str(current[0])
         # Same name but a different file (a shadowing copy appeared since): not a read of the target.
-        if source and _resolved_str(Path(source)) != resolved:
+        if current[1] != content or (source and _resolved_str(Path(source)) != resolved):
+            if stale is not None:
+                stale.append((name, file_path))
             continue
         marks.add(resolved)
         marked += 1
     return marked
+
+
+def stale_skill_views_note(stale: list) -> str:
+    """Review-prompt line naming replayed skill copies that are out of date, or ''.
+
+    Without it the fork patches from the parent's old copy, read-before-write refuses (correctly),
+    and every such review burns a failed call before the re-view (coach: kanban-orchestrator)."""
+    if not stale:
+        return ""
+    labels = ", ".join(sorted({f"{n} ({fp or 'SKILL.md'})" for n, fp in stale}))
+    return (f"\n\nThese skills changed on disk after this conversation loaded them, so the copies above "
+            f"are stale: {labels}. Before any skill_manage write to them, call skill_view (with "
+            f"file_path for a supporting file) and base the edit on the content it returns.")
 
 
 def _current_skill_view(name: str, file_path: Optional[str], session_id: Optional[str]):

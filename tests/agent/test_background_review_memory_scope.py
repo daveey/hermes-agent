@@ -138,12 +138,45 @@ class TestExplicitRefineOrigin:
                 patch.object(bg, "finish_background_review_run", noop), \
                 patch.object(bg, "_release_fork_clients", noop), \
                 patch("tools.skill_manager_guards.seed_background_review_reads_from_history",
-                      lambda history, session_id=None: seeded.append((history, session_id)) or 0):
+                      lambda history, session_id=None, stale=None: seeded.append((history, session_id)) or 0):
             bg._run_review_fork(SimpleNamespace(session_id="s1"), snapshot, "p", None, None,
                                 bg._ReviewForkState())
         expected = digest if routed else snapshot
         assert seeded == [(expected, "s1")]
         assert replayed == [expected]
+
+
+    def test_fork_prompt_names_skills_whose_replayed_copy_is_stale(self):
+        """The parent loaded kanban-orchestrator; another session's review edited it since. The
+        fork must be told its copy is stale, else it patches blind and read-before-write refuses
+        (coach bug: kanban-orchestrator refusals in long-lived sessions)."""
+        prompts = []
+
+        def fake_build(agent, task_cfg=None, *, max_iterations, write_origin="background_review"):
+            fork = SimpleNamespace(
+                _memory_enabled=True, _user_profile_enabled=False, _memory_write_origin=write_origin,
+                run_conversation=lambda **kw: prompts.append(kw["user_message"]),
+                _session_messages=[])
+            return fork, {}, False
+
+        def fake_seed(history, session_id=None, stale=None):
+            stale.extend([("kanban-orchestrator", None), ("bb", "references/x.md")])
+            return 0
+
+        noop = lambda *a, **k: None
+        with patch.object(bg, "build_cache_parity_fork", fake_build), \
+                patch.object(bg, "_track_review_fork", noop), \
+                patch.object(bg, "_snapshot_review_usage", lambda a: {}), \
+                patch.object(bg, "_record_review_usage_to_parent", noop), \
+                patch.object(bg, "finish_background_review_run", noop), \
+                patch.object(bg, "_release_fork_clients", noop), \
+                patch("tools.skill_manager_guards.seed_background_review_reads_from_history", fake_seed):
+            bg._run_review_fork(SimpleNamespace(session_id="s1"), [{"role": "user", "content": "hi"}],
+                                "p", None, None, bg._ReviewForkState())
+        assert len(prompts) == 1
+        assert "kanban-orchestrator (SKILL.md)" in prompts[0]
+        assert "bb (references/x.md)" in prompts[0]
+        assert "stale" in prompts[0] and "skill_view" in prompts[0]
 
 
 class TestConsolidationProposalSurfaces:
