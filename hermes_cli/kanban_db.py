@@ -3753,6 +3753,33 @@ def invalidate_descendants_for_parent_reopen(
     return {"invalidated": invalidated, "terminations": terminations}
 
 
+# Events after a ``block_loop_detected`` that count as new human input on a
+# triage card: a comment, an edit, or a manual status move. Worker comments land
+# before the escalation (same txn window), so anything later came from someone else.
+_HUMAN_INPUT_EVENT_KINDS = ("commented", "edited", "status")
+
+
+def awaiting_human_after_block_loop(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when a triage card was escalated by ``block_loop_detected`` and has had
+    no human input (comment/edit/status move) since. The auto-decomposer must leave
+    such cards alone: re-specifying them re-promotes the same blocked work and the
+    worker just re-blocks, burning a run every couple of minutes.
+    """
+    row = conn.execute(
+        "SELECT MAX(id) AS eid FROM task_events WHERE task_id = ? AND kind = 'block_loop_detected'",
+        (task_id,),
+    ).fetchone()
+    loop_eid = row[0] if row is not None else None
+    if loop_eid is None:
+        return False
+    kinds = ", ".join("?" for _ in _HUMAN_INPUT_EVENT_KINDS)
+    later = conn.execute(
+        f"SELECT 1 FROM task_events WHERE task_id = ? AND id > ? AND kind IN ({kinds}) LIMIT 1",
+        (task_id, loop_eid, *_HUMAN_INPUT_EVENT_KINDS),
+    ).fetchone()
+    return later is None
+
+
 def specify_triage_task(
     conn: sqlite3.Connection, task_id: str, *, title: Optional[str] = None,
     body: Optional[str] = None, assignee: Optional[str] = None, author: Optional[str] = None,

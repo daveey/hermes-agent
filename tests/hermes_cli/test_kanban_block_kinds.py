@@ -198,3 +198,68 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
 # ---------------------------------------------------------------------------
 
 
+
+
+# ---------------------------------------------------------------------------
+# Auto-decomposer must not re-promote a block-loop escalation without human input
+# ---------------------------------------------------------------------------
+
+
+def _loop_to_triage(conn) -> str:
+    tid = _running_task(conn)
+    kb.block_task(conn, tid, reason="needs David", kind="needs_input")
+    kb.unblock_task(conn, tid)
+    _make_running_again(conn, tid)
+    kb.block_task(conn, tid, reason="needs David", kind="needs_input")
+    assert kb.get_task(conn, tid).status == "triage"
+    return tid
+
+
+def test_auto_decompose_sweep_skips_block_loop_escalation(kanban_home: Path) -> None:
+    from hermes_cli import kanban_decompose as decomp
+
+    with kbc.connect_closing() as conn:
+        looped = _loop_to_triage(conn)
+        plain = kb.create_task(conn, title="rough idea", triage=True)
+        assert kb.awaiting_human_after_block_loop(conn, looped) is True
+        assert kb.awaiting_human_after_block_loop(conn, plain) is False
+
+    swept = decomp.list_triage_ids(skip_awaiting_human=True)
+    assert plain in swept
+    assert looped not in swept
+    # The explicit/CLI listing is unchanged.
+    assert looped in decomp.list_triage_ids()
+
+
+def test_human_comment_after_escalation_reenables_auto_decompose(kanban_home: Path) -> None:
+    from hermes_cli import kanban_decompose as decomp
+
+    with kbc.connect_closing() as conn:
+        looped = _loop_to_triage(conn)
+        kb.add_comment(conn, looped, "david", "Try channel 11 on the new AP.")
+        assert kb.awaiting_human_after_block_loop(conn, looped) is False
+
+    assert looped in decomp.list_triage_ids(skip_awaiting_human=True)
+
+
+def test_dispatcher_auto_decompose_tick_requests_human_skip(monkeypatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    import hermes_cli
+    from gateway import kanban_watchers_dispatcher as kwd
+
+    seen = {}
+
+    def fake_list(**kw):
+        seen.update(kw)
+        return []
+
+    fake = SimpleNamespace(list_triage_ids=fake_list, decompose_task=lambda *a, **k: None)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_decompose", fake)
+    monkeypatch.setattr(hermes_cli, "kanban_decompose", fake, raising=False)
+    monkeypatch.setattr(kwd, "_board_slugs", lambda kb_: ["default"])
+    settings = kwd._DispatcherSettings(60.0, None, None, 2, 0, True, None, None)
+    disp = kwd._KanbanDispatcher(SimpleNamespace(DEFAULT_BOARD="default"), settings)
+    assert disp.auto_decompose_tick(5) == 0
+    assert seen.get("skip_awaiting_human") is True

@@ -336,8 +336,15 @@ def decompose_task(
     return _apply_fanout(task_id, parsed, routing, audit_author)
 
 
-def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+def list_triage_ids(*, tenant: Optional[str] = None, skip_awaiting_human: bool = False) -> list[str]:
+    """Return task ids currently in the triage column.
+
+    ``skip_awaiting_human`` (the dispatcher's auto-decompose sweep) drops cards
+    that ``block_loop_detected`` escalated for a human and that have had no human
+    input since; explicit specify/decompose of one id still works on them.
+    """
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
+        if skip_awaiting_human:
+            rows = [row for row in rows if not kb.awaiting_human_after_block_loop(conn, row.id)]
     return [row.id for row in rows]

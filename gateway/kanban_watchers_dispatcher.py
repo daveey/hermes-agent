@@ -268,7 +268,9 @@ class _KanbanDispatcher:
                 try:
                     os.environ["HERMES_KANBAN_BOARD"] = slug
                     try:
-                        triage_ids = _decomp.list_triage_ids()
+                        # Cards a block loop escalated for a human stay put until
+                        # a human adds input; re-specifying them restarts the loop.
+                        triage_ids = _decomp.list_triage_ids(skip_awaiting_human=True)
                     except Exception as exc:
                         logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
                         triage_ids = []
