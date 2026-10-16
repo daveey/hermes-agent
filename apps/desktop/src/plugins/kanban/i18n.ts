@@ -219,6 +219,9 @@ type KanbanMessages = {
   sidebar: {
     blocked: string
     blockedTip: (title: string, reason: string) => string
+    noSession: string
+    untitledSession: string
+    openSession: (title: string) => string
   }
   // native/toast notifications for terminal worker events (completion-notify)
   notify: {
@@ -457,7 +460,10 @@ export const en: KanbanMessages = {
   auto: 'Auto',
   sidebar: {
     blocked: 'Blocked',
-    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title)
+    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title),
+    noSession: 'No session',
+    untitledSession: 'Untitled session',
+    openSession: (title: string) => `Open ${title}`
   },
   notify: {
     completedTitle: 'Task completed',
@@ -693,7 +699,10 @@ const ja: KanbanMessages = {
   auto: '自動',
   sidebar: {
     blocked: 'ブロック中',
-    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title)
+    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title),
+    noSession: 'セッションなし',
+    untitledSession: '無題のセッション',
+    openSession: (title: string) => `${title} を開く`
   },
   notify: {
     completedTitle: 'タスク完了',
@@ -926,7 +935,10 @@ const zh: KanbanMessages = {
   auto: '自动',
   sidebar: {
     blocked: '受阻',
-    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title)
+    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title),
+    noSession: '无会话',
+    untitledSession: '未命名会话',
+    openSession: (title: string) => `打开 ${title}`
   },
   notify: {
     completedTitle: '任务已完成',
@@ -1159,7 +1171,10 @@ const zhHant: KanbanMessages = {
   auto: '自動',
   sidebar: {
     blocked: '受阻',
-    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title)
+    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title),
+    noSession: '無工作階段',
+    untitledSession: '未命名工作階段',
+    openSession: (title: string) => `開啟 ${title}`
   },
   notify: {
     completedTitle: '任務已完成',

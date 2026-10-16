@@ -2,14 +2,15 @@
  * [daveey] Left-pane "Blocked" section: every blocked card on every board and
  * gateway, between Pinned and Projects (core's `sidebar.sections` area). This
  * replaces the in-app "task blocked" toast — the card stays visible here until
- * someone unblocks it, instead of a popup that vanishes. Clicking a row opens
- * the task's drawer on its own board. Hidden while nothing is blocked.
+ * someone unblocks it, instead of a popup that vanishes. Cards are grouped
+ * under the chat managing them (header click opens that chat); a card row
+ * opens the task's drawer on its own board. Hidden while nothing is blocked.
  */
 
 import { atom, host, SidebarSection, SidebarSectionRow, useQuery, useValue } from '@hermes/plugin-sdk'
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 
-import { blockedKey, fetchBlockedTasks, useKanbanScope } from './api'
+import { blockedKey, type BlockedTask, boardGateways, fetchBlockedTasks, useKanbanScope } from './api'
 import { $openTaskRequest } from './open-task'
 import { ago, useKanban } from './ui'
 
@@ -19,6 +20,39 @@ export const $blockedSectionOpen = atom<boolean>(true)
 const INITIAL_ROWS = 5
 const LOAD_STEP = 10
 const POLL_MS = 30_000
+
+export interface BlockedGroup {
+  key: string
+  /** Managing chat's live stored id; null = no session owns these cards. */
+  sessionId: null | string
+  title: null | string
+  gateway?: string
+  tasks: BlockedTask[]
+}
+
+/** Cards grouped by the chat managing them, in the order the fetch ranked
+ *  them (a group sits where its most urgent card would), sessionless last. */
+export function groupBlockedTasks(tasks: readonly BlockedTask[]): BlockedGroup[] {
+  const groups = new Map<string, BlockedGroup>()
+
+  for (const task of tasks) {
+    const sessionId = task.manager?.id ?? null
+    const key = sessionId ? `${task.gateway ?? ''}:${sessionId}` : `${task.gateway ?? ''}:`
+    let group = groups.get(key)
+
+    if (!group) {
+      group = { gateway: task.gateway, key, sessionId, tasks: [], title: task.manager?.title ?? null }
+      groups.set(key, group)
+    }
+
+    group.title ||= task.manager?.title ?? null
+    group.tasks.push(task)
+  }
+
+  const all = [...groups.values()]
+
+  return [...all.filter(g => g.sessionId), ...all.filter(g => !g.sessionId)]
+}
 
 export function BlockedTasksSection() {
   const k = useKanban()
@@ -38,32 +72,68 @@ export function BlockedTasksSection() {
     return null
   }
 
-  const shown = tasks.slice(0, visible)
+  const groups = groupBlockedTasks(tasks)
+  const localGateway = boardGateways()[0]
+  let budget = visible
+
+  const openTask = (task: BlockedTask) => {
+    $openTaskRequest.set({ board: task.board, taskId: task.id })
+    host.navigate('/kanban')
+  }
 
   return (
     <SidebarSection
       count={tasks.length}
-      hiddenCount={tasks.length - shown.length}
+      hiddenCount={Math.max(0, tasks.length - visible)}
       label={k.sidebar.blocked}
       loadMoreStep={LOAD_STEP}
       onLoadMore={() => setVisible(n => n + LOAD_STEP)}
       onToggle={() => $blockedSectionOpen.set(!open)}
       open={open}
     >
-      {shown.map(task => (
-        <SidebarSectionRow
-          accentColor="var(--ui-yellow)"
-          icon="question"
-          key={`${task.gateway ?? ''}:${task.board}:${task.id}`}
-          label={task.title || task.id}
-          meta={ago(task.created_at) ?? undefined}
-          onSelect={() => {
-            $openTaskRequest.set({ board: task.board, taskId: task.id })
-            host.navigate('/kanban')
-          }}
-          tip={k.sidebar.blockedTip(task.title || task.id, (task.latest_summary ?? '').trim())}
-        />
-      ))}
+      {groups.map(group => {
+        if (budget <= 0) {
+          return null
+        }
+
+        const shown = group.tasks.slice(0, budget)
+        budget -= shown.length
+        const title = group.sessionId ? group.title || k.sidebar.untitledSession : k.sidebar.noSession
+        // Sessions on another gateway open from that gateway's own sidebar.
+        const sessionId = group.sessionId
+        const canOpen = Boolean(sessionId) && (!group.gateway || group.gateway === localGateway)
+
+        return (
+          <Fragment key={group.key}>
+            <SidebarSectionRow
+              icon={sessionId ? 'comment-discussion' : 'circle-slash'}
+              label={title}
+              meta={group.tasks.length}
+              muted
+              onSelect={() => {
+                if (canOpen && sessionId) {
+                  void host.openSession(sessionId)
+                } else {
+                  openTask(group.tasks[0])
+                }
+              }}
+              tip={canOpen ? k.sidebar.openSession(title) : title}
+            />
+            {shown.map(task => (
+              <SidebarSectionRow
+                accentColor="var(--ui-yellow)"
+                icon="question"
+                indent
+                key={`${task.gateway ?? ''}:${task.board}:${task.id}`}
+                label={task.title || task.id}
+                meta={ago(task.created_at) ?? undefined}
+                onSelect={() => openTask(task)}
+                tip={k.sidebar.blockedTip(task.title || task.id, (task.latest_summary ?? '').trim())}
+              />
+            ))}
+          </Fragment>
+        )
+      })}
     </SidebarSection>
   )
 }

@@ -729,11 +729,21 @@ export function mergeBoardLists(parts: Array<{ gateway: string; boards: BoardsRe
 /** A blocked card plus the board it lives on (the drawer opens it there). */
 export interface BlockedTask extends KanbanTask {
   board: string
+  /** The chat managing the card, resolved to its live compression tip and
+   *  title on the card's own gateway; null when no session owns it. */
+  manager: null | { id: string; title: null | string }
+}
+
+interface SessionLabels {
+  sessions?: Record<string, { tip_id?: string; title?: null | string }>
 }
 
 interface BoardsWithCounts extends BoardsResponse {
   boards: Array<BoardMeta & { counts?: Record<string, number> }>
 }
+
+const managerId = (task: KanbanTask): null | string =>
+  (task.managing_session_id ?? task.session_id ?? '').trim() || null
 
 /** Every `blocked` card on every board of every gateway, highest priority
  *  first, then newest. Boards whose `/boards` counts say they hold no blocked
@@ -756,11 +766,33 @@ export async function fetchBlockedTasks(): Promise<BlockedTask[]> {
           const board = await read<KanbanBoard>(withSlug('/board', slug))
           const tasks = board.columns.find(col => col.name === 'blocked')?.tasks ?? []
 
-          return tasks.map(task => ({ ...task, board: slug, gateway: gateways.length > 1 ? gateway : task.gateway }))
+          return tasks.map(task => ({
+            ...task,
+            board: slug,
+            gateway: gateways.length > 1 ? gateway : task.gateway,
+            manager: null
+          }))
         })
       )
 
-      return parts.flatMap(part => (part.status === 'fulfilled' ? part.value : []))
+      const found = parts.flatMap(part => (part.status === 'fulfilled' ? part.value : []))
+      const ids = [...new Set(found.map(managerId).filter((id): id is string => Boolean(id)))]
+      let labels: SessionLabels['sessions'] = {}
+
+      if (ids.length) {
+        try {
+          labels = (await read<SessionLabels>(`/session-labels?ids=${encodeURIComponent(ids.join(','))}`)).sessions ?? {}
+        } catch {
+          // Older backend without the endpoint: group by the raw id, untitled.
+        }
+      }
+
+      return found.map((task): BlockedTask => {
+        const id = managerId(task)
+        const label = id ? labels?.[id] : undefined
+
+        return { ...task, manager: id ? { id: label?.tip_id || id, title: label?.title?.trim() || null } : null }
+      })
     })
   )
 

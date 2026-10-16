@@ -39,6 +39,11 @@ export interface KanbanTask {
   /** [daveey] Registry connection id of the gateway that owns this card —
    *  stamped client-side by the merged board read (api.ts `mergeBoards`). */
   gateway?: string
+  /** [daveey] Chat session that created the card (null from CLI/dashboard). */
+  session_id?: null | string
+  /** [daveey] Chat managing the card: its latest `tui` notify subscriber,
+   *  else `session_id`. Absent on older backends. */
+  managing_session_id?: null | string
 }
 
 export interface KanbanColumn {

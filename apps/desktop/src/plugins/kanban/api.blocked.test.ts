@@ -139,6 +139,59 @@ describe('fetchBlockedTasks', () => {
     expect(taskGateway('mini-b')).toBe('mini')
   })
 
+  it('resolves each managing session to its live tip and title on the card\'s gateway', async () => {
+    registry('local')
+    await bind(call => {
+      if (call.path === '/boards') {
+        return { boards: [{ counts: { blocked: 3 }, slug: 'default' }], current: 'default' }
+      }
+
+      if (call.path === '/board?board=default') {
+        return board({
+          blocked: [
+            task('a', { managing_session_id: 'old-id', session_id: 'creator', status: 'blocked' }),
+            task('b', { managing_session_id: null, session_id: 'creator', status: 'blocked' }),
+            task('c', { status: 'blocked' })
+          ]
+        })
+      }
+
+      if (call.path.startsWith('/session-labels?')) {
+        return { sessions: { creator: { tip_id: 'creator', title: '' }, 'old-id': { tip_id: 'new-id', title: 'Ship it' } } }
+      }
+
+      return new Error(`unexpected ${call.path}`)
+    })
+
+    const tasks = await fetchBlockedTasks()
+
+    expect(calls.map(c => c.path)).toContain(`/session-labels?ids=${encodeURIComponent('old-id,creator')}`)
+    expect(Object.fromEntries(tasks.map(t => [t.id, t.manager]))).toEqual({
+      a: { id: 'new-id', title: 'Ship it' },
+      b: { id: 'creator', title: null },
+      c: null
+    })
+  })
+
+  it('an older backend without /session-labels still groups by the raw id', async () => {
+    registry('local')
+    await bind(call => {
+      if (call.path === '/boards') {
+        return { boards: [{ counts: { blocked: 1 }, slug: 'default' }], current: 'default' }
+      }
+
+      if (call.path === '/board?board=default') {
+        return board({ blocked: [task('a', { session_id: 'creator', status: 'blocked' })] })
+      }
+
+      return new Error('404: Not Found')
+    })
+
+    const [only] = await fetchBlockedTasks()
+
+    expect(only.manager).toEqual({ id: 'creator', title: null })
+  })
+
   it('throws when no gateway answers', async () => {
     registry('local')
     await bind(() => new Error('down'))

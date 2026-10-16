@@ -287,6 +287,19 @@ def _link_tasks(conn: sqlite3.Connection, links: dict[str, list[str]]) -> list[d
 
 # --- GET /board -------------------------------------------------------------
 
+def _managing_sessions(conn: sqlite3.Connection) -> dict[str, str]:
+    """``{task_id: chat session id}`` of each card's most recent ``tui`` notify
+    subscriber — a session asked to shepherd someone else's card subscribes to
+    it, so the latest subscriber is the one managing it now. [daveey]"""
+    try:
+        rows = conn.execute(
+            "SELECT task_id, chat_id FROM kanban_notify_subs "
+            "WHERE platform = 'tui' AND chat_id != '' ORDER BY created_at, rowid").fetchall()
+    except sqlite3.Error:  # board predates notify subscriptions
+        return {}
+    return {str(r[0]): str(r[1]) for r in rows}
+
+
 def get_board(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
@@ -323,6 +336,7 @@ def get_board(
         # One query for the active run's start per card (avoids N+1); the run
         # clock ticks from this, not the task's first-ever start.
         run_start_map = kanban_db.current_run_started_ats(conn, [t.id for t in tasks])
+        managers = _managing_sessions(conn)
         for t in tasks:
             full = summary_map.get(t.id)
             d = _task_dict(t, latest_summary=(full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None),
@@ -330,6 +344,9 @@ def get_board(
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
+            # [daveey] The chat shepherding the card: its latest ``tui`` notify
+            # subscriber, else the session that created it.
+            d["managing_session_id"] = managers.get(t.id) or (t.session_id or None)
             _attach_diagnostics(d, diagnostics_per_task.get(t.id))
             columns[t.status if t.status in columns else "todo"].append(d)
 
@@ -354,6 +371,38 @@ def get_board(
 
 
 _read_board = coalesced_read(get_board)
+
+
+# --- GET /session-labels ------------------------------------------------------
+
+@router.get("/session-labels")
+def get_session_labels(ids: str = Query(..., max_length=4000)):
+    """Title and live compression tip of each chat session id — the sidebar's
+    Blocked section groups cards by the session managing them, and a card keeps
+    the id it was subscribed under while compression rotates the chat onto a
+    fresh one. Unknown ids are omitted. [daveey]"""
+    from hermes_cli.web_server_sessions import _open_session_db_for_profile
+
+    wanted = list(dict.fromkeys(s.strip() for s in ids.split(",") if s.strip()))[:100]
+    out: dict[str, dict[str, Any]] = {}
+    if not wanted:
+        return {"sessions": out}
+    db = _open_session_db_for_profile(None, read_only=True)
+    try:
+        for sid in wanted:
+            try:
+                row = db.get_session(sid)
+                if not row:
+                    continue
+                tip_id = db.get_compression_tip(sid) or sid
+                tip = db.get_session(tip_id) if tip_id != sid else row
+                title = ((tip or {}).get("title") or row.get("title") or "").strip()
+                out[sid] = {"tip_id": tip_id, "title": title or None}
+            except Exception as exc:  # one bad row must not sink the rest
+                log.debug("session label lookup failed for %s: %s", sid, exc)
+    finally:
+        db.close()
+    return {"sessions": out}
 
 
 @router.get("/board")

@@ -107,10 +107,24 @@ export interface SidebarSectionRowProps {
   /** Muted trailing text (age, owner). */
   meta?: React.ReactNode
   active?: boolean
+  /** Nest under a group header row (one lead-column step in). */
+  indent?: boolean
+  /** Muted label typography for group header rows. */
+  muted?: boolean
 }
 
 /** One clickable row on the session-row grid. */
-export function SidebarSectionRow({ accentColor, active, icon, label, meta, onSelect, tip }: SidebarSectionRowProps) {
+export function SidebarSectionRow({
+  accentColor,
+  active,
+  icon,
+  indent,
+  label,
+  meta,
+  muted,
+  onSelect,
+  tip
+}: SidebarSectionRowProps) {
   return (
     <SidebarRowShell
       actions={
@@ -118,7 +132,8 @@ export function SidebarSectionRow({ accentColor, active, icon, label, meta, onSe
       }
       className={cn(
         'group/contrib-row relative hover:bg-(--chrome-action-hover)',
-        active && 'bg-(--chrome-action-hover)'
+        active && 'bg-(--chrome-action-hover)',
+        indent && 'pl-3'
       )}
     >
       <Tip label={tip ?? label}>
@@ -137,7 +152,11 @@ export function SidebarSectionRow({ accentColor, active, icon, label, meta, onSe
               />
             )}
           </SidebarRowLead>
-          <SidebarRowLabel className="group-hover/contrib-row:text-foreground">{label}</SidebarRowLabel>
+          <SidebarRowLabel
+            className={cn('group-hover/contrib-row:text-foreground', muted && 'text-(--ui-text-tertiary)')}
+          >
+            {label}
+          </SidebarRowLabel>
         </SidebarRowBody>
       </Tip>
     </SidebarRowShell>
