@@ -1719,6 +1719,15 @@ export { SidebarRowLead } from '@/app/chat/sidebar/chrome'
  *  switcher, the fleet profile rail and any plugin rail listing gateways share
  *  it, so a connection looks the same wherever it is named. */
 export { ConnectionGlyph } from '@/app/chat/sidebar/connection-glyph'
+/** [daveey] Chrome for a `SIDEBAR_SECTIONS_AREA` contribution (left pane,
+ *  between Pinned and Projects): the collapsible header + capped body of the
+ *  core sections, and a clickable row on the session-row grid. */
+export {
+  SidebarSection,
+  type SidebarSectionProps,
+  SidebarSectionRow,
+  type SidebarSectionRowProps
+} from '@/app/chat/sidebar/contributed-sections'
 /** [daveey] The sidebar session row's "which machine" glyph (laptop / Mac
  *  mini / cloud) for a registry connection id. Renders nothing with fewer
  *  than two gateways, so single-gateway users see no change. */
@@ -1770,6 +1779,7 @@ export {
   ROUTES_AREA,
   SIDEBAR_NAV_AREA,
   SIDEBAR_PROFILE_GROUP_HEADER_AREA,
+  SIDEBAR_SECTIONS_AREA,
   type SidebarNavContribution,
   WORKSPACE_PAGE_HEADER_AREA
 } from '@/app/routes'

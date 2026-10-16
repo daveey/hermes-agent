@@ -23,6 +23,7 @@ import {
   type RouteContribution,
   ROUTES_AREA,
   SIDEBAR_NAV_AREA,
+  SIDEBAR_SECTIONS_AREA,
   type SidebarNavContribution,
   STATUSBAR_AREAS,
   Tip,
@@ -31,6 +32,7 @@ import {
 } from '@hermes/plugin-sdk'
 
 import { $boardSlug, bindApi, boardKey, fetchBoard, useKanbanScope } from './api'
+import { $blockedSectionOpen, BlockedTasksSection } from './blocked-section'
 import { KanbanBoardPage } from './board'
 import { KANBAN_LOCALES } from './i18n'
 import { $newTaskLane, useKanban } from './ui'
@@ -85,7 +87,19 @@ const plugin: HermesPlugin = {
   defaultEnabled: false,
   register(ctx) {
     ctx.i18n.register(KANBAN_LOCALES)
-    ctx.onDispose(bindApi(ctx.rest, ctx.storage, ctx.socket, { os: ctx.os, t: ctx.i18n.t }))
+    // [daveey] Completions never pop a card (the board/session already show
+    // them); blocked cards live in the left pane's Blocked section instead of
+    // a toast, keeping only the away-from-Hermes OS notification.
+    ctx.onDispose(
+      bindApi(ctx.rest, ctx.storage, ctx.socket, {
+        os: ctx.os,
+        quiet: { silent: ['completed'], toastless: ['blocked'] },
+        t: ctx.i18n.t
+      })
+    )
+
+    $blockedSectionOpen.set(ctx.storage.get('blockedSectionOpen', true))
+    ctx.onDispose($blockedSectionOpen.listen(value => ctx.storage.set('blockedSectionOpen', value)))
 
     // The plugin command pattern: ONE action id (`kanban.newTask`) wired into
     // two areas — a keybind (dispatch + rebindable panel row) and a palette row
@@ -110,6 +124,12 @@ const plugin: HermesPlugin = {
         area: ROUTES_AREA,
         data: { path: '/kanban' } satisfies RouteContribution,
         render: () => <KanbanBoardPage />
+      },
+      {
+        id: 'blocked',
+        area: SIDEBAR_SECTIONS_AREA,
+        order: 10,
+        render: () => <BlockedTasksSection />
       },
       {
         id: 'count',

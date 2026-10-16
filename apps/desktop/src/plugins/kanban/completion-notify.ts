@@ -78,6 +78,17 @@ const baselinePending = new Set<string>()
 let rest: Rest | null = null
 let translate: PluginTranslate | null = null
 let osDoor: PluginOs | null = null
+let silentKinds: ReadonlySet<string> = new Set()
+let toastlessKinds: ReadonlySet<string> = new Set()
+
+/** [daveey] Per-kind delivery overrides. `silent` kinds fire nothing (no toast,
+ *  no OS notification); `toastless` kinds skip the in-app toast but keep the
+ *  native OS notification the shell shows only while the user is away. Both
+ *  still advance the cursor. Unset = every terminal kind toasts (upstream). */
+export interface CompletionNotifyQuiet {
+  silent?: readonly string[]
+  toastless?: readonly string[]
+}
 
 /** Resolve a dot-path against the plugin's own English bundle — the same
  *  last-rung fallback the plugin i18n registry applies, usable before (or
@@ -103,10 +114,17 @@ function t(key: string, ...args: unknown[]): string {
   return translated && translated !== key ? translated : fallbackT(key, ...args)
 }
 
-export function bindCompletionNotify(r: Rest, pluginTranslate?: PluginTranslate, os?: PluginOs): void {
+export function bindCompletionNotify(
+  r: Rest,
+  pluginTranslate?: PluginTranslate,
+  os?: PluginOs,
+  quiet?: CompletionNotifyQuiet
+): void {
   rest = r
   translate = pluginTranslate ?? null
   osDoor = os ?? null
+  silentKinds = new Set(quiet?.silent ?? [])
+  toastlessKinds = new Set(quiet?.toastless ?? [])
 }
 
 async function ensureBaseline(slug: string): Promise<void> {
@@ -186,26 +204,29 @@ function notifyOne(
   const detail = [taskId, artifactText, rawErrorFor(kind, ev)].filter(Boolean).join(' · ')
   const title = t(spec.titleKey)
   const message = body || taskId || title
-  host.notify({
-    kind: spec.toast,
-    icon: spec.icon,
-    accentColor: spec.accentColor,
-    title,
-    message,
-    ...(detail ? { detail } : {}),
-    action: {
-      label: t('notify.openKanban'),
-      onClick: () => {
-        // Land on the event's board with the task's drawer open, not just
-        // whatever board the page last showed.
-        if (taskId) {
-          $openTaskRequest.set({ board: slug, taskId })
-        }
 
-        host.navigate('/kanban')
+  if (!toastlessKinds.has(kind)) {
+    host.notify({
+      kind: spec.toast,
+      icon: spec.icon,
+      accentColor: spec.accentColor,
+      title,
+      message,
+      ...(detail ? { detail } : {}),
+      action: {
+        label: t('notify.openKanban'),
+        onClick: () => {
+          // Land on the event's board with the task's drawer open, not just
+          // whatever board the page last showed.
+          if (taskId) {
+            $openTaskRequest.set({ board: slug, taskId })
+          }
+
+          host.navigate('/kanban')
+        }
       }
-    }
-  })
+    })
+  }
 
   // Native OS notification — the desktop shell fires it only while the user
   // is away from Hermes (the toast above covers the foreground case). Isolated:
@@ -244,7 +265,7 @@ export async function onKanbanEventsFrame(slug: string, events?: CompletionEvent
     seenEventIdByBoard.set(slug, cursor)
     const spec = TERMINAL_NOTIFY.get(ev.kind ?? '')
 
-    if (spec) {
+    if (spec && !silentKinds.has(ev.kind!)) {
       try {
         notifyOne(slug, ev.kind!, spec, ev)
         fired = true

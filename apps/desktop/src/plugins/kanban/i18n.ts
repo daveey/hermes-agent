@@ -215,6 +215,11 @@ type KanbanMessages = {
   profileDescriptionsHint: string
   profileGoodAt: string
   auto: string
+  // [daveey] left-pane Blocked section (blocked-section.tsx)
+  sidebar: {
+    blocked: string
+    blockedTip: (title: string, reason: string) => string
+  }
   // native/toast notifications for terminal worker events (completion-notify)
   notify: {
     completedTitle: string
@@ -450,6 +455,10 @@ export const en: KanbanMessages = {
     'Descriptions guide the decomposer’s routing. Auto-generate with the auxiliary model, or write your own.',
   profileGoodAt: 'What is this profile good at?',
   auto: 'Auto',
+  sidebar: {
+    blocked: 'Blocked',
+    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title)
+  },
   notify: {
     completedTitle: 'Task completed',
     blockedTitle: 'Task blocked — needs your input',
@@ -682,6 +691,10 @@ const ja: KanbanMessages = {
     '説明はデコンポーザーのルーティングを導きます。補助モデルで自動生成するか、自分で書いてください。',
   profileGoodAt: 'このプロフィールの得意分野は？',
   auto: '自動',
+  sidebar: {
+    blocked: 'ブロック中',
+    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title)
+  },
   notify: {
     completedTitle: 'タスク完了',
     blockedTitle: 'タスクがブロック中 — 入力が必要です',
@@ -911,6 +924,10 @@ const zh: KanbanMessages = {
   profileDescriptionsHint: '说明用于引导分解器的路由。可用辅助模型自动生成，或自行填写。',
   profileGoodAt: '这个配置档擅长什么？',
   auto: '自动',
+  sidebar: {
+    blocked: '受阻',
+    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title)
+  },
   notify: {
     completedTitle: '任务已完成',
     blockedTitle: '任务受阻 — 需要你的输入',
@@ -1140,6 +1157,10 @@ const zhHant: KanbanMessages = {
   profileDescriptionsHint: '說明用於引導分解器的路由。可用輔助模型自動產生，或自行填寫。',
   profileGoodAt: '這個設定檔擅長什麼？',
   auto: '自動',
+  sidebar: {
+    blocked: '受阻',
+    blockedTip: (title: string, reason: string) => (reason ? `${title} — ${reason}` : title)
+  },
   notify: {
     completedTitle: '任務已完成',
     blockedTitle: '任務受阻 — 需要你的輸入',

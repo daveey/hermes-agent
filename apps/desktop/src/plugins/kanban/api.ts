@@ -28,7 +28,12 @@ import {
 } from '@hermes/plugin-sdk'
 
 // Native completion notification.
-import { bindCompletionNotify, type CompletionEvent, onKanbanEventsFrame } from './completion-notify'
+import {
+  bindCompletionNotify,
+  type CompletionEvent,
+  type CompletionNotifyQuiet,
+  onKanbanEventsFrame
+} from './completion-notify'
 import type {
   BoardExportResult,
   BoardImportResult,
@@ -178,6 +183,8 @@ function onEventsFrame(scope: string, slug: string, data: unknown, selectedSlug 
   void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
   // Any event can change a board's card count — keep the switcher badge honest.
   void queryClient.invalidateQueries({ queryKey: boardsKey(scope) })
+  // [daveey] The sidebar's Blocked section spans every board.
+  void queryClient.invalidateQueries({ queryKey: blockedKey(scope) })
 
   for (const taskId of new Set(events.map(event => event.task_id).filter(Boolean))) {
     void queryClient.invalidateQueries({ queryKey: taskKey(scope, slug, taskId!) })
@@ -208,11 +215,11 @@ export function bindApi(
   r: Rest,
   storage: PluginStorage,
   socket: Socket,
-  notifyDoors?: { os?: PluginOs; t?: PluginTranslate }
+  notifyDoors?: { os?: PluginOs; quiet?: CompletionNotifyQuiet; t?: PluginTranslate }
 ): () => void {
   rest = r
   os = notifyDoors?.os ?? null
-  bindCompletionNotify(r, notifyDoors?.t, notifyDoors?.os)
+  bindCompletionNotify(r, notifyDoors?.t, notifyDoors?.os, notifyDoors?.quiet)
   const unsubs: Array<() => void> = []
 
   queryClient.setQueryDefaults(KANBAN_KEY_ROOT, { enabled: routedToScope })
@@ -388,6 +395,8 @@ export const boardsKey = (scope: string) => ['kanban', 'boards', scope] as const
 export const profilesKey = (scope: string) => ['kanban', 'profiles', scope] as const
 export const projectsKey = (scope: string) => ['kanban', 'projects', scope] as const
 export const orchestrationKey = (scope: string) => ['kanban', 'orchestration', scope] as const
+/** [daveey] Blocked cards across every board and gateway (sidebar section). */
+export const blockedKey = (scope: string) => ['kanban', 'blocked', scope] as const
 
 // ── gateways [daveey] ────────────────────────────────────────────────────────
 //
@@ -713,6 +722,59 @@ export function mergeBoardLists(parts: Array<{ gateway: string; boards: BoardsRe
   }
 
   return { boards: [...bySlug.values()], current }
+}
+
+// ── [daveey] blocked cards across every board (the sidebar's Blocked section) ─
+
+/** A blocked card plus the board it lives on (the drawer opens it there). */
+export interface BlockedTask extends KanbanTask {
+  board: string
+}
+
+interface BoardsWithCounts extends BoardsResponse {
+  boards: Array<BoardMeta & { counts?: Record<string, number> }>
+}
+
+/** Every `blocked` card on every board of every gateway, highest priority
+ *  first, then newest. Boards whose `/boards` counts say they hold no blocked
+ *  card are skipped, so an idle fleet costs one `/boards` read per gateway.
+ *  A gateway that fails contributes nothing; throws only when all fail. */
+export async function fetchBlockedTasks(): Promise<BlockedTask[]> {
+  const gateways = boardGateways()
+
+  const perGateway = await Promise.allSettled(
+    gateways.map(async (gateway, index) => {
+      const read = <T>(path: string) => (index === 0 ? call<T>(path) : remoteRead<T>(gateway, path))
+      const { boards } = await read<BoardsWithCounts>('/boards')
+
+      const slugs = (boards ?? [])
+        .filter(meta => (meta.counts ? (meta.counts.blocked ?? 0) > 0 : true))
+        .map(meta => meta.slug)
+
+      const parts = await Promise.allSettled(
+        slugs.map(async slug => {
+          const board = await read<KanbanBoard>(withSlug('/board', slug))
+          const tasks = board.columns.find(col => col.name === 'blocked')?.tasks ?? []
+
+          return tasks.map(task => ({ ...task, board: slug, gateway: gateways.length > 1 ? gateway : task.gateway }))
+        })
+      )
+
+      return parts.flatMap(part => (part.status === 'fulfilled' ? part.value : []))
+    })
+  )
+
+  if (perGateway.every(result => result.status === 'rejected')) {
+    throw (perGateway[0] as PromiseRejectedResult).reason
+  }
+
+  const tasks = perGateway.flatMap(result => (result.status === 'fulfilled' ? result.value : []))
+
+  for (const task of tasks) {
+    taskOwners.set(task.id, { board: task.board, gateway: task.gateway ?? gateways[0] })
+  }
+
+  return tasks.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || (b.created_at ?? 0) - (a.created_at ?? 0))
 }
 
 /** The assignee roster of `gateway` (default: the routed one) — profiles are

@@ -152,6 +152,7 @@ import type { SidebarNavItem } from '../../types'
 import { type NewSessionSplitHandler, startNewSessionDrag } from '../new-session-drag'
 
 import { SidebarSectionAddButton } from './chrome'
+import { SidebarContributedSections } from './contributed-sections'
 import { SidebarCronJobsSection } from './cron-jobs-section'
 import { SidebarFilterMenu } from './filter-menu'
 import { buildGatewaySessionGroups, scopeGatewaySessionGroups, useGatewaySessionGroups } from './gateway-group-model'
@@ -1841,6 +1842,9 @@ export function ChatSidebar({
                 sortable={pinnedSessions.length > 1}
               />
             )}
+
+            {/* [daveey] Plugin sections (Kanban's Blocked tasks) sit above Projects. */}
+            {!trimmedQuery && <SidebarContributedSections />}
 
             {!trimmedQuery && inProject && projectLoadFailed && <SidebarLoadErrorState onRetry={retryProject} />}
             {!trimmedQuery && (

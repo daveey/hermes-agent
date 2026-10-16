@@ -20,7 +20,12 @@ interface OsDoor {
   notify: (input: { title: string; body?: string; silent?: boolean }) => void
 }
 interface Mod {
-  bindCompletionNotify(r: Rest, t?: Translate, os?: OsDoor): void
+  bindCompletionNotify(
+    r: Rest,
+    t?: Translate,
+    os?: OsDoor,
+    quiet?: { silent?: readonly string[]; toastless?: readonly string[] }
+  ): void
   onKanbanEventsFrame(slug: string, events?: CompletionEvent[]): Promise<boolean>
 }
 
@@ -542,6 +547,36 @@ describe('native OS door', () => {
     const fired = await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked')])
     expect(fired).toBe(true)
     expect(hostMock.notify).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('quiet kinds', () => {
+  it('silent kinds fire neither toast nor OS notification but still advance the cursor', async () => {
+    const os = { notify: vi.fn() }
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never, undefined, os, { silent: ['completed'] })
+
+    const fired = await m.onKanbanEventsFrame('smoke', [ev(101, 'completed', { summary: 'Done' })])
+    expect(fired).toBe(false)
+    expect(hostMock.notify).not.toHaveBeenCalled()
+    expect(os.notify).not.toHaveBeenCalled()
+
+    // Cursor moved to 101: a replay stays silent, a later crash still toasts.
+    await m.onKanbanEventsFrame('smoke', [ev(101, 'crashed'), ev(102, 'crashed')])
+    expect(hostMock.notify).toHaveBeenCalledTimes(1)
+    expect(lastNotify().message).toBe('t102')
+  })
+
+  it('toastless kinds skip the in-app toast but keep the away-only OS notification', async () => {
+    const os = { notify: vi.fn() }
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never, undefined, os, { toastless: ['blocked'] })
+
+    const fired = await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'needs input' })])
+    expect(fired).toBe(true)
+    expect(hostMock.notify).not.toHaveBeenCalled()
+    expect(os.notify).toHaveBeenCalledTimes(1)
+    expect(os.notify.mock.calls[0][0]).toMatchObject({ body: 'needs input\nt101' })
   })
 })
 

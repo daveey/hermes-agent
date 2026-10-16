@@ -138,6 +138,15 @@ export interface SidebarNavContribution {
   tier?: InterfaceTier
 }
 
+// ── [daveey] Contributed sidebar sections — the `sidebar.sections` area ──────
+// A RENDER contribution mounted in the sessions sidebar between Pinned and
+// Projects, for plugin-owned lists that deserve a standing place in the left
+// pane (the Kanban plugin's Blocked tasks). Build it from the SDK's
+// `SidebarSection` + `SidebarSectionRow` so it reads like the core sections.
+// Return null to hide the section entirely (e.g. nothing blocked).
+
+export const SIDEBAR_SECTIONS_AREA = 'sidebar.sections'
+
 // ── Contributed profile-group header — the `sidebar.profileGroup.header` area ─
 // A RENDER contribution mounted at the top of each gateway/profile group in the
 // Sessions sidebar (above its session rows) while the group is expanded. The
