@@ -136,6 +136,40 @@ def validate_deferred_call_args(name: str, args: dict[str, Any]) -> Optional[str
         return None
 
 
+_OAUTH_WIRE_PREFIX = "mcp__"
+
+
+def canonical_bridge_tool_name(name: str) -> str:
+    """Map a provider *wire* tool name the model echoed inside bridge arguments back to the
+    registered name. On the Anthropic OAuth wire every tool is presented as ``mcp__<name>``
+    (and a few under aliases, e.g. ``session_search`` -> ``chat_history_lookup``); the
+    transport reverses that for top-level ``tool_use`` blocks, but names nested in
+    ``tool_call``/``tool_describe`` arguments arrive untranslated. The model then gets
+    "'mcp__kanban_comment' is not a known tool name … use tool_search" and loops. Same
+    resolution order as ``agent.transports.anthropic._unprefix_oauth_tool_name``: a name that
+    is already registered (or a connector) always wins; otherwise try ``mcp_<bare>``,
+    ``<bare>``, then the OAuth reverse aliases. Unresolvable names are returned unchanged."""
+    if not isinstance(name, str) or not name or name.startswith("connectors__"):
+        return name
+    if name in BRIDGE_TOOL_NAMES or _registry_entry(name) is not None:
+        return name
+    bare = name[len(_OAUTH_WIRE_PREFIX):] if name.startswith(_OAUTH_WIRE_PREFIX) else None
+    candidates = [f"mcp_{bare}", bare] if bare else []
+    if bare in BRIDGE_TOOL_NAMES:
+        return bare
+    try:
+        from agent.anthropic_adapter import _OAUTH_TOOL_NAME_REVERSE_ALIASES as _rev
+    except Exception:
+        _rev = {}
+    for key in (bare, name):
+        if key and key in _rev:
+            candidates.append(_rev[key])
+    for candidate in candidates:
+        if candidate and _registry_entry(candidate) is not None:
+            return candidate
+    return name
+
+
 def normalize_tool_call_entries(args: dict[str, Any]) -> tuple[list[dict[str, Any]], Optional[str]]:
     """Normalize ``tool_call`` arguments into a ``calls[]`` list of entries.
 
@@ -170,6 +204,7 @@ def normalize_tool_call_entries(args: dict[str, Any]) -> tuple[list[dict[str, An
         name = str(raw.get("name") or "").strip()
         if not name:
             return [], f"tool_call calls[{position}] requires a 'name'"
+        name = canonical_bridge_tool_name(name)
         if name in BRIDGE_TOOL_NAMES:
             return [], f"tool_call cannot invoke '{name}' (it is itself a bridge tool)"
         raw_args = raw.get("arguments")
@@ -219,7 +254,7 @@ def not_deferrable_error(name: str) -> str:
     from tools.tool_search import _core_tool_names  # late: tool_search imports this module
     if name in _core_tool_names() or _registry_entry(name) is not None:
         return (f"'{name}' is a directly-listed tool, not a deferred one. "
-                "Call it directly instead of via tool_call.")
+                "Call it directly instead of via tool_call. The tool was NOT invoked.")
     suffix = f"__{name}"
     try:
         from tools.registry import registry
