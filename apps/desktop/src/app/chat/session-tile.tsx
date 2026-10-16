@@ -80,6 +80,7 @@ import { paneMirror } from './pane-mirror'
 import { SessionDraftTitle } from './session-draft-title'
 import { startSessionDrag } from './session-drag'
 import { SessionStatusDot } from './session-status-dot'
+import { SessionTabAccent } from './session-tab-accent'
 import { useSessionTileActions } from './session-tile-actions'
 import { tileOwnerRoute } from './session-tile-owner'
 import { reasoningEffortPending, type SessionView, SessionViewProvider } from './session-view'
@@ -894,23 +895,25 @@ export function SessionTabMenu({
 
   return (
     <span className="contents" onContextMenu={event => event.stopPropagation()}>
-      <SessionContextMenu
-        onArchive={() => void sessionTileDelegate()?.archiveSession(storedSessionId)}
-        onBranch={() => void sessionTileDelegate()?.branchSession(storedSessionId)}
-        onClose={onClose}
-        onDelete={() => void sessionTileDelegate()?.deleteSession(storedSessionId)}
-        onHideTabBar={onHideTabBar}
-        onPin={() => (pinned ? unpinSession(pinId) : pinSession(pinId))}
-        pinned={pinned}
-        profile={profile}
-        renameable={renameable}
-        sessionId={storedSessionId}
-        surface="tab"
-        tabPaneId={tabPaneId}
-        title={title}
-      >
-        {children}
-      </SessionContextMenu>
+      <SessionTabAccent session={tileStoredRow(storedSessionId)} storedSessionId={storedSessionId}>
+        <SessionContextMenu
+          onArchive={() => void sessionTileDelegate()?.archiveSession(storedSessionId)}
+          onBranch={() => void sessionTileDelegate()?.branchSession(storedSessionId)}
+          onClose={onClose}
+          onDelete={() => void sessionTileDelegate()?.deleteSession(storedSessionId)}
+          onHideTabBar={onHideTabBar}
+          onPin={() => (pinned ? unpinSession(pinId) : pinSession(pinId))}
+          pinned={pinned}
+          profile={profile}
+          renameable={renameable}
+          sessionId={storedSessionId}
+          surface="tab"
+          tabPaneId={tabPaneId}
+          title={title}
+        >
+          {children}
+        </SessionContextMenu>
+      </SessionTabAccent>
     </span>
   )
 }
@@ -933,7 +936,7 @@ export function WorkspaceTabMenu({ children }: { children: React.ReactElement })
   }
 
   if (!selected) {
-    return children
+    return <SessionTabAccent storedSessionId={null}>{children}</SessionTabAccent>
   }
 
   return (

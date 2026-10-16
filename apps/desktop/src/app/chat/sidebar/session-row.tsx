@@ -23,6 +23,7 @@ import { displayModelName } from '@/lib/model-status-label'
 import { sessionProjectLabel } from '@/lib/session-project-label'
 import { SESSION_ROW_AREAS } from '@/lib/session-row-slots'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
+import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { coarseElapsed } from '@/lib/time'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
@@ -514,7 +515,10 @@ function SidebarSessionRowImpl({
         {statusStripe === 'periodic' && (
           <span
             aria-hidden="true"
-            className="pointer-events-none absolute top-1/2 -left-0.5 flex -translate-y-1/2 text-zinc-400 dark:text-zinc-500"
+            className={cn(
+              'pointer-events-none absolute top-1/2 -left-0.5 flex -translate-y-1/2 text-(--session-status-color)',
+              sessionStatusStripeColor(statusStripe)
+            )}
             data-slot="session-status-stripe"
             data-status-stripe={statusStripe}
           >
@@ -525,12 +529,8 @@ function SidebarSessionRowImpl({
           <span
             aria-hidden="true"
             className={cn(
-              'pointer-events-none absolute top-1 bottom-1 left-0 w-[3px] rounded-full',
-              statusStripe === 'done'
-                ? 'bg-emerald-500'
-                : statusStripe === 'blocked'
-                  ? 'bg-zinc-400 dark:bg-zinc-500'
-                  : 'bg-red-500'
+              'pointer-events-none absolute top-1 bottom-1 left-0 w-[3px] rounded-full bg-(--session-status-color)',
+              sessionStatusStripeColor(statusStripe)
             )}
             data-slot="session-status-stripe"
             data-status-stripe={statusStripe}
