@@ -276,6 +276,12 @@ class TestMemoryStoreReplace:
         store.add("memory", "x" * 380)  # 65 + 3 + 380 = 448 of 500
         full = store.add("memory", "y" * 54)  # 448 + 3 + 54 = 505
         assert "by 5 chars" in full["error"] and "free at least 5 chars" in full["error"]
+        # ...and how much to free so the NEXT save fits too: 505 - 450 (90% of 500) = 55.
+        assert "Free ~55 chars instead to leave 10% headroom" in full["error"]
+        over = store.apply_batch("memory", [{"action": "patch", "old_text": "manual approval",
+                                             "content": "manual approval, " + "z" * 60}])  # +62 -> 510
+        assert "free at least 10 chars" in over["error"] and "Free ~60 chars instead" in over["error"]
+        assert store.memory_entries[0].endswith("manual approval.")  # all-or-nothing: unchanged
         miss = store.apply_batch("memory", [{"action": "patch", "old_text": "Deploys via GitHub Actions to Fly",
                                              "content": "Deploys: Fly.io + canary."}])
         assert miss["closest_entries"] == ["Deploys go through GitHub Actions to Fly.io with manual approval."]
@@ -461,6 +467,22 @@ class TestMemoryStoreSnapshot:
         assert "MEMORY" in snapshot
         assert "loaded at start" in snapshot
         assert "added later" not in snapshot
+
+    def test_header_calls_out_free_chars_when_nearly_full(self, store):
+        """Stores lived at 97-99% (2,170/2,200): the header showed only a percentage, so every
+        save tried a bare add first, overflowed, and retried. Under 10% headroom the header now
+        names the free count and the same-batch rule; with room to spare it stays terse."""
+        store.add("memory", "x" * 200)
+        store.load_from_disk()
+        roomy = store.format_for_system_prompt("memory")
+        assert "[40% — 200/500 chars]\n" in roomy and "free" not in roomy
+
+        store.add("memory", "y" * 260)  # 200 + 3 + 260 = 463 of 500
+        store.load_from_disk()
+        tight = store.format_for_system_prompt("memory")
+        header = tight.splitlines()[1]
+        assert header.startswith("MEMORY (your personal notes) [92% — 463/500 chars]")
+        assert "only 37 chars free" in header and "SAME batch" in header
 
 
 # =========================================================================

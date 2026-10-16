@@ -128,6 +128,32 @@ def _over_limit(new_total: int, limit: int) -> str:
     return f"would put memory at {new_total:,}/{limit:,} chars: free at least {new_total - limit:,} chars"
 
 
+# Stores used to sit at 97-99% full: every overflow retry freed just enough to fit, so the next
+# save overflowed again and burned a round trip each time. Consolidations should leave this much
+# of the limit free, and the system-prompt header calls out the free count once below it.
+HEADROOM_FRACTION = 0.10
+
+
+def _headroom_floor(limit: int) -> int:
+    return int(limit * (1 - HEADROOM_FRACTION))
+
+
+def _headroom_hint(new_total: int, limit: int) -> str:
+    """Sentence telling an over-limit write how much to free so the NEXT save fits too."""
+    target = new_total - _headroom_floor(limit)
+    return (f" Free ~{target:,} chars instead to leave {int(HEADROOM_FRACTION * 100)}% headroom, "
+            f"or the next save will overflow again.")
+
+
+def _low_headroom_note(current: int, limit: int) -> str:
+    """Header suffix once free space drops under the headroom floor ("" otherwise)."""
+    if limit <= 0 or current <= _headroom_floor(limit):
+        return ""
+    free = max(0, limit - current)
+    return (f" — only {free:,} chars free: a write that adds text must put removes or shortening "
+            f"patches of stale entries in the SAME batch")
+
+
 # Patch content cannot be empty, and 'remove' would drop the sibling facts in the entry.
 PATCH_DROP_HINT = "To drop text inside an entry, patch a longer span that contains it; 'remove' deletes the whole entry."
 
@@ -383,7 +409,8 @@ class MemoryStore:
                     f"Memory at {self._char_count(target):,}/{limit:,} chars; adding this entry ({len(content)} chars) "
                     f"would exceed the limit by {new_total - limit:,} chars. Retry as ONE 'operations' batch that "
                     f"removes or shortens (patch) stale entries from current_entries below to free at least "
-                    f"{new_total - limit:,} chars AND adds this entry — the limit is checked only on the batch result."))
+                    f"{new_total - limit:,} chars AND adds this entry — the limit is checked only on the batch result."
+                    + _headroom_hint(new_total, limit)))
             return entries + [content], "Entry added."
         # Append-only: skip the drift guard (appending never clobbers foreign
         # content) but still refuse a failed read — add rewrites the WHOLE file.
@@ -433,7 +460,7 @@ class MemoryStore:
                 return self._failure_with_entries(target, (
                     f"Patch would put memory at {new_total:,}/{limit:,} chars. Shorten the new "
                     f"text, or 'remove' other stale or less important entries to make room "
-                    f"(see current_entries below), then retry — all in this turn."))
+                    f"(see current_entries below), then retry — all in this turn." + _headroom_hint(new_total, limit)))
             return patched, "Entry patched.", {
                 "patched_entry_before": before, "patched_entry_after": after}
         return self._mutate(target, _apply)
@@ -484,7 +511,8 @@ class MemoryStore:
                 return self._failure_with_entries(target, (
                     f"Replacement {_over_limit(new_total, limit)}. Shorten the new content, or retry as ONE "
                     f"'operations' batch with this replace plus removes/shortenings of other stale entries "
-                    f"(see current_entries below) — the limit is checked only on the batch result."))
+                    f"(see current_entries below) — the limit is checked only on the batch result."
+                    + _headroom_hint(new_total, limit)))
             return replaced, "Entry replaced.", {"replaced_entry": entries[idx]}
         return self._mutate(target, _apply)
 
@@ -594,7 +622,8 @@ class MemoryStore:
             if new_total > limit:
                 return self._batch_failure(target, (
                     f"Applying all {len(operations)} operations {_over_limit(new_total, limit)} more. Add "
-                    f"removes or shortening patches of other stale entries to the same batch, then retry."),
+                    f"removes or shortening patches of other stale entries to the same batch, then retry."
+                    + _headroom_hint(new_total, limit)),
                     "over_budget")
             if not commit:
                 return {"success": True, "matched_entries": matched}
@@ -641,7 +670,8 @@ class MemoryStore:
             return ""
         content, sep = ENTRY_DELIMITER.join(entries), "═" * 46
         title = MEMORY_BLOCK_HEADERS["user" if target == "user" else "memory"]
-        return f"{sep}\n{title} [{self._usage_pct(target, len(content))}]\n{sep}\n{content}"
+        note = _low_headroom_note(len(content), self._char_limit(target))
+        return f"{sep}\n{title} [{self._usage_pct(target, len(content))}]{note}\n{sep}\n{content}"
 
     @staticmethod
     def _read_raw_checked(path: Path) -> tuple[str, bool]:
