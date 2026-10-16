@@ -49,6 +49,23 @@ describe('sameCronSignature', () => {
     expect(sameCronSignature(a, b)).toBe(false)
   })
 
+  // The backend stamps live activity on list rows (kanban counts, goal, cron,
+  // background jobs). A card finishing elsewhere moves only those fields, so a
+  // gate that ignored them kept the sidebar badge and stripe frozen on the old
+  // counts until the row's own messages moved. [daveey]
+  it.each([
+    ['kanban_active', 2, 1],
+    ['kanban_blocked', 1, undefined],
+    ['goal_active', true, undefined],
+    ['cron_active', true, undefined],
+    ['background_active', 1, 2]
+  ] as const)('is false when only %s changed', (field, before, after) => {
+    const a = [session('a', 't', { [field]: before })]
+    const b = [session('a', 't', { [field]: after })]
+    expect(sameCronSignature(a, b)).toBe(false)
+    expect(sameCronSignature(a, [session('a', 't', { [field]: before })])).toBe(true)
+  })
+
   it('is false when only the archived flag changed', () => {
     const a = [session('a', 't', { archived: false })]
     const b = [session('a', 't', { archived: true })]

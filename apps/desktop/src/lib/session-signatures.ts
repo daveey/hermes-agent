@@ -35,7 +35,15 @@ export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
       // frozen copy forever. An idle conversation never moves any of the
       // fields above again, which is exactly when a pin gets toggled (#76919).
       session.pinned === other.pinned &&
-      session.archived === other.archived
+      session.archived === other.archived &&
+      // Live activity the backend stamps on each row. A kanban card finishing
+      // or a background job exiting moves only these, and they drive the
+      // sidebar badge and the done/working stripe. [daveey]
+      session.kanban_active === other.kanban_active &&
+      session.kanban_blocked === other.kanban_blocked &&
+      session.goal_active === other.goal_active &&
+      session.cron_active === other.cron_active &&
+      session.background_active === other.background_active
     )
   })
 }
