@@ -172,3 +172,85 @@ class TestHandPlacedSkillsNoLimit:
         assert "content" in result
         # The full content is returned — no truncation at the storage layer
         assert len(result["content"]) > MAX_SKILL_CONTENT_CHARS
+
+
+def _sectioned_skill(name: str, sections: dict[str, int]) -> str:
+    body = "".join(f"## {h}\n\n" + ("z" * n) + "\n\n" for h, n in sections.items())
+    return f"---\nname: {name}\ndescription: A test skill.\n---\n# T\n\n## When to Use\n\nAlways.\n\n{body}"
+
+
+class TestSizePressure:
+    """Regression: babybear-development grew silently to the 100k cap (the linter's oversized-body
+    finding fires only on the write that first crosses 24k), then every patch failed with a bare
+    'consider splitting' error. Growing writes past half the cap now warn every time, and the
+    cap error names the sections to move and the in-batch order that frees room."""
+
+    def test_growing_patch_past_half_cap_warns_with_sections(self, isolate_skills):
+        content = _sectioned_skill("big", {"Huge Section": 45_000, "Small": 500, "Medium": 9_000})
+        assert json.loads(skill_manage(action="create", name="big", content=content))["success"]
+        r = json.loads(skill_manage(action="patch", name="big", old_string="## Small\n",
+                                    new_string="## Small\n\nOne more lesson.\n"))
+        assert r["success"] is True
+        w = r["size_warning"]
+        assert "% of the 100,000-char hard cap" in w and "'## Huge Section'" in w
+        assert w.index("Huge Section") < w.index("Medium")  # largest first
+        assert "references/" in w
+
+    def test_every_growing_patch_warns_not_just_the_crossing_one(self, isolate_skills):
+        content = _sectioned_skill("big2", {"A": 60_000})
+        skill_manage(action="create", name="big2", content=content)
+        for i in range(3):
+            r = json.loads(skill_manage(action="patch", name="big2", old_string="## A\n",
+                                        new_string=f"## A\nlesson {i}\n"))
+            assert r["success"] and "size_warning" in r
+
+    def test_shrinking_or_small_patch_stays_quiet(self, isolate_skills):
+        content = _sectioned_skill("big3", {"A": 60_000, "B": 100})
+        skill_manage(action="create", name="big3", content=content)
+        r = json.loads(skill_manage(action="patch", name="big3", old_string="## B\n\n" + "z" * 100,
+                                    new_string="## B\n\nshort"))  # shrinks
+        assert r["success"] and "size_warning" not in r
+        small = _sectioned_skill("tiny", {"A": 1_000})
+        skill_manage(action="create", name="tiny", content=small)
+        r = json.loads(skill_manage(action="patch", name="tiny", old_string="## A\n",
+                                    new_string="## A\nmore\n"))
+        assert r["success"] and "size_warning" not in r
+
+    def test_batch_surfaces_size_warning(self, isolate_skills):
+        content = _sectioned_skill("big4", {"A": 60_000})
+        skill_manage(action="create", name="big4", content=content)
+        r = json.loads(skill_manage(action=None, name=None, operations=[
+            {"action": "patch", "name": "big4", "old_string": "## A\n", "new_string": "## A\nx\n"}]))
+        assert r["success"] is True
+        assert "size_warning" in r["results"][0]
+
+    def test_cap_error_names_sections_and_recipe(self, isolate_skills):
+        content = _sectioned_skill("full", {"Giant": 80_000, "Other": 19_000})
+        assert len(content) < MAX_SKILL_CONTENT_CHARS
+        skill_manage(action="create", name="full", content=content)
+        r = json.loads(skill_manage(action="patch", name="full", old_string="## Other\n",
+                                    new_string="## Other\n" + "y" * 2_000 + "\n"))
+        assert r["success"] is False
+        err = r["error"]
+        assert err.startswith("SKILL.md content is")  # coach signature prefix unchanged
+        assert "chars over" in err and "'## Giant'" in err and "come before the growing one" in err
+
+    def test_shrink_then_grow_in_one_batch_succeeds_at_cap(self, isolate_skills):
+        """The recipe the error prescribes actually works on a skill sitting at the cap."""
+        content = _sectioned_skill("full2", {"Giant": 80_000, "Other": 19_000})
+        skill_manage(action="create", name="full2", content=content)
+        giant = "## Giant\n\n" + "z" * 80_000 + "\n\n"
+        r = json.loads(skill_manage(action=None, name=None, operations=[
+            {"action": "write_file", "name": "full2", "file_path": "references/giant.md",
+             "file_content": giant},
+            {"action": "patch", "name": "full2", "old_string": giant,
+             "new_string": "## Giant\n\nSee references/giant.md.\n\n"},
+            {"action": "patch", "name": "full2", "old_string": "## Other\n",
+             "new_string": "## Other\n" + "y" * 2_000 + "\n"},
+        ]))
+        assert r["success"] is True, r
+
+    def test_section_sizes_ignore_fenced_headings(self):
+        from tools.skill_manager_tool import _section_sizes
+        text = "## Real\n```\n## fake\n```\nbody\n## Two\nx\n"
+        assert [h for h, _ in _section_sizes(text)] == ["## Real", "## Two"]
