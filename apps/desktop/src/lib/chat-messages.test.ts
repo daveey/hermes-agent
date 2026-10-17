@@ -538,6 +538,30 @@ describe('toChatMessages', () => {
     ])
   })
 
+  it('renders a client Stop notice as a system line naming who stopped the turn', () => {
+    // [daveey] The gateway persists `turn_stopped` (role=user, like model_switch) when a client's Stop
+    // ends a turn, so a chat stopped from the Redde iPhone app says so instead of just going quiet.
+    const messages = toChatMessages([
+      { role: 'user', content: 'investigate', timestamp: 1 },
+      {
+        role: 'user',
+        content: '[Turn stopped by redde before it finished.]',
+        display_kind: 'turn_stopped',
+        display_metadata: { display_text: 'Stopped by redde' },
+        timestamp: 2
+      },
+      {
+        role: 'user',
+        content: '[Turn stopped by Desktop before it finished.]',
+        display_kind: 'turn_stopped',
+        timestamp: 3
+      }
+    ])
+
+    expect(messages.map(message => message.role)).toEqual(['user', 'system', 'system'])
+    expect(messages.map(chatMessageText)).toEqual(['investigate', 'Stopped by redde', 'turn stopped'])
+  })
+
   it('never paints a background-process heartbeat wake as a user bubble', () => {
     // Current backends type the wake `display_kind: 'hidden'`; a row persisted by an older
     // backend arrives untyped and must disappear the same way — the user never wrote it.

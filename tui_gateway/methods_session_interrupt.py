@@ -29,6 +29,64 @@ def _resume_wake_after_interrupt() -> None:
         _wake_resume_if_owner(owner)
 
 
+# ── stop attribution [daveey] ────────────────────────────────────────
+# A client Stop (session.interrupt) records who sent it; the interrupted turn then persists a visible
+# ``turn_stopped`` notice. Without it a turn stopped by a remote client (e.g. the Redde iPhone app) ended on
+# a hidden empty row and the chat simply went quiet, reading as "stuck".
+_STOP_NOTICE_KIND = "turn_stopped"
+
+
+def _stop_issuer_label(transport) -> str:
+    """The login that sent a Stop (``basic:redde`` -> ``redde``), or ``Desktop`` for the local credential."""
+    auth = _transport_auth_user_id(transport)
+    return auth.split(":", 1)[-1] if auth else "Desktop"
+
+
+def _note_stop_issuer(sid: str, session: dict, transport) -> None:
+    """Remember who stopped the running turn and log it; an idle session queues nothing."""
+    label = _stop_issuer_label(transport)
+    with session["history_lock"]:
+        running = bool(session.get("running"))
+        if running:
+            session["_stop_issuer"] = label
+    logger.info("session.interrupt: ui_session=%s session_key=%s by=%s peer=%s running=%s", sid,
+                session.get("session_key") or "", label, getattr(transport, "_peer", "-"), running)
+
+
+def _record_stop_notice(session: dict, status: str) -> dict | None:
+    """After a turn ends: if a client Stop ended it, append + persist the ``turn_stopped`` notice. Always
+    consumes the recorded issuer so a Stop that raced a finishing turn never labels a later one."""
+    with session["history_lock"]:
+        label = session.pop("_stop_issuer", None)
+    if not label or status != "interrupted":
+        return None
+    text = f"Stopped by {label}"
+    content = f"[Turn stopped by {label} before it finished.]"
+    metadata = {"display_text": text, "stopped_by": label}
+    entry: dict = {"role": "user", "content": content, "display_kind": _STOP_NOTICE_KIND,
+                   "display_metadata": metadata}
+    with session["history_lock"]:
+        session.setdefault("history", []).append(entry)
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+    try:
+        agent = session.get("agent")
+        db = getattr(agent, "_session_db", None) if agent is not None else None
+        if db is None:
+            _ensure_session_db_row(session)
+        with (contextlib.nullcontext(db) if db is not None else _session_db(session)) as db:
+            if db is not None:
+                from agent.context_compressor import _DB_PERSISTED_MARKER
+                from agent.message_metadata import stamp_message_uid
+                entry["_row_id"] = db.append_message(
+                    session_id=_submit_row_target_key(session), role="user", content=content,
+                    display_kind=_STOP_NOTICE_KIND, display_metadata=dict(metadata),
+                    message_uid=stamp_message_uid(entry))
+                entry[_DB_PERSISTED_MARKER] = True
+    except Exception:
+        logger.warning("failed to persist stop notice", exc_info=True)
+    return entry
+
+
 # ── interrupt / steer / redirect ─────────────────────────────────────
 def _note_user_input(session: dict) -> None:
     """Mark the running turn as touched by the user (also covers compute-host turns, whose agent
@@ -83,6 +141,7 @@ def _(rid, params: dict) -> dict:
                     return _ok(rid, {"status": "not_interrupted", "interrupted": False})
         sid = str(params.get("session_id") or "")
         _note_user_input(session)
+        _note_stop_issuer(sid, session, current_transport())
         if _session_uses_compute_host(session):
             with session["history_lock"]:
                 inflight_at_interrupt = session.get("inflight_turn")

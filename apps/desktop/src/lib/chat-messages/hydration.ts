@@ -167,7 +167,9 @@ const NOTICE_DISPLAY_KINDS = [
   'auto_continue',
   'personality_switch',
   // Hermes closing a failed turn, not the model speaking.
-  'failed_turn'
+  'failed_turn',
+  // [daveey] A client's Stop ended the turn ("Stopped by redde").
+  'turn_stopped'
 ] as const
 
 function isMachineNotice(displayKind: SessionMessage['display_kind']): boolean {
@@ -280,6 +282,10 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
 
   if (message.display_kind === 'personality_switch') {
     return 'personality changed'
+  }
+
+  if (message.display_kind === 'turn_stopped') {
+    return timelineDisplayText(message.display_metadata) ?? 'turn stopped'
   }
 
   if (message.display_kind === 'async_delegation_complete') {

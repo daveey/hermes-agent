@@ -397,6 +397,7 @@ const NOTICE_KINDS = new Set([
   'auto_continue',
   'personality_switch',
   'failed_turn',
+  'turn_stopped',
   'hidden'
 ])
 

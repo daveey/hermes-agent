@@ -742,6 +742,7 @@ export interface SessionMessage {
     | 'personality_switch'
     | 'process_complete'
     | 'steer'
+    | 'turn_stopped'
     | string
   /**
    * A backend older than this app can still serve this as unparsed JSON text,

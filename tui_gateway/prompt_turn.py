@@ -1214,6 +1214,9 @@ def _run_prompt_submit(
             status_note = _absorb_turn_result(
                 sid, session, st, text, display_kind, display_metadata)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
+            # [daveey] A client Stop ended this turn: persist "Stopped by <login>" so the chat says why it
+            # went quiet (methods_session_interrupt._record_stop_notice; a no-op for any other ending).
+            _record_stop_notice(session, status)
             if status == "complete":
                 # Before message.complete: the desktop re-reads the sign-in offer on that event.
                 from tui_gateway.free_tier_task_done import note_task_done
@@ -1238,6 +1241,7 @@ def _run_prompt_submit(
                     session["running"] = False
                     session["last_active"] = time.time()
                     session.pop("_turn_user_input", None)  # per turn: never leaks into the next one
+                    session.pop("_stop_issuer", None)  # [daveey] ditto: a raised turn never consumed it
                     if not st.error_retained:
                         _clear_inflight_turn(session)
                     _release_hosted_room_turn_slot(session)
