@@ -199,6 +199,17 @@ def kanban_command(args: argparse.Namespace) -> int:
 
 # --- Handlers ---
 
+# Env vars only an agent's tool process carries (terminal session bridge, execute_code
+# sandbox RPC). A plain user shell has none of them, so it never gets the warning. [daveey]
+_AGENT_ENV_MARKERS = ("HERMES_SESSION_KEY", "HERMES_SESSION_ID", "HERMES_SESSION_SOURCE",
+                      "HERMES_RPC_SOCKET", "HERMES_KERNEL_SENTINEL")
+
+
+def _agent_invoked() -> bool:
+    """Whether this CLI call came from an agent tool (terminal / execute_code)."""
+    return any(os.environ.get(name) for name in _AGENT_ENV_MARKERS)
+
+
 def _profile_author() -> str:
     """Best-effort author name for an interactive CLI call."""
     from hermes_cli.profiles import current_profile_name
@@ -401,6 +412,15 @@ def _cmd_create(args: argparse.Namespace) -> int:
             from tools.kanban_tools import _maybe_auto_subscribe
             _maybe_auto_subscribe(conn, task_id)
         task = kb.get_task(conn, task_id)
+    if not in_worker and not session_id and not idem_hit and _agent_invoked():
+        # An agent shelled out but no chat could be stamped (unknown/missing session env:
+        # ssh to another host, `env -i`, another profile...). Say so loudly: an unlinked card
+        # silently never shows in the chat's task strip or sidebar badge. [daveey]
+        print(f"⚠  {task_id} is not linked to any chat (no known HERMES_SESSION_KEY/ID in this "
+              "environment), so it won't show in the chat's task strip. Create cards with the "
+              "kanban_create tool instead, or link it to the chat: "
+              f"hermes kanban notify-subscribe {task_id} --platform tui --chat-id <session_id>",
+              file=sys.stderr)
     if getattr(args, "json", False):
         _print_json(_task_to_dict(task))
     else:
