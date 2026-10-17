@@ -55,6 +55,13 @@ class ToolSearchConfig:
     # [daveey] Names that are never deferred, even plugin/MCP tools (which otherwise always
     # defer). Wins over ``defer``. Empty (the default) = upstream behavior.
     eager_tools: frozenset = frozenset()
+    # [daveey] When a ``tool_call`` names a registered tool that is directly listed (not
+    # deferred), run it instead of refusing. The deferred/direct split is read from the LIVE
+    # config at dispatch, so a ``defer``/``eager`` edit mid-session (or synced from another
+    # host) flips a tool the model was successfully calling through the bridge into a hard
+    # "call it directly" refusal; models also route direct tools through the bridge on their
+    # own. The session-scope gate still applies. False (the default) = upstream behavior.
+    forward_direct_calls: bool = False
 
     @property
     def effective_defer_tools(self) -> frozenset:
@@ -91,7 +98,20 @@ class ToolSearchConfig:
             listing_max_tokens=_clamped_int(raw.get("listing_max_tokens"), 4000, 200, 60000),
             defer_tools=(frozenset(str(n).strip() for n in defer_raw if str(n).strip())
                          if isinstance(defer_raw, (list, tuple, set)) else None),
-            eager_tools=frozenset(str(n).strip() for n in (eager_raw or ()) if str(n).strip()))
+            eager_tools=frozenset(str(n).strip() for n in (eager_raw or ()) if str(n).strip()),
+            forward_direct_calls=_safe_bool(raw.get("forward_direct_calls"), False))
+
+
+def _safe_bool(value: Any, fallback: bool) -> bool:
+    """Bool-ish config value (``true``/``on``/``1``...); ``fallback`` when unrecognized."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off"):
+        return False
+    return fallback
 
 
 _TRI_STATE_ALIASES = {"true": "on", "1": "on", "yes": "on", "false": "off", "0": "off", "no": "off"}
@@ -549,6 +569,11 @@ def scoped_deferrable_names(tool_defs: list[dict[str, Any]]) -> frozenset[str]:
     universe ``tool_call`` may reach. Gates bridge dispatch AND the executor unwrap so a
     restricted session cannot invoke an out-of-scope tool via the bridge."""
     cfg = load_config_readonly()
+    if cfg.forward_direct_calls:
+        # [daveey] Directly-listed tools in this session's scope are forwarded too (see
+        # ``ToolSearchConfig.forward_direct_calls``): the model may already call them
+        # directly, so reaching them through the bridge grants nothing new.
+        return frozenset(n for n in _tool_def_names(tool_defs) if n and n not in BRIDGE_TOOL_NAMES)
     return frozenset(n for n in _tool_def_names(tool_defs)
                      if n and is_deferrable_tool_name(n, cfg.effective_defer_tools, cfg.eager_tools))
 
@@ -597,6 +622,10 @@ def resolve_underlying_call(args: dict[str, Any]) -> tuple[Optional[str], dict[s
     raw_args = entries[0]["arguments"]
     _cfg = load_config_readonly()
     if not is_deferrable_tool_name(name, _cfg.effective_defer_tools, _cfg.eager_tools):
+        if _cfg.forward_direct_calls and _registry_entry(name) is not None:
+            # [daveey] Directly-listed tool sent through the bridge: run it (callers still
+            # apply the session-scope gate via scoped_deferrable_names).
+            return name, raw_args, None
         return None, {}, not_deferrable_error(name)
     return name, raw_args, None
 

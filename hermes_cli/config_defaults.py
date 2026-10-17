@@ -2033,6 +2033,11 @@ DEFAULT_CONFIG = {
             # [daveey] Tools that are never deferred, even plugin/MCP tools (which otherwise always
             # defer behind the bridge). Wins over ``defer``. [] = upstream behavior.
             "eager": [],
+            # [daveey] A tool_call naming a directly-listed (non-deferred) tool runs it instead of
+            # refusing with "call it directly". The split is read from the live config, so a
+            # defer/eager edit mid-session otherwise breaks calls the model already made through
+            # the bridge. Session toolset scope still applies. False = upstream behavior.
+            "forward_direct_calls": False,
         },
         # Remote connector discovery/lifecycle through the Nous tool gateway.
         # The flag is the user's off switch; availability additionally requires
