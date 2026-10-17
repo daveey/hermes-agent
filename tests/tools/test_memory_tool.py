@@ -1039,3 +1039,46 @@ class TestBackgroundReviewDeleteGate:
             reset_current_write_origin(token)
         assert result["success"] is True
         assert "rewritten by refine" in store._entries_for("memory")
+
+
+class TestUnattendedReviewAtCap:
+    """A review fork at the cap was told to "add removes to the same batch", but unattended
+    reviews only stage removes/patches. Every review save overflowed, then staged a proposal no
+    one approved (MEMORY.md/USER.md unchanged for days, 50 pending). Both the over-budget error
+    and the review prompt must say what actually works unattended, from live disk usage."""
+
+    def _fill(self, store):
+        for i in range(8):
+            assert store.add("memory", f"standing fact number {i:02d} " + "x" * 30)["success"] is True
+
+    def test_over_budget_add_in_review_names_the_staging_rule(self, store):
+        self._fill(store)
+        token = set_current_write_origin("background_review")
+        try:
+            result = json.loads(memory_tool(action="add", content="y" * 120, store=store))
+            batch = json.loads(memory_tool(operations=[{"action": "add", "content": "z" * 120}], store=store))
+        finally:
+            reset_current_write_origin(token)
+        for r in (result, batch):
+            assert r["success"] is False
+            assert "staged for the user's approval" in r["error"]
+            assert "skip it" in r["error"]
+
+    def test_foreground_over_budget_keeps_plain_advice(self, store):
+        self._fill(store)
+        result = json.loads(memory_tool(action="add", content="y" * 120, store=store))
+        assert result["success"] is False
+        assert "staged for the user's approval" not in result["error"]
+
+    def test_review_budget_note_reads_live_disk_not_snapshot(self, store, tmp_path):
+        # Another session fills the store after this one loaded its snapshot.
+        other = MemoryStore(memory_char_limit=500, user_char_limit=300)
+        other.load_from_disk()
+        for i in range(8):
+            other.add("memory", f"other session fact {i:02d} " + "x" * 30)
+        used, limit = other.live_usage("memory")
+        note = store.review_budget_note()
+        assert f"{used:,}/{limit:,}" in note
+        assert f"at most {limit - used - 3:,} chars fits" in note
+        assert "staged for the user's approval" in note
+        assert "USER.md (target='user'): 0/300 chars" in note

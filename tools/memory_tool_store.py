@@ -154,6 +154,18 @@ def _low_headroom_note(current: int, limit: int) -> str:
             f"patches of stale entries in the SAME batch")
 
 
+# An unattended background review may only append: its patch/remove ops are staged for
+# approval (#105921). The generic over-budget advice ("add removes to the same batch")
+# cannot land a save there, so reviews at the cap overflowed, then staged a proposal no one
+# approved, every time. Both the review prompt and over-budget errors say this instead.
+UNATTENDED_REVIEW_FULL_HINT = (
+    "This is an unattended background review: 'patch'/'remove' are staged for the user's "
+    "approval, not applied, so only a plain add that fits the free space lands now. If the fact "
+    "does not fit, skip it (or record it in the relevant skill instead); do not retry a bare add. "
+    "Only if the fact clearly matters, send ONE batch with the removes/patches AND the add — the "
+    "whole batch is staged as a single proposal for approval.")
+
+
 # Patch content cannot be empty, and 'remove' would drop the sibling facts in the entry.
 PATCH_DROP_HINT = "To drop text inside an entry, patch a longer span that contains it; 'remove' deletes the whole entry."
 
@@ -643,6 +655,29 @@ class MemoryStore:
                 replaced_fields["removed_entries"] = removed
             return working, f"Applied {len(operations)} operation(s).", replaced_fields
         return self._mutate(target, _apply, skip_drift=not commit)
+
+    def live_usage(self, target: str) -> tuple[int, int]:
+        """``(used, limit)`` chars read from disk NOW. The system-prompt header is frozen at
+        session start, and other sessions keep writing, so a long-lived session's header (and
+        every review fork replaying it) can be days stale."""
+        entries = list(dict.fromkeys(self._read_file(self._path_for(target))))
+        return len(ENTRY_DELIMITER.join(entries)), self._char_limit(target)
+
+    def review_budget_note(self) -> str:
+        """Live free-space block for an unattended background-review prompt ("" if no store)."""
+        lines = []
+        for target, label in (("memory", "MEMORY.md (target='memory')"), ("user", "USER.md (target='user')")):
+            if not self.target_enabled(target):
+                continue
+            used, limit = self.live_usage(target)
+            free = max(0, limit - used)
+            # Each extra entry also costs the delimiter, so the usable add size is smaller.
+            fits = max(0, free - len(ENTRY_DELIMITER)) if used else free
+            lines.append(f"  • {label}: {used:,}/{limit:,} chars — a new entry of at most {fits:,} chars fits")
+        if not lines:
+            return ""
+        return ("Live memory budget (read just now; the usage in the system prompt header was frozen "
+                "at session start and may be stale):\n" + "\n".join(lines) + "\n" + UNATTENDED_REVIEW_FULL_HINT)
 
     def format_for_system_prompt(self, target: str) -> Optional[str]:
         """Frozen load-time snapshot (NOT live state — mid-session writes don't touch

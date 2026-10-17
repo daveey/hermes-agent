@@ -41,7 +41,16 @@ def get_memory_dir() -> Path:
 
 
 from tools.memory_tool_store import (
-    ENTRY_DELIMITER, FAILURE_CLASS, MEMORY_BLOCK_HEADERS, PATCH_DROP_HINT, MemoryStore, _scan_memory_content)
+    ENTRY_DELIMITER, FAILURE_CLASS, MEMORY_BLOCK_HEADERS, PATCH_DROP_HINT, UNATTENDED_REVIEW_FULL_HINT,
+    MemoryStore, _scan_memory_content)
+
+
+def _is_unattended_review() -> bool:
+    try:
+        from tools.skill_provenance import is_unattended_review
+        return is_unattended_review()
+    except Exception:
+        return False
 
 
 def load_on_disk_store() -> MemoryStore:
@@ -239,6 +248,11 @@ def memory_tool(action: str | None = None, target: str = "memory", content: str 
 
 
 def _applied(result: dict[str, Any]) -> tuple[str, str]:
+    # An unattended review cannot follow the store's "add removes to the same batch" advice
+    # (those ops are staged, not applied), so say what does work there.
+    if (not result.get("success") and not result.get("done") and FAILURE_CLASS.get() == "over_budget"
+            and _is_unattended_review()):
+        result = {**result, "error": f"{result.get('error', '')} {UNATTENDED_REVIEW_FULL_HINT}"}
     return ("success" if result.get("success") else "failed"), json.dumps(result, ensure_ascii=False)
 
 

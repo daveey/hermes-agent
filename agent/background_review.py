@@ -1307,6 +1307,22 @@ def _run_review_in_thread(
         _set_thread_approval_callback(None)
 
 
+def _live_memory_budget_note(agent: Any) -> str:
+    """Live per-store free space for an unattended memory review. The fork replays the parent's
+    system prompt, whose memory header is frozen at session start, while only appends land
+    unattended — so without the live figures the fork tried bare adds into a store other
+    sessions had already filled, overflowed, then staged proposals nobody approved."""
+    store = getattr(agent, "_memory_store", None)
+    if store is None or not hasattr(store, "review_budget_note"):
+        return ""
+    try:
+        note = store.review_budget_note()
+        return note if isinstance(note, str) else ""
+    except Exception:
+        logger.debug("Could not read live memory budget for review prompt", exc_info=True)
+        return ""
+
+
 # (review_memory, review_skills) -> prompt attribute name; skills-only is also the default.
 _PROMPT_NAME_BY_SCOPE = {
     (True, True): "_COMBINED_REVIEW_PROMPT", (True, False): "_MEMORY_REVIEW_PROMPT",
@@ -1331,6 +1347,8 @@ def spawn_background_review_thread(
     # Per-agent overrides (agent._MEMORY_REVIEW_PROMPT etc.) keep working.
     name = _PROMPT_NAME_BY_SCOPE[(review_memory, review_skills)]
     prompt = getattr(agent, name, globals()[name])
+    if review_memory and not explicit and (budget := _live_memory_budget_note(agent)):
+        prompt = f"{prompt}\n\n{budget}"
     if focus := (focus or "").strip():
         prompt = (
             f"{prompt}\n\nThe user explicitly requested this review with the following "

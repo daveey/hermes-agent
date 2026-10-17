@@ -261,3 +261,37 @@ class TestConsolidationProposalSurfaces:
         ]
         actions = bg.summarize_background_review_actions(review_messages, [])
         assert any("staged for your approval" in a for a in actions)
+
+
+class TestReviewPromptLiveBudget:
+    """An unattended memory review gets live per-store free space plus the staging rule; the
+    replayed system-prompt header is frozen at session start and was days stale."""
+
+    def _agent(self, tmp_path, monkeypatch):
+        from tools.memory_tool_store import MemoryStore
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        store = MemoryStore(memory_char_limit=200, user_char_limit=100)
+        store.load_from_disk()
+        store.add("memory", "m" * 150)
+        return SimpleNamespace(_memory_store=store)
+
+    def test_unattended_memory_review_prompt_has_live_budget(self, tmp_path, monkeypatch):
+        agent = self._agent(tmp_path, monkeypatch)
+        _, prompt = bg.spawn_background_review_thread(agent, [], review_memory=True, review_skills=False)
+        assert "Live memory budget" in prompt
+        assert "150/200 chars — a new entry of at most 47 chars fits" in prompt
+        assert "staged for the user's approval" in prompt
+        _, combined = bg.spawn_background_review_thread(agent, [], review_memory=True, review_skills=True)
+        assert "Live memory budget" in combined
+
+    def test_skill_only_and_explicit_reviews_omit_it(self, tmp_path, monkeypatch):
+        agent = self._agent(tmp_path, monkeypatch)
+        _, skills = bg.spawn_background_review_thread(agent, [], review_memory=False, review_skills=True)
+        _, explicit = bg.spawn_background_review_thread(
+            agent, [], review_memory=True, review_skills=False, explicit=True)
+        assert "Live memory budget" not in skills
+        assert "Live memory budget" not in explicit
+
+    def test_agent_without_store_keeps_plain_prompt(self):
+        _, prompt = bg.spawn_background_review_thread(SimpleNamespace(), [], review_memory=True)
+        assert prompt == bg._MEMORY_REVIEW_PROMPT
