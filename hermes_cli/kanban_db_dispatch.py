@@ -2170,9 +2170,16 @@ def _dispatch_lane_task(
         else:
             workspace = _kbw.resolve_workspace(claimed, board=board)
     except Exception as exc:
+        # A misconfigured worktree (no repo to anchor it, relative path, board
+        # without default_workdir) fails identically on every retry: block on the
+        # first occurrence (sticky) with the reason instead of spending the
+        # retry budget. [daveey]
+        config_error = isinstance(exc, _kbw.WorktreeWorkspaceConfigError)
         if _record_task_failure(
             conn, claimed.id, f"workspace: {exc}",
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
+            force_trip=config_error,
+            event_payload_extra={"workspace_config_error": True} if config_error else None,
         ):
             result.auto_blocked.append(claimed.id)
         return False

@@ -485,7 +485,10 @@ KANBAN_CREATE_SCHEMA = _schema(
         },
         "workspace_path": _prop("string", (
                 "Absolute path for 'dir' or 'worktree' workspace. "
-                "Relative paths are rejected at dispatch."
+                "Relative paths are rejected at dispatch. A 'worktree' path must be a git repo "
+                "root (the dispatcher creates <repo>/.worktrees/<task-id>), an existing linked "
+                "worktree, or a new path whose parent is inside a repo; anything else is "
+                "rejected at create time."
         )),
         "project": _prop("string", (
                 "Optional project id or slug to link the task to. When "

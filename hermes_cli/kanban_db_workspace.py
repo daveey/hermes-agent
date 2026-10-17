@@ -622,6 +622,78 @@ def _maybe_emit_scratch_tip(
 # Workspace resolution
 # ---------------------------------------------------------------------------
 
+class WorktreeWorkspaceConfigError(ValueError):
+    """A ``worktree`` workspace that can never resolve as configured (no repo to
+    anchor it on, relative path, board without ``default_workdir``). Retrying the
+    spawn cannot fix it, so the dispatcher blocks on the first occurrence and
+    ``create_task(validate_workspace=True)`` rejects it up front. [daveey]"""
+
+
+def _sibling_repo_hint(requested: Path) -> Optional[Path]:
+    """For a sibling-worktree name like ``~/code/<repo>-<slug>``, the ``<repo>``
+    root it most likely meant (longest matching sibling that is a repo root)."""
+    parent = _nearest_existing_path(requested.parent)
+    if parent != requested.parent:
+        return None
+    best: Optional[Path] = None
+    try:
+        siblings = [p for p in parent.iterdir() if p.is_dir()]
+    except OSError:
+        return None
+    for sib in siblings:
+        if not requested.name.startswith(sib.name + "-"):
+            continue
+        if best is not None and len(sib.name) <= len(best.name):
+            continue
+        top = _git_toplevel(sib)
+        if top is not None and _path_key(top) == _path_key(sib.resolve(strict=False)):
+            best = sib
+    return best
+
+
+def worktree_workspace_problem(
+    workspace_path: Optional[str], *, board: Optional[str] = None,
+) -> Optional[str]:
+    """Why a ``worktree`` workspace with this path would fail to resolve at
+    spawn, or ``None`` when it resolves. Same acceptance rules as
+    :func:`_resolve_worktree_workspace`, without creating anything: an existing
+    linked worktree, a repo root, or a path whose parent is inside a repo; no
+    path -> the board's ``default_workdir`` must be an absolute path in a repo."""
+    if not workspace_path:
+        board_slug = board if board else _kb.get_current_board()
+        board_default = (_kb.read_board_metadata(board_slug).get("default_workdir") or "").strip()
+        if not board_default:
+            return (
+                f"workspace_kind=worktree with no workspace_path needs a board default_workdir, "
+                f"and board {board_slug!r} has none. Pass workspace_path=<absolute git repo root> "
+                "(the dispatcher then creates <repo>/.worktrees/<task-id>)."
+            )
+        anchor = Path(board_default).expanduser()
+        if not anchor.is_absolute() or _git_toplevel(anchor) is None:
+            return (
+                f"board {board_slug!r} default_workdir {board_default!r} is not an absolute path "
+                "inside a git repo. Pass workspace_path=<absolute git repo root> instead."
+            )
+        return None
+    requested = Path(workspace_path).expanduser()
+    if not requested.is_absolute():
+        return f"worktree workspace_path {workspace_path!r} is not absolute; use an absolute path"
+    if requested.exists() and _is_linked_worktree_checkout(requested):
+        return None
+    if _git_toplevel(requested) is not None:
+        return None
+    if _repo_root_for_worktree_target(requested.parent) is not None:
+        return None
+    hint = _sibling_repo_hint(requested)
+    repo = str(hint) if hint is not None else "<repo root>"
+    return (
+        f"worktree path {workspace_path!r} is not inside a git repo and does not point at a "
+        f"git repo root. Fix: use workspace_path={repo!r} (the dispatcher creates "
+        f"<repo>/.worktrees/<task-id>), or first run: "
+        f"git -C {repo} worktree add {workspace_path} -b <branch>"
+    )
+
+
 def _git_toplevel(path: Path) -> Optional[Path]:
     """Return the git toplevel containing ``path``, or ``None`` if not in a repo."""
     out = _kb._git_out(path, "rev-parse", "--show-toplevel")
@@ -723,7 +795,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
         board_slug = board if board else _kb.get_current_board()
         board_default = (_kb.read_board_metadata(board_slug).get("default_workdir") or "").strip()
         if not board_default:
-            raise ValueError(
+            raise WorktreeWorkspaceConfigError(
                 f"task {task.id} has workspace_kind=worktree but no workspace_path, "
                 f"and board {board_slug!r} has no default_workdir set. Set a board "
                 "default workdir (a git repo) or create the task with "
@@ -731,13 +803,13 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             )
         anchor = Path(board_default).expanduser()
         if not anchor.is_absolute():
-            raise ValueError(
+            raise WorktreeWorkspaceConfigError(
                 f"board {board_slug!r} default_workdir {board_default!r} is not "
                 "absolute; use an absolute path to a git repo"
             )
         repo_root = _git_toplevel(anchor)
         if repo_root is None:
-            raise ValueError(
+            raise WorktreeWorkspaceConfigError(
                 f"task {task.id} has workspace_kind=worktree but board "
                 f"{board_slug!r} default_workdir {board_default!r} is not inside a git repo"
             )
@@ -745,7 +817,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
 
     requested = Path(task.workspace_path).expanduser()
     if not requested.is_absolute():
-        raise ValueError(
+        raise WorktreeWorkspaceConfigError(
             f"task {task.id} has non-absolute worktree path "
             f"{task.workspace_path!r}; use an absolute path"
         )
@@ -776,9 +848,11 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
 
     repo_root = _repo_root_for_worktree_target(requested.parent)
     if repo_root is None:
-        raise ValueError(
-            f"task {task.id} worktree path {task.workspace_path!r} is not inside a git repo "
-            "and does not point at a git repo root"
+        raise WorktreeWorkspaceConfigError(
+            f"task {task.id} "
+            + (worktree_workspace_problem(task.workspace_path, board=board)
+               or f"worktree path {task.workspace_path!r} is not inside a git repo "
+                  "and does not point at a git repo root")
         )
     _ensure_git_worktree(repo_root, requested, branch_name)
     return requested, branch_name

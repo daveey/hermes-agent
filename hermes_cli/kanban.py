@@ -389,23 +389,28 @@ def _cmd_create(args: argparse.Namespace) -> int:
         idem_hit = bool(idem_key) and conn.execute(
             "SELECT 1 FROM tasks WHERE idempotency_key = ? AND status != 'archived' LIMIT 1",
             (idem_key,)).fetchone() is not None
-        task_id = kb.create_task(
-            conn, title=args.title, body=body, assignee=args.assignee, session_id=session_id,
-            created_by=args.created_by or _profile_author(),
-            workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
-            project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
-            parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
-            idempotency_key=idem_key,
-            max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
-            max_retries=max_retries, model_override=getattr(args, "model_override", None),
-            provider_override=getattr(args, "provider_override", None),
-            goal_mode=bool(getattr(args, "goal_mode", False)),
-            goal_max_turns=getattr(args, "goal_max_turns", None),
-            completion_contract=getattr(args, "completion_contract", None),
-            initial_status=getattr(args, "initial_status", "running"),
-            creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
-                             if in_worker else None),
-        )
+        from hermes_cli.kanban_db_workspace import WorktreeWorkspaceConfigError
+        try:
+            task_id = kb.create_task(
+                conn, title=args.title, body=body, assignee=args.assignee, session_id=session_id,
+                created_by=args.created_by or _profile_author(),
+                workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
+                project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
+                parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
+                idempotency_key=idem_key,
+                max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
+                max_retries=max_retries, model_override=getattr(args, "model_override", None),
+                provider_override=getattr(args, "provider_override", None),
+                goal_mode=bool(getattr(args, "goal_mode", False)),
+                goal_max_turns=getattr(args, "goal_max_turns", None),
+                completion_contract=getattr(args, "completion_contract", None),
+                initial_status=getattr(args, "initial_status", "running"),
+                creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
+                                 if in_worker else None),
+                validate_workspace=True,
+            )
+        except WorktreeWorkspaceConfigError as exc:
+            return _err(f"kanban: --workspace: {exc}", 2)
         if session_key and not idem_hit:
             # Same completion subscription the kanban_create tool adds, so the chat
             # that shelled out hears when the card lands (and its row stays busy).

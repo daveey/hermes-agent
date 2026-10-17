@@ -1192,8 +1192,14 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    validate_workspace: bool = False,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
+
+    ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project
+    ``worktree`` workspace that could never resolve at spawn with
+    ``WorktreeWorkspaceConfigError`` naming the fix, instead of letting the
+    dispatcher discover it later. [daveey]
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
     forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
@@ -1256,6 +1262,14 @@ def create_task(
         ).fetchone()
         if row:
             return row["id"]
+
+    if validate_workspace and workspace_kind == "worktree" and not project_id:
+        from hermes_cli.kanban_db_workspace import (
+            WorktreeWorkspaceConfigError, worktree_workspace_problem,
+        )
+        problem = worktree_workspace_problem(workspace_path, board=board)
+        if problem:
+            raise WorktreeWorkspaceConfigError(problem)
 
     now = int(time.time())
 
