@@ -279,7 +279,16 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
                         "success": False,
                         "error": (f"operations[{i}] ({op['action']} on '{names[i]}') failed: "
                                   f"{parsed.get('error', 'unknown error')} — batch aborted, {note}."),
-                        "failed_index": i, "completed_before_failure": i}
+                        "failed_index": i, "completed_before_failure": i,
+                        "rollback_complete": not rollback_failed,
+                        "retry_instruction": (
+                            "Rollback failed: inspect every affected file before retrying; "
+                            "some operations may remain applied."
+                            if rollback_failed else
+                            "No operations remain applied. After correcting the failed operation, "
+                            "retry the entire batch, including earlier operations that were rolled back.")}
+                    if not rollback_failed:
+                        fail["operations_applied"] = 0
                     # Carry the failing op's teaching payload (patch's file_preview /
                     # fuzzy-match hints) through — without it the model recovers blind.
                     for k, v in parsed.items():

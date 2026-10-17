@@ -622,7 +622,23 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str | N
         with suppress(Exception):
             from tools.fuzzy_match import format_no_match_hint
             match_error += format_no_match_hint(match_error, match_count, old_string, content)
-        return _err(match_error) | {"file_preview": _clip(content, 500, "...")}
+        # A stale anchor is not permission to replace a similar, newer passage. Give
+        # an actionable read rather than only the opening 500 chars (usually frontmatter).
+        # Keep it structured so the batch wrapper cannot bury it in truncated prose.
+        read_args = {"name": name}
+        if file_path:
+            read_args["file_path"] = file_path
+        return _err(match_error) | {
+            "file_preview": _clip(content, 500, "..."),
+            "recovery": {
+                "tool": "skill_view", "arguments": read_args,
+                "instruction": (
+                    "Reload this exact file before retrying. old_string may be stale or "
+                    "ambiguous; copy a unique anchor from the fresh read and preserve newer "
+                    "content when constructing new_string. Do not resend the unchanged patch "
+                    "or replace the whole file from an older snapshot."),
+            },
+        }
     if err := _validate_content_size(new_content, label=target_label):
         return _err(err)
     if not file_path and (err := _validate_frontmatter(new_content)):
