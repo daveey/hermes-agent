@@ -29,6 +29,8 @@ interface DockHint {
 export interface PaneMirror<T> {
   /** Reactive source list. */
   source: ReadableAtom<T[]>
+  /** Tiles born offscreen, registered without adopting into a zone. */
+  initiallyParked?: ReadableAtom<T[]>
   /** Extra atoms whose changes should re-sync (e.g. titles living elsewhere). */
   also?: ReadableAtom<unknown>[]
   /** Stable key + pane-id seed for a tile. */
@@ -99,20 +101,26 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
     removeTreePane(paneId(key))
   }
 
-  const sync = () => {
-    const tiles = cfg.source.get()
-    const wanted = new Set(tiles.map(cfg.key))
+  const registerTiles = (tiles: T[], wanted: Set<string>) => {
     let unparked = false
 
-    for (const tile of tiles) {
+    const hidden = (cfg.initiallyParked?.get() ?? []).filter(tile => !wanted.has(cfg.key(tile)))
+
+    for (const tile of [...tiles, ...hidden]) {
       const key = cfg.key(tile)
       const title = cfg.title(key)
       const current = registered.get(key)
+      const isHidden = !wanted.has(key)
+
+      if (isHidden && !current) {
+        parked.add(key)
+        setTreePaneParked(paneId(key), true)
+      }
 
       // A retained tile coming back keeps its registration — re-registering
       // would remount its body — and re-docks where it fits NOW (its old
       // anchor may have left the tree), before the tiles leaving below go.
-      if (current && parked.delete(key)) {
+      if (!isHidden && current && parked.delete(key)) {
         Object.assign(current.dock, dockFor(tile))
         setTreePaneParked(paneId(key), false)
         unparked = true
@@ -159,6 +167,12 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
     if (unparked) {
       adoptContributedPanes()
     }
+  }
+
+  const sync = () => {
+    const tiles = cfg.source.get()
+    const wanted = new Set(tiles.map(cfg.key))
+    registerTiles(tiles, wanted)
 
     for (const key of [...registered.keys()]) {
       if (wanted.has(key)) {
@@ -196,6 +210,7 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
   return () => {
     sync()
     cfg.source.listen(sync)
+    cfg.initiallyParked?.listen(sync)
     cfg.also?.forEach(atom => atom.listen(sync))
   }
 }

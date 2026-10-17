@@ -261,6 +261,44 @@ describe('preview tiles mirror the visible session tabs', () => {
     expect(tree.treePanesWithPrefix('preview-tile:')).toEqual([`preview-tile:${ids[0]}`])
   })
 
+  it('does not eagerly mount hidden restored tabs', async () => {
+    const { preview, session } = await setup()
+    const { registry } = await import('@/contrib/registry')
+    session.$selectedStoredSessionId.set('focused')
+    preview.$previewTabs.set([
+      { id: 'url:restored', sessionId: 'hidden', target: browserTarget('https://restored.example') }
+    ])
+    expect(registry.getArea('panes').some(pane => pane.id === 'preview-tile:url:restored')).toBe(false)
+  })
+
+  it('does not remount cap-evicted background opens on unrelated updates', async () => {
+    const { preview, session } = await setup()
+    const { registry } = await import('@/contrib/registry')
+    session.$selectedStoredSessionId.set('focused')
+
+    const ids = Array.from({ length: 9 }, (_, n) =>
+      preview.openPreview(browserTarget(`https://hidden-${n}.example`), `hidden-${n}`, `runtime-${n}`, 'default', true)
+    )
+
+    const panes = () => registry.getArea('panes').filter(pane => pane.id.startsWith('preview-tile:'))
+    expect(panes()).toHaveLength(8)
+    expect(panes().some(pane => pane.id === `preview-tile:${ids[0]}`)).toBe(false)
+    preview.$previewTabs.set([...preview.$previewTabs.get()])
+    expect(panes()).toHaveLength(8)
+    expect(panes().some(pane => pane.id === `preview-tile:${ids[0]}`)).toBe(false)
+
+    const reopened = preview.openPreview(
+      browserTarget('https://hidden-0.example'),
+      'hidden-0',
+      'runtime-0',
+      'default',
+      true
+    )
+
+    expect(reopened).toBe(ids[0])
+    expect(panes().some(pane => pane.id === `preview-tile:${ids[0]}`)).toBe(true)
+  })
+
   it('does not create panes for another session tabs', async () => {
     const { preview, session, tree } = await setup()
 

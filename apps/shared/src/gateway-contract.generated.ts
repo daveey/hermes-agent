@@ -4562,6 +4562,11 @@ export interface VaultCodeRequestParams {
   site?: string | null
   hint?: string | null
 }
+export interface PreviewOpenRequestParams {
+  session_id: string
+  url: string
+  label?: string
+}
 export interface ReadRangeRequestParams {
   session_id: string
   start?: number | null
@@ -5848,6 +5853,8 @@ export interface ServerRequestMap {
   'display.install.sudo': { params: DisplayInstallSudoParams; result: ValueResult }
   /** Click / type / scroll / annotate inside the in-app browser preview. */
   'preview.act': { params: PreviewActRequestParams; result: ValueResult }
+  /** Create and mount a preview tab in one selected window (JSON acknowledgement). */
+  'preview.open': { params: PreviewOpenRequestParams; result: ValueResult }
   /** Read the in-app browser preview's text (JSON text answer). */
   'preview.read': { params: ReadRangeRequestParams; result: ValueResult }
   /** Masked value for a named env var (skills / setup flows). */
@@ -5874,6 +5881,7 @@ export const SERVER_REQUEST_METHODS = [
   'clarify',
   'display.install.sudo',
   'preview.act',
+  'preview.open',
   'preview.read',
   'secret',
   'setup_choose',

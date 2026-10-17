@@ -56,6 +56,30 @@ def _session_answering_clients(sid: str) -> list:
             if isinstance(peer, WSTransport) and server_requests.answers_requests(peer)]
 
 
+def _preview_request_client(sid: str):
+    """Prefer a session peer; otherwise choose one stable, same-login attached peer.
+
+    Never fan out creation: the renderer mounts hidden sessions without activating them.
+    """
+    from tui_gateway import server_requests
+
+    session = _sessions.get(sid)
+    if session is None:
+        return None
+    identity = _session_auth_user_id(session)
+    with _live_transports_lock:
+        fallback = sorted(_live_transports, key=id)
+    candidates = _session_live_transports(session) + fallback
+    selected = next((peer for peer in candidates
+                 if _transport_is_live_peer(peer)
+                 and server_requests.answers_requests(peer)
+                 and _transport_auth_user_id(peer) == identity), None)
+    if selected is not None:
+        # Later preview.read/act requests use this same session transport.
+        _attach_session_transport(session, selected)
+    return selected
+
+
 def _warn_foreign_login(session: dict, transport) -> None:
     """Ownership is not enforced; a second login sharing a session is only logged, and the agent keeps the
     creator's user id."""

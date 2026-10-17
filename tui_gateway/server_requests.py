@@ -60,12 +60,14 @@ class ServerRequest:
         "qids",
         "result",
         "sid",
+        "target",
     )
 
     def __init__(self, sid: str, method: str, params: dict, *, qids: list[str] | None = None,
                  on_result: Callable[[dict | None], None] | None = None) -> None:
         self.id = f"srq-{uuid.uuid4().hex[:12]}"
         self.sid = sid
+        self.target = None
         self.method = method
         self.params = dict(params)
         self.event = threading.Event()
@@ -106,6 +108,7 @@ _answerable: Callable[[str], bool] = lambda sid: True
 # ``clients(sid)``: the attached client transports that answer server→client requests — the set whose
 # unanimous NOT_SHOWN_CODE decline settles a window-owned request (session_transports.py).
 _clients: Callable[[str], list] = lambda sid: []
+_preview_client: Callable[[str], Any] = lambda sid: None
 
 # Error code a client answers when none of its windows shows the request's session, and the refusal the
 # tool reports once every attached client said so. Mirrored in apps/desktop server-requests.ts.
@@ -119,11 +122,14 @@ _answering_clients: set = set()
 
 
 def bind_sinks(write_json: Callable[[dict], Any], emit: Callable[[str, str, dict], Any],
-               answerable: Callable[[str], bool], clients: Callable[[str], list] | None = None) -> None:
-    global _write, _emit, _answerable, _clients
+               answerable: Callable[[str], bool], clients: Callable[[str], list] | None = None,
+               preview_client: Callable[[str], Any] | None = None) -> None:
+    global _write, _emit, _answerable, _clients, _preview_client
     _write, _emit, _answerable = write_json, emit, answerable
     if clients is not None:
         _clients = clients
+    if preview_client is not None:
+        _preview_client = preview_client
 
 
 def advertise(transport: Any, server_requests: bool) -> None:
@@ -169,7 +175,10 @@ def _register(req: ServerRequest) -> None:
         raise ValueError(problem)  # a key the renderer's typed handler would never read: our bug
     with _lock:
         _open[req.id] = req
-    _write(req.frame())
+    if req.target is None:
+        _write(req.frame())
+    elif not req.target.write(req.frame()):
+        resolve_response({"id": req.id, "error": {"message": "Desktop window disconnected"}}, req.target)
 
 
 def send(method: str, sid: str, params: dict, *, timeout: float | None,
@@ -181,10 +190,19 @@ def send(method: str, sid: str, params: dict, *, timeout: float | None,
     cancelled, 0 → return immediately, > 0 → bounded wait. A batch (``qids``) that settled returns
     ``{"answers": <locked so far>, "outcome"}`` (``submitted`` / ``cancelled`` / ``timed_out``).
     """
-    if _unanswerable(method, sid):
+    target = _preview_client(sid) if method == "preview.open" else None
+    if method == "preview.open" and target is None:
+        return None
+    if target is None and _unanswerable(method, sid):
         return None
     req = ServerRequest(sid, method, params, qids=qids)
-    _register(req)
+    req.target = target
+    try:
+        _register(req)
+    except BaseException:
+        with _lock:
+            _open.pop(req.id, None)
+        raise
     try:
         req.event.wait(timeout)
     except BaseException:
@@ -269,7 +287,11 @@ def resolve_response(frame: dict, transport: Any = None) -> bool:
     rid = frame.get("id")
     if not isinstance(rid, str):
         return False
-    if _is_not_shown(frame):
+    with _lock:
+        pending = _open.get(rid)
+        if pending is not None and pending.target is not None and pending.target is not transport:
+            return False
+    if _is_not_shown(frame) and (pending is None or pending.target is None):
         return _decline(rid, transport)
     with _lock:
         req = _open.get(rid)
@@ -347,9 +369,10 @@ def cancel(sid: str | None = None, reason: str = "interrupted") -> int:
 
 
 def open_requests(sid: str) -> list[dict]:
-    """Unanswered requests for *sid*, oldest first."""
+    """Replayable requests for *sid*, oldest first. Targeted creation must not replay
+    into a different window and create a duplicate tab."""
     with _lock:
-        reqs = sorted((req for req in _open.values() if req.sid == sid), key=lambda r: r.created_at)
+        reqs = sorted((req for req in _open.values() if req.sid == sid and req.target is None), key=lambda r: r.created_at)
     return [req.snapshot() for req in reqs]
 
 

@@ -56,6 +56,37 @@ function deliver(method: string, params: Record<string, unknown>, activeSessionI
   return { decline, fail, handled, respond }
 }
 
+describe('acknowledged preview open', () => {
+  afterEach(() => vi.useRealTimers())
+  it('acknowledges a mounted text file without requiring a browser script runner', async () => {
+    vi.useFakeTimers()
+    const { registerPreviewPaneMount } = await import('@/app/chat/right-rail/preview-mount')
+    closeRightRail()
+    const result = deliver('preview.open', { session_id: 'hidden', url: '/work/readme.txt' }, 'foreground')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(result.respond).not.toHaveBeenCalled()
+    const tab = $previewTabs.get()[0]!
+    const unregister = registerPreviewPaneMount(tab.id)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(result.respond).toHaveBeenCalledWith({
+      value: JSON.stringify({ success: true, url: '/work/readme.txt', label: '' })
+    })
+    unregister()
+    closeRightRail()
+  })
+
+  it('fails instead of acknowledging a tab that never mounts', async () => {
+    vi.useFakeTimers()
+    const result = deliver('preview.open', { session_id: 'hidden', url: 'https://example.com' }, 'foreground')
+    expect(result.handled).toBe(true)
+    expect(result.respond).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(result.respond).toHaveBeenCalledWith({ value: expect.stringContaining('"success":false') })
+    closeRightRail()
+    vi.useRealTimers()
+  })
+})
+
 describe('connection request routing', () => {
   it('does not route connection operations through the server-request rail', () => {
     const { handled, respond } = deliver(

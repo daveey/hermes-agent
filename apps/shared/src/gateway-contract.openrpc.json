@@ -23461,6 +23461,30 @@
         "title": "PreviewOpenPayload",
         "type": "object"
       },
+      "PreviewOpenRequestParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "url"
+        ],
+        "title": "PreviewOpenRequestParams",
+        "type": "object"
+      },
       "PreviewRestartParams": {
         "additionalProperties": false,
         "properties": {
@@ -40536,6 +40560,24 @@
           "name": "params",
           "schema": {
             "$ref": "#/components/schemas/PreviewActRequestParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ValueResult"
+        }
+      }
+    },
+    {
+      "name": "preview.open",
+      "summary": "Create and mount a preview tab in one selected window (JSON acknowledgement).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PreviewOpenRequestParams"
           }
         }
       ],

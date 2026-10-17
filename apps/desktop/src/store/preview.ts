@@ -258,6 +258,10 @@ let viewKey = 'default'
 
 export const $previewTabs = atom<PreviewTab[]>([])
 
+/** Explicit agent opens may mount before their session is ever shown. Restored
+ * tabs must remain lazy; the mirror applies the same bounded retention policy. */
+export const $requestedPreviewMounts = atom<ReadonlySet<string>>(new Set())
+
 // Adoption phase: emissions that carry storage THIS MODULE JUST READ, not a
 // change. nanostores' subscribe fires immediately, and writing what was just
 // read back is a data-loss clobber: every renderer boots against storage it
@@ -934,8 +938,13 @@ export function openPreview(
   runtimeId: null | string = $activeSessionId.get(),
   /** The asking agent's profile, when it is not the chat on screen: only that
    *  profile's pins may be reused. Omitted = the viewed profile. */
-  profile?: null | string
+  profile?: null | string,
+  ownTabOnly = false
 ) {
+  if (ownTabOnly && profile && (normalizeProfileKey(profile) || 'default') !== viewKey) {
+    throw new Error('Preview profile is not mounted in this window.')
+  }
+
   // Stamp the tip, not an alias: the alias map is memory-only, so a tab
   // stamped with a rotated-away id would be orphaned by the next relaunch.
   const owner = currentSessionId(requestedOwner)
@@ -949,7 +958,7 @@ export function openPreview(
     ownerIdentity({ profile, runtimeId: owner === null ? runtimeId : null, sessionId: owner }),
     viewKey,
     viewKey
-  )
+  ).filter(tab => !ownTabOnly || !tab.pinned)
 
   const existing =
     target.kind === 'url'
@@ -970,18 +979,27 @@ export function openPreview(
     target: withRenderMode(target, existing?.target)
   }
 
-  $previewTabs.set(existing ? current.map(item => (item === existing ? tab : item)) : [...current, tab])
+  if (ownTabOnly) {
+    const openIds = new Set<string>(current.map(item => item.id))
+    $requestedPreviewMounts.set(
+      new Set([...$requestedPreviewMounts.get()].filter(key => key !== id && openIds.has(key)).concat(id))
+    )
+  }
 
+  // Stamp before publishing so an unknown runtime never flashes as a draft.
   setPendingRuntime(id, tab.sessionId == null && !tab.pinned ? runtimeId : null)
+  $previewTabs.set(existing ? current.map(item => (item === existing ? tab : item)) : [...current, tab])
 
   if (!$visiblePreviewTabs.get().some(item => item.id === id)) {
     rememberActiveTab(owner, id)
 
-    return
+    return id
   }
 
   noteExplicitPreviewOpen(id)
   selectRightRailTab(id)
+
+  return id
 }
 
 const blankPage = (): PreviewTarget => ({ kind: 'url', label: 'Browser', source: 'about:blank', url: 'about:blank' })

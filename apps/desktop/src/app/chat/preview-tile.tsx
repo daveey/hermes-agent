@@ -11,6 +11,7 @@
  */
 
 import { useStore } from '@nanostores/react'
+import { computed } from 'nanostores'
 
 import { findGroup } from '@/components/pane-shell/tree/model'
 import {
@@ -31,6 +32,7 @@ import {
   $dockedVisiblePreviewTabs,
   $poppedBrowserTabIds,
   $previewTabs,
+  $requestedPreviewMounts,
   $visiblePreviewTabs,
   adoptPersistedBrowserTab,
   type BrowserPage,
@@ -328,7 +330,10 @@ const HIDDEN_LIVE_PREVIEW_LIMIT = 8
 function keepsLiveBody(tabId: string): boolean {
   const target = targetFor(tabId)
 
-  return target?.kind === 'url' || target?.previewKind === 'html'
+  return (
+    Boolean(target) &&
+    (target?.kind === 'url' || target?.previewKind === 'html' || $requestedPreviewMounts.get().has(tabId))
+  )
 }
 
 /** A tab whose session left the screen keeps its live body when it is a page
@@ -343,6 +348,9 @@ const watchPreviewTileMirror = paneMirror<{ id: string }>({
   // to that session shows the same guest, not a reload; a popped-out
   // Browser's pane leaves the docked tree for good.
   source: $dockedVisiblePreviewTabs,
+  initiallyParked: computed([$previewTabs, $poppedBrowserTabIds, $requestedPreviewMounts], (tabs, popped, requested) =>
+    [...requested].flatMap(id => tabs.filter(tab => tab.id === id && !popped.has(id))).slice(-HIDDEN_LIVE_PREVIEW_LIMIT)
+  ),
   retain: retainHiddenPreview,
   retainLimit: HIDDEN_LIVE_PREVIEW_LIMIT,
   key: tab => tab.id,

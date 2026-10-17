@@ -187,6 +187,15 @@ server_request("vault.code", params=VaultCodeRequestParams, result=ValueResult,
 # ── desktop GUI bridges ───────────────────────────────────────────────────────────────────────
 
 
+class PreviewOpenRequestParams(ServerRequestParams):
+    url: str
+    label: str = ""
+
+
+server_request("preview.open", params=PreviewOpenRequestParams, result=ValueResult,
+               doc="Create and mount a preview tab in one selected window (JSON acknowledgement).")
+
+
 class ReadRangeRequestParams(ServerRequestParams):
     start: int | None = None
     count: int | None = None

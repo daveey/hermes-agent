@@ -17,17 +17,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 class TestPreviewHandler(unittest.TestCase):
-    def test_open_and_close_route_through_desktop_ui(self):
+    def test_open_is_acknowledged_and_close_emits(self):
         from tools import preview_tool
 
         sent = []
-        with patch("tools.desktop_ui.emit", side_effect=lambda ev, p: sent.append((ev, p)) or True):
+        with patch("tools.desktop_ui.emit", side_effect=lambda ev, p: sent.append((ev, p)) or True), patch(
+            "tui_gateway.server_requests.send",
+            return_value={"value": json.dumps({"success": True, "url": "https://www.cnn.com"})},
+        ) as request:
             r = json.loads(preview_tool._handle_preview({"action": "open", "url": "www.cnn.com"}))
             self.assertTrue(r["success"])
             self.assertEqual(r["url"], "https://www.cnn.com")  # normalizer kept
             r = json.loads(preview_tool._handle_preview({"action": "close"}))
             self.assertTrue(r["success"])
-        self.assertEqual([e for e, _ in sent], ["preview.open", "preview.close"])
+        self.assertEqual(request.call_args.args[0], "preview.open")
+        self.assertEqual(request.call_args.args[2]["url"], "https://www.cnn.com")
+        self.assertEqual([e for e, _ in sent], ["preview.close"])
 
     def test_read_outside_desktop_session_teaches(self):
         from tools import preview_tool

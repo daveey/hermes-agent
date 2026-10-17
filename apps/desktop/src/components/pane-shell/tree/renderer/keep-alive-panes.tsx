@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils'
 
 import { $layoutEditMode } from '../../edit-mode'
 import { hiddenPaneProps, PaneGroupContext, PaneLifecycleContext, PaneVisibleContext } from '../../pane-visibility'
+import { $parkedTreePanes } from '../parked-panes'
 import { $collapsedTreeSides, $treePaneEpochs, paneRootSide } from '../store'
 
 import { paneChrome } from './track-model'
@@ -43,6 +44,7 @@ const PlacementContext = createContext<PlacePane | null>(null)
  * an Electron webview's guest. Only its CSS anchor and contexts may change. */
 export function KeepAlivePanes({ children }: { children: ReactNode }) {
   const panes = useContributions('panes')
+  const parked = useStore($parkedTreePanes)
   const epochs = useStore($treePaneEpochs)
   const [placements, setPlacements] = useState<Placements>(() => new Map())
 
@@ -76,10 +78,17 @@ export function KeepAlivePanes({ children }: { children: ReactNode }) {
       )
 
       const retained = [...previous].filter(([id]) => present.has(id))
+      const next = new Map(retained)
 
-      return retained.length === previous.size ? previous : new Map(retained)
+      for (const id of parked) {
+        if (present.has(id) && !next.has(id)) {
+          next.set(id, { anchor: '', groupId: '', headerVisible: false, visible: false })
+        }
+      }
+
+      return next.size === previous.size && retained.length === previous.size ? previous : next
     })
-  }, [panes])
+  }, [panes, parked])
 
   return (
     <PlacementContext value={place}>

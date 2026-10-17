@@ -1,12 +1,14 @@
 import { JSON_RPC_INTERNAL_ERROR } from '@hermes/shared'
 
 import { backgroundPreviewTabFor } from '@/app/chat/right-rail/preview-active-tab'
+import { hasPreviewPaneMount } from '@/app/chat/right-rail/preview-mount'
 import {
   hasLivePreviewSurface,
   requestPopoutPreviewAct,
   requestPopoutPreviewRead
 } from '@/app/chat/right-rail/preview-popout-bridge'
 import { readActivePreview } from '@/app/chat/right-rail/preview-reader'
+import { hasPreviewScriptRunner } from '@/app/chat/right-rail/preview-script-runner'
 import {
   abortPreviewTyping,
   releasePreviewTyping,
@@ -16,11 +18,14 @@ import { readActiveTerminal } from '@/app/right-sidebar/terminal/buffer'
 import { pendingClarifyToolPayload } from '@/app/session/hooks/use-session-actions/restore-pending-clarify'
 import { translateNow } from '@/i18n'
 import { restorePendingClarifyToolCall } from '@/lib/chat-messages'
+import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import type { PreviewActAction } from '@/lib/preview-act/act-in-page'
+import { reachablePreviewUrl } from '@/lib/preview-reach'
 import type { TourAction, TourStep } from '@/lib/tour'
 import { type ClarifyRequest, normalizeQuestions, normalizeSetupChoose, setClarifyRequest } from '@/store/clarify'
 import type { ScopedServerRequest } from '@/store/gateway'
 import { dispatchNativeNotification } from '@/store/native-notifications'
+import { openPreview, renderedHtmlTarget } from '@/store/preview'
 import type { PreviewOwner } from '@/store/preview-ownership'
 import {
   receiveApprovalRequest,
@@ -81,6 +86,46 @@ const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : und
 /** Answer a string-valued request with a JSON-encoded result ('' = nothing / unavailable). */
 const answerValue = (request: ScopedServerRequest, result: unknown) =>
   request.respond({ value: result ? JSON.stringify(result) : '' })
+
+const previewOpen: Handler = ({ request, sessionId }) => {
+  void (async () => {
+    try {
+      if (!sessionId) {throw new Error('Preview open requires a session.')}
+      const source = str(request.params.url).trim()
+      const label = str(request.params.label).trim()
+      const resolved = await normalizeOrLocalPreviewTarget(source)
+
+      if (!resolved) {throw new Error('Unsupported preview target.')}
+      const url = resolved.kind === 'url' ? await reachablePreviewUrl(resolved.url) : resolved.url
+
+      const owner = {
+        profile: request.profile || previewScopeForRuntime(sessionId),
+        runtimeId: sessionId,
+        sessionId: storedSessionIdForRuntimeId(sessionId)
+      }
+
+      const tabId = openPreview(
+        renderedHtmlTarget({ ...resolved, url, label: label || resolved.label }),
+        owner.sessionId,
+        sessionId,
+        owner.profile,
+        true
+      )
+
+      const deadline = performance.now() + 5000
+      const isWeb = resolved.kind === 'url' || resolved.previewKind === 'html'
+
+      while (!(isWeb ? hasPreviewScriptRunner(tabId) : hasPreviewPaneMount(tabId))) {
+        if (performance.now() >= deadline) {throw new Error('Preview surface did not mount before timeout.')}
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+
+      answerValue(request, { success: true, url: source, label })
+    } catch (error) {
+      answerValue(request, { success: false, error: String(error) })
+    }
+  })()
+}
 
 export interface ServerRequestContext {
   deps: Pick<
@@ -719,6 +764,7 @@ export const SERVER_REQUEST_HANDLERS: Record<string, Handler> = {
   clarify,
   'display.install.sudo': displayInstallSudo,
   'preview.act': previewAct,
+  'preview.open': previewOpen,
   'preview.read': previewRead,
   secret,
   setup_choose: setupChoose,

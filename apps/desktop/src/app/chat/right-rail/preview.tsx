@@ -5,6 +5,7 @@ import { $restartPreviewServer } from '@/app/contrib/panes'
 import { $previewReloadRequest, $previewTabs, adoptPersistedBrowserTab } from '@/store/preview'
 import { isBrowserWindow } from '@/store/windows'
 
+import { registerPreviewPaneMount } from './preview-mount'
 import { PreviewPane } from './preview-pane'
 
 interface PreviewTilePaneProps {
@@ -40,6 +41,8 @@ export function PreviewTilePane({ onClose, tabId }: PreviewTilePaneProps) {
   }, [previewTabs, tabId])
 
   const target = previewTabs.find(tab => tab.id === tabId)?.target
+
+  useEffect(() => (target ? registerPreviewPaneMount(tabId) : undefined), [tabId, target])
 
   // The tab closed while this pane was still mounted (the mirror disposes it a
   // tick later).

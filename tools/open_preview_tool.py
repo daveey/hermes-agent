@@ -2,16 +2,18 @@
 """Open a URL, dev server, or file in the Hermes desktop GUI's preview pane.
 
 Registration lives in the `desktop_preview` tool (``tools.preview_tool``); this module keeps
-the normalizer + open action. Emits ``preview.open`` via ``desktop_ui``: the renderer opens
-the pane for the window that asked and never steals focus for a background session.
+the normalizer + open action. Requests ``preview.open`` from one renderer and returns
+only its acknowledgement; hidden sessions are mounted without stealing focus.
 """
 
+import json
 import os
 import re
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from tools import desktop_ui
+from gateway.session_context import get_session_env
+from tui_gateway import server_requests
 from tools.registry import tool_error
 
 
@@ -81,9 +83,15 @@ def open_preview_tool(url: str, label: str = "") -> str:
         )
 
     label = (label or "").strip()
-    return desktop_ui.emit_or_error(
-        "preview.open",
-        {"url": target, "label": label},
-        "Failed to open the preview pane: ",
-        "The preview pane is only available in the Hermes desktop app.",
-        {"success": True, "url": target, "label": label})
+    try:
+        answer = server_requests.send(
+            "preview.open", get_session_env("HERMES_UI_SESSION_ID", ""),
+            {"url": target, "label": label}, timeout=15)
+        value = (answer or {}).get("value")
+        result = json.loads(value) if isinstance(value, str) else None
+        if isinstance(result, dict):
+            return json.dumps(result, ensure_ascii=False)
+    except (ValueError, RuntimeError, OSError) as exc:
+        return tool_error(f"Failed to open the preview pane: {exc}")
+    return tool_error("No Hermes Desktop window acknowledged opening the preview. "
+                      "Open or update the Desktop app, then retry.")

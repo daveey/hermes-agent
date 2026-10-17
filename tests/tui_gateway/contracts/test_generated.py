@@ -74,12 +74,15 @@ def emitted_event_names() -> set[str]:
     names.update(_BROKER_FRAME.findall(_read(REPO / "gateway" / "browser_control_broker.py")))
     names.update(_SETUP_READY.findall(_read(REPO / "hermes_cli" / "free_tier_bootstrap.py")))
     names.update(_FREE_TIER_CHALLENGE.findall(_read(REPO / "hermes_cli" / "anon_challenge.py")))
+    # Older backends still emit this notification; current renderers retain its
+    # decoder while acknowledged opens use the request contract.
+    names.add("preview.open")
     return names
 
 
 def sent_server_requests() -> set[str]:
     names: set[str] = set()
-    for src in (REPO / "tui_gateway").glob("*.py"):
+    for src in [*(REPO / "tui_gateway").glob("*.py"), *(REPO / "tools").glob("*.py")]:
         names.update(_LITERAL_REQUEST.findall(_read(src)))
     return names
 
