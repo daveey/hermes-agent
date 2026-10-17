@@ -1,6 +1,7 @@
 import { JSON_RPC_INTERNAL_ERROR } from '@hermes/shared'
 
 import { backgroundPreviewTabFor } from '@/app/chat/right-rail/preview-active-tab'
+import { previewGuestEpoch, previewGuestState } from '@/app/chat/right-rail/preview-guest-ready'
 import { hasPreviewPaneMount } from '@/app/chat/right-rail/preview-mount'
 import {
   hasLivePreviewSurface,
@@ -8,7 +9,6 @@ import {
   requestPopoutPreviewRead
 } from '@/app/chat/right-rail/preview-popout-bridge'
 import { readActivePreview } from '@/app/chat/right-rail/preview-reader'
-import { hasPreviewScriptRunner } from '@/app/chat/right-rail/preview-script-runner'
 import {
   abortPreviewTyping,
   releasePreviewTyping,
@@ -25,7 +25,7 @@ import type { TourAction, TourStep } from '@/lib/tour'
 import { type ClarifyRequest, normalizeQuestions, normalizeSetupChoose, setClarifyRequest } from '@/store/clarify'
 import type { ScopedServerRequest } from '@/store/gateway'
 import { dispatchNativeNotification } from '@/store/native-notifications'
-import { openPreview, renderedHtmlTarget } from '@/store/preview'
+import { $offViewPreviewTabs, $previewTabs, openPreview, renderedHtmlTarget } from '@/store/preview'
 import type { PreviewOwner } from '@/store/preview-ownership'
 import {
   receiveApprovalRequest,
@@ -87,42 +87,83 @@ const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : und
 const answerValue = (request: ScopedServerRequest, result: unknown) =>
   request.respond({ value: result ? JSON.stringify(result) : '' })
 
+/** How long a hidden open may take to reach a usable page: under the tool's
+ *  15s server-request deadline, so the agent always hears this verdict. */
+const PREVIEW_OPEN_READY_MS = 12_000
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+/** Wait until `tabId`'s guest can answer: dom-ready for the page this open
+ *  asked for (a reused tab steering to a new address must report a NEW
+ *  dom-ready, not the previous page's), or a mounted pane for surfaces with
+ *  no guest. A main-frame load failure ends the wait with that error. */
+async function waitForPreviewSurface(tabId: string, guest: boolean, sinceEpoch: number | null): Promise<void> {
+  const deadline = performance.now() + PREVIEW_OPEN_READY_MS
+
+  for (;;) {
+    if (!guest) {
+      if (hasPreviewPaneMount(tabId)) {
+        return
+      }
+    } else {
+      const state = previewGuestState(tabId)
+
+      if (state && (sinceEpoch === null || state.epoch > sinceEpoch)) {
+        if (state.status === 'ready') {
+          return
+        }
+
+        if (state.status === 'failed') {
+          throw new Error(state.error)
+        }
+      }
+    }
+
+    if (performance.now() >= deadline) {
+      throw new Error(guest ? 'Preview page did not finish loading before timeout.' : 'Preview surface did not mount before timeout.')
+    }
+
+    await sleep(25)
+  }
+}
+
 const previewOpen: Handler = ({ request, sessionId }) => {
   void (async () => {
     try {
-      if (!sessionId) {throw new Error('Preview open requires a session.')}
+      if (!sessionId) {
+        throw new Error('Preview open requires a session.')
+      }
+
       const source = str(request.params.url).trim()
       const label = str(request.params.label).trim()
       const resolved = await normalizeOrLocalPreviewTarget(source)
 
-      if (!resolved) {throw new Error('Unsupported preview target.')}
-      const url = resolved.kind === 'url' ? await reachablePreviewUrl(resolved.url) : resolved.url
+      if (!resolved) {
+        throw new Error('Unsupported preview target.')
+      }
 
+      const url = resolved.kind === 'url' ? await reachablePreviewUrl(resolved.url) : resolved.url
+      const target = renderedHtmlTarget({ ...resolved, url, label: label || resolved.label })
+
+      // The same owner (and so the same profile bucket) the follow-up
+      // read/act requests resolve, so they find the page this open mounted.
       const owner = {
-        profile: request.profile || previewScopeForRuntime(sessionId),
+        profile: previewScopeForRuntime(sessionId),
         runtimeId: sessionId,
         sessionId: storedSessionIdForRuntimeId(sessionId)
       }
 
-      const tabId = openPreview(
-        renderedHtmlTarget({ ...resolved, url, label: label || resolved.label }),
-        owner.sessionId,
-        sessionId,
-        owner.profile,
-        true
-      )
-
-      const deadline = performance.now() + 5000
-      const isWeb = resolved.kind === 'url' || resolved.previewKind === 'html'
-
-      while (!(isWeb ? hasPreviewScriptRunner(tabId) : hasPreviewPaneMount(tabId))) {
-        if (performance.now() >= deadline) {throw new Error('Preview surface did not mount before timeout.')}
-        await new Promise(resolve => setTimeout(resolve, 25))
-      }
-
+      const priorTabs = [...$previewTabs.get(), ...$offViewPreviewTabs.get()]
+      const epoch = previewGuestEpoch()
+      const tabId = openPreview(target, owner.sessionId, sessionId, owner.profile, true)
+      // A reused tab already showing this address loads nothing new: its
+      // current guest state is the answer. Anything else waits for a fresh one.
+      const unchanged = priorTabs.find(tab => tab.id === tabId)?.target.url === target.url
+      const guest = (target.kind === 'url' || target.previewKind === 'html') && !target.dataUrl && !target.transient
+      await waitForPreviewSurface(tabId, guest, unchanged ? null : epoch)
       answerValue(request, { success: true, url: source, label })
     } catch (error) {
-      answerValue(request, { success: false, error: String(error) })
+      answerValue(request, { success: false, error: error instanceof Error ? error.message : String(error) })
     }
   })()
 }

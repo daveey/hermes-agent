@@ -240,6 +240,8 @@ function persistTabs() {
       ? null
       : JSON.stringify(buckets, (key, value) => (key === 'dataUrl' ? undefined : value))
   )
+  // Every bucket edit lands here; a parked off-view page must follow it.
+  syncOffViewTabs()
 }
 
 // Tabs are scoped to THE CHAT ON SCREEN, not to the window's gateway socket.
@@ -261,6 +263,37 @@ export const $previewTabs = atom<PreviewTab[]>([])
 /** Explicit agent opens may mount before their session is ever shown. Restored
  * tabs must remain lazy; the mirror applies the same bounded retention policy. */
 export const $requestedPreviewMounts = atom<ReadonlySet<string>>(new Set())
+
+/** Agent-opened tabs of profiles NOT in view, still mounted (parked) so a
+ *  hidden chat of another profile keeps a live page. They stay in their own
+ *  profile's bucket — never in `$previewTabs`, so the viewed profile's rail,
+ *  drawer and agents never see them; only their owner's read/act requests
+ *  (`previewTabsFor`) and the pane host resolve them. */
+export const $offViewPreviewTabs = atom<readonly PreviewTab[]>([])
+
+function offViewTabsFor(key: string): PreviewTab[] {
+  const requested = $requestedPreviewMounts.get()
+
+  return Object.entries(tabsByProfile)
+    .filter(([bucket]) => bucket !== key)
+    .flatMap(([, tabs]) => tabs.filter(tab => requested.has(tab.id)))
+}
+
+function syncOffViewTabs(): void {
+  const next = offViewTabsFor(viewKey)
+  const current = $offViewPreviewTabs.get()
+
+  if (next.length !== current.length || next.some((tab, index) => tab !== current[index])) {
+    $offViewPreviewTabs.set(next)
+  }
+}
+
+$requestedPreviewMounts.listen(syncOffViewTabs)
+
+/** The tab `tabId` names, in view or parked off view. */
+export function previewTabById(tabId: string): PreviewTab | undefined {
+  return $previewTabs.get().find(tab => tab.id === tabId) ?? $offViewPreviewTabs.get().find(tab => tab.id === tabId)
+}
 
 // Adoption phase: emissions that carry storage THIS MODULE JUST READ, not a
 // change. nanostores' subscribe fires immediately, and writing what was just
@@ -315,8 +348,13 @@ function applyPreviewScope(next: string) {
     persistTabs()
   }
 
+  // A parked off-view page must never be absent from both lists, even for one
+  // notification: a pane whose tab vanishes is destroyed (its guest with it).
+  // Publish the union first, then the view, then the settled off-view list.
+  $offViewPreviewTabs.set([...new Set([...$offViewPreviewTabs.get(), ...offViewTabsFor(next)])])
   viewKey = next
   $previewTabs.set(tabsByProfile[next] ?? [])
+  syncOffViewTabs()
 }
 
 /** Drop one profile's rail. Delete counterpart of the tiles store's
@@ -331,6 +369,7 @@ export function dropPreviewTabsForProfile(profile: string) {
     $previewTabs.set([])
   } else {
     forgetGonePendingTabs()
+    syncOffViewTabs()
   }
 }
 
@@ -366,6 +405,8 @@ export function migratePreviewTabsForProfile(oldProfile: string, newProfile: str
   if (wasInView) {
     $previewTabs.set(tabsByProfile[to] ?? [])
   }
+
+  syncOffViewTabs()
 }
 
 if (typeof window !== 'undefined') {
@@ -388,7 +429,15 @@ export function previewTabsFor(owner: PreviewOwner = $focusedStoredSessionId.get
     return $previewTabs.get().filter(tab => tab.id === own)
   }
 
-  return bucketTabsFor($previewTabs.get(), ownerIdentity(owner), viewKey, viewKey)
+  const who = ownerIdentity(owner)
+  const inView = bucketTabsFor($previewTabs.get(), who, viewKey, viewKey)
+
+  if (!who.profile || who.profile === viewKey) {
+    return inView
+  }
+
+  // Another profile's agent also reaches its own pages parked off view.
+  return [...inView, ...bucketTabsFor($offViewPreviewTabs.get(), who, who.profile, viewKey).filter(tab => !tab.pinned)]
 }
 
 /** Ids of the tabs `owner` may see in ANY profile's rail, for scoping a
@@ -941,8 +990,10 @@ export function openPreview(
   profile?: null | string,
   ownTabOnly = false
 ) {
-  if (ownTabOnly && profile && (normalizeProfileKey(profile) || 'default') !== viewKey) {
-    throw new Error('Preview profile is not mounted in this window.')
+  const bucketKey = profile ? normalizeProfileKey(profile) || 'default' : viewKey
+
+  if (ownTabOnly && bucketKey !== viewKey) {
+    return openOffViewPreview(target, requestedOwner, runtimeId, bucketKey)
   }
 
   // Stamp the tip, not an alias: the alias map is memory-only, so a tab
@@ -980,7 +1031,7 @@ export function openPreview(
   }
 
   if (ownTabOnly) {
-    const openIds = new Set<string>(current.map(item => item.id))
+    const openIds = new Set<string>([...current, ...Object.values(tabsByProfile).flat()].map(item => item.id))
     $requestedPreviewMounts.set(
       new Set([...$requestedPreviewMounts.get()].filter(key => key !== id && openIds.has(key)).concat(id))
     )
@@ -998,6 +1049,45 @@ export function openPreview(
 
   noteExplicitPreviewOpen(id)
   selectRightRailTab(id)
+
+  return id
+}
+
+/** `openPreview` for an agent of a profile that is not in view: the tab joins
+ *  that profile's own bucket and mounts parked off view (`$offViewPreviewTabs`),
+ *  so the viewed profile's rail, selection and pins are untouched. Reuse is
+ *  among the owner's own non-pinned tabs in that bucket. */
+function openOffViewPreview(
+  target: PreviewTarget,
+  requestedOwner: null | string,
+  runtimeId: null | string,
+  key: string
+): RightRailTabId {
+  const owner = currentSessionId(requestedOwner)
+  const bucket = tabsByProfile[key] ?? []
+
+  const own = bucketTabsFor(
+    bucket,
+    ownerIdentity({ profile: key, runtimeId: owner === null ? runtimeId : null, sessionId: owner }),
+    key,
+    viewKey
+  ).filter(tab => !tab.pinned)
+
+  const existing = target.kind === 'url' ? browserTabFor(own) : target.kind === 'file' ? fileTabFor(own, target) : undefined
+  const everyTab = [...$previewTabs.get(), ...Object.values(tabsByProfile).flat()]
+
+  const id =
+    existing?.id ?? (target.kind === 'url' ? mintBrowserTabId() : unusedTabId(previewTabId(target, owner), everyTab))
+
+  const tab: PreviewTab = { id, pinned: false, sessionId: owner ?? undefined, target: withRenderMode(target, existing?.target) }
+
+  setPendingRuntime(id, tab.sessionId == null ? runtimeId : null)
+  tabsByProfile[key] = existing ? bucket.map(item => (item === existing ? tab : item)) : [...bucket, tab]
+  persistTabs()
+  rememberActiveTab(owner, id)
+  // Publishing the mount request re-derives `$offViewPreviewTabs`.
+  $requestedPreviewMounts.set(new Set([...$requestedPreviewMounts.get()].filter(item => item !== id).concat(id)))
+  syncOffViewTabs()
 
   return id
 }

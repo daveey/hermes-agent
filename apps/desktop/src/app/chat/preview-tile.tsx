@@ -30,6 +30,7 @@ import { $rightRailActiveTabId, type RightRailTabId, selectRightRailTab } from '
 import {
   $browserPages,
   $dockedVisiblePreviewTabs,
+  $offViewPreviewTabs,
   $poppedBrowserTabIds,
   $previewTabs,
   $requestedPreviewMounts,
@@ -42,6 +43,7 @@ import {
   newBrowserTab,
   popOutBrowserTab,
   preferredVisibleTabId,
+  previewTabById,
   type PreviewTarget,
   setPreviewTabPinned
 } from '@/store/preview'
@@ -54,7 +56,7 @@ import { forgetPreviewConsole } from './right-rail/preview-console-store'
 
 /** The target behind a tile id, or null once its tab is gone. */
 function targetFor(tabId: string): PreviewTarget | null {
-  return $previewTabs.get().find(tab => tab.id === tabId)?.target ?? null
+  return previewTabById(tabId)?.target ?? null
 }
 
 /** Schemes that are not a page the user's default browser can usefully open
@@ -348,8 +350,21 @@ const watchPreviewTileMirror = paneMirror<{ id: string }>({
   // to that session shows the same guest, not a reload; a popped-out
   // Browser's pane leaves the docked tree for good.
   source: $dockedVisiblePreviewTabs,
-  initiallyParked: computed([$previewTabs, $poppedBrowserTabIds, $requestedPreviewMounts], (tabs, popped, requested) =>
-    [...requested].flatMap(id => tabs.filter(tab => tab.id === id && !popped.has(id))).slice(-HIDDEN_LIVE_PREVIEW_LIMIT)
+  // Agent opens for hidden sessions mount parked before they are ever shown —
+  // another profile's included (`$offViewPreviewTabs`), so its page loads
+  // without entering this profile's rail.
+  initiallyParked: computed(
+    [$previewTabs, $offViewPreviewTabs, $poppedBrowserTabIds, $requestedPreviewMounts],
+    (tabs, offView, popped, requested) => {
+      const known = new Map<string, (typeof tabs)[number]>([...offView, ...tabs].map(tab => [tab.id, tab]))
+
+      return [...requested].flatMap(id => {
+        const tab = known.get(id)
+
+        return tab && !popped.has(tab.id) ? [tab] : []
+      })
+        .slice(-HIDDEN_LIVE_PREVIEW_LIMIT)
+    }
   ),
   retain: retainHiddenPreview,
   retainLimit: HIDDEN_LIVE_PREVIEW_LIMIT,

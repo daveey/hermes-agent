@@ -2,7 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useEffect } from 'react'
 
 import { $restartPreviewServer } from '@/app/contrib/panes'
-import { $previewReloadRequest, $previewTabs, adoptPersistedBrowserTab } from '@/store/preview'
+import { $offViewPreviewTabs, $previewReloadRequest, $previewTabs, adoptPersistedBrowserTab } from '@/store/preview'
 import { isBrowserWindow } from '@/store/windows'
 
 import { registerPreviewPaneMount } from './preview-mount'
@@ -28,6 +28,8 @@ interface PreviewTilePaneProps {
 export function PreviewTilePane({ onClose, tabId }: PreviewTilePaneProps) {
   const previewReloadRequest = useStore($previewReloadRequest)
   const previewTabs = useStore($previewTabs)
+  // Another profile's hidden agent page, parked while this profile is in view.
+  const offViewTabs = useStore($offViewPreviewTabs)
   const restartPreviewServer = useStore($restartPreviewServer)
 
   // A popped-out Browser is a fresh renderer: no session ever pushes a scope
@@ -40,7 +42,7 @@ export function PreviewTilePane({ onClose, tabId }: PreviewTilePaneProps) {
     }
   }, [previewTabs, tabId])
 
-  const target = previewTabs.find(tab => tab.id === tabId)?.target
+  const target = (previewTabs.find(tab => tab.id === tabId) ?? offViewTabs.find(tab => tab.id === tabId))?.target
 
   useEffect(() => (target ? registerPreviewPaneMount(tabId) : undefined), [tabId, target])
 

@@ -31,6 +31,10 @@ interface Placement {
   groupId: string
   headerVisible: boolean
   visible: boolean
+  /** Mounted parked before it was ever placed (an agent's page for a chat
+   *  that is not on screen): it has no measured size to keep, and a 0×0 guest
+   *  has a 0×0 viewport, where nothing on the page can be located or clicked. */
+  bornParked?: boolean
   overlay?: boolean
   onMouseLeave?: MouseEventHandler<HTMLDivElement>
 }
@@ -38,6 +42,10 @@ interface Placement {
 type Placements = ReadonlyMap<string, Placement>
 type PlacePane = (paneId: string, placement: Placement) => () => void
 const PlacementContext = createContext<PlacePane | null>(null)
+
+/** A laptop-sized viewport for a page that has never been on screen. */
+const BORN_PARKED_WIDTH = '1280px'
+const BORN_PARKED_HEIGHT = '800px'
 
 /** Own the live bodies outside the replaceable split/group tree. Neither React
  * remounts nor DOM moves are safe for a native guest: even moveBefore destroys
@@ -82,7 +90,7 @@ export function KeepAlivePanes({ children }: { children: ReactNode }) {
 
       for (const id of parked) {
         if (present.has(id) && !next.has(id)) {
-          next.set(id, { anchor: '', groupId: '', headerVisible: false, visible: false })
+          next.set(id, { anchor: '', bornParked: true, groupId: '', headerVisible: false, visible: false })
         }
       }
 
@@ -168,8 +176,8 @@ const KeepAlivePaneHost = memo(function KeepAlivePaneHost({ pane, placement, epo
           positionAnchor: placement.anchor,
           left: 'anchor(left)',
           top: 'anchor(top)',
-          width: placement.visible ? 'anchor-size(width)' : 'var(--pane-kept-width, 0px)',
-          height: placement.visible ? 'anchor-size(height)' : 'var(--pane-kept-height, 0px)'
+          width: placement.visible ? 'anchor-size(width)' : `var(--pane-kept-width, ${placement.bornParked ? BORN_PARKED_WIDTH : '0px'})`,
+          height: placement.visible ? 'anchor-size(height)' : `var(--pane-kept-height, ${placement.bornParked ? BORN_PARKED_HEIGHT : '0px'})`
         } as CSSProperties
       }
     >

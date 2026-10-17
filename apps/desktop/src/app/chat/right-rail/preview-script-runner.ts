@@ -19,10 +19,6 @@ export type PreviewScriptRunner = (code: string) => Promise<unknown>
 
 const runners = new Map<string, PreviewScriptRunner>()
 
-export function hasPreviewScriptRunner(tabId: string): boolean {
-  return runners.has(tabId)
-}
-
 /** Register a live preview's script runner; returns an idempotent unregister. */
 export function registerPreviewScriptRunner(tabId: string, runner: PreviewScriptRunner): () => void {
   runners.set(tabId, runner)

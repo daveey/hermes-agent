@@ -80,7 +80,7 @@ describe('acknowledged preview open', () => {
     const result = deliver('preview.open', { session_id: 'hidden', url: 'https://example.com' }, 'foreground')
     expect(result.handled).toBe(true)
     expect(result.respond).not.toHaveBeenCalled()
-    await vi.advanceTimersByTimeAsync(6000)
+    await vi.advanceTimersByTimeAsync(13_000)
     expect(result.respond).toHaveBeenCalledWith({ value: expect.stringContaining('"success":false') })
     closeRightRail()
     vi.useRealTimers()

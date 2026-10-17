@@ -71,6 +71,7 @@ import { type ConsoleEntry } from './preview-console-state'
 import { previewConsoleState } from './preview-console-store'
 import { LocalFilePreview, PreviewEmptyState, PreviewModeSwitcher } from './preview-file'
 import { usePreviewGuestOffscreen } from './preview-guest-offscreen'
+import { clearPreviewGuestState, setPreviewGuestState, touchPreviewGuestReady } from './preview-guest-ready'
 import { type PreviewInputEvent, registerPreviewInput, toWebviewInputSpace } from './preview-input'
 import { PREVIEW_BROWSER_ATTR, registerPreviewNav } from './preview-nav'
 import { registerPreviewPageReader } from './preview-reader'
@@ -1247,6 +1248,19 @@ export function PreviewPane({
         url: detail.validatedURL || guestPage(webview, liveUrlRef.current).url
       })
       setLoading(false)
+
+      if (tabId) {
+        setPreviewGuestState(tabId, {
+          error: copy.loadFailedConsole(errorCode, detail.errorDescription || detail.validatedURL || copy.unknownError),
+          status: 'failed'
+        })
+      }
+    }
+
+    const onGuestReady = () => {
+      if (tabId) {
+        setPreviewGuestState(tabId, { status: 'ready' })
+      }
     }
 
     const onStart = () => setLoading(true)
@@ -1365,6 +1379,12 @@ export function PreviewPane({
     // #101880: never let a guest reach the native print panel.
     webview.addEventListener('dom-ready', armPrintGuard)
     webview.addEventListener('dom-ready', noteGuestReady)
+    webview.addEventListener('dom-ready', onGuestReady)
+
+    if (tabId) {
+      setPreviewGuestState(tabId, { status: 'loading' })
+    }
+
     host.appendChild(webview)
     webviewRef.current = webview
 
@@ -1383,7 +1403,13 @@ export function PreviewPane({
       webview.removeEventListener('page-title-updated', notePage)
       webview.removeEventListener('dom-ready', armPrintGuard)
       webview.removeEventListener('dom-ready', noteGuestReady)
+      webview.removeEventListener('dom-ready', onGuestReady)
       webview.remove()
+
+      if (tabId) {
+        clearPreviewGuestState(tabId)
+      }
+
       setAnnotate(session => (session.mode ? { ...endAnnotateMode(session), stack: emptyAnnotateStack() } : session))
     }
   }, [appendConsoleEntry, consoleState, copy, isRemoteHtml, isWebPreview, noteGuestReady, tabId, target.kind])
@@ -1409,7 +1435,15 @@ export function PreviewPane({
     const nextUrl = targetUrlRef.current
 
     if (liveUrlRef.current === nextUrl) {
+      if (tabId) {
+        touchPreviewGuestReady(tabId)
+      }
+
       return
+    }
+
+    if (tabId) {
+      setPreviewGuestState(tabId, { status: 'loading' })
     }
 
     annotateLoopRef.current += 1
@@ -1427,13 +1461,18 @@ export function PreviewPane({
     setLoading(true)
     setCurrentUrl(nextUrl)
     void webview.loadURL?.(nextUrl)?.catch((error: unknown) => {
-      setLoadError({
-        description: error instanceof Error ? error.message : copy.unreachableDescription,
-        url: nextUrl
-      })
+      const description = error instanceof Error ? error.message : copy.unreachableDescription
+
+      setLoadError({ description, url: nextUrl })
       setLoading(false)
+
+      // An aborted load was superseded (a redirect, a newer navigation); the
+      // page that replaced it reports its own dom-ready or failure.
+      if (tabId && !description.includes('ERR_ABORTED')) {
+        setPreviewGuestState(tabId, { error: description, status: 'failed' })
+      }
     })
-  }, [annotateGuest, consoleState, copy.unreachableDescription, isRemoteHtml, isWebPreview, target.url])
+  }, [annotateGuest, consoleState, copy.unreachableDescription, isRemoteHtml, isWebPreview, tabId, target.url])
 
   return (
     <aside

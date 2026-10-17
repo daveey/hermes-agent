@@ -18,6 +18,7 @@ import {
 } from '../session/hooks/use-message-stream/gateway-event/server-requests'
 
 import { watchPreviewTiles } from './preview-tile'
+import { setPreviewGuestState } from './right-rail/preview-guest-ready'
 import { registerPreviewPageReader } from './right-rail/preview-reader'
 import { registerPreviewScriptRunner } from './right-rail/preview-script-runner'
 
@@ -41,6 +42,8 @@ vi.mock('./right-rail/preview', () => ({
   PreviewTilePane: ({ tabId }: { tabId: string }) => {
     useEffect(() => {
       mounts.set(tabId, (mounts.get(tabId) ?? 0) + 1)
+      // The stand-in guest is attached at once (the real pane reports dom-ready).
+      setPreviewGuestState(tabId, { status: 'ready' })
 
       const stopRead = registerPreviewPageReader(tabId, async () => ({
         text: 'Hidden page text',
