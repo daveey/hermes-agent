@@ -928,3 +928,41 @@ def test_synthesized_run_for_unassigned_card_keeps_null_profile(kanban_home: Pat
             "SELECT profile, outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (tid,),
         ).fetchone()
         assert (run["outcome"], run["profile"]) == ("blocked", None)
+
+
+def test_active_pr_guard_lifts_when_the_card_is_unblocked_after_the_pr(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker opens its PR, blocks waiting for the merge, and is unblocked.
+
+    The unblock is the resume signal for THAT PR (ship, verify, close), not a
+    duplicate implementation; without it the card sat in ``ready`` for the
+    rest of the 24 h window after its PR merged. A crash/reclaim still guards,
+    and a newer PR comment after the unblock guards again.
+    """
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(cfgmod, "load_config", lambda *a, **k: {})
+    pr_comment = "Fix done; PR #300 (https://github.com/example/repo/pull/300) is waiting in the merge queue."
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="blocked on own pr", assignee="dev")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        kb.add_comment(conn, tid, author="dev", body=pr_comment)
+        assert kb.block_task(conn, tid, reason="waiting for the merge queue")
+        _backdate_comments(conn, tid)
+        control = kb.create_task(conn, title="crashed after pr", assignee="dev")
+        kb.add_comment(conn, control, author="dev", body=pr_comment)
+        _backdate_comments(conn, control)
+        assert kbd.check_respawn_guard(conn, control) == "active_pr"
+
+        assert kb.unblock_task(conn, tid)
+        assert kbd.check_respawn_guard(conn, tid) is None
+        res = kbd.dispatch_once(conn, dry_run=True)
+        assert tid in [s[0] for s in res.spawned]
+        assert dict(res.respawn_guarded).get(control) == "active_pr"
+
+        kb.add_comment(conn, tid, author="dev", body="Opened https://github.com/example/repo/pull/301")
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
