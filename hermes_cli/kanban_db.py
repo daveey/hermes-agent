@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
 
@@ -1020,16 +1021,12 @@ def _new_task_id() -> str:
 
 def _claimer_id() -> str:
     """Return a ``host:pid`` string that identifies this claimer."""
-    import socket
-    try:
-        host = socket.gethostname() or "unknown"
-    except Exception:
-        host = "unknown"
-    return f"{host}:{os.getpid()}"
+    from hermes_cli.kanban_host_identity import claim_prefix
+    return f"{claim_prefix()}{os.getpid()}"
 
 
 def _host_prefix() -> str:
-    """``"<host>:"`` prefix shared by every claim lock issued from this host."""
+    """Stable local claim prefix, shared across dispatcher restarts."""
     return f"{_claimer_id().split(':', 1)[0]}:"
 
 
@@ -2381,7 +2378,7 @@ def release_stale_claims(
         "  AND claim_expires < ?", (now,),
     ).fetchall()
     for row in stale:
-        host_local = (row["claim_lock"] or "").startswith(host_prefix)
+        host_local = _claim_is_local(row["claim_lock"], host_prefix)
         hb = _to_epoch(row["last_heartbeat_at"])
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
@@ -3961,7 +3958,8 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     _ctx_parent_results(lines, conn, task_id, now)
     _ctx_role_history(lines, conn, task, now)
     _ctx_comments(lines, list_comments(conn, task_id), now)
-    return "\n".join(lines).rstrip() + "\n"
+    from hermes_cli.kanban_worker_recovery import build_recovery_context
+    return "\n".join(lines).rstrip() + "\n" + build_recovery_context(conn, task_id)
 
 
 def _ctx_cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:

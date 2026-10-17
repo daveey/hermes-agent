@@ -524,7 +524,7 @@ def _terminate_reclaimed_worker(
     }
     if not pid or pid <= 0 or not claim_lock:
         return info
-    if not str(claim_lock).startswith(_kb._host_prefix()):
+    if not _kb._claim_is_local(claim_lock):
         return info
     info["host_local"] = True
 
@@ -595,7 +595,7 @@ def reap_terminal_workers(conn: sqlite3.Connection, *, signal_fn=None) -> list[s
 
 def _reap_terminal_worker_row(conn, row, host_prefix: str, signal_fn, reaped: list[str]) -> None:
     pid, fingerprint = int(row["worker_pid"]), row["worker_started_at"]
-    if pid == os.getpid() or not str(row["claim_lock"] or "").startswith(host_prefix):
+    if pid == os.getpid() or not _kb._claim_is_local(row["claim_lock"], host_prefix):
         return
     if fingerprint == UNVERIFIED_WORKER_FINGERPRINT and _kb._pid_alive(pid):
         return  # unproven identity: never signalled; its evidence is cleared once the pid is gone
@@ -731,7 +731,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     ).fetchall()
     for row in rows:
         lock = row["claim_lock"] or ""
-        if not lock.startswith(host_prefix):
+        if not _kb._claim_is_local(lock, host_prefix):
             continue
         # Runtime is per attempt: ``tasks.started_at`` records the FIRST start,
         # so retries must be measured from the active task_runs row.
@@ -1217,7 +1217,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
         host_prefix = _kb._host_prefix()
         for row in rows:
             lock = row["claim_lock"] or ""
-            if not lock.startswith(host_prefix):
+            if not _kb._claim_is_local(lock, host_prefix):
                 continue
             # Launch-window grace so a freshly-spawned worker isn't reclaimed
             # before its PID is visible on /proc.
@@ -1559,7 +1559,7 @@ def adopt_worker_pid(conn: sqlite3.Connection, task_id: str, run_id: int, pid: i
         if row is None or row["status"] != "running" or row["current_run_id"] != int(run_id):
             return False
         # Liveness checks are host-local: a pid from another host (or pid namespace) proves nothing here.
-        if row["worker_pid"] is None and (row["claim_lock"] or "").startswith(_kb._host_prefix()):
+        if row["worker_pid"] is None and _kb._claim_is_local(row["claim_lock"]):
             conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
                          (int(pid), started_at, task_id))
             conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",

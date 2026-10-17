@@ -341,6 +341,24 @@ gateway docs). Without a running gateway, `ready` tasks stay where they are
 until one comes up — `hermes kanban create` warns about this at creation
 time.
 
+#### Restart survival and retry context
+
+On POSIX, workers start in separate process sessions with file-backed logs, so
+terminating the gateway or Desktop backend process group does not signal them.
+The next dispatcher observes the existing PID and run rather than starting a
+replacement. On macOS, new claim ownership uses the boot-session UUID, not the
+network-dependent hostname; hostname changes on wake do not make these claims
+appear remote. Legacy hostname claims remain recognized under that hostname.
+
+Workers register their persisted session against their exact board, task, run,
+profile and live claim. After a crash, reclaim or iteration-budget exhaustion,
+`kanban_show` includes a bounded historical transcript tail from the latest
+registered closed run (including a compression summary when available). The new
+run keeps its own ownership and must verify uncertain tool side effects before
+retrying them; it does not replay tools or reopen the old session. Existing
+iteration and failure limits still apply. Older runs without registration, deleted
+transcripts and cross-profile handoffs do not receive transcript recovery.
+
 #### Workers and systemd cgroups
 
 Workers are fire-and-forget processes that outlive the dispatcher tick, so

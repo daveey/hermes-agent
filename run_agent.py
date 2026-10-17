@@ -341,6 +341,9 @@ class AIAgent(
                 cwd=_launch_cwd_for_session(source), profile_name=profile_for_session,
             )
             self._session_db_created = True
+            if source == "kanban":
+                from hermes_cli.kanban_worker_recovery import register_worker_session
+                register_worker_session(self._session_db, self.session_id)
         except Exception as e:
             # Transient failure (e.g. SQLite lock): _session_db_created stays False so the next turn retries.
             logger.warning("Session DB creation failed (will retry next turn): %s", e)
