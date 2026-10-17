@@ -179,7 +179,9 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "``reason`` is shown to the human on the board. If a task keeps "
         "getting unblocked and re-blocked for the same reason, it is "
         "auto-escalated to triage. Use for genuine blockers only — don't "
-        "block on things you can resolve yourself."
+        "block on things you can resolve yourself. Waiting on time or an "
+        "external event (a cap, a soak, a release window) is not a block: use "
+        "kanban_schedule, since a blocked card marks its chat as needing a human."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),

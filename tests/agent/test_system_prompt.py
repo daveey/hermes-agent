@@ -956,3 +956,14 @@ class TestConversationStartedTwoLine:
         vol = self._volatile(agent)
         assert "Conversation started:" not in vol
         assert "as of the last context rebuild" not in vol
+
+
+def test_kanban_guidance_routes_timed_waits_to_schedule_not_block():
+    """A worker waiting on a clock (a cap, a soak, a release window) must park
+    with kanban_schedule: a blocked card paints its chat red as needing a human. [daveey]"""
+    from agent.prompt_builder import KANBAN_GUIDANCE
+    from tools.kanban_tools_schemas import KANBAN_BLOCK_SCHEMA
+
+    assert "kanban_schedule(" in KANBAN_GUIDANCE
+    assert "SCHEDULED_UNTIL=" in KANBAN_GUIDANCE
+    assert "kanban_schedule" in KANBAN_BLOCK_SCHEMA["description"]
