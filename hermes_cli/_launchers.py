@@ -174,6 +174,29 @@ def signed_python_app(store_python: Path) -> Path | None:
     return None
 
 
+def prefer_signed_python_on_path(path: str) -> str:
+    """[daveey] Put the signed Hermes Python.app ahead of the matching store Python's ``bin`` on *path*.
+
+    Children of the launchd gateway (kanban workers' terminals, cron scripts) resolve bare ``python3``
+    to the store's ad-hoc ``~/.hermes/tools/python-*/bin/python3``. The gateway's launchd wrapper is
+    ``/usr/bin/osascript`` (a platform binary), so TCC attributes their Automation/Photos/FDA requests
+    to that bare binary and prompts for "python3.14" instead of using Hermes Python.app's grants.
+    """
+    if sys.platform != "darwin" or not path:
+        return path
+    entries = [e for e in path.split(os.pathsep) if e]
+    out: list[str] = []
+    for entry in entries:
+        exe = signed_python_app(Path(entry) / "python3") if entry.rstrip("/").endswith("/bin") else None
+        if exe is not None:
+            signed_dir = str(exe.parent)
+            if signed_dir not in out:
+                out.append(signed_dir)
+        if entry not in out:
+            out.append(entry)
+    return os.pathsep.join(out)
+
+
 def _load_script_maker():
     """distlib's ScriptMaker — standalone first, then pip's vendored copy."""
     try:

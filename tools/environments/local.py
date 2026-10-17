@@ -304,6 +304,9 @@ def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
     # already applies this invariant; Cron scripts use this sanitizer directly (#92998).
     if path_key is not None:
         out[path_key] = _prepend_hermes_bin_dir(fix_path(out.get(path_key, "")))
+        # [daveey] bare python3 -> the Developer-ID Hermes Python.app, so macOS TCC uses its grants.
+        from hermes_cli._launchers import prefer_signed_python_on_path
+        out[path_key] = prefer_signed_python_on_path(out[path_key])
     return _finalize_child_env(out)
 
 
