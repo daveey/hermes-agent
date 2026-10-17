@@ -35,7 +35,7 @@ import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
 import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
-import { $sessionDotStateById, hasLiveTurn, sessionStatusStripe } from '@/store/session-dot-state'
+import { $sessionDotStateById, hasLiveTurn, sessionStatusStripe, withRowActivity } from '@/store/session-dot-state'
 import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
 import { sessionCostUsd } from '@/store/sidebar-archive'
@@ -313,10 +313,17 @@ function SidebarSessionRowImpl({
   // Telegram thread continued here still reads as Telegram.
   const handoffSource = handoffOriginSource(session.handoff_state, session.handoff_platform)
   const handoffLabel = handoffSource ? (sessionSourceLabel(handoffSource) ?? handoffSource) : null
+
   // The same resolved state the row's dot paints, so the arc and the dot cannot
   // contradict each other. A selector, not a plain useStore: the map is rebuilt
   // whenever any session's status changes, but a row only repaints on its own.
-  const dotState = useStoreSelector($sessionDotStateById, states => states[session.id] ?? 'idle')
+  // [daveey] The row's own activity stamps count too: a project-tree row (older
+  // than the recents page) is not in $sessions, so the store can't see them.
+  const dotState = withRowActivity(
+    useStoreSelector($sessionDotStateById, states => states[session.id] ?? 'idle'),
+    session
+  )
+
   const liveTurn = hasLiveTurn(dotState)
   // [daveey] The left stripe is the session's status: green = its turn is done
   // and waiting on you (stays after you open it); red = not done but stuck

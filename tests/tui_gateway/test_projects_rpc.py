@@ -759,3 +759,35 @@ def test_projects_without_a_profile_stay_on_the_launch_home(monkeypatch, tmp_pat
     assert not (Path(os.environ["HERMES_HOME"]) / "projects.db").exists()
 
 
+
+
+def test_tree_rows_carry_session_activity_stamps(monkeypatch, tmp_path):
+    """[daveey] Project-mode rows older than the recents page are the sidebar's only copy:
+    they must carry goal/kanban/cron/background stamps or the row paints done (green)."""
+    from hermes_cli import (cron_session_activity, goal_session_activity,
+                            kanban_session_activity, process_session_activity)
+
+    launch_home = _profile_dir(tmp_path, "launch")
+    repo = tmp_path / "repos" / "activity"
+    repo.mkdir(parents=True)
+    _bind_profiles(monkeypatch, tmp_path, {"default": launch_home})
+    project = _create_project(launch_home, "Act", repo, use=True)
+    for sid in ("s_goal", "s_cards", "s_quiet"):
+        _create_session(launch_home, sid, repo)
+
+    monkeypatch.setattr(goal_session_activity, "active_goal_sessions", lambda: frozenset({"s_goal"}))
+    monkeypatch.setattr(kanban_session_activity, "_all_counts", lambda: ({"s_cards": 2}, {"s_cards": 1}))
+    monkeypatch.setattr(cron_session_activity, "cron_owner_sessions", lambda: frozenset())
+    monkeypatch.setattr(process_session_activity, "_owned_processes", lambda: {"s_quiet": set()})
+
+    with _serving_launch_profile(launch_home):
+        tree = _call("projects.tree", {"preview_limit": 5})
+        drill = _call("projects.project_sessions", {"project_id": project["id"]})
+
+    previews = {s["id"]: s for p in tree["projects"] for s in p.get("previewSessions") or []}
+    lane = {s["id"]: s for r in drill["project"]["repos"] for g in r["groups"] for s in g["sessions"]}
+    for rows in (previews, lane):
+        assert rows["s_goal"].get("goal_active") is True
+        assert rows["s_cards"]["kanban_active"] == 2 and rows["s_cards"]["kanban_blocked"] == 1
+        # Control: an idle session carries none of them.
+        assert not {"goal_active", "kanban_active", "background_active", "cron_active"} & rows["s_quiet"].keys()

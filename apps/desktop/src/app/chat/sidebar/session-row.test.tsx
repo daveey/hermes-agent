@@ -513,3 +513,27 @@ describe('SidebarSessionRow kanban counts', () => {
     expect(screen.queryByTestId('session-row-kanban-counts')).toBeNull()
   })
 })
+
+// [daveey] A project-mode row older than the recents page is not in $sessions,
+// so the dot-state store can't see its activity stamps; the row reads its own.
+describe('SidebarSessionRow own activity stamps', () => {
+  const stripe = (c: HTMLElement) => c.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe') ?? null
+
+  for (const stamp of [{ goal_active: true }, { kanban_active: 2 }, { background_active: 1 }]) {
+    it(`keeps the row off green while ${Object.keys(stamp)[0]} is set`, () => {
+      const { container } = renderRow(
+        makeSession({ id: 'old-proj', message_count: 9, title: 'Old', ...stamp } as Partial<SessionInfo> & {
+          title: string
+        })
+      )
+
+      expect(stripe(container)).toBeNull()
+    })
+  }
+
+  it('still paints done (green) with no activity stamps', () => {
+    const { container } = renderRow(makeSession({ id: 'old-proj', message_count: 9, title: 'Old' }))
+
+    expect(stripe(container)).toBe('done')
+  })
+})

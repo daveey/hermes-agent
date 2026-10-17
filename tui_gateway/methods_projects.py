@@ -336,6 +336,25 @@ def _project_tree_row(r: dict) -> dict:
     return row
 
 
+def _annotate_tree_activity(sessions: list[dict]) -> list[dict]:
+    """[daveey] Stamp the same activity fields the session lists carry (``kanban_active`` /
+    ``kanban_blocked``, ``goal_active``, ``cron_active``, ``background_active``) on tree rows.
+    In project mode an older session's ONLY loaded row is this one (it's past the recents
+    page), so without them the sidebar painted it done (green) while its /goal, cards or
+    background jobs were still in flight. ``build_tree`` passes these dicts through by
+    reference, so previews and hydrated lanes both carry the stamps. Never raises."""
+    try:
+        from hermes_cli.cron_session_activity import annotate_cron_activity
+        from hermes_cli.goal_session_activity import annotate_goal_activity
+        from hermes_cli.kanban_session_activity import annotate_kanban_activity
+        from hermes_cli.process_session_activity import annotate_background_activity
+        annotate_background_activity(annotate_cron_activity(
+            annotate_goal_activity(annotate_kanban_activity(sessions))))
+    except Exception:  # the tree must render without them
+        pass
+    return sessions
+
+
 def _project_tree_inputs(
     db, session_limit: int, *, include_discovered: bool
 ) -> tuple[list[dict], list[dict], list[dict], str | None]:
@@ -347,7 +366,7 @@ def _project_tree_inputs(
         limit=session_limit, offset=0, order_by_last_active=True, min_message_count=1,
         include_children=False, exclude_sources=_PROJECT_TREE_EXCLUDED_SOURCES,
         include_archived=False, compact_rows=True)
-    sessions = [_project_tree_row(r) for r in rows]
+    sessions = _annotate_tree_activity([_project_tree_row(r) for r in rows])
     # Parallel-warm the git cache so build_tree's resolver doesn't cold-probe each cwd in turn.
     git_probe.warm_roots(s["cwd"] for s in sessions if s.get("cwd"))
     from hermes_cli import projects_db as pdb

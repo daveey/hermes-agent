@@ -23,7 +23,8 @@ import {
   hasLiveTurn,
   sessionStatusStripe,
   showsRunningArc,
-  unreadSessionCount
+  unreadSessionCount,
+  withRowActivity
 } from './session-dot-state'
 import { clearAllSessionStates, publishSessionState } from './session-states'
 import { $unreadWriteGuard } from './session-unread-remote'
@@ -408,5 +409,23 @@ describe('standing goal in flight ($goalActiveSessionIds)', () => {
     publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
 
     expect($sessionDotStateById.get()['s1']).toBe('working')
+  })
+})
+
+describe('withRowActivity', () => {
+  it('claims background over idle/unread/draft when the row carries an activity stamp', () => {
+    for (const state of ['idle', 'unread', 'draft'] as const) {
+      expect(withRowActivity(state, { goal_active: true })).toBe('background')
+      expect(withRowActivity(state, { kanban_active: 1 })).toBe('background')
+      expect(withRowActivity(state, { background_active: 2 })).toBe('background')
+    }
+  })
+
+  it('leaves louder states and stamp-less rows alone', () => {
+    for (const state of ['working', 'stalled', 'needs-input'] as const) {
+      expect(withRowActivity(state, { goal_active: true })).toBe(state)
+    }
+
+    expect(withRowActivity('idle', { goal_active: false, kanban_active: 0 })).toBe('idle')
   })
 })

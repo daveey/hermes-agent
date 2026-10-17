@@ -26,6 +26,7 @@
 import { computed } from 'nanostores'
 
 import { stableArray, stableRecord } from '@/lib/stable-array'
+import type { SessionInfo } from '@/types/hermes'
 
 import { $backgroundRunningSessionIds } from './composer-status'
 import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
@@ -164,6 +165,21 @@ export const sessionStatusStripe = (
     : state === 'unread' || (state === 'idle' && hasTurns)
       ? 'done'
       : null
+
+/** [daveey] Fold the row's OWN backend activity stamps into its resolved state.
+ *  `$sessionDotStateById` only reads those stamps off `$sessions` /
+ *  `$messagingSessions`, but a project-mode row older than the recents page
+ *  comes from the project tree and is in neither — so a session with an active
+ *  /goal, open kanban cards or a live background job painted done (green).
+ *  Same claim (and priority) as the store: it beats idle/unread/draft only. */
+export const withRowActivity = (
+  state: SessionDotState,
+  row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active'>
+): SessionDotState =>
+  (state === 'idle' || state === 'unread' || state === 'draft') &&
+  (row.goal_active === true || (row.kanban_active ?? 0) > 0 || (row.background_active ?? 0) > 0)
+    ? 'background'
+    : state
 
 /** Whether this turn is the session's own, live: brighter title, and the row's
  *  age yields to the actions menu. Wider than the arc — a turn waiting on an
