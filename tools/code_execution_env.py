@@ -113,6 +113,32 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
     return delegated_child_subprocess_env(scrubbed)
 
 
+# Session identity (non-secret ids) the sandbox child needs so a script shelling out to
+# `hermes kanban create` stamps the owning chat, exactly like the terminal tool does;
+# without it the card never shows in that chat's task strip / sidebar badge. [daveey]
+_SESSION_IDENTITY_VARS = ("HERMES_SESSION_ID", "HERMES_SESSION_KEY")
+
+
+def _bridge_session_identity(env: dict) -> None:
+    """Copy the turn's session id/key into *env*. ContextVars are authoritative once the
+    session context is engaged (the os.environ mirror may belong to a concurrent turn);
+    an unengaged CLI falls back to os.environ. Empty/unbound values are left out."""
+    try:
+        from gateway.session_context import _UNSET, _VAR_MAP, session_context_engaged
+    except Exception:
+        return
+    engaged = session_context_engaged()
+    for name in _SESSION_IDENTITY_VARS:
+        var = _VAR_MAP.get(name)
+        value = var.get() if var is not None else _UNSET
+        if value is _UNSET:
+            value = None if engaged else os.environ.get(name)
+        if value:
+            env[name] = str(value)
+        else:
+            env.pop(name, None)
+
+
 def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
                      child_python: str) -> dict[str, str]:
     """Build the scrubbed child environment both execution paths share."""
@@ -135,6 +161,7 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     if _tz_name and not _IS_WINDOWS:
         child_env["TZ"] = _tz_name
     child_env.pop("HERMES_TIMEZONE", None)
+    _bridge_session_identity(child_env)
     apply_subprocess_home_env(child_env)
     # Multiplexed gateway/Desktop (#110303): the server process env carries the machine-default
     # HERMES_HOME, but this turn runs under a per-profile override (ContextVar bound per turn).
