@@ -136,6 +136,8 @@ class DispatchResult:
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
+    woken_continuations: list[str] = field(default_factory=list)
+    """Task ids whose ``kanban_continue(resume_after_seconds=...)`` wait came due this tick."""
     stale: list[str] = field(default_factory=list)
     """Task ids reclaimed for no heartbeat within ``dispatch_stale_timeout_seconds``."""
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
@@ -2264,6 +2266,8 @@ def _run_reclaim_phase(
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.timed_out = enforce_max_runtime(conn)
+    from hermes_cli.kanban_continuation import wake_due_continuations
+    result.woken_continuations = wake_due_continuations(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 

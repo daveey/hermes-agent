@@ -78,11 +78,14 @@ class ActivityTrackingMixin:
             # Never let the bridge break the loop; this guard covers import-time failures.
             with suppress(Exception):
                 from tools.kanban_tools import (
-                    heartbeat_current_worker_from_env, inject_new_comments_from_env
+                    heartbeat_current_worker_from_env, inject_new_comments_from_env,
+                    inject_soft_deadline_from_env,
                 )
                 heartbeat_current_worker_from_env()
                 # Fold new operator notes into the running turn (OUT-OF-BAND steer).
                 inject_new_comments_from_env(self)
+                # Near max_runtime: tell the worker to checkpoint via kanban_continue.
+                inject_soft_deadline_from_env(self)
         if force_persist or is_terminal_compression_provenance(resolved_provenance):
             # A terminal compression stamp must land durably NOW. The heartbeat wrote "context compression
             # in progress" moments ago, so deferring this write to the next 60s window leaves the durable

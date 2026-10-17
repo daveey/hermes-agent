@@ -359,6 +359,28 @@ retrying them; it does not replay tools or reopen the old session. Existing
 iteration and failure limits still apply. Older runs without registration, deleted
 transcripts and cross-profile handoffs do not receive transcript recovery.
 
+#### Runtime caps: checkpoint and continue
+
+A card with `max_runtime_seconds` is still hard-killed at the cap (`timed_out`,
+which counts toward the failure breaker). Before that, at
+`kanban.soft_deadline_fraction` of the cap (default `0.85`; `0` disables it),
+the running worker gets an out-of-band notice, and a final one shortly before the
+kill. A worker that will not finish in time calls
+`kanban_continue(checkpoint=...)`. The run closes with outcome `continued` and the
+card goes straight back to `ready` (or `review` for a reviewer run). The next
+run's context opens with that checkpoint, followed by the transcript tail
+described above.
+
+`kanban_continue(..., resume_after_seconds=N)` hands off a wait (CI, a release,
+a soak) instead of polling inside the run: the card parks in `scheduled` and
+the dispatcher re-queues it after `N` seconds (at most 24 h). Plain
+`kanban_schedule` parks are never auto-woken.
+
+Continuations leave `consecutive_failures` and the unblock-loop counter
+untouched, so they never trip the give-up or block-loop limits. Their own
+bound is `kanban.max_continuations` (default 12) consecutive `continued` runs.
+Past that, the worker has to complete or block.
+
 #### Workers and systemd cgroups
 
 Workers are fire-and-forget processes that outlive the dispatcher tick, so

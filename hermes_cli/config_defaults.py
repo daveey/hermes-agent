@@ -1952,6 +1952,13 @@ DEFAULT_CONFIG = {
         # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to
         # ready on the next tick; a still-running local worker is terminated first. 0 = off.
         "dispatch_stale_timeout_seconds": 14400,
+        # Soft deadline for cards with max_runtime_seconds: at this fraction of the cap the worker
+        # gets an OUT-OF-BAND steer to checkpoint with kanban_continue (re-queued as a fresh run,
+        # not a failure) before the hard kill at 100%. 0 = off (hard kill only).
+        "soft_deadline_fraction": 0.85,
+        # Bound on back-to-back kanban_continue runs without a completion; past it the worker
+        # must complete or block.
+        "max_continuations": 12,
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.

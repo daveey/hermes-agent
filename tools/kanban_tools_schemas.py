@@ -224,6 +224,44 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
 )
 
 
+KANBAN_CONTINUE_SCHEMA = _schema(
+    "kanban_continue",
+    (
+        "Checkpoint your current task and end this run so a FRESH run continues "
+        "it. Use when the work will not finish inside this run's max runtime "
+        "(you get a 'Kanban soft deadline' message near the cap), or when the "
+        "next step is a long wait (CI, a release, a soak, a training "
+        "checkpoint) that should not burn runtime in a sleep/poll loop. The "
+        "run closes with outcome 'continued' and the card is re-queued at once "
+        "(or after ``resume_after_seconds``) with your checkpoint at the top of "
+        "the next run's context plus this run's transcript tail. A "
+        "continuation is NOT a failure or a block: it never counts toward the "
+        "retry give-up or unblock-loop limits. After it returns, end your turn "
+        "with a one-line reply; do not call more tools."
+    ),
+    {
+        "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "checkpoint": _prop("string", (
+            "Everything the next run needs to resume without re-deriving it: "
+            "what is done (commits/branches/files/deploys, with ids), current "
+            "state, the exact next steps, background processes to re-adopt "
+            "(PIDs, process_manage session ids, log paths, worktrees), what is "
+            "being waited on and how to check it, and what must not be redone. "
+            "Markdown. No secrets."
+        )),
+        "resume_after_seconds": {"type": "integer", "description": (
+            "Optional. 0 (default) re-queues immediately. N > 0 parks the card in "
+            "'scheduled' and the dispatcher re-queues it after N seconds (max "
+            "86400): use this to hand off a wait instead of polling."
+        )},
+        "metadata": {"type": "object", "description": (
+            "Optional machine-readable state (e.g. {\"pids\": [...], \"ci_run\": ...})."
+        )},
+    },
+    ["checkpoint"],
+)
+
+
 KANBAN_REQUEST_REVIEW_SCHEMA = _schema(
     "kanban_request_review",
     (

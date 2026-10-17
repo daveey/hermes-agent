@@ -22,7 +22,7 @@ from hermes_cli.config import cfg_get, load_config
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
-    KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
+    KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
 
@@ -109,7 +109,7 @@ def _check_kanban_orchestrator_mode() -> bool:
 # would silently skip the run-ownership CAS in kanban_db. Non-lifecycle tools
 # (heartbeat / attach / attach_url) do not terminate a run and are not gated.
 _RUN_LIFECYCLE_TOOLS = frozenset({
-    "kanban_complete", "kanban_block", "kanban_schedule",
+    "kanban_complete", "kanban_block", "kanban_schedule", "kanban_continue",
     "kanban_request_review", "kanban_request_changes",
 })
 
@@ -657,6 +657,59 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         return False
 
 
+# Soft deadline: near ``max_runtime_seconds`` steer the running turn to checkpoint with
+# kanban_continue instead of being SIGTERMed mid-work by enforce_max_runtime. Two notices per
+# run: at ``kanban.soft_deadline_fraction`` of the cap and a final one two thirds of the way
+# from there to the cap. The deadline is read from the board (live max_runtime, active run's
+# started_at) with the dispatcher's own wall clock, so both sides agree on "elapsed".
+_SOFT_DEADLINE_POLL_MIN_INTERVAL_SECONDS = 15.0
+_soft_deadline_last_attempt: float = 0.0
+_soft_deadline_sent: dict[tuple[str, int], int] = {}  # (task, run) -> notices delivered
+
+
+def inject_soft_deadline_from_env(agent: Any, *, now: Optional[float] = None) -> bool:
+    """Steer a soft-deadline notice into ``agent`` when due; True iff one was injected."""
+    global _soft_deadline_last_attempt
+    tid = os.environ.get("HERMES_KANBAN_TASK") if _is_dispatcher_owned_worker() else None
+    mono = time.monotonic()
+    if (not tid or agent is None or not hasattr(agent, "steer")
+            or (mono - _soft_deadline_last_attempt) < _SOFT_DEADLINE_POLL_MIN_INTERVAL_SECONDS):
+        return False
+    _soft_deadline_last_attempt = mono
+    run_id = _worker_run_id(tid)
+    if run_id is None or _soft_deadline_sent.get((tid, run_id), 0) >= 2:
+        return False
+    try:
+        from hermes_cli import kanban_continuation as kc
+        fraction = kc.soft_deadline_fraction()
+        if fraction <= 0:
+            return False
+        with _board(None, quiet_close=True) as (kb, conn):
+            row = conn.execute(
+                "SELECT t.max_runtime_seconds, r.started_at FROM tasks t "
+                "JOIN task_runs r ON r.id = t.current_run_id "
+                "WHERE t.id = ? AND t.current_run_id = ? AND t.status = 'running'",
+                (tid, run_id),
+            ).fetchone()
+            started = kb._to_epoch(row["started_at"]) if row else None
+        if not row or not row["max_runtime_seconds"] or started is None:
+            return False
+        limit = int(row["max_runtime_seconds"])
+        elapsed = int((time.time() if now is None else now) - started)
+        soft_at = int(limit * fraction)
+        final_at = soft_at + (limit - soft_at) * 2 // 3
+        sent = _soft_deadline_sent.get((tid, run_id), 0)
+        due = 2 if elapsed >= final_at else 1 if elapsed >= soft_at else 0
+        if due <= sent:
+            return False
+        note = kc.soft_deadline_message(elapsed=elapsed, limit=limit, final=due == 2)
+        _soft_deadline_sent[(tid, run_id)] = due
+        return bool(agent.steer(note))
+    except Exception:
+        logger.debug("soft-deadline inject failed", exc_info=True)
+        return False
+
+
 # --- Handlers ---
 
 @_kanban_handler("kanban_show")
@@ -868,6 +921,34 @@ def _handle_schedule(args: dict, **kw) -> str:
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not schedule {tid} (unknown id or not in todo/ready/running/blocked)")
         return _ok_landed(kb, conn, tid, "scheduled", reason=reason)
+
+
+@_kanban_handler("kanban_continue")
+def _handle_continue(args: dict, **kw) -> str:
+    """Checkpoint + end this run; the dispatcher re-queues the card for a fresh run."""
+    tid = _worker_guard("kanban_continue", args)
+    checkpoint = _redact(_require_text(
+        args, "checkpoint", "checkpoint is required — write what is done, current state, next "
+        "steps and background jobs to re-adopt so the next run can resume"))
+    raw_after = args.get("resume_after_seconds", 0)
+    _check(raw_after is None or (isinstance(raw_after, (int, float)) and not isinstance(raw_after, bool)),
+           "resume_after_seconds must be an integer number of seconds")
+    metadata = args.get("metadata")
+    _require_dict_metadata(metadata)
+    if metadata is not None:
+        metadata = _redact_metadata(metadata)
+        _check(metadata is not None, "metadata could not be safely serialized")
+    metadata = _stamp_worker_session_metadata(tid, metadata)
+    from hermes_cli.kanban_continuation import continue_task
+    with _board(args.get("board")) as (kb, conn):
+        res = continue_task(conn, tid, checkpoint=checkpoint, resume_after_seconds=int(raw_after or 0),
+                            expected_run_id=_worker_run_id(tid), metadata=metadata)
+        _check(res.get("ok"), f"could not continue {tid}: {res.get('error')}")
+        note = ("Checkpoint saved; a fresh run will resume this card"
+                + (f" after {int(raw_after)}s" if raw_after else " now")
+                + ". End your turn with a one-line reply; do not call more tools.")
+        return _ok_landed(kb, conn, tid, res["status"], continuation=res["continuation"],
+                          wake_at=res.get("wake_at"), next=note)
 
 
 @_kanban_handler("kanban_request_review")
@@ -1315,6 +1396,7 @@ _TOOLS = (
     ("kanban_complete", KANBAN_COMPLETE_SCHEMA, _handle_complete, "✔"),
     ("kanban_block", KANBAN_BLOCK_SCHEMA, _handle_block, "⏸"),
     ("kanban_schedule", KANBAN_SCHEDULE_SCHEMA, _handle_schedule, "⏰"),
+    ("kanban_continue", KANBAN_CONTINUE_SCHEMA, _handle_continue, "⏭"),
     ("kanban_request_review", KANBAN_REQUEST_REVIEW_SCHEMA, _handle_request_review, "👀"),
     ("kanban_request_changes", KANBAN_REQUEST_CHANGES_SCHEMA, _handle_request_changes, "↩"),
     ("kanban_heartbeat", KANBAN_HEARTBEAT_SCHEMA, _handle_heartbeat, "💓"),

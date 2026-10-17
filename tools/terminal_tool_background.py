@@ -7,6 +7,7 @@ monkeypatch points authoritative.
 
 import json
 import logging
+import os
 import sys
 from typing import Any, List, Optional
 
@@ -52,6 +53,14 @@ _ASYNC_UNSUPPORTED_NOTE = (
     'an async completion after the turn ends (a one-shot runner such as `hermes -z`, a cron '
     'job, a Kanban worker, or a stateless HTTP endpoint). The process is running in the '
     "background; retrieve its result with process(action='poll') or process(action='wait')."
+)
+# Kanban workers: max_runtime timeouts were mostly sleep/poll loops on CI, releases and soaks.
+_KANBAN_WAIT_HANDOFF_NOTE = (
+    " Kanban worker: if this takes more than ~10 minutes, do not sit in a poll/wait loop — call "
+    "kanban_continue(checkpoint=<what is running: pid, log path, how to check it, next steps>, "
+    "resume_after_seconds=N) and end the run; the card re-queues itself after N seconds. A job that "
+    "must outlive this run needs persist_on_release=true (or nohup); the next run is a new process, "
+    "so check it by pid/log path, not by process id."
 )
 
 # proc_session attribute -> HERMES_SESSION_* env var carrying it.
@@ -109,7 +118,8 @@ def _apply_async_support(proc_session, result_data, notify_on_complete, watch_pa
         _stamp_gateway_routing(proc_session, get_session_env)
         return notify_on_complete, watch_patterns
     result_data["notify_on_complete"] = False
-    result_data["notify_unsupported"] = _ASYNC_UNSUPPORTED_NOTE
+    result_data["notify_unsupported"] = _ASYNC_UNSUPPORTED_NOTE + (
+        _KANBAN_WAIT_HANDOFF_NOTE if os.environ.get("HERMES_KANBAN_TASK") else "")
     logger.info("background proc %s: async delivery unsupported on this "
                 "session; notify_on_complete/watch_patterns disabled", proc_session.id)
     return False, None
