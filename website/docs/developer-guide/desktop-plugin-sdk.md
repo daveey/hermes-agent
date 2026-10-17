@@ -184,6 +184,9 @@ interface PluginContext {
   registerMany: (cs: PluginContribution[]) => () => void
   /** Own entry (+ sub-pages) under Settings → Plugins. Removed on disable/unload. */
   registerSettingsPage: (page: PluginSettingsPage) => () => void
+  /** Report work still linked to a chat before it is archived; any returned
+   *  `{ label, value }` line makes the archive ask first. Removed on unload. */
+  registerArchiveGuard: (guard: (ctx: ArchiveGuardContext) => Promise<ArchiveLinkedItem[] | null>) => () => void
   /** REST to this plugin's own backend namespace (`/api/plugins/<id>`). */
   rest: <T>(path: string, opts?: PluginRestOptions) => Promise<T>
   /** Live WebSocket to this plugin's own namespace. Returns a disposer. */

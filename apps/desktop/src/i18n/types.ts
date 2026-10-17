@@ -4320,6 +4320,12 @@ export interface Translations extends NoticeTranslations {
     deleteFailed: string
     archived: string
     archiveFailed: string
+    archiveLinkedTitle: (title: string) => string
+    archiveLinkedBody: string
+    archiveLinkedConfirm: string
+    archiveLinkedCancel: string
+    archiveLinkedTasksLabel: string
+    archiveLinkedTasksValue: (open: number, blocked: number) => string
     restored: string
     unarchiveFailed: string
     cwdChangeFailed: string

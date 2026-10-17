@@ -24,6 +24,7 @@ import {
   runPluginAppAction
 } from '@/lib/keybinds/plugin-actions'
 import { readKey, writeKey } from '@/lib/storage'
+import { type ArchiveGuard, registerArchiveGuard } from '@/store/archive-guards'
 import { dispatchPluginNativeNotification, type PluginNativeNotificationInput } from '@/store/native-notifications'
 import { $petActive } from '@/store/pet'
 import { clearPetMessages, type PetSayOptions, sayPetMessage } from '@/store/pet-plugin-messages'
@@ -39,6 +40,7 @@ import type { Contribution } from './types'
 export type { PluginRestOptions } from '@/hermes'
 export type { HermesOpenTarget } from '@/lib/hermes-open-target'
 export type { PluginAppActionId, PluginAppActionInfo, PluginRunActionResult } from '@/lib/keybinds/plugin-actions'
+export type { ArchiveGuard, ArchiveGuardContext, ArchiveLinkedItem } from '@/store/archive-guards'
 export type { PluginNativeNotificationInput, PluginNotificationAction } from '@/store/native-notifications'
 export type { PetMessageTone, PetSayOptions } from '@/store/pet-plugin-messages'
 
@@ -119,6 +121,13 @@ export interface PluginContext {
    *  Removed with the plugin on disable/unload. Feature-detect on older hosts:
    *  `ctx.registerSettingsPage?.(...)`. */
   registerSettingsPage: (page: PluginSettingsPage) => () => void
+  /** [daveey] Report work still linked to a chat (rented machines, jobs, …)
+   *  before the user archives it. The guard gets the chat's ids, row, profile
+   *  and owning connection and resolves `{label, value}` lines; any line makes
+   *  the archive ask for confirmation first. Capped at ~2.5 s and skipped on
+   *  error, so it can never block archiving. Removed on unload. Feature-detect
+   *  on older hosts: `ctx.registerArchiveGuard?.(...)`. */
+  registerArchiveGuard: (guard: ArchiveGuard) => () => void
   /** Register an arbitrary cleanup to run on unload/disable — for side effects
    *  that aren't contributions or sockets (store subscriptions, timers). Runs
    *  alongside every other disposer when the plugin deactivates. */
@@ -360,6 +369,7 @@ export function createPluginContext(pluginId: string, onDispose?: (dispose: () =
     register: c => track(registry.register(scope(c))),
     registerMany: cs => track(registry.registerMany(cs.map(scope))),
     registerSettingsPage: page => track(registry.register(scope(settingsPageContribution(page)))),
+    registerArchiveGuard: guard => track(registerArchiveGuard(source, guard)),
     onDispose: fn => void track(fn),
     onEvent: (type, listener) => track(onGatewayEvent(type, listener)),
     ...createPluginLifetime(track),

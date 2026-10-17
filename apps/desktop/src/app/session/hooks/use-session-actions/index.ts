@@ -34,6 +34,7 @@ import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { purgeInFlightTurnJournals, recoverInFlightTurnJournal } from '@/lib/inflight-turn-journal'
 import { latestSessionTodoSnapshot } from '@/lib/todos'
 import { setSessionYolo } from '@/lib/yolo-session'
+import { collectArchiveLinks, kanbanArchiveLinks } from '@/store/archive-guards'
 import { $clarifyRequests, clearClarifyRequest } from '@/store/clarify'
 import {
   announceGoneSessionDraft,
@@ -44,6 +45,7 @@ import {
 } from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
 import { resetSessionBackground } from '@/store/composer-status'
+import { confirm as confirmAction } from '@/store/confirm'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $connectionRequests } from '@/store/connection-request'
 import {
@@ -3452,7 +3454,8 @@ export function useSessionActions({
   const archiveSession = useCallback(
     // `onDeselect` replaces the fresh-draft fallback when the archived session
     // was the open one (the ⌘⇧A hotkey steps to the next sidebar session).
-    async (storedSessionId: string, options?: { onDeselect?: () => void }) => {
+    // `skipLinkedConfirm` archives without the linked-work prompt.
+    async (storedSessionId: string, options?: { onDeselect?: () => void; skipLinkedConfirm?: boolean }) => {
       clearNotifications()
 
       const listed = findListedSession(storedSessionId)
@@ -3469,6 +3472,38 @@ export function useSessionActions({
         notifyError(new Error('Session ownership could not be resolved'), copy.archiveFailed)
 
         return
+      }
+
+      // [daveey] Archiving only hides the chat: its Kanban tasks and rented
+      // machines keep running out of sight. Ask first when anything is linked.
+      if (!options?.skipLinkedConfirm) {
+        const linked = [
+          ...kanbanArchiveLinks(archived, {
+            label: copy.archiveLinkedTasksLabel,
+            value: copy.archiveLinkedTasksValue
+          }),
+          ...(await collectArchiveLinks({
+            connectionId: archived?.connection_id,
+            ids: [...new Set([storedSessionId, archived?.id, archived?._lineage_root_id].filter(Boolean) as string[])],
+            profile: profile || undefined,
+            session: archived,
+            sessionId: storedSessionId
+          }))
+        ]
+
+        if (linked.length > 0) {
+          const ok = await confirmAction({
+            cancelLabel: copy.archiveLinkedCancel,
+            confirmLabel: copy.archiveLinkedConfirm,
+            description: copy.archiveLinkedBody,
+            details: linked,
+            title: copy.archiveLinkedTitle(archived?.title?.trim() || '')
+          })
+
+          if (!ok) {
+            return
+          }
+        }
       }
 
       const wasSelected = selectedStoredSessionIdRef.current === storedSessionId
