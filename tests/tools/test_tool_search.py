@@ -75,6 +75,75 @@ class TestConfigParsing:
         assert cfg.search_default_limit <= cfg.max_search_limit
 
 
+class TestEagerTools:
+    """[daveey] ``tools.tool_search.eager`` keeps named tools out of the bridge, plugin tools
+    included (they otherwise always defer); empty by default = upstream behavior."""
+
+    def _register_plugin_tool(self, name):
+        from tools.registry import registry
+        registry.register(name=name, handler=lambda args, **kw: "{}", schema=_td(name, "plugin tool"),
+                          toolset="eager-test-plugin")
+
+    def test_eager_config_parses_and_defaults_empty(self, caplog):
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+        from tools.tool_search import ToolSearchConfig
+        assert DEFAULT_CONFIG["tools"]["tool_search"]["eager"] == []
+        assert ToolSearchConfig.from_raw(None).eager_tools == frozenset()
+        assert ToolSearchConfig.from_raw({"eager": ["a", " b ", ""]}).eager_tools == {"a", "b"}
+        with caplog.at_level("WARNING", logger="tools.tool_search"):
+            assert ToolSearchConfig.from_raw({"eager": "a"}).eager_tools == frozenset()
+        assert any("eager" in r.getMessage() for r in caplog.records)
+
+    def test_plugin_tool_defers_unless_eager(self):
+        from tools.registry import registry
+        from tools.tool_search import is_deferrable_tool_name
+        name = "eager_test_plugin_tool"
+        self._register_plugin_tool(name)
+        try:
+            assert is_deferrable_tool_name(name)  # control: plugin tools defer by default
+            assert not is_deferrable_tool_name(name, None, frozenset({name}))
+        finally:
+            registry.deregister(name)
+
+    def test_eager_wins_over_defer_for_core_tool(self):
+        from tools.tool_search import is_deferrable_tool_name
+        assert is_deferrable_tool_name("process_manage", frozenset({"process_manage"}))
+        assert not is_deferrable_tool_name("process_manage", frozenset({"process_manage"}),
+                                           frozenset({"process_manage"}))
+
+    def test_assembly_keeps_eager_plugin_tool_visible(self):
+        from tools.registry import registry
+        from tools.tool_search import ToolSearchConfig, assemble_tool_defs
+        eager, other = "eager_test_visible", "eager_test_hidden"
+        for n in (eager, other):
+            self._register_plugin_tool(n)
+        try:
+            assembled = assemble_tool_defs(
+                [_td(eager, "keep me"), _td(other, "defer me")], context_length=200_000,
+                config=ToolSearchConfig.from_raw({"enabled": "on", "eager": [eager]}))
+            names = {td["function"]["name"] for td in assembled.tool_defs}
+            assert assembled.activated
+            assert eager in names and other not in names
+        finally:
+            for n in (eager, other):
+                registry.deregister(n)
+
+    def test_eager_tool_is_refused_by_tool_call_bridge(self, monkeypatch):
+        """An eager tool is a direct tool, so the bridge sends the model to the direct door."""
+        import tools.tool_search as ts
+        from tools.registry import registry
+        name = "eager_test_bridge"
+        self._register_plugin_tool(name)
+        monkeypatch.setattr(ts, "load_config_readonly",
+                            lambda: ts.ToolSearchConfig.from_raw({"eager": [name]}))
+        try:
+            _n, _a, err = ts.resolve_underlying_call({"name": name, "arguments": {}})
+            assert err
+            assert ts.scoped_deferrable_names([_td(name)]) == frozenset()
+        finally:
+            registry.deregister(name)
+
+
 # ---------------------------------------------------------------------------
 # Classification — the hard invariant: core tools NEVER defer.
 # ---------------------------------------------------------------------------
