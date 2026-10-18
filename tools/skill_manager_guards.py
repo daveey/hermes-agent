@@ -309,11 +309,38 @@ def _background_review_delete_guard(name: str, skill_dir: Path) -> Optional[dict
     return None
 
 
+# Inline the refused file's current text up to this size: past it the refusal falls back to
+# "call skill_view" (SKILL.md content is capped well below this, so in practice always inline).
+_INLINE_REFUSAL_MAX_CHARS = 120_000
+
+
 def _background_review_read_before_write_guard(
     name: str, target: Path, action: str, file_label: str) -> Optional[dict[str, Any]]:
-    """Require review forks to load the exact target before mutating it."""
+    """Require review forks to load the exact target before mutating it.
+
+    The refusal itself serves the current file and counts as the read, so the fork's next call
+    can be the corrected write. Refuse -> skill_view -> retry was a three-step recovery and review
+    forks kept stopping after the re-view, so the learning was never saved (coach:
+    babybear-devices-home, seen only through a search_files snippet, patched, refused, re-viewed,
+    turn ended with nothing written). The write is still refused: the fork must rebuild the edit
+    against the full current text, not resend the blind one."""
     if not _is_background_review() or _background_review_has_read(target):
         return None
+    current: Optional[str] = None
+    with suppress(Exception):
+        text = target.read_text(encoding="utf-8-sig")
+        if len(text) <= _INLINE_REFUSAL_MAX_CHARS:
+            current = text
+    if current is not None:
+        mark_background_review_skill_read(target)
+        return _refusal(
+            f"Refusing background curator {action} for skill '{name}': the current {file_label} "
+            f"content had not been loaded in this review turn, so nothing was written. Its current "
+            f"text is in current_content and now counts as loaded. Do not stop here: rebuild the "
+            f"edit from current_content (anchor old_string on it, skip guidance it already has, "
+            f"keep newer content) and send the corrected skill_manage call now. In a batch, resend "
+            f"every operation; the earlier ones were rolled back.",
+            _read_before_write_required=True, current_file=file_label, current_content=current)
     return _refusal(
         f"Refusing background curator {action} for skill '{name}': the current {file_label} "
         f"content has not been loaded in this review turn. Call skill_view(name) for SKILL.md, or "

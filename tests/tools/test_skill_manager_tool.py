@@ -1314,6 +1314,57 @@ class TestCuratorConsolidationDeleteGuard:
 
         _reset_background_review_read_marks()
 
+    def test_background_review_refusal_serves_current_content_so_retry_lands(
+        self, tmp_path, monkeypatch
+    ):
+        """Coach bug (babybear-devices-home): the fork saw the skill only through a search_files
+        snippet, patched it, was refused, re-viewed it and ended the turn with nothing saved. The
+        refusal now carries the current text and counts as the read: the very next call — the
+        corrected write, no skill_view in between — must land, single-op and batched."""
+        from tools.skill_manager_guards import _reset_background_review_read_marks
+
+        _reset_background_review_read_marks()
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch):
+            _create_curator_skill("reviewed", _skill_content("reviewed"))
+            current = (tmp_path / ".hermes" / "skills" / "reviewed" / "SKILL.md").read_text()
+
+            blocked = json.loads(skill_manage(
+                action="", name="", operations=[{"action": "patch", "name": "reviewed",
+                                                 "old_string": "Step 1: Do the thing.",
+                                                 "new_string": "Step 1: Do the thing safely."}]))
+            assert blocked["success"] is False
+            assert blocked.get("_read_before_write_required") is True
+            assert blocked["current_content"] == current
+            assert blocked["current_file"] == "SKILL.md"
+            assert "Do not stop here" in blocked["error"]
+
+            retried = json.loads(skill_manage(
+                action="", name="", operations=[{"action": "patch", "name": "reviewed",
+                                                 "old_string": "Step 1: Do the thing.",
+                                                 "new_string": "Step 1: Do the thing safely."}]))
+            assert retried["success"] is True, retried
+
+        _reset_background_review_read_marks()
+
+    def test_background_review_refusal_falls_back_when_file_too_large_to_inline(
+        self, tmp_path, monkeypatch
+    ):
+        from tools import skill_manager_guards as guards
+
+        guards._reset_background_review_read_marks()
+        monkeypatch.setattr(guards, "_INLINE_REFUSAL_MAX_CHARS", 10)
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch):
+            _create_curator_skill("reviewed", _skill_content("reviewed"))
+            for _ in range(2):  # no inline content => no read mark => still refused
+                blocked = json.loads(skill_manage(
+                    action="patch", name="reviewed",
+                    old_string="Step 1: Do the thing.", new_string="Step 1: Do the thing safely."))
+                assert blocked.get("_read_before_write_required") is True
+                assert "current_content" not in blocked
+                assert "Call skill_view(name)" in blocked["error"]
+
+        guards._reset_background_review_read_marks()
+
     def test_background_review_support_file_overwrite_requires_that_file_read(self, tmp_path, monkeypatch):
         from tools.skills_tool import skill_view
         from tools.skill_manager_guards import _reset_background_review_read_marks
