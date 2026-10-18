@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -1323,6 +1324,52 @@ def _live_memory_budget_note(agent: Any) -> str:
         return ""
 
 
+# [daveey] Optional evidence gate (``auxiliary.background_review.require_evidence``, default off =
+# upstream prompts byte-for-byte). When on, the skill-review and combined prompts swap their
+# "Be ACTIVE ... not a neutral outcome." push (and the closing "don't default to Nothing to save"
+# nudge) for a gate: edit a skill only when a specific moment in the conversation shows the
+# mechanism. The memory-only prompt is never touched.
+_EVIDENCE_GATE = (
+    "Update a skill only when a SPECIFIC moment in this conversation shows the mechanism: a "
+    "command that failed and the fix that worked, a user correction, a step that cost time. Name "
+    "that moment to yourself before writing. 'This looks like good practice' is not evidence. A "
+    "failure seen once that did not reproduce is noise; don't write a rule for it. 'Nothing to "
+    "save.' is a valid, neutral outcome: an edit the conversation doesn't support is a regression, "
+    "because it costs context on every later load. Always-on SKILL.md text is paid on every load; "
+    "if you add some, look for something to cut."
+)
+_BE_ACTIVE_RE = re.compile(r"Be ACTIVE — .*?not a neutral outcome\.", re.DOTALL)
+_GATED_CLOSINGS = (
+    ("'Nothing to save.' is a real option but should NOT be the default. If the session ran "
+     "smoothly with no corrections and produced no new technique, just say 'Nothing to save.' and "
+     "stop. Otherwise, act.",
+     "If no specific moment in this conversation supports an edit, say 'Nothing to save.' and stop."),
+    ("If genuinely nothing stands out on either, say 'Nothing to save.' and stop — but don't reach "
+     "for that conclusion as a default.",
+     "If nothing on either dimension has evidence behind it, say 'Nothing to save.' and stop."),
+)
+
+
+def _require_evidence(task_cfg: Optional[dict[str, Any]]) -> bool:
+    try:
+        from utils import is_truthy_value
+        return is_truthy_value(_background_review_task_config(task_cfg).get("require_evidence"),
+                               default=False)
+    except Exception:
+        return False
+
+
+def build_review_prompt(name: str, base: str, require_evidence: bool) -> str:
+    """Return review prompt ``name`` (``base`` is its text, possibly a per-agent override) with
+    the evidence gate applied when ``require_evidence`` and the prompt reviews skills."""
+    if not require_evidence or name == "_MEMORY_REVIEW_PROMPT":
+        return base
+    prompt = _BE_ACTIVE_RE.sub(lambda _m: _EVIDENCE_GATE, base, count=1)
+    for old, new in _GATED_CLOSINGS:
+        prompt = prompt.replace(old, new)
+    return prompt
+
+
 # (review_memory, review_skills) -> prompt attribute name; skills-only is also the default.
 _PROMPT_NAME_BY_SCOPE = {
     (True, True): "_COMBINED_REVIEW_PROMPT", (True, False): "_MEMORY_REVIEW_PROMPT",
@@ -1346,7 +1393,8 @@ def spawn_background_review_thread(
         task_cfg = _background_review_task_config()
     # Per-agent overrides (agent._MEMORY_REVIEW_PROMPT etc.) keep working.
     name = _PROMPT_NAME_BY_SCOPE[(review_memory, review_skills)]
-    prompt = getattr(agent, name, globals()[name])
+    prompt = build_review_prompt(name, getattr(agent, name, globals()[name]),
+                                 _require_evidence(task_cfg))
     if review_memory and not explicit and (budget := _live_memory_budget_note(agent)):
         prompt = f"{prompt}\n\n{budget}"
     if focus := (focus or "").strip():
@@ -1368,6 +1416,7 @@ __all__ = [
     "_MEMORY_REVIEW_PROMPT",
     "_SKILL_REVIEW_PROMPT",
     "build_memory_write_metadata",
+    "build_review_prompt",
     "load_background_review_settings",
     "spawn_background_review_thread",
     "summarize_background_review_actions",

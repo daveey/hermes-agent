@@ -811,7 +811,10 @@ DEFAULT_CONFIG = {
         # conversation's reasoning config verbatim so its request bytes keep the parent's warm
         # prompt-cache prefix (#30532). Set provider/model below to route the review to another model
         # if you want a different effort level; a one-time warning says so when the key is set.
-        "background_review": {"enabled": True, **_aux(120)},
+        # [daveey] require_evidence: gate skill edits on a specific observed moment instead of
+        # upstream's "Be ACTIVE" push (agent/background_review.py build_review_prompt). Off =
+        # upstream prompts byte-for-byte.
+        "background_review": {"enabled": True, "require_evidence": False, **_aux(120)},
         # No reasoning_effort on MoA blocks by design — configured PER SLOT in the preset
         # (moa.presets.<name>.reference_models[].reasoning_effort / aggregator.reasoning_effort).
         "moa_reference": _aux(900, reasoning_effort=False),
