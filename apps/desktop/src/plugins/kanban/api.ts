@@ -471,6 +471,13 @@ interface TaskOwner {
 
 const taskOwners = new Map<string, TaskOwner>()
 
+/** [daveey] Record where a task lives before the board has read it (the
+ *  open-task hook: a card opened from a chat on another gateway), so the
+ *  drawer's first fetch goes to the owning gateway + board. */
+export function rememberTaskOwner(id: string, board: string, gateway: string): void {
+  taskOwners.set(id, { board, gateway })
+}
+
 /** Registry ids of every gateway, the routed (active) one first. A single
  *  gateway, or a legacy profile-only Desktop, yields just the routed scope. */
 export function boardGateways(): string[] {

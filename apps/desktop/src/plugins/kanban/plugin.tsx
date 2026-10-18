@@ -31,10 +31,11 @@ import {
   useValue
 } from '@hermes/plugin-sdk'
 
-import { $boardSlug, bindApi, boardKey, fetchBoard, useKanbanScope } from './api'
+import { $boardSlug, bindApi, boardKey, fetchBoard, rememberTaskOwner, useKanbanScope } from './api'
 import { $blockedSectionOpen, BlockedTasksSection } from './blocked-section'
 import { KanbanBoardPage } from './board'
 import { KANBAN_LOCALES } from './i18n'
+import { installOpenTaskHook } from './open-task'
 import { $newTaskLane, useKanban } from './ui'
 
 // Live "N running / ready" pill — one glance at fleet activity from anywhere,
@@ -97,6 +98,9 @@ const plugin: HermesPlugin = {
         t: ctx.i18n.t
       })
     )
+
+    // [daveey] window.__hermesKanbanOpenTask(id, board?, gateway?) for disk plugins.
+    ctx.onDispose(installOpenTaskHook({ navigate: path => host.navigate(path), rememberOwner: rememberTaskOwner }))
 
     $blockedSectionOpen.set(ctx.storage.get('blockedSectionOpen', true))
     ctx.onDispose($blockedSectionOpen.listen(value => ctx.storage.set('blockedSectionOpen', value)))
