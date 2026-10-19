@@ -1,0 +1,186 @@
+"""A kanban notice whose agent turn is refused must not be lost. [daveey]
+
+Live incident (2026-10-18, session 20261018_172500_719391): the chat was open in two backends. At 21:17:35 the
+backend that did NOT hold the session lease polled the board, claimed the ``completed`` event of child card
+t_05d71bf2 (advancing ``last_event_id``), then ``_run_prompt_submit`` refused the turn with SESSION_NOT_OWNED.
+The batch had already left ``_kanban_pending`` and the cursor stayed claimed, so the owning backend never saw
+the completion and the parent never ran its "send the invite when it's ready" follow-up. The same happened to
+t_27101455 at 19:13:50.
+
+Fix: a refused turn rewinds (CAS) its claimed cursor ranges so the owner's poller claims them, and the refused
+session backs off claiming. These tests drive ``_notif_poll_kanban_scoped`` against a real kanban DB with only
+the admission gate faked.
+"""
+
+import threading
+import time
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
+from tui_gateway import server
+
+KEY = "20261018_172500_719391"
+
+
+def _session(key: str = KEY) -> dict:
+    return {"session_key": key, "history_lock": threading.RLock(), "running": False}
+
+
+def _task(title: str = "Mac person invite") -> str:
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title=title, assignee="default")
+        kbn.add_notify_sub(conn, task_id=tid, platform="tui", chat_id=KEY)
+        return tid
+    finally:
+        conn.close()
+
+
+def _complete(tid: str, summary: str) -> None:
+    conn = kbc.connect()
+    try:
+        assert kb.complete_task(conn, tid, summary=summary)
+    finally:
+        conn.close()
+
+
+def _cursor(tid: str) -> int:
+    conn = kbc.connect()
+    try:
+        return kbn.list_notify_subs(conn, task_id=tid)[0]["last_event_id"]
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def gate(monkeypatch):
+    """Fake admission gate: ``gate["accept"]`` decides; every submitted text is recorded."""
+    state = {"accept": True, "submitted": []}
+
+    def _submit(rid, sid, session, text, **kwargs):
+        state["submitted"].append((sid, text))
+        if not state["accept"]:
+            with session["history_lock"]:
+                session["running"] = False  # what _admit_prompt_turn does on SESSION_NOT_OWNED
+            return False
+        with session["history_lock"]:
+            session["running"] = False  # the turn "ran"
+        return True
+
+    monkeypatch.setattr(server, "_run_prompt_submit", _submit)
+    monkeypatch.setattr(server, "_emit", lambda *a, **k: None)
+    return state
+
+
+def test_refused_completion_is_handed_back_to_the_owning_backend(gate):
+    tid = _task()
+    before = _cursor(tid)
+    _complete(tid, "Rose's Mac invite is minted but NOT sent: <invite url>")
+
+    non_owner, owner = _session(), _session()
+    gate["accept"] = False
+    server._notif_poll_kanban_scoped("ui-non-owner", non_owner)
+
+    assert len(gate["submitted"]) == 1 and tid in gate["submitted"][0][1]
+    assert _cursor(tid) == before, "the refused claim must be rewound, not left claimed"
+    assert non_owner["_kanban_pending"] == [] and non_owner["_kanban_claims"] == []
+    assert non_owner["running"] is False
+
+    gate["accept"] = True
+    server._notif_poll_kanban_scoped("ui-owner", owner)
+
+    assert [sid for sid, _ in gate["submitted"]] == ["ui-non-owner", "ui-owner"]
+    assert "NOT sent" in gate["submitted"][1][1]
+    assert _cursor(tid) > before
+    assert owner["_kanban_claims"] == []
+
+
+def test_refused_session_backs_off_instead_of_reclaiming_every_poll(gate):
+    tid = _task()
+    _complete(tid, "done")
+    non_owner = _session()
+    gate["accept"] = False
+    server._notif_poll_kanban_scoped("ui-non-owner", non_owner)
+    server._notif_poll_kanban_scoped("ui-non-owner", non_owner)  # inside the backoff: no claim, no turn
+
+    assert len(gate["submitted"]) == 1
+    assert non_owner["_kanban_refused_until"] > time.monotonic()
+
+    non_owner["_kanban_refused_until"] = 0  # backoff elapsed; this backend now owns the chat
+    gate["accept"] = True
+    server._notif_poll_kanban_scoped("ui-non-owner", non_owner)
+    assert len(gate["submitted"]) == 2 and tid in gate["submitted"][1][1]
+    assert "_kanban_refused_until" not in non_owner and "_kanban_refusal_delay" not in non_owner
+
+
+def test_completion_arriving_while_busy_with_other_notices_is_delivered_once(gate):
+    """Parent is mid-turn handling another card's notice when the child completes."""
+    other, child = _task("verify watch"), _task("Mac person invite")
+    session = _session()
+    _complete(other, "watch verified")
+    server._notif_poll_kanban_scoped("ui", session)
+    assert len(gate["submitted"]) == 1
+
+    session["running"] = True  # a turn (the user's, or the previous notice's) is live
+    _complete(child, "invite minted, NOT sent")
+    server._notif_poll_kanban_scoped("ui", session)
+    assert len(gate["submitted"]) == 1, "no second turn while busy"
+    assert any(child in t for t in session["_kanban_pending"])
+
+    session["running"] = False
+    server._notif_poll_kanban_scoped("ui", session)
+    server._notif_poll_kanban_scoped("ui", session)
+    assert len(gate["submitted"]) == 2 and child in gate["submitted"][1][1]
+    assert session["_kanban_pending"] == [] and session["_kanban_claims"] == []
+
+
+def test_refusal_after_a_busy_wait_still_rewinds(gate):
+    tid = _task()
+    session = _session()
+    session["running"] = True
+    _complete(tid, "done")
+    server._notif_poll_kanban_scoped("ui", session)  # claimed + buffered while busy
+    claimed = _cursor(tid)
+    session["running"] = False
+    gate["accept"] = False
+    server._notif_poll_kanban_scoped("ui", session)
+    assert _cursor(tid) < claimed
+    assert session["_kanban_pending"] == []
+
+
+def test_repeated_completion_after_reopen_notifies_each_event_once(gate):
+    """A retried/reopened card re-notifies its new event only; the delivered one never replays."""
+    tid = _task()
+    session = _session()
+    _complete(tid, "first")
+    server._notif_poll_kanban_scoped("ui", session)
+    server._notif_poll_kanban_scoped("ui", session)
+    conn = kbc.connect()
+    try:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        assert kb.complete_task(conn, tid, summary="second")
+    finally:
+        conn.close()
+    server._notif_poll_kanban_scoped("ui", session)
+    server._notif_poll_kanban_scoped("ui", session)
+    texts = [t for _, t in gate["submitted"]]
+    assert len(texts) == 2 and "first" in texts[0] and "second" in texts[1] and "first" not in texts[1]
+
+
+def test_submit_exception_rewinds_too(gate, monkeypatch):
+    tid = _task()
+    before = _cursor(tid)
+    _complete(tid, "done")
+
+    def _boom(*a, **k):
+        raise RuntimeError("emit failed")
+
+    monkeypatch.setattr(server, "_run_prompt_submit", _boom)
+    session = _session()
+    server._notif_poll_kanban_scoped("ui", session)
+    assert _cursor(tid) == before
+    assert session["running"] is False
