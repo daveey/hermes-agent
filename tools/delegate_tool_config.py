@@ -112,6 +112,11 @@ def _get_independent_completions() -> bool:
     completion messages that land as each finishes. Off = one consolidated message when the whole call is done."""
     return is_truthy_value(_cfg().get("independent_completions", False))
 
+def _get_allow_task_model() -> bool:
+    """[daveey] delegation.allow_task_model (bool, default False): advertise and honor a per-task ``model`` /
+    ``provider`` pin on delegate_task. Off = upstream: the fields are hidden from the schema and stripped."""
+    return is_truthy_value(_cfg().get("allow_task_model", False))
+
 def _get_worktree_isolation() -> bool:
     """delegation.worktree_isolation (bool, default False): each child gets its own
     git worktree off the parent's HEAD so parallel children never contend for one

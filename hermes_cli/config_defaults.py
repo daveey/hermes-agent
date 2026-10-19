@@ -1336,6 +1336,10 @@ DEFAULT_CONFIG = {
     "delegation": {
         "model": "",  # e.g. "google/gemini-3-flash-preview" (empty = inherit parent)
         "provider": "",  # e.g. "openrouter" (empty = inherit parent provider + credentials)
+        # [daveey] Let the model pin `model` (and `provider`) per tasks[] entry, overriding the two keys
+        # above for that child only (e.g. Opus for an adversarial review, a cheaper tier otherwise).
+        # Off upstream: no model-facing field can then carry a route, and pins are stripped.
+        "allow_task_model": False,
         # Fallback chain for delegated children (same entry format as the top-level list).
         # For an unpinned child, null = inherit the parent chain; [] = disable fallback.
         # A child pinned by provider, endpoint, or model gets no fallback unless this
