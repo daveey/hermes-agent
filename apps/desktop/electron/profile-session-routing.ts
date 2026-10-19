@@ -214,16 +214,48 @@ function errorsOf(data: unknown): SessionScanError[] | undefined {
   return Array.isArray(errors) && errors.length ? (errors as SessionScanError[]) : undefined
 }
 
+/** The owner tag for a pinned aggregate's base rows [daveey]. The base is the
+ *  registry PRIMARY's own aggregate even when another gateway is pinned, and a
+ *  bare row means "the gateway that served this list" to the renderer, which
+ *  stamps (and resumes) it on the pinned gateway. Name the primary instead.
+ *  Null when nothing is pinned or the pin IS the primary: bare stays bare. */
+export function primaryRowsOwnerTag(
+  pinnedConnectionId: string | null | undefined,
+  primaryConnectionId: string | null | undefined
+): string | null {
+  const pinned = String(pinnedConnectionId ?? '').trim()
+  const primary = String(primaryConnectionId ?? '').trim() || 'local'
+
+  return pinned && pinned !== primary ? primary : null
+}
+
 /** Fetch the primary backend's profile-aware session slice. A failed read is
  *  still an empty page, but it carries `errors` naming the requested scope
  *  (`all` for the unified list), like the backend's failed profile scan, so the
- *  renderer keeps the rows it could not re-read instead of clearing them. */
+ *  renderer keeps the rows it could not re-read instead of clearing them.
+ *  `ownerTag` (see primaryRowsOwnerTag) stamps rows that name no owner. */
 export async function fetchPrimaryProfileSessions(
   searchParams: URLSearchParams,
-  fetchJsonForProfile: FetchJsonForProfile
+  fetchJsonForProfile: FetchJsonForProfile,
+  ownerTag: string | null = null
 ): Promise<ProfileSessionsResponse> {
   try {
-    return (await fetchJsonForProfile(null, `/api/profiles/sessions?${searchParams}`)) as ProfileSessionsResponse
+    const response = (await fetchJsonForProfile(
+      null,
+      `/api/profiles/sessions?${searchParams}`
+    )) as ProfileSessionsResponse
+
+    // Copy, never mutate: the primary read may be shared with unpinned callers.
+    return ownerTag
+      ? {
+          ...response,
+          sessions: rowsOf(response).map(row =>
+            row && typeof row === 'object' && !String((row as Record<string, unknown>).connection_id ?? '').trim()
+              ? { ...row, connection_id: ownerTag }
+              : row
+          )
+        }
+      : response
   } catch (error) {
     const profile = (searchParams.get('profile') || '').trim() || 'all'
 

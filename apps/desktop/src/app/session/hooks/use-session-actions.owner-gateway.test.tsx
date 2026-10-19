@@ -76,7 +76,7 @@ type GatewayHandler = (method: string, params: Record<string, unknown>) => unkno
 /** Per-connection, per-method gateway mocks. `local` is the window primary
  *  (the ambient socket); every other id is a registry connection reached
  *  through requestGatewayForAgent. */
-function mockGateways(handlers: Record<string, GatewayHandler>) {
+function mockGateways(handlers: Record<string, GatewayHandler>, ambientConnection = 'local') {
   const calls: { connection: string; method: string; params: Record<string, unknown> }[] = []
 
   const dispatch = async (connection: string, method: string, params: Record<string, unknown> = {}) => {
@@ -91,7 +91,7 @@ function mockGateways(handlers: Record<string, GatewayHandler>) {
   }
 
   const ambient = vi.fn(
-    async (method: string, params?: Record<string, unknown>) => await dispatch('local', method, params)
+    async (method: string, params?: Record<string, unknown>) => await dispatch(ambientConnection, method, params)
   ) as unknown as <T>(method: string, params?: Record<string, unknown>) => Promise<T>
 
   vi.mocked(requestGatewayForAgent).mockImplementation(async (connectionId, _profile, method, params) =>
@@ -431,6 +431,41 @@ describe('resume routes by the session owner, not the selected gateway', () => {
     expect(gateways.resumesOn(MACBOOK)).toHaveLength(0)
     expect(gateways.calls.filter(call => call.method === 'session.resume')).toHaveLength(1)
     expect(gateways.calls.find(call => call.method === 'session.resume')?.connection).toBe('local')
+    expect($activeConnectionId.get()).toBe('local')
+  })
+
+  // Ghost-resume class [daveey]: with a remote gateway (nous-1) selected, the
+  // unified list still carries this Mac's own chats. Electron now names their
+  // owner (`local`) on the pinned aggregate; opening one must resume it here
+  // and send nothing to the selected remote, which would materialize an empty
+  // row for an id it never minted.
+  it('(e) opening a local row while a remote gateway is selected resumes ONLY on local', async () => {
+    const NOUS = 'skint-polycentrism'
+    $connectionsRegistry.set({
+      connections: [
+        { id: 'local', kind: 'local', label: 'This device' },
+        { id: NOUS, kind: 'remote', label: 'nous-1' }
+      ],
+      primary: 'local',
+      version: 2
+    } as never)
+    setConnection({ connectionId: NOUS, mode: 'remote', registryScoped: true } as never)
+    setSessions([storedSession({ connection_id: 'local', id: LOCAL_SESSION, profile: 'default' })])
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({ ...TRANSCRIPT, session_id: LOCAL_SESSION } as never)
+
+    const gateways = mockGateways(
+      {
+        local: owningGateway([LOCAL_SESSION], 'rt-local'),
+        [NOUS]: owningGateway([], 'rt-nous')
+      },
+      NOUS
+    )
+
+    const resume = await mountResume(gateways.ambient)
+    await resume(LOCAL_SESSION, true)
+
+    expect(gateways.calls.filter(call => call.connection === NOUS)).toEqual([])
+    expect(gateways.resumesOn('local')).toHaveLength(1)
     expect($activeConnectionId.get()).toBe('local')
   })
 

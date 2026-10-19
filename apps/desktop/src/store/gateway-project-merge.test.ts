@@ -16,6 +16,21 @@ const project = (over: Partial<SidebarProjectTree> & Pick<SidebarProjectTree, 'i
 })
 
 describe('mergeGatewayProjectTrees', () => {
+  // [daveey] With a remote gateway active, This device's tree arrives as a
+  // remote tree. A bare row there would resume on the ACTIVE remote (ghost row
+  // on nous-1), so `local` is stamped explicitly in a remote tree.
+  it("stamps This device's rows `local` when they arrive as another gateway's tree", () => {
+    const merged = mergeGatewayProjectTrees(
+      [project({ id: 'nous-home', label: 'Home', previewSessions: [row('n1', 10)] })],
+      [{ connectionId: 'local', projects: [project({ id: 'mbp-taxes', label: 'taxes', previewSessions: [row('t1', 5)] })] }],
+      3
+    )
+
+    const taxes = merged.find(node => node.label === 'taxes')
+
+    expect(taxes?.previewSessions?.map(s => [s.id, s.connection_id])).toEqual([['t1', 'local']])
+  })
+
   it('returns the base tree untouched when no remote answered', () => {
     const base = [project({ id: 'a', label: 'hermes' })]
 

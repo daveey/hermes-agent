@@ -26,17 +26,23 @@ const sessionRecency = (session: SessionInfo): number => Number(session.last_act
 const projectKey = (project: SidebarProjectTree): string =>
   project.isNoProject ? '\u0000home' : `label:${project.label.trim().toLowerCase()}`
 
+// A remote tree is never the active gateway's, so every row in it names its
+// owner — `local` included: when This device is not the active gateway a bare
+// row would resume on the active remote, which never minted it. [daveey]
+const stampOwner = (sessions: SessionInfo[], connectionId: string): SessionInfo[] =>
+  connectionId === 'local'
+    ? sessions.map(session => (session.connection_id?.trim() ? session : { ...session, connection_id: 'local' }))
+    : stampRowsWithOwningConnection(sessions, connectionId)
+
 function stampTree(project: SidebarProjectTree, connectionId: string): SidebarProjectTree {
   return {
     ...project,
-    ...(project.previewSessions
-      ? { previewSessions: stampRowsWithOwningConnection(project.previewSessions, connectionId) }
-      : {}),
+    ...(project.previewSessions ? { previewSessions: stampOwner(project.previewSessions, connectionId) } : {}),
     repos: (project.repos ?? []).map(repo => ({
       ...repo,
       groups: repo.groups.map(group => ({
         ...group,
-        sessions: stampRowsWithOwningConnection(group.sessions, connectionId)
+        sessions: stampOwner(group.sessions, connectionId)
       }))
     }))
   }

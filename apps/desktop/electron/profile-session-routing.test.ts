@@ -13,6 +13,7 @@ import {
   isAllProfilesSessionListRequest,
   mergeProfileSessionWindow,
   pathWithRemoteOwnerScope,
+  primaryRowsOwnerTag,
   remoteProfileQueryScope,
   settleRemoteProfileSessions,
   shouldIncludeLocalRegistrySessionSource,
@@ -148,6 +149,39 @@ test('primary session reads report a failed read in errors', async () => {
     profile_totals: {},
     errors: [{ profile: 'default', error: 'remote unavailable' }]
   })
+})
+
+// Ghost-resume class [daveey]: with a remote registry gateway selected, the
+// unified list's base is still the PRIMARY's (this Mac's) aggregate. Its rows
+// came back bare, the renderer stamped them with the selected remote, and a
+// click on a local chat sent session.resume to nous-1 — which materialized an
+// empty row for an id it never minted. Base rows of a pinned aggregate name
+// their real owner.
+test('a registry-pinned aggregate tags the primary base rows with the primary, keeping explicit owners', async () => {
+  const result = await fetchPrimaryProfileSessions(
+    new URLSearchParams({ limit: '20' }),
+    async () => ({
+      sessions: [{ id: 'local-taxes', profile: 'default' }, { id: 'tagged', connection_id: 'mac-mini' }],
+      total: 2
+    }),
+    primaryRowsOwnerTag('skint-polycentrism', 'local')
+  )
+
+  assert.deepEqual(
+    (result.sessions as Array<Record<string, unknown>>).map(row => [row.id, row.connection_id]),
+    [
+      ['local-taxes', 'local'],
+      ['tagged', 'mac-mini']
+    ]
+  )
+})
+
+test('primary base rows stay bare when the request is not pinned to another gateway', () => {
+  assert.equal(primaryRowsOwnerTag(null, 'local'), null)
+  assert.equal(primaryRowsOwnerTag('', 'local'), null)
+  assert.equal(primaryRowsOwnerTag('local', 'local'), null)
+  assert.equal(primaryRowsOwnerTag('mac-mini', null), 'local')
+  assert.equal(primaryRowsOwnerTag('local', 'nous-cloud'), 'nous-cloud')
 })
 
 test('a failed unified primary read names the whole aggregate', async () => {

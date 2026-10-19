@@ -496,6 +496,7 @@ import {
   hasPinnedRegistrySessionSource,
   isAllProfilesSessionListRequest,
   pathWithRemoteOwnerScope,
+  primaryRowsOwnerTag,
   type RegistrySessionSource,
   remoteProfileQueryScope,
   settleRemoteProfileSessions,
@@ -17170,7 +17171,12 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
       return profileHasRemoteOverride(requested) ? remoteSessionList(requested, searchParams) : undefined
     }
 
-    return mergeRemoteProfileSessions(searchParams, remoteProfiles, registrySources)
+    return mergeRemoteProfileSessions(
+      searchParams,
+      remoteProfiles,
+      registrySources,
+      primaryRowsOwnerTag(registryConnectionId, readDesktopConnectionsRegistry().primary)
+    )
   }
 
   // Batched sidebar slices. With no remote profiles the local batched endpoint
@@ -17197,11 +17203,12 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
     }
 
     const { recents: recentsSp, cron: cronSp, messaging: messagingSp } = buildSidebarSessionSliceParams(searchParams)
+    const ownerTag = primaryRowsOwnerTag(registryConnectionId, readDesktopConnectionsRegistry().primary)
 
     const [recents, cron, messaging] = await Promise.all([
-      fetchProfilesSessionSlice(recentsSp, remoteProfiles, registrySources),
-      fetchProfilesSessionSlice(cronSp, remoteProfiles, registrySources),
-      fetchProfilesSessionSlice(messagingSp, remoteProfiles, registrySources)
+      fetchProfilesSessionSlice(recentsSp, remoteProfiles, registrySources, ownerTag),
+      fetchProfilesSessionSlice(cronSp, remoteProfiles, registrySources, ownerTag),
+      fetchProfilesSessionSlice(messagingSp, remoteProfiles, registrySources, ownerTag)
     ])
 
     return assembleSidebarSessionSlices(recents, cron, messaging)
@@ -17342,7 +17349,7 @@ async function remoteOwnerProfileForSession(sessionId: string) {
 // returns data (never `undefined`) so a batched caller can compose slices. A
 // specific local profile reads from the local primary; a remote-override profile
 // reads from its remote; 'all' merges every remote into the primary aggregate.
-async function fetchProfilesSessionSlice(searchParams, remoteProfiles, registrySources = null) {
+async function fetchProfilesSessionSlice(searchParams, remoteProfiles, registrySources = null, ownerTag = null) {
   const requested = (searchParams.get('profile') || 'all').trim() || 'all'
 
   if (requested !== 'all') {
@@ -17350,10 +17357,10 @@ async function fetchProfilesSessionSlice(searchParams, remoteProfiles, registryS
       return remoteSessionList(requested, searchParams)
     }
 
-    return fetchPrimaryProfileSessions(searchParams, fetchJsonForProfile)
+    return fetchPrimaryProfileSessions(searchParams, fetchJsonForProfile, ownerTag)
   }
 
-  return mergeRemoteProfileSessions(searchParams, remoteProfiles, registrySources)
+  return mergeRemoteProfileSessions(searchParams, remoteProfiles, registrySources, ownerTag)
 }
 
 // Unified list: primary's local aggregate, with each remote profile's stale local
@@ -17362,12 +17369,19 @@ async function fetchProfilesSessionSlice(searchParams, remoteProfiles, registryS
 // than breaking the sidebar. Connected registry gateways' sessions are spliced
 // in too (#88880) — the unified Sessions list shows EVERY connected gateway's
 // chats, tagged with connection_id + profile so opens route correctly.
-async function mergeRemoteProfileSessions(searchParams, remoteProfiles, registrySourcesOverride = null) {
+// `ownerTag` names the primary on its own base rows when another gateway is
+// pinned (primaryRowsOwnerTag), so they never resume on the pinned one.
+async function mergeRemoteProfileSessions(
+  searchParams,
+  remoteProfiles,
+  registrySourcesOverride = null,
+  ownerTag: null | string = null
+) {
   const limit = Math.max(1, Number(searchParams.get('limit')) || 20)
   const offset = Math.max(0, Number(searchParams.get('offset')) || 0)
   const order = searchParams.get('order') === 'created' ? 'started_at' : 'last_active'
 
-  const base = (await fetchPrimaryProfileSessions(searchParams, fetchJsonForProfile)) as any
+  const base = (await fetchPrimaryProfileSessions(searchParams, fetchJsonForProfile, ownerTag)) as any
 
   // Over-fetch each remote from offset 0 (limit+offset rows) so the merged window
   // is correct for this page — mirrors the primary's per-profile over-fetch.
