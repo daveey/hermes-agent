@@ -502,6 +502,17 @@ def _safe_client_label(label: str) -> str:
     return safe.lstrip(".").strip()
 
 
+@method("diagnostics.account_usage_cache")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    """Read-only snapshot of this process's subscription-usage cache for the scoped home: refresh
+    claims inflight and their ages, last-try and snapshot ages per slot. Confirms a wedged claim
+    behind pooled accounts rendering ``unknown`` without restarting the backend. [daveey]"""
+    from agent.account_usage_cache import account_usage_cache_diagnostics
+
+    return _ok(rid, account_usage_cache_diagnostics())
+
+
 @method("diagnostics.share_nous")
 def _(rid, params: dict) -> dict:
     """Upload a redacted debug bundle to Nous-internal diagnostics storage — same collection +

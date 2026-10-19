@@ -630,6 +630,29 @@ export interface DiagnosticsShareNousResult {
   expires_at?: string | null
   error?: string | null
 }
+export interface DiagnosticsAccountUsageCacheParams {
+  profile?: string | null
+  session_id?: string | null
+}
+export interface DiagnosticsAccountUsageCacheResult {
+  home: string
+  inflight_count: number
+  slots: AccountUsageCacheSlot[]
+  refresh_after_s: number
+  inflight_expire_s: number
+  snapshot_stale_after_s: number
+}
+/** One ``agent/account_usage_cache.py`` slot (home-scoped; never a token). */
+export interface AccountUsageCacheSlot {
+  provider: string
+  identity_id?: string | null
+  base_url?: string | null
+  inflight: boolean
+  inflight_age_s?: number | null
+  last_try_age_s?: number | null
+  snapshot_age_s?: number | null
+  stale: boolean
+}
 /** ``available`` = an identity exists AND the tier is on; whether inference runs on it is ``setup.runtime_check.free_tier_route``'s question. */
 export interface FreeTierStatusResult {
   has_guest: boolean
@@ -5158,6 +5181,8 @@ export interface RpcMethods {
   'delegation.pause': { params: DelegationPauseParams; result: DelegationPauseResult }
   /** Running subagent tree plus the spawn pause flag and limits. */
   'delegation.status': { params: ProfileParams; result: DelegationStatusResult }
+  /** Read-only usage-cache state (inflight refresh claims, try/snapshot ages) for the scoped home. */
+  'diagnostics.account_usage_cache': { params: DiagnosticsAccountUsageCacheParams; result: DiagnosticsAccountUsageCacheResult }
   /** Upload a force-redacted debug bundle to Nous-internal diagnostics storage. */
   'diagnostics.share_nous': { params: DiagnosticsShareNousParams; result: DiagnosticsShareNousResult }
   /** Run the distro package install on the gateway host; progress streams as display.install.log/.done. */
@@ -5634,6 +5659,7 @@ export const RPC_METHODS = [
   'cron.manage',
   'delegation.pause',
   'delegation.status',
+  'diagnostics.account_usage_cache',
   'diagnostics.share_nous',
   'display.install',
   'display.lease.acquire',

@@ -15,6 +15,7 @@ gauge: a per-turn or ``/usage`` fetch still lands there, so non-pooled chips are
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from contextvars import copy_context
@@ -30,6 +31,17 @@ REFRESH_AFTER_S = 120.0
 # account that may have recovered (or worsened) in the meantime.
 SNAPSHOT_STALE_AFTER_S = 15 * 60.0
 
+# Built-in fetchers bound each HTTP call at 15 s (httpx), plugin hooks at 10 s; a Codex read may try
+# two backend URLs. A refresh still claimed after twice that is wedged, not slow.
+USAGE_FETCH_BOUND_S = 15.0
+# An inflight claim older than this no longer blocks a new refresh. A leaked claim (a thread start
+# that raised, a worker that died before its ``finally``) would otherwise hide the slot's usage for
+# the life of the process: the snapshot ages past ``SNAPSHOT_STALE_AFTER_S`` and renders
+# ``unknown`` forever. A duplicate fetch after expiry is harmless (the late-fetch guard orders it).
+INFLIGHT_EXPIRE_S = 4 * USAGE_FETCH_BOUND_S
+
+logger = logging.getLogger(__name__)
+
 _lock = threading.Lock()
 # slot key (home, provider, identity_id, base_url) → snapshot
 _snapshots: dict[tuple[str, str, str, str], AccountUsageSnapshot] = {}
@@ -37,7 +49,8 @@ _snapshots: dict[tuple[str, str, str, str], AccountUsageSnapshot] = {}
 _started: dict[tuple[str, str, str, str], float] = {}
 # slot key → monotonic time of the last refresh try (success or failure)
 _last_try: dict[tuple[str, str, str, str], float] = {}
-_inflight: set[tuple[str, str, str, str]] = set()
+# slot key → (claim token, monotonic time the claim was taken or last touched by its worker)
+_inflight: dict[tuple[str, str, str, str], tuple[object, float]] = {}
 
 
 def _key(provider: str, identity_id: Optional[str] = None, base_url: Optional[str] = None) -> tuple[str, str, str, str]:
@@ -146,22 +159,55 @@ def snapshot_is_stale(snapshot: Optional[AccountUsageSnapshot]) -> bool:
     return age < 0 or age > SNAPSHOT_STALE_AFTER_S
 
 
-def _claim_refresh(key: tuple[str, str, str, str], now: float) -> bool:
+def _claim_refresh(key: tuple[str, str, str, str], now: float) -> Optional[object]:
     """Take the refresh right for *key* unless one is inflight or tried too recently.
 
-    A failed or empty fetch still counts as a try, so a dead credential (or a provider with no
-    usage API) isn't re-asked on every picker open."""
+    Returns the claim token (truthy) or ``None``. A failed or empty fetch still counts as a try,
+    so a dead credential (or a provider with no usage API) isn't re-asked on every picker open.
+    An inflight claim older than ``INFLIGHT_EXPIRE_S`` is presumed leaked and taken over."""
     with _lock:
-        if key in _inflight or now - _last_try.get(key, float("-inf")) < REFRESH_AFTER_S:
-            return False
-        _inflight.add(key)
+        held = _inflight.get(key)
+        if held is not None:
+            age = now - held[1]
+            if age < INFLIGHT_EXPIRE_S:
+                return None
+            logger.warning(
+                "account usage: refresh claim for %s/%s expired after %.0fs inflight; reclaiming",
+                key[1], key[2] or "-", age)
+        if now - _last_try.get(key, float("-inf")) < REFRESH_AFTER_S:
+            return None
+        token = object()
+        _inflight[key] = (token, now)
         _last_try[key] = now
-        return True
+        return token
 
 
-def _release_refresh(key: tuple[str, str, str, str]) -> None:
+def _touch_refresh(key: tuple[str, str, str, str], token: Optional[object]) -> None:
+    """Restart *key*'s inflight clock as its worker begins the fetch, so a slot queued behind
+    serial siblings is not mistaken for a wedged one."""
     with _lock:
-        _inflight.discard(key)
+        held = _inflight.get(key)
+        if held is not None and (token is None or held[0] is token):
+            _inflight[key] = (held[0], time.monotonic())
+
+
+def _release_refresh(key: tuple[str, str, str, str], token: Optional[object] = None) -> None:
+    """Drop *key*'s claim. With *token*, only that exact claim: a worker whose claim expired and
+    was retaken must not release the newer one."""
+    with _lock:
+        held = _inflight.get(key)
+        if held is not None and (token is None or held[0] is token):
+            del _inflight[key]
+
+
+def _abandon_refresh(key: tuple[str, str, str, str], token: Optional[object]) -> None:
+    """Undo a claim whose worker never started: release it and forget the try, so the next
+    picker open retries instead of waiting out ``REFRESH_AFTER_S`` for a fetch that never ran."""
+    with _lock:
+        held = _inflight.get(key)
+        if held is not None and (token is None or held[0] is token):
+            del _inflight[key]
+            _last_try.pop(key, None)
 
 
 def refresh_account_usage_async(providers: Iterable[str]) -> list[threading.Thread]:
@@ -171,23 +217,30 @@ def refresh_account_usage_async(providers: Iterable[str]) -> list[threading.Thre
     now = time.monotonic()
     for provider in dict.fromkeys(providers):
         key = _key(provider)
-        if not _claim_refresh(key, now):
+        token = _claim_refresh(key, now)
+        if token is None:
             continue
-        thread = threading.Thread(
-            target=copy_context().run, args=(_refresh_legacy, provider, key),
-            name="hermes-account-usage-refresh", daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(
+                target=copy_context().run, args=(_refresh_legacy, provider, key, token),
+                name="hermes-account-usage-refresh", daemon=True)
+            thread.start()
+        except Exception as exc:  # e.g. RuntimeError("can't start new thread") under load
+            _abandon_refresh(key, token)
+            logger.warning("account usage: could not start refresh for %s: %s", provider, exc)
+            continue
         started.append(thread)
     return started
 
 
-def _refresh_legacy(provider: str, key: tuple[str, str, str, str]) -> None:
+def _refresh_legacy(provider: str, key: tuple[str, str, str, str], token: Optional[object] = None) -> None:
     from agent.account_usage import fetch_account_usage
 
     try:
+        _touch_refresh(key, token)
         fetch_account_usage(provider)  # remembers its own result
     finally:
-        _release_refresh(key)
+        _release_refresh(key, token)
 
 
 def refresh_account_usage_entries_async(requests: Iterable[dict]) -> list[threading.Thread]:
@@ -199,33 +252,89 @@ def refresh_account_usage_entries_async(requests: Iterable[dict]) -> list[thread
     refreshing the credential. Throttled per account slot, failures included."""
     due: list[dict] = []
     now = time.monotonic()
-    for request in requests:
-        provider = str(request.get("provider") or "").strip().lower()
-        identity_id = str(request.get("identity_id") or "").strip()
-        if not provider or not identity_id or not str(request.get("api_key") or "").strip():
-            continue
-        if not _claim_refresh(_key(provider, identity_id), now):
-            continue
-        due.append(request)
-    if not due:
+    try:
+        for request in requests:
+            provider = str(request.get("provider") or "").strip().lower()
+            identity_id = str(request.get("identity_id") or "").strip()
+            if not provider or not identity_id or not str(request.get("api_key") or "").strip():
+                continue
+            key = _key(provider, identity_id)
+            token = _claim_refresh(key, now)
+            if token is None:
+                continue
+            # The worker releases exactly this key/claim; it never re-derives the key in-thread.
+            due.append({**request, "provider": provider, "identity_id": identity_id,
+                        "_claim_key": key, "_claim_token": token})
+        if not due:
+            return []
+        thread = threading.Thread(
+            target=copy_context().run, args=(_refresh_entries, list(due)),
+            name="hermes-account-usage-refresh", daemon=True)
+        thread.start()
+    except Exception as exc:
+        for request in due:
+            _abandon_refresh(request["_claim_key"], request["_claim_token"])
+        logger.warning("account usage: could not start per-account refresh (%d slots): %s", len(due), exc)
         return []
-    thread = threading.Thread(
-        target=copy_context().run, args=(_refresh_entries, list(due)),
-        name="hermes-account-usage-refresh", daemon=True)
-    thread.start()
     return [thread]
 
 
 def _refresh_entries(requests: list[dict]) -> None:
     from agent.account_usage import fetch_account_usage
 
-    for request in requests:
-        provider = request["provider"]
-        key = _key(provider, request["identity_id"])
-        try:
-            fetch_account_usage(
-                provider, base_url=request.get("base_url"), api_key=request.get("api_key"),
-                read_only=True, identity_id=request["identity_id"],
-            )
-        finally:
-            _release_refresh(key)
+    claims = [(request.get("_claim_key") or _key(request["provider"], request["identity_id"]),
+               request.get("_claim_token")) for request in requests]
+    try:
+        for request, (key, token) in zip(requests, claims):
+            try:
+                _touch_refresh(key, token)
+                fetch_account_usage(
+                    request["provider"], base_url=request.get("base_url"), api_key=request.get("api_key"),
+                    read_only=True, identity_id=request["identity_id"],
+                )
+            except Exception as exc:  # one bad slot must not starve its siblings
+                logger.debug("account usage: refresh for %s/%s failed: %s",
+                             request.get("provider"), request.get("identity_id"), exc)
+            finally:
+                _release_refresh(key, token)
+    finally:
+        # Anything escaping the loop (a BaseException) must not strand the slots behind it.
+        for key, token in claims:
+            _release_refresh(key, token)
+
+
+def account_usage_cache_diagnostics(*, now: Optional[float] = None) -> dict:
+    """Read-only view of this process's usage cache for the CURRENT home: which slots hold a
+    refresh claim and for how long, when each was last tried, and how old its snapshot is.
+    Confirms (or rules out) a wedged claim behind accounts rendering ``unknown``."""
+    mono = time.monotonic() if now is None else now
+    wall = time.time()
+    home = _key("")[0]
+
+    def _age(value: Optional[float]) -> Optional[float]:
+        return None if value is None else round(mono - value, 1)
+
+    with _lock:
+        keys = {k for store in (_snapshots, _last_try, _inflight) for k in store if k[0] == home}
+        slots = []
+        for key in sorted(keys):
+            held = _inflight.get(key)
+            snapshot = _snapshots.get(key)
+            try:
+                snapshot_age = round(wall - snapshot.fetched_at.timestamp(), 1) if snapshot else None
+            except (AttributeError, TypeError, ValueError, OSError, OverflowError):
+                snapshot_age = None
+            slots.append({
+                "provider": key[1], "identity_id": key[2] or None, "base_url": key[3] or None,
+                "inflight": held is not None,
+                "inflight_age_s": _age(held[1]) if held else None,
+                "last_try_age_s": _age(_last_try.get(key)),
+                "snapshot_age_s": snapshot_age,
+                "stale": snapshot_is_stale(snapshot),
+            })
+        inflight_count = sum(1 for k in _inflight if k[0] == home)
+    return {
+        "home": home, "inflight_count": inflight_count, "slots": slots,
+        "refresh_after_s": REFRESH_AFTER_S, "inflight_expire_s": INFLIGHT_EXPIRE_S,
+        "snapshot_stale_after_s": SNAPSHOT_STALE_AFTER_S,
+    }

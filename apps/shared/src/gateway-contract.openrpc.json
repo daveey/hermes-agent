@@ -817,6 +817,24 @@
       }
     },
     {
+      "name": "diagnostics.account_usage_cache",
+      "summary": "Read-only usage-cache state (inflight refresh claims, try/snapshot ages) for the scoped home.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/DiagnosticsAccountUsageCacheParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/DiagnosticsAccountUsageCacheResult"
+        }
+      }
+    },
+    {
       "name": "diagnostics.share_nous",
       "summary": "Upload a force-redacted debug bundle to Nous-internal diagnostics storage.",
       "params": [
@@ -4720,6 +4738,91 @@
           "type"
         ],
         "title": "AccountOwner",
+        "type": "object"
+      },
+      "AccountUsageCacheSlot": {
+        "additionalProperties": false,
+        "description": "One ``agent/account_usage_cache.py`` slot (home-scoped; never a token).",
+        "properties": {
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "identity_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Identity Id"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Base Url"
+          },
+          "inflight": {
+            "title": "Inflight",
+            "type": "boolean"
+          },
+          "inflight_age_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Inflight Age S"
+          },
+          "last_try_age_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Last Try Age S"
+          },
+          "snapshot_age_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Snapshot Age S"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider",
+          "inflight",
+          "stale"
+        ],
+        "title": "AccountUsageCacheSlot",
         "type": "object"
       },
       "ActiveIdResult": {
@@ -12623,6 +12726,79 @@
           "max_concurrent_children"
         ],
         "title": "DelegationStatusResult",
+        "type": "object"
+      },
+      "DiagnosticsAccountUsageCacheParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          }
+        },
+        "title": "DiagnosticsAccountUsageCacheParams",
+        "type": "object"
+      },
+      "DiagnosticsAccountUsageCacheResult": {
+        "additionalProperties": false,
+        "properties": {
+          "home": {
+            "title": "Home",
+            "type": "string"
+          },
+          "inflight_count": {
+            "title": "Inflight Count",
+            "type": "integer"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/AccountUsageCacheSlot"
+            },
+            "title": "Slots",
+            "type": "array"
+          },
+          "refresh_after_s": {
+            "title": "Refresh After S",
+            "type": "number"
+          },
+          "inflight_expire_s": {
+            "title": "Inflight Expire S",
+            "type": "number"
+          },
+          "snapshot_stale_after_s": {
+            "title": "Snapshot Stale After S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "home",
+          "inflight_count",
+          "slots",
+          "refresh_after_s",
+          "inflight_expire_s",
+          "snapshot_stale_after_s"
+        ],
+        "title": "DiagnosticsAccountUsageCacheResult",
         "type": "object"
       },
       "DiagnosticsShareNousParams": {

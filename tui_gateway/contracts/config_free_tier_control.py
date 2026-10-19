@@ -1,7 +1,7 @@
 """Contracts: config, setup readiness, free tier, model inventory, connectors, diagnostics,
 image generation and structured session control.
 
-Handlers: ``tui_gateway/methods_config.py`` (``config.get``, ``setup.*``, ``diagnostics.share_nous``),
+Handlers: ``tui_gateway/methods_config.py`` (``config.get``, ``setup.*``, ``diagnostics.*``),
 ``methods_config_set.py`` (``config.set``), ``methods_free_tier.py``, ``methods_shared_metrics.py``,
 ``methods_complete.py``
 (``model.options``), ``methods_connectors.py``, ``methods_images.py``, ``methods_session_control.py``
@@ -176,6 +176,41 @@ class DiagnosticsShareNousResult(Result):
 
 method("diagnostics.share_nous", params=DiagnosticsShareNousParams, result=DiagnosticsShareNousResult,
        doc="Upload a force-redacted debug bundle to Nous-internal diagnostics storage.")
+
+
+# ── diagnostics.account_usage_cache ───────────────────────────────────────────────────────────
+
+
+class DiagnosticsAccountUsageCacheParams(Params):
+    profile: str | None = None
+    session_id: str | None = None
+
+
+class AccountUsageCacheSlot(Result):
+    """One ``agent/account_usage_cache.py`` slot (home-scoped; never a token)."""
+
+    provider: str
+    identity_id: str | None = None
+    base_url: str | None = None
+    inflight: bool
+    inflight_age_s: float | None = None
+    last_try_age_s: float | None = None
+    snapshot_age_s: float | None = None
+    stale: bool
+
+
+class DiagnosticsAccountUsageCacheResult(Result):
+    home: str
+    inflight_count: int
+    slots: list[AccountUsageCacheSlot]
+    refresh_after_s: float
+    inflight_expire_s: float
+    snapshot_stale_after_s: float
+
+
+method("diagnostics.account_usage_cache", params=DiagnosticsAccountUsageCacheParams,
+       result=DiagnosticsAccountUsageCacheResult,
+       doc="Read-only usage-cache state (inflight refresh claims, try/snapshot ages) for the scoped home.")
 
 
 # ── free tier ─────────────────────────────────────────────────────────────────────────────────
