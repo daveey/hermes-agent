@@ -888,12 +888,9 @@ def _apply_transform_tool_result_hook(function_name: str, function_args: dict[st
 
     Runs after post_tool_call and before the result enters context. Fail-open;
     first string return wins. Gated on has_hook so the no-listener path is cheap.
-    Inside defer_transform_tool_result_hook() the call is queued and *result* returned as-is.
+    handle_function_call queues it instead when it claimed an executor's
+    defer_transform_tool_result_hook() queue.
     """
-    deferred = _deferred_transform_tool_results.get()
-    if deferred is not None:
-        deferred.append((function_name, function_args, duration_ms, ids))
-        return result
     try:
         from hermes_cli.lifecycle import has_hook, invoke_hook
         if has_hook("transform_tool_result"):
@@ -927,6 +924,35 @@ def handle_function_call(
     it (single-fire contract). enabled/disabled_toolsets scope the Tool Search
     bridge catalog to this session's grant (None = unrestricted).
     """
+    # [daveey] Claim the executor's transform deferral for THIS call only: the dispatch below runs
+    # with it cleared, so nested calls (execute_code's sandbox RPC thread inherits this context via
+    # propagate_context_to_thread) transform their own results inline instead of queueing onto ours.
+    own_deferred = _deferred_transform_tool_results.get()
+    if own_deferred is None:
+        return _handle_function_call(function_name, function_args, task_id, tool_call_id, session_id, turn_id,
+                                     api_request_id, user_task, enabled_tools, skip_pre_tool_call_hook,
+                                     skip_tool_request_middleware, skip_tool_execution_middleware,
+                                     tool_request_middleware_trace, enabled_toolsets, disabled_toolsets, None)
+    token = _deferred_transform_tool_results.set(None)
+    try:
+        return _handle_function_call(function_name, function_args, task_id, tool_call_id, session_id, turn_id,
+                                     api_request_id, user_task, enabled_tools, skip_pre_tool_call_hook,
+                                     skip_tool_request_middleware, skip_tool_execution_middleware,
+                                     tool_request_middleware_trace, enabled_toolsets, disabled_toolsets,
+                                     own_deferred)
+    finally:
+        _deferred_transform_tool_results.reset(token)
+
+
+def _handle_function_call(
+    function_name: str, function_args: dict[str, Any], task_id: Optional[str], tool_call_id: Optional[str],
+    session_id: Optional[str], turn_id: Optional[str], api_request_id: Optional[str], user_task: Optional[str],
+    enabled_tools: Optional[list[str]], skip_pre_tool_call_hook: bool, skip_tool_request_middleware: bool,
+    skip_tool_execution_middleware: bool, tool_request_middleware_trace: Optional[list[dict[str, Any]]],
+    enabled_toolsets: Optional[list[str]], disabled_toolsets: Optional[list[str]], own_deferred: Optional[list],
+) -> str:
+    """Body of handle_function_call. *own_deferred*: the executor's transform queue claimed by this
+    call (None = run transform_tool_result inline)."""
     function_args = coerce_tool_args(function_name, function_args)
     if not isinstance(function_args, dict):
         function_args = {}
@@ -956,12 +982,19 @@ def handle_function_call(
                 enabled_tools=enabled_tools, middleware_trace=trace,
                 enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
             ), duration_ms=_elapsed_ms(start))
-        return handle_function_call(
-            *underlying, **asdict(ids), user_task=user_task, enabled_tools=enabled_tools,
-            skip_pre_tool_call_hook=skip_pre_tool_call_hook, skip_tool_request_middleware=skip_tool_request_middleware,
-            skip_tool_execution_middleware=skip_tool_execution_middleware, tool_request_middleware_trace=list(trace),
-            enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
-        )
+        # The bridged tool_call IS this call: hand it our claimed deferral.
+        rec_token = _deferred_transform_tool_results.set(own_deferred)
+        try:
+            return handle_function_call(
+                *underlying, **asdict(ids), user_task=user_task, enabled_tools=enabled_tools,
+                skip_pre_tool_call_hook=skip_pre_tool_call_hook,
+                skip_tool_request_middleware=skip_tool_request_middleware,
+                skip_tool_execution_middleware=skip_tool_execution_middleware,
+                tool_request_middleware_trace=list(trace),
+                enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
+            )
+        finally:
+            _deferred_transform_tool_results.reset(rec_token)
 
     from tools.connectors import is_connector_name
     from tools.connectors.gateway.names import parse_connector_name
@@ -998,6 +1031,9 @@ def handle_function_call(
                                enabled_tools=enabled_tools, skip_tool_execution_middleware=skip_tool_execution_middleware)
         duration_ms = _elapsed_ms(start)
         _emit(result, duration_ms=duration_ms)
+        if own_deferred is not None:
+            own_deferred.append((function_name, function_args, duration_ms, ids))
+            return result
         return _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)
 
     except Exception as e:

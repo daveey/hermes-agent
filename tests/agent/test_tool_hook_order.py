@@ -74,3 +74,63 @@ def test_post_tool_call_fires_before_transform_tool_result(agent, monkeypatch, c
         content = results[call_id]
         text = content if isinstance(content, str) else str(content)
         assert f"HINT-{call_id}" in text, (call_id, text)
+
+
+@pytest.mark.parametrize("via_thread", [True, False], ids=["rpc-thread", "same-thread"])
+def test_nested_call_transforms_its_own_result(agent, monkeypatch, via_thread):
+    """A tool call made from inside a sequential registry tool (execute_code's sandbox RPC thread
+    inherits the executor's context via propagate_context_to_thread) runs its OWN
+    transform_tool_result inline on the inner result; only the outer hook touches the outer result."""
+    import threading
+
+    import model_tools
+    from tools.registry import registry
+    from tools.thread_context import propagate_context_to_thread
+
+    events: list[tuple[str, str, str]] = []
+
+    def _hook(hook_name, **kw):
+        if hook_name in ("post_tool_call", "transform_tool_result"):
+            events.append((hook_name, kw.get("tool_name"), kw.get("tool_call_id") or ""))
+        if hook_name == "transform_tool_result":
+            return [f"{kw['result']}|T({kw.get('tool_name')})"]
+        return []
+
+    monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", _hook)
+    monkeypatch.setattr("hermes_cli.lifecycle.has_hook", lambda name: True)
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _hook, raising=False)
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True, raising=False)
+
+    inner: dict = {}
+
+    def _dispatch(name, args, **kw):
+        if name == "web_search":
+            return '{"output": "inner"}'
+
+        def _rpc():
+            inner["r"] = model_tools.handle_function_call("web_search", {"query": "x"}, task_id="task-1")
+
+        if via_thread:
+            t = threading.Thread(target=propagate_context_to_thread(_rpc), daemon=True)
+            t.start()
+            t.join(10)
+        else:
+            _rpc()
+        return '{"output": "outer"}'
+
+    monkeypatch.setattr(registry, "dispatch", _dispatch)
+
+    msg = _mock_assistant_msg(content="", tool_calls=[
+        _mock_tool_call(name="web_extract", arguments='{"urls": ["https://x"]}', call_id="c1")])
+    messages: list = []
+    agent.session_id = "session-1"
+    agent._execute_tool_calls_sequential(msg, messages, "task-1")
+
+    assert inner["r"] == '{"output": "inner"}|T(web_search)', inner
+    outer = [m["content"] for m in messages if m.get("role") == "tool"]
+    assert len(outer) == 1
+    text = outer[0] if isinstance(outer[0], str) else str(outer[0])
+    assert "|T(web_extract)" in text and "T(web_search)" not in text, text
+    # The outer call still runs post_tool_call before its transform.
+    mine = [h for h, name, cid in events if cid == "c1"]
+    assert mine == ["post_tool_call", "transform_tool_result"], events
