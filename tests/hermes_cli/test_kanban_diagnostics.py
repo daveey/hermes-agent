@@ -221,3 +221,28 @@ def test_severity_at_or_above_uses_threshold_semantics():
     assert kd.severity_at_or_above("error", "critical") is False
     assert kd.severity_at_or_above("mystery", "warning") is False
     assert kd.severity_at_or_above("warning", None) is True
+
+
+# ---------------------------------------------------------------------------
+# overdue_wake
+# ---------------------------------------------------------------------------
+
+
+def test_overdue_wake_flags_scheduled_card_past_wake_at():
+    now = 1_000_000
+    events = [_event("continued", ts=now - 5000, wake_at=now - 4000, status="scheduled"),
+              _event("commented", ts=now - 100)]
+    diags = kd.compute_task_diagnostics(_task(status="scheduled"), events, [], now=now)
+    assert [d.kind for d in diags] == ["overdue_wake"]
+    assert diags[0].severity == "critical" and diags[0].data["late_seconds"] == 4000
+    # Within the 10 min grace: quiet.
+    assert kd.compute_task_diagnostics(_task(status="scheduled"), events, [], now=now - 4000 + 600) == []
+    # Woken (no longer scheduled): clears.
+    assert kd.compute_task_diagnostics(_task(status="ready"), events, [], now=now) == []
+
+
+def test_overdue_wake_ignores_kanban_schedule_parks():
+    now = 1_000_000
+    events = [_event("continued", ts=now - 5000, wake_at=now - 4000),
+              _event("scheduled", ts=now - 3000, reason="SCHEDULED_UNTIL=2030")]
+    assert kd.compute_task_diagnostics(_task(status="scheduled"), events, [], now=now) == []

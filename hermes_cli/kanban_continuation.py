@@ -159,11 +159,41 @@ def continue_task(
             "continuation": streak + 1, "wake_at": wake_at}
 
 
-def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:
-    """Promote ``scheduled`` cards whose latest event is a due ``continued`` wait.
+# The only event kinds that put a card INTO ``scheduled`` (``continue_task`` with a wait, and
+# ``schedule_task``). Every other kind -- comments, heartbeats, notifications, edits, links,
+# attachments -- is an annotation on the parked card and must not mask a due wake. [daveey]
+SCHEDULED_ENTRY_EVENTS = (CONTINUED_OUTCOME, "scheduled")
+# ``wake_due_continuations`` runs every dispatcher tick; a wake this late means it is stuck.
+OVERDUE_WAKE_GRACE_SECONDS = 600
 
-    Cards scheduled by ``kanban_schedule`` (no wake time) are left for a human/cron unblock.
-    Counters are untouched (``unblock_task`` would reset ``consecutive_failures``).
+
+def pending_wake_payload(kind: Optional[str], payload: Any) -> Optional[dict]:
+    """The ``continued`` payload when the event that parked the card is a timed wait, else None."""
+    from hermes_cli import kanban_db as kb
+
+    if kind != CONTINUED_OUTCOME:
+        return None
+    data = payload if isinstance(payload, dict) else kb._json_dict(payload)
+    return data if isinstance(data.get("wake_at"), (int, float)) else None
+
+
+def pending_wake(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """``continued`` payload (with ``wake_at``) of the event that parked ``task_id`` in ``scheduled``."""
+    marks = ",".join("?" for _ in SCHEDULED_ENTRY_EVENTS)
+    event = conn.execute(
+        f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
+        "ORDER BY id DESC LIMIT 1", (task_id, *SCHEDULED_ENTRY_EVENTS),
+    ).fetchone()
+    return pending_wake_payload(event[0], event[1]) if event else None
+
+
+def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:
+    """Promote ``scheduled`` cards parked by a ``continued`` wait whose wake time has passed.
+
+    The parking event is the latest ``SCHEDULED_ENTRY_EVENTS`` row, so a comment or heartbeat
+    landing after it does not hide the wake. Cards scheduled by ``kanban_schedule`` (no wake
+    time) are left for a human/cron unblock. Counters are untouched (``unblock_task`` would
+    reset ``consecutive_failures``).
     """
     from hermes_cli import kanban_db as kb
 
@@ -171,14 +201,11 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
     woken: list[str] = []
     for row in conn.execute("SELECT id FROM tasks WHERE status = 'scheduled'").fetchall():
         tid = row[0]
-        event = conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1", (tid,),
-        ).fetchone()
-        if not event or event[0] != CONTINUED_OUTCOME:
+        payload = pending_wake(conn, tid)
+        if payload is None:
             continue
-        payload = kb._json_dict(event[1])
-        wake_at = payload.get("wake_at")
-        if not isinstance(wake_at, (int, float)) or wake_at > now:
+        wake_at = payload["wake_at"]
+        if wake_at > now:
             continue
         resume = payload.get("resume_status") if payload.get("resume_status") in ("ready", "review") else "ready"
         with kb.write_txn(conn):

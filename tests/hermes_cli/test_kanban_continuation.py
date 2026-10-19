@@ -210,6 +210,52 @@ def test_wait_handoff_wakes_on_dispatcher_tick(home, monkeypatch):
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 10 ** 7) == []
 
 
+def _park_with_wait(monkeypatch, title: str) -> tuple[str, int]:
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title=title, assignee="default", max_runtime_seconds=600)
+    _start_run(monkeypatch, tid, started_ago=60)
+    out = json.loads(kt._handle_continue({"checkpoint": "waiting on CI", "resume_after_seconds": 900}))
+    assert out["status"] == "scheduled"
+    return tid, out["wake_at"]
+
+
+@pytest.mark.parametrize("kind", ["commented", "heartbeat", "notified", "edited"])
+def test_due_wake_is_not_masked_by_later_annotation(home, monkeypatch, kind):
+    """A comment (another card's FYI), heartbeat or other non-transition event landing after
+    the ``continued`` wait used to hide the wake forever."""
+    tid, wake_at = _park_with_wait(monkeypatch, f"masked by {kind}")
+    with kbc.connect_closing() as conn:
+        if kind == "commented":
+            kb.add_comment(conn, tid, "t_other", "FYI: parent landed")
+        else:
+            with kb.write_txn(conn):
+                kb._append_event(conn, tid, kind, {"note": "x"})
+        assert kc.wake_due_continuations(conn, now=wake_at - 1) == []
+        assert kc.wake_due_continuations(conn, now=wake_at) == [tid]
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_kanban_schedule_after_wait_and_comment_still_stays_put(home, monkeypatch):
+    """Re-parked with kanban_schedule (no wake time) after a timed wait: never auto-woken,
+    even when a comment lands afterwards."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="parked", assignee="default")
+        kb.claim_task(conn, tid)
+        kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2030-01-01")
+        kb.add_comment(conn, tid, "t_other", "FYI")
+        assert kc.pending_wake(conn, tid) is None
+        assert kc.wake_due_continuations(conn, now=int(time.time()) + 10 ** 7) == []
+        assert kb.get_task(conn, tid).status == "scheduled"
+    tid2, wake_at = _park_with_wait(monkeypatch, "wait then park")
+    with kbc.connect_closing() as conn:
+        kb.unblock_task(conn, tid2)
+        kb.claim_task(conn, tid2)
+        kb.schedule_task(conn, tid2, reason="until release")
+        kb.add_comment(conn, tid2, "t_other", "FYI")
+        assert kc.wake_due_continuations(conn, now=wake_at + 10 ** 6) == []
+        assert kb.get_task(conn, tid2).status == "scheduled"
+
+
 def test_continue_refuses_stale_run_and_bad_args(home, monkeypatch):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="x", assignee="default", max_runtime_seconds=600)

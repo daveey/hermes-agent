@@ -736,6 +736,45 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _rule_overdue_wake(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """A ``scheduled`` card parked by a timed ``kanban_continue`` wait is still parked more than
+    cfg["overdue_wake_grace_seconds"] (default 10 min) after its ``wake_at``: the dispatcher's
+    wake pass is not reaching it (dispatcher down, or a wake bug). [daveey]"""
+    from hermes_cli import kanban_continuation as kc
+
+    if _task_field(task, "status") != "scheduled":
+        return []
+    grace = float(cfg.get("overdue_wake_grace_seconds", kc.OVERDUE_WAKE_GRACE_SECONDS))
+    parking = None
+    for idx, ev in enumerate(events or []):
+        if _event_kind(ev) not in kc.SCHEDULED_ENTRY_EVENTS:
+            continue
+        key = (_event_ts(ev), int(_task_field(ev, "id", default=0) or 0), idx)
+        if parking is None or key >= parking[0]:
+            parking = (key, ev)
+    if parking is None:
+        return []
+    payload = kc.pending_wake_payload(_event_kind(parking[1]), _parse_payload(parking[1]))
+    if payload is None:
+        return []
+    wake_at = int(payload["wake_at"])
+    late = now - wake_at
+    if late <= grace:
+        return []
+    late_str = f"{late / 3600:.1f}h" if late >= 3600 else f"{int(late / 60)}m"
+    return [Diagnostic(
+        kind="overdue_wake", severity="critical" if late >= 3600 else "error",
+        title=f"Scheduled wake is {late_str} overdue",
+        detail=f"This task handed off a wait with kanban_continue and should have woken {late_str} "
+               f"ago, but it is still scheduled. Check that the dispatcher is running; unblock the "
+               f"task to resume it now.",
+        actions=[DiagnosticAction(kind="unblock", label="Resume the task now", suggested=True),
+                 _cli_hint("Check dispatcher status", "hermes kanban diagnostics")],
+        first_seen_at=wake_at, last_seen_at=wake_at, count=1,
+        data={"wake_at": wake_at, "late_seconds": int(late)},
+    )]
+
+
 # Order matters: earlier rules render first on severity ties.
 _RULES: list[RuleFn] = [
     _rule_hallucinated_cards,
@@ -748,6 +787,7 @@ _RULES: list[RuleFn] = [
     _rule_stuck_in_blocked,
     _rule_block_unblock_cycling,
     _rule_stranded_in_ready,
+    _rule_overdue_wake,
 ]
 
 
