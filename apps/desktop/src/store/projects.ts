@@ -546,6 +546,29 @@ function reapplyLastProjectTree(): void {
   }
 }
 
+// A remote's sessions live in every profile it serves (nous-1 keeps none in
+// `default`), so read its all-profiles REST tree: each row carries its own
+// `profile`, which with the connection stamp is the exact owner a click
+// resumes on. An older gateway without that route answers with the one
+// profile `projects.tree` serves.
+async function fetchRemoteProjectTree(connectionId: string, profile: string): Promise<ProjectTreePayload> {
+  try {
+    return await hermesApi<ProjectTreePayload>({
+      connectionId,
+      path: `/api/profiles/projects/tree?preview_limit=${projectTreePreviewLimit()}`,
+      timeoutMs: REMOTE_TREE_TIMEOUT_MS
+    })
+  } catch {
+    return requestGatewayForAgent<ProjectTreePayload>(
+      connectionId,
+      profile,
+      'projects.tree',
+      { preview_limit: projectTreePreviewLimit() },
+      REMOTE_TREE_TIMEOUT_MS
+    )
+  }
+}
+
 async function refreshRemoteProjectTree(connectionId: string, profile: string): Promise<void> {
   const now = Date.now()
   const entry = remoteTrees.get(connectionId) ?? { projects: [], fetchedAt: 0, failedAt: 0, inFlight: false }
@@ -562,13 +585,7 @@ async function refreshRemoteProjectTree(connectionId: string, profile: string): 
   remoteTrees.set(connectionId, entry)
 
   try {
-    const res = await requestGatewayForAgent<ProjectTreePayload>(
-      connectionId,
-      profile,
-      'projects.tree',
-      { preview_limit: projectTreePreviewLimit() },
-      REMOTE_TREE_TIMEOUT_MS
-    )
+    const res = await fetchRemoteProjectTree(connectionId, profile)
 
     entry.projects = res.projects ?? []
     entry.fetchedAt = Date.now()

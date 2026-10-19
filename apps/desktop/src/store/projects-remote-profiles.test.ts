@@ -1,0 +1,156 @@
+import { atom } from 'nanostores'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
+import { hermesApi, type SessionInfo } from '@/hermes'
+import { activeGateway, activeGatewayConnectionId, isActivePrimary, requestGatewayForAgent } from '@/store/gateway'
+import { $activeGatewayProfile, setShowAllProfiles } from '@/store/profile'
+import { $sessions } from '@/store/session'
+import { sessionOwnerRouteFromRow } from '@/store/session-request-router'
+
+import { $connectionsRegistry } from './connection-registry-state'
+import { $projectTree, refreshProjectTree } from './projects'
+
+vi.mock('@/store/gateway', () => ({
+  $gateway: atom(null),
+  activeGateway: vi.fn(),
+  activeGatewayConnectionId: vi.fn(),
+  isActivePrimary: vi.fn(),
+  ensureActiveGatewayOpen: vi.fn(),
+  requestGatewayForAgent: vi.fn()
+}))
+vi.mock('@/i18n', () => ({ translateNow: (key: string) => key }))
+vi.mock('@/hermes', () => ({
+  getHermesConfig: vi.fn(),
+  getProfiles: vi.fn(),
+  hermesApi: vi.fn(),
+  setApiRequestProfile: vi.fn(),
+  STARTUP_REQUEST_TIMEOUT_MS: 1000
+}))
+
+// Cross-gateway sidebar [daveey]: a remote's sessions live in many profiles
+// (nous-1 keeps none in `default`), so the overview must read the remote's
+// all-profiles tree, not one profile's `projects.tree`.
+
+const localTree: SidebarProjectTree[] = [
+  { id: 'p_local', label: 'local-only', path: '/Users/daveey/code/local', repos: [], sessionCount: 0 }
+]
+
+function remoteProject(rows: Partial<SessionInfo>[]): SidebarProjectTree {
+  return {
+    id: 'p_fleece',
+    label: 'fleece',
+    path: '/opt/data/code/fleece',
+    sessionCount: rows.length,
+    previewSessions: rows as SessionInfo[],
+    repos: [
+      {
+        id: 'r_fleece',
+        label: 'fleece',
+        path: '/opt/data/code/fleece',
+        sessionCount: rows.length,
+        groups: [{ id: 'g_main', label: 'main', path: '/opt/data/code/fleece', sessions: rows as SessionInfo[] }]
+      }
+    ]
+  }
+}
+
+function allRows(projects: SidebarProjectTree[]): SessionInfo[] {
+  return projects.flatMap(project => [
+    ...(project.previewSessions ?? []),
+    ...project.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))
+  ])
+}
+
+const flush = async () => {
+  for (let i = 0; i < 10; i += 1) {
+    await Promise.resolve()
+  }
+}
+
+function useRegistry(remoteId: string) {
+  $connectionsRegistry.set({
+    connections: [
+      { id: 'local', kind: 'local', label: 'This device' },
+      { id: remoteId, kind: 'remote', label: remoteId }
+    ],
+    primary: 'local'
+  } as never)
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  setShowAllProfiles(false)
+  $activeGatewayProfile.set('default')
+  $sessions.set([])
+  $projectTree.set([])
+  vi.mocked(activeGatewayConnectionId).mockReturnValue('local')
+  vi.mocked(isActivePrimary).mockReturnValue(true)
+  vi.mocked(activeGateway).mockReturnValue({
+    connectionState: 'open',
+    request: vi.fn(async (method: string) =>
+      method === 'projects.tree' ? { active_id: null, projects: localTree, scoped_session_ids: [] } : {}
+    )
+  } as never)
+})
+
+describe('remote gateway trees in the overview', () => {
+  it("reads each remote's all-profiles tree and keeps every row's own profile + connection", async () => {
+    useRegistry('skint-polycentrism')
+    vi.mocked(hermesApi).mockResolvedValue({
+      active_id: null,
+      projects: [
+        remoteProject([
+          { id: 'alpha-1', profile: 'alpha', title: 'Switch Fleece to Token Broker', last_active: 2 },
+          { id: 'coach-1', profile: 'coach', title: 'Coach run', last_active: 1 }
+        ])
+      ],
+      scoped_session_ids: ['alpha-1', 'coach-1']
+    })
+    vi.mocked(requestGatewayForAgent).mockRejectedValue(new Error('single-profile path must not run'))
+
+    await refreshProjectTree()
+    await flush()
+
+    expect(hermesApi).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: 'skint-polycentrism',
+        path: expect.stringMatching(/^\/api\/profiles\/projects\/tree\?preview_limit=\d+$/)
+      })
+    )
+    expect(requestGatewayForAgent).not.toHaveBeenCalled()
+
+    const alpha = allRows($projectTree.get()).find(row => row.id === 'alpha-1')
+
+    expect(alpha).toMatchObject({ connection_id: 'skint-polycentrism', profile: 'alpha' })
+    expect(sessionOwnerRouteFromRow(alpha)).toEqual({ connectionId: 'skint-polycentrism', profile: 'alpha' })
+    expect(sessionOwnerRouteFromRow(allRows($projectTree.get()).find(row => row.id === 'coach-1'))).toEqual({
+      connectionId: 'skint-polycentrism',
+      profile: 'coach'
+    })
+  })
+
+  it('falls back to the single-profile projects.tree when the remote lacks the REST tree', async () => {
+    useRegistry('old-gateway')
+    vi.mocked(hermesApi).mockRejectedValue(Object.assign(new Error('404 Not Found'), { status: 404 }))
+    vi.mocked(requestGatewayForAgent).mockResolvedValue({
+      active_id: null,
+      projects: [remoteProject([{ id: 'old-1', title: 'Old gateway chat', last_active: 1 }])],
+      scoped_session_ids: ['old-1']
+    } as never)
+
+    await refreshProjectTree()
+    await flush()
+
+    expect(requestGatewayForAgent).toHaveBeenCalledWith(
+      'old-gateway',
+      'default',
+      'projects.tree',
+      expect.any(Object),
+      expect.any(Number)
+    )
+    expect(allRows($projectTree.get()).find(row => row.id === 'old-1')).toMatchObject({
+      connection_id: 'old-gateway'
+    })
+  })
+})
