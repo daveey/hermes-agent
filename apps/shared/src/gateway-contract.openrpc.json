@@ -27206,7 +27206,7 @@
       },
       "ProviderUsageAccount": {
         "additionalProperties": false,
-        "description": "One account of a provider's credential pool (``hermes_cli/inventory.py::_pool_usage_accounts``).\n``id`` is a stable non-secret account identity (never a key or URL); ``label`` may be empty (UI\nfalls back to a localized \"Account N\"). ``windows`` is empty while the account's usage is not\nyet known \u2014 state carries the meaning, never a fabricated gauge.\n\n``state``: ``ready`` \u2014 live quota below the cap (numeric windows present); ``limited`` \u2014 a live\ncredential-wide cooldown or exhausted account-scoped quota windows; ``unknown`` \u2014 no live\nnumeric windows (failed/empty fetch, stale snapshot, provider without a usage API);\n``unavailable`` \u2014 DEAD auth row (kept visible, never a quota row).\n\n``resets_at``: for a limited account, the LATEST of its exhausted account-scoped windows (or a\nlive cooldown when later); ``None`` when unknown (the frontend renders its own advisory, e.g.\nthe earliest limited sibling).",
+        "description": "One account of a provider's credential pool (``hermes_cli/inventory.py::_pool_usage_accounts``).\n``id`` is a stable non-secret account identity (never a key or URL); ``label`` may be empty (UI\nfalls back to a localized \"Account N\"). ``windows`` is empty while the account's usage is not\nyet known \u2014 state carries the meaning, never a fabricated gauge.\n\n``state``: ``ready`` \u2014 live quota below the cap (numeric windows present); ``limited`` \u2014 a live\ncredential-wide cooldown or exhausted account-scoped quota windows; ``unknown`` \u2014 no live\nnumeric windows (failed/empty fetch, stale snapshot, provider without a usage API);\n``unavailable`` \u2014 DEAD auth row (kept visible, never a quota row).\n\n``resets_at``: for a limited account, the LATEST of its exhausted account-scoped windows (or a\nlive cooldown when later); ``None`` when unknown (the frontend renders its own advisory, e.g.\nthe earliest limited sibling).\n\nSanitized cause fields (classified codes and timestamps only, never a provider message):\n``limit_kind`` (set only when ``limited``): ``quota`` \u2014 the account is out (exhausted\naccount-scoped window, billing, or a provider usage/quota reason such as Codex\n``usage_limit_reached``) and waits for the provider's reset; ``cooldown`` \u2014 a temporary pool\nbench (rate limit, transient auth) that ends on its own. Both block selection. ``reason``:\n``quota_window`` / ``billing`` / ``usage_limit`` / ``rate_limit`` / ``auth`` / ``cooldown``\n(``auth`` also marks an ``unavailable`` row). ``cooldown_until``: ISO expiry of a live\ncredential-wide cooldown. ``model_cooldowns``: live per-model rate-limit cooldowns that leave\nthe account usable for other models (entitlement benches excluded).",
         "properties": {
           "id": {
             "title": "Id",
@@ -27245,6 +27245,61 @@
             ],
             "default": null,
             "title": "Resets At"
+          },
+          "limit_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "quota",
+                  "cooldown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Limit Kind"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "quota_window",
+                  "billing",
+                  "usage_limit",
+                  "rate_limit",
+                  "auth",
+                  "cooldown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          },
+          "cooldown_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cooldown Until"
+          },
+          "model_cooldowns": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderUsageModelCooldown"
+            },
+            "title": "Model Cooldowns",
+            "type": "array"
           }
         },
         "required": [
@@ -27252,6 +27307,26 @@
           "state"
         ],
         "title": "ProviderUsageAccount",
+        "type": "object"
+      },
+      "ProviderUsageModelCooldown": {
+        "additionalProperties": false,
+        "description": "A live per-model rate-limit cooldown on one account (``until`` is ISO).",
+        "properties": {
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "until": {
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "until"
+        ],
+        "title": "ProviderUsageModelCooldown",
         "type": "object"
       },
       "ProviderUsageWindow": {

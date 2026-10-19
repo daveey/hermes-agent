@@ -845,13 +845,22 @@ export interface ProviderUsageWindow {
   resets_at?: string | null
   scope?: 'account' | 'model'
 }
-/** One account of a provider's credential pool (``hermes_cli/inventory.py::_pool_usage_accounts``). ``id`` is a stable non-secret account identity (never a key or URL); ``label`` may be empty (UI falls back to a localized "Account N"). ``windows`` is empty while the account's usage is not yet known — state carries the meaning, never a fabricated gauge. ``state``: ``ready`` — live quota below the cap (numeric windows present); ``limited`` — a live credential-wide cooldown or exhausted account-scoped quota windows; ``unknown`` — no live numeric windows (failed/empty fetch, stale snapshot, provider without a usage API); ``unavailable`` — DEAD auth row (kept visible, never a quota row). ``resets_at``: for a limited account, the LATEST of its exhausted account-scoped windows (or a live cooldown when later); ``None`` when unknown (the frontend renders its own advisory, e.g. the earliest limited sibling). */
+/** One account of a provider's credential pool (``hermes_cli/inventory.py::_pool_usage_accounts``). ``id`` is a stable non-secret account identity (never a key or URL); ``label`` may be empty (UI falls back to a localized "Account N"). ``windows`` is empty while the account's usage is not yet known — state carries the meaning, never a fabricated gauge. ``state``: ``ready`` — live quota below the cap (numeric windows present); ``limited`` — a live credential-wide cooldown or exhausted account-scoped quota windows; ``unknown`` — no live numeric windows (failed/empty fetch, stale snapshot, provider without a usage API); ``unavailable`` — DEAD auth row (kept visible, never a quota row). ``resets_at``: for a limited account, the LATEST of its exhausted account-scoped windows (or a live cooldown when later); ``None`` when unknown (the frontend renders its own advisory, e.g. the earliest limited sibling). Sanitized cause fields (classified codes and timestamps only, never a provider message): ``limit_kind`` (set only when ``limited``): ``quota`` — the account is out (exhausted account-scoped window, billing, or a provider usage/quota reason such as Codex ``usage_limit_reached``) and waits for the provider's reset; ``cooldown`` — a temporary pool bench (rate limit, transient auth) that ends on its own. Both block selection. ``reason``: ``quota_window`` / ``billing`` / ``usage_limit`` / ``rate_limit`` / ``auth`` / ``cooldown`` (``auth`` also marks an ``unavailable`` row). ``cooldown_until``: ISO expiry of a live credential-wide cooldown. ``model_cooldowns``: live per-model rate-limit cooldowns that leave the account usable for other models (entitlement benches excluded). */
 export interface ProviderUsageAccount {
   id: string
   label?: string
   windows?: ProviderUsageWindow[]
   state: 'ready' | 'limited' | 'unknown' | 'unavailable'
   resets_at?: string | null
+  limit_kind?: 'quota' | 'cooldown' | null
+  reason?: 'quota_window' | 'billing' | 'usage_limit' | 'rate_limit' | 'auth' | 'cooldown' | null
+  cooldown_until?: string | null
+  model_cooldowns?: ProviderUsageModelCooldown[]
+}
+/** A live per-model rate-limit cooldown on one account (``until`` is ISO). */
+export interface ProviderUsageModelCooldown {
+  model: string
+  until: string
 }
 export interface ImageGenerateParams {
   prompt?: string | null

@@ -500,6 +500,13 @@ class ProviderUsageWindow(Result):
     scope: Literal["account", "model"] = "account"
 
 
+class ProviderUsageModelCooldown(Result):
+    """A live per-model rate-limit cooldown on one account (``until`` is ISO)."""
+
+    model: str
+    until: str
+
+
 class ProviderUsageAccount(Result):
     """One account of a provider's credential pool (``hermes_cli/inventory.py::_pool_usage_accounts``).
     ``id`` is a stable non-secret account identity (never a key or URL); ``label`` may be empty (UI
@@ -513,13 +520,27 @@ class ProviderUsageAccount(Result):
 
     ``resets_at``: for a limited account, the LATEST of its exhausted account-scoped windows (or a
     live cooldown when later); ``None`` when unknown (the frontend renders its own advisory, e.g.
-    the earliest limited sibling)."""
+    the earliest limited sibling).
+
+    Sanitized cause fields (classified codes and timestamps only, never a provider message):
+    ``limit_kind`` (set only when ``limited``): ``quota`` — the account is out (exhausted
+    account-scoped window, billing, or a provider usage/quota reason such as Codex
+    ``usage_limit_reached``) and waits for the provider's reset; ``cooldown`` — a temporary pool
+    bench (rate limit, transient auth) that ends on its own. Both block selection. ``reason``:
+    ``quota_window`` / ``billing`` / ``usage_limit`` / ``rate_limit`` / ``auth`` / ``cooldown``
+    (``auth`` also marks an ``unavailable`` row). ``cooldown_until``: ISO expiry of a live
+    credential-wide cooldown. ``model_cooldowns``: live per-model rate-limit cooldowns that leave
+    the account usable for other models (entitlement benches excluded)."""
 
     id: str
     label: str = ""
     windows: list[ProviderUsageWindow] = Field(default_factory=list)
     state: Literal["ready", "limited", "unknown", "unavailable"]
     resets_at: str | None = None
+    limit_kind: Literal["quota", "cooldown"] | None = None
+    reason: Literal["quota_window", "billing", "usage_limit", "rate_limit", "auth", "cooldown"] | None = None
+    cooldown_until: str | None = None
+    model_cooldowns: list[ProviderUsageModelCooldown] = Field(default_factory=list)
 
 
 class ProviderUsage(Result):

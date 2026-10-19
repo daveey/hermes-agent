@@ -358,6 +358,50 @@ def _apply_usage(rows: list[dict]) -> None:
 # A window this spent counts as exhausted when computing an account's recovery time.
 _EXHAUSTED_WINDOW_PERCENT = 100.0
 
+# Provider error reasons that mean the account's quota/usage window is spent (a real exhaustion
+# that waits for the provider's reset), as opposed to a short rate-limit cooldown.
+_QUOTA_ERROR_REASONS = frozenset({
+    "usage_limit_reached", "usage_limit", "insufficient_quota", "quota_exceeded", "quota_exhausted",
+    "rate_limit_exceeded_quota", "billing_hard_limit_reached",
+})
+
+
+def _cooldown_cause(entry) -> tuple[str, str]:
+    """``(limit_kind, reason)`` for a live credential-wide cooldown, from persisted classified
+    fields only (status code, classifier verdict, provider reason code) — never the raw message.
+
+    ``quota``: the provider says the account is out (402, billing verdict, a usage/quota reason
+    code such as Codex ``usage_limit_reached``) — it waits for the provider's reset. ``cooldown``:
+    a temporary bench (rate limit, transient auth) that ends on its own."""
+    code = entry.last_error_code
+    failure_reason = str(getattr(entry, "failure_reason", "") or "").strip().lower()
+    error_reason = str(entry.last_error_reason or "").strip().lower()
+    if code == 402 or failure_reason == "billing":
+        return "quota", "billing"
+    if error_reason in _QUOTA_ERROR_REASONS:
+        return "quota", "usage_limit"
+    if code == 401 or failure_reason in {"auth", "auth_permanent"}:
+        return "cooldown", "auth"
+    if code == 429 or failure_reason in {"rate_limit", "billing_unverified"}:
+        return "cooldown", "rate_limit"
+    return "cooldown", "cooldown"
+
+
+def _live_model_cooldowns(entry, now: float) -> list[dict]:
+    """Live per-model rate-limit cooldowns of *entry* (the credential stays usable for other
+    models). Entitlement benches (a plan lacking the model, a year long) are not windows and are
+    left out, matching ``CredentialPoolModelCooldownMixin.limit_state``."""
+    from agent.credential_pool_model_cooldowns import MODEL_ENTITLEMENT_BENCH_SECONDS
+
+    rows = []
+    for model, until in sorted((entry.model_cooldowns or {}).items()):
+        if not isinstance(until, (int, float)) or until <= now:
+            continue
+        if until - now >= MODEL_ENTITLEMENT_BENCH_SECONDS / 2:
+            continue
+        rows.append({"model": str(model), "until": _iso_from_epoch(until)})
+    return rows
+
 
 def _iso_from_epoch(epoch: float) -> str:
     from datetime import datetime, timezone
@@ -412,10 +456,15 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
         quota_exhausted = bool(windows) and any(
             w.get("scope") == "account" and w.get("used_percent") is not None
             and float(w["used_percent"]) >= _EXHAUSTED_WINDOW_PERCENT for w in windows)
+        limit_kind = reason = None
         if is_dead:
             state = "unavailable"
+            reason = "auth"
         elif live_cooldown is not None or quota_exhausted:
             state = "limited"
+            # Exhausted quota windows are the account's real state; a live cooldown says why the
+            # pool benched it. Quota (red) outranks a temporary cooldown (amber); both block.
+            limit_kind, reason = ("quota", "quota_window") if quota_exhausted else _cooldown_cause(entry)
         elif snapshot is None or stale or not windows:
             # No numeric live windows (failed/empty fetch, stale snapshot, non-supporting
             # provider): unknown — including a "ready-looking" account with nothing to show.
@@ -425,13 +474,22 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
         account_row = {
             "id": identity_id, "label": str(entry.label or ""), "windows": windows,
             "state": state, "resets_at": account_resets_at(snapshot, live_cooldown),
+            # Additive, sanitized cause fields: classified codes and timestamps only.
+            "limit_kind": limit_kind, "reason": reason,
+            "cooldown_until": _iso_from_epoch(live_cooldown) if live_cooldown is not None else None,
+            "model_cooldowns": [] if is_dead else _live_model_cooldowns(entry, now),
         }
         if dedupe_key in seen:
             # Same account under a second credential: keep the row that says more (state rank
-            # limited > ready > unknown > unavailable), but never duplicate the account.
+            # limited > ready > unknown > unavailable; a quota limit outranks a cooldown), but
+            # never duplicate the account.
             existing = seen[dedupe_key]
             rank = {"limited": 3, "ready": 2, "unknown": 1, "unavailable": 0}
-            if rank.get(account_row["state"], 0) > rank.get(existing["state"], 0):
+
+            def _rank(row: dict) -> tuple[int, int]:
+                return rank.get(row["state"], 0), 1 if row.get("limit_kind") == "quota" else 0
+
+            if _rank(account_row) > _rank(existing):
                 accounts[accounts.index(existing)] = account_row
                 seen[dedupe_key] = account_row
             continue
