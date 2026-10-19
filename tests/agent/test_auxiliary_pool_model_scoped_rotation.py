@@ -1,0 +1,214 @@
+"""Auxiliary pool rotation must name the failed credential AND the failed wire model.
+
+``_recover_provider_pool`` used to call ``mark_exhausted_and_rotate`` without ``model``.
+The pool only scopes a generic Anthropic 429 to the rate-limited model when it is told
+which model failed, so every auxiliary 429 (goal judge, title, compression...) benched the
+whole Claude account credential-wide for an hour, though its quota windows had room.
+The rotated retry's failure was also reported with no credential at all, so the pool
+guessed ``current()`` instead of the key that actually failed.
+
+These tests drive the real recovery ladder (sync ``call_llm`` and async
+``async_call_llm``) with synthetic keys, record exactly what reaches
+``mark_exhausted_and_rotate``, and then prove the end state on a real pool.
+"""
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+import agent.auxiliary_client as aux
+
+MODEL_A = "claude-haiku-4-5"
+MODEL_B = "claude-sonnet-4-5"
+KEY_A = "sk-ant-api03-synthetic-key-aaaa"
+KEY_B = "sk-ant-api03-synthetic-key-bbbb"
+ANTHROPIC_URL = "https://api.anthropic.com"
+
+
+class _ApiError(Exception):
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _rate_limit():
+    return _ApiError("Error code: 429 - rate_limit_error: Number of request tokens has exceeded your "
+                     "per-minute rate limit", 429)
+
+
+def _billing_429():
+    return _ApiError("Error code: 429 - Your credit balance is too low (billing)", 429)
+
+
+class _Response:
+    def __init__(self, text):
+        self.choices = [SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None),
+                                        finish_reason="stop")]
+        self.usage = None
+        self.model = MODEL_A
+
+
+class _RecordingPool:
+    def __init__(self):
+        self.rotate_calls = []
+
+    def has_credentials(self):
+        return True
+
+    def try_refresh_current(self):
+        return None
+
+    def mark_exhausted_and_rotate(self, **kwargs):
+        self.rotate_calls.append(kwargs)
+        return SimpleNamespace(id=f"next-{len(self.rotate_calls)}")
+
+
+def _client(key, side_effect, *, async_mode):
+    client = MagicMock()
+    client.api_key = key
+    client.base_url = ANTHROPIC_URL
+    create = AsyncMock(side_effect=side_effect) if async_mode else MagicMock(side_effect=side_effect)
+    client.chat.completions.create = create
+    return client
+
+
+def _run(async_mode, first_client, second_client, pool):
+    """One auxiliary call: first_client serves the initial request, second the rotated retry."""
+    patches = (
+        patch("agent.auxiliary_client._resolve_task_provider_model",
+              return_value=("anthropic", MODEL_A, None, None, None)),
+        patch("agent.auxiliary_client._get_cached_client",
+              side_effect=[(first_client, MODEL_A), (second_client, MODEL_A)]),
+        patch("agent.auxiliary_client._recoverable_pool_provider", return_value="anthropic"),
+        patch("agent.auxiliary_client._refresh_provider_credentials", return_value=False),
+        patch("agent.auxiliary_client._evict_cached_clients", return_value=None),
+        patch("agent.auxiliary_client.load_pool", return_value=pool),
+        patch("agent.auxiliary_client._validate_llm_response", side_effect=lambda resp, _task, **_kw: resp),
+        # Keep the provider-fallback rung offline: no fallback candidate configured.
+        patch("agent.auxiliary_client._try_configured_fallback_chain", return_value=(None, None, "")),
+        patch("agent.auxiliary_client._try_main_fallback_chain", return_value=(None, None, "")),
+        patch("agent.auxiliary_client._try_payment_fallback", return_value=(None, None, "")),
+    )
+    for p in patches:
+        p.start()
+    try:
+        kwargs = dict(task="goal_judge", provider="anthropic", model=MODEL_A,
+                      messages=[{"role": "user", "content": "hi"}])
+        if async_mode:
+            return asyncio.run(aux.async_call_llm(**kwargs))
+        return aux.call_llm(**kwargs)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+def test_initial_429_reports_failed_model_and_credential(async_mode):
+    pool = _RecordingPool()
+    first = _client(KEY_A, [_rate_limit(), _rate_limit()], async_mode=async_mode)
+    second = _client(KEY_B, [_Response("ok")], async_mode=async_mode)
+
+    resp = _run(async_mode, first, second, pool)
+
+    assert resp.choices[0].message.content == "ok"
+    assert len(pool.rotate_calls) == 1
+    call = pool.rotate_calls[0]
+    assert call["model"] == MODEL_A
+    assert call["api_key_hint"] == KEY_A
+    assert call["status_code"] == 429
+    assert call["failure_reason"] == "rate_limit"
+
+
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+def test_rotated_retry_failure_reports_the_rotated_credential(async_mode):
+    """The second failure came from KEY_B; reporting it without identity let the pool bench
+    whatever ``current()`` happened to be (or, after another process rotated, nothing)."""
+    pool = _RecordingPool()
+    first = _client(KEY_A, [_rate_limit(), _rate_limit()], async_mode=async_mode)
+    second = _client(KEY_B, [_rate_limit()], async_mode=async_mode)
+
+    with pytest.raises(Exception):
+        _run(async_mode, first, second, pool)
+
+    assert [c["api_key_hint"] for c in pool.rotate_calls] == [KEY_A, KEY_B]
+    assert [c["model"] for c in pool.rotate_calls] == [MODEL_A, MODEL_A]
+    assert all(c["failure_reason"] == "rate_limit" for c in pool.rotate_calls)
+
+
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+def test_billing_429_is_reported_as_billing(async_mode):
+    """A quota/billing 429 must stay account-wide even though the model is passed."""
+    pool = _RecordingPool()
+    first = _client(KEY_A, [_billing_429()], async_mode=async_mode)
+    second = _client(KEY_B, [_Response("ok")], async_mode=async_mode)
+
+    _run(async_mode, first, second, pool)
+
+    assert pool.rotate_calls[0]["failure_reason"] == "billing"
+    assert pool.rotate_calls[0]["api_key_hint"] == KEY_A
+
+
+# ── real pool: the recorded arguments produce the right persisted state ─────────
+
+
+@pytest.fixture
+def real_pool(tmp_path, monkeypatch):
+    root = tmp_path / "hermes-root"
+    root.mkdir()
+    (tmp_path / "fakehome").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "fakehome"))
+    for var in ("ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    import hermes_constants
+    hermes_constants._default_hermes_root_memo = None  # type: ignore[attr-defined]
+    (root / "auth.json").write_text(json.dumps({"credential_pool": {"anthropic": [
+        {"id": "seat-a", "label": "seat-a", "auth_type": "api_key", "priority": 0,
+         "source": "manual", "access_token": KEY_A},
+        {"id": "seat-b", "label": "seat-b", "auth_type": "api_key", "priority": 1,
+         "source": "manual", "access_token": KEY_B},
+    ]}}))
+    from agent.credential_pool import load_pool
+    return load_pool
+
+
+def _entry(pool, entry_id):
+    return next(e for e in pool.entries() if e.id == entry_id)
+
+
+def test_model_a_429_does_not_bench_model_b_on_a_real_pool(real_pool, monkeypatch):
+    monkeypatch.setattr(aux, "_evict_cached_clients", lambda *a, **k: None)
+    pool = real_pool("anthropic")
+    with patch("agent.auxiliary_client.load_pool", return_value=pool):
+        assert aux._recover_provider_pool("anthropic", _rate_limit(), failed_api_key=KEY_A,
+                                          failed_model=MODEL_A) is True
+
+    fresh = real_pool("anthropic")
+    seat_a = _entry(fresh, "seat-a")
+    assert seat_a.last_status is None  # credential-wide state untouched
+    assert MODEL_A in (seat_a.model_cooldowns or {})
+    assert MODEL_B not in (seat_a.model_cooldowns or {})
+    assert fresh.select(model=MODEL_B).id == "seat-a"  # unrelated model keeps the account
+    assert fresh.select(model=MODEL_A).id == "seat-b"
+
+
+@pytest.mark.parametrize("exc_factory,status", [
+    (_billing_429, 429),
+    (lambda: _ApiError("Error code: 402 - payment required", 402), 402),
+    (lambda: _ApiError("Error code: 401 - invalid x-api-key", 401), 401),
+])
+def test_billing_and_auth_stay_account_wide_on_a_real_pool(real_pool, monkeypatch, exc_factory, status):
+    from agent.credential_pool import STATUS_EXHAUSTED
+
+    monkeypatch.setattr(aux, "_evict_cached_clients", lambda *a, **k: None)
+    pool = real_pool("anthropic")
+    with patch("agent.auxiliary_client.load_pool", return_value=pool):
+        aux._recover_provider_pool("anthropic", exc_factory(), failed_api_key=KEY_A, failed_model=MODEL_A)
+
+    seat_a = _entry(real_pool("anthropic"), "seat-a")
+    assert seat_a.last_status == STATUS_EXHAUSTED
+    assert seat_a.last_error_code == status
+    assert not seat_a.model_cooldowns
