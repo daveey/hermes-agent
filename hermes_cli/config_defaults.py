@@ -1970,6 +1970,15 @@ DEFAULT_CONFIG = {
         # the dispatcher spawns at most one card behind it per this many seconds (one probe at a
         # time either way); a human unblock lets that card probe at once. [daveey]
         "shared_blocker_probe_seconds": 1800,
+        # Default model tier [daveey] (hermes_cli/kanban_model_tier.py): model (+ optional provider) the
+        # dispatcher runs a card on when the card pins no model. "" = upstream (the profile's own model).
+        # Cards keep the profile model when pinned, in the review lane, retried after a failed run or
+        # changes_requested, or matching a keep pattern. default_model_profiles limits it to those
+        # assignees ([] = all); default_model_keep_patterns are case-insensitive regexes on title+body.
+        "default_model": "",
+        "default_provider": "",
+        "default_model_profiles": [],
+        "default_model_keep_patterns": [],
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.

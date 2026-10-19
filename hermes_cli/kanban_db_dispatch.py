@@ -2207,6 +2207,10 @@ def _dispatch_lane_task(
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
+    # Default model tier (kanban.default_model): pins a cheaper model on the in-memory task unless the card is
+    # pinned, a review, a retry after a failure or matches a keep pattern. Never raises. [daveey]
+    from hermes_cli.kanban_model_tier import apply_model_tier
+    apply_model_tier(conn, claimed, lane=lane)
     try:
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:
