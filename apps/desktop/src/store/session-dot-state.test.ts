@@ -91,6 +91,20 @@ describe('sessionStatusStripe', () => {
     expect(sessionStatusStripe('needs-input', true, false, 0, true)).toBe('stuck')
     expect(sessionStatusStripe('idle', true, true, 0, true)).toBe('blocked')
   })
+
+  it('[daveey] a PR waiting on my review is red; on others for <24h is grey; working wins', () => {
+    for (const state of ['idle', 'unread', 'background'] as const) {
+      expect(sessionStatusStripe(state, true, false, 0, false, 'stuck')).toBe('stuck')
+      expect(sessionStatusStripe(state, true, false, 0, false, 'parked')).toBe('blocked')
+    }
+
+    expect(sessionStatusStripe('working', true, false, 0, false, 'stuck')).toBeNull()
+    expect(sessionStatusStripe('working', true, false, 0, false, 'parked')).toBeNull()
+    expect(sessionStatusStripe('needs-input', true, false, 0, false, 'parked')).toBe('stuck')
+    expect(sessionStatusStripe('idle', true, true, 0, false, 'stuck')).toBe('blocked')
+    expect(sessionStatusStripe('idle', true, false, 0, false, null)).toBe('done')
+    expect(sessionStatusStripe('idle', true, false, 0, false, undefined)).toBe('done')
+  })
 })
 
 describe('hasLiveTurn', () => {

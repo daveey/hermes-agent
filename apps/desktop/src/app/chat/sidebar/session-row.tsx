@@ -328,7 +328,8 @@ function SidebarSessionRowImpl({
   // [daveey] The left stripe is the session's status: green = its turn is done
   // and waiting on you (stays after you open it); red = not done but stuck
   // (blocked on a prompt, or gone quiet mid-turn, or kanban cards it made are
-  // blocked on a human). Working: no stripe.
+  // blocked on a human, or a PR it links waits on a review that's on you).
+  // Working: no stripe. A review only others were asked for (<24h) is grey.
   // ⌘B parks a session as blocked: grey stripe, skipped by ⌘] / ⌘[.
   const userBlocked = useStoreSelector($blockedSessionIds, ids => isSessionBlocked(session.id, ids))
 
@@ -339,7 +340,8 @@ function SidebarSessionRowImpl({
         session.message_count > 0,
         userBlocked,
         kanbanBlocked,
-        session.cron_active === true
+        session.cron_active === true,
+        session.review_wait
       )
 
   // Card header line: the workspace this belongs to — the project when it

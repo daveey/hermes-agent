@@ -26,7 +26,8 @@ export function SessionTabAccent({ children, session, storedSessionId }: Session
         (session?.message_count ?? 0) > 0,
         blocked,
         session?.kanban_blocked,
-        session?.cron_active
+        session?.cron_active,
+        session?.review_wait
       )
 
   return (

@@ -659,6 +659,13 @@ export interface SessionInfo {
    *  row off "done" even when this window never polled the session. Absent
    *  when zero or against an older backend. */
   background_active?: number
+  /** [daveey] Set when this conversation's latest reply links an open GitHub
+   *  PR still waiting on a code review: `stuck` when the review is on the
+   *  viewer (or nobody / others asked >24h ago), `parked` when only other
+   *  reviewers were requested in the last 24h. Absent otherwise. */
+  review_wait?: 'parked' | 'stuck'
+  /** [daveey] The PR `review_wait` refers to. */
+  review_wait_pr?: string
   preview: null | string
   source: null | string
   started_at: number

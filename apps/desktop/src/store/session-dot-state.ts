@@ -149,19 +149,32 @@ export const showsRunningArc = (state: SessionDotState): boolean => state === 's
  *  `blocked` (⌘] / ⌘[ skip it); only a real prompt (needs-input) beats it. */
 export type SessionStatusStripe = 'blocked' | 'done' | 'periodic' | 'stuck'
 
+/** [daveey] Backend `review_wait` stamp: the session's latest reply links an
+ *  open PR still needing a code review. `stuck` = the review is on the user
+ *  (requested from them, nobody requested, or others asked over 24h ago) →
+ *  red; `parked` = only others requested, under 24h → grey like ⌘B. Either
+ *  beats a running watcher (`background`) and `done`, never a working turn. */
+export type ReviewWait = 'parked' | 'stuck'
+
 export const sessionStatusStripe = (
   state: SessionDotState,
   hasTurns: boolean,
   userBlocked = false,
   kanbanBlocked = 0,
-  periodic = false
+  periodic = false,
+  reviewWait: null | ReviewWait | undefined = null
 ): null | SessionStatusStripe =>
   userBlocked
     ? 'blocked'
     : periodic && state !== 'needs-input'
     ? 'periodic'
-    : state === 'needs-input' || state === 'stalled' || (kanbanBlocked > 0 && state !== 'working')
+    : state === 'needs-input' ||
+        state === 'stalled' ||
+        (kanbanBlocked > 0 && state !== 'working') ||
+        (reviewWait === 'stuck' && state !== 'working')
     ? 'stuck'
+    : reviewWait === 'parked' && state !== 'working'
+    ? 'blocked'
     : state === 'unread' || (state === 'idle' && hasTurns)
       ? 'done'
       : null
