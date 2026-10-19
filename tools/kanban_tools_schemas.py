@@ -176,7 +176,9 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "needed), 'needs_input' (you need a human decision/answer), "
         "'capability' (a hard wall: no access, missing credentials, an action "
         "no agent can do), or 'transient' (a flaky failure that may clear). "
-        "``reason`` is shown to the human on the board. If a task keeps "
+        "``reason`` is shown to the human on the board and, in Desktop, in a "
+        "panel above the managing chat's composer as the steps to unblock it. "
+        "If a task keeps "
         "getting unblocked and re-blocked for the same reason, it is "
         "auto-escalated to triage. Use for genuine blockers only — don't "
         "block on things you can resolve yourself. Waiting on time or an "
@@ -186,9 +188,14 @@ KANBAN_BLOCK_SCHEMA = _schema(
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "reason": _prop("string", (
-                "What you need answered or what stopped you, in one or "
-                "two sentences. Don't paste the whole conversation; the "
-                "human has the board and can ask follow-ups via comments."
+                "The human's unblock instructions. Lead with the ask, not "
+                "with what you finished. For needs_input/capability write "
+                "numbered steps the human must perform (\"1) ... 2) ...\"), "
+                "naming the exact device, app, setting, page or command, then "
+                "what to do when done (e.g. \"then unblock this card\" or "
+                "\"reply with the value\"). For a decision, state the question "
+                "and the options. Keep it short; the human has the board and "
+                "can ask follow-ups via comments."
         )),
         "kind": {
             "type": "string",

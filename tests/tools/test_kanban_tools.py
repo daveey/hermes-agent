@@ -141,6 +141,21 @@ def test_kanban_task_id_descriptions_state_the_non_worker_case():
     assert "kanban_show" in seen
 
 
+def test_kanban_block_reason_asks_for_unblock_steps():
+    """[daveey] Desktop's blocked-panel shows ``reason`` above the chat's composer as
+    the human's unblock instructions, so the schema must ask for an ask-first,
+    numbered, concrete reason instead of a one-or-two-sentence status summary."""
+    from tools import kanban_tools_schemas as kts
+
+    desc = kts.KANBAN_BLOCK_SCHEMA["parameters"]["properties"]["reason"]["description"]
+    assert "unblock instructions" in desc
+    assert "Lead with the ask" in desc
+    assert "numbered steps" in desc
+    assert "exact device, app, setting" in desc
+    assert "one or two sentences" not in desc
+    assert "above the managing chat's composer" in kts.KANBAN_BLOCK_SCHEMA["description"]
+
+
 def test_list_filters_tasks(monkeypatch, worker_env):
     """kanban_list gives orchestrators filtered board discovery."""
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
