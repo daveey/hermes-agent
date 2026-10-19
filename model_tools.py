@@ -28,17 +28,53 @@ from utils import file_signature
 logger = logging.getLogger(__name__)
 
 _post_tool_call_hook_suppressed: ContextVar[bool] = ContextVar("post_tool_call_hook_suppressed", default=False)
+# [daveey] Non-None inside defer_transform_tool_result_hook(): transform_tool_result calls are
+# queued here instead of run, so the outer executor that owns post_tool_call fires them after it.
+_deferred_transform_tool_results: ContextVar[Optional[list]] = ContextVar(
+    "deferred_transform_tool_results", default=None
+)
 
 
 @contextmanager
 def suppress_post_tool_call_hook(suppressed: bool = True):
     """Let an outer executor own the terminal post-tool event. ``suppressed=False`` re-enables it
-    inside such a block, for calls that are their own (each entry of a connector batch)."""
+    inside such a block, for calls that are their own (each entry of a connector batch); such
+    calls also run their own transform_tool_result inline (any deferral is lifted)."""
     token = _post_tool_call_hook_suppressed.set(suppressed)
+    defer_token = None if suppressed else _deferred_transform_tool_results.set(None)
     try:
         yield
     finally:
+        if defer_token is not None:
+            _deferred_transform_tool_results.reset(defer_token)
         _post_tool_call_hook_suppressed.reset(token)
+
+
+@contextmanager
+def defer_transform_tool_result_hook():
+    """Queue transform_tool_result instead of running it inside handle_function_call.
+
+    An executor that suppresses the inner post_tool_call emits it later itself; running the
+    transform inside the call would fire it BEFORE post_tool_call, against the hook contract
+    (a hint a plugin queues in post_tool_call then lands on the next tool's result). Yields the
+    queue; the executor runs each entry with apply_deferred_transform_tool_result() after its
+    post_tool_call. [daveey]"""
+    queue: list = []
+    token = _deferred_transform_tool_results.set(queue)
+    try:
+        yield queue
+    finally:
+        _deferred_transform_tool_results.reset(token)
+
+
+def apply_deferred_transform_tool_result(entry: tuple, result: Any) -> Any:
+    """Run one transform queued by defer_transform_tool_result_hook() against *result*."""
+    function_name, function_args, duration_ms, ids = entry
+    token = _deferred_transform_tool_results.set(None)
+    try:
+        return _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)
+    finally:
+        _deferred_transform_tool_results.reset(token)
 
 # Platform-bundle names already flagged in disabled_toolsets (advisory logged once per name).
 _WARNED_DISABLED_BUNDLES: set = set()
@@ -852,7 +888,12 @@ def _apply_transform_tool_result_hook(function_name: str, function_args: dict[st
 
     Runs after post_tool_call and before the result enters context. Fail-open;
     first string return wins. Gated on has_hook so the no-listener path is cheap.
+    Inside defer_transform_tool_result_hook() the call is queued and *result* returned as-is.
     """
+    deferred = _deferred_transform_tool_results.get()
+    if deferred is not None:
+        deferred.append((function_name, function_args, duration_ms, ids))
+        return result
     try:
         from hermes_cli.lifecycle import has_hook, invoke_hook
         if has_hook("transform_tool_result"):

@@ -1653,7 +1653,9 @@ class _SequentialDispatch:
     is_delegate: bool = False
     finish_spinner: bool = True
     finish_in_finally: bool = True  # inline tools print their completion line only on success
-    transform_applied: bool = False  # True when execute already fired transform_tool_result
+    # Registry calls: transform_tool_result calls handle_function_call queued (not ran), to be
+    # fired after the executor's post_tool_call. None → the executor applies the transform itself.
+    deferred_transforms: Optional[list] = None
 
 
 def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _SequentialDispatch:
@@ -1688,27 +1690,33 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
             error_log="memory_manager.handle_tool_call raised for %s: %s",
         )
 
-    # Registry tools: post hook is owned by this executor (inner observer suppressed).
+    # Registry tools: post hook is owned by this executor (inner observer suppressed), so the
+    # inner transform_tool_result is deferred until after it (the hook's documented order).
+    deferred_transforms: list = []
+
     def _execute(next_args: dict) -> Any:
         import model_tools
 
-        with model_tools.suppress_post_tool_call_hook():
-            return model_tools.handle_function_call(
-                function_name,
-                next_args,
-                effective_task_id,
-                tool_call_id=tool_call_id,
-                session_id=agent.session_id or "",
-                turn_id=getattr(agent, "_current_turn_id", "") or "",
-                api_request_id=getattr(agent, "_current_api_request_id", "") or "",
-                enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                skip_pre_tool_call_hook=True,
-                skip_tool_request_middleware=True,
-                skip_tool_execution_middleware=True,
-                tool_request_middleware_trace=list(middleware_trace),
-                enabled_toolsets=getattr(agent, "enabled_toolsets", None),
-                disabled_toolsets=getattr(agent, "disabled_toolsets", None),
-            )
+        with model_tools.suppress_post_tool_call_hook(), model_tools.defer_transform_tool_result_hook() as queued:
+            try:
+                return model_tools.handle_function_call(
+                    function_name,
+                    next_args,
+                    effective_task_id,
+                    tool_call_id=tool_call_id,
+                    session_id=agent.session_id or "",
+                    turn_id=getattr(agent, "_current_turn_id", "") or "",
+                    api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+                    enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
+                    skip_pre_tool_call_hook=True,
+                    skip_tool_request_middleware=True,
+                    skip_tool_execution_middleware=True,
+                    tool_request_middleware_trace=list(middleware_trace),
+                    enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+                    disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                )
+            finally:
+                deferred_transforms[:] = queued
 
     return _SequentialDispatch(
         execute=_execute,
@@ -1718,7 +1726,7 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
         error_log="handle_function_call raised for %s: %s",
         handles_keyboard_interrupt=True,
         finish_spinner=bool(agent.quiet_mode),
-        transform_applied=True,  # handle_function_call fires transform_tool_result itself
+        deferred_transforms=deferred_transforms,
     )
 
 
@@ -1790,7 +1798,7 @@ def _run_sequential_call(
     return managed, tool_duration
 
 
-def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed: _ManagedToolResult, *, tool_duration: float, index: int, budget: BudgetConfig, transform_applied: bool) -> bool:
+def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed: _ManagedToolResult, *, tool_duration: float, index: int, budget: BudgetConfig, deferred_transforms: Optional[list] = None) -> bool:
     """Terminal hook → observe → commit → completion callbacks/print for one sequential
     result; False when the incremental flush failed (the caller must stop the batch)."""
     ref.args, ref.trace, function_result = managed.args, managed.middleware_trace, managed.result
@@ -1798,10 +1806,16 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
     # Inline-dispatched runtime tools never reach handle_function_call, so the
     # executor owns the one terminal post_tool_call per tool_call_id (the inner
     # observer is suppressed); also stops an abandoned timeout worker reporting late.
-    # transform_tool_result follows the observer, unless the dispatch already fired it.
+    # transform_tool_result follows the observer; registry dispatches queued theirs (see
+    # _SequentialDispatch.deferred_transforms) and fire them here, after post_tool_call.
     if not managed.blocked and not _execution_timed_out:
         ref.emit_post(agent, function_result, duration_ms=int(tool_duration * 1000))
-        if not transform_applied:
+        if deferred_transforms is not None:
+            import model_tools
+
+            for _entry in list(deferred_transforms):
+                function_result = model_tools.apply_deferred_transform_tool_result(_entry, function_result)
+        else:
             function_result = apply_transform_tool_result(
                 agent, function_name=ref.name, function_args=ref.args, result=function_result,
                 effective_task_id=ref.task_id, tool_call_id=ref.call_id,
@@ -1890,7 +1904,7 @@ def _execute_tool_calls_sequential(agent, assistant_message, messages: list, eff
             tool_start_time=tool_start_time,
         )
         if not _publish_sequential_result(agent, messages, ref, managed, tool_duration=tool_duration, index=i,
-                                          budget=_tool_budget, transform_applied=dispatch.transform_applied):
+                                          budget=_tool_budget, deferred_transforms=dispatch.deferred_transforms):
             return
 
         if agent._interrupt_requested and i < len(tool_calls):
