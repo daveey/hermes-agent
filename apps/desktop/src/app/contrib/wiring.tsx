@@ -43,6 +43,7 @@ import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { isMessagingSource } from '@/lib/session-source'
 import { activateWakeIndicator } from '@/lib/wake-indicator'
 import { playWakeSound } from '@/lib/wake-sound'
+import { dispatchArchiveHotkey } from '@/store/archive-hotkey'
 import { $billingSettingsRequest } from '@/store/billing-block'
 import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
@@ -1019,7 +1020,13 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     const next = nextSidebarSessionId(sessionId, 1, false, true)
     const onDeselect = next && next !== sessionId ? () => openSession(next, navigate) : undefined
 
-    void archiveSession(sessionId, { onDeselect })
+    // [daveey] A plugin that owns this session (Inbox) may archive it and pick
+    // the next one itself (`store/archive-hotkey.ts`); otherwise core archives.
+    dispatchArchiveHotkey(sessionId, {
+      archive: archiveSession,
+      focusedId: $focusedStoredSessionId.get(),
+      onDeselect
+    })
   }, [archiveSession, navigate])
 
   // Single global listener for every rebindable hotkey plus the on-screen

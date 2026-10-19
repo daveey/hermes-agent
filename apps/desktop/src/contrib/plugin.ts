@@ -25,6 +25,7 @@ import {
 } from '@/lib/keybinds/plugin-actions'
 import { readKey, writeKey } from '@/lib/storage'
 import { type ArchiveGuard, registerArchiveGuard } from '@/store/archive-guards'
+import { type ArchiveHotkeyHandler, registerArchiveHotkeyHandler } from '@/store/archive-hotkey'
 import { dispatchPluginNativeNotification, type PluginNativeNotificationInput } from '@/store/native-notifications'
 import { $petActive } from '@/store/pet'
 import { clearPetMessages, type PetSayOptions, sayPetMessage } from '@/store/pet-plugin-messages'
@@ -128,6 +129,12 @@ export interface PluginContext {
    *  error, so it can never block archiving. Removed on unload. Feature-detect
    *  on older hosts: `ctx.registerArchiveGuard?.(...)`. */
   registerArchiveGuard: (guard: ArchiveGuard) => () => void
+  /** [daveey] Take over the ⌘⇧A archive-and-advance hotkey for sessions this
+   *  plugin owns (e.g. Inbox messages). The handler gets the target id,
+   *  whether it is the open chat, and `openNextSession()` (core's own next
+   *  step); return true when handled, false to let core archive as usual.
+   *  Removed on unload. Feature-detect: `ctx.registerArchiveHotkeyHandler?.(...)`. */
+  registerArchiveHotkeyHandler: (handler: ArchiveHotkeyHandler) => () => void
   /** Register an arbitrary cleanup to run on unload/disable — for side effects
    *  that aren't contributions or sockets (store subscriptions, timers). Runs
    *  alongside every other disposer when the plugin deactivates. */
@@ -370,6 +377,7 @@ export function createPluginContext(pluginId: string, onDispose?: (dispose: () =
     registerMany: cs => track(registry.registerMany(cs.map(scope))),
     registerSettingsPage: page => track(registry.register(scope(settingsPageContribution(page)))),
     registerArchiveGuard: guard => track(registerArchiveGuard(source, guard)),
+    registerArchiveHotkeyHandler: handler => track(registerArchiveHotkeyHandler(source, handler)),
     onDispose: fn => void track(fn),
     onEvent: (type, listener) => track(onGatewayEvent(type, listener)),
     ...createPluginLifetime(track),
