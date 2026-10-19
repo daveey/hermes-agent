@@ -552,6 +552,10 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
     return None
 
 
+
+# [daveey] Unique fragment of the signed-bundle launchd wrapper's inline source (hermes_cli.gateway_launchd).
+SIGNED_LAUNCHD_WRAPPER_MARKER = "subprocess.Popen(['/bin/sh', '-c', sys.argv[1]])"
+
 def _gateway_command_subcommand(command: str | None) -> str | None:
     """Hermes gateway lifecycle subcommand from a command line, or None. No loose substring matches
     (``"gateway" in cmdline`` also matched ``gateway status`` / ``python -m tui_gateway``): needs a
@@ -559,6 +563,11 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
     quote-aware (Windows paths with spaces); ``--profile``/``-p`` selectors are stripped anywhere in
     argv since ``_apply_profile_override`` removes them before argparse."""
     if not command:
+        return None
+    # [daveey] The signed-bundle launchd wrapper (gateway_launchd.launchd_program_arguments) carries the gateway
+    # argv as data, like the osascript wrapper below; its interpreter path ("Hermes Python.app") has a space, so
+    # the token checks can't see it is a ``-c`` program. The gateway is its child, matched on its own line.
+    if SIGNED_LAUNCHD_WRAPPER_MARKER in command:
         return None
     try:
         raw_tokens = shlex.split(command, posix=False)

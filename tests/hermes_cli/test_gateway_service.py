@@ -1778,6 +1778,72 @@ class TestProfileArg:
         # The wrapper's own ps line must never be taken for the gateway (stop/status would signal osascript).
         assert status.looks_like_gateway_command_line(" ".join(program_args)) is False
 
+    def test_launchd_signed_python_owns_job_when_installed(self, tmp_path, monkeypatch):
+        """[daveey] With Hermes Python.app installed, it (not osascript) is the job's first executable, so
+        macOS attributes children's Accessibility/Automation requests to the signed bundle."""
+        profile_dir = tmp_path / ".hermes"
+        profile_dir.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(profile_dir))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_dir)
+        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: "/usr/bin/python3")
+        signed = tmp_path / "Applications" / "Hermes Python.app" / "Contents" / "MacOS" / "python3.14"
+        from hermes_cli import gateway_launchd
+        monkeypatch.setattr(gateway_launchd, "launchd_responsible_python", lambda: signed)
+
+        program_args = plistlib.loads(gateway_cli.generate_launchd_plist().encode("utf-8"))["ProgramArguments"]
+
+        assert program_args[:3] == [str(signed), "-I", "-c"]
+        assert len(program_args) == 5
+        assert status.SIGNED_LAUNCHD_WRAPPER_MARKER in program_args[3]
+        exec_, *argv = shlex.split(program_args[4])
+        assert exec_ == "exec"
+        assert argv[-4:] == [">>", str(profile_dir / "logs" / "gateway.log"),
+                             "2>>", str(profile_dir / "logs" / "gateway.error.log")]
+        assert argv[0] == "/usr/bin/python3"
+        assert argv[-5] == "--external-supervisor"
+        # The wrapper's own ps line must never be taken for the gateway (stop/status would signal it).
+        assert status.looks_like_gateway_command_line(" ".join(program_args)) is False
+
+    def test_launchd_signed_python_absent_keeps_osascript(self, tmp_path, monkeypatch):
+        """[daveey] No signed bundle (any non-fork install): the upstream osascript wrapper is unchanged."""
+        profile_dir = tmp_path / ".hermes"
+        profile_dir.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(profile_dir))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_dir)
+        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: str(tmp_path / "python-3.14.7+x" / "bin" / "python3"))
+
+        program_args = plistlib.loads(gateway_cli.generate_launchd_plist().encode("utf-8"))["ProgramArguments"]
+
+        assert program_args[0] == "/usr/bin/osascript"
+
+    @pytest.mark.platforms("macos")
+    @pytest.mark.parametrize(("child", "expected"), [
+        ("import os, sys; print(os.getpgrp()); sys.exit(23)", 23),
+        ("import os, signal; print(os.getpgrp()); os.kill(os.getpid(), signal.SIGTERM)", 128 + 15),
+    ])
+    def test_launchd_signed_wrapper_preserves_process_group_and_exit_status(self, tmp_path, child, expected):
+        """[daveey] The signed-bundle wrapper keeps the osascript wrapper's group and KeepAlive exit semantics."""
+        stdout_log = tmp_path / "stdout.log"
+        stderr_log = tmp_path / "stderr.log"
+        command = [sys.executable, "-c", child]
+
+        wrapper = subprocess.Popen(
+            launchd_program_arguments(command, stdout_log, stderr_log, responsible=Path(sys.executable)),
+            start_new_session=True,
+        )
+        try:
+            returncode = wrapper.wait(timeout=10)
+        finally:
+            if wrapper.poll() is None:
+                os.killpg(wrapper.pid, signal.SIGKILL)
+                wrapper.wait()
+
+        assert returncode == expected
+        assert int(stdout_log.read_text()) == wrapper.pid
+        assert stderr_log.read_text() == ""
+
     @pytest.mark.platforms("macos")
     def test_launchd_osascript_wrapper_preserves_process_group_and_exit_status(self, tmp_path):
         """The non-polling JXA wait keeps lifecycle signals and KeepAlive failure semantics intact."""

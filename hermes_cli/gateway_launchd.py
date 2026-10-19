@@ -216,7 +216,26 @@ def _gateway_run_command() -> list[str]:
                            python=_gw().get_python_path())
 
 
-def launchd_program_arguments(command: list[str], stdout_log: Path, stderr_log: Path) -> list[str]:
+# [daveey] Inline source of the signed-bundle launchd wrapper (see ``launchd_program_arguments``). Default
+# SIGTERM disposition on purpose: launchd signals the job's process group, so the gateway gets exactly one
+# SIGTERM, the same as under the osascript wrapper. Signal deaths map to 128+N like the JXA wrapper.
+# gateway.status matches SIGNED_LAUNCHD_WRAPPER_MARKER so the wrapper's ps line is never taken for the gateway.
+_SIGNED_WRAPPER_SOURCE = (
+    "import signal, subprocess, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); "
+    "rc = subprocess.Popen(['/bin/sh', '-c', sys.argv[1]]).wait(); "
+    "sys.exit(128 - rc if rc < 0 else rc)"
+)
+
+
+def launchd_responsible_python() -> Path | None:
+    """[daveey] The Developer-ID-signed Hermes Python.app executable to own the launchd job, if installed."""
+    from hermes_cli._launchers import signed_python_app
+    return signed_python_app(Path(_gw().get_python_path()))
+
+
+def launchd_program_arguments(
+    command: list[str], stdout_log: Path, stderr_log: Path, *, responsible: Path | None = None,
+) -> list[str]:
     """launchd ``ProgramArguments`` that run ``command`` with a Local Network identity macOS accepts (#71206).
 
     macOS Local Network Privacy attributes a socket to the process launchd spawned for the job. A bare
@@ -236,8 +255,18 @@ def launchd_program_arguments(command: list[str], stdout_log: Path, stderr_log: 
     bootout`` / ``kickstart -k`` still deliver SIGTERM to it. stdout/stderr are appended inside the shell
     command because ``system()`` otherwise inherits osascript's plist log handles. The encoded wait status
     is translated back to a process exit code so KeepAlive's ``SuccessfulExit`` semantics are preserved.
+
+    [daveey] ``responsible``: a Developer-ID-signed app executable (Hermes Python.app) to own the job instead
+    of osascript. macOS attributes every child's Accessibility/Automation request to the job's responsible
+    process, so under osascript a terminal-tool ``osascript -e 'tell application "System Events"…'`` prompts
+    for "osascript", a grant that also covers every unrelated script on the Mac. A signed bundle with
+    ``NSLocalNetworkUsageDescription`` keeps LAN access (verified live on macOS 26.6), and its grants survive
+    rebuilds because TCC keys them by bundle id + team. It waits for ``/bin/sh -c exec …`` like JXA's
+    ``system()`` and dies on launchd's SIGTERM like osascript, so lifecycle semantics are unchanged.
     """
     shell = f"exec {shlex.join(command)} >> {shlex.quote(str(stdout_log))} 2>> {shlex.quote(str(stderr_log))}"
+    if responsible is not None:
+        return [str(responsible), "-I", "-c", _SIGNED_WRAPPER_SOURCE, shell]
     javascript = (
         'ObjC.import("stdlib"); '
         f"const status=$.system({json.dumps(shell)}); "
@@ -367,11 +396,11 @@ def generate_launchd_plist() -> str:
 
     # ProgramArguments (incl. --profile); the stderr wrapper keeps launchd restart semantics while timestamping
     # stderr; the osascript wrapper gives the job a Local Network identity (see launchd_program_arguments).
+    # [daveey] With Hermes Python.app installed, the signed bundle owns the job instead (TCC attribution).
     stdout_log, stderr_log = log_dir / "gateway.log", log_dir / "gateway.error.log"
     command = _timestamped_stderr_gateway_command(stderr_log, external_supervisor=True)
-    prog_args_xml = "\n        ".join(
-        f"<string>{escape(part)}</string>" for part in launchd_program_arguments(command, stdout_log, stderr_log)
-    )
+    prog_args = launchd_program_arguments(command, stdout_log, stderr_log, responsible=launchd_responsible_python())
+    prog_args_xml = "\n        ".join(f"<string>{escape(part)}</string>" for part in prog_args)
 
     # Persist the configured RLIMIT_NOFILE floor: launchd defaults to soft 256, and every plist
     # rewrite would otherwise strip a manual limit and reintroduce EMFILE crashes.
