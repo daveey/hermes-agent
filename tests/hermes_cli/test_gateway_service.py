@@ -1820,8 +1820,8 @@ class TestProfileArg:
 
     @pytest.mark.platforms("macos")
     @pytest.mark.parametrize(("child", "expected"), [
-        ("import os, sys; print(os.getpgrp()); sys.exit(23)", 23),
-        ("import os, signal; print(os.getpgrp()); os.kill(os.getpid(), signal.SIGTERM)", 128 + 15),
+        ("import os, sys; print(os.getpgrp(), flush=True); sys.exit(23)", 23),
+        ("import os, signal; print(os.getpgrp(), flush=True); os.kill(os.getpid(), signal.SIGTERM)", 128 + 15),
     ])
     def test_launchd_signed_wrapper_preserves_process_group_and_exit_status(self, tmp_path, child, expected):
         """[daveey] The signed-bundle wrapper keeps the osascript wrapper's group and KeepAlive exit semantics."""
@@ -1852,7 +1852,7 @@ class TestProfileArg:
         command = [
             sys.executable,
             "-c",
-            "import os, sys; print(os.getpgrp()); sys.exit(23)",
+            "import os, sys; print(os.getpgrp(), flush=True); sys.exit(23)",
         ]
 
         # A fresh session makes the wrapper its own group leader (as launchd does), so the child
