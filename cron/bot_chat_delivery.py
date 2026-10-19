@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 _warned_unreadable: set[Path] = set()
 _running: set[Path] = set()
 _running_lock = threading.Lock()
+# A replay refused because the Bot Chat is busy (SESSION_NOT_OWNED / MAX_CONCURRENT_SESSIONS) never
+# ran, so it goes back to ``queued``; after this many consecutive busy drains (one per tick, so
+# about two hours) it settles as ``ambiguous`` instead of spawning a refused child forever.
+MAX_BUSY_ATTEMPTS = 120
 
 
 def _root() -> Path:
@@ -134,6 +138,13 @@ def _drain(root: Path) -> None:
             # The claim survives uncertainty; one failed attempt must not stop peers.
             error = f"{type(exc).__name__}: {exc}"
             logger.exception("Deferred Bot Chat delivery %s failed", record["id"])
+        busy = job.pop("_bot_chat_busy_requeue", None)
+        if busy and not job.get("_bot_chat_delivery_receipts"):
+            attempts = int(record.get("busy_attempts") or 0) + 1
+            record.update(busy_attempts=attempts, error=error,
+                          status="queued" if attempts < MAX_BUSY_ATTEMPTS else "ambiguous")
+            atomic_json_write(path, record, fsync_dir=True, mode=0o600)
+            continue
         receipt = job.get("_bot_chat_delivery_receipts", {}).get(
             f"bot-chat:{record['profile'] or '(own)'}")
         status = "transferred" if receipt else "ambiguous" if error else "settled"

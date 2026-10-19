@@ -722,6 +722,19 @@ _BOT_CHAT_STDERR_TAIL = 500
 # stdout is the model's answer; only a short tail is persisted (jobs.json / ledger).
 _BOT_CHAT_STDOUT_TAIL = 200
 _BOT_CHAT_BANNER_PREFIXES = ("Resumed session", "session_id:")
+# Admission refusals meaning "another writer holds this Bot Chat right now — come back later"
+# (hermes_cli.active_sessions). The CLI refuses before reading the query, so the turn never ran
+# and the payload is deferred for replay instead of being recorded as a final failure.
+_BOT_CHAT_BUSY_REASONS = frozenset({"SESSION_NOT_OWNED", "MAX_CONCURRENT_SESSIONS"})
+_REFUSAL_PREFIX = "hermes-refusal-reason: "
+
+
+def _bot_chat_refusal_reason(stderr) -> Optional[str]:
+    """The machine-readable refusal code a ``-Q`` child printed (format_refusal_stderr), if any."""
+    for line in (stderr or "").splitlines():
+        if line.startswith(_REFUSAL_PREFIX):
+            return line[len(_REFUSAL_PREFIX):].strip() or None
+    return None
 
 
 def _run_bot_chat_turn(argv: list, env: dict, report_path: str, timeout: float) -> subprocess.CompletedProcess:
@@ -938,6 +951,27 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str, *, deferred: Opt
         result = _run_bot_chat_turn(argv, env, report_file, timeout_s)
         if result.returncode != 0:
             tail = _format_failure_streams(result)
+            reason = _bot_chat_refusal_reason(getattr(result, "stderr", None))
+            if reason in _BOT_CHAT_BUSY_REASONS:
+                # Another delivery child (or CLI session) holds the Bot Chat lease: the turn was
+                # refused at admission and never ran, so defer under the same key — replayed
+                # exactly once by the deferred lane when the session frees.
+                target = f"bot-chat:{profile_label}"
+                logger.info("Job '%s': Bot Chat %s busy (%s); deferring receipt=%s",
+                            job_id, profile_label, reason, key)
+                if deferred is not None:
+                    # Replay refused again: tell the drain to put its claim back to queued.
+                    job["_bot_chat_busy_requeue"] = reason
+                    return f"{target} busy ({reason}) (receipt {key}): requeued; do not resend"
+                from cron.bot_chat_delivery import defer
+                pending = defer(key, dict(job), content, profile, home, for_failure=for_failure)
+                status = pending["status"]
+                job.setdefault("_bot_chat_delivery_receipts", {})[target] = {
+                    "status": status, "delivery_id": key}
+                if status == "settled":
+                    return None
+                return (f"{target} {status} (receipt {key}): session busy ({reason}); "
+                        "completion unverified; do not resend")
             logger.warning(
                 "Job '%s': bot-chat delivery to profile '%s' failed at %s: %s",
                 job_id, profile_label, home, tail)
