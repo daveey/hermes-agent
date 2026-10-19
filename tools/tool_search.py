@@ -12,6 +12,7 @@ import functools
 import json
 import logging
 import math
+import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -62,10 +63,18 @@ class ToolSearchConfig:
     # "call it directly" refusal; models also route direct tools through the bridge on their
     # own. The session-scope gate still applies. False (the default) = upstream behavior.
     forward_direct_calls: bool = False
+    # [daveey] Extra names deferred only OUTSIDE a dispatcher-spawned Kanban worker
+    # (``HERMES_KANBAN_TASK`` unset): worker-lifecycle tools (heartbeat, complete, block,
+    # request_review...) every worker calls but chats rarely do. Chats still reach them via
+    # ``tool_call``; workers keep them direct. Empty (the default) = upstream behavior.
+    defer_outside_kanban_worker: frozenset = frozenset()
 
     @property
     def effective_defer_tools(self) -> frozenset:
-        return _DEFAULT_DEFERRED_TOOLS if self.defer_tools is None else self.defer_tools
+        base = _DEFAULT_DEFERRED_TOOLS if self.defer_tools is None else self.defer_tools
+        if self.defer_outside_kanban_worker and not _in_kanban_worker():
+            return base | self.defer_outside_kanban_worker
+        return base
 
     @classmethod
     def from_raw(cls, raw: Any) -> ToolSearchConfig:
@@ -99,7 +108,25 @@ class ToolSearchConfig:
             defer_tools=(frozenset(str(n).strip() for n in defer_raw if str(n).strip())
                          if isinstance(defer_raw, (list, tuple, set)) else None),
             eager_tools=frozenset(str(n).strip() for n in (eager_raw or ()) if str(n).strip()),
-            forward_direct_calls=_safe_bool(raw.get("forward_direct_calls"), False))
+            forward_direct_calls=_safe_bool(raw.get("forward_direct_calls"), False),
+            defer_outside_kanban_worker=_name_set(raw, "defer_outside_kanban_worker"))
+
+
+def _in_kanban_worker() -> bool:
+    """[daveey] True in a dispatcher-spawned Kanban worker process (``HERMES_KANBAN_TASK`` set)."""
+    return bool(os.environ.get("HERMES_KANBAN_TASK"))
+
+
+def _name_set(raw: dict, key: str) -> frozenset:
+    """[daveey] ``raw[key]`` as a frozenset of stripped names; a non-list warns and yields empty."""
+    value = raw.get(key)
+    if value is None:
+        return frozenset()
+    if not isinstance(value, (list, tuple, set)):
+        logger.warning("tools.tool_search.%s is %r, expected a YAML list of tool names - "
+                       "ignoring it.", key, value)
+        return frozenset()
+    return frozenset(str(n).strip() for n in value if str(n).strip())
 
 
 def _safe_bool(value: Any, fallback: bool) -> bool:

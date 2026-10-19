@@ -2052,6 +2052,10 @@ DEFAULT_CONFIG = {
             # defer/eager edit mid-session otherwise breaks calls the model already made through
             # the bridge. Session toolset scope still applies. False = upstream behavior.
             "forward_direct_calls": False,
+            # [daveey] Extra tool names deferred only outside a dispatcher-spawned Kanban worker
+            # (HERMES_KANBAN_TASK unset), e.g. worker-lifecycle tools chats rarely call. Workers
+            # keep them direct; chats reach them via tool_call. [] = upstream behavior.
+            "defer_outside_kanban_worker": [],
         },
         # Remote connector discovery/lifecycle through the Nous tool gateway.
         # The flag is the user's off switch; availability additionally requires
