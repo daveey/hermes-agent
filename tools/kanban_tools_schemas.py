@@ -599,7 +599,8 @@ KANBAN_CREATE_SCHEMA = _schema(
 KANBAN_UNBLOCK_SCHEMA = _schema(
     "kanban_unblock",
     (
-        "Unblock a Kanban task. It moves to ready when all parents are done, "
+        "Unblock a Kanban task (blocked, scheduled, or a triage card a block "
+        "loop escalated). It moves to ready when all parents are done, "
         "or todo while any parent remains open. Orchestrator-only — only "
         "profiles with the kanban toolset can unblock routed work; "
         "dispatcher-spawned task workers never see this tool."

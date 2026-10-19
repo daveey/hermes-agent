@@ -3221,6 +3221,10 @@ def block_task(
         new_status, event_kind, set_sql, params, payload = _route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
+            prev_reason=_latest_block_reason(conn, task_id),
+            # A dependency re-kinded to needs_input is an impossible wait, not a
+            # human question: its rewording is no progress.
+            compare_reason=requested_kind == "needs_input",
         )
         if rekind_reason:
             payload["requested_kind"] = requested_kind
@@ -3286,9 +3290,27 @@ def _latest_run_blocker(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     return None
 
 
+def _latest_block_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """``reason`` of the newest ``blocked``/``block_loop_detected`` event, if any. [daveey]"""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind IN ('blocked', 'block_loop_detected') ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    value = _json_dict(_row_get(row, "payload")).get("reason")
+    return value if isinstance(value, str) else None
+
+
+def _normalized_reason(reason: Optional[str]) -> str:
+    return " ".join((reason or "").split()).casefold()
+
+
 def _route_block(
     kind: Optional[str], reason: Optional[str], source_status: str, *,
-    prev_kind: Optional[str], prev_recurrences: int,
+    prev_kind: Optional[str], prev_recurrences: int, prev_reason: Optional[str] = None,
+    compare_reason: bool = False,
 ) -> tuple[str, str, str, tuple, dict]:
     """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
 
@@ -3302,11 +3324,19 @@ def _route_block(
     incoming one means blocked -> unblocked -> re-block for the same cause
     (un-typed None compares equal to a prior un-typed block). At
     ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+
+    A ``needs_input`` re-block whose reason differs from the previous block's
+    is progress (the human answered one question, the worker asks the next),
+    not a loop, so it restarts the count at 1. [daveey]
     """
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
         return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
-    recurrences = prev_recurrences + 1 if prev_kind == kind else 1
+    same_cause = prev_kind == kind and (
+        not (compare_reason and kind == "needs_input")
+        or _normalized_reason(reason) == _normalized_reason(prev_reason)
+    )
+    recurrences = prev_recurrences + 1 if same_cause else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
     if recurrences >= BLOCK_RECURRENCE_LIMIT:
@@ -3549,21 +3579,27 @@ def request_changes(
     return True, implementer
 
 
+_PROMOTABLE_STATUSES = ("todo", "blocked", "triage")
+
+
 def promote_task(
     conn: sqlite3.Connection, task_id: str, *, actor: str, reason: Optional[str] = None,
     dry_run: bool = False,
 ) -> tuple[bool, Optional[str]]:
-    """Operator promotion ``todo``/``blocked`` -> ``ready`` with an audit event.
+    """Operator promotion ``todo``/``blocked``/``triage`` -> ``ready`` with an
+    audit event. ``triage`` is the supported exit for a card a block loop
+    escalated (or any triage card a human has already specified) without
+    running the specifier/decomposer. [daveey]
     Refused while a parent is unfinished; ``dry_run`` only validates.
     Returns ``(ok, reason)``."""
     cur_status = _task_status(conn, task_id)
     if cur_status is None:
         return False, f"task {task_id} not found"
 
-    if cur_status not in ("todo", "blocked"):
+    if cur_status not in _PROMOTABLE_STATUSES:
         return False, (
             f"task {task_id} is {cur_status!r}; promote only applies to "
-            f"'todo' or 'blocked'"
+            f"'todo', 'blocked' or 'triage'"
         )
 
     # No override: claim_task demotes ready -> todo on an undone parent whichever
@@ -3589,11 +3625,14 @@ def promote_task(
     with write_txn(conn):
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready' "
-            "WHERE id = ? AND status IN ('todo', 'blocked')", (task_id,),
+            "WHERE id = ? AND status IN ('todo', 'blocked', 'triage')", (task_id,),
         )
         if upd.rowcount != 1:
             return False, f"task {task_id} status changed during promotion"
-        _append_event(conn, task_id, "promoted_manual", {"actor": actor, "reason": reason})
+        _append_event(conn, task_id, "promoted_manual", {
+            "actor": actor, "reason": reason,
+            **({"from_status": cur_status} if cur_status != "todo" else {}),
+        })
 
     return True, None
 
@@ -3629,17 +3668,19 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    """``blocked``/``scheduled``/``triage`` -> its resumable phase (parent
+    re-gated; ``review`` when that is where it left off), closing any leaked run
+    first. ``triage`` is accepted so a card a block loop escalated can go back
+    to work without the specifier/decomposer rewriting it. [daveey]"""
     now = int(time.time())
     with write_txn(conn):
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
+            if _task_status(conn, task_id) in ("blocked", "triage")
             else "ready"
         )
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=("blocked", "scheduled", "triage"), now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -3657,7 +3698,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
+            "WHERE id = ? AND status IN ('blocked', 'scheduled', 'triage')", (new_status, task_id),
         )
         if cur.rowcount != 1:
             return False
@@ -3828,6 +3869,34 @@ def awaiting_human_after_block_loop(conn: sqlite3.Connection, task_id: str) -> b
         (task_id, loop_eid, *_HUMAN_INPUT_EVENT_KINDS),
     ).fetchone()
     return later is None
+
+
+def decomposition_refusal(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Why *task_id* must not be specified/decomposed by the aux LLM, or None.
+
+    Only never-started cards are candidates. A card that has run (``started_at``
+    set or any ``task_runs`` row) carries shipped work and handoffs the LLM does
+    not see; re-decomposing it from its body re-implements the shipped feature.
+    A ``block_loop_detected`` escalation is a wait for a human, not a request
+    for a new spec. Either way the exit is ``hermes kanban promote`` /
+    ``kanban_unblock`` (triage -> ready). [daveey]
+    """
+    row = conn.execute("SELECT started_at FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return None
+    ran = row["started_at"] is not None or conn.execute(
+        "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (task_id,),
+    ).fetchone() is not None
+    if ran:
+        return ("task has already run; decomposing it would redo its shipped work. "
+                f"Return it to work with `hermes kanban promote {task_id}` or kanban_unblock")
+    if conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'block_loop_detected' LIMIT 1",
+        (task_id,),
+    ).fetchone() is not None:
+        return ("task was escalated to triage by block-loop detection and is waiting for a human; "
+                f"return it to work with `hermes kanban promote {task_id}` or kanban_unblock")
+    return None
 
 
 def specify_triage_task(

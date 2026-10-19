@@ -305,13 +305,20 @@ def decompose_task(
     *,
     author: Optional[str] = None,
     timeout: Optional[int] = None,
+    force: bool = False,
 ) -> DecomposeOutcome:
     """Decompose a triage task into a graph of child tasks. Expected failures
     (not in triage, no aux client, API error, malformed/empty reply) surface
-    as ``ok=False``."""
+    as ``ok=False``. A card that already ran or was escalated by a block loop
+    is refused (:func:`kanban_db.decomposition_refusal`) unless ``force``."""
     task, reason = _load_triage_task(task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
+    if not force:
+        with kbc.connect_closing() as conn:
+            refusal = kb.decomposition_refusal(conn, task_id)
+        if refusal:
+            return DecomposeOutcome(task_id, False, refusal)
 
     routing = _load_routing(root_assignee=task.assignee)
     raw, reason = _call_aux(
@@ -337,14 +344,16 @@ def decompose_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None, skip_awaiting_human: bool = False) -> list[str]:
-    """Return task ids currently in the triage column.
+    """Return the triage task ids that are decomposition candidates.
 
-    ``skip_awaiting_human`` (the dispatcher's auto-decompose sweep) drops cards
-    that ``block_loop_detected`` escalated for a human and that have had no human
-    input since; explicit specify/decompose of one id still works on them.
+    Every sweep (the dispatcher's auto-decompose and ``decompose --all``) drops
+    cards that already ran or that ``block_loop_detected`` escalated, even after
+    a human comments on them (:func:`kanban_db.decomposition_refusal`); those wait
+    for ``promote``/``unblock``. ``skip_awaiting_human`` is kept for callers and
+    is now implied. [daveey]
     """
+    del skip_awaiting_human
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-        if skip_awaiting_human:
-            rows = [row for row in rows if not kb.awaiting_human_after_block_loop(conn, row.id)]
+        rows = [row for row in rows if kb.decomposition_refusal(conn, row.id) is None]
     return [row.id for row in rows]

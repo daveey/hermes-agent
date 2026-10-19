@@ -469,6 +469,15 @@ survives each unblock (it resets only on a successful `complete`). To keep an
 unblocked task in the work pool, resolve *why it keeps re-blocking* (unfinished
 parent, missing input, unmet capability) before unblocking, or raise
 `BLOCK_RECURRENCE_LIMIT` if the loop is expected.
+
+A `needs_input` re-block whose reason text changed since the previous block
+(the human answered one question, the worker asks the next) counts as
+progress and restarts the counter at 1. A card escalated to `triage` this way,
+or any triage card that has already run, is never picked up by the
+specifier/decomposer sweeps (rewriting it from its body would redo shipped
+work), even after someone comments on it. Return it to work with
+`hermes kanban unblock <id>` / `kanban_unblock`, or `hermes kanban promote <id>`;
+`hermes kanban decompose <id> --force` overrides the refusal explicitly.
 :::
 
 ## Enabling tools for a chat profile
@@ -999,7 +1008,7 @@ hermes kanban assign <id> <profile>                    # or 'none' to unassign
 hermes kanban reassign <id>... <profile>               # bulk re-assign tasks to a profile
 hermes kanban edit <id> [--title ...] [--body ...]     # edit task title / body / priority in place
         [--priority N]
-hermes kanban promote <id>...                          # move todo/blocked tasks to ready (recovery)
+hermes kanban promote <id>...                          # move todo/blocked/triage tasks to ready (recovery)
 hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time
 hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
 hermes kanban link <parent_id> <child_id>

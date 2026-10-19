@@ -331,7 +331,7 @@ _SPECS = [
     _cmd("unblock", [
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
         _TASK_IDS,
-    ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open"),
+    ], help="Return blocked/scheduled/triage tasks to ready, or todo while parents remain open"),
     _cmd("request-review", [
         _TASK_ID,
         _arg("--summary", help="What was implemented and how it was verified — shown to the reviewer."),
@@ -353,7 +353,7 @@ _SPECS = [
         _bulk_ids("promote"),
         _arg("--dry-run", action="store_true", help="Validate the promotion without mutating state"),
         _arg("--json", dest="json", action="store_true", help="Emit machine-readable JSON result"),
-    ], help="Manually move one or more todo/blocked tasks to ready (recovery path)"),
+    ], help="Manually move one or more todo/blocked/triage tasks to ready (recovery path)"),
     _cmd("archive", [
         _arg("task_ids", nargs="*", help="Task ids to archive (default mode)"),
         _arg("--rm", dest="purge_ids", nargs="+",
@@ -429,7 +429,10 @@ _SPECS = [
          help="Flesh out a triage-column task into a concrete spec (title + "
               "body) and promote it to todo. Uses the auxiliary LLM "
               "configured under auxiliary.triage_specifier."),
-    _cmd("decompose", _triage_sweep_args("decompose", "Decompose", "decomposer"),
+    _cmd("decompose", (*_triage_sweep_args("decompose", "Decompose", "decomposer"),
+                       _arg("--force", action="store_true",
+                            help="Decompose even a card that already ran or was escalated by "
+                                 "block-loop detection (normally refused: it redoes shipped work)")),
          help="Decompose a triage-column task into a graph of child tasks "
               "routed to specialist profiles by description. Falls back "
               "to specify-style single-task promotion when the task "

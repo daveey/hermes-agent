@@ -227,19 +227,112 @@ def test_auto_decompose_sweep_skips_block_loop_escalation(kanban_home: Path) -> 
     swept = decomp.list_triage_ids(skip_awaiting_human=True)
     assert plain in swept
     assert looped not in swept
-    # The explicit/CLI listing is unchanged.
-    assert looped in decomp.list_triage_ids()
+    # ``decompose --all`` is a sweep too: it skips the escalation as well.
+    assert looped not in decomp.list_triage_ids()
 
 
-def test_human_comment_after_escalation_reenables_auto_decompose(kanban_home: Path) -> None:
+def test_human_comment_after_escalation_does_not_reenable_auto_decompose(kanban_home: Path) -> None:
+    """A comment on a block-loop escalation is the human working the acceptance
+    step, not a request for a new spec: the sweep must still leave it alone
+    (it re-decomposed a shipped card into 5 re-implementation children)."""
     from hermes_cli import kanban_decompose as decomp
 
     with kbc.connect_closing() as conn:
         looped = _loop_to_triage(conn)
         kb.add_comment(conn, looped, "david", "Try channel 11 on the new AP.")
-        assert kb.awaiting_human_after_block_loop(conn, looped) is False
+        assert kb.decomposition_refusal(conn, looped) is not None
 
-    assert looped in decomp.list_triage_ids(skip_awaiting_human=True)
+    assert looped not in decomp.list_triage_ids(skip_awaiting_human=True)
+
+
+def _ran_then_triaged(conn) -> str:
+    """A card that has run and reached triage by some path other than a block loop."""
+    tid = _running_task(conn, title="shipped feature")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='triage', current_run_id=NULL, claim_lock=NULL "
+                     "WHERE id=?", (tid,))
+    return tid
+
+
+def test_decomposer_refuses_card_that_already_ran(kanban_home: Path, monkeypatch) -> None:
+    from hermes_cli import kanban_decompose as decomp
+
+    with kbc.connect_closing() as conn:
+        ran = _ran_then_triaged(conn)
+        fresh = kb.create_task(conn, title="rough idea", triage=True)
+        assert kb.decomposition_refusal(conn, fresh) is None
+        assert "already run" in (kb.decomposition_refusal(conn, ran) or "")
+
+    calls = []
+    monkeypatch.setattr(decomp, "_call_aux", lambda *a, **k: calls.append(a) or (None, "no aux"))
+    assert ran not in decomp.list_triage_ids(skip_awaiting_human=True)
+    assert fresh in decomp.list_triage_ids(skip_awaiting_human=True)
+    outcome = decomp.decompose_task(ran, author="auto-decomposer")
+    assert outcome.ok is False and "already run" in outcome.reason
+    assert calls == []  # refused before any LLM call
+    # An explicit --force still reaches the LLM.
+    decomp.decompose_task(ran, author="david", force=True)
+    assert len(calls) == 1
+
+
+def test_cli_decompose_threads_force_flag(kanban_home: Path, monkeypatch) -> None:
+    from hermes_cli import kanban_decompose as decomp
+
+    seen = []
+
+    def fake(tid, *, author=None, timeout=None, force=False):
+        seen.append(force)
+        return decomp.DecomposeOutcome(tid, False, "stub")
+
+    monkeypatch.setattr(decomp, "decompose_task", fake)
+    for force in (False, True):
+        args = argparse.Namespace(task_id="t_x", all_triage=False, author="david",
+                                  json=False, tenant=None, force=force)
+        kanban_cli._cmd_decompose(args)
+    assert seen == [False, True]
+
+
+def test_needs_input_reblock_with_new_reason_is_progress_not_a_loop(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        kb.block_task(conn, tid, reason="Approve the Google sign-in on your iPhone", kind="needs_input")
+        kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="Now tap Allow on the MacBook prompt", kind="needs_input")
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_recurrences == 1
+        # Same question again (only whitespace/case differs) IS a loop.
+        kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="now tap allow on the  MacBook prompt", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_unblock_moves_block_loop_triage_card_back_to_ready(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        looped = _loop_to_triage(conn)
+        assert kb.unblock_task(conn, looped) is True
+        assert kb.get_task(conn, looped).status == "ready"
+        # Plain blocked/scheduled behaviour is unchanged; unknown/done still refused.
+        assert kb.unblock_task(conn, looped) is False
+
+
+def test_promote_moves_triage_card_to_ready_with_audit(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        looped = _loop_to_triage(conn)
+        ok, err = kb.promote_task(conn, looped, actor="david", reason="human step done")
+        assert ok, err
+        assert kb.get_task(conn, looped).status == "ready"
+        ev = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='promoted_manual'",
+                          (looped,)).fetchone()
+        assert '"from_status": "triage"' in ev[0]
+        # Parent gating still applies to a triage card.
+        parent = kb.create_task(conn, title="p", assignee="worker")
+        child = kb.create_task(conn, title="c", triage=True)
+        kb.link_tasks(conn, parent_id=parent, child_id=child)
+        ok, err = kb.promote_task(conn, child, actor="david")
+        assert not ok and "unsatisfied parent" in err
 
 
 def test_dispatcher_auto_decompose_tick_requests_human_skip(monkeypatch) -> None:
