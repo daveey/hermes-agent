@@ -913,6 +913,18 @@ def _handle_complete(args: dict, **kw) -> str:
                        for a in kb.list_attachments(conn, tid)])
 
 
+def _blocker_id_arg(args: dict) -> Optional[str]:
+    """Validated ``blocker_id`` (shared external blocker slug) or None. [daveey]"""
+    raw = args.get("blocker_id")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    _check(isinstance(raw, str), "blocker_id must be a string")
+    from hermes_cli.kanban_shared_blockers import normalize_blocker_id
+    bid = normalize_blocker_id(raw)
+    _check(bid is not None, "blocker_id must be a short slug like 'github-actions-billing'")
+    return bid
+
+
 @_kanban_handler("kanban_block")
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
@@ -939,10 +951,14 @@ def _handle_block(args: dict, **kw) -> str:
                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "
                f"finished or cannot proceed for another reason, call kanban_complete instead — "
                f"the completion judge will evaluate it.")
-        ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid))
+        blocker_id = _blocker_id_arg(args)
+        ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
+                           blocker_id=blocker_id)
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
         landed_kind = kb.get_task(conn, tid).block_kind
         extra: dict = {"block_kind": landed_kind}
+        if blocker_id:
+            extra["blocker_id"] = blocker_id
         if kind == "dependency" and landed_kind != kind:
             # block_task re-kinds a dependency wait that no open parent can satisfy.
             extra["requested_kind"] = kind
@@ -991,6 +1007,9 @@ def _handle_continue(args: dict, **kw) -> str:
         metadata = _redact_metadata(metadata)
         _check(metadata is not None, "metadata could not be safely serialized")
     metadata = _stamp_worker_session_metadata(tid, metadata)
+    blocker_id = _blocker_id_arg(args)
+    if blocker_id:
+        metadata = {**(metadata or {}), "blocker_id": blocker_id}
     from hermes_cli.kanban_continuation import continue_task
     with _board(args.get("board")) as (kb, conn):
         res = continue_task(conn, tid, checkpoint=checkpoint, resume_after_seconds=int(raw_after or 0),

@@ -135,6 +135,12 @@ def continue_task(
         if cur.rowcount != 1:
             return {"ok": False, "error": "task changed state concurrently"}
         meta = dict(metadata or {})
+        from hermes_cli.kanban_shared_blockers import normalize_blocker_id
+        if "blocker_id" in meta:
+            # Shared external blocker (kanban_shared_blockers); drop an unusable id. [daveey]
+            bid = normalize_blocker_id(meta.pop("blocker_id"))
+            if bid:
+                meta["blocker_id"] = bid
         meta.update({"checkpoint": checkpoint, "continuation": streak + 1,
                      "resume_after_seconds": resume_after, "resume_status": source_status})
         if wake_at is not None:
@@ -144,6 +150,8 @@ def continue_task(
             summary=kb._first_line(checkpoint, 400) or "checkpoint", metadata=meta,
         )
         payload = {"continuation": streak + 1, "status": new_status, "resume_status": source_status}
+        if meta.get("blocker_id"):
+            payload["blocker_id"] = meta["blocker_id"]
         if wake_at is not None:
             payload["wake_at"] = wake_at
         kb._append_event(conn, task_id, CONTINUED_OUTCOME, payload, run_id=run_id)

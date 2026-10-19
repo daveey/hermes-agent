@@ -142,8 +142,12 @@ class DispatchResult:
     """Task ids reclaimed for no heartbeat within ``dispatch_stale_timeout_seconds``."""
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, reason)`` skipped by the respawn guard: ``"blocker_auth"``
-    (quota/auth error — also auto-blocked), ``"recent_success"`` (completed run
+    (quota/auth error — also auto-blocked), ``"shared_blocker"`` (parked behind
+    a declared shared blocker another card is probing), ``"recent_success"`` (completed run
     within guard window), ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    shared_blocker_released: list[str] = field(default_factory=list)
+    """Blocked task ids unblocked because a probe cleared the shared blocker
+    they were parked behind (``kanban_shared_blockers``). [daveey]"""
     rate_limited: list[str] = field(default_factory=list)
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
@@ -1655,6 +1659,18 @@ def check_respawn_guard(
     if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
+    # 2b. Shared external blocker (``kanban_shared_blockers``): while another
+    #     card probes the same declared wall, or the last probe was recent,
+    #     hold this one instead of letting every card rediscover it. [daveey]
+    from hermes_cli.kanban_shared_blockers import shared_blocker_guard
+    try:
+        shared = shared_blocker_guard(conn, task_id, now=now)
+    except Exception:
+        _kb._log.debug("kanban: shared blocker guard failed for %s", task_id, exc_info=True)
+        shared = None
+    if shared is not None:
+        return shared
+
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
     # are the canonical *inputs* to a review handoff, not duplicate-work signals.
     if lane == "review":
@@ -2276,6 +2292,11 @@ def _run_reclaim_phase(
     from hermes_cli.kanban_continuation import wake_due_continuations
     result.woken_continuations = wake_due_continuations(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
+    from hermes_cli.kanban_shared_blockers import release_cleared_blockers
+    try:
+        result.shared_blocker_released = release_cleared_blockers(conn)
+    except Exception:
+        _kb._log.warning("kanban: releasing cleared shared blockers failed", exc_info=True)
 
 
 def _tick_spawn_budget(

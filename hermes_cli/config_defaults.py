@@ -1962,6 +1962,10 @@ DEFAULT_CONFIG = {
         # Bound on back-to-back kanban_continue runs without a completion; past it the worker
         # must complete or block.
         "max_continuations": 12,
+        # Shared external blockers (kanban_block/kanban_continue blocker_id): while one is open,
+        # the dispatcher spawns at most one card behind it per this many seconds (one probe at a
+        # time either way); a human unblock lets that card probe at once. [daveey]
+        "shared_blocker_probe_seconds": 1800,
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.

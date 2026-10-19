@@ -3158,6 +3158,7 @@ def edit_task(
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
+    blocker_id: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`_route_block`). ``kind='dependency'`` with no incomplete parent is
@@ -3165,6 +3166,10 @@ def block_task(
     promote it into a context-free respawn. ``transient`` still counts
     toward the loop breaker so a forever-flaky task escalates. True on any
     transition.
+
+    ``blocker_id`` names a shared external blocker (``kanban_shared_blockers``):
+    it is stored on the closed run's metadata and the event payload, so other
+    cards stopped by the same wall are held behind one probe. [daveey]
 
     An already-``blocked`` card that the failure breaker parked UNTYPED
     (``block_kind IS NULL``, no live run) is classified in place when *kind*
@@ -3220,6 +3225,21 @@ def block_task(
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
+        from hermes_cli.kanban_shared_blockers import normalize_blocker_id
+        blocker_id = normalize_blocker_id(blocker_id)
+        if blocker_id:
+            payload["blocker_id"] = blocker_id
+            if (new_status == "triage" and _row_get(cur_row, "block_kind") == kind
+                    and _latest_run_blocker(conn, task_id) == blocker_id):
+                # A probe re-asserting the shared blocker it was parked behind is the
+                # dispatcher's bounded probe cadence, not an unblock loop: keep the
+                # recurrence count where it was and stay ``blocked``. [daveey]
+                prev = max(int(_row_get(cur_row, "block_recurrences") or 0), 1)
+                new_status, event_kind = "blocked", "blocked"
+                params = (kind, prev)
+                payload["recurrences"] = prev
+                payload.pop("limit", None)
+                payload["shared_blocker_probe"] = True
         sql = f"""
                 UPDATE tasks
                    SET status        = '{new_status}',
@@ -3237,7 +3257,9 @@ def block_task(
         if conn.execute(sql, params).rowcount != 1:
             return False
         run_id = _end_or_synthesize_run(
-            conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
+            conn, task_id, outcome="blocked", status="blocked", summary=reason,
+            metadata={"blocker_id": blocker_id} if blocker_id else None,
+            synthesize=bool(reason or blocker_id),
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
@@ -3247,6 +3269,21 @@ def block_task(
             return True
     _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
     return True
+
+
+def _latest_run_blocker(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """``blocker_id`` of the task's latest non-neutral closed run, if any. [daveey]"""
+    from hermes_cli.kanban_shared_blockers import NEUTRAL_OUTCOMES, normalize_blocker_id
+    for row in conn.execute(
+        "SELECT outcome, metadata FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT 20", (task_id,),
+    ):
+        bid = normalize_blocker_id(_json_dict(row["metadata"]).get("blocker_id"))
+        if bid is not None:
+            return bid
+        if (row["outcome"] or "") not in NEUTRAL_OUTCOMES:
+            return None
+    return None
 
 
 def _route_block(
@@ -3973,6 +4010,14 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     checkpoint = render_checkpoint_context(conn, task_id)
     if checkpoint:
         lines.append(checkpoint)
+    from hermes_cli.kanban_shared_blockers import render_blocker_context
+    try:
+        blockers = render_blocker_context(conn, task_id)
+    except Exception:  # advisory only; never break context assembly
+        _log.debug("shared blocker context failed for %s", task_id, exc_info=True)
+        blockers = ""
+    if blockers:
+        lines.append(blockers)
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)

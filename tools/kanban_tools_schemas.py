@@ -207,6 +207,14 @@ KANBAN_BLOCK_SCHEMA = _schema(
                 "The others surface to a human. Omit only if none apply."
             ),
         },
+        "blocker_id": _prop("string", (
+            "Optional. Set ONLY when the wall is outside this card and would stop other "
+            "cards too (CI billing/quota refused, a provider or service outage, a release "
+            "pipeline down): a short slug such as 'github-actions-billing'. Reuse an id "
+            "from 'Open shared blockers' in your context when it is the same wall. The "
+            "dispatcher then holds every card behind it and runs one probe card per "
+            "interval; a run that ends without the id clears it and releases the rest."
+        )),
     },
     ["reason"],
 )
@@ -264,6 +272,14 @@ KANBAN_CONTINUE_SCHEMA = _schema(
         "metadata": {"type": "object", "description": (
             "Optional machine-readable state (e.g. {\"pids\": [...], \"ci_run\": ...})."
         )},
+        "blocker_id": _prop("string", (
+            "Optional. Set ONLY when the wall is outside this card and would stop other "
+            "cards too (CI billing/quota refused, a provider or service outage, a release "
+            "pipeline down): a short slug such as 'github-actions-billing'. Reuse an id "
+            "from 'Open shared blockers' in your context when it is the same wall. The "
+            "dispatcher then holds every card behind it and runs one probe card per "
+            "interval; a run that ends without the id clears it and releases the rest."
+        )),
     },
     ["checkpoint"],
 )
