@@ -114,16 +114,50 @@ _RUN_LIFECYCLE_TOOLS = frozenset({
 })
 
 class _Reject(Exception):
-    """Carries a finished ``tool_error`` payload out of a validation helper."""
+    """Carries a finished ``tool_error`` payload out of a validation helper.
 
-    def __init__(self, message: str):
-        super().__init__(tool_error(message))
+    ``rejection`` stamps a stable machine-readable class on the payload (see
+    ``COMPLETE_REJECTION_CLASSES``) so digests can count refusals by cause
+    instead of grepping prose that changes between releases."""
+
+    def __init__(self, message: str, rejection: Optional[str] = None):
+        extra = {"rejection": rejection} if rejection else {}
+        super().__init__(tool_error(message, **extra))
+        self.rejection = rejection
 
 
-def _check(cond: Any, message: str) -> None:
+def _check(cond: Any, message: str, rejection: Optional[str] = None) -> None:
     """Reject (as a tool error) unless ``cond`` is truthy."""
     if not cond:
-        raise _Reject(message)
+        raise _Reject(message, rejection)
+
+
+# Stable ``rejection`` classes on every kanban_complete tool_error. Consumers
+# (coach digests, board analytics) key on these strings: add, never rename.
+COMPLETE_REJECTION_CLASSES = frozenset({
+    "goal_judge",     # goal-mode completion judge said not done / blocked
+    "phantom_cards",  # created_cards names ids this worker did not create
+    "artifacts",      # declared artifacts could not be preserved
+    "empty",          # no summary/result, or an evidence-free completion
+    "live_claim",     # another live dispatcher worker owns the card
+    "stale_run",      # run superseded, card already terminal, or unknown id
+    "parents",        # unsatisfied parent dependencies
+    "not_owner",      # delegate child / other task / unbound run id
+    "invalid_args",   # unknown parameter or malformed argument
+    "error",          # unexpected exception (logged)
+})
+
+
+def _tag_rejection(payload: str, rejection: str) -> str:
+    """Add ``rejection`` to a tool_error JSON payload that lacks one."""
+    try:
+        data = json.loads(payload)
+    except (TypeError, ValueError):
+        return payload
+    if not isinstance(data, dict) or "error" not in data or data.get("rejection"):
+        return payload
+    data["rejection"] = rejection
+    return json.dumps(data, ensure_ascii=False)
 
 
 # Keys a handler reads that its LLM-facing schema deliberately does not declare:
@@ -150,10 +184,12 @@ def _persisted_identity() -> str:
     return current_profile_name("worker") or "worker"
 
 
-def _kanban_handler(tool_name: str) -> Callable:
+def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Callable:
     """Wrap a handler so every failure is a structured tool error. ``ValueError``
     (invalid board slug, DB validation such as cycle/self-link, ``AttachmentTooLarge``)
-    is reported without a traceback; anything else is logged with ``logger.exception``."""
+    is reported without a traceback; anything else is logged with ``logger.exception``.
+    With ``classify_rejections`` every error carries a ``rejection`` class: an
+    untagged ``_Reject`` is ``invalid_args``, any other exception ``error``."""
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(args: dict, **kw) -> str:
@@ -164,13 +200,21 @@ def _kanban_handler(tool_name: str) -> Callable:
                 unknown = sorted(set(args) - allowed)
                 _check(not unknown,
                        f"{tool_name}: unknown parameter(s): {', '.join(unknown)}. "
-                       f"Valid parameters: {', '.join(sorted(properties))}. Nothing changed.")
-                return fn(args, **kw)
+                       f"Valid parameters: {', '.join(sorted(properties))}. Nothing changed.",
+                       "invalid_args")
+                out = fn(args, **kw)
+                if classify_rejections and isinstance(out, str) and out.startswith('{"error"'):
+                    out = _tag_rejection(out, "invalid_args")
+                return out
             except _Reject as e:
+                if classify_rejections:
+                    return _tag_rejection(e.args[0], e.rejection or "invalid_args")
                 return e.args[0]
             except Exception as e:
                 if not isinstance(e, ValueError):
                     logger.exception(f"{tool_name} failed")
+                if classify_rejections:
+                    return tool_error(f"{tool_name}: {e}", rejection="error")
                 return tool_error(f"{tool_name}: {e}")
         return wrapper
     return deco
@@ -514,7 +558,7 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
     if verdict == "done":
         return
     key = "blocked" if verdict == "blocked" else "continue"
-    raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid))
+    raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid), "goal_judge")
 
 
 # --- Runtime-activity → board bridges (auto-heartbeat, live comment injection) ---
@@ -776,10 +820,14 @@ def _handle_list(args: dict, **kw) -> str:
             "promoted": promoted})
 
 
-@_kanban_handler("kanban_complete")
+@_kanban_handler("kanban_complete", classify_rejections=True)
 def _handle_complete(args: dict, **kw) -> str:
-    """Mark the current task done with a structured handoff."""
-    tid = _worker_guard("kanban_complete", args)
+    """Mark the current task done with a structured handoff. Every refusal
+    carries a ``rejection`` class from ``COMPLETE_REJECTION_CLASSES``."""
+    try:
+        tid = _worker_guard("kanban_complete", args)
+    except _Reject as e:
+        raise _Reject(json.loads(e.args[0])["error"], e.rejection or "not_owner") from None
     summary = _redact_opt(args.get("summary"))
     result = _redact_opt(args.get("result"))
     metadata = args.get("metadata")
@@ -791,7 +839,7 @@ def _handle_complete(args: dict, **kw) -> str:
     artifacts = _coerce_str_list(args.get("artifacts"), "artifacts", "file paths", strip=True)
     if artifacts:
         metadata = _merge_artifacts(metadata, artifacts)
-    _check(summary or result, "provide at least one of: summary (preferred), result")
+    _check(summary or result, "provide at least one of: summary (preferred), result", "empty")
     _require_dict_metadata(metadata)
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
@@ -814,13 +862,14 @@ def _handle_complete(args: dict, **kw) -> str:
                 f"kanban_complete could not preserve the declared artifacts: {artifact_err}. "
                 f"Your task is still in-flight and its scratch workspace was kept. Fix the "
                 f"artifact path or storage error, then retry kanban_complete with the same "
-                f"handoff.")
+                f"handoff.", rejection="artifacts")
         except kb.LiveClaimError as claim_err:
             # Env-less caller (orchestrator, another session) on a card a dispatcher
             # worker is executing: refusing here is what keeps that worker's run open.
             return tool_error(
                 f"kanban_complete refused: {claim_err}. Nothing changed. Wait for the worker "
-                f"to finish, or an operator can run `hermes kanban complete --force {tid}`.")
+                f"to finish, or an operator can run `hermes kanban complete --force {tid}`.",
+                rejection="live_claim")
         except kb.HallucinatedCardsError as hall_err:
             # The gate runs before the write txn, so the task was NOT mutated;
             # say so explicitly or the model treats the error as terminal and
@@ -830,14 +879,15 @@ def _handle_complete(args: dict, **kw) -> str:
                 f"created by this worker: {', '.join(hall_err.phantom)}. Your task is still "
                 f"in-flight (no state change). Retry kanban_complete with the same "
                 f"summary/metadata and either drop these ids from created_cards, or pass "
-                f"created_cards=[] to skip the card-claim check entirely.")
+                f"created_cards=[] to skip the card-claim check entirely.",
+                rejection="phantom_cards")
         except kb.EmptyCompletionError as empty_err:
             # Same shape as the card gate: nothing was mutated, the audit event
             # already landed; the worker retries with evidence instead of stalling.
             return tool_error(
                 f"kanban_complete blocked: {empty_err}. Your task is still in-flight (no state "
                 f"change). Retry kanban_complete with a non-empty summary or result describing "
-                f"what was done.")
+                f"what was done.", rejection="empty")
         task = kb.get_task(conn, tid)
         if not ok:
             # complete_task reports every refusal as bare False; a reopened or
@@ -848,9 +898,10 @@ def _handle_complete(args: dict, **kw) -> str:
                 detail = ", ".join(f"{pid} ({status})" for pid, status in blockers)
                 raise _Reject(
                     f"could not complete {tid}: unsatisfied parent dependencies: "
-                    f"{detail}; complete the parents first (done or archived)")
+                    f"{detail}; complete the parents first (done or archived)", "parents")
             _check(False, (task.last_failure_error if task else None) or
-                   f"could not complete {tid} (unknown id, stale run, or already terminal)")
+                   f"could not complete {tid} (unknown id, stale run, or already terminal)",
+                   "stale_run")
         run = kb.latest_run(conn, tid)
         # Artifact staging is atomic with the completion write, so a worker that
         # read `kanban_attachments` before completing saw an empty list and has
