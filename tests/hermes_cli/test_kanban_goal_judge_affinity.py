@@ -110,3 +110,46 @@ def test_goal_loop_judge_binds_per_task_affinity_scope():
     assert result["outcome"] == "blocked_budget"
     assert seen == ["kanban:task-7", "kanban:task-7"]
     assert get_affinity_scope() is None
+
+
+_FINISH_WITH_REVIEW_BODY = "Fix the widget and add a test.\n\nDone when: tests pass. Finish with kanban_request_review."
+
+
+def _strict_handoff_judge(seen):
+    """Stand-in for the real judge's failure: it withholds ``done`` for an unperformed
+    "finish with kanban_request_review" step unless the goal says the call being graded is it."""
+    def fake_judge(*, goal, last_response, **_kw):
+        seen.append(goal)
+        if "Finish with kanban_request_review" in goal and "satisfied by this call" not in goal:
+            return ("continue", "the required final kanban_request_review has not been confirmed",
+                    False, None, False)
+        return ("done", "ok", False, None, False)
+    return fake_judge
+
+
+def test_tool_review_gate_counts_the_review_call_as_the_finish_step():
+    task = SimpleNamespace(id="t1", title="fix widget", body=_FINISH_WITH_REVIEW_BODY, goal_mode=True)
+    seen = []
+    with patch.object(kanban_tools, "_goal_judge_available", return_value=True), \
+            patch.object(kanban_tools, "judge_goal", side_effect=_strict_handoff_judge(seen)):
+        kanban_tools._goal_gate("kanban_request_review", task, "t1", "tests pass: 3/3")  # no raise
+    assert "`kanban_request_review` call" in seen[-1]
+    assert seen[-1].startswith("fix widget\n\n" + _FINISH_WITH_REVIEW_BODY)
+
+
+def test_cli_review_gate_counts_the_review_call_as_the_finish_step():
+    task = SimpleNamespace(id="t1", title="fix widget", body=_FINISH_WITH_REVIEW_BODY, goal_mode=True)
+    seen = []
+    with _aux_client(), patch("hermes_cli.goals.judge_goal", side_effect=_strict_handoff_judge(seen)):
+        assert kanban_cli._goal_mode_handoff_rejection(
+            task, "tests pass", "kanban_request_review") == ("done", None)
+    assert "`kanban_request_review` call" in seen[-1]
+
+
+def test_handoff_goal_text_keeps_real_criteria_and_names_the_tool():
+    from hermes_cli.goals import handoff_judge_goal
+
+    text = handoff_judge_goal("t", "Done when: X. Finish with kanban_complete.", "kanban_complete")
+    assert text.startswith("t\n\nDone when: X. Finish with kanban_complete.")
+    assert "`kanban_complete` call" in text and "Judge only the rest" in text
+    assert handoff_judge_goal("", None, "kanban_complete") == ""  # empty goal still skips

@@ -891,6 +891,25 @@ def _call_goal_judge_llm(call_llm, system_prompt: str, user_prompt: str, timeout
         return ""
 
 
+def handoff_judge_goal(title: str, body: Optional[str], handoff: str) -> str:
+    """Goal text for a kanban terminal-handoff gate (``kanban_complete`` / ``kanban_request_review``).
+
+    The gate runs *inside* the handoff call, before it returns. A card body that ends with
+    "Finish with kanban_request_review" lists that call as an acceptance item the judge can never
+    see confirmed, so every review handoff was rejected as "the final kanban_request_review has
+    not been performed". Tell the judge the call being graded is that step.
+    """
+    goal = f"{title}\n\n{body or ''}".strip()
+    if not goal:
+        return goal
+    return (
+        f"{goal}\n\n[Grading note: this verdict gates the worker's `{handoff}` call, which is being "
+        f"made right now and only takes effect if you answer done. Any instruction to finish with, "
+        f"hand off via, or request review through `{handoff}` (or a kanban review/complete "
+        f"handoff) is satisfied by this call; do not withhold done for it. Judge only the rest.]"
+    )
+
+
 def judge_goal(
     goal: str,
     last_response: str,
