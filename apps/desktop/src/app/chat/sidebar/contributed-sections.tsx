@@ -111,11 +111,18 @@ export interface SidebarSectionRowProps {
   indent?: boolean
   /** Muted label typography for group header rows. */
   muted?: boolean
+  /** Hover-revealed trailing controls (e.g. an archive button); replace
+   *  `meta` while the row is hovered or focused. Clicks inside should
+   *  `stopPropagation()` — they sit outside the row body anyway. */
+  actions?: React.ReactNode
+  /** Emphasised (unread) label typography. */
+  strong?: boolean
 }
 
 /** One clickable row on the session-row grid. */
 export function SidebarSectionRow({
   accentColor,
+  actions,
   active,
   icon,
   indent,
@@ -123,12 +130,41 @@ export function SidebarSectionRow({
   meta,
   muted,
   onSelect,
+  strong,
   tip
 }: SidebarSectionRowProps) {
+  const metaNode = meta ? (
+    <span
+      className={cn(
+        'text-[0.6875rem] text-(--ui-text-tertiary) tabular-nums',
+        actions && 'group-focus-within/contrib-row:hidden group-hover/contrib-row:hidden'
+      )}
+    >
+      {meta}
+    </span>
+  ) : null
+
+  const actionsNode = actions ? (
+    <span
+      className={cn(
+        'items-center gap-0.5',
+        meta ? 'hidden group-focus-within/contrib-row:flex group-hover/contrib-row:flex' : 'flex opacity-0 group-focus-within/contrib-row:opacity-100 group-hover/contrib-row:opacity-100'
+      )}
+      data-slot="sidebar-section-row-actions"
+    >
+      {actions}
+    </span>
+  ) : null
+
   return (
     <SidebarRowShell
       actions={
-        meta ? <span className="text-[0.6875rem] text-(--ui-text-tertiary) tabular-nums">{meta}</span> : undefined
+        metaNode || actionsNode ? (
+          <>
+            {metaNode}
+            {actionsNode}
+          </>
+        ) : undefined
       }
       className={cn(
         'group/contrib-row relative hover:bg-(--chrome-action-hover)',
@@ -153,7 +189,11 @@ export function SidebarSectionRow({
             )}
           </SidebarRowLead>
           <SidebarRowLabel
-            className={cn('group-hover/contrib-row:text-foreground', muted && 'text-(--ui-text-tertiary)')}
+            className={cn(
+              'group-hover/contrib-row:text-foreground',
+              muted && 'text-(--ui-text-tertiary)',
+              strong && 'font-semibold text-foreground'
+            )}
           >
             {label}
           </SidebarRowLabel>

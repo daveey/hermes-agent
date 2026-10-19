@@ -77,4 +77,47 @@ describe('SidebarContributedSections', () => {
     })
     expect(screen.queryByText('Blocked')).toBeNull()
   })
+
+  it('renders hover actions beside meta without selecting the row, and bolds strong labels', () => {
+    const onSelect = vi.fn()
+    const onArchive = vi.fn()
+
+    const { container } = render(
+      <SidebarSection label="Inbox" onToggle={() => {}} open>
+        <SidebarSectionRow
+          actions={
+            <button
+              onClick={event => {
+                event.stopPropagation()
+                onArchive()
+              }}
+              type="button"
+            >
+              Archive
+            </button>
+          }
+          label="Idle box"
+          meta="12m"
+          onSelect={onSelect}
+          strong
+        />
+        <SidebarSectionRow label="Plain" meta="1d" onSelect={() => {}} />
+      </SidebarSection>
+    )
+
+    const slot = container.querySelector('[data-slot="sidebar-section-row-actions"]')
+    expect(slot).not.toBeNull()
+    expect(slot?.className).toContain('group-hover/contrib-row:flex')
+    expect(screen.getByText('12m').className).toContain('group-hover/contrib-row:hidden')
+    // A row without actions keeps its meta visible on hover.
+    expect(screen.getByText('1d').className).not.toContain('hidden')
+    expect(container.querySelectorAll('[data-slot="sidebar-section-row-actions"]')).toHaveLength(1)
+
+    fireEvent.click(screen.getByText('Archive'))
+    expect(onArchive).toHaveBeenCalledTimes(1)
+    expect(onSelect).not.toHaveBeenCalled()
+
+    expect(screen.getByText('Idle box').className).toContain('font-semibold')
+    expect(screen.getByText('Plain').className).not.toContain('font-semibold')
+  })
 })
