@@ -480,11 +480,14 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
             "model_cooldowns": [] if is_dead else _live_model_cooldowns(entry, now),
         }
         if dedupe_key in seen:
-            # Same account under a second credential: keep the row that says more (state rank
-            # limited > ready > unknown > unavailable; a quota limit outranks a cooldown), but
-            # never duplicate the account.
+            # Same account under a second credential: never duplicate the account. Both rows share
+            # the account's usage windows, so a 'ready' row means the live windows have quota left
+            # and this credential is usable: the pool can serve the account, and a sibling's
+            # leftover bench (e.g. an old usage_limit_reached) must not paint it red. Otherwise
+            # keep the row that says more (ready > limited > unknown > unavailable; a quota limit
+            # outranks a cooldown). [daveey]
             existing = seen[dedupe_key]
-            rank = {"limited": 3, "ready": 2, "unknown": 1, "unavailable": 0}
+            rank = {"ready": 3, "limited": 2, "unknown": 1, "unavailable": 0}
 
             def _rank(row: dict) -> tuple[int, int]:
                 return rank.get(row["state"], 0), 1 if row.get("limit_kind") == "quota" else 0

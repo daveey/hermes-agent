@@ -187,3 +187,60 @@ def test_dead_row_reason_is_auth(monkeypatch, tmp_path):
     assert accounts["dead"]["state"] == "unavailable"
     assert accounts["dead"]["reason"] == "auth"
     assert accounts["dead"]["limit_kind"] is None
+
+
+def _codex_jwt(account_id: str, sub: str) -> str:
+    import base64
+
+    def b64(part: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(part).encode()).decode().rstrip("=")
+
+    return f"{b64({'alg': 'none'})}.{b64({'sub': sub, 'https://api.openai.com/auth': {'chatgpt_account_id': account_id}})}.sig"
+
+
+def _codex_dupe_rows(monkeypatch, tmp_path, *, used: float | None, stale_first: bool):
+    """One Codex account signed in twice: one credential still benched by an old
+    ``usage_limit_reached``, the other healthy. ``used`` = the account's live usage window."""
+    monkeypatch.setitem(account_usage._USAGE_FETCHERS, "openai-codex", lambda base_url, api_key: None)
+    tok = _codex_jwt("acct-1", "user-1")
+    benched = _entry("old", tok, auth_type="oauth", last_status="exhausted",
+                     last_status_at=time.time() - 3 * 86400, last_error_code=429,
+                     last_error_reason="usage_limit_reached",
+                     last_error_reset_at=float(int(time.time() + 2 * 86400)), failure_reason="rate_limit")
+    healthy = _entry("new", tok, auth_type="oauth")
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    entries = [benched, healthy] if stale_first else [healthy, benched]
+    (home / "auth.json").write_text(json.dumps({"version": 1, "credential_pool": {"openai-codex": entries}}))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    if used is not None:
+        remember_account_usage("openai-codex", _snapshot(used), identity_id="codex:acct-1:user-1")
+    row = {"slug": "openai-codex", "name": "Codex", "models": ["m"], "authenticated": True}
+    _apply_usage([row])
+    return row["usage"]["accounts"]
+
+
+@pytest.mark.parametrize("stale_first", [True, False])
+def test_duplicate_login_with_live_quota_left_shows_ready(monkeypatch, tmp_path, stale_first):
+    """A stale bench on one credential must not paint the account red when the account's live
+    usage window says it has quota left and another credential of it is usable."""
+    accounts = _codex_dupe_rows(monkeypatch, tmp_path, used=30.0, stale_first=stale_first)
+    assert len(accounts) == 1
+    assert accounts[0]["state"] == "ready"
+    assert accounts[0]["limit_kind"] is None
+
+
+@pytest.mark.parametrize("stale_first", [True, False])
+def test_duplicate_login_without_live_usage_keeps_the_limit(monkeypatch, tmp_path, stale_first):
+    """Control: with no live usage to contradict it, the provider's usage_limit verdict stands."""
+    accounts = _codex_dupe_rows(monkeypatch, tmp_path, used=None, stale_first=stale_first)
+    assert len(accounts) == 1
+    assert (accounts[0]["state"], accounts[0]["limit_kind"]) == ("limited", "quota")
+
+
+@pytest.mark.parametrize("stale_first", [True, False])
+def test_duplicate_login_with_exhausted_window_stays_red(monkeypatch, tmp_path, stale_first):
+    """Control: a really exhausted account is red whichever credential is read first."""
+    accounts = _codex_dupe_rows(monkeypatch, tmp_path, used=100.0, stale_first=stale_first)
+    assert len(accounts) == 1
+    assert (accounts[0]["state"], accounts[0]["limit_kind"]) == ("limited", "quota")
