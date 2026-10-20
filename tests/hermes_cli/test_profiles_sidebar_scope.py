@@ -144,6 +144,23 @@ class TestSidebarScope:
 
 class TestCrossProfileProjectTree:
 
+    def test_profile_sidebar_exclude_sources_hides_its_machine_sessions(self, client, profiles_on_disk):
+        # A machine profile (an api_server backing another app) declares its traffic out of the
+        # sidebar; the list applies to that profile's own rows only.
+        (profiles_on_disk["worker"] / "config.yaml").write_text(
+            "sessions:\n  sidebar_exclude_sources: [api_server]\n", encoding="utf-8")
+        _seed_session(profiles_on_disk["worker"], "worker-api", source="api_server")
+        _seed_session(profiles_on_disk["worker"], "worker-chat", source="cli")
+        _seed_session(profiles_on_disk["default"], "default-api", source="api_server")
+
+        payload = client.get("/api/profiles/projects/tree", params={"preview_limit": 50}).json()
+
+        assert payload["errors"] == []
+        ids = set(payload["scoped_session_ids"]) | {
+            s["id"] for p in payload["projects"] for s in p.get("previewSessions") or []}
+        assert "worker-api" not in ids
+        assert {"worker-chat", "default-api"} <= ids
+
     def test_one_folder_worked_in_by_two_profiles_is_one_project(self, client, profiles_on_disk, tmp_path):
         # A folder is a folder no matter who opened it. Two profiles working the
         # same checkout is the normal case (that's the point of profiles), so it

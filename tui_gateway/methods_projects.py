@@ -319,6 +319,15 @@ def _discover_repos_payload(
 _PROJECT_TREE_EXCLUDED_SOURCES = ["cron", "kanban", "oneshot"]
 
 
+def _project_tree_excluded_sources() -> list[str]:
+    """The built-in exclusions plus this store's ``sessions.sidebar_exclude_sources`` [daveey].
+    Read under the caller's home scope, so the all-profiles tree applies each profile's own list."""
+    from hermes_cli.session_listing import sidebar_excluded_sources
+    from hermes_constants import get_hermes_home
+    extra = sidebar_excluded_sources(get_hermes_home())
+    return _PROJECT_TREE_EXCLUDED_SOURCES + [s for s in extra if s not in _PROJECT_TREE_EXCLUDED_SOURCES]
+
+
 def _project_tree_row(r: dict) -> dict:
     """Project a SessionDB row to the minimal shape the sidebar renders (grouping fields +
     what ``SidebarSessionRow`` reads), minus the heavy columns."""
@@ -365,7 +374,7 @@ def _project_tree_inputs(
     # compact_rows: selecting the system-prompt blob only to drop it costs tens of MB of reads.
     rows = db.list_sessions_rich(
         limit=session_limit, offset=0, order_by_last_active=True, min_message_count=1,
-        include_children=False, exclude_sources=_PROJECT_TREE_EXCLUDED_SOURCES,
+        include_children=False, exclude_sources=_project_tree_excluded_sources(),
         include_archived=False, compact_rows=True)
     sessions = _annotate_tree_activity([_project_tree_row(r) for r in rows])
     # Parallel-warm the git cache so build_tree's resolver doesn't cold-probe each cwd in turn.

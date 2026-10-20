@@ -30,6 +30,30 @@ def show_subagent_sessions(hermes_home: str | Path) -> bool:
     return isinstance(sessions_cfg, dict) and is_truthy_value(sessions_cfg.get("show_subagents"))
 
 
+def sidebar_excluded_sources(hermes_home: str | Path) -> list[str]:
+    """``sessions.sidebar_exclude_sources`` from *hermes_home*'s own config.yaml: extra session
+    sources this profile keeps out of the desktop sidebar (machine traffic such as an
+    OpenAI-compatible ``api_server`` backend serving another app). Like ``show_subagents`` the
+    store's home decides, so a machine profile hides its own rows wherever it is listed. ``[]``
+    when unset or unreadable."""
+    from hermes_cli.config import load_config_readonly
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(hermes_home))
+    try:
+        sessions_cfg = load_config_readonly().get("sessions") or {}
+    except Exception:
+        return []
+    finally:
+        reset_hermes_home_override(token)
+    raw = sessions_cfg.get("sidebar_exclude_sources") if isinstance(sessions_cfg, dict) else None
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(s).strip() for s in raw if str(s).strip()]
+
+
 def subagent_listing_scope(
     hermes_home: str | Path, *, source: str | None = None, sources: list[str] | None = None,
     exclude_sources: list[str] | None = None,

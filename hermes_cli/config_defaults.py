@@ -2330,6 +2330,10 @@ DEFAULT_CONFIG = {
         # List delegate_task subagent runs in session lists (desktop sidebar, dashboard, session.list),
         # nested under their parent. Off by default: they are machinery, not conversations.
         "show_subagents": False,
+        # Extra session sources this profile keeps out of the desktop sidebar's project tree
+        # (cron/kanban/oneshot are always out). For machine profiles whose sessions are app
+        # traffic, e.g. ["api_server"] on a profile serving another app's LLM calls. [daveey]
+        "sidebar_exclude_sources": [],
         # VACUUM after a prune that deleted rows (SQLite never reclaims disk on DELETE). VACUUM
         # blocks writes (~seconds per 100MB), so it runs only at startup, only when ≥1 session was
         # deleted AND freelist/page_count > 25%.
