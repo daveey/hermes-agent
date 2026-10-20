@@ -159,6 +159,29 @@ def detect_vendor(model_name: str) -> Optional[str]:
     return next((vendor for prefix, vendor in _VENDOR_PREFIXES.items() if name_lower.startswith(prefix)), None)
 
 
+# [daveey] Direct providers that serve only their own vendor's models. A model whose detected vendor is
+# another one (``claude-opus-5-5`` on ``gemini``) can never work there: the API 404s on every call.
+_SINGLE_VENDOR_PROVIDERS: dict[str, str] = {
+    "gemini": "google",
+    "anthropic": "anthropic"}
+
+
+def model_conflicts_with_provider(model_name: object, provider: str) -> bool:
+    """True only when ``model_name`` clearly belongs to another vendor than single-vendor ``provider``.
+
+    Unknown vendors, aggregators and every other provider return False: this is a "certainly wrong"
+    check (used when ``--provider`` is given without ``-m``), never a guess about an unfamiliar id."""
+    if not isinstance(model_name, str) or not model_name.strip():
+        return False
+    expected = _SINGLE_VENDOR_PROVIDERS.get(_normalize_provider_alias(provider or ""))
+    if not expected:
+        return False
+    vendor = detect_vendor(_strip_matching_provider_prefix(model_name.strip(), provider))
+    # Only vendors from the known table count: ``models/gemini-…`` (Gemini's own resource form) or a
+    # custom ``org/model`` prefix is no evidence of a mismatch.
+    return vendor in set(_VENDOR_PREFIXES.values()) and vendor != expected
+
+
 def _prepend_vendor(model_name: str) -> str:
     """Prepend the detected ``vendor/`` for aggregators; names with ``/`` or no detectable vendor
     pass through (the aggregator may still accept them)."""

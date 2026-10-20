@@ -201,3 +201,22 @@ class TestColonProviderPrefixIsStrippedLikeSlash:
     ])
     def test_non_matching_colon_untouched(self, model, provider):
         assert normalize_model_for_provider(model, provider) == model
+
+
+class TestModelConflictsWithProvider:
+    """[daveey] Only certain cross-vendor mismatches on single-vendor providers count."""
+
+    @pytest.mark.parametrize(("model", "provider"), [
+        ("claude-opus-5-5", "gemini"), ("gpt-5.5", "gemini"), ("anthropic/claude-sonnet-5", "google"),
+        ("gemini-3.8-flash", "anthropic")])
+    def test_conflicts(self, model, provider):
+        from hermes_cli.model_normalize import model_conflicts_with_provider
+        assert model_conflicts_with_provider(model, provider)
+
+    @pytest.mark.parametrize(("model", "provider"), [
+        ("gemini-3.8-flash", "gemini"), ("google/gemini-3.8-flash", "gemini"), ("models/gemini-3.8-flash", "gemini"),
+        ("gemma-4-27b", "gemini"), ("my-finetune", "gemini"), ("", "gemini"), (None, "gemini"),
+        ("claude-opus-5-5", "openrouter"), ("claude-opus-5-5", "custom"), ("claude-opus-5-5", "anthropic")])
+    def test_no_conflict(self, model, provider):
+        from hermes_cli.model_normalize import model_conflicts_with_provider
+        assert not model_conflicts_with_provider(model, provider)

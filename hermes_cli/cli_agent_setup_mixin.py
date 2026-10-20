@@ -327,6 +327,24 @@ class CLIAgentSetupMixin:
             except Exception:
                 pass
 
+        # [daveey] `--provider gemini` without `-m` must not send the config's claude-* model to Gemini
+        # (404 on every call): a model that clearly belongs to another vendor falls back to the
+        # provider's default. Unknown/ambiguous ids pass through untouched.
+        if getattr(self, "_provider_flag_without_model", False) and resolved_provider and isinstance(self.model, str):
+            try:
+                from hermes_cli.model_normalize import model_conflicts_with_provider
+                if model_conflicts_with_provider(self.model, resolved_provider):
+                    from hermes_cli.models import get_default_model_for_provider
+                    _default = get_default_model_for_provider(resolved_provider)
+                    if _default:
+                        logger.info(
+                            "--provider %s without -m: configured model %s belongs to another vendor; "
+                            "using %s", resolved_provider, self.model, _default)
+                        self.model = _default
+                        self._model_is_default = True
+            except Exception:
+                logger.debug("provider-default model swap failed", exc_info=True)
+
         # Normalize model for the resolved provider (e.g. swap non-Codex models on openai-codex).
         # Fixes #651.
         model_changed = self._normalize_model_for_provider(resolved_provider)

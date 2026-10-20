@@ -41,7 +41,7 @@ gemini = GeminiProfile(
     name="gemini", aliases=("google", "google-gemini", "google-ai-studio"), api_mode="chat_completions",
     env_vars=("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     base_url="https://generativelanguage.googleapis.com/v1beta", auth_type="api_key",
-    default_aux_model="gemini-3.6-flash",
+    default_aux_model="gemini-3.8-flash",  # [daveey] 3.8 is the id Google points new keys at
 )
 
 register_provider(gemini)

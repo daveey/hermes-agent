@@ -162,6 +162,7 @@ class CLIInitMixin:
         # `--provider <custom>` without `-m` uses that entry's default_model, else the global
         # default goes to the custom endpoint and the compressor gets the wrong context length.
         # Explicit `-m` still wins. See #86978.
+        _custom_default_applied = False
         if not model and provider:
             try:
                 from hermes_cli.runtime_provider import _get_named_custom_provider
@@ -177,6 +178,11 @@ class CLIInitMixin:
             if _provider_default:
                 self.model = _provider_default
                 self._model_is_default = False
+                _custom_default_applied = True
+        # [daveey] `--provider X` without `-m` (and no custom default above): the config's model belongs
+        # to the config's provider, so _ensure_runtime_credentials swaps it for X's default when it
+        # clearly belongs to another vendor (claude-* on gemini 404s on every call).
+        self._provider_flag_without_model = bool(provider) and not model and not _custom_default_applied
         self._provider_source: Optional[str] = None
         self.provider = self.requested_provider
         self.api_mode = "chat_completions"

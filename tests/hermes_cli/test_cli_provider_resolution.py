@@ -875,3 +875,52 @@ def test_custom_endpoint_key_env_is_a_valid_posix_name_for_ip_endpoints():
     for identity in ("127.0.0.1_8080", "0.0.0.0", "10.0.0.7:11434", "", "-–-"):
         assert _ENV_VAR_NAME_RE.match(custom_endpoint_key_env(identity)), identity
 
+
+
+# [daveey] `--provider gemini` without `-m` used to send the config's claude-* model to Gemini (404).
+def _gemini_runtime(**kwargs):
+    return {
+        "provider": "gemini",
+        "api_mode": "chat_completions",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "api_key": "test-gemini-key",
+        "source": "env",
+    }
+
+
+def _claude_config(monkeypatch, cli, default="claude-opus-5-5"):
+    monkeypatch.setitem(cli.CLI_CONFIG, "model", {"default": default, "provider": "anthropic"})
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _gemini_runtime)
+
+
+def test_provider_switch_without_model_drops_foreign_vendor_model(monkeypatch):
+    cli = _import_cli()
+    _claude_config(monkeypatch, cli)
+    from hermes_cli.models import get_default_model_for_provider
+
+    shell = cli.HermesCLI(provider="gemini", compact=True, max_turns=1)
+    assert shell._ensure_runtime_credentials() is True
+
+    assert shell.provider == "gemini"
+    assert shell.model == get_default_model_for_provider("gemini") == "gemini-3.8-flash"
+
+
+def test_provider_switch_with_explicit_model_keeps_it(monkeypatch):
+    """An explicit -m is the user's call, even a foreign-vendor one."""
+    cli = _import_cli()
+    _claude_config(monkeypatch, cli)
+
+    for explicit in ("gemini-3.6-flash", "claude-opus-5-5"):
+        shell = cli.HermesCLI(provider="gemini", model=explicit, compact=True, max_turns=1)
+        assert shell._ensure_runtime_credentials() is True
+        assert shell.model == explicit
+
+
+@pytest.mark.parametrize("configured", ["gemini-3.7-flash", "models/gemini-3.7-flash", "my-private-finetune"])
+def test_provider_switch_without_model_keeps_same_vendor_or_unknown_model(monkeypatch, configured):
+    cli = _import_cli()
+    _claude_config(monkeypatch, cli, default=configured)
+
+    shell = cli.HermesCLI(provider="gemini", compact=True, max_turns=1)
+    assert shell._ensure_runtime_credentials() is True
+    assert shell.model == configured
