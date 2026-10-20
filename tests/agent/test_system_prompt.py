@@ -960,10 +960,13 @@ class TestConversationStartedTwoLine:
 
 def test_kanban_guidance_routes_timed_waits_to_schedule_not_block():
     """A worker waiting on a clock (a cap, a soak, a release window) must park
-    with kanban_schedule: a blocked card paints its chat red as needing a human. [daveey]"""
+    with kanban_schedule, or kanban_block(kind='time') on a goal-mode card: a blocked
+    card paints its chat red as needing a human. [daveey]"""
     from agent.prompt_builder import KANBAN_GUIDANCE
     from tools.kanban_tools_schemas import KANBAN_BLOCK_SCHEMA
 
     assert "kanban_schedule(" in KANBAN_GUIDANCE
     assert "SCHEDULED_UNTIL=" in KANBAN_GUIDANCE
-    assert "kanban_schedule" in KANBAN_BLOCK_SCHEMA["description"]
+    assert 'kind=\\"time\\"' in repr(KANBAN_GUIDANCE) or 'kind="time"' in KANBAN_GUIDANCE
+    assert "time" in KANBAN_BLOCK_SCHEMA["parameters"]["properties"]["kind"]["enum"]
+    assert "kind='time'" in KANBAN_BLOCK_SCHEMA["description"]

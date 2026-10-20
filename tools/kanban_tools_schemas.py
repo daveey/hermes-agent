@@ -175,7 +175,9 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "goes to todo and auto-resumes when that task finishes, no human "
         "needed), 'needs_input' (you need a human decision/answer), "
         "'capability' (a hard wall: no access, missing credentials, an action "
-        "no agent can do), or 'transient' (a flaky failure that may clear). "
+        "no agent can do), 'transient' (a flaky failure that may clear), or "
+        "'time' (waiting on a clock, a cron, a soak or a release, not a person: "
+        "parks the card 'scheduled' with a wake time, never as a human block). "
         "``reason`` is shown to the human on the board and, in Desktop, in a "
         "panel above the managing chat's composer as the steps to unblock it. "
         "If a task keeps "
@@ -183,7 +185,8 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "auto-escalated to triage. Use for genuine blockers only — don't "
         "block on things you can resolve yourself. Waiting on time or an "
         "external event (a cap, a soak, a release window) is not a block: use "
-        "kanban_schedule, since a blocked card marks its chat as needing a human."
+        "kind='time' (put SCHEDULED_UNTIL=<ISO8601> in the reason to set the wake; "
+        "default 24h), since a blocked card marks its chat as needing a human."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
@@ -199,12 +202,13 @@ KANBAN_BLOCK_SCHEMA = _schema(
         )),
         "kind": {
             "type": "string",
-            "enum": ["dependency", "needs_input", "capability", "transient"],
+            "enum": ["dependency", "needs_input", "capability", "transient", "time"],
             "description": (
                 "Why you're blocked. 'dependency' waits in todo and "
                 "resumes automatically when an incomplete parent finishes; "
-                "if no parent is open it is recorded as needs_input instead. "
-                "The others surface to a human. Omit only if none apply."
+                "if no parent is open it is a timed wait (scheduled). 'time' "
+                "parks scheduled until SCHEDULED_UNTIL=<ISO8601> in the reason "
+                "(default 24h). The others surface to a human. Omit only if none apply."
             ),
         },
         "blocker_id": _prop("string", (
@@ -224,9 +228,8 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
     (
         "Park your current task in the 'scheduled' state while it waits for "
         "time or an external event. This ends the current run and makes the "
-        "task non-dispatchable until an orchestrator unblocks it; it does not "
-        "create a timer. Put any wake-up marker such as "
-        "``SCHEDULED_UNTIL=<ISO8601>`` in ``reason``."
+        "task non-dispatchable until an orchestrator unblocks it, or until the "
+        "time named by a ``SCHEDULED_UNTIL=<ISO8601>`` marker in ``reason``."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),

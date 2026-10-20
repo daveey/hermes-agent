@@ -1,0 +1,149 @@
+"""Timed parks: a block that waits on a clock is ``scheduled``, never a human block.
+
+Regression for cards that parked on a timer with ``kanban_block`` (goal-mode cards
+may not ``kanban_schedule``): a parent-less ``dependency`` was re-kinded to
+``needs_input``, so the Desktop sidebar painted the chat red. [daveey]
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_continuation as kc
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_session_activity as ksa
+from hermes_cli import kanban_timed_park as ktp
+
+
+@pytest.fixture
+def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    ksa._reset_cache_for_tests()
+    yield home
+    ksa._reset_cache_for_tests()
+
+
+def _running(conn, session_id: str | None = None) -> str:
+    tid = kb.create_task(conn, title="t", assignee="worker")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='ready', session_id=? WHERE id=?", (session_id, tid))
+    assert kb.claim_task(conn, tid, claimer="worker") is not None
+    return tid
+
+
+def _last(conn, tid, kind):
+    return [e for e in kb.list_events(conn, tid) if e.kind == kind][-1].payload
+
+
+def test_parentless_dependency_block_parks_scheduled_not_needs_input(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        before = int(time.time())
+        assert kb.block_task(conn, tid, reason="waiting for tonight's 04:30 run; cron wakes it", kind="dependency")
+        task = kb.get_task(conn, tid)
+        assert task.status == "scheduled"
+        assert task.block_kind is None
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == "blocked"]
+        park = _last(conn, tid, "scheduled")
+        assert park["timed_park"] and park["requested_kind"] == "dependency"
+        assert before + ktp.DEFAULT_WAKE_SECONDS <= park["wake_at"] <= int(time.time()) + ktp.DEFAULT_WAKE_SECONDS
+        assert kb.latest_run(conn, tid).outcome == "scheduled"
+
+
+def test_scheduled_until_marker_sets_the_wake_and_the_dispatcher_wakes_it(kanban_home: Path) -> None:
+    wake = int(time.time()) + 3 * 3600
+    stamp = datetime.fromtimestamp(wake, tz=UTC).isoformat().replace("+00:00", "Z")
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        assert kb.block_task(conn, tid, reason=f"SCHEDULED_UNTIL={stamp} — soak ends", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert _last(conn, tid, "scheduled")["wake_at"] == wake
+        assert kc.wake_due_continuations(conn, now=wake - 1) == []
+        assert kc.wake_due_continuations(conn, now=wake) == [tid]
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_time_kind_parks_and_unblock_still_wakes_early(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        assert kb.block_task(conn, tid, reason="re-check after the nightly index", kind="time")
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_kanban_schedule_marker_becomes_a_real_timer(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2000-01-01T00:00:00Z")
+        due = _last(conn, tid, "scheduled")["wake_at"]
+        assert kc.wake_due_continuations(conn, now=due) == [tid]
+        # No marker -> no timer (left for a cron/human, as before).
+        tid2 = _running(conn)
+        assert kb.schedule_task(conn, tid2, reason="waiting on Rose")
+        assert kc.wake_due_continuations(conn, now=int(time.time()) + 10**7) == []
+
+
+def test_needs_input_without_marker_still_blocks_for_a_human(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        assert kb.block_task(conn, tid, reason="1) tap Approve on the iPhone", kind="needs_input")
+        assert (kb.get_task(conn, tid).status, kb.get_task(conn, tid).block_kind) == ("blocked", "needs_input")
+
+
+def test_shared_blocker_dependency_keeps_sticky_needs_input(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        assert kb.block_task(conn, tid, reason="CI billing", kind="dependency", blocker_id="gh-billing")
+        assert kb.get_task(conn, tid).block_kind == "needs_input"
+
+
+def test_kanban_block_tool_time_kind_on_goal_mode_card(kanban_home: Path, monkeypatch) -> None:
+    from tools import kanban_tools as kt
+
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET goal_mode = 1 WHERE id = ?", (tid,))
+        run_id = kb.get_task(conn, tid).current_run_id
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    out = json.loads(kt._handle_block({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z nightly run", "kind": "time"}))
+    assert out.get("status") == "scheduled", out
+    assert out.get("wake_at")
+
+
+def _sidebar_counts(home: Path):
+    db = home / "kanban.db"
+    with sqlite3.connect(db):
+        pass
+    ksa._reset_cache_for_tests()
+    return ksa.active_task_counts(), ksa.blocked_task_counts()
+
+
+def test_sidebar_counts_only_human_blocks_as_blocked(kanban_home: Path, monkeypatch) -> None:
+    """The row paints red (``kanban_blocked``) for needs_input/capability/untyped blocks
+    only; a timed park or a transient block counts as in-progress work."""
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(kanban_home))
+    with kbc.connect_closing() as conn:
+        human = _running(conn, "s_human")
+        kb.block_task(conn, human, reason="1) tap Approve", kind="needs_input")
+        timed = _running(conn, "s_timed")
+        kb.block_task(conn, timed, reason="nightly run; cron wakes", kind="dependency")
+        flaky = _running(conn, "s_flaky")
+        kb.block_task(conn, flaky, reason="429s", kind="transient")
+        untyped = _running(conn, "s_untyped")
+        kb.block_task(conn, untyped, reason="??")
+    active, blocked = _sidebar_counts(kanban_home)
+    assert blocked == {"s_human": 1, "s_untyped": 1}
+    assert active.get("s_timed") == 1 and active.get("s_flaky") == 1

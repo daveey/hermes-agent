@@ -203,10 +203,10 @@ def test_wait_handoff_wakes_on_dispatcher_tick(home, monkeypatch):
         task = kb.get_task(conn, tid)
         assert (task.status, task.consecutive_failures) == ("ready", 0)
         assert "waiting for CI run 9" in kb.build_worker_context(conn, tid)
-        # A plain kanban_schedule park is never auto-woken.
+        # A kanban_schedule park without a SCHEDULED_UNTIL marker is never auto-woken.
         tid2 = kb.create_task(conn, title="parked", assignee="default")
         kb.claim_task(conn, tid2)
-        kb.schedule_task(conn, tid2, reason="SCHEDULED_UNTIL=2030-01-01")
+        kb.schedule_task(conn, tid2, reason="waiting on the cron that unblocks it")
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 10 ** 7) == []
 
 
@@ -241,7 +241,7 @@ def test_kanban_schedule_after_wait_and_comment_still_stays_put(home, monkeypatc
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="parked", assignee="default")
         kb.claim_task(conn, tid)
-        kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2030-01-01")
+        kb.schedule_task(conn, tid, reason="waiting on the cron that unblocks it")
         kb.add_comment(conn, tid, "t_other", "FYI")
         assert kc.pending_wake(conn, tid) is None
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 10 ** 7) == []

@@ -28,8 +28,13 @@ _log = logging.getLogger(__name__)
 # creating session busy.
 ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled")
 # Waiting on a human. These don't keep the session busy, but the sidebar row
-# shows how many there are next to the open count (``kanban_blocked``). [daveey]
+# shows how many there are next to the open count (``kanban_blocked``) and the
+# row paints red. [daveey]
 BLOCKED_STATUSES = ("blocked",)
+# A ``blocked`` card only waits on a human for these kinds (NULL = generic human
+# blocker). A ``transient``/``time`` block waits on a retry or a clock, so it
+# counts as in-progress work instead, like ``scheduled``. [daveey]
+HUMAN_BLOCK_KINDS = ("needs_input", "capability")
 
 _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
@@ -53,27 +58,41 @@ def _board_db_paths() -> list[Path]:
     return paths
 
 
+def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple[str, tuple]:
+    """SQL predicate on ``t`` for "in ``statuses``", splitting ``blocked`` by its kind:
+    the human set (``BLOCKED_STATUSES``) keeps only human-kind blocks, the active set
+    gains the ``transient``/``time`` ones. A board without ``block_kind`` is unchanged."""
+    ph = ",".join("?" for _ in statuses)
+    if not {r[1] for r in conn.execute("PRAGMA table_info(tasks)")} >= {"block_kind"}:
+        return f"t.status IN ({ph})", statuses
+    kinds = ",".join("?" for _ in HUMAN_BLOCK_KINDS)
+    human = f"(t.block_kind IS NULL OR t.block_kind IN ({kinds}))"
+    if statuses == BLOCKED_STATUSES:
+        return f"(t.status = 'blocked' AND {human})", HUMAN_BLOCK_KINDS
+    return f"(t.status IN ({ph}) OR (t.status = 'blocked' AND NOT {human}))", (*statuses, *HUMAN_BLOCK_KINDS)
+
+
 def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
     """Tasks per session in ``statuses``: tasks the session created, plus tasks
     it is a ``tui`` notify subscriber of (a session asked to shepherd someone
     else's card subscribes to it, and is just as "still working" until it
     lands). Each (session, task) pair counts once."""
-    placeholders = ",".join("?" for _ in statuses)
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
     try:
+        match, params = _status_filter(conn, statuses)
         pairs: set[tuple[str, str]] = {
             (str(sid), str(tid)) for sid, tid in conn.execute(
-                f"SELECT session_id, id FROM tasks WHERE session_id IS NOT NULL "
-                f"AND session_id != '' AND status IN ({placeholders})",
-                statuses,
+                f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL "
+                f"AND session_id != '' AND {match}",
+                params,
             )
         }
         try:
             pairs.update(
                 (str(sid), str(tid)) for sid, tid in conn.execute(
                     f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND t.status IN ({placeholders})",
-                    statuses,
+                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {match}",
+                    params,
                 )
             )
         except sqlite3.Error:  # board predates notify subscriptions

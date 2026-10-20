@@ -492,7 +492,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
 
 # --- Goal-mode judge gate ---
 
-_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input"})
+_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input", "time"})
 
 
 def _goal_judge_available() -> bool:
@@ -959,6 +959,14 @@ def _handle_block(args: dict, **kw) -> str:
         extra: dict = {"block_kind": landed_kind}
         if blocker_id:
             extra["blocker_id"] = blocker_id
+        landed_status = kb.get_task(conn, tid).status
+        if landed_status == "scheduled":
+            # A wait on time, not on a human: parked with a wake time (kanban_timed_park). [daveey]
+            from hermes_cli.kanban_continuation import pending_wake
+            wake = pending_wake(conn, tid) or {}
+            return _ok_landed(kb, conn, tid, "scheduled", requested_kind=kind, wake_at=wake.get("wake_at"),
+                              note=("Parked as a timed wait (scheduled), not a human block: it wakes at "
+                                    "wake_at, or earlier on `hermes kanban unblock`."))
         if kind == "dependency" and landed_kind != kind:
             # block_task re-kinds a dependency wait that no open parent can satisfy.
             extra["requested_kind"] = kind
@@ -982,9 +990,9 @@ def _handle_schedule(args: dict, **kw) -> str:
         # parking would bypass the completion judge (see kanban_block, #38696).
         task = kb.get_task(conn, tid)
         _check(not (task and task.goal_mode),
-               "goal_mode tasks cannot be scheduled: use kanban_block with kind "
-               f"in {sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} for a genuine external "
-               "blocker, or kanban_complete so the completion judge can evaluate it.")
+               "goal_mode tasks cannot be scheduled: for a wait on time or a cron use "
+               "kanban_block with kind='time' (SCHEDULED_UNTIL=<ISO8601> in the reason sets "
+               "the wake), or kanban_complete so the completion judge can evaluate it.")
         ok = kb.schedule_task(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not schedule {tid} (unknown id or not in todo/ready/running/blocked)")

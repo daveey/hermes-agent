@@ -168,10 +168,11 @@ OVERDUE_WAKE_GRACE_SECONDS = 600
 
 
 def pending_wake_payload(kind: Optional[str], payload: Any) -> Optional[dict]:
-    """The ``continued`` payload when the event that parked the card is a timed wait, else None."""
+    """The parking payload when the event that parked the card is a timed wait, else None: a
+    ``continued`` wait, or a ``scheduled`` timed park from ``kanban_timed_park``. [daveey]"""
     from hermes_cli import kanban_db as kb
 
-    if kind != CONTINUED_OUTCOME:
+    if kind not in SCHEDULED_ENTRY_EVENTS:
         return None
     data = payload if isinstance(payload, dict) else kb._json_dict(payload)
     return data if isinstance(data.get("wake_at"), (int, float)) else None

@@ -108,7 +108,7 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
 # Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
-VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
+VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient", "time"}
 
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
@@ -3161,15 +3161,12 @@ def block_task(
     blocker_id: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
-    :func:`_route_block`). ``kind='dependency'`` with no incomplete parent is
-    re-kinded to ``needs_input`` (sticky) so ``recompute_ready`` cannot
-    promote it into a context-free respawn. ``transient`` still counts
-    toward the loop breaker so a forever-flaky task escalates. True on any
-    transition.
-
-    ``blocker_id`` names a shared external blocker (``kanban_shared_blockers``):
-    it is stored on the closed run's metadata and the event payload, so other
-    cards stopped by the same wall are held behind one probe. [daveey]
+    :func:`_route_block`). A wait on time -- ``kind='time'``, a ``dependency``
+    with no open parent, or a ``SCHEDULED_UNTIL=`` reason -- parks ``scheduled``
+    with a wake time instead (``kanban_timed_park``). ``transient`` still counts
+    toward the loop breaker. True on any transition. ``blocker_id`` names a
+    shared external blocker (``kanban_shared_blockers``), stored on the closed
+    run's metadata and the event payload. [daveey]
 
     An already-``blocked`` card that the failure breaker parked UNTYPED
     (``block_kind IS NULL``, no live run) is classified in place when *kind*
@@ -3209,13 +3206,14 @@ def block_task(
             })
             return True
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
-        requested_kind = kind
-        rekind_reason = None
-        # ``dependency`` only waits on incomplete parents. A worker filing that
-        # kind with none open would park in ``todo`` and ``recompute_ready``
-        # would promote+respawn it context-free on the next tick. Re-kind to
-        # ``needs_input`` so it is sticky until a human unblocks.
-        if kind == "dependency" and _parents_satisfied(conn, task_id):
+        requested_kind, rekind_reason = kind, None
+        no_open_parent = _parents_satisfied(conn, task_id)
+        from hermes_cli import kanban_timed_park as ktp
+        if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent):
+            return ktp.park(conn, task_id, reason=reason, requested_kind=kind,
+                            source_status=source_status, expected_run_id=expected_run_id)
+        # Parent-less ``dependency`` behind a shared blocker: sticky ``needs_input`` (todo would respawn it).
+        if kind == "dependency" and no_open_parent:
             kind = "needs_input"
             rekind_reason = "no_open_parent"
         new_status, event_kind, set_sql, params, payload = _route_block(
@@ -4057,7 +4055,8 @@ def schedule_task(
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
         )
-        _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
+        from hermes_cli.kanban_timed_park import scheduled_payload  # SCHEDULED_UNTIL= wakes it [daveey]
+        _append_event(conn, task_id, "scheduled", scheduled_payload(reason), run_id=run_id)
         return True
 
 

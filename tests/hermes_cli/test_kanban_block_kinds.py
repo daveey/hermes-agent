@@ -7,8 +7,8 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 
 * ``dependency`` blocks route to ``todo`` (parent-gated, auto-resumed) and
   never enter the human ``blocked`` bucket a cron would keep unblocking —
-  unless no parent is open, in which case the wait can never be satisfied
-  and the block is recorded as ``needs_input`` (sticky, loop-counted).
+  with no open parent the wait is on something off the board, so it is a
+  timed park (``scheduled`` with a wake time, ``kanban_timed_park``).
 * ``needs_input`` / ``capability`` / un-typed blocks land in ``blocked``;
   each same-cause re-block after an unblock increments ``block_recurrences``,
   and at ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
@@ -113,14 +113,13 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
         assert kb.get_task(conn, child).status == "ready"
 
 
-def test_dependency_block_with_terminal_parents_parks_then_escalates(
+def test_dependency_block_with_terminal_parents_is_a_timed_park(
     kanban_home: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A ``dependency`` block whose parents are all terminal can never be
-    satisfied by ``recompute_ready``: it must park in ``blocked`` as
-    ``needs_input`` (no ``dependency_wait``, no re-promotion), say so on the
-    CLI, and count toward the loop breaker so a re-block after an unblock
-    reaches ``triage``."""
+    """A ``dependency`` block whose parents are all terminal waits on something off
+    the board (a nightly run, a release), not on a human: it parks ``scheduled`` with
+    a wake time -- no ``dependency_wait``, no ``blocked`` bucket, no re-promotion by
+    ``recompute_ready`` -- and a cron/human unblock still wakes it. [daveey]"""
     with kbc.connect_closing() as conn:
         parent = kb.create_task(conn, title="already-done-parent", assignee="worker")
         with kb.write_txn(conn):
@@ -131,23 +130,17 @@ def test_dependency_block_with_terminal_parents_parks_then_escalates(
         # `hermes kanban block <child> --kind dependency waiting on upstream`
         args = argparse.Namespace(task_id=child, ids=None, reason=["waiting", "on", "upstream"], kind="dependency")
         assert kanban_cli._cmd_block(args) == 0
-        assert "needs_input" in capsys.readouterr().out
+        capsys.readouterr()
         parked = kb.get_task(conn, child)
-        assert (parked.status, parked.block_kind, parked.block_recurrences) == ("blocked", "needs_input", 1)
+        assert (parked.status, parked.block_kind) == ("scheduled", None)
         events = kb.list_events(conn, child)
-        assert not [e for e in events if e.kind == "dependency_wait"]
-        blocked = [e for e in events if e.kind == "blocked"][-1].payload
-        assert (blocked["requested_kind"], blocked["rekind_reason"]) == ("dependency", "no_open_parent")
+        assert not [e for e in events if e.kind in ("dependency_wait", "blocked")]
+        park = [e for e in events if e.kind == "scheduled"][-1].payload
+        assert park["timed_park"] and park["requested_kind"] == "dependency" and park["wake_at"]
         assert kb.recompute_ready(conn) == 0
-        assert kb.get_task(conn, child).status == "blocked"
-
-        # A cron/human unblocks; the worker re-declares the same impossible wait.
+        assert kb.get_task(conn, child).status == "scheduled"
         assert kb.unblock_task(conn, child)
-        assert kb.claim_task(conn, child, claimer="worker") is not None
-        assert kb.block_task(conn, child, reason="still waiting", kind="dependency")
-        assert kb.get_task(conn, child).status == "triage"
-        loop = [e for e in kb.list_events(conn, child) if e.kind == "block_loop_detected"][-1].payload
-        assert loop["recurrences"] == kb.BLOCK_RECURRENCE_LIMIT
+        assert kb.get_task(conn, child).status == "ready"
 
 
 def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(

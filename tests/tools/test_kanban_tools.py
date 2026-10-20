@@ -467,7 +467,8 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
         run = kb.latest_run(conn, worker_env)
         assert (run.outcome, run.summary) == ("scheduled", reason)
         assert any(
-            event.kind == "scheduled" and event.payload == {"reason": reason}
+            event.kind == "scheduled" and event.payload == {"reason": reason, "wake_at": event.payload.get("wake_at")}
+            and event.payload["wake_at"]  # SCHEDULED_UNTIL= sets a real wake time
             for event in kb.list_events(conn, worker_env)
         )
 
@@ -593,15 +594,14 @@ def test_schedule_exposed_to_codex_runtime_workers():
     assert "kanban_schedule" in EXPOSED_TOOLS
 
 
-def test_block_dependency_without_open_parent_is_rekinded(worker_env):
-    """kind=dependency with no incomplete parent must not park in todo; the
-    tool reports the landed kind and tells the worker why."""
+def test_block_dependency_without_open_parent_is_a_timed_park(worker_env):
+    """kind=dependency with no incomplete parent must not park in todo, nor in the
+    human ``blocked`` bucket: it is a timed wait, and the tool says when it wakes."""
     from tools import kanban_tools as kt
 
     d = json.loads(kt._handle_block({"reason": "upstream input is missing", "kind": "dependency"}))
-    assert (d["ok"], d["status"], d["block_kind"]) == (True, "blocked", "needs_input")
-    assert d["requested_kind"] == "dependency"
-    assert "no parent is open" in d["note"]
+    assert (d["ok"], d["status"], d["requested_kind"]) == (True, "scheduled", "dependency")
+    assert d["wake_at"] and "not a human block" in d["note"]
 
 
 def test_heartbeat_extends_claim_expires(worker_env):
