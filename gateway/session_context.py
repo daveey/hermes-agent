@@ -7,7 +7,7 @@ other's routing ids.  ``get_session_env`` is a drop-in for ``os.getenv``.
 
 import os
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from typing import Any, Iterator
 
 # "Never set here" (falls back to os.environ for CLI/cron) vs "" = explicitly cleared (no fallback).
@@ -122,8 +122,9 @@ def set_session_vars(
     session_history_delivery: str | None = None,
 ) -> list:
     """Set all session context variables and return reset tokens.  Call
-    ``clear_session_vars(tokens)`` in a ``finally``; not nestable, clearing resets every var
-    to ``""`` rather than restoring prior values (tokens are accepted only for API compat).
+    ``clear_session_vars(tokens)`` in a ``finally``.  Clearing resets every var to ``""``
+    rather than restoring prior values, EXCEPT a nested re-bind of the session already bound
+    here (same non-empty session key), which restores the outer binding. [daveey]
 
     ``session_history_delivery`` declares whether the bound chat id is one the client can address again:
     ``"1"`` (audited producers — explicit session-id header, native API sessions, /v1/runs) or
@@ -140,8 +141,28 @@ def set_session_vars(
     tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values)]
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))
     tokens.append(_SESSION_HISTORY_DELIVERY.set(_UNSET if session_history_delivery is None else session_history_delivery))
-    _runtime_cwd("set_session_cwd", cwd)
+    try:
+        from agent import runtime_cwd
+        tokens.append(runtime_cwd.set_session_cwd(cwd))
+    except Exception:
+        pass
     return tokens
+
+
+def _nested_rebind_tokens(tokens: list) -> dict | None:
+    """``{var: token}`` when *tokens* re-bound the session key that was already bound (a
+    helper re-binding the turn's own session, e.g. the system-prompt refresh a queued model
+    switch runs on the turn thread), else None.  Only that case restores prior values: a
+    clear after binding a DIFFERENT session must still wipe, so an asyncio task that inherited
+    another session's vars never falls back to that identity. [daveey]"""
+    by_var = {tok.var: tok for tok in tokens or () if isinstance(tok, Token)}
+    key_tok = by_var.get(_SESSION_KEY)
+    if key_tok is None:
+        return None
+    prior = key_tok.old_value
+    if prior is Token.MISSING or prior is _UNSET or not prior or prior != _SESSION_KEY.get():
+        return None
+    return by_var
 
 
 def clear_session_vars(tokens: list) -> None:
@@ -149,7 +170,20 @@ def clear_session_vars(tokens: list) -> None:
     ``get_session_env`` returns empty instead of stale ``os.environ`` values.  Async-delivery
     goes back to ``_UNSET``: a cleared context is default-supported, not opted-out.  Wake
     capability goes back to ``_UNSET`` too — but for the opposite reason: a cleared context has
-    declared nothing, and an undeclared capability FAILS CLOSED (#98619)."""
+    declared nothing, and an undeclared capability FAILS CLOSED (#98619).
+
+    A nested re-bind of the same session restores the outer binding instead: wiping it
+    left the rest of a Desktop turn with no ``HERMES_SESSION_KEY``/``ID``, so its
+    ``kanban_create`` cards were neither stamped nor subscribed. [daveey]"""
+    nested = _nested_rebind_tokens(tokens)
+    if nested is not None:
+        for var, tok in nested.items():
+            prior = tok.old_value
+            if prior is Token.MISSING:  # never bound in this context: own module's "unset"
+                prior = _UNSET if var.name in _VAR_MAP or var in (
+                    _SESSION_ASYNC_DELIVERY, _SESSION_HISTORY_DELIVERY) else ""
+            var.set(prior)
+        return
     for var in _SESSION_VARS:
         var.set("")
     _SESSION_ASYNC_DELIVERY.set(_UNSET)

@@ -316,3 +316,52 @@ async def test_plugin_slash_command_sees_session_env(monkeypatch):
     # Bound only for the handler call, not leaked past dispatch
     assert get_session_env("HERMES_SESSION_KEY") == ""
 
+
+
+def test_nested_rebind_of_same_session_restores_outer_binding(monkeypatch):
+    """A helper that re-binds the turn's OWN session (the system-prompt refresh a queued
+    model switch runs on the Desktop turn thread) must hand the outer binding back on clear.
+    Wiping it left the rest of the turn without HERMES_SESSION_KEY/ID, so kanban_create
+    cards were neither stamped with session_id nor subscribed. [daveey]"""
+    from agent.runtime_cwd import scoped_session_cwd
+
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    outer = set_session_vars(session_key="s1", session_id="s1", source="desktop",
+                             profile="default", ui_session_id="ui1", cwd="/tmp/a")
+    try:
+        inner = set_session_vars(session_key="s1", session_id="s1", source="desktop",
+                                 profile="default", cwd="/tmp/a")
+        clear_session_vars(inner)
+        assert get_session_env("HERMES_SESSION_KEY") == "s1"
+        assert get_session_env("HERMES_SESSION_ID") == "s1"
+        assert get_session_env("HERMES_SESSION_SOURCE") == "desktop"
+        assert get_session_env("HERMES_UI_SESSION_ID") == "ui1"  # outer-only value survives
+        assert scoped_session_cwd() == "/tmp/a"
+    finally:
+        clear_session_vars(outer)
+    # The outermost clear still wipes (no os.environ fallback).
+    assert get_session_env("HERMES_SESSION_KEY") == ""
+    assert get_session_env("HERMES_SESSION_ID") == ""
+    assert scoped_session_cwd() == ""
+
+
+def test_bind_of_other_session_then_clear_still_wipes(monkeypatch):
+    """Control: clearing a binding of a DIFFERENT session never falls back to the session
+    bound before it (an asyncio task inheriting A's vars must not read A after B clears)."""
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+    outer = set_session_vars(session_key="A", session_id="A")
+    try:
+        inner = set_session_vars(session_key="B", session_id="B")
+        clear_session_vars(inner)
+        assert get_session_env("HERMES_SESSION_KEY") == ""
+        assert get_session_env("HERMES_SESSION_ID") == ""
+    finally:
+        clear_session_vars(outer)
+
+
+def test_clear_without_tokens_still_wipes(monkeypatch):
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+    set_session_vars(session_key="s1")
+    clear_session_vars([])
+    assert get_session_env("HERMES_SESSION_KEY") == ""
