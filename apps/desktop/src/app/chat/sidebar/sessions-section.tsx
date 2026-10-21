@@ -10,7 +10,7 @@ import { SidebarGroup, SidebarGroupContent } from '@/components/ui/sidebar'
 import type { HermesGitWorktree } from '@/global'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { flattenSessionsWithBranches } from '@/lib/session-branch-tree'
+import { flattenSessionsWithBranches, sessionActivityAt, sessionCreatedAt } from '@/lib/session-branch-tree'
 import {
   groupEntriesByRecency,
   groupEntriesByStatus,
@@ -22,6 +22,7 @@ import { sessionBucketLabel } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import {
   $sidebarListGroupIds,
+  $sidebarOrdering,
   $sidebarShowAllSessions,
   $sidebarWorkspaceNodeOpen,
   listGroupNodeId,
@@ -271,9 +272,16 @@ export function SidebarSessionsSection({
   // Only Pinned arrives pre-ordered as a flat sequence. Recents keeps its
   // recency sort — the drag order is layered on per date group below, so the
   // buckets stay truthful and a reorder never costs the list its dividers.
+  // [daveey] The "created" sort key has to own the base order and the date
+  // buckets, not just re-slot rows inside buckets cut by last activity: with
+  // activity deciding the buckets, every reply in an old chat lifted it into
+  // the newest group and reshuffled the list it was supposed to hold still.
+  const ordering = useStore($sidebarOrdering)
+  const timeOf = ordering === 'created' ? sessionCreatedAt : sessionActivityAt
+
   const displayEntries = useMemo(
-    () => flattenSessionsWithBranches(sessions, { preserveOrder }),
-    [sessions, preserveOrder]
+    () => flattenSessionsWithBranches(sessions, { preserveOrder, timeOf }),
+    [sessions, preserveOrder, timeOf]
   )
 
   const renderRow = useCallback(
@@ -383,8 +391,10 @@ export function SidebarSessionsSection({
   // Sessions inside repos/worktrees are date-ordered and static.
   const renderRows = useCallback(
     (items: SessionInfo[]) =>
-      flattenSessionsWithBranches(items).map(({ branchStem, session }) => renderRow(session, false, branchStem)),
-    [renderRow]
+      flattenSessionsWithBranches(items, { timeOf }).map(({ branchStem, session }) =>
+        renderRow(session, false, branchStem)
+      ),
+    [renderRow, timeOf]
   )
 
   // Limit complete groups, not sessions, so a burst and its branches stay
@@ -392,17 +402,18 @@ export function SidebarSessionsSection({
   const renderPreviewRows = useCallback(
     (items: SessionInfo[], projectId: string) => {
       const rows = groupEntriesByRecency(
-        flattenSessionsWithBranches(items),
+        flattenSessionsWithBranches(items, { timeOf }),
         undefined,
         undefined,
-        showAllSessions ? Infinity : 2
+        showAllSessions ? Infinity : 2,
+        timeOf
       ).map(row => (row.kind === 'divider' ? { ...row, key: `project:${projectId}:${row.key}` } : row))
 
       const ordered = manualOrderIds?.length ? orderRowsWithinGroups(rows, manualOrderIds) : rows
 
       return hideCollapsedGroupRows(ordered, isListGroupOpen).map(row => renderListRow(row, false))
     },
-    [isListGroupOpen, manualOrderIds, renderListRow, showAllSessions]
+    [isListGroupOpen, manualOrderIds, renderListRow, showAllSessions, timeOf]
   )
 
   // Same as `renderRows`, but with date dividers folded in — used for
@@ -410,13 +421,14 @@ export function SidebarSessionsSection({
   // chronologically, matching the flat recents list.
   const renderRowsDated = useCallback(
     (items: SessionInfo[]) => {
-      const entries = flattenSessionsWithBranches(items)
+      const entries = flattenSessionsWithBranches(items, { timeOf })
 
-      const rows = grouping === 'date' ? groupEntriesByRecency(entries) : toSessionRows(entries)
+      const rows =
+        grouping === 'date' ? groupEntriesByRecency(entries, undefined, undefined, undefined, timeOf) : toSessionRows(entries)
 
       return hideCollapsedGroupRows(rows, isListGroupOpen).map(row => renderListRow(row, false))
     },
-    [grouping, isListGroupOpen, renderListRow]
+    [grouping, isListGroupOpen, renderListRow, timeOf]
   )
 
   // Flat recents as list rows: grouped by recency when enabled, plain otherwise.
@@ -426,7 +438,7 @@ export function SidebarSessionsSection({
   const flatRows: SidebarListRow[] = useMemo(() => {
     const rows =
       grouping === 'date'
-        ? groupEntriesByRecency(displayEntries)
+        ? groupEntriesByRecency(displayEntries, undefined, undefined, undefined, timeOf)
         : grouping === 'status'
           ? groupEntriesByStatus(
               displayEntries,
@@ -436,7 +448,7 @@ export function SidebarSessionsSection({
           : toSessionRows(displayEntries)
 
     return manualOrderIds?.length ? orderRowsWithinGroups(rows, manualOrderIds) : rows
-  }, [grouping, displayEntries, dotStates, manualOrderIds, statusDividerLabels])
+  }, [grouping, displayEntries, dotStates, manualOrderIds, statusDividerLabels, timeOf])
 
   // Closed date/status buckets keep their divider and drop the sessions under
   // it. Same array when nothing is collapsed so the virtualizer's rows ref

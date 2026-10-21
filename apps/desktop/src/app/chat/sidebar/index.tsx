@@ -26,6 +26,7 @@ import { useContributions } from '@/contrib/react/use-contributions'
 import { type SessionInfo, type SessionSearchResult } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { comboTokens } from '@/lib/keybinds/combo'
+import { sessionCreatedAt } from '@/lib/session-branch-tree'
 import { sessionMatchesSearch } from '@/lib/session-search'
 import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
 import { cn } from '@/lib/utils'
@@ -702,10 +703,13 @@ export function ChatSidebar({
   // last_active immediately. Ordering by status doesn't sort here — it re-slots
   // rows *inside* whatever dividers are on, via sortOrderIds below — so the
   // date buckets stay chronological either way.
-  const sortedSessions = useMemo(
-    () => [...visibleSessions].sort((a, b) => sessionTime(b) - sessionTime(a)),
-    [visibleSessions]
-  )
+  // [daveey] Except under the "created" key, which must not move a row when
+  // it gets a reply — see sessions-section's `timeOf`.
+  const sortedSessions = useMemo(() => {
+    const timeOf = ordering === 'created' ? sessionCreatedAt : sessionTime
+
+    return [...visibleSessions].sort((a, b) => timeOf(b) - timeOf(a))
+  }, [visibleSessions, ordering])
 
   const visibleCronSessions = useMemo(
     () => filterSessionsByProfileScope(cronSessions, profileScope),

@@ -13,9 +13,21 @@ export interface FlattenSessionsOptions {
    * their parent; sibling branches stay ordered by their own recency.
    */
   preserveOrder?: boolean
+  /**
+   * [daveey] The timestamp roots and sibling branches sort by. Defaults to
+   * last activity; the "created" sort key passes `sessionCreatedAt` so a reply
+   * landing in an old chat can't float it above newer ones.
+   */
+  timeOf?: SessionTime
 }
 
-const recency = (session: SessionInfo): number => session.last_active || session.started_at || 0
+export type SessionTime = (session: SessionInfo) => number
+
+/** Last activity, falling back to creation: the sidebar's default clock. */
+export const sessionActivityAt: SessionTime = session => session.last_active || session.started_at || 0
+
+/** Creation time only — never moves once the session exists. */
+export const sessionCreatedAt: SessionTime = session => session.started_at || 0
 
 /**
  * Parent id to nest under, or undefined for a top-level sibling.
@@ -88,6 +100,7 @@ export function flattenSessionsWithBranches(
   options: FlattenSessionsOptions = {}
 ): SidebarSessionEntry[] {
   const sessions = collapseCompressionLineages(input)
+  const recency = options.timeOf ?? sessionActivityAt
 
   if (sessions.length < 2) {
     return sessions.map(session => ({ session }))

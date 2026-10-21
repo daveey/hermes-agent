@@ -4,7 +4,7 @@ import type { SessionInfo } from '@/types/hermes'
 
 import { makeSessionInfo } from '../test/session-info'
 
-import type { SidebarSessionEntry } from './session-branch-tree'
+import { sessionCreatedAt, type SidebarSessionEntry } from './session-branch-tree'
 import { groupEntriesByRecency, hideCollapsedGroupRows, toSessionRows } from './session-date-groups'
 
 const session = (id: string, overrides: Partial<SessionInfo> = {}): SessionInfo =>
@@ -265,5 +265,26 @@ describe('toSessionRows', () => {
       { entry: entries[0], kind: 'session' },
       { entry: entries[1], kind: 'session' }
     ])
+  })
+})
+
+describe('groupEntriesByRecency with the created clock', () => {
+  it('buckets by started_at, so a fresh reply does not pull an old chat into the head', () => {
+    // Created last week, but replied to an hour ago.
+    const old = session('old', { last_active: at(2026, 5, 18, 11), started_at: at(2026, 5, 9) })
+    const fresh = session('fresh', { last_active: at(2026, 5, 18, 9), started_at: at(2026, 5, 18, 9) })
+    const entries = [entry(fresh), entry(old)]
+
+    const byCreated = groupEntriesByRecency(entries, NOW, MONDAY, Infinity, sessionCreatedAt)
+    const byActivity = group(entries)
+
+    expect(dividerKeys(byCreated)).toHaveLength(1)
+    expect(byCreated.map(row => (row.kind === 'session' ? row.entry.session.id : 'divider'))).toEqual([
+      'fresh',
+      'divider',
+      'old'
+    ])
+    // Control: the default clock keeps both in the same recent run.
+    expect(dividerKeys(byActivity)).toEqual([])
   })
 })

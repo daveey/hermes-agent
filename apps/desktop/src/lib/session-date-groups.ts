@@ -1,4 +1,4 @@
-import { type SidebarSessionEntry } from '@/lib/session-branch-tree'
+import { sessionActivityAt, type SessionTime, type SidebarSessionEntry } from '@/lib/session-branch-tree'
 import { calendarBucket, HOUR, localeWeekStartDay, MINUTE, SECOND, type SessionBucket } from '@/lib/time'
 
 // A flat list row is either a divider or a session entry. Interleaving these
@@ -11,9 +11,9 @@ export type SidebarListRow =
   | { key: string; kind: 'divider'; label: string }
 
 // The row's own age label reads from `last_active || started_at`; bucket off the
-// same value so a divider lines up with what the row actually shows.
-const recencyMs = (entry: SidebarSessionEntry): number =>
-  (entry.session.last_active || entry.session.started_at || 0) * SECOND
+// same value so a divider lines up with what the row actually shows. [daveey]
+// The "created" sort key buckets by `started_at` instead (see `timeOf`).
+const entryMs = (entry: SidebarSessionEntry, timeOf: SessionTime): number => timeOf(entry.session) * SECOND
 
 // Aim the head at "the most recent handful". A break shorter than
 // MIN_RUN_BREAK_MS never counts as one — that would slice a rapid-fire burst —
@@ -41,10 +41,15 @@ const MAX_RUN_GAP_MS = 8 * HOUR
 //
 // Returns the oldest timestamp (ms) still inside the head; -Infinity means the
 // whole list is one run, +Infinity means no head (calendar groups own it all).
-function headRunCutoffMs(entries: readonly SidebarSessionEntry[], nowMs: number, weekStartsOn: number): number {
+function headRunCutoffMs(
+  entries: readonly SidebarSessionEntry[],
+  nowMs: number,
+  weekStartsOn: number,
+  timeOf: SessionTime
+): number {
   const times = entries
     .filter(entry => !entry.branchStem)
-    .map(recencyMs)
+    .map(entry => entryMs(entry, timeOf))
     .sort((a, b) => b - a)
 
   let bestIdx = -1
@@ -98,11 +103,12 @@ export function groupEntriesByRecency(
   entries: readonly SidebarSessionEntry[],
   nowMs = Date.now(),
   weekStartsOn = localeWeekStartDay(),
-  maxGroups = Number.POSITIVE_INFINITY
+  maxGroups = Number.POSITIVE_INFINITY,
+  timeOf: SessionTime = sessionActivityAt
 ): SidebarListRow[] {
   const rows: SidebarListRow[] = []
   const emitted = new Set<string>()
-  const cutoff = headRunCutoffMs(entries, nowMs, weekStartsOn)
+  const cutoff = headRunCutoffMs(entries, nowMs, weekStartsOn, timeOf)
   let lastKey: null | string = null
   let groups = 1
 
@@ -115,7 +121,7 @@ export function groupEntriesByRecency(
       continue
     }
 
-    const ms = recencyMs(entry)
+    const ms = entryMs(entry, timeOf)
 
     // Head-run sessions are never labelled.
     if (ms >= cutoff) {
