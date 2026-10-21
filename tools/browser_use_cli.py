@@ -63,7 +63,9 @@ def _hermes_ensure_own_tab():
     try:
         # Force a fresh target: new_tab() would REUSE a blank current tab,
         # which is exactly the tab a sibling daemon may also hold.
-        _tid = cdp("Target.createTarget", url="about:blank").get("targetId")
+        # background=True: a foreground createTarget makes macOS hand Chrome
+        # keyboard focus, stealing it from the user's app on every new session.
+        _tid = cdp("Target.createTarget", url="about:blank", background=True).get("targetId")
         if _tid:
             switch_tab(_tid)
     except Exception:

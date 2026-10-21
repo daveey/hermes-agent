@@ -706,6 +706,22 @@ class TestOwnTabPreamble:
         # and composes with model code
         ast.parse(bu_cli._OWN_TAB_PREAMBLE + "print('x')")
 
+    def test_preamble_opens_its_tab_in_the_background(self):
+        """A foreground Target.createTarget makes macOS hand Chrome keyboard focus, so every new
+        browser_exec session stole focus from the user's app. The harness's own new_tab() passes
+        background=True; the preamble must too."""
+        import ast
+
+        calls = [
+            n for n in ast.walk(ast.parse(bu_cli._OWN_TAB_PREAMBLE))
+            if isinstance(n, ast.Call) and n.args and isinstance(n.args[0], ast.Constant)
+            and n.args[0].value == "Target.createTarget"
+        ]
+        assert calls, "preamble no longer creates its own tab"
+        for call in calls:
+            kw = {k.arg: k.value for k in call.keywords}
+            assert isinstance(kw.get("background"), ast.Constant) and kw["background"].value is True
+
 
 class TestProviderPickerIntegration:
     """The `hermes tools` Browser Automation picker row (browser_backend
