@@ -82,7 +82,65 @@ export function dispatchArchiveHotkey(
   return 'core'
 }
 
+// [daveey] The same "step to the next session" outside the hotkey: a plugin
+// that closes its own session from a button (Inbox resolve/task actions on
+// the last card) must not leave the user on the now-archived chat. Wiring
+// installs the opener (it owns `navigate`); plugins reach it through
+// `ctx.openNextSession(fromId)`.
+
+/** Opens the session core's ⌘⇧A would step to from `fromId`; false when
+ *  there is none. */
+export type NextSessionOpener = (fromId: string) => boolean
+
+let nextSessionOpener: NextSessionOpener | null = null
+
+export function registerNextSessionOpener(opener: NextSessionOpener): () => void {
+  nextSessionOpener = opener
+
+  return () => {
+    if (nextSessionOpener === opener) {
+      nextSessionOpener = null
+    }
+  }
+}
+
+/** The opener wiring installs: `pick` is core's next-session choice (the one
+ *  ⌘⇧A uses), `open` navigates. Never re-opens `fromId` itself. */
+export function nextSessionOpenerFor(
+  pick: (fromId: string) => null | string | undefined,
+  open: (sessionId: string) => unknown
+): NextSessionOpener {
+  return fromId => {
+    const next = pick(fromId)
+
+    if (!next || next === fromId) {
+      return false
+    }
+
+    void open(next)
+
+    return true
+  }
+}
+
+/** Step from `fromId` like ⌘⇧A after an archive. False when the shell isn't
+ *  mounted, there is no next session, or the opener throws. */
+export function openNextSessionFrom(fromId: string): boolean {
+  if (!fromId || !nextSessionOpener) {
+    return false
+  }
+
+  try {
+    return nextSessionOpener(fromId) === true
+  } catch (error) {
+    console.warn('[archive-hotkey] next-session opener failed', error)
+
+    return false
+  }
+}
+
 /** Test seam. */
 export function resetArchiveHotkeyHandlersForTests(): void {
   handlers.clear()
+  nextSessionOpener = null
 }

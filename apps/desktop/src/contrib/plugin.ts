@@ -25,7 +25,7 @@ import {
 } from '@/lib/keybinds/plugin-actions'
 import { readKey, writeKey } from '@/lib/storage'
 import { type ArchiveGuard, registerArchiveGuard } from '@/store/archive-guards'
-import { type ArchiveHotkeyHandler, registerArchiveHotkeyHandler } from '@/store/archive-hotkey'
+import { type ArchiveHotkeyHandler, openNextSessionFrom, registerArchiveHotkeyHandler } from '@/store/archive-hotkey'
 import { dispatchPluginNativeNotification, type PluginNativeNotificationInput } from '@/store/native-notifications'
 import { $petActive } from '@/store/pet'
 import { clearPetMessages, type PetSayOptions, sayPetMessage } from '@/store/pet-plugin-messages'
@@ -135,6 +135,11 @@ export interface PluginContext {
    *  step); return true when handled, false to let core archive as usual.
    *  Removed on unload. Feature-detect: `ctx.registerArchiveHotkeyHandler?.(...)`. */
   registerArchiveHotkeyHandler: (handler: ArchiveHotkeyHandler) => () => void
+  /** [daveey] Step from `fromId` to the session ⌘⇧A would open after
+   *  archiving it (next status-striped sidebar row, else the plain
+   *  neighbour). For plugins that close their own session from a button.
+   *  False when there is none. Feature-detect: `ctx.openNextSession?.(id)`. */
+  openNextSession: (fromId: string) => boolean
   /** Register an arbitrary cleanup to run on unload/disable — for side effects
    *  that aren't contributions or sockets (store subscriptions, timers). Runs
    *  alongside every other disposer when the plugin deactivates. */
@@ -378,6 +383,7 @@ export function createPluginContext(pluginId: string, onDispose?: (dispose: () =
     registerSettingsPage: page => track(registry.register(scope(settingsPageContribution(page)))),
     registerArchiveGuard: guard => track(registerArchiveGuard(source, guard)),
     registerArchiveHotkeyHandler: handler => track(registerArchiveHotkeyHandler(source, handler)),
+    openNextSession: fromId => openNextSessionFrom(fromId),
     onDispose: fn => void track(fn),
     onEvent: (type, listener) => track(onGatewayEvent(type, listener)),
     ...createPluginLifetime(track),

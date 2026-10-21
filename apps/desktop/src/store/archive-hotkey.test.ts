@@ -4,7 +4,10 @@ import { createPluginContext } from '@/contrib/plugin'
 
 import {
   dispatchArchiveHotkey,
+  nextSessionOpenerFor,
+  openNextSessionFrom,
   registerArchiveHotkeyHandler,
+  registerNextSessionOpener,
   resetArchiveHotkeyHandlersForTests,
   runArchiveHotkeyHandlers
 } from './archive-hotkey'
@@ -84,5 +87,55 @@ describe('archive hotkey handlers', () => {
     expect(runArchiveHotkeyHandlers(base)).toBe(true)
     disposers.forEach(dispose => dispose())
     expect(runArchiveHotkeyHandlers(base)).toBe(false)
+  })
+
+  it('openNextSessionFrom: false before wiring installs an opener, then opens core next pick', () => {
+    expect(openNextSessionFrom('s1')).toBe(false)
+    const open = vi.fn()
+    const pick = vi.fn(() => 's2')
+    const dispose = registerNextSessionOpener(nextSessionOpenerFor(pick, open))
+
+    expect(openNextSessionFrom('s1')).toBe(true)
+    expect(pick).toHaveBeenCalledWith('s1')
+    expect(open).toHaveBeenCalledWith('s2')
+    expect(openNextSessionFrom('')).toBe(false)
+    dispose()
+    expect(openNextSessionFrom('s1')).toBe(false)
+  })
+
+  it('opener never re-opens the source and reports no next session', () => {
+    const open = vi.fn()
+    registerNextSessionOpener(nextSessionOpenerFor(id => (id === 'a' ? 'a' : null), open))
+
+    expect(openNextSessionFrom('a')).toBe(false)
+    expect(openNextSessionFrom('b')).toBe(false)
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('a throwing opener returns false instead of breaking the plugin', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    registerNextSessionOpener(() => {
+      throw new Error('nope')
+    })
+
+    expect(openNextSessionFrom('s1')).toBe(false)
+  })
+
+  it('a stale disposer does not remove a newer opener', () => {
+    const first = registerNextSessionOpener(() => true)
+    registerNextSessionOpener(() => true)
+    first()
+
+    expect(openNextSessionFrom('s1')).toBe(true)
+  })
+
+  it('plugin ctx.openNextSession reaches the installed opener', () => {
+    const plugin = createPluginContext('inbox', () => {})
+    const open = vi.fn()
+
+    expect(plugin.openNextSession('s1')).toBe(false)
+    registerNextSessionOpener(nextSessionOpenerFor(() => 's9', open))
+    expect(plugin.openNextSession('s1')).toBe(true)
+    expect(open).toHaveBeenCalledWith('s9')
   })
 })

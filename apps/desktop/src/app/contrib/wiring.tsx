@@ -43,7 +43,7 @@ import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { isMessagingSource } from '@/lib/session-source'
 import { activateWakeIndicator } from '@/lib/wake-indicator'
 import { playWakeSound } from '@/lib/wake-sound'
-import { dispatchArchiveHotkey } from '@/store/archive-hotkey'
+import { dispatchArchiveHotkey, nextSessionOpenerFor, registerNextSessionOpener } from '@/store/archive-hotkey'
 import { $billingSettingsRequest } from '@/store/billing-block'
 import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
@@ -1028,6 +1028,19 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       onDeselect
     })
   }, [archiveSession, navigate])
+
+  // [daveey] The same step for plugins that close their own session from a
+  // button (`ctx.openNextSession`, see `store/archive-hotkey.ts`).
+  useEffect(
+    () =>
+      registerNextSessionOpener(
+        nextSessionOpenerFor(
+          fromId => nextSidebarSessionId(fromId, 1, false, true),
+          next => openSession(next, navigate)
+        )
+      ),
+    [navigate]
+  )
 
   // Single global listener for every rebindable hotkey plus the on-screen
   // keybind editor's capture mode (same as DesktopController).
