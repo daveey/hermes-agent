@@ -30,7 +30,10 @@ ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled")
 # Waiting on a human. These don't keep the session busy, but the sidebar row
 # shows how many there are next to the open count (``kanban_blocked``) and the
 # row paints red. [daveey]
-BLOCKED_STATUSES = ("blocked",)
+# ``triage`` joins it only for a card block-loop detection escalated there: it
+# keeps its human ``block_kind`` and still waits on the user. A card created
+# in triage for a specifier (``block_kind`` NULL) is not red. [daveey]
+BLOCKED_STATUSES = ("blocked", "triage")
 # A ``blocked`` card only waits on a human for these kinds (NULL = generic human
 # blocker). A ``transient``/``time`` block waits on a retry or a clock, so it
 # counts as in-progress work instead, like ``scheduled``. [daveey]
@@ -64,11 +67,14 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
     gains the ``transient``/``time`` ones. A board without ``block_kind`` is unchanged."""
     ph = ",".join("?" for _ in statuses)
     if not {r[1] for r in conn.execute("PRAGMA table_info(tasks)")} >= {"block_kind"}:
+        if statuses == BLOCKED_STATUSES:
+            return "t.status = 'blocked'", ()
         return f"t.status IN ({ph})", statuses
     kinds = ",".join("?" for _ in HUMAN_BLOCK_KINDS)
     human = f"(t.block_kind IS NULL OR t.block_kind IN ({kinds}))"
     if statuses == BLOCKED_STATUSES:
-        return f"(t.status = 'blocked' AND {human})", HUMAN_BLOCK_KINDS
+        escalated = f"(t.status = 'triage' AND t.block_kind IN ({kinds}))"
+        return f"((t.status = 'blocked' AND {human}) OR {escalated})", (*HUMAN_BLOCK_KINDS, *HUMAN_BLOCK_KINDS)
     return f"(t.status IN ({ph}) OR (t.status = 'blocked' AND NOT {human}))", (*statuses, *HUMAN_BLOCK_KINDS)
 
 
