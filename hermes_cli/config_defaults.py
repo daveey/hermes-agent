@@ -216,6 +216,10 @@ DEFAULT_CONFIG = {
         # Also fire `pre_verify` on turns without file edits (changed_paths=[]), so a plugin can check
         # any final answer (e.g. a hand-off or an unverified "done"). False = upstream: edits only.
         "pre_verify_every_turn": False,
+        # [daveey] Max silent `pre_final_gate` holds per turn; the next text stop delivers.
+        "pre_final_gate_max": 2,
+        # [daveey] Seconds one `pre_final_gate` callback may take before it is skipped (delivers).
+        "pre_final_gate_timeout": 30,
         # Verification closure: after code edits in a workspace, refuse a final answer until fresh
         # verification evidence exists or the agent explains why it can't check (bounded loop,
         # passive ledger). False (default) because the nudges proved more noise than signal; true =

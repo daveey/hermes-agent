@@ -151,6 +151,8 @@ def run_tool_round(
 
     # A UI must never observe an assistant/tool-call row that is only an in-memory
     # projection: emit interim commentary after the DB append.
+    # A tool-call response is commentary, never a held final: release buffered text (pre_final_gate).
+    agent._flush_final_gate_buffer()
     if not duplicate_previous_interim:
         agent._emit_interim_assistant_message(assistant_msg)
 

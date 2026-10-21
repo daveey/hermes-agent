@@ -340,6 +340,7 @@ def finish_text_response(
     if _sg.continue_turn:
         final_response = None
         return _verdict("continue")
+    final_response = _sg.final_response  # a pre_final_gate ``append`` extends it [daveey]
 
     # Plugins rewrite the reply BEFORE it is appended and flushed: SQLite treats a non-blank
     # assistant row as settled, so a transform after this write would reach the user but never

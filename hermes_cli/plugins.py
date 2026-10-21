@@ -117,6 +117,9 @@ VALID_HOOKS: set[str] = {
     # {"action": "continue", "message"} (or Claude-Code Stop {"decision": "block", "reason"}) to keep
     # going; anything else finishes. Bounded by agent.max_verify_nudges.
     "pre_verify", "pre_api_request", "post_api_request", "api_request_error",
+    # pre_final_gate [daveey]: every text stop, after pre_verify. Return {"hold": True, "nudge"} to
+    # silently withhold the answer and continue, or {"append": str}. Contract: agent/pre_final_gate.py.
+    "pre_final_gate",
     # pre/post_auxiliary_call: once per physical provider attempt of an auxiliary LLM call
     # (agent/auxiliary_hooks.py — titling, compression, MoA, vision, approval, ...). Same payload
     # shape as pre/post_api_request plus ``aux_task``; distinct events so turn-scoped

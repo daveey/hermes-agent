@@ -25,7 +25,10 @@ from agent.served_model import result_model_fields
 # Verification-continuation nudges (verify-on-stop / pre_verify) must be stripped from
 # returned/live history to avoid role-alternation breaks; the assistant response is
 # real content and is not flagged. (#65919)
-_VERIFICATION_CONTINUATION_FLAGS = ("_verification_stop_synthetic", "_pre_verify_synthetic")
+# ``_pre_final_gate_synthetic`` [daveey] marks BOTH rows of a silent hold (the held answer too).
+_VERIFICATION_CONTINUATION_FLAGS = (
+    "_verification_stop_synthetic", "_pre_verify_synthetic", "_pre_final_gate_synthetic",
+)
 
 _SENTENCE_END = {".", "!", "?", "。", "！", "？", "`", ")"}
 
@@ -530,6 +533,14 @@ def finalize_turn(
 ):
     """Run the post-loop finalization and return the turn ``result`` dict."""
     from agent.conversation_loop import logger
+
+    # pre_final_gate stream buffer [daveey]: release text no gate held (interrupts, error exits),
+    # then stop buffering so the budget summary and post-turn output stream normally.
+    try:
+        agent._flush_final_gate_buffer()
+    except Exception:
+        logger.debug("pre_final_gate buffer flush failed", exc_info=True)
+    agent._final_gate_buffer = None
 
     final_response, _turn_exit_reason, preserved_verification_fallback, interrupted = _resolve_budget_fallback(
         agent, final_response=final_response, api_call_count=api_call_count,

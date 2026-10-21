@@ -612,7 +612,7 @@ _PER_TURN_RESET_STATE: tuple[tuple[str, Any], ...] = (
     ("_harness_metrics_turn", None),
     ("_iteration_budget_warning_injected", False),
     ("_run_budget_wrapup_injected", False), ("_verification_stop_nudges", 0),
-    ("_pre_verify_nudges", 0),
+    ("_pre_verify_nudges", 0), ("_pre_final_gate_attempts", 0),
 )
 
 
@@ -622,6 +622,12 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
         setattr(agent, name, value)
     agent._turn_failed_file_mutations = {}
     agent._turn_file_mutation_paths = set()
+    # pre_final_gate stream buffer: a list only while a needs_buffer hook applies this turn.
+    try:
+        from agent.pre_final_gate import needs_buffer
+        agent._final_gate_buffer = [] if needs_buffer(agent) else None
+    except Exception:
+        agent._final_gate_buffer = None
     agent._tool_guardrails.reset_for_turn()
     _reset_consol = getattr(agent._memory_store, "reset_consolidation_failures", None)
     if callable(_reset_consol):

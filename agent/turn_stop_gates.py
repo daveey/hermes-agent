@@ -3,6 +3,8 @@
 When the model stops with a text answer, three gates may instead append the answer as an
 interim row plus a synthetic user-role nudge and continue the turn: verify-on-stop (#65919),
 the ``pre_verify`` plugin hook after code edits, and the kanban worker terminal-tool guard.
+A fourth, the ``pre_final_gate`` hook [daveey], holds the answer silently (never emitted or
+persisted) or appends to it; see ``agent/pre_final_gate.py``.
 Each keeps the candidate answer as a budget-exhaustion fallback
 (``pending_verification_response``) and clears ``final_response`` so the finalizer can tell
 this gate from error exits (#61631). Nothing here imports ``agent.conversation_loop`` at
@@ -171,8 +173,54 @@ def apply_stop_gates(
             "(kanban_complete/kanban_request_review/kanban_block) — nudging to finish"
         )
         return verdict
+
+    _decision = _pre_final_gate_decision(agent, final_response, messages)
+    if _decision.hold:
+        # Silent hold [daveey]: no interim emit, no flush, buffered deltas dropped. The candidate
+        # survives only as the budget-exhaustion fallback; both rows are ephemeral scaffolding.
+        agent._pre_final_gate_attempts = getattr(agent, "_pre_final_gate_attempts", 0) + 1
+        agent._discard_final_gate_buffer()
+        final_msg["finish_reason"] = "pre_final_gate_hold"
+        final_msg[_PFG_FLAG] = True
+        append_message(messages, final_msg)
+        verdict = _continue(_decision.nudge, _PFG_FLAG)
+        logger.info("pre_final_gate hold issued (attempt %d)", agent._pre_final_gate_attempts)
+        return verdict
+    if _decision.append:
+        final_response = _append_to_final(agent, final_msg, final_response, _decision.append)
+    else:
+        agent._flush_final_gate_buffer()
     return StopGateVerdict(
         continue_turn=False, final_response=final_response,
         pending_verification_response=pending_verification_response,
         pending_verification_response_previewed=pending_verification_response_previewed,
     )
+
+
+_PFG_FLAG = "_pre_final_gate_synthetic"
+
+
+def _pre_final_gate_decision(agent, final_response, messages):
+    from agent.pre_final_gate import GateDecision, evaluate
+
+    if getattr(agent, "_interrupt_requested", False):
+        return GateDecision()
+    try:
+        return evaluate(agent, final_response, messages, getattr(agent, "_pre_final_gate_attempts", 0))
+    except Exception:
+        logger.warning("pre_final_gate evaluation failed; delivering", exc_info=True)
+        return GateDecision()
+
+
+def _append_to_final(agent, final_msg, final_response: str, extra: str) -> str:
+    """Deliver with ``extra`` appended: rewrite the row, release the buffer, stream the suffix so
+    streamed text and the final answer still match."""
+    suffix = "\n\n" + extra
+    final_response = final_response.rstrip() + suffix
+    key = "api_content" if final_msg.get("api_content") and not final_msg.get("content") else "content"
+    if isinstance(final_msg.get(key), str):
+        final_msg[key] = final_msg[key].rstrip() + suffix
+    agent._flush_final_gate_buffer()
+    if getattr(agent, "_streamed_assistant_text_parts", None):  # only extend a live stream
+        agent._deliver_stream_text(suffix)
+    return final_response

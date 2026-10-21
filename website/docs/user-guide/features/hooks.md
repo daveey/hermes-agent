@@ -885,6 +885,45 @@ For standing guidance that should shape the built-in missing-evidence nudge, use
 
 ---
 
+### `pre_final_gate`
+
+Fires on **every text stop** (after `pre_verify` and the kanban worker guard) with the answer the agent is about to deliver. Unlike `pre_verify`, a hold is **silent**: the held answer is never shown, never persisted, and never emitted as an interim message. Use it to check an answer before the user sees it (for example, an "ask the user" gate).
+
+**Callback signature:**
+
+```python
+def my_gate(session_id: str, platform: str, model: str, final_response: str,
+            turn_messages: list, attempt: int, **kwargs):
+```
+
+`turn_messages` holds this turn's rows from the last real user message on (tool calls and results included). `attempt` counts holds already issued this turn.
+
+**Return value:**
+
+- `None` — deliver unchanged.
+- `{"hold": True, "nudge": "..."}` — withhold the answer and continue the turn. The nudge goes to the model as a private synthetic user message. The held answer is kept only as the fallback if the iteration budget runs out.
+- `{"append": "..."}` — deliver with `"\n\n" + text` appended.
+
+**Bounded:** `agent.pre_final_gate_max` (default 2) holds per turn. After that a hold is treated as deliver, and its `append` (if any) is still applied. A callback that raises, or runs longer than `agent.pre_final_gate_timeout` seconds (default 30), is logged and the answer is delivered unchanged.
+
+**Scope:** runs in interactive sessions (CLI, TUI, Desktop, messaging gateways). It is skipped in kanban workers, `delegate_task` subagents and cron jobs unless the callback sets `include_background = True`.
+
+**Streaming:** the answer streams to the screen before the gate runs, and no surface can take back text it already shows. A callback that holds should set `needs_buffer = True`. Assistant text is then buffered for the whole turn while the hook applies. It is released when a response turns out to carry tool calls, when the gate delivers, or at turn end, and a held answer is dropped from the buffer. The cost is that answers appear all at once instead of streaming.
+
+```python
+def ask_gate(final_response, attempt, **kwargs):
+    if attempt == 0 and "can you" in final_response.lower():
+        return {"hold": True, "nudge": "Check whether you can do this yourself before asking."}
+    return None
+
+ask_gate.needs_buffer = True
+
+def register(ctx):
+    ctx.register_hook("pre_final_gate", ask_gate)
+```
+
+---
+
 ### `transform_api_error_classification`
 
 Fires once per failed API call, at the top of `agent/error_classifier.classify_api_error()`, before the built-in pipeline. Provider plugins use it to own their provider's error quirks without core patches. It is behavior-changing (transform family): the returned classification drives retry, compression, credential rotation, and fallback routing.

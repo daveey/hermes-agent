@@ -59,7 +59,7 @@ class StreamDeliveryMixin:
         self._stream_reasoning_hooks_enabled = None
 
         def deliver(tail: str) -> None:
-            if tail:
+            if tail and not self._buffer_final_gate_text(tail):
                 self._deliver_to_stream_callbacks(tail)
                 self._record_streamed_assistant_text(tail)
 
@@ -200,6 +200,9 @@ class StreamDeliveryMixin:
         different final summary."""
         if not isinstance(assistant_msg, dict):
             return
+        # Interim text is meant to be seen: release any pre_final_gate buffer first so
+        # ``already_streamed`` below reflects what is on screen.
+        self._flush_final_gate_buffer()
         commentary_parts = self._extract_codex_interim_visible_parts(assistant_msg)
         # Dedup within this message and against earlier deliveries, first occurrence wins.
         pending: dict[str, str] = {}
@@ -328,10 +331,38 @@ class StreamDeliveryMixin:
                 text = text.lstrip("\n")
         if not text:
             return
+        if self._buffer_final_gate_text(text):
+            return
+        self._deliver_stream_text(text)
+
+    def _deliver_stream_text(self, text: str) -> None:
         delivered = self._deliver_to_stream_callbacks(text)
         self._enqueue_stream_hook("on_stream_delta", delta=text, kind="text")
         if delivered:
             self._record_streamed_assistant_text(text)
+
+    # pre_final_gate buffer [daveey]: while a ``needs_buffer`` pre_final_gate hook is eligible this
+    # turn (``_final_gate_buffer`` is a list, set per turn), visible text deltas are held here so a
+    # held answer never reaches the screen. Released on a tool-call response (commentary), when the
+    # gate delivers, or at turn end; discarded on hold. See agent/pre_final_gate.py.
+    def _buffer_final_gate_text(self, text: str) -> bool:
+        buf = getattr(self, "_final_gate_buffer", None)
+        if buf is None:
+            return False
+        buf.append(text)
+        return True
+
+    def _flush_final_gate_buffer(self) -> None:
+        buf = getattr(self, "_final_gate_buffer", None)
+        if buf:
+            text = "".join(buf)
+            buf.clear()
+            self._deliver_stream_text(text)
+
+    def _discard_final_gate_buffer(self) -> None:
+        buf = getattr(self, "_final_gate_buffer", None)
+        if buf:
+            buf.clear()
 
     def _fire_reasoning_delta(self, text: str, *, inline: bool = False) -> None:
         """Fire reasoning callback if registered; superseded writers are fenced like content deltas.
