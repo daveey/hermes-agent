@@ -970,3 +970,14 @@ def test_kanban_guidance_routes_timed_waits_to_schedule_not_block():
     assert 'kind=\\"time\\"' in repr(KANBAN_GUIDANCE) or 'kind="time"' in KANBAN_GUIDANCE
     assert "time" in KANBAN_BLOCK_SCHEMA["parameters"]["properties"]["kind"]["enum"]
     assert "kind='time'" in KANBAN_BLOCK_SCHEMA["description"]
+
+
+def test_kanban_guidance_makes_the_worker_remove_worktrees_it_creates():
+    """Every `git worktree add` instruction needs a matching remove step: an audit found 630 leaked worktrees,
+    ~100 of them made by Kanban workers that completed without `git worktree remove`. [daveey]"""
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    assert "git worktree add" in KANBAN_GUIDANCE
+    assert "git worktree remove" in KANBAN_GUIDANCE
+    i = KANBAN_GUIDANCE.index("git worktree remove")
+    assert "kanban_complete" in KANBAN_GUIDANCE[i - 400:i + 400]
