@@ -442,7 +442,10 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
         targets = (await self._cdp("Target.getTargets")).get("result", {}).get("targetInfos", [])
         page_target = next((t for t in targets if t.get("type") == "page"), None)
         if page_target is None:
-            page_target = (await self._cdp("Target.createTarget", {"url": "about:blank"}))["result"]
+            # background: a foreground createTarget hands Chrome keyboard focus on macOS.
+            page_target = (await self._cdp(
+                "Target.createTarget", {"url": "about:blank", "background": True}
+            ))["result"]
         attach = await self._cdp("Target.attachToTarget", {"targetId": page_target["targetId"], "flatten": True})
         self._page_session_id = sid = attach["result"]["sessionId"]
         await self._enable_page_domains(sid, timeout=10.0)
