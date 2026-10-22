@@ -308,6 +308,16 @@
     "kind": "bare_which"
   },
   {
+    "path": "hermes_cli/main_desktop.py",
+    "symbol": "_prebuilt_desktop_app_mismatch",
+    "kind": "bare_which"
+  },
+  {
+    "path": "hermes_cli/main_desktop.py",
+    "symbol": "_prebuilt_signature_error",
+    "kind": "bare_which"
+  },
+  {
     "path": "hermes_cli/main_tui_launch.py",
     "symbol": "_apply_tui_python_env",
     "kind": "bare_which"
@@ -657,6 +667,11 @@
     "path": "agent/anthropic_adapter.py",
     "symbol": "<module>",
     "kind": "known_path_table"
+  },
+  {
+    "path": "hermes_cli/review_session_activity.py",
+    "symbol": "_gh",
+    "kind": "bare_which"
   },
   {
     "path": "tools/bot_desktop/browser.py",
