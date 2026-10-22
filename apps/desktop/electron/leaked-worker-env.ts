@@ -19,7 +19,9 @@ export const AGENT_SCOPE_EXACT_KEYS = [
   'HERMES_DELEGATED_CHILD_CONTEXT',
   'HERMES_SINGLE_QUERY_SESSION',
   'HERMES_SPAWN',
-  'HERMES_SUPERVISED_CHILD'
+  'HERMES_SUPERVISED_CHILD',
+  'TERMINAL_CWD',
+  'HERMES_UI_SESSION_ID'
 ] as const
 
 export const AGENT_SCOPE_PREFIXES = [
@@ -28,7 +30,8 @@ export const AGENT_SCOPE_PREFIXES = [
   'HERMES_CRON_',
   'HERMES_PARENT_',
   'HERMES_RPC_',
-  'HERMES_KERNEL_'
+  'HERMES_KERNEL_',
+  'HERMES_BROWSER_CONTROL_'
 ] as const
 
 // Operator tunables sharing those prefixes are config, not identity: keep them.

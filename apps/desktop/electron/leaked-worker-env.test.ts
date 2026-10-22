@@ -61,6 +61,20 @@ describe('scrubLeakedWorkerEnv', () => {
     })
   })
 
+  it('drops the dispatcher TERMINAL_CWD pin and UI session id that rode along (pid 59331)', () => {
+    const env: NodeJS.ProcessEnv = {
+      HERMES_DELEGATED_CHILD_CONTEXT: '/Users/x/.hermes',
+      HERMES_UI_SESSION_ID: 'ui-1',
+      HERMES_BROWSER_CONTROL_PRINCIPAL: 'p',
+      TERMINAL_CWD: '/Users/x/.hermes/kanban/workspaces/t_45d5a361',
+      TERMINAL_TIMEOUT: '180',
+      PATH: '/bin'
+    }
+
+    scrubLeakedWorkerEnv(env)
+    expect(env).toEqual({ PATH: '/bin', TERMINAL_TIMEOUT: '180' })
+  })
+
   it('keeps a deliberate board pin when no worker marker is present', () => {
     const env: NodeJS.ProcessEnv = { HERMES_KANBAN_BOARD: 'x', HERMES_KANBAN_DB: '/tmp/k.db' }
 

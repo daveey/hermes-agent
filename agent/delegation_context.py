@@ -47,6 +47,10 @@ AGENT_SCOPE_EXACT_KEYS: tuple[str, ...] = (
     "HERMES_SINGLE_QUERY_SESSION",
     "HERMES_SPAWN",
     "HERMES_SUPERVISED_CHILD",
+    # The dispatcher pins TERMINAL_CWD to the worker's workspace; a Desktop that inherits it
+    # anchors file tools and context files there (pid 59331 had .../workspaces/t_45d5a361).
+    "TERMINAL_CWD",
+    "HERMES_UI_SESSION_ID",  # gateway.session_context._VAR_MAP outside the HERMES_SESSION_ prefix
 )
 AGENT_SCOPE_PREFIXES: tuple[str, ...] = (
     "HERMES_KANBAN_",
@@ -55,6 +59,7 @@ AGENT_SCOPE_PREFIXES: tuple[str, ...] = (
     "HERMES_PARENT_",
     "HERMES_RPC_",
     "HERMES_KERNEL_",
+    "HERMES_BROWSER_CONTROL_",
 )
 # Operator tunables sharing those prefixes (HERMES_CRON_TIMEOUT, HERMES_SESSION_STALL_TIMEOUT,
 # HERMES_CRON_MAX_PARALLEL, HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS...) are config, not identity.

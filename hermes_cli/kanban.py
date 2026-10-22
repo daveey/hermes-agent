@@ -151,7 +151,9 @@ def kanban_command(args: argparse.Namespace) -> int:
     # Fast-fail for UX only; the durable trust boundary is in kanban_db, since children can
     # import DB mutators directly.
     if _is_delegated_child_cli_mutation(args):
-        return _err("kanban: delegate_task child contexts cannot mutate Kanban tasks via the CLI")
+        from hermes_cli.top_level_env import delegated_child_refusal  # names a leaked worker env [daveey]
+        return _err(delegated_child_refusal(
+            "kanban: delegate_task child contexts cannot mutate Kanban tasks via the CLI"))
 
     # `boards …` manages board metadata and the current-board pointer itself, so it must ignore
     # the `--board` routing override (else `--board beta boards show` reports beta).

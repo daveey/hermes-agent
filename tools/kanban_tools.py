@@ -224,10 +224,15 @@ def _reject_delegated_child_mutation(tool_name: str) -> None:
     """A delegate_task child shares the parent's process, so inherited HERMES_KANBAN_*
     env is not proof of ownership: it may report findings but must not mutate."""
     if _delegation_ctx("is_delegated_child_process_context", False):
-        raise _Reject(
-            f"{tool_name} refused: delegate_task child agents are not Kanban run owners. "
-            "Return findings to the parent agent; the dispatcher worker or an explicitly "
-            "configured Kanban orchestrator must perform board mutations.")
+        msg = (f"{tool_name} refused: delegate_task child agents are not Kanban run owners. "
+               "Return findings to the parent agent; the dispatcher worker or an explicitly "
+               "configured Kanban orchestrator must perform board mutations")
+        if not _is_delegated_child_context():
+            # Fenced by an inherited env marker, not an in-process child: a leaked worker env
+            # (a Desktop reopened from a worker) must say so instead. [daveey]
+            from hermes_cli.top_level_env import delegated_child_refusal
+            msg = delegated_child_refusal(msg)
+        raise _Reject(msg if msg.endswith(".") else msg + ".")
 
 
 def _default_task_id(arg: Any) -> Optional[str]:

@@ -148,7 +148,12 @@ def _assert_not_delegated_child_mutation(path: str | Path | None = None) -> None
     from agent.delegation_context import kanban_path_is_fenced
 
     if kanban_path_is_fenced(kanban_home() if path is None else path):
-        raise PermissionError("delegate_task child contexts cannot mutate Kanban tasks or boards")
+        msg = "delegate_task child contexts cannot mutate Kanban tasks or boards"
+        from agent.delegation_context import is_delegated_child_context
+        if not is_delegated_child_context():  # env-inherited fence: name a leaked worker env [daveey]
+            from hermes_cli.top_level_env import delegated_child_refusal
+            msg = delegated_child_refusal(msg)
+        raise PermissionError(msg)
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
