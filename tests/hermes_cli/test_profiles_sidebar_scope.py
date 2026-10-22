@@ -185,6 +185,22 @@ class TestAutomatedSessions:
         assert rows["worker-chat"] is True
         assert rows["default-chat"] is False
 
+    def test_interactive_allowlist_flags_unlisted_sources_per_profile(self, client, profiles_on_disk):
+        # [daveey] worker allowlists desktop only; a new eval source there is automated while the
+        # default profile (no allowlist) keeps the same source visible.
+        (profiles_on_disk["worker"] / "config.yaml").write_text(
+            "sessions:\n  interactive_sources: [desktop]\n", encoding="utf-8")
+        _seed_session(profiles_on_disk["worker"], "worker-desk", source="desktop")
+        _seed_session(profiles_on_disk["worker"], "worker-eval", source="selfheal-replay")
+        _seed_session(profiles_on_disk["default"], "default-eval", source="selfheal-replay")
+        rows = client.get("/api/profiles/sessions", params={"limit": 50}).json()["sessions"]
+        assert {r["id"]: r["automated"] for r in rows} == {
+            "worker-desk": False, "worker-eval": True, "default-eval": False}
+        tree = client.get("/api/profiles/projects/tree", params={"preview_limit": 50}).json()
+        flags = {s["id"]: s["automated"] for p in tree["projects"] for s in p.get("previewSessions") or []}
+        assert flags["worker-eval"] is True and flags["worker-desk"] is False
+        assert flags["default-eval"] is False
+
 
 class TestCrossProfileProjectTree:
 

@@ -192,3 +192,41 @@ class TestAutomatedSources:
         human = self._home(tmp_path, "human", "{}\n")
         assert set(self._stamp(bot).values()) == {True}
         assert set(self._stamp(human).values()) == {False}
+
+
+class TestInteractiveSources:
+    """[daveey] ``sessions.interactive_sources`` is an allowlist: unlisted sources are automated."""
+
+    _home = TestAutomatedSources._home
+
+    def _stamp(self, home):
+        from hermes_cli.session_listing import stamp_automated
+        rows = [{"id": "d", "source": "desktop"}, {"id": "r", "source": "selfheal-replay"},
+                {"id": "s", "source": "scratch"}, {"id": "n", "source": None},
+                {"id": "D", "source": " Desktop "}]
+        return {r["id"]: r["automated"] for r in stamp_automated(rows, home)}
+
+    def test_unlisted_source_is_automated_listed_is_not(self, tmp_path):
+        home = self._home(tmp_path, "p", "sessions:\n  interactive_sources: [desktop, cli]\n")
+        assert self._stamp(home) == {"d": False, "r": True, "s": True, "n": False, "D": False}
+
+    def test_empty_allowlist_keeps_old_behaviour(self, tmp_path):
+        home = self._home(tmp_path, "p", "sessions:\n  interactive_sources: []\n  automated_sources: [scratch]\n")
+        assert self._stamp(home) == {"d": False, "r": False, "s": True, "n": False, "D": False}
+
+    def test_automated_sources_still_wins_over_allowlist(self, tmp_path):
+        home = self._home(tmp_path, "p", "sessions:\n  interactive_sources: [desktop]\n  automated_sources: [desktop]\n")
+        assert self._stamp(home)["d"] is True
+
+    def test_each_store_reads_its_own_home(self, tmp_path):
+        strict = self._home(tmp_path, "strict", "sessions:\n  interactive_sources: [desktop]\n")
+        loose = self._home(tmp_path, "loose", "{}\n")
+        assert self._stamp(strict)["r"] is True
+        assert self._stamp(loose)["r"] is False
+
+    def test_policy_is_truthy_with_only_an_allowlist(self, tmp_path):
+        from hermes_cli.session_listing import automated_session_sources, is_automated_source
+        pol = automated_session_sources(self._home(tmp_path, "p", "sessions:\n  interactive_sources: [desktop]\n"))
+        assert pol and list(pol) == [] and pol.interactive == ["desktop"]
+        assert is_automated_source("kanban", pol) and not is_automated_source("desktop", pol)
+        assert not is_automated_source("kanban", ["slack"])  # plain list callers: unchanged

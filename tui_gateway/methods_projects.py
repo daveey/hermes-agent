@@ -339,7 +339,7 @@ def _project_tree_automated_sources() -> list[str]:
 def _project_tree_row(r: dict, automated_sources: list[str] | None = None) -> dict:
     """Project a SessionDB row to the minimal shape the sidebar renders (grouping fields +
     what ``SidebarSessionRow`` reads), minus the heavy columns. ``automated`` [daveey] marks
-    bot/test traffic per ``sessions.automated_sources`` (the sidebar hides it by default)."""
+    bot/test traffic per ``sessions.automated_sources`` / ``interactive_sources`` (the sidebar hides it by default)."""
     from hermes_cli.session_listing import is_automated_source
     row = {k: r.get(k) for k in (
         "id", "_lineage_root_id", "_lineage_ids", "parent_session_id",

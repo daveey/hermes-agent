@@ -2342,6 +2342,11 @@ DEFAULT_CONFIG = {
         # sidebar hides those rows unless "Show automated & test sessions" is on (pinned and
         # blocked / needs-input rows stay). "*" = every session in this profile. [daveey]
         "automated_sources": [],
+        # Allowlist twin of automated_sources: when non-empty, every session whose source is NOT
+        # listed is `automated` too (hidden behind the same toggle), so a new bot / eval / scratch
+        # source writing into a human profile stays out of the sidebar by default. Rows with no
+        # source are never flagged by this list. [] = off (only automated_sources applies). [daveey]
+        "interactive_sources": [],
         # VACUUM after a prune that deleted rows (SQLite never reclaims disk on DELETE). VACUUM
         # blocks writes (~seconds per 100MB), so it runs only at startup, only when ≥1 session was
         # deleted AND freelist/page_count > 25%.

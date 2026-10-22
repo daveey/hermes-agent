@@ -57,12 +57,9 @@ def sidebar_excluded_sources(hermes_home: str | Path) -> list[str]:
 AUTOMATED_ALL_SOURCES = "*"
 
 
-def automated_session_sources(hermes_home: str | Path) -> list[str]:
-    """``sessions.automated_sources`` from *hermes_home*'s own config.yaml [daveey]: session sources
-    this profile marks ``automated`` (bot / smoke-test traffic the desktop sidebar hides unless
-    "Show automated & test sessions" is on). ``"*"`` marks every session in the store. Like
-    ``sidebar_exclude_sources`` the store's home decides, never the process ``HERMES_HOME``.
-    ``[]`` when unset or unreadable."""
+def _sessions_source_list(hermes_home: str | Path, key: str) -> list[str]:
+    """Lower-cased ``sessions.<key>`` source list from *hermes_home*'s own config.yaml [daveey];
+    ``[]`` when unset or unreadable (a comma string is accepted too)."""
     from hermes_cli.config import load_config_readonly
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
@@ -73,7 +70,7 @@ def automated_session_sources(hermes_home: str | Path) -> list[str]:
         return []
     finally:
         reset_hermes_home_override(token)
-    raw = sessions_cfg.get("automated_sources") if isinstance(sessions_cfg, dict) else None
+    raw = sessions_cfg.get(key) if isinstance(sessions_cfg, dict) else None
     if isinstance(raw, str):
         raw = raw.split(",")
     if not isinstance(raw, (list, tuple)):
@@ -81,21 +78,54 @@ def automated_session_sources(hermes_home: str | Path) -> list[str]:
     return [str(s).strip().lower() for s in raw if str(s).strip()]
 
 
-def is_automated_source(source: Any, automated_sources: list[str]) -> bool:
-    """Whether a row with *source* is automated under *automated_sources* (``"*"`` = all)."""
+class AutomatedSourcePolicy(list):
+    """``sessions.automated_sources`` (the list itself, so existing list callers keep working) plus
+    ``interactive`` = ``sessions.interactive_sources`` [daveey]. A non-empty ``interactive`` turns
+    the classifier into an allowlist: any source outside it is automated, so a NEW bot / eval /
+    scratch source writing into a human profile is hidden by default instead of leaking."""
+
+    def __init__(self, automated=(), interactive=()):
+        super().__init__(automated)
+        self.interactive: list[str] = list(interactive)
+
+    def __bool__(self) -> bool:  # an allowlist-only policy is still a policy
+        return bool(len(self) or self.interactive)
+
+
+def automated_session_sources(hermes_home: str | Path) -> AutomatedSourcePolicy:
+    """``sessions.automated_sources`` + ``sessions.interactive_sources`` from *hermes_home*'s own
+    config.yaml [daveey]: which session sources this profile marks ``automated`` (bot / smoke-test
+    traffic the desktop sidebar hides unless "Show automated & test sessions" is on).
+    ``automated_sources``: exact sources, ``"*"`` marks every session in the store.
+    ``interactive_sources``: when non-empty, every source NOT listed is automated too.
+    Like ``sidebar_exclude_sources`` the store's home decides, never the process ``HERMES_HOME``.
+    Empty policy when unset or unreadable."""
+    return AutomatedSourcePolicy(
+        _sessions_source_list(hermes_home, "automated_sources"),
+        _sessions_source_list(hermes_home, "interactive_sources"))
+
+
+def is_automated_source(source: Any, automated_sources: list[str] | None) -> bool:
+    """Whether a row with *source* is automated under *automated_sources* (``"*"`` = all). When it
+    is an :class:`AutomatedSourcePolicy` with ``interactive`` sources, a non-empty source outside
+    that allowlist is automated too. A row with no source at all (legacy) is never flagged by the
+    allowlist alone: hiding unknown human chats is worse than showing one stray row."""
     if not automated_sources:
         return False
-    if AUTOMATED_ALL_SOURCES in automated_sources:
+    src = str(source or "").strip().lower()
+    if AUTOMATED_ALL_SOURCES in automated_sources or (src and src in automated_sources):
         return True
-    return str(source or "").strip().lower() in automated_sources
+    interactive = getattr(automated_sources, "interactive", None)
+    return bool(interactive) and bool(src) and src not in interactive
 
 
 def stamp_automated(
     rows: list[dict[str, Any]], hermes_home: str | Path | None = None, *,
     automated_sources: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Set ``automated: bool`` on every row from its store's ``sessions.automated_sources``
-    (read from *hermes_home* unless *automated_sources* is given). Returns *rows*."""
+    """Set ``automated: bool`` on every row from its store's ``sessions.automated_sources`` /
+    ``sessions.interactive_sources`` (read from *hermes_home* unless *automated_sources* is
+    given). Returns *rows*."""
     if automated_sources is None:
         automated_sources = automated_session_sources(hermes_home) if hermes_home is not None else []
     for row in rows:
