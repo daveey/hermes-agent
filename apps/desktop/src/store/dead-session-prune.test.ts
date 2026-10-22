@@ -14,7 +14,7 @@ vi.mock('@/hermes', async importOriginal => {
   }
 })
 
-import { clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
+import { clearSessionDraft, rotateFreshDraftKey, stashSessionDraft, takeSessionDraft } from '@/store/composer'
 import { $queuedPromptsBySession, enqueueQueuedPrompt, getQueuedPrompts } from '@/store/composer-queue'
 import { $pinnedSessionIds } from '@/store/layout'
 import { $activeGatewayProfile, $profiles } from '@/store/profile'
@@ -123,6 +123,26 @@ describe('__runDeadSessionPrunePass', () => {
 
     expect(takeSessionDraft('dead-draft-session').text).toBe('')
     expect(takeSessionDraft('__new__').text).toBe('brand new')
+  })
+
+  it('never discards a per-lifecycle new-chat draft (__new__:<uuid>) — ⌘N must find it again', async () => {
+    // The user typed into a new chat and switched to another session: the
+    // unsent text now lives only in the stash under the rotated fresh key.
+    // The backend 404s on that key (it is not a session id), which must not
+    // read as "dead session".
+    $sessions.set([row('unrelated')])
+    const freshKey = rotateFreshDraftKey()
+    stashSessionDraft(freshKey, 'half-written prompt', [])
+    stashSessionDraft('dead-draft-session', 'stale text', [])
+    getSessionMock.mockRejectedValue(notFound())
+
+    await __runDeadSessionPrunePass()
+
+    expect(takeSessionDraft(freshKey).text).toBe('half-written prompt')
+    expect(getSessionMock).not.toHaveBeenCalledWith(freshKey, expect.anything())
+    // Control: a real dead session's draft is still pruned.
+    expect(takeSessionDraft('dead-draft-session').text).toBe('')
+    clearSessionDraft(freshKey)
   })
 
   it('drops queued prompts for dead sessions and keeps live ones', async () => {
