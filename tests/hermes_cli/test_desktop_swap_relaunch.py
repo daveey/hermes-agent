@@ -62,7 +62,7 @@ def test_stopped_desktop_is_reopened_from_the_new_bundle(swap):
 
 
 def test_launch_args_are_preserved(swap):
-    desktop_dir, staging, live_exe, state = swap
+    desktop_dir, staging, _live_exe, state = swap
     state["launches"] = {101: ["--hermes-flag"]}
 
     main_desktop._swap_staged_desktop_app(desktop_dir, staging)
@@ -83,7 +83,7 @@ def test_setting_off_keeps_upstream_behaviour(swap):
 
 def test_desktop_not_stopped_is_not_reopened(swap):
     """An ancestor Desktop (in-app update) is spared by the stop, so it is not in `stopped`."""
-    desktop_dir, staging, live_exe, state = swap
+    desktop_dir, staging, _live_exe, state = swap
     state["launches"] = {101: []}
     state["stopped"] = []
 

@@ -151,7 +151,7 @@ tidy.tidy_partial_clone_packs(Path(sys.argv[1]))
 
 def _git_supports_incremental_midx() -> bool:
     """`multi-pack-index write --incremental` arrived in git 2.47; older runners exit 129 (usage)."""
-    out = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout
+    out = subprocess.run(["git", "--version"], capture_output=True, text=True, check=False).stdout
     m = re.search(r"(\d+)\.(\d+)", out)
     return bool(m) and (int(m[1]), int(m[2])) >= (2, 47)
 

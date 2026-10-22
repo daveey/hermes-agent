@@ -75,6 +75,6 @@ def test_one_failure_does_not_stop_the_sweep(tmp_path):
 
 
 def test_start_is_noop_when_disabled(monkeypatch):
-    import hermes_cli.config as config
-    monkeypatch.setattr(config, "load_config", lambda: {})
+    from hermes_cli import config
+    monkeypatch.setattr(config, "load_config", dict)
     assert sr.start_startup_resume_sweep() is None

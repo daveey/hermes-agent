@@ -33,13 +33,13 @@ def run(live, merge_flag, upstream_edit):
 
 
 def test_flag_off_leaves_fork_untouched(tmp_path):
-    up, fork, live = mkrepo(tmp_path); pre = sh("git", "rev-parse", "HEAD", cwd=live)
+    _up, _fork, live = mkrepo(tmp_path); pre = sh("git", "rev-parse", "HEAD", cwd=live)
     assert run(live, False, ("b.txt", "b up\n"))
     assert sh("git", "rev-parse", "HEAD", cwd=live) == pre
 
 
 def test_flag_on_merges_upstream_and_pushes(tmp_path):
-    up, fork, live = mkrepo(tmp_path)
+    _up, fork, live = mkrepo(tmp_path)
     assert run(live, True, ("b.txt", "b up\n"))
     head = sh("git", "rev-parse", "HEAD", cwd=live)
     assert (live / "a.txt").read_text() == "a fork\n" and (live / "b.txt").read_text() == "b up\n"
@@ -49,7 +49,7 @@ def test_flag_on_merges_upstream_and_pushes(tmp_path):
 
 
 def test_conflict_moves_nothing(tmp_path):
-    up, fork, live = mkrepo(tmp_path); pre = sh("git", "rev-parse", "HEAD", cwd=live)
+    _up, fork, live = mkrepo(tmp_path); pre = sh("git", "rev-parse", "HEAD", cwd=live)
     assert not run(live, True, ("a.txt", "a upstream conflict\n"))
     assert sh("git", "rev-parse", "HEAD", cwd=live) == pre
     assert sh("git", "rev-parse", "main", cwd=fork) == pre

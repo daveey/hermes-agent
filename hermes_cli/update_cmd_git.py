@@ -380,11 +380,11 @@ def _synthesize_upstream_merge(git_cmd: list[str], cwd: Path, upstream: str) -> 
         print("  ✗ Could not resolve HEAD. Skipping upstream merge.")
         return None
     tree_proc = subprocess.run([*git_cmd, "merge-tree", "--write-tree", "--no-messages", head, upstream],
-                               cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+                               cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     tree = (tree_proc.stdout or "").split("\n", 1)[0].strip()
     if tree_proc.returncode != 0 or not tree:
         conflicts = subprocess.run([*git_cmd, "merge-tree", "--write-tree", "--name-only", "--no-messages", head, upstream],
-                                   cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.splitlines()[1:]
+                                   cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False).stdout.splitlines()[1:]
         print("  ✗ Upstream does not merge cleanly into your fork — nothing changed.\n"
               "    Conflicting paths: " + (", ".join(p for p in conflicts if p.strip())[:400] or "?") + "\n"
               "    Resolve by hand: git merge upstream/main, fix, commit, git push origin main")
