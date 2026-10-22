@@ -2347,6 +2347,11 @@ DEFAULT_CONFIG = {
         # source writing into a human profile stays out of the sidebar by default. Rows with no
         # source are never flagged by this list. [] = off (only automated_sources applies). [daveey]
         "interactive_sources": [],
+        # ROOT home only (ignored in a profile's own config): the profiles whose sessions belong in
+        # the desktop sidebar. When non-empty, every profile NOT listed is treated as
+        # automated_sources: ["*"] unless its own config sets automated_sources or
+        # interactive_sources explicitly, so a new bot profile starts hidden. [] = off. [daveey]
+        "sidebar_profiles": [],
         # VACUUM after a prune that deleted rows (SQLite never reclaims disk on DELETE). VACUUM
         # blocks writes (~seconds per 100MB), so it runs only at startup, only when ≥1 session was
         # deleted AND freelist/page_count > 25%.

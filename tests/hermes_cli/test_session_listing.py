@@ -230,3 +230,57 @@ class TestInteractiveSources:
         assert pol and list(pol) == [] and pol.interactive == ["desktop"]
         assert is_automated_source("kanban", pol) and not is_automated_source("desktop", pol)
         assert not is_automated_source("kanban", ["slack"])  # plain list callers: unchanged
+
+
+class TestSidebarProfiles:
+    """[daveey] Root-home ``sessions.sidebar_profiles``: unlisted profiles default to automated."""
+
+    def _tree(self, tmp_path, root_cfg, profiles):
+        root = tmp_path / ".hermes"
+        (root / "profiles").mkdir(parents=True)
+        (root / "config.yaml").write_text(root_cfg, encoding="utf-8")
+        homes = {"default": root}
+        for name, cfg in profiles.items():
+            home = root / "profiles" / name
+            home.mkdir()
+            (home / "config.yaml").write_text(cfg, encoding="utf-8")
+            homes[name] = home
+        return homes
+
+    def _stamp(self, home):
+        from hermes_cli.session_listing import stamp_automated
+        rows = [{"id": "c", "source": "cli"}, {"id": "d", "source": "desktop"}]
+        return {r["id"]: r["automated"] for r in stamp_automated(rows, home)}
+
+    def test_unlisted_profile_is_automated(self, tmp_path):
+        homes = self._tree(tmp_path, "sessions:\n  sidebar_profiles: [default]\n", {"newbot": "{}\n"})
+        assert self._stamp(homes["newbot"]) == {"c": True, "d": True}
+
+    def test_listed_profile_is_not(self, tmp_path):
+        homes = self._tree(tmp_path, "sessions:\n  sidebar_profiles: [default, Work]\n", {"work": "{}\n"})
+        assert self._stamp(homes["default"]) == {"c": False, "d": False}
+        assert self._stamp(homes["work"]) == {"c": False, "d": False}
+
+    def test_explicit_profile_setting_wins(self, tmp_path):
+        homes = self._tree(tmp_path, "sessions:\n  sidebar_profiles: [default]\n", {
+            "allow": "sessions:\n  interactive_sources: [desktop]\n",
+            "deny": "sessions:\n  automated_sources: [cli]\n",
+            "optout": "sessions:\n  automated_sources: []\n"})
+        assert self._stamp(homes["allow"]) == {"c": True, "d": False}
+        assert self._stamp(homes["deny"]) == {"c": True, "d": False}
+        assert self._stamp(homes["optout"]) == {"c": False, "d": False}
+
+    def test_unset_keeps_old_behaviour(self, tmp_path):
+        homes = self._tree(tmp_path, "{}\n", {"newbot": "{}\n"})
+        assert self._stamp(homes["newbot"]) == {"c": False, "d": False}
+        homes2 = self._tree(tmp_path / "x", "sessions:\n  sidebar_profiles: []\n", {"newbot": "{}\n"})
+        assert self._stamp(homes2["newbot"]) == {"c": False, "d": False}
+
+    def test_read_from_root_never_the_profile(self, tmp_path):
+        # A profile listing itself in its OWN config does not opt it in; the root decides.
+        homes = self._tree(tmp_path, "sessions:\n  sidebar_profiles: [default]\n",
+                           {"sneaky": "sessions:\n  sidebar_profiles: [sneaky]\n"})
+        assert self._stamp(homes["sneaky"]) == {"c": True, "d": True}
+        # ...and a profile-level list is ignored when the root sets none.
+        homes2 = self._tree(tmp_path / "y", "{}\n", {"bot": "sessions:\n  sidebar_profiles: [default]\n"})
+        assert self._stamp(homes2["bot"]) == {"c": False, "d": False}

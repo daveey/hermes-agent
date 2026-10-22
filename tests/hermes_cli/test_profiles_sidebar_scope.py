@@ -202,6 +202,18 @@ class TestAutomatedSessions:
         assert flags["default-eval"] is False
 
 
+    def test_root_sidebar_profiles_hides_unlisted_profile(self, client, profiles_on_disk):
+        # [daveey] root sidebar_profiles: [default] -> the worker profile (no own policy) is
+        # automated on every payload; the default profile stays visible.
+        (profiles_on_disk["default"] / "config.yaml").write_text(
+            "sessions:\n  sidebar_profiles: [default]\n", encoding="utf-8")
+        _seed_session(profiles_on_disk["worker"], "worker-cli", source="cli")
+        _seed_session(profiles_on_disk["default"], "default-cli", source="cli")
+        rows = client.get("/api/profiles/sessions", params={"limit": 50}).json()["sessions"]
+        assert {r["id"]: r["automated"] for r in rows} == {"worker-cli": True, "default-cli": False}
+        one = client.get("/api/sessions", params={"profile": "worker", "limit": 5}).json()
+        assert {r["id"]: r["automated"] for r in one["sessions"]} == {"worker-cli": True}
+
 class TestCrossProfileProjectTree:
 
     def test_profile_sidebar_exclude_sources_hides_its_machine_sessions(self, client, profiles_on_disk):

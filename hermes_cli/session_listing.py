@@ -92,6 +92,34 @@ class AutomatedSourcePolicy(list):
         return bool(len(self) or self.interactive)
 
 
+def _profile_sets_source_policy(hermes_home: str | Path) -> bool:
+    """Whether *hermes_home*'s own config.yaml spells out ``sessions.automated_sources`` or
+    ``sessions.interactive_sources`` (even as ``[]``), as written, not merged with defaults."""
+    from hermes_cli.config import read_raw_config_readonly
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(hermes_home))
+    try:
+        sessions_cfg = read_raw_config_readonly().get("sessions") or {}
+    except Exception:
+        return False
+    finally:
+        reset_hermes_home_override(token)
+    return isinstance(sessions_cfg, dict) and (
+        "automated_sources" in sessions_cfg or "interactive_sources" in sessions_cfg)
+
+
+def _store_profile_and_root(hermes_home: str | Path) -> tuple[str, Path]:
+    """``(profile name, root home)`` for a store's home: ``<root>/profiles/<name>`` is named
+    profile ``<name>``, anything else is the ``default`` profile living in the root itself."""
+    from hermes_constants import named_profile_home
+
+    named = named_profile_home(hermes_home)
+    if named is not None:
+        return named.name, named.parent.parent
+    return "default", Path(hermes_home)
+
+
 def automated_session_sources(hermes_home: str | Path) -> AutomatedSourcePolicy:
     """``sessions.automated_sources`` + ``sessions.interactive_sources`` from *hermes_home*'s own
     config.yaml [daveey]: which session sources this profile marks ``automated`` (bot / smoke-test
@@ -99,10 +127,22 @@ def automated_session_sources(hermes_home: str | Path) -> AutomatedSourcePolicy:
     ``automated_sources``: exact sources, ``"*"`` marks every session in the store.
     ``interactive_sources``: when non-empty, every source NOT listed is automated too.
     Like ``sidebar_exclude_sources`` the store's home decides, never the process ``HERMES_HOME``.
+    ``sessions.sidebar_profiles`` in the ROOT home's config (never a profile's): when non-empty, a
+    profile NOT listed behaves as ``automated_sources: ["*"]`` unless its own config.yaml sets
+    ``automated_sources`` or ``interactive_sources`` explicitly, so a new bot profile starts hidden.
     Empty policy when unset or unreadable."""
-    return AutomatedSourcePolicy(
+    policy = AutomatedSourcePolicy(
         _sessions_source_list(hermes_home, "automated_sources"),
         _sessions_source_list(hermes_home, "interactive_sources"))
+    try:
+        profile, root = _store_profile_and_root(hermes_home)
+    except Exception:
+        return policy
+    sidebar_profiles = _sessions_source_list(root, "sidebar_profiles")
+    if (sidebar_profiles and profile.lower() not in sidebar_profiles
+            and not _profile_sets_source_policy(hermes_home)):
+        return AutomatedSourcePolicy([AUTOMATED_ALL_SOURCES])
+    return policy
 
 
 def is_automated_source(source: Any, automated_sources: list[str] | None) -> bool:
