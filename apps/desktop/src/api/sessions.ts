@@ -757,3 +757,25 @@ export function renameSession(
     body: { title, ...(owner ? { profile: owner } : {}) }
   })
 }
+
+/** [daveey] Stop one live background process a sidebar row owns (the process
+ *  badge's Stop). Routes to the row's own gateway; the backend kills it via
+ *  the process registry (the `process_manage kill` path) or, for a process
+ *  another Hermes process supervises, by its start-time-checked pid. */
+export function stopSessionBackgroundProcess(
+  row: Pick<SessionInfo, '_lineage_ids' | '_lineage_root_id' | 'connection_id' | 'id' | 'profile'>,
+  processId: string
+): Promise<{ ok: boolean; status?: string }> {
+  const scope: ProfileScope = row.connection_id
+    ? { connectionId: row.connection_id, profile: row.profile || 'default' }
+    : row.profile
+
+  return hermesApi<{ ok: boolean; status?: string }>({
+    ...sessionScoped(scope),
+    path: `/api/sessions/${encodeURIComponent(row.id)}/background-processes/${encodeURIComponent(processId)}/stop`,
+    method: 'POST',
+    body: {
+      session_ids: [row._lineage_root_id, ...(row._lineage_ids ?? [])].filter((id): id is string => Boolean(id))
+    }
+  })
+}

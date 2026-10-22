@@ -26,7 +26,7 @@
 import { computed } from 'nanostores'
 
 import { stableArray, stableRecord } from '@/lib/stable-array'
-import type { SessionInfo } from '@/types/hermes'
+import type { SessionBackgroundProcess, SessionInfo } from '@/types/hermes'
 
 import { $backgroundRunningSessionIds } from './composer-status'
 import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
@@ -108,6 +108,63 @@ export const $backgroundActiveSessionIds = computed([$sessions, $messagingSessio
 
   return (backgroundActiveIds = stableArray(backgroundActiveIds, ids))
 })
+
+// [daveey] WHAT keeps a row off green when it is a background process: the
+// backend lists each live process (`background_processes`) next to the count.
+// The sidebar row shows a process badge from this — a finished chat held only
+// by a 72 h watcher used to sit un-green with nothing on the row to say why.
+const NO_PROCESSES: readonly SessionBackgroundProcess[] = []
+
+/** The live background processes a row lists, oldest first. Falls back to
+ *  placeholder entries when an older backend stamped only the count. */
+export const rowBackgroundProcesses = (
+  row: Pick<SessionInfo, 'background_active' | 'background_processes'>
+): readonly SessionBackgroundProcess[] => {
+  if (row.background_processes?.length) {
+    return row.background_processes
+  }
+
+  const n = row.background_active ?? 0
+
+  return n > 0 ? Array.from({ length: n }, (_, i) => ({ command: '', id: `#${i}` })) : NO_PROCESSES
+}
+
+let backgroundProcessesById: Readonly<Record<string, readonly SessionBackgroundProcess[]>> = {}
+export const $backgroundProcessesBySessionId = computed([$sessions, $messagingSessions], (sessions, messaging) => {
+  const next: Record<string, readonly SessionBackgroundProcess[]> = {}
+
+  for (const rows of [sessions, messaging]) {
+    for (const row of rows) {
+      const procs = rowBackgroundProcesses(row)
+
+      if (procs.length > 0) {
+        next[row.id] = procs
+      }
+    }
+  }
+
+  return (backgroundProcessesById = stableRecord(backgroundProcessesById, next))
+})
+
+/** Drop a stopped process from a row at once (the next list poll confirms):
+ *  the badge loses it, and with nothing else holding it the row goes green. */
+export const withoutBackgroundProcess = (row: SessionInfo, processId: string): SessionInfo => {
+  const listed = row.background_processes ?? []
+
+  if (!listed.some(proc => proc.id === processId)) {
+    return row
+  }
+
+  const left = listed.filter(proc => proc.id !== processId)
+  const active = Math.max(0, (row.background_active ?? listed.length) - 1)
+  const { background_active: _a, background_processes: _p, ...rest } = row
+
+  return {
+    ...rest,
+    ...(active > 0 ? { background_active: active } : {}),
+    ...(left.length > 0 ? { background_processes: left } : {})
+  }
+}
 
 // [daveey] Sessions with a standing `/goal` still active. Between goal turns —
 // especially while the judge has parked it on a `wait` timer — no turn is live,

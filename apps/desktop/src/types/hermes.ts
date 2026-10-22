@@ -659,6 +659,9 @@ export interface SessionInfo {
    *  row off "done" even when this window never polled the session. Absent
    *  when zero or against an older backend. */
   background_active?: number
+  /** [daveey] What those processes are (oldest first, capped): the sidebar's
+   *  process badge lists each command and its age, with a Stop button. */
+  background_processes?: SessionBackgroundProcess[]
   /** [daveey] Set when this conversation's latest reply links an open GitHub
    *  PR still waiting on a code review: `stuck` when the review is on the
    *  viewer (or nobody / others asked >24h ago), `parked` when only other
@@ -694,6 +697,17 @@ export interface SessionInfo {
    *  rows served by the primary/local backend. Opens must route through the
    *  connection-scoped gateway (`ensureGatewayAgent`) when present. */
   connection_id?: string
+}
+
+/** [daveey] One live background process a session row owns (backend stamp). */
+export interface SessionBackgroundProcess {
+  /** Process-registry id (`proc_…`), what Stop names. */
+  id: string
+  /** Redacted, whitespace-collapsed, truncated command line. */
+  command: string
+  /** Epoch seconds. */
+  started_at?: number
+  pid?: number
 }
 
 export type TimelineDisplayMetadata =

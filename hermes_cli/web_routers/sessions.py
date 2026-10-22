@@ -23,12 +23,12 @@ from hermes_cli.web_deps import late
 from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
 from hermes_cli.cron_session_activity import annotate_cron_activity
 from hermes_cli.goal_session_activity import annotate_goal_activity
-from hermes_cli.process_session_activity import annotate_background_activity
+from hermes_cli.process_session_activity import annotate_background_activity, stop_session_process
 from hermes_cli.review_session_activity import annotate_review_wait
 from hermes_cli.web_server_gateway import _strip_session_list_rows
 from hermes_cli.web_server_sessions import _maybe_auto_archive_for_profile, _session_latest_descendant
 from hermes_cli.web_models import (
-    BulkDeleteSessions, SessionImport, SessionOwnerBackfill, SessionPrune, SessionRename)
+    BackgroundProcessStop, BulkDeleteSessions, SessionImport, SessionOwnerBackfill, SessionPrune, SessionRename)
 from hermes_cli.web_routers._common import (
     CORRUPT_STORE_DETAIL, corrupt_store_as_status, log as _log, destructive_profile, http_failure,
 )
@@ -846,6 +846,19 @@ async def get_session_messages_around(
     result["messages"] = await asyncio.to_thread(
         _project_for_display, result["messages"], home=_history_profile_home(profile))
     return result
+
+
+@manage_router.post("/api/sessions/{session_id}/background-processes/{process_id}/stop")
+async def stop_session_background_process(session_id: str, process_id: str, body: BackgroundProcessStop):
+    """Kill one live background process the sidebar row ``session_id`` (plus the
+    lineage ids in ``session_ids``) owns: the Stop button on the row's process
+    badge. 404 when no such process belongs to the row. [daveey]"""
+    result = await asyncio.to_thread(stop_session_process, process_id, [session_id, *body.session_ids])
+    if result.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail=result.get("error") or "no such process")
+    if result.get("status") == "error":
+        raise HTTPException(status_code=409, detail=result.get("error") or "stop failed")
+    return {"ok": True, "status": result.get("status"), "process_id": process_id}
 
 
 @manage_router.delete("/api/sessions/{session_id}")

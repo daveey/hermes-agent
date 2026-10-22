@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, SecretStr, StrictBool, field_validator
+from pydantic import BaseModel, Field, SecretStr, StrictBool, field_validator
 
 
 class ConfigUpdate(BaseModel):
@@ -264,6 +264,13 @@ class BulkDeleteSessions(BaseModel):
 class SessionImport(BaseModel):
     sessions: list[dict[str, Any]]
     profile: Optional[str] = None
+
+
+class BackgroundProcessStop(BaseModel):
+    """Body of the sidebar's Stop on a row's background process: the row's
+    compression-lineage ids, any of which may own the process. [daveey]"""
+    session_ids: list[str] = Field(default_factory=list, max_length=200)
+
 
 class SessionRename(BaseModel):
     title: Optional[str] = None

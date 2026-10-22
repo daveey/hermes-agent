@@ -15,6 +15,7 @@ import {
 } from './session'
 import {
   $backgroundActiveSessionIds,
+  $backgroundProcessesBySessionId,
   $delegatingSessionIds,
   $goalActiveSessionIds,
   $kanbanBusySessionIds,
@@ -24,6 +25,7 @@ import {
   sessionStatusStripe,
   showsRunningArc,
   unreadSessionCount,
+  withoutBackgroundProcess,
   withRowActivity
 } from './session-dot-state'
 import { clearAllSessionStates, publishSessionState } from './session-states'
@@ -383,6 +385,60 @@ describe('backend-registered background process ($backgroundActiveSessionIds)', 
     publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
 
     expect($sessionDotStateById.get()['s1']).toBe('working')
+  })
+})
+
+// [daveey] The row's process badge: which live processes hold it off green.
+describe('background processes a row lists ($backgroundProcessesBySessionId)', () => {
+  const sleep = { command: 'sleep 600', id: 'proc_a', started_at: 1_700_000_000 }
+
+  beforeEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $unreadFinishedSessionIds.set([])
+    $unreadWriteGuard.set(new Map())
+  })
+
+  afterEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+  })
+
+  it('lists the process of a row held only by it, and drops it when the process exits', () => {
+    setSessions([storedRow('s1', { background_active: 1, background_processes: [sleep] }), storedRow('s2')])
+
+    expect($backgroundProcessesBySessionId.get()).toEqual({ s1: [sleep] })
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+
+    // The next list poll no longer stamps it: badge gone, row green.
+    setSessions([storedRow('s1'), storedRow('s2')])
+
+    expect($backgroundProcessesBySessionId.get()).toEqual({})
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+  })
+
+  it('a confirmed Stop drops the process from the row at once', () => {
+    const other = { command: 'gh run watch 1', id: 'proc_b' }
+    const row = storedRow('s1', { background_active: 2, background_processes: [sleep, other] })
+
+    const one = withoutBackgroundProcess(row, 'proc_a')
+    expect(one.background_processes).toEqual([other])
+    expect(one.background_active).toBe(1)
+
+    const none = withoutBackgroundProcess(one, 'proc_b')
+    setSessions([none])
+
+    expect(none.background_active).toBeUndefined()
+    expect($backgroundProcessesBySessionId.get()).toEqual({})
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+    // Control: an id the row doesn't list leaves it untouched.
+    expect(withoutBackgroundProcess(row, 'proc_zzz')).toBe(row)
+  })
+
+  it('falls back to count-only placeholders against an older backend', () => {
+    setSessions([storedRow('s1', { background_active: 2 })])
+
+    expect($backgroundProcessesBySessionId.get()['s1']?.map(p => p.id)).toEqual(['#0', '#1'])
   })
 })
 

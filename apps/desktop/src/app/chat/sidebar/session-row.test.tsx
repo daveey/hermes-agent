@@ -35,6 +35,10 @@ vi.mock('@/i18n', () => ({
           ageMin: 'm',
           ageNow: 'now',
           kanbanTasks: (open: number, blocked: number) => `${open} open, ${blocked} blocked`,
+          backgroundProcesses: (count: number) => `${count} background processes`,
+          backgroundProcessUnnamed: 'background process',
+          stopProcess: 'Stop',
+          stoppingProcess: 'Stopping…',
           backgroundRunning: 'Running in background',
           finishedUnread: 'Finished',
           handoffOrigin: (platform: string) => `Started on ${platform}`,
@@ -162,7 +166,7 @@ function makeSession(overrides: Partial<SessionInfo> & { title: string }): Sessi
 
 const noop = vi.fn()
 
-const renderRow = (session: SessionInfo, extra?: { card?: boolean; selected?: boolean }) =>
+const renderRow = (session: SessionInfo, extra?: { card?: boolean; onResume?: () => void; selected?: boolean }) =>
   render(
     <SidebarSessionRow
       card={extra?.card}
@@ -171,7 +175,7 @@ const renderRow = (session: SessionInfo, extra?: { card?: boolean; selected?: bo
       onArchive={noop}
       onDelete={noop}
       onPin={noop}
-      onResume={noop}
+      onResume={extra?.onResume ?? noop}
       onToggleUnread={noop}
       session={session}
       unread={false}
@@ -535,5 +539,68 @@ describe('SidebarSessionRow own activity stamps', () => {
     const { container } = renderRow(makeSession({ id: 'old-proj', message_count: 9, title: 'Old' }))
 
     expect(stripe(container)).toBe('done')
+  })
+})
+
+// [daveey] A finished chat held off green only by a background process says
+// so: a process glyph beside the kanban badge, hover lists it with Stop.
+describe('SidebarSessionRow background process badge', () => {
+  const proc = { command: 'sleep 600', id: 'proc_a' }
+
+  const held = (extra: Partial<SessionInfo> = {}) =>
+    makeSession({
+      background_active: 1,
+      background_processes: [{ ...proc, started_at: Date.now() / 1000 - 125 }],
+      id: 'held',
+      message_count: 4,
+      title: 'Held',
+      ...extra
+    } as Partial<SessionInfo> & { title: string })
+
+  it('shows the glyph (no count for one) and keeps the row off green', () => {
+    const { container } = renderRow(held())
+    const badge = screen.getByTestId('session-row-background-processes')
+
+    expect(badge.getAttribute('aria-label')).toBe('1 background processes')
+    expect(badge.textContent).toBe('')
+    expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
+  })
+
+  it('shows the count when more than one, in the one-line row and the card', () => {
+    const two = held({
+      background_active: 2,
+      background_processes: [proc, { command: 'gh run watch 1', id: 'proc_b' }]
+    } as Partial<SessionInfo>)
+
+    renderRow(two)
+    expect(screen.getByTestId('session-row-background-processes').textContent).toBe('2')
+    cleanup()
+    renderRow(two, { card: true })
+    expect(screen.getByTestId('session-row-background-processes').textContent).toBe('2')
+  })
+
+  it('hover lists the command, its age and a Stop button', async () => {
+    renderRow(held())
+    fireEvent.pointerEnter(screen.getByTestId('session-row-background-processes'))
+
+    const card = await screen.findByTestId('session-row-background-processes-card')
+    expect(card.textContent).toContain('sleep 600')
+    expect(card.textContent).toContain('5m') // coarseElapsed is mocked to 5 minutes above
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy()
+  })
+
+  it('click opens the session', () => {
+    const onResume = vi.fn()
+    renderRow(held(), { onResume })
+    fireEvent.click(screen.getByTestId('session-row-background-processes'))
+
+    expect(onResume).toHaveBeenCalledTimes(1)
+  })
+
+  it('is gone once the process exits', () => {
+    const { container } = renderRow(makeSession({ id: 'held', message_count: 4, title: 'Held' }))
+
+    expect(screen.queryByTestId('session-row-background-processes')).toBeNull()
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('done')
   })
 })

@@ -83,3 +83,71 @@ def test_in_process_registry_counts(home, sleeper):
         host_start_time=ProcessRegistry._safe_host_start_time(live.pid), started_at=time.time())
 
     assert psa.background_process_counts() == {"s_mem": 1}
+
+
+def test_rows_list_each_process_with_command_and_age(home, sleeper):
+    """The sidebar badge's tooltip: what the process is and how long it ran."""
+    a, b = sleeper(), sleeper()
+    (home / "processes.json").write_text(json.dumps([
+        {**_entry("proc_new", b.pid, session_key="s_w"), "command": "sleep 600", "started_at": 200.0},
+        {**_entry("proc_old", a.pid, session_key="s_w"), "command": "x " * 200, "started_at": 100.0},
+    ]))
+    rows = [{"id": "s_w"}, {"id": "s_idle", "background_processes": [{"id": "stale"}]}]
+
+    psa.annotate_background_activity(rows)
+
+    procs = rows[0]["background_processes"]
+    assert [p["id"] for p in procs] == ["proc_old", "proc_new"]  # oldest first
+    assert procs[1] == {"id": "proc_new", "command": "sleep 600", "started_at": 200.0, "pid": b.pid}
+    assert len(procs[0]["command"]) <= 160 and procs[0]["command"].endswith("\u2026")
+    assert "background_processes" not in rows[1]
+
+
+def test_stop_kills_checkpoint_process_owned_by_row_only(home, sleeper):
+    live = sleeper()
+    (home / "processes.json").write_text(json.dumps([_entry("proc_x", live.pid, session_key="s_own")]))
+
+    assert psa.stop_session_process("proc_x", ["s_other"])["status"] == "not_found"
+    assert live.poll() is None  # a row can't stop another row's process
+
+    psa.annotate_background_activity([{"id": "s_own"}])  # warm the cache
+    assert psa.stop_session_process("proc_x", ["s_own"])["status"] == "killed"
+    assert live.wait(timeout=5) is not None
+    rows = [{"id": "s_own"}]
+    psa.annotate_background_activity(rows)
+    assert "background_active" not in rows[0]  # cache dropped: the row goes green at once
+
+
+def test_stop_uses_registry_kill_for_in_process_sessions(home, sleeper, monkeypatch):
+    import tools.process_registry as pr
+
+    live = sleeper()
+    pr.process_registry._running["proc_mem"] = ProcessSession(
+        id="proc_mem", command="sleep 600", task_id="default", session_key="s_mem", pid=live.pid,
+        host_start_time=ProcessRegistry._safe_host_start_time(live.pid), started_at=time.time())
+    calls = []
+    monkeypatch.setattr(pr.process_registry, "kill_process",
+                        lambda pid, source="": calls.append((pid, source)) or {"status": "killed"})
+
+    assert psa.stop_session_process("proc_mem", ["s_mem"]) == {"status": "killed"}
+    assert calls == [("proc_mem", "sidebar.stop")]
+
+
+def test_stop_endpoint(home, sleeper):
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+    live = sleeper()
+    (home / "processes.json").write_text(json.dumps([_entry("proc_e", live.pid, session_key="s_root")]))
+    client = TestClient(app)
+    client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+    url = "/api/sessions/s_tip/background-processes/proc_e/stop"
+
+    assert client.post(url, json={}).status_code == 404  # tip alone doesn't own it
+    res = client.post(url, json={"session_ids": ["s_root"]})
+
+    assert res.status_code == 200 and res.json()["status"] == "killed"
+    assert live.wait(timeout=5) is not None

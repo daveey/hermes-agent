@@ -35,7 +35,13 @@ import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
 import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
-import { $sessionDotStateById, hasLiveTurn, sessionStatusStripe, withRowActivity } from '@/store/session-dot-state'
+import {
+  $sessionDotStateById,
+  hasLiveTurn,
+  rowBackgroundProcesses,
+  sessionStatusStripe,
+  withRowActivity
+} from '@/store/session-dot-state'
 import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
 import { sessionCostUsd } from '@/store/sidebar-archive'
@@ -43,6 +49,7 @@ import { $todoProgressBySession } from '@/store/todos'
 
 import { SessionStatusDot } from '../session-status-dot'
 
+import { BackgroundProcessBadge } from './background-process-badge'
 import {
   SIDEBAR_ROW_CARD_MIN_H,
   SIDEBAR_TRUNCATED_LEADING,
@@ -212,6 +219,13 @@ function SidebarSessionRowImpl({
       </Tip>
     ) : null
 
+  // [daveey] Live background processes holding this row off green: a process
+  // glyph beside the kanban badge; hover lists them with Stop, click opens.
+  const processBadge =
+    !session.archived && rowBackgroundProcesses(session).length > 0 ? (
+      <BackgroundProcessBadge onOpen={onResume} session={session} />
+    ) : null
+
   // Pinned metadata occupies the actions slot and swaps out for the kebab on
   // hover, so the row reserves the same width either way and never reflows.
   const pinnedAge = rowMeta.includes('updated')
@@ -289,17 +303,19 @@ function SidebarSessionRowImpl({
               figures.at(-1)
             )}
             {kanbanCounts}
+            {processBadge}
             {gatewayIcon}
           </span>
         </span>
       )
     })
-  } else if (kanbanCounts || gatewayIcon) {
+  } else if (kanbanCounts || processBadge || gatewayIcon) {
     trailing.push({
       key: 'gateway',
       node: (
         <span className="pointer-events-none whitespace-nowrap text-[0.625rem] leading-none text-(--ui-text-tertiary)">
           {kanbanCounts}
+          {processBadge}
           {gatewayIcon}
         </span>
       )

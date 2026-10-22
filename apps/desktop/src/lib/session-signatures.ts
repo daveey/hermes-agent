@@ -5,6 +5,11 @@
 
 import type { SessionInfo, SessionMessage } from '@/hermes'
 
+// [daveey] Which background processes a row lists: one changing for another
+// keeps the count but must still repaint the badge's tooltip.
+const backgroundProcessKey = (session: SessionInfo): string =>
+  (session.background_processes ?? []).map(proc => proc.id).join(',')
+
 export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
   if (a.length !== b.length) {
     return false
@@ -44,6 +49,7 @@ export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
       session.goal_active === other.goal_active &&
       session.cron_active === other.cron_active &&
       session.background_active === other.background_active &&
+      backgroundProcessKey(session) === backgroundProcessKey(other) &&
       session.review_wait === other.review_wait
     )
   })

@@ -3370,7 +3370,11 @@ export const en: Translations = {
       kanbanTasks: (open, blocked) =>
         [open > 0 ? `${open} kanban ${open === 1 ? 'task' : 'tasks'} open` : '', blocked > 0 ? `${blocked} blocked` : '']
           .filter(Boolean)
-          .join(', ')
+          .join(', '),
+      backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
+      backgroundProcessUnnamed: 'background process',
+      stopProcess: 'Stop',
+      stoppingProcess: 'Stopping…'
     },
     dateDivider: {
       today: 'Earlier today',
