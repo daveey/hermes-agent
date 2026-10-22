@@ -455,6 +455,36 @@ class SessionMessagesMixin:
 
         return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
+    def append_kanban_notice(self, session_id: str, content: str, metadata: dict[str, Any]) -> int:
+        """Persist a kanban completion notice into a session nobody has loaded, exactly once, and mark the row
+        unread. ``metadata['notice_id']`` is the identity (board:task:cursor range), checked and inserted in
+        one writer txn so two gateway processes cannot both land it. Refuses (SessionTurnLeaseLostError) while
+        another backend runs a live turn in the session: that backend's poller owns delivery. A NULL
+        ``last_read_at`` (never tracked = read) is stamped just before the notice so it reads unread. [daveey]"""
+        notice_id = metadata.get("notice_id")
+        if not notice_id:
+            raise ValueError("Kanban notice requires a stable notice_id")
+        msg = {"content": content, "display_kind": "kanban_notice", "display_metadata": metadata}
+        stamp_message_uid(msg)
+        ts = time.time()
+        params = self._message_row_params(session_id, "user", msg, None, ts, keep_reasoning=True)
+
+        def _do(conn):
+            existing = conn.execute(
+                "SELECT m.id FROM messages m WHERE m.session_id = ? AND m.display_kind = 'kanban_notice' "
+                "AND json_extract(m.display_metadata, '$.notice_id') = ? LIMIT 1", (session_id, notice_id)).fetchone()
+            if existing is not None:
+                return existing[0]
+            self._check_transcript_write_guards(conn, session_id, None, reject_active_turn_lease=True)
+            msg_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
+            self._bump_session_counters(conn, session_id, 1, 0, unit=True)
+            from hermes_state_sessions import _LINEAGE_CTE_SQL  # watermark is lineage-stamped
+            conn.execute(_LINEAGE_CTE_SQL + "UPDATE sessions SET last_read_at = ? WHERE last_read_at IS NULL "
+                         "AND id IN (SELECT id FROM lineage)", (session_id, session_id, ts - 0.001))
+            return msg_id
+
+        return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
+
     def append_messages_batch(
         self, session_id: str, messages: list[dict[str, Any]], compression_lock_holder: Optional[str] = None,
         turn_lease_holder: Optional[str] = None, chunk_rows: Optional[int] = None,

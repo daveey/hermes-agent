@@ -298,7 +298,8 @@ def main():
     # so it must start BEFORE the sweep.
     for start, what in (
             (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
-            (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling")):
+            (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling"),
+            (server._start_kanban_unloaded_sweeper, "kanban unloaded-session sweeper start")):
         try:
             start()
         except Exception:

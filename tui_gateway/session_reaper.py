@@ -456,6 +456,18 @@ def _sweep_orphaned_session_rows() -> list[str]:
         logger.info(
             "Closed %d orphaned session row(s) from a previous gateway process (startup_orphan_reap): %s",
             len(swept), ", ".join(swept))
+        # [daveey] A reaped chat keeps its kanban subscriptions; kanban_unloaded.py delivers their results to the
+        # transcript, but say which chats depend on that so a missing notice is traceable.
+        try:
+            from tui_gateway.kanban_unloaded import open_subscription_sessions
+            held = open_subscription_sessions(list(swept))
+            if held:
+                logger.warning(
+                    "Orphan-reaped session(s) still hold open kanban subscriptions (results are delivered to "
+                    "the transcript by the unloaded-session sweeper): %s",
+                    ", ".join(f"{sid} ({n})" for sid, n in sorted(held.items())))
+        except Exception:
+            logger.debug("orphan-reap kanban subscription check failed", exc_info=True)
     return swept
 
 
