@@ -218,11 +218,17 @@ class _Relay:
 _EXPORT_WORKER = "hermes-shared-metrics-flush"
 
 
+# Generous bounds: CI runners can be heavily loaded (load ~77). They only cap a
+# hang; tests release/join explicitly, so healthy runs return immediately.
+_WORKER_JOIN_TIMEOUT_S = 120
+_PARK_TIMEOUT_S = 120
+
+
 def _join_export_workers() -> None:
     """Task/session exports run on a background worker; wait for it before reading the store."""
     while workers := [t for t in threading.enumerate() if t.name == _EXPORT_WORKER]:
         for worker in workers:
-            worker.join(timeout=10)
+            worker.join(timeout=_WORKER_JOIN_TIMEOUT_S)
             assert not worker.is_alive()
 
 
@@ -2539,7 +2545,7 @@ def parked_flush(direct_runtime, monkeypatch):
     def parked() -> None:
         state.attempts += 1
         state.entered.set()
-        state.release.wait(3)
+        state.release.wait(_PARK_TIMEOUT_S)
 
     direct_runtime.subscribers.flush = parked
     yield state
@@ -2551,7 +2557,7 @@ def test_task_ends_do_not_wait_on_the_process_wide_flush_barrier(parked_flush, t
     _finish_desktop_task("s1", "t1")
 
     # The turn thread is back while the barrier is still parked, so nothing is exported yet.
-    assert parked_flush.entered.wait(3)
+    assert parked_flush.entered.wait(_PARK_TIMEOUT_S)
     outbox = tmp_path / "hermes-home" / "telemetry" / "shared_metrics" / "outbox"
     assert list(outbox.glob("*.json")) == []
 
