@@ -15,24 +15,10 @@ from __future__ import annotations
 import os
 from typing import MutableMapping, Optional, Sequence
 
-# Presence of any of these means the env was inherited from a worker or delegate child.
-WORKER_MARKER_KEYS: tuple[str, ...] = (
-    "HERMES_DELEGATED_CHILD_CONTEXT",
-    "HERMES_KANBAN_TASK",
-    "HERMES_KANBAN_WORKSPACE",
-    "HERMES_KANBAN_RUN_ID",
-    "HERMES_KANBAN_CLAIM_LOCK",
-)
-# Dispatcher-injected worker env (``kanban_db_dispatch._default_spawn``). The board pins are
-# only stripped together with a marker: set alone they are a deliberate operator choice.
-WORKER_ENV_KEYS: tuple[str, ...] = (
-    *WORKER_MARKER_KEYS,
-    "HERMES_KANBAN_BRANCH",
-    "HERMES_KANBAN_GOAL_MODE",
-    "HERMES_KANBAN_GOAL_MAX_TURNS",
-    "HERMES_KANBAN_DB",
-    "HERMES_KANBAN_BOARD",
-    "HERMES_KANBAN_WORKSPACES_ROOT",
+# The key family and the marker rule live in agent/delegation_context.py so they can't drift.
+from agent.delegation_context import (
+    AGENT_SCOPE_MARKER_KEYS as WORKER_MARKER_KEYS,
+    strip_agent_scope_env,
 )
 
 # First positional argv of a top-level surface (never a worker).
@@ -40,15 +26,10 @@ TOP_LEVEL_COMMANDS = frozenset({"serve", "dashboard", "gui", "desktop", "gateway
 
 
 def scrub_leaked_worker_env(environ: Optional[MutableMapping[str, str]] = None) -> list[str]:
-    """Remove worker/delegate identity keys from ``environ`` (default ``os.environ``) when any
-    worker marker is present. Returns the removed key names (empty when nothing leaked)."""
-    env = os.environ if environ is None else environ
-    if not any(env.get(key) for key in WORKER_MARKER_KEYS):
-        return []
-    removed = [key for key in WORKER_ENV_KEYS if key in env]
-    for key in removed:
-        env.pop(key, None)
-    return removed
+    """Remove the agent-scope env family (worker/delegate/session/cron/RPC identity) from
+    ``environ`` (default ``os.environ``) when any worker marker is present. Returns the removed
+    key names (empty when nothing leaked)."""
+    return strip_agent_scope_env(os.environ if environ is None else environ)
 
 
 def clean_launch_env(base: Optional[MutableMapping[str, str]] = None) -> dict[str, str]:
@@ -71,6 +52,6 @@ def scrub_for_top_level_launch(argv: Sequence[str]) -> list[str]:
         import logging
 
         logging.getLogger(__name__).warning(
-            "hermes %s: dropped inherited worker env %s (launched from a kanban worker/delegate child)",
+            "hermes %s: dropped inherited agent-scope env %s (launched from a kanban worker/delegate child)",
             _first_positional(argv), ", ".join(removed))
     return removed
