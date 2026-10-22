@@ -126,7 +126,6 @@ def _pid_alive(pid: int) -> bool:
     except (PermissionError, OSError):
         return True
     return True
-    return True
 
 
 def _parent_pid(pid: int) -> Optional[int]:

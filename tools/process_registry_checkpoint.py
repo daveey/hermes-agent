@@ -43,7 +43,8 @@ class ProcessCheckpointMixin:
         def _lock():
             path = _checkpoint_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            with open(str(path) + ".lock", "a+") as fh:
+            lock_path = str(path) + ".lock"
+            with open(lock_path, "ab") as fh:  # flock-only; never read or written
                 try:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 except OSError:

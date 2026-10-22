@@ -83,7 +83,7 @@ def _read_owners(path: Path) -> frozenset[str]:
     hit = _file_cache.get(str(path))
     if hit and hit[0] == stamp:
         return hit[1]
-    data = json.loads(path.read_text(encoding="utf-8") or "[]")
+    data = json.loads(path.read_text(encoding="utf-8-sig") or "[]")
     jobs = data.get("jobs", []) if isinstance(data, dict) else data
     owners = frozenset(owners_from_jobs(jobs if isinstance(jobs, list) else []))
     _file_cache[str(path)] = (stamp, owners)
