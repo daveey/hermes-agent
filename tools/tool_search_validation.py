@@ -245,13 +245,24 @@ def local_batch_error(entries: list[dict[str, Any]]) -> str:
     )
 
 
-def not_deferrable_error(name: str) -> str:
+def _not_in_session_error(name: str) -> str:
+    """[daveey] A registered tool whose toolset is off for this session: name the toolset and the fix.
+    Telling the agent 'call it directly' sent it hunting for a tool that is not in its list."""
+    toolset = getattr(_registry_entry(name), "toolset", None) or "?"
+    return (f"'{name}' is registered but NOT enabled in this session: its toolset '{toolset}' is off for this "
+            f"platform. Enable it with `hermes tools enable {toolset} --platform cli` (Desktop and CLI use the "
+            "'cli' platform), then start a new session. The tool was NOT invoked.")
+
+
+def not_deferrable_error(name: str, in_session: bool = True) -> str:
     """Rejection for a ``tool_call`` naming something that is not a deferred tool.
     Two different mistakes reach here and need opposite corrections: a directly-listed
     tool (call it without the bridge) vs. an unknown name — typically a deferred MCP tool
     cited by its bare suffix instead of the full ``mcp__<server>__{tool}`` name. Telling
     the second group 'call it directly' is the opposite of what they must do."""
     from tools.tool_search import _core_tool_names  # late: tool_search imports this module
+    if not in_session and _registry_entry(name) is not None:
+        return _not_in_session_error(name)
     if name in _core_tool_names() or _registry_entry(name) is not None:
         return (f"'{name}' is a directly-listed tool, not a deferred one. "
                 "Call it directly instead of via tool_call. The tool was NOT invoked.")
