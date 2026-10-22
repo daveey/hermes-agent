@@ -120,6 +120,35 @@ def _store_profile_and_root(hermes_home: str | Path) -> tuple[str, Path]:
     return "default", Path(hermes_home)
 
 
+_SIDEBAR_POLICY_KEYS = ("automated_sources", "interactive_sources", "sidebar_profiles")
+
+
+def strip_inherited_sidebar_policy(config_path: Path, profile_name: str, root_home: Path) -> list[str]:
+    """Drop the sidebar source lists a ``profile create --clone`` copied from its source [daveey].
+
+    Only when *root_home*'s ``sessions.sidebar_profiles`` is non-empty and *profile_name* is not on
+    it: otherwise the copied ``interactive_sources`` / ``automated_sources`` would count as the new
+    profile's own explicit choice and override the "unlisted profiles start automated" default.
+    Returns the dotted keys removed (``[]`` when nothing applies)."""
+    sidebar_profiles = _sessions_source_list(root_home, "sidebar_profiles")
+    if not sidebar_profiles or profile_name.lower() in sidebar_profiles or not config_path.is_file():
+        return []
+    from hermes_cli.config import atomic_config_replace, read_user_config_raw
+    raw = read_user_config_raw(config_path)
+    sessions_cfg = raw.get("sessions")
+    if not isinstance(sessions_cfg, dict):
+        return []
+    removed = [k for k in _SIDEBAR_POLICY_KEYS if k in sessions_cfg]
+    if not removed:
+        return []
+    for key in removed:
+        sessions_cfg.pop(key)
+    if not sessions_cfg:
+        raw.pop("sessions")
+    atomic_config_replace(config_path, raw)
+    return [f"sessions.{k}" for k in removed]
+
+
 def automated_session_sources(hermes_home: str | Path) -> AutomatedSourcePolicy:
     """``sessions.automated_sources`` + ``sessions.interactive_sources`` from *hermes_home*'s own
     config.yaml [daveey]: which session sources this profile marks ``automated`` (bot / smoke-test

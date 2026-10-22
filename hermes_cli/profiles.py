@@ -1445,6 +1445,13 @@ def create_profile(
             stripped = strip_channel_settings(staging, include_state=clone_all, source_dir=source_dir)
             if stripped:
                 logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
+        if source_dir is not None:
+            # [daveey] a clone must not inherit the source's sidebar source lists, or the root's
+            # sessions.sidebar_profiles default (unlisted profiles start automated) never applies.
+            from hermes_cli.session_listing import strip_inherited_sidebar_policy
+            dropped = strip_inherited_sidebar_policy(staging / "config.yaml", canon, profile_dir.parent.parent)
+            if dropped:
+                logger.info("profile %s: cloned without sidebar source lists %s", canon, dropped)
         _finish_profile_layout(staging, no_skills=no_skills, clone_all=clone_all, description=description)
         os.rename(staging, profile_dir)
     except BaseException:

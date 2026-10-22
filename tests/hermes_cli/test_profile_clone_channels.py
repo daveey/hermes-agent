@@ -281,3 +281,27 @@ def test_clone_all_drops_directory_shaped_channel_state(home):
     (home / "google_chat_user_tokens" / "u@x.json").write_text("{}", encoding="utf-8")
     profile_dir = create_profile("full", clone_all=True, no_alias=True)
     assert not (profile_dir / "google_chat_user_tokens").exists()
+
+
+
+def test_clone_drops_source_sidebar_lists_when_root_lists_sidebar_profiles(home):
+    # [daveey] root sidebar_profiles: [default] -> a clone must not inherit default's own
+    # interactive/automated source lists (they would count as the new profile's explicit choice).
+    cfg = dict(_SOURCE_CONFIG, sessions={"sidebar_profiles": ["default"], "interactive_sources": ["desktop", "cli"],
+                                         "automated_sources": ["x"], "auto_archive": True})
+    (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    profile_dir = create_profile("newbot", clone_config=True, no_alias=True)
+    sessions = yaml.safe_load((profile_dir / "config.yaml").read_text(encoding="utf-8"))["sessions"]
+    assert sessions == {"auto_archive": True}
+    from hermes_cli.session_listing import stamp_automated
+    assert stamp_automated([{"id": "a", "source": "cli"}], profile_dir)[0]["automated"] is True
+    # Source untouched.
+    assert yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["sessions"]["interactive_sources"]
+
+
+def test_clone_keeps_sidebar_lists_when_root_sets_no_sidebar_profiles(home):
+    cfg = dict(_SOURCE_CONFIG, sessions={"interactive_sources": ["desktop", "cli"]})
+    (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    profile_dir = create_profile("plain", clone_config=True, no_alias=True)
+    sessions = yaml.safe_load((profile_dir / "config.yaml").read_text(encoding="utf-8"))["sessions"]
+    assert sessions["interactive_sources"] == ["desktop", "cli"]
