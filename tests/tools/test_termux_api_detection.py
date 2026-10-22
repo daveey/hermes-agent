@@ -21,6 +21,7 @@ These tests pin the new probe ladder:
 from __future__ import annotations
 
 import subprocess
+import pytest
 from types import SimpleNamespace
 
 
@@ -155,6 +156,14 @@ class TestDetectAudioEnvironmentTermuxFallback:
     """The point of the fix is that #31015 users with the binary on PATH
     no longer see the misleading 'Termux:API Android app is not installed'
     warning when the package-manager probe is inconclusive."""
+
+    @pytest.fixture(autouse=True)
+    def _not_in_container(self, monkeypatch):
+        # CI runners are containers (/.dockerenv), which adds an unrelated "no audio devices" warning
+        # and flips `available`; these tests are about the Termux:API branch only.
+        monkeypatch.setattr("hermes_constants.is_container", lambda: False)
+        for var in ("PULSE_SERVER", "PIPEWIRE_REMOTE"):
+            monkeypatch.delenv(var, raising=False)
 
     def test_inconclusive_probes_with_binary_does_not_emit_app_warning(
         self, monkeypatch

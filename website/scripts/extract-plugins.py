@@ -158,7 +158,7 @@ def load_git_dates(catalog_dir: Path) -> dict[str, dict[str, str]]:
             _log("shallow checkout: skipping addedAt/updatedAt (need fetch-depth: 0)")
             return {}
         log = subprocess.run(
-            ["git", "log", "--format=%x00%cI", "--name-status", "--relative", "-M", "--", "."],
+            ["git", "log", "--format=%x00%ct", "--name-status", "--relative", "-M", "--", "."],
             cwd=catalog_dir, capture_output=True, text=True, check=True, timeout=120,
         ).stdout
     except (OSError, subprocess.SubprocessError) as e:
@@ -179,7 +179,11 @@ def load_git_dates(catalog_dir: Path) -> dict[str, dict[str, str]]:
     when = ""
     for line in log.splitlines():
         if line.startswith("\x00"):
-            when = line[1:].strip()
+            # Epoch -> UTC "Z" ourselves: git's %cI prints "+00:00" or "Z" for UTC depending on version.
+            try:
+                when = datetime.fromtimestamp(int(line[1:].strip()), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                when = ""
             continue
         parts = line.split("\t")
         if len(parts) < 2 or not when:

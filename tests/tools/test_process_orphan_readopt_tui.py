@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -217,9 +218,18 @@ def test_concurrent_backends_adopt_an_orphan_once(checkpoint, procs, tmp_path):
         "    print(ProcessRegistry().recover_from_checkpoint(owner='tui'), flush=True)\n"
         "    time.sleep(10)\n")  # stay alive: a live writer is what makes the sibling skip
     import os
-    runs = [subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, text=True,
-                             cwd=os.getcwd(), env=os.environ.copy()) for _ in range(4)]
-    counts = [int(run.communicate(timeout=60)[0].strip().splitlines()[-1]) for run in runs]
+    # `python script.py` puts the script's dir (tmp_path), not the cwd, on sys.path, so the repo
+    # root must be passed explicitly or `import tools...` fails wherever the repo isn't installed
+    # editable (CI), leaving empty stdout and an IndexError instead of the real error.
+    repo_root = str(Path(__file__).resolve().parents[2])
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [repo_root, env.get("PYTHONPATH")]))
+    runs = [subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, cwd=repo_root, env=env) for _ in range(4)]
+    outs = [run.communicate(timeout=60) for run in runs]
+    for run, (out, err) in zip(runs, outs):
+        assert run.returncode == 0 and out.strip(), f"adopter subprocess failed ({run.returncode}): {err}"
+    counts = [int(out.strip().splitlines()[-1]) for out, _ in outs]
     assert sorted(counts) == [0, 0, 0, 1]
 
 
