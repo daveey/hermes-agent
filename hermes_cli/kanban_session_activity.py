@@ -41,7 +41,7 @@ HUMAN_BLOCK_KINDS = ("needs_input", "capability")
 
 _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
-_cache: tuple[float, dict[str, int], dict[str, int]] | None = None
+_cache: tuple[float, dict[str, int], dict[str, int], dict[str, int]] | None = None
 
 
 def _board_db_paths() -> list[Path]:
@@ -111,16 +111,44 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
     return counts
 
 
-def _all_counts() -> tuple[dict[str, int], dict[str, int]]:
-    """``(active, blocked)`` per-session task counts across every board, cached."""
+# Terminal kinds that produce a visible notice (mirrors tui_gateway.session_notifications; silent kinds such as
+# archived/unblocked never leave a notice waiting).
+UNSEEN_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status")
+
+
+def _read_unseen(path: Path) -> dict[str, int]:
+    """``tui`` subscriptions per chat whose cursor trails a terminal event: a result the session has not been
+    handed yet (its backend is gone, so no poller claims it until the unloaded-session sweeper does). [daveey]"""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+    try:
+        ph = ",".join("?" for _ in UNSEEN_KINDS)
+        rows = conn.execute(
+            f"SELECT s.chat_id, COUNT(*) FROM kanban_notify_subs s WHERE s.platform = 'tui' AND s.chat_id != '' "
+            f"AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = s.task_id AND e.id > s.last_event_id "
+            f"AND e.kind IN ({ph})) GROUP BY s.chat_id", UNSEEN_KINDS).fetchall()
+    except sqlite3.Error:  # board predates notify subscriptions
+        return {}
+    finally:
+        conn.close()
+    return {str(sid): int(n) for sid, n in rows}
+
+
+def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """``(active, blocked, unseen)`` per-session task counts across every board, cached."""
     global _cache
     now = time.monotonic()
     with _cache_lock:
         if _cache is not None and now < _cache[0]:
-            return _cache[1], _cache[2]
+            return _cache[1], _cache[2], _cache[3]
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
+    unseen: dict[str, int] = {}
     for path in _board_db_paths():
+        try:
+            for sid, n in _read_unseen(path).items():
+                unseen[sid] = unseen.get(sid, 0) + n
+        except sqlite3.Error as exc:
+            _log.debug("kanban unseen read failed for %s: %s", path, exc)
         for statuses, into in ((ACTIVE_STATUSES, active), (BLOCKED_STATUSES, blocked)):
             try:
                 for sid, n in _read_counts(path, statuses).items():
@@ -128,8 +156,8 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int]]:
             except sqlite3.Error as exc:  # an old schema without session_id, a locked file
                 _log.debug("kanban activity read failed for %s: %s", path, exc)
     with _cache_lock:
-        _cache = (now + _CACHE_TTL_S, active, blocked)
-    return active, blocked
+        _cache = (now + _CACHE_TTL_S, active, blocked, unseen)
+    return active, blocked, unseen
 
 
 def active_task_counts() -> dict[str, int]:
@@ -211,19 +239,20 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
 
 
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stamp ``kanban_active`` and ``kanban_blocked`` on each session row
+    """Stamp ``kanban_active``, ``kanban_blocked`` and ``kanban_unseen`` (finished cards whose result the
+    session has not been handed yet) on each session row
     (summed over its whole compression lineage). Never raises: the list must
     render without them."""
     if not rows:
         return rows
     try:
-        active, blocked = _all_counts()
+        active, blocked, unseen = _all_counts()
     except Exception:
         _log.debug("kanban activity unavailable", exc_info=True)
         return rows
     for row in rows:
         ids = list(_row_ids(row))
-        for key, counts in (("kanban_active", active), ("kanban_blocked", blocked)):
+        for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen)):
             n = sum(counts.get(sid, 0) for sid in ids)
             if n:
                 row[key] = n

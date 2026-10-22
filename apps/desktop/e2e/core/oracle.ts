@@ -398,6 +398,7 @@ const NOTICE_KINDS = new Set([
   'personality_switch',
   'failed_turn',
   'turn_stopped',
+  'kanban_notice',
   'hidden'
 ])
 

@@ -88,6 +88,26 @@ export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions], (
   return (kanbanBusyIds = stableArray(kanbanBusyIds, ids))
 })
 
+// [daveey] Sessions whose kanban cards finished while no backend held the chat:
+// the result is waiting in the kanban store (`kanban_unseen`, until the
+// unloaded-session sweeper hands it over; after that it is a persisted unread
+// row). It is "done, results waiting" — the same green as an unread finish —
+// and yields to running cards, which keep the row in `background`.
+let kanbanUnseenIds: readonly string[] = []
+export const $kanbanUnseenSessionIds = computed([$sessions, $messagingSessions], (sessions, messaging) => {
+  const ids: string[] = []
+
+  for (const rows of [sessions, messaging]) {
+    for (const row of rows) {
+      if ((row.kanban_unseen ?? 0) > 0) {
+        ids.push(row.id)
+      }
+    }
+  }
+
+  return (kanbanUnseenIds = stableArray(kanbanUnseenIds, ids))
+})
+
 // [daveey] Sessions owning a live background process, per the backend. The
 // renderer's own $backgroundRunningSessionIds only knows sessions it polled
 // after one of their tool events streamed into this window, so a turn the
@@ -244,11 +264,14 @@ export const sessionStatusStripe = (
  *  Same claim (and priority) as the store: it beats idle/unread/draft only. */
 export const withRowActivity = (
   state: SessionDotState,
-  row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active'>
+  row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active'> &
+    Partial<Pick<SessionInfo, 'kanban_unseen'>>
 ): SessionDotState =>
   (state === 'idle' || state === 'unread' || state === 'draft') &&
   (row.goal_active === true || (row.kanban_active ?? 0) > 0 || (row.background_active ?? 0) > 0)
     ? 'background'
+    : (state === 'idle' || state === 'draft') && (row.kanban_unseen ?? 0) > 0
+    ? 'unread'
     : state
 
 /** Whether this turn is the session's own, live: brighter title, and the row's
@@ -285,6 +308,7 @@ export const $sessionDotStateById = computed(
     $backgroundActiveSessionIds,
     $delegatingSessionIds,
     $kanbanBusySessionIds,
+    $kanbanUnseenSessionIds,
     $goalActiveSessionIds,
     $unreadFinishedSessionIds,
     $draftSessionIds,
@@ -299,6 +323,7 @@ export const $sessionDotStateById = computed(
     backgroundActive,
     delegating,
     kanbanBusy,
+    kanbanUnseen,
     goalActive,
     unread,
     draft,
@@ -349,6 +374,9 @@ export const $sessionDotStateById = computed(
     }
 
     claim(persistedUnread, 'unread')
+    // Finished kanban cards whose result no chat has been handed yet: green,
+    // below every live claim (running cards, a goal, a turn) painted next.
+    claim(kanbanUnseen, 'unread')
 
     claim(background, 'background')
     // Same claim from the backend's process registry (survives restarts).

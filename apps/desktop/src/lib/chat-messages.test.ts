@@ -562,6 +562,23 @@ describe('toChatMessages', () => {
     expect(messages.map(chatMessageText)).toEqual(['investigate', 'Stopped by redde', 'turn stopped'])
   })
 
+  it('renders a persisted kanban result as a system line, not a user bubble', () => {
+    // [daveey] The gateway writes `kanban_notice` into a chat no backend had loaded when its card finished.
+    const messages = toChatMessages([
+      { role: 'user', content: 'start the cards', timestamp: 1 },
+      {
+        role: 'user',
+        content: '✔ Kanban t_1 done — shipped',
+        display_kind: 'kanban_notice',
+        display_metadata: { display_text: '✔ Kanban t_1 done — shipped' },
+        timestamp: 2
+      }
+    ])
+
+    expect(messages.map(message => message.role)).toEqual(['user', 'system'])
+    expect(chatMessageText(messages[1])).toBe('✔ Kanban t_1 done — shipped')
+  })
+
   it('never paints a background-process heartbeat wake as a user bubble', () => {
     // Current backends type the wake `display_kind: 'hidden'`; a row persisted by an older
     // backend arrives untyped and must disappear the same way — the user never wrote it.

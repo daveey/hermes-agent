@@ -19,6 +19,7 @@ import {
   $delegatingSessionIds,
   $goalActiveSessionIds,
   $kanbanBusySessionIds,
+  $kanbanUnseenSessionIds,
   $sessionDotStateById,
   $unreadSessionCount,
   hasLiveTurn,
@@ -497,5 +498,51 @@ describe('withRowActivity', () => {
     }
 
     expect(withRowActivity('idle', { goal_active: false, kanban_active: 0 })).toBe('idle')
+  })
+})
+
+// [daveey] A chat that was not loaded anywhere when its cards finished.
+describe('kanban results waiting for an unloaded session ($kanbanUnseenSessionIds)', () => {
+  beforeEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $unreadFinishedSessionIds.set([])
+    $unreadWriteGuard.set(new Map())
+  })
+
+  afterEach(() => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $unreadFinishedSessionIds.set([])
+  })
+
+  it('all cards done plus an unseen result paints green (unread -> done stripe)', () => {
+    setSessions([storedRow('s1', { kanban_active: 0, kanban_unseen: 2 }), storedRow('s2')])
+
+    expect($kanbanUnseenSessionIds.get()).toEqual(['s1'])
+    expect($sessionDotStateById.get()['s1']).toBe('unread')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+  })
+
+  it('cards still running keep the row in background (no stripe), even with a result waiting', () => {
+    setSessions([storedRow('s1', { kanban_active: 1, kanban_unseen: 1 })])
+
+    expect($sessionDotStateById.get()['s1']).toBe('background')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+  })
+
+  it('an orphan-reaped idle session with no cards is green, never working or stalled', () => {
+    setSessions([storedRow('s1', { ended_at: 1, end_reason: 'startup_orphan_reap' } as never)])
+
+    const state = $sessionDotStateById.get()['s1'] ?? 'idle'
+
+    expect(state === 'working' || state === 'stalled').toBe(false)
+    expect(sessionStatusStripe(state, true)).toBe('done')
+  })
+
+  it('withRowActivity turns an idle project-tree row with a waiting result green', () => {
+    expect(withRowActivity('idle', { kanban_active: 0, kanban_unseen: 1 })).toBe('unread')
+    expect(withRowActivity('idle', { kanban_active: 1, kanban_unseen: 1 })).toBe('background')
+    expect(withRowActivity('idle', { kanban_active: 0 })).toBe('idle')
   })
 })

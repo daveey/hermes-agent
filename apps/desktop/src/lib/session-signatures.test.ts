@@ -56,6 +56,7 @@ describe('sameCronSignature', () => {
   it.each([
     ['kanban_active', 2, 1],
     ['kanban_blocked', 1, undefined],
+    ['kanban_unseen', 1, undefined],
     ['goal_active', true, undefined],
     ['cron_active', true, undefined],
     ['background_active', 1, 2]

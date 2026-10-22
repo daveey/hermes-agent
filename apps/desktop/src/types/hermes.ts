@@ -643,6 +643,12 @@ export interface SessionInfo {
    *  are blocked on a human, summed over its compression lineage. Shown next
    *  to the open count on the sidebar row. Absent when zero. */
   kanban_blocked?: number
+  /** [daveey] Finished kanban cards (created or subscribed) whose result this
+   *  conversation has not been handed — it was not loaded in any backend when
+   *  they completed. Paints the row green (unread) until the gateway's
+   *  unloaded-session sweeper writes the notice into the transcript. Absent
+   *  when zero. */
+  kanban_unseen?: number
   /** [daveey] True while this conversation's standing `/goal` is still
    *  active (running between turns or parked on a judge `wait` timer). The
    *  goal loop resumes it unasked, so the sidebar paints it like a background
@@ -763,6 +769,7 @@ export interface SessionMessage {
     | 'auto_continue'
     | 'failed_turn'
     | 'hidden'
+    | 'kanban_notice'
     | 'model_switch'
     | 'personality_switch'
     | 'process_complete'

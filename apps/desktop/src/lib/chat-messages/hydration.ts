@@ -169,7 +169,9 @@ const NOTICE_DISPLAY_KINDS = [
   // Hermes closing a failed turn, not the model speaking.
   'failed_turn',
   // [daveey] A client's Stop ended the turn ("Stopped by redde").
-  'turn_stopped'
+  'turn_stopped',
+  // [daveey] A kanban result persisted into a chat no backend had loaded.
+  'kanban_notice'
 ] as const
 
 function isMachineNotice(displayKind: SessionMessage['display_kind']): boolean {
@@ -286,6 +288,10 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
 
   if (message.display_kind === 'turn_stopped') {
     return timelineDisplayText(message.display_metadata) ?? 'turn stopped'
+  }
+
+  if (message.display_kind === 'kanban_notice') {
+    return timelineDisplayText(message.display_metadata) ?? content
   }
 
   if (message.display_kind === 'async_delegation_complete') {

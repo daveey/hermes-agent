@@ -184,3 +184,26 @@ def test_session_kanban_tasks_endpoint(kanban_root, _isolate_hermes_home):
     assert res.status_code == 200
     assert [t["id"] for t in res.json()["tasks"]] == ["t_run"]
     assert client.get("/api/session-kanban-tasks").status_code == 422
+
+
+def test_kanban_unseen_counts_subscriptions_trailing_a_terminal_event(kanban_root):
+    """[daveey] A finished card whose result no backend claimed shows up as ``kanban_unseen``; a claimed one,
+    a silent kind and a running card do not."""
+    path = kanban_root / "kanban.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, session_id TEXT)")
+    conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT)")
+    conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT, "
+                 "thread_id TEXT DEFAULT '', last_event_id INTEGER DEFAULT 0)")
+    conn.executemany("INSERT INTO tasks VALUES (?, 'done', NULL)", [("a",), ("b",), ("c",), ("d",)])
+    conn.executemany("INSERT INTO task_events (id, task_id, kind) VALUES (?, ?, ?)",
+                     [(1, "a", "completed"), (2, "b", "completed"), (3, "c", "archived"), (4, "d", "created")])
+    conn.executemany("INSERT INTO kanban_notify_subs VALUES (?, 'tui', ?, '', ?)",
+                     [("a", "s_gone", 0), ("b", "s_claimed", 2), ("c", "s_silent", 0), ("d", "s_run", 0)])
+    conn.commit()
+    conn.close()
+    rows = [{"id": "s_gone"}, {"id": "s_claimed"}, {"id": "s_silent"}, {"id": "s_run"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0]["kanban_unseen"] == 1
+    assert all("kanban_unseen" not in r for r in rows[1:])
