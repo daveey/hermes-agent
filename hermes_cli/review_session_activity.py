@@ -160,7 +160,7 @@ def _fetch_pr(key: tuple[str, str, int]) -> dict[str, Any] | None:
     proc = subprocess.run(
         [gh, "api", "graphql", "-F", f"o={owner}", "-F", f"r={repo}", "-F", f"n={number}",
          "-f", f"query={_QUERY}"],
-        capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL, check=False,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20, stdin=subprocess.DEVNULL, check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip()[:200])

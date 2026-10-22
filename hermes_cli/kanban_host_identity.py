@@ -26,7 +26,7 @@ def boot_prefix() -> str | None:
     try:
         result = subprocess.run(
             ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
-            capture_output=True, text=True, timeout=2, check=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2, check=True,
         )
         return f"boot-{uuid.UUID(result.stdout.strip())}:"
     except (OSError, ValueError, subprocess.SubprocessError):

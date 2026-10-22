@@ -115,11 +115,17 @@ def _task_state(db: Path, task_id: str) -> Optional[tuple[str, Optional[int]]]:
 
 def _pid_alive(pid: int) -> bool:
     try:
-        os.kill(pid, 0)
+        import psutil
+        return bool(psutil.pid_exists(pid))
+    except ImportError:
+        pass
+    try:
+        os.kill(pid, 0)  # windows-footgun: ok (psutil-less POSIX fallback)
     except ProcessLookupError:
         return False
     except (PermissionError, OSError):
         return True
+    return True
     return True
 
 
@@ -132,7 +138,7 @@ def _parent_pid(pid: int) -> Optional[int]:
     except Exception:
         return None
     try:
-        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True,
+        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, encoding="utf-8", errors="replace",
                              timeout=5, check=False).stdout.strip()
         return int(out) if out else None
     except (OSError, ValueError, subprocess.SubprocessError):
