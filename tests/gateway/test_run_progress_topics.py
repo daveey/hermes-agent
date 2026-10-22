@@ -1761,6 +1761,10 @@ async def test_base_processing_stops_typing_before_hung_post_delivery_callback(
 ):
     """A stuck post-delivery callback must not keep the typing task alive."""
     monkeypatch.setattr(base_platform, "_POST_DELIVERY_CALLBACK_TIMEOUT_SECONDS", 0.01)
+    # The durable delivery ledger does SQLite work in a worker thread that can take >1s on a cold or
+    # loaded host; this test is about typing vs the hung callback, not the ledger.
+    import gateway.delivery_ledger as _ledger
+    monkeypatch.setattr(_ledger, "ledger_enabled", lambda: False)
     adapter = ProgressCaptureAdapter()
     events = []
 
@@ -1795,7 +1799,7 @@ async def test_base_processing_stops_typing_before_hung_post_delivery_callback(
     adapter._post_delivery_callbacks[session_key] = _post_delivery_cb
 
     await asyncio.wait_for(
-        adapter._process_message_background(event, session_key), timeout=1.0
+        adapter._process_message_background(event, session_key), timeout=5.0
     )
 
     assert [call["content"] for call in adapter.sent] == ["done"]

@@ -39,6 +39,11 @@ def served_root(tmp_path, monkeypatch):
     import hermes_constants
     from gateway import status
     monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None)
+    # These tests model a host (systemd) install; CI runs inside a container, where the service
+    # verbs refuse a user-scope install and setup prints the docker guidance instead.
+    import hermes_cli.gateway as _gw
+    monkeypatch.setattr(hermes_constants, "is_container", lambda: False)
+    monkeypatch.setattr(_gw, "is_container", lambda: False)
     # Liveness is a VERIFIED identity: this pytest process stands in for the default gateway only
     # because its command line reads as one; any other PID keeps its real command line.
     real_cmdline = status._read_process_cmdline
