@@ -1374,8 +1374,35 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
     return None
 
 
-def _create_titled_session(title: str) -> Optional[str]:
+def _titled_session_source(explicit: Optional[str] = None) -> str:
+    """Source label for a ``chat -c <title> --create-if-missing`` row. [daveey]
+
+    ``--source`` wins; else an inherited ``HERMES_SESSION_SOURCE`` (automation labels such as
+    ``tool``/``kanban``/``cron`` are inherited on purpose, but a ``tui``/``desktop`` label leaked
+    from a parent UI session is not, unless marked explicit — same rule as
+    ``agent.session_source.session_source_for``); else ``cli``. Without this every
+    create-if-missing row was ``cli`` = a normal user chat in the Desktop sidebar, even for
+    ``--source tool`` integrations.
+    """
+    source = str(explicit or "").strip()
+    if source:
+        return source
+    source = str(os.environ.get("HERMES_SESSION_SOURCE", "") or "").strip()
+    if source:
+        try:
+            from agent.session_source import UI_TRANSPORT_SOURCES
+        except Exception:
+            UI_TRANSPORT_SOURCES = frozenset({"tui", "desktop"})
+        explicit_env = os.environ.get("HERMES_SESSION_SOURCE_EXPLICIT", "") == "1"
+        if source not in UI_TRANSPORT_SOURCES or explicit_env:
+            return source
+    return "cli"
+
+
+def _create_titled_session(title: str, source: Optional[str] = None) -> Optional[str]:
     """Create a fresh titled session (``chat -c <title> --create-if-missing``).
+
+    ``source`` (from ``--source``) labels the row; see :func:`_titled_session_source`. [daveey]
 
     Same timestamp+uuid id shape the CLI uses; the title is recorded with
     user provenance so auto-titling never overwrites it.
@@ -1393,7 +1420,7 @@ def _create_titled_session(title: str) -> Optional[str]:
         # The CLI acquires the registry handle for this same path moments later; share it
         # instead of minting a second writer for one INSERT (close() releases the refcount).
         db = acquire()
-        db.create_session(new_session_id, source="cli")
+        db.create_session(new_session_id, source=_titled_session_source(source))
         db.set_session_title(new_session_id, title)
         return new_session_id
     except Exception:
@@ -1432,7 +1459,7 @@ def _resolve_continue_arg(args, *, use_tui: bool) -> None:
                 # a quiet send to a not-yet-existing session silently no-ops.
                 # --create-if-missing: no session matches the title — create a new session with that title
                 # and proceed. See #86794.
-                new_sid = _create_titled_session(continue_val)
+                new_sid = _create_titled_session(continue_val, source=getattr(args, "source", None))
                 if new_sid:
                     args.resume = new_sid
                 else:
