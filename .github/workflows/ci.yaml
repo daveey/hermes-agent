@@ -66,7 +66,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   detect:
     name: Detect affected areas
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 1
     outputs:
       python: ${{ steps.gate-lanes.outputs.python }}
@@ -395,7 +395,7 @@ jobs:
       # to block a merge. A separate run also stops it from holding this
       # run open. That is what blocked ``gh run rerun``.
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 10
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
@@ -430,7 +430,7 @@ jobs:
     name: CI timing report
     needs: [all-checks-pass]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 10
     steps:
       - name: Checkout code

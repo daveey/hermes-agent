@@ -34,7 +34,7 @@ concurrency:
 jobs:
   diff:
     name: Prompt surface summary
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 5
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
