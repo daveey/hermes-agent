@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from hermes_cli.kanban_db_connect import write_txn
-from hermes_cli.kanban_pr_acceptance import _PR, collect_acceptance
+from hermes_cli import kanban_pr_acceptance as _kpa
+from hermes_cli.kanban_pr_acceptance import _PR
 
 
 def _snapshot(conn, task_id):
@@ -29,10 +30,26 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
             conn.execute("UPDATE tasks SET completion_contract=? WHERE id=?", (published_pr, task_id))
         snapshot = (run_id, status, published_pr)
         contract = published_pr
+    elif match and published_pr != contract and (bound := _PR.fullmatch(contract)) and bound[1] == match[1]:
+        # Publication binds once -- unless the bound PR was closed without merging (the
+        # change shipped some other way). That PR can never be accepted, so a binding that
+        # cannot be replaced parks the card forever. Rebind only on GitHub's positive
+        # "closed, not merged" answer, and leave an audit event. [daveey]
+        assignee = conn.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()["assignee"]
+        if _kpa.pr_closed_unmerged(contract, assignee):
+            from hermes_cli.kanban_db import _append_event
+            with write_txn(conn):
+                if _snapshot(conn, task_id) != snapshot:
+                    return False
+                conn.execute("UPDATE tasks SET completion_contract=? WHERE id=?", (published_pr, task_id))
+                _append_event(conn, task_id, "pr_rebound", {"from": contract, "to": published_pr,
+                                                            "reason": "bound PR closed unmerged"}, run_id=run_id)
+            snapshot = (run_id, status, published_pr)
+            contract = published_pr
     # The assignee profile's gh login owns the repo: acceptance must not run as
     # the ambient login of whichever process completes the card (#122689).
     assignee = conn.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()["assignee"]
-    return snapshot, collect_acceptance(contract, published_pr, assignee=assignee)
+    return snapshot, _kpa.collect_acceptance(contract, published_pr, assignee=assignee)
 
 
 def record_acceptance(conn, task_id, acceptance):

@@ -995,7 +995,8 @@ def _handle_schedule(args: dict, **kw) -> str:
                "the wake), or kanban_complete so the completion judge can evaluate it.")
         ok = kb.schedule_task(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid))
-        _check(ok, f"could not schedule {tid} (unknown id or not in todo/ready/running/blocked)")
+        _check(ok, f"could not schedule {tid} (unknown id, not in todo/ready/running/blocked, or it "
+                   "waits on a human answer: needs_input/capability asks stay blocked, never scheduled)")
         return _ok_landed(kb, conn, tid, "scheduled", reason=reason)
 
 

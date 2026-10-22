@@ -200,10 +200,12 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
 
     now = int(time.time()) if now is None else int(now)
     woken: list[str] = []
-    for row in conn.execute("SELECT id FROM tasks WHERE status = 'scheduled'").fetchall():
+    for row in conn.execute("SELECT id, block_kind FROM tasks WHERE status = 'scheduled'").fetchall():
         tid = row[0]
         payload = pending_wake(conn, tid)
         if payload is None:
+            # Invariant: every scheduled card has a wake or becomes blocked. [daveey]
+            _enforce_wake_invariant(conn, tid, row[1], now, woken)
             continue
         wake_at = payload["wake_at"]
         if wake_at > now:
@@ -221,6 +223,68 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
                                  {"status": new_status, "wake_at": wake_at})
                 woken.append(tid)
     return woken
+
+
+HUMAN_BLOCK_KINDS = ("needs_input", "capability")
+
+
+def missing_wake(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """For a ``scheduled`` card with no timed wake: ``{"parked_at", "wake_at", "reason"}`` with the
+    wake implied by ``kanban_timed_park.implied_wake`` (None when the card has a real wake). [daveey]"""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_timed_park import implied_wake
+
+    marks = ",".join("?" for _ in SCHEDULED_ENTRY_EVENTS)
+    event = conn.execute(
+        f"SELECT kind, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
+        "ORDER BY id DESC LIMIT 1", (task_id, *SCHEDULED_ENTRY_EVENTS),
+    ).fetchone()
+    if event is not None and pending_wake_payload(event[0], event[1]) is not None:
+        return None
+    if event is None:
+        last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ?", (task_id,)).fetchone()
+        parked_at = int(last[0]) if last and last[0] else int(time.time())
+        payload: dict = {}
+    else:
+        parked_at, payload = int(event[2]), kb._json_dict(event[1])
+    reason = payload.get("reason") if isinstance(payload.get("reason"), str) else None
+    return {"parked_at": parked_at, "wake_at": implied_wake(payload, parked_at), "reason": reason}
+
+
+def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int, woken: list) -> bool:
+    """A scheduled card without a wake (parked by older code, or by ``kanban_schedule`` before
+    every park carried one): a human-kind card goes to ``blocked`` at once -- it waits on a
+    person, and ``scheduled`` hid it from every needs-me surface (t_6feb6afd, 2+ days) --
+    anything else wakes at its implied time. True when the card moved. [daveey]"""
+    from hermes_cli import kanban_db as kb
+
+    info = missing_wake(conn, tid)
+    if info is None:
+        return False
+    if block_kind in HUMAN_BLOCK_KINDS:
+        reason = kb._latest_block_reason(conn, tid) or info["reason"] or (
+            "Parked in scheduled with no wake while waiting on a human answer.")
+        with kb.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'blocked', current_run_id = NULL WHERE id = ? AND status = 'scheduled'",
+                (tid,))
+            if cur.rowcount == 1:
+                kb._append_event(conn, tid, "blocked", {
+                    "reason": reason, "kind": block_kind, "source_status": "scheduled",
+                    "wake_invariant": "human wait parked without a wake"})
+        return cur.rowcount == 1
+    if info["wake_at"] > now:
+        return False
+    with kb.write_txn(conn):
+        landing = kb._landing_status_after_parents(conn, tid)
+        cur = conn.execute(
+            "UPDATE tasks SET status = ?, current_run_id = NULL WHERE id = ? AND status = 'scheduled'",
+            (landing, tid))
+        if cur.rowcount == 1:
+            kb._append_event(conn, tid, CONTINUATION_WOKEN_EVENT, {
+                "status": landing, "wake_at": info["wake_at"], "implied_wake": True})
+            woken.append(tid)
+    return cur.rowcount == 1
 
 
 def render_checkpoint_context(conn: sqlite3.Connection, task_id: str) -> str:

@@ -203,11 +203,13 @@ def test_wait_handoff_wakes_on_dispatcher_tick(home, monkeypatch):
         task = kb.get_task(conn, tid)
         assert (task.status, task.consecutive_failures) == ("ready", 0)
         assert "waiting for CI run 9" in kb.build_worker_context(conn, tid)
-        # A kanban_schedule park without a SCHEDULED_UNTIL marker is never auto-woken.
+        # A kanban_schedule park without a SCHEDULED_UNTIL marker still wakes, after the
+        # default wait: no scheduled card may depend on a cron that can vanish. [daveey]
         tid2 = kb.create_task(conn, title="parked", assignee="default")
         kb.claim_task(conn, tid2)
         kb.schedule_task(conn, tid2, reason="waiting on the cron that unblocks it")
-        assert kc.wake_due_continuations(conn, now=int(time.time()) + 10 ** 7) == []
+        assert kc.wake_due_continuations(conn, now=int(time.time()) + 3600) == []
+        assert kc.wake_due_continuations(conn, now=int(time.time()) + 10 ** 7) == [tid2]
 
 
 def _park_with_wait(monkeypatch, title: str) -> tuple[str, int]:
@@ -236,15 +238,16 @@ def test_due_wake_is_not_masked_by_later_annotation(home, monkeypatch, kind):
 
 
 def test_kanban_schedule_after_wait_and_comment_still_stays_put(home, monkeypatch):
-    """Re-parked with kanban_schedule (no wake time) after a timed wait: never auto-woken,
-    even when a comment lands afterwards."""
+    """Re-parked with kanban_schedule (no marker) after a timed wait: it stays put for the
+    default wait, even when a comment lands afterwards, then wakes. [daveey]"""
+    from hermes_cli.kanban_timed_park import DEFAULT_WAKE_SECONDS
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="parked", assignee="default")
         kb.claim_task(conn, tid)
         kb.schedule_task(conn, tid, reason="waiting on the cron that unblocks it")
         kb.add_comment(conn, tid, "t_other", "FYI")
-        assert kc.pending_wake(conn, tid) is None
-        assert kc.wake_due_continuations(conn, now=int(time.time()) + 10 ** 7) == []
+        assert kc.pending_wake(conn, tid)["wake_at"] >= int(time.time()) + DEFAULT_WAKE_SECONDS - 5
+        assert kc.wake_due_continuations(conn, now=int(time.time()) + 3600) == []
         assert kb.get_task(conn, tid).status == "scheduled"
     tid2, wake_at = _park_with_wait(monkeypatch, "wait then park")
     with kbc.connect_closing() as conn:
@@ -252,7 +255,8 @@ def test_kanban_schedule_after_wait_and_comment_still_stays_put(home, monkeypatc
         kb.claim_task(conn, tid2)
         kb.schedule_task(conn, tid2, reason="until release")
         kb.add_comment(conn, tid2, "t_other", "FYI")
-        assert kc.wake_due_continuations(conn, now=wake_at + 10 ** 6) == []
+        # The old continuation wake no longer applies; only the new park's own (default) wake does.
+        assert kc.wake_due_continuations(conn, now=wake_at + 60) == []
         assert kb.get_task(conn, tid2).status == "scheduled"
 
 

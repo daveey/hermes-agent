@@ -71,6 +71,57 @@ _RESPAWN_BLOCKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ``last_failure_error`` written by the completion gates (PR acceptance, ...) starts with
+# this: the worker ran, its completion was refused, and the next run must retry or rebind.
+# It is never a worker/provider quota or auth failure, whatever words the gate detail
+# contains, so it never matches ``blocker_auth``. [daveey]
+_COMPLETION_GATE_ERROR_PREFIXES = ("PR acceptance ",)
+
+# A guard hold that never ends parks a card in ``ready`` forever with nothing on the board
+# saying so (2026-10-21: ``blocker_auth`` held t_10de9798 for hours; a held card never
+# runs, so ``consecutive_failures`` never grows and the breaker never trips). Past the cap
+# the dispatcher blocks the card with the guard reason so it shows as waiting on someone.
+# ``blocker_auth`` gets the short cap: it never clears without a human. Every other guard
+# is time-bounded by design and only hits the long cap when something is wrong.
+# ``shared_blocker`` holds are exempt: they are a declared wall another card is probing.
+# Override via ``HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS`` / ``..._LONG_SECONDS``. [daveey]
+DEFAULT_GUARD_HOLD_CAP_SECONDS = 30 * 60
+DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS = 6 * 3600
+_GUARD_HOLD_SHORT_CAP_REASONS = frozenset({"blocker_auth"})
+_GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker"})
+
+
+def _env_seconds(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, "") or default))
+    except ValueError:
+        return default
+
+
+def guard_hold_cap_seconds(reason: str) -> Optional[int]:
+    """Max seconds the respawn guard may hold a card for ``reason`` (None = no cap)."""
+    if reason in _GUARD_HOLD_EXEMPT_REASONS:
+        return None
+    if reason in _GUARD_HOLD_SHORT_CAP_REASONS:
+        return _env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS", DEFAULT_GUARD_HOLD_CAP_SECONDS)
+    return _env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_LONG_SECONDS", DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS)
+
+
+def _guard_hold_started_at(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    """When the current unbroken run of ``respawn_guarded`` events began: the first one
+    after the newest event of any other kind (a claim, a block, an unblock, a comment...)."""
+    row = conn.execute(
+        "SELECT MIN(created_at) FROM task_events WHERE task_id = ? AND kind = 'respawn_guarded' "
+        "AND id > COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ? "
+        "AND kind != 'respawn_guarded'), 0)", (task_id, task_id),
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def _is_completion_gate_error(err: str) -> bool:
+    return err.lstrip().startswith(_COMPLETION_GATE_ERROR_PREFIXES)
+
+
 # Within this window a completed run counts as "recent proof"; don't re-spawn.
 _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
 
@@ -1590,6 +1641,30 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
         )
 
 
+def _block_if_guard_hold_capped(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
+    """Block ``task_id`` when the guard has held it for ``reason`` past the cap. [daveey]"""
+    cap = guard_hold_cap_seconds(reason)
+    if cap is None:
+        return False
+    started = _guard_hold_started_at(conn, task_id)
+    if started is None:
+        return False
+    held = int(time.time()) - started
+    if held < cap:
+        return False
+    row = conn.execute("SELECT last_failure_error FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    err = _kb._first_line(_kb._lossy_text(row["last_failure_error"]) if row else "", 300) or "(no error recorded)"
+    minutes = max(1, held // 60)
+    message = (f"Held in ready by the respawn guard ({reason}) for {minutes} min without running. "
+               f"Last error: {err} Fix the cause (credentials, quota, PR binding), then unblock.")
+    kind = "capability" if reason in _GUARD_HOLD_SHORT_CAP_REASONS else "needs_input"
+    try:
+        return bool(_kb.block_task(conn, task_id, reason=message, kind=kind))
+    except Exception:
+        _kb._log.warning("kanban: auto-blocking guard-held %s failed", task_id, exc_info=True)
+        return False
+
+
 def check_respawn_guard(
     conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
 ) -> Optional[str]:
@@ -1602,7 +1677,9 @@ def check_respawn_guard(
     checked BEFORE ``blocker_auth`` because the requeue stamps a quota-flavored
     ``last_failure_error`` that would otherwise park the task forever — that
     path never increments ``consecutive_failures``), ``"blocker_auth"``
-    (quota/auth pattern; the breaker still trips eventually), then for the
+    (quota/auth pattern from a worker/provider failure, never a completion-gate
+    refusal; a held card never runs, so the breaker can NOT trip — the
+    dispatcher's hold cap, :func:`guard_hold_cap_seconds`, blocks it instead), then for the
     ready lane only ``"recent_success"`` (completed run within the window, unless
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
     (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
@@ -1656,7 +1733,8 @@ def check_respawn_guard(
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    if (err and latest_outcome != "crashed" and not _is_completion_gate_error(err)
+            and _RESPAWN_BLOCKER_RE.search(err)):
         return "blocker_auth"
 
     # 2b. Shared external blocker (``kanban_shared_blockers``): while another
@@ -2161,6 +2239,9 @@ def _dispatch_lane_task(
         # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
         # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
         if not dry_run:
+            if _block_if_guard_hold_capped(conn, task_id, guard_reason):
+                result.auto_blocked.append(task_id)
+                return False
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
         return False

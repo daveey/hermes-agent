@@ -245,4 +245,7 @@ def test_overdue_wake_ignores_kanban_schedule_parks():
     now = 1_000_000
     events = [_event("continued", ts=now - 5000, wake_at=now - 4000),
               _event("scheduled", ts=now - 3000, reason="SCHEDULED_UNTIL=2030")]
-    assert kd.compute_task_diagnostics(_task(status="scheduled"), events, [], now=now) == []
+    kinds = [d.kind for d in kd.compute_task_diagnostics(_task(status="scheduled"), events, [], now=now)]
+    assert "overdue_wake" not in kinds
+    # A park with no wake is its own signal now (the dispatcher wakes it at the implied time). [daveey]
+    assert kinds == ["scheduled_without_wake"]

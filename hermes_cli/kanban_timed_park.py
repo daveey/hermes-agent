@@ -52,11 +52,25 @@ def scheduled_until(reason: Optional[str], *, now: Optional[int] = None) -> Opti
     return max(now + MIN_WAKE_SECONDS, min(epoch, now + MAX_WAKE_SECONDS))
 
 
-def scheduled_payload(reason: Optional[str]) -> dict:
-    """``scheduled`` event payload for ``kanban_schedule``: a ``SCHEDULED_UNTIL=`` marker is a
-    real timer (``wake_due_continuations``); without one the card waits for a cron/human."""
-    wake_at = scheduled_until(reason)
-    return {"reason": reason, "wake_at": wake_at} if wake_at else {"reason": reason}
+def scheduled_payload(reason: Optional[str], *, now: Optional[int] = None) -> dict:
+    """``scheduled`` event payload for ``kanban_schedule``. Every scheduled card carries a wake:
+    a ``SCHEDULED_UNTIL=`` marker sets it, otherwise ``DEFAULT_WAKE_SECONDS``. A park without
+    one waited on a cron/human that may never come (a deleted cron left t_2ba76784 parked for
+    days); a cron or ``unblock`` still wakes the card earlier. [daveey]"""
+    now = int(time.time()) if now is None else int(now)
+    wake_at = scheduled_until(reason, now=now) or now + DEFAULT_WAKE_SECONDS
+    return {"reason": reason, "wake_at": wake_at}
+
+
+def implied_wake(payload: dict, event_at: int) -> int:
+    """Wake time for a parking event written before every park carried ``wake_at``: the
+    ``SCHEDULED_UNTIL=`` marker in its reason, else ``DEFAULT_WAKE_SECONDS`` after the park.
+    The marker is clamped against the park time, so an overdue legacy wake is due now. [daveey]"""
+    wake = payload.get("wake_at")
+    if isinstance(wake, (int, float)):
+        return int(wake)
+    reason = payload.get("reason")
+    return scheduled_until(reason if isinstance(reason, str) else None, now=event_at) or event_at + DEFAULT_WAKE_SECONDS
 
 
 def is_timed_park(kind: Optional[str], reason: Optional[str], *, parents_satisfied: bool) -> bool:

@@ -1195,6 +1195,8 @@ def _cmd_stats(args: argparse.Namespace) -> int:
         print("\nBy assignee:")
         for who, counts in sorted(stats["by_assignee"].items()):
             print(f"  {who:20s}  {_fmt_counts(counts)}")
+    if stats.get("waiting_on_user"):
+        print(f"\nWaiting on you: {stats['waiting_on_user']} ({', '.join(stats['waiting_on_user_ids'][:10])})")
     age = stats["oldest_ready_age_seconds"]
     if age is not None:
         print(f"\nOldest ready task age: {int(age)}s")

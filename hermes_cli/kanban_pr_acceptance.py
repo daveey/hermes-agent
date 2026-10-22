@@ -110,8 +110,11 @@ def collect_acceptance(contract: str, published_pr: str | None,
                "pr_url": published_pr, "checks": [],
                "recovery": "Fix required failures, rerun infrastructure checks or wait, then retry completion. "
                            "Use kanban_block if human input is needed; receipts remain on the task event log."}
+    # Named in the catch-all detail so a failure says WHICH read broke, not "check gh auth". [daveey]
+    phase = "resolving the assignee profile"
     try:
         profile_home = _assignee_profile_home(assignee)
+        phase = "matching the published PR to the contract"
         declared = _PR.fullmatch(contract)
         url = contract if declared else published_pr
         match = _PR.fullmatch(url or "")
@@ -121,6 +124,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
         owner, name = repo.split("/")
+        phase = "reading the PR"
         query = f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)}){{pullRequest(number:{number:d}){{headRefOid baseRefName state\n            baseRef{{branchProtectionRule{{requiredStatusChecks{{context app{{databaseId}}}}}}}}}}}}}}'
         repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
         if repository is None:
@@ -129,10 +133,19 @@ def collect_acceptance(contract: str, published_pr: str | None,
         pr = repository["pullRequest"]
         sha, branch = pr["headRefOid"], pr["baseRefName"]
         receipt["head_sha"] = sha
+        if pr["state"] == "CLOSED":
+            # Closed without merging (e.g. the code landed by a direct push): this PR can never
+            # be accepted. Name it, and the way out: a new PR rebinds the contract. [daveey]
+            receipt.update(classification="closed_unmerged",
+                           detail=f"Bound PR {url} was closed without merging; it can never pass acceptance. "
+                                  "Open (or find) the PR that carries the change and complete with "
+                                  "metadata.published_pr=<that PR URL>; a closed-unmerged binding is replaced.")
+            return receipt
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
-            raise ValueError("PR is closed or current head is unavailable")
+            raise ValueError("PR head is unavailable")
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
         required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
+        phase = "reading branch rules"
         rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
                      paginate=True, profile_home=profile_home)
         for page in rules:
@@ -144,11 +157,13 @@ def collect_acceptance(contract: str, published_pr: str | None,
         if not required:
             receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
             return receipt
+        phase = "reading check runs"
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
                      paginate=True, profile_home=profile_home)
         runs = [run for page in pages for run in page["check_runs"]]
         if len({r["id"] for r in runs}) != pages[0]["total_count"]:
             raise ValueError("Incomplete check-run pagination")
+        phase = "reading commit statuses"
         statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                        paginate=True, profile_home=profile_home) for s in page]
         outcomes = []
@@ -171,6 +186,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
                     "head_sha": check.get("head_sha", check.get("sha")),
                     "classification": classification, "conclusion": outcome})
         # Re-read after all pages: old-head successes are never transferable.
+        phase = "re-reading the PR head"
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
         if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
@@ -184,10 +200,31 @@ def collect_acceptance(contract: str, published_pr: str | None,
                        detail=f"GitHub refused the acceptance read ({exc}) as {login}; "
                               "fix that profile's GitHub credentials/access to the repository, then retry completion.")
         return receipt
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError) as exc:
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.
-        receipt.update(classification="infra", detail="GitHub acceptance evidence unavailable or incomplete; check gh authentication/API access and retry.")
+        # Auth refusals are ``_GateAuthError`` above, so this text must not blame gh auth:
+        # the respawn guard used to read "authentication" here as a provider auth wall. [daveey]
+        receipt.update(classification="infra",
+                       detail=f"GitHub acceptance evidence unavailable or incomplete while {phase} "
+                              f"({type(exc).__name__}); retry completion.")
         return receipt
+
+
+def pr_closed_unmerged(url: str, assignee: str | None = None) -> bool:
+    """True only when GitHub positively reports PR ``url`` as closed and not merged.
+    Any error, or an open/merged PR, is False: a binding is replaced only on proof. [daveey]"""
+    match = _PR.fullmatch(url or "")
+    if not match:
+        return False
+    owner, name = match[1].split("/")
+    query = (f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)})'
+             f'{{pullRequest(number:{int(match[2]):d}){{state}}}}}}')
+    try:
+        profile_home = _assignee_profile_home(assignee)
+        repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
+        return bool(repository) and repository["pullRequest"]["state"] == "CLOSED"
+    except Exception:
+        return False
 
 
 def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:

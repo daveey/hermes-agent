@@ -88,10 +88,12 @@ def test_kanban_schedule_marker_becomes_a_real_timer(kanban_home: Path) -> None:
         assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2000-01-01T00:00:00Z")
         due = _last(conn, tid, "scheduled")["wake_at"]
         assert kc.wake_due_continuations(conn, now=due) == [tid]
-        # No marker -> no timer (left for a cron/human, as before).
+        # No marker -> the default wait, never "forever" (a deleted cron stranded cards). [daveey]
         tid2 = _running(conn)
         assert kb.schedule_task(conn, tid2, reason="waiting on Rose")
-        assert kc.wake_due_continuations(conn, now=int(time.time()) + 10**7) == []
+        assert _last(conn, tid2, "scheduled")["wake_at"] >= int(time.time()) + ktp.DEFAULT_WAKE_SECONDS - 5
+        assert kc.wake_due_continuations(conn, now=int(time.time()) + 3600) == []
+        assert kc.wake_due_continuations(conn, now=int(time.time()) + 10**7) == [tid2]
 
 
 def test_needs_input_without_marker_still_blocks_for_a_human(kanban_home: Path) -> None:

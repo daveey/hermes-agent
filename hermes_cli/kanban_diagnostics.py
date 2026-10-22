@@ -775,6 +775,109 @@ def _rule_overdue_wake(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _latest_parking_event(events):
+    from hermes_cli import kanban_continuation as kc
+
+    parking = None
+    for idx, ev in enumerate(events or []):
+        if _event_kind(ev) not in kc.SCHEDULED_ENTRY_EVENTS:
+            continue
+        key = (_event_ts(ev), int(_task_field(ev, "id", default=0) or 0), idx)
+        if parking is None or key >= parking[0]:
+            parking = (key, ev)
+    return parking[1] if parking else None
+
+
+def _rule_scheduled_without_wake(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """A ``scheduled`` card whose parking event carries no ``wake_at``: nothing on the board
+    will ever wake it (parked by older code, or its waking cron was deleted). The dispatcher
+    wakes it at the implied time (``kanban_timed_park.implied_wake``) or blocks a human-kind
+    one; this makes the gap visible meanwhile. [daveey]"""
+    from hermes_cli import kanban_continuation as kc
+    from hermes_cli.kanban_timed_park import implied_wake
+
+    if _task_field(task, "status") != "scheduled":
+        return []
+    ev = _latest_parking_event(events)
+    payload = _parse_payload(ev) if ev is not None else {}
+    if ev is not None and kc.pending_wake_payload(_event_kind(ev), payload) is not None:
+        return []
+    parked_at = _event_ts(ev) if ev is not None else int(_task_field(task, "created_at", default=now) or now)
+    wake_at = implied_wake(payload, parked_at)
+    human = _task_field(task, "block_kind") in kc.HUMAN_BLOCK_KINDS
+    return [Diagnostic(
+        kind="scheduled_without_wake", severity="error" if human or wake_at <= now else "warning",
+        title="Scheduled with no wake time",
+        detail=("This card is parked in scheduled but its park recorded no wake time, so only a cron "
+                "or a human would ever resume it. "
+                + ("It waits on a human answer; the dispatcher moves it to blocked."
+                   if human else "The dispatcher wakes it at the implied time.")),
+        actions=[DiagnosticAction(kind="unblock", label="Resume the task now", suggested=True)],
+        first_seen_at=parked_at, last_seen_at=parked_at, count=1,
+        data={"parked_at": parked_at, "implied_wake_at": wake_at},
+    )]
+
+
+def _block_loop_ask(events) -> Optional[str]:
+    """Reason of the newest ``block_loop_detected`` event with no human input after it."""
+    latest = None
+    for ev in events or []:
+        kind = _event_kind(ev)
+        if kind == "block_loop_detected":
+            latest = ev
+        elif latest is not None and kind in ("commented", "edited", "status", "unblocked", "promoted"):
+            latest = None
+    if latest is None:
+        return None
+    return str(_parse_payload(latest).get("reason") or "").strip() or "(no reason recorded)"
+
+
+def _rule_escalated_waiting_on_user(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Block-loop detection moved a repeatedly re-blocked card to ``triage``. It keeps its human
+    ``block_kind`` and waits on the user exactly like ``blocked`` -- surface it as such. [daveey]"""
+    from hermes_cli import kanban_continuation as kc
+
+    if _task_field(task, "status") != "triage" or _task_field(task, "block_kind") not in kc.HUMAN_BLOCK_KINDS:
+        return []
+    ask = _block_loop_ask(events)
+    if ask is None:
+        return []
+    ts = _latest_event_ts(events, {"block_loop_detected"}) or now
+    task_id = str(_task_field(task, "id") or "")
+    return [Diagnostic(
+        kind="escalated_waiting_on_user", severity="error",
+        title="Waiting on you (block-loop escalation)",
+        detail=f"The worker re-blocked on the same ask repeatedly, so the card was escalated to triage: {ask}",
+        actions=[_cli_hint("Answer, then return it to work", f"hermes kanban promote {task_id}", suggested=True)],
+        first_seen_at=ts, last_seen_at=ts, count=1, data={"ask": ask},
+    )]
+
+
+def _rule_waiting_behind_user(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """A ``todo`` card gated on a parent that waits on the user (human-kind ``blocked``, or a
+    block-loop escalation in ``triage``): it looks queued but cannot move until the user acts. [daveey]"""
+    from hermes_cli import kanban_continuation as kc
+
+    if _task_field(task, "status") != "todo":
+        return []
+    graph = cfg.get("_graph")
+    if not isinstance(graph, dict):
+        return []
+    waiting = [p for p in (graph.get("parents") or []) if isinstance(p, dict) and (
+        (p.get("status") == "blocked" and p.get("block_kind") in (None, *kc.HUMAN_BLOCK_KINDS))
+        or (p.get("status") == "triage" and p.get("block_kind") in kc.HUMAN_BLOCK_KINDS))]
+    if not waiting:
+        return []
+    ids = [str(p.get("id")) for p in waiting]
+    return [Diagnostic(
+        kind="waiting_behind_user", severity="warning",
+        title=f"Waiting behind {len(ids)} parent(s) that need you",
+        detail="This card cannot start until these parents get a human answer: " + ", ".join(ids),
+        actions=[_cli_hint("Show the blocking parent", f"hermes kanban show {ids[0]}", suggested=True)],
+        first_seen_at=now, last_seen_at=now, count=len(ids), data={"waiting_on": ids},
+    )]
+
+
 # Order matters: earlier rules render first on severity ties.
 _RULES: list[RuleFn] = [
     _rule_hallucinated_cards,
@@ -788,6 +891,9 @@ _RULES: list[RuleFn] = [
     _rule_block_unblock_cycling,
     _rule_stranded_in_ready,
     _rule_overdue_wake,
+    _rule_scheduled_without_wake,
+    _rule_escalated_waiting_on_user,
+    _rule_waiting_behind_user,
 ]
 
 

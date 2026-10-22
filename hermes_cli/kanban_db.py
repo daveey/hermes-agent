@@ -1689,12 +1689,13 @@ def task_graph_contexts(conn: sqlite3.Connection, task_ids: Iterable[str]) -> di
     placeholders = ",".join("?" for _ in ordered_ids)
     for bucket, own, other in (("parents", "child_id", "parent_id"), ("children", "parent_id", "child_id")):
         for row in conn.execute(
-            f"SELECT l.{own} AS owner_id, t.id, t.title, t.status "
+            f"SELECT l.{own} AS owner_id, t.id, t.title, t.status, t.block_kind "
             f"FROM task_links l JOIN tasks t ON t.id = l.{other} "
             f"WHERE l.{own} IN ({placeholders}) ORDER BY l.{own}, t.id", tuple(ordered_ids),
         ).fetchall():
             contexts[row["owner_id"]][bucket].append(
-                {"id": row["id"], "title": row["title"], "status": row["status"]}
+                {"id": row["id"], "title": row["title"], "status": row["status"],
+                 "block_kind": row["block_kind"]}
             )
     return contexts
 
@@ -4034,9 +4035,13 @@ def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Park in ``scheduled`` (waiting on time, not a human; not dispatchable)
-    until ``unblock_task`` re-gates it."""
+    """Park in ``scheduled`` (waiting on time, not a human; not dispatchable) until its wake
+    (``SCHEDULED_UNTIL=`` in the reason, else ``kanban_timed_park.DEFAULT_WAKE_SECONDS``) or an
+    ``unblock_task``. Refused (False) while the card waits on a human answer: ``scheduled`` is
+    not on any needs-me surface, so such a park hid the ask (t_6feb6afd). [daveey]"""
     with write_txn(conn):
+        if _awaiting_human_answer(conn, task_id):
+            return False
         params: list[Any] = [task_id]
         sql = """
             UPDATE tasks
@@ -4058,6 +4063,24 @@ def schedule_task(
         from hermes_cli.kanban_timed_park import scheduled_payload  # SCHEDULED_UNTIL= wakes it [daveey]
         _append_event(conn, task_id, "scheduled", scheduled_payload(reason), run_id=run_id)
         return True
+
+
+def _awaiting_human_answer(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when the card's outstanding ask is for a human: a human-kind ``block_kind``
+    (``needs_input``/``capability``) whose latest ``blocked``/``block_loop_detected`` event
+    has had no ``unblocked`` and no new run (``claimed``) since. [daveey]"""
+    row = conn.execute("SELECT status, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or _row_get(row, "block_kind") not in ("needs_input", "capability"):
+        return False
+    ask = conn.execute(
+        "SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind IN ('blocked', 'block_loop_detected')",
+        (task_id,)).fetchone()[0]
+    if ask is None:
+        return row["status"] == "blocked"
+    answered = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND id > ? AND kind IN ('unblocked', 'claimed') LIMIT 1",
+        (task_id, ask)).fetchone()
+    return answered is None
 
 
 # --- Worker context builder (what a spawned worker sees) ---
@@ -4309,10 +4332,19 @@ def board_stats(conn: sqlite3.Connection) -> dict:
         if oldest_row and oldest_row["ts"] is not None else None
     )
 
+    # Waiting on the user: human-kind ``blocked`` plus block-loop escalations in ``triage``
+    # (they keep their human ``block_kind``). A plain triage card awaiting a specifier is not. [daveey]
+    waiting_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM tasks WHERE (status = 'blocked' AND (block_kind IS NULL OR block_kind IN "
+        "('needs_input', 'capability'))) OR (status = 'triage' AND block_kind IN ('needs_input', 'capability')) "
+        "ORDER BY id")]
+
     return {
         "by_status": by_status,
         "by_assignee": by_assignee,
         "oldest_ready_age_seconds": oldest_ready_age,
+        "waiting_on_user": len(waiting_ids),
+        "waiting_on_user_ids": waiting_ids,
         "now": now,
     }
 

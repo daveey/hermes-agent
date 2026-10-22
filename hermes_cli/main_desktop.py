@@ -434,6 +434,10 @@ def _relaunch_stopped_desktops(desktop_dir: Path, launches: list[list[str]]) -> 
         return []
     opened: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
+    # ``open`` hands this process's env to the app: from a worker's ``hermes update`` that made
+    # the Desktop a kanban "delegate child" (pid 59331, 2026-10-21). [daveey]
+    from hermes_cli.top_level_env import clean_launch_env
+    launch_env = clean_launch_env()
     for args in launches:
         if tuple(args) in seen:  # the single-instance lock would only focus a duplicate
             continue
@@ -445,7 +449,8 @@ def _relaunch_stopped_desktops(desktop_dir: Path, launches: list[list[str]]) -> 
             cmd = [str(exe), *args]
         try:
             subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
+                             env=launch_env)
         except OSError as exc:
             logger.warning("could not reopen the desktop app after the rebuild: %s", exc)
             continue
