@@ -45,7 +45,8 @@ def test_compute_host_line_json_hello_and_shutdown():
     assert proc.stdin is not None
     out = _stdout_queue(proc)
     try:
-        hello = _read_json_line(out)
+        # Cold import of tui_gateway.server on a loaded runner exceeds 2s.
+        hello = _read_json_line(out, timeout=30.0)
         assert hello["type"] == "hello"
         assert hello["host_pid"] == proc.pid
 

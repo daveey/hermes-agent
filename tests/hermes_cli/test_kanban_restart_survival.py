@@ -83,7 +83,9 @@ while True: time.sleep(1)
     pid = None
     try:
         wait_for(lambda: (tmp_path / 'parent-ready').exists())
-        wait_for(lambda: (tmp_path / 'worker-ready').exists())
+        # write_text truncates before it writes; wait for the pid, not the file.
+        wait_for(lambda: (tmp_path / 'worker-ready').exists()
+                 and (tmp_path / 'worker-ready').read_text().strip().isdigit())
         pid = int((tmp_path / 'worker-ready').read_text())
         assert os.getpgid(pid) != os.getpgid(parent.pid)
         with kbc.connect_closing(board) as conn:
