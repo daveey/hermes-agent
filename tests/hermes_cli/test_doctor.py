@@ -318,6 +318,8 @@ def test_doctor_reports_vercel_backend_diagnostics(monkeypatch, tmp_path):
     monkeypatch.delenv("VERCEL_PROJECT_ID", raising=False)
     monkeypatch.setenv("VERCEL_TEAM_ID", "team")
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: object() if name == "vercel" else None)
+    # Inside a container (e.g. a containerized CI runner) doctor forces the local backend and skips this check.
+    monkeypatch.setattr("hermes_constants.is_container", lambda: False)
 
     fake_model_tools = types.SimpleNamespace(
         check_tool_availability=lambda *a, **kw: ([], []),
@@ -1094,6 +1096,8 @@ class TestGitHubTokenCheck:
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"Logged in to github.com")
 
         monkeypatch.setattr(subprocess, "run", gh_2_98)
+        # Don't depend on a real gh being on PATH (absent on CI runners).
+        monkeypatch.setattr("hermes_cli.doctor_tools._safe_which", lambda cmd: f"/usr/bin/{cmd}")
         assert doctor_state._gh_authenticated() is True
 
 
