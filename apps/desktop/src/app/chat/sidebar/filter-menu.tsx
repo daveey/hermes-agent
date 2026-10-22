@@ -45,6 +45,7 @@ import {
   $sidebarRowMeta,
   $sidebarShowAllSessions,
   $sidebarShowArchived,
+  $sidebarShowAutomated,
   $sidebarStatusFilter,
   $sidebarViewCustomized,
   $sidebarWorkspaceNodeOpen,
@@ -54,6 +55,7 @@ import {
   setSidebarOrdering,
   setSidebarShowAllSessions,
   setSidebarShowArchived,
+  setSidebarShowAutomated,
   setWorkspaceNodesOpen,
   SIDEBAR_GROUPING_ORDER,
   type SidebarGrouping,
@@ -266,6 +268,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
   const narrowsByProfile = showAllProfiles && profileNames.length > 1
   const prFilter = useStore($sidebarPrFilter)
   const showArchived = useStore($sidebarShowArchived)
+  const showAutomated = useStore($sidebarShowAutomated)
   const filtersActive = useStore($sidebarFiltersActive)
   const viewCustomized = useStore($sidebarViewCustomized)
   const nodeOpen = useStore($sidebarWorkspaceNodeOpen)
@@ -527,6 +530,14 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
             checked={showArchived}
             onCheck={() => setSidebarShowArchived(!showArchived)}
             option={{ id: 'archived', label: f.archived }}
+          />
+
+          {/* [daveey] Bot / smoke-test rows (`automated`, per the owning
+              profile's sessions.automated_sources) stay hidden unless on. */}
+          <OptionCheckbox
+            checked={showAutomated}
+            onCheck={() => setSidebarShowAutomated(!showAutomated)}
+            option={{ id: 'automated', label: f.automated }}
           />
 
           {/* One way back rather than two near-identical ones: this drops the

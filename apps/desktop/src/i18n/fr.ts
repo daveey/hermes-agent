@@ -3688,6 +3688,7 @@ export const frOverrides = {
       profile: 'Profil',
       project: 'Projet',
       archived: 'Archivées',
+      automated: 'Afficher les sessions automatisées et de test',
       resetToDefaults: 'Rétablir les valeurs par défaut',
       expandAll: 'Tout déplier',
       collapseAll: 'Tout replier',

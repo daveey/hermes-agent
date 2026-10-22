@@ -142,6 +142,50 @@ class TestSidebarScope:
         assert {row["profile"] for row in payload["messaging"]["sessions"]} == {"default", "worker"}
 
 
+class TestAutomatedSessions:
+    """[daveey] ``sessions.automated_sources`` stamps ``automated`` per profile on every sidebar
+    payload (recents/messaging slices, the unified list, the project tree); unset = all False."""
+
+    @pytest.fixture
+    def seeded(self, profiles_on_disk):
+        (profiles_on_disk["worker"] / "config.yaml").write_text(
+            "sessions:\n  automated_sources: ['*']\n", encoding="utf-8")
+        _seed_session(profiles_on_disk["worker"], "worker-chat", source="cli")
+        _seed_session(profiles_on_disk["worker"], "worker-slack", source="slack")
+        _seed_session(profiles_on_disk["default"], "default-chat", source="cli")
+        return profiles_on_disk
+
+    def test_sidebar_slices_flag_only_the_flagged_profile(self, client, seeded):
+        payload = client.get(
+            "/api/profiles/sessions/sidebar",
+            params={"recents_profile": "all", "recents_exclude": "slack", "messaging_exclude": "cli,cron"},
+        ).json()
+        recents = {r["id"]: r["automated"] for r in payload["recents"]["sessions"]}
+        messaging = {r["id"]: r["automated"] for r in payload["messaging"]["sessions"]}
+        assert recents == {"worker-chat": True, "default-chat": False}
+        assert messaging == {"worker-slack": True}
+
+    def test_unified_list_flags_rows(self, client, seeded):
+        rows = client.get("/api/profiles/sessions", params={"limit": 50}).json()["sessions"]
+        assert {r["id"]: r["automated"] for r in rows} == {
+            "worker-chat": True, "worker-slack": True, "default-chat": False}
+
+    def test_listed_source_only(self, client, profiles_on_disk):
+        (profiles_on_disk["worker"] / "config.yaml").write_text(
+            "sessions:\n  automated_sources: [slack]\n", encoding="utf-8")
+        _seed_session(profiles_on_disk["worker"], "worker-chat", source="cli")
+        _seed_session(profiles_on_disk["worker"], "worker-slack", source="slack")
+        rows = client.get("/api/profiles/sessions", params={"limit": 50}).json()["sessions"]
+        assert {r["id"]: r["automated"] for r in rows} == {"worker-chat": False, "worker-slack": True}
+
+    def test_project_tree_rows_flagged_per_profile(self, client, seeded):
+        payload = client.get("/api/profiles/projects/tree", params={"preview_limit": 50}).json()
+        assert payload["errors"] == []
+        rows = {s["id"]: s["automated"] for p in payload["projects"] for s in p.get("previewSessions") or []}
+        assert rows["worker-chat"] is True
+        assert rows["default-chat"] is False
+
+
 class TestCrossProfileProjectTree:
 
     def test_profile_sidebar_exclude_sources_hides_its_machine_sessions(self, client, profiles_on_disk):

@@ -1,6 +1,7 @@
-import { $sessions } from '@/store/session'
+import { $messagingSessions, $sessions } from '@/store/session'
 import { isSessionBlocked } from '@/store/session-blocked'
 import { $sessionDotStateById, sessionStatusStripe } from '@/store/session-dot-state'
+import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
 
 // The sidebar's session order as the user sees it, for ⌘] / ⌘[ stepping.
 // Each rendered SessionsSection (pinned, recents, …) publishes the ids of its
@@ -58,6 +59,16 @@ function domOrder(a: SectionEntry, b: SectionEntry): number {
   return a.anchor.compareDocumentPosition(b.anchor) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
 }
 
+/** [daveey] Whether the sidebar keeps this id out as automated / test traffic
+ *  (store/sidebar-automated.ts — the predicate the list renderer filters by).
+ *  A virtualized section's row model and the recency fallback are not
+ *  DOM-filtered, so stepping must apply it itself. */
+function hiddenAsAutomated(id: string): boolean {
+  const row = $sessions.get().find(s => s.id === id) ?? $messagingSessions.get().find(s => s.id === id)
+
+  return row ? sessionHiddenAsAutomated(row) : false
+}
+
 /** Visible sidebar session ids, top to bottom (deduped). Falls back to the
  *  recency list when no section is mounted (sidebar hidden, project view). */
 export function sidebarSessionOrder(): string[] {
@@ -69,12 +80,20 @@ export function sidebarSessionOrder(): string[] {
     for (const id of sectionIds(entry)) {
       if (!seen.has(id)) {
         seen.add(id)
-        ids.push(id)
+
+        if (!hiddenAsAutomated(id)) {
+          ids.push(id)
+        }
       }
     }
   }
 
-  return ids.length ? ids : $sessions.get().map(session => session.id)
+  return ids.length
+    ? ids
+    : $sessions
+        .get()
+        .filter(session => !sessionHiddenAsAutomated(session))
+        .map(session => session.id)
 }
 
 /** Whether a sidebar row shows a coloured status stripe — green (finished,

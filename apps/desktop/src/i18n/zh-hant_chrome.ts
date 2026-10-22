@@ -53,6 +53,7 @@ export const zhHantChrome = {
       profile: '設定檔',
       project: '專案',
       archived: '已封存',
+      automated: '顯示自動化與測試工作階段',
       resetToDefaults: '重設為預設值',
       expandAll: '全部展開',
       collapseAll: '全部收合',

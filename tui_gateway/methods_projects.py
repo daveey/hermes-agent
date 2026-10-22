@@ -328,9 +328,19 @@ def _project_tree_excluded_sources() -> list[str]:
     return _PROJECT_TREE_EXCLUDED_SOURCES + [s for s in extra if s not in _PROJECT_TREE_EXCLUDED_SOURCES]
 
 
-def _project_tree_row(r: dict) -> dict:
+def _project_tree_automated_sources() -> list[str]:
+    """This store's ``sessions.automated_sources`` [daveey], read under the caller's home scope
+    like ``_project_tree_excluded_sources`` (the all-profiles tree applies each profile's own)."""
+    from hermes_cli.session_listing import automated_session_sources
+    from hermes_constants import get_hermes_home
+    return automated_session_sources(get_hermes_home())
+
+
+def _project_tree_row(r: dict, automated_sources: list[str] | None = None) -> dict:
     """Project a SessionDB row to the minimal shape the sidebar renders (grouping fields +
-    what ``SidebarSessionRow`` reads), minus the heavy columns."""
+    what ``SidebarSessionRow`` reads), minus the heavy columns. ``automated`` [daveey] marks
+    bot/test traffic per ``sessions.automated_sources`` (the sidebar hides it by default)."""
+    from hermes_cli.session_listing import is_automated_source
     row = {k: r.get(k) for k in (
         "id", "_lineage_root_id", "_lineage_ids", "parent_session_id",
         "_reset_from", "_branched_from", "title", "preview")}
@@ -341,7 +351,8 @@ def _project_tree_row(r: dict) -> dict:
         **{k: r.get(k) or 0 for k in (
             "message_count", "tool_call_count", "input_tokens", "output_tokens")},
         **{k: r.get(k) for k in ("actual_cost_usd", "estimated_cost_usd", "model")},
-        is_active=False, **{k: r.get(k) for k in ("cwd", "git_branch", "git_repo_root")})
+        is_active=False, **{k: r.get(k) for k in ("cwd", "git_branch", "git_repo_root")},
+        automated=is_automated_source(r.get("source"), automated_sources or []))
     return row
 
 
@@ -376,7 +387,8 @@ def _project_tree_inputs(
         limit=session_limit, offset=0, order_by_last_active=True, min_message_count=1,
         include_children=False, exclude_sources=_project_tree_excluded_sources(),
         include_archived=False, compact_rows=True)
-    sessions = _annotate_tree_activity([_project_tree_row(r) for r in rows])
+    automated = _project_tree_automated_sources()
+    sessions = _annotate_tree_activity([_project_tree_row(r, automated) for r in rows])
     # Parallel-warm the git cache so build_tree's resolver doesn't cold-probe each cwd in turn.
     git_probe.warm_roots(s["cwd"] for s in sessions if s.get("cwd"))
     from hermes_cli import projects_db as pdb

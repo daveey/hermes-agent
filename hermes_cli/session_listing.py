@@ -54,6 +54,55 @@ def sidebar_excluded_sources(hermes_home: str | Path) -> list[str]:
     return [str(s).strip() for s in raw if str(s).strip()]
 
 
+AUTOMATED_ALL_SOURCES = "*"
+
+
+def automated_session_sources(hermes_home: str | Path) -> list[str]:
+    """``sessions.automated_sources`` from *hermes_home*'s own config.yaml [daveey]: session sources
+    this profile marks ``automated`` (bot / smoke-test traffic the desktop sidebar hides unless
+    "Show automated & test sessions" is on). ``"*"`` marks every session in the store. Like
+    ``sidebar_exclude_sources`` the store's home decides, never the process ``HERMES_HOME``.
+    ``[]`` when unset or unreadable."""
+    from hermes_cli.config import load_config_readonly
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(hermes_home))
+    try:
+        sessions_cfg = load_config_readonly().get("sessions") or {}
+    except Exception:
+        return []
+    finally:
+        reset_hermes_home_override(token)
+    raw = sessions_cfg.get("automated_sources") if isinstance(sessions_cfg, dict) else None
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(s).strip().lower() for s in raw if str(s).strip()]
+
+
+def is_automated_source(source: Any, automated_sources: list[str]) -> bool:
+    """Whether a row with *source* is automated under *automated_sources* (``"*"`` = all)."""
+    if not automated_sources:
+        return False
+    if AUTOMATED_ALL_SOURCES in automated_sources:
+        return True
+    return str(source or "").strip().lower() in automated_sources
+
+
+def stamp_automated(
+    rows: list[dict[str, Any]], hermes_home: str | Path | None = None, *,
+    automated_sources: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Set ``automated: bool`` on every row from its store's ``sessions.automated_sources``
+    (read from *hermes_home* unless *automated_sources* is given). Returns *rows*."""
+    if automated_sources is None:
+        automated_sources = automated_session_sources(hermes_home) if hermes_home is not None else []
+    for row in rows:
+        row["automated"] = is_automated_source(row.get("source"), automated_sources)
+    return rows
+
+
 def subagent_listing_scope(
     hermes_home: str | Path, *, source: str | None = None, sources: list[str] | None = None,
     exclude_sources: list[str] | None = None,

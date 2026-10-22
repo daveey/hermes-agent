@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 
-from hermes_cli.session_listing import subagent_listing_scope
+from hermes_cli.session_listing import stamp_automated, subagent_listing_scope
 from hermes_cli.web_deps import late
 from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
 from hermes_cli.cron_session_activity import annotate_cron_activity
@@ -246,6 +246,7 @@ def get_sessions(
                 # SQLite stores the flags as 0/1; expose real JSON booleans.
                 s["archived"] = bool(s.get("archived"))
                 s["pinned"] = bool(s.get("pinned"))
+            stamp_automated(sessions, Path(db.db_path).parent)
             if not full:
                 _strip_session_list_rows(sessions)
             annotate_kanban_activity(sessions)

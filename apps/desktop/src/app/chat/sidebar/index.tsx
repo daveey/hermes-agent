@@ -58,6 +58,7 @@ import {
   $sidebarSessionOrderManual,
   $sidebarShowAllSessions,
   $sidebarShowArchived,
+  $sidebarShowAutomated,
   $sidebarStatusFilter,
   $sidebarWorkspaceOrderIds,
   $sidebarWorkspaceParentOrderIds,
@@ -137,6 +138,7 @@ import { $workingSessionIds } from '@/store/session-states'
 import { ackAllSessionsRead } from '@/store/session-unread'
 import { markSessionUnread } from '@/store/session-unread-remote'
 import { $archivedSessions, loadArchivedSessions } from '@/store/sidebar-archive'
+import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
 import { applySidebarNavPrefs, SIDEBAR_NAV_PREFS_AREA } from '@/store/sidebar-nav'
 import { $sidebarSessionRankIds } from '@/store/sidebar-sort'
 
@@ -469,6 +471,7 @@ export function ChatSidebar({
   const pullRequests = useStore($pullRequestsByBranch)
   const filtersActive = useStore($sidebarFiltersActive)
   const showArchived = useStore($sidebarShowArchived)
+  const showAutomated = useStore($sidebarShowAutomated)
   const cardRows = useStore($sidebarCardRows)
   const archivedSessions = useStore($archivedSessions)
   const dotStates = useStore($sessionDotStateById)
@@ -649,6 +652,17 @@ export function ChatSidebar({
         return false
       }
 
+      // [daveey] Bot / test rows leave every list and lane unless shown (pinned
+      // and blocked / needs-input rows stay). Same predicate ⌘] / ⌘[ use.
+      if (
+        sessionHiddenAsAutomated(session, showAutomated, {
+          dotState: dotStates[session.id] ?? 'idle',
+          pinnedIds: pinnedSessionIds
+        })
+      ) {
+        return false
+      }
+
       if (statusFilter.length && !statusFilter.includes(sessionStatusBucket(dotStates[session.id]))) {
         return false
       }
@@ -675,6 +689,8 @@ export function ChatSidebar({
     [
       hiddenGatewayIds,
       gatewayRegistry,
+      showAutomated,
+      pinnedSessionIds,
       statusFilter,
       projectFilter,
       profileFilter,
@@ -689,6 +705,7 @@ export function ChatSidebar({
 
   const filtersNarrow =
     hiddenGatewayIds.length > 0 ||
+    !showAutomated ||
     statusFilter.length > 0 ||
     projectFilter.length > 0 ||
     prFilter.length > 0 ||
@@ -716,9 +733,18 @@ export function ChatSidebar({
     [cronSessions, profileScope]
   )
 
+  // [daveey] A bot profile's platform threads (Slack followers…) are
+  // automated too: same predicate as recents and the project lanes.
   const visibleMessagingSessions = useMemo(
-    () => filterSessionsByProfileScope(messagingSessions, profileScope),
-    [messagingSessions, profileScope]
+    () =>
+      filterSessionsByProfileScope(messagingSessions, profileScope).filter(
+        session =>
+          !sessionHiddenAsAutomated(session, showAutomated, {
+            dotState: dotStates[session.id] ?? 'idle',
+            pinnedIds: pinnedSessionIds
+          })
+      ),
+    [messagingSessions, profileScope, showAutomated, dotStates, pinnedSessionIds]
   )
 
   // Index sessions by every id a pin might be stored under — recents, cron,

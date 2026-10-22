@@ -4247,6 +4247,7 @@
     "sidebar.dateDivider.yesterday",
     "sidebar.files",
     "sidebar.filter.archived",
+    "sidebar.filter.automated",
     "sidebar.filter.closed",
     "sidebar.filter.collapseAll",
     "sidebar.filter.cost",

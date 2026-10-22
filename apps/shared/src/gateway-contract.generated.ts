@@ -2596,6 +2596,7 @@ export interface ProjectTreeSession {
   _lineage_ids?: string[] | null
   continuation_kind?: string | null
   profile?: string | null
+  automated?: boolean
   [key: string]: unknown
 }
 export interface ProjectsProjectSessionsParams {

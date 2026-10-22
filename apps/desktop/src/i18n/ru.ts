@@ -2537,6 +2537,7 @@ export const ruOverrides = {
       profile: 'Профиль',
       project: 'Проект',
       archived: 'Архивные',
+      automated: 'Показывать автоматические и тестовые сессии',
       expandAll: 'Развернуть все',
       collapseAll: 'Свернуть все',
       updated: 'Обновление',

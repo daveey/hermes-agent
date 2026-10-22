@@ -14,6 +14,8 @@ vi.mock('@/store/session-dot-state', async importOriginal => {
   return { ...real, $sessionDotStateById: $dots }
 })
 
+import { $sidebarShowAutomated } from './layout'
+import { $sessions } from './session'
 import { $blockedSessionIds, toggleSessionBlocked } from './session-blocked'
 import {
   nextSidebarSessionId,
@@ -207,5 +209,51 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
     expect(nextSidebarSessionId('p3', 1, false)).toBe('p5') // p4 is grey (⌘B)
     expect(nextSidebarSessionId('p5', 1, false)).toBe('p1') // wraps
     expect(nextSidebarSessionId('p1', -1, false)).toBe('p5')
+  })
+})
+
+describe('automated / test rows (sessions.automated_sources) [daveey]', () => {
+  const key = Symbol('recents')
+
+  afterEach(() => {
+    unpublishSidebarSection(key)
+    dots.value = {}
+    $sessions.set([])
+    $sidebarShowAutomated.set(false)
+    document.body.innerHTML = ''
+  })
+
+  // a, c: green human rows; b: green automated row (hidden by default).
+  function setup() {
+    const anchor = document.createElement('span')
+    document.body.append(anchor)
+    publishSidebarSection(key, { anchor, ids: ['a', 'b', 'c'], turnIds: ['a', 'b', 'c'], virtualized: true })
+    dots.value = { a: 'idle', b: 'idle', c: 'idle' }
+    $sessions.set([
+      { id: 'a', message_count: 2 },
+      { automated: true, id: 'b', message_count: 2 },
+      { id: 'c', message_count: 2 }
+    ] as never)
+  }
+
+  it('drops hidden automated rows from the visible order, and stepping skips them', () => {
+    setup()
+    expect(sidebarSessionOrder()).toEqual(['a', 'c'])
+    expect(nextSidebarSessionId('a', 1, false)).toBe('c')
+    expect(nextSidebarSessionId('a', 1, true)).toBe('c')
+  })
+
+  it('steps onto them again once "Show automated & test sessions" is on', () => {
+    setup()
+    $sidebarShowAutomated.set(true)
+    expect(sidebarSessionOrder()).toEqual(['a', 'b', 'c'])
+    expect(nextSidebarSessionId('a', 1, false)).toBe('b')
+  })
+
+  it('keeps an automated row that needs the user (red stripe) in the order', () => {
+    setup()
+    dots.value = { a: 'idle', b: 'needs-input', c: 'idle' }
+    expect(sidebarSessionOrder()).toEqual(['a', 'b', 'c'])
+    expect(nextSidebarSessionId('a', 1, false)).toBe('b')
   })
 })

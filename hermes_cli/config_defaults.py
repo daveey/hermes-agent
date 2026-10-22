@@ -2338,6 +2338,10 @@ DEFAULT_CONFIG = {
         # (cron/kanban/oneshot are always out). For machine profiles whose sessions are app
         # traffic, e.g. ["api_server"] on a profile serving another app's LLM calls. [daveey]
         "sidebar_exclude_sources": [],
+        # Session sources this profile marks `automated` (bot / smoke-test traffic): the desktop
+        # sidebar hides those rows unless "Show automated & test sessions" is on (pinned and
+        # blocked / needs-input rows stay). "*" = every session in this profile. [daveey]
+        "automated_sources": [],
         # VACUUM after a prune that deleted rows (SQLite never reclaims disk on DELETE). VACUUM
         # blocks writes (~seconds per 100MB), so it runs only at startup, only when ≥1 session was
         # deleted AND freelist/page_count > 25%.

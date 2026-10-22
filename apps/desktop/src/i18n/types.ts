@@ -2821,6 +2821,7 @@ export interface Translations extends NoticeTranslations {
       profile: string
       project: string
       archived: string
+      automated: string
       resetToDefaults: string
       expandAll: string
       collapseAll: string

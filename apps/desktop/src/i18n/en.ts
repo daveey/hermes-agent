@@ -3241,6 +3241,7 @@ export const en: Translations = {
       profile: 'Profile',
       project: 'Project',
       archived: 'Archived',
+      automated: 'Show automated & test sessions',
       resetToDefaults: 'Reset to defaults',
       expandAll: 'Expand all',
       collapseAll: 'Collapse all',

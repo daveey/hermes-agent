@@ -3140,6 +3140,7 @@ export const zhOverrides = {
       profile: '配置档案',
       project: '项目',
       archived: '已归档',
+      automated: '显示自动化和测试会话',
       resetToDefaults: '重置为默认',
       expandAll: '全部展开',
       collapseAll: '全部折叠',

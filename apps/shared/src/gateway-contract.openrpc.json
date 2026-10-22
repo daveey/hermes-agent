@@ -26302,6 +26302,11 @@
             ],
             "default": null,
             "title": "Profile"
+          },
+          "automated": {
+            "default": false,
+            "title": "Automated",
+            "type": "boolean"
           }
         },
         "required": [

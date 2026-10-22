@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 
-from hermes_cli.session_listing import subagent_listing_scope
+from hermes_cli.session_listing import automated_session_sources, stamp_automated, subagent_listing_scope
 from hermes_cli.web_deps import late
 from hermes_cli.config import get_process_hermes_home
 from hermes_cli.profiles import ProfileIdentitySettlementPending
@@ -503,7 +503,7 @@ def get_profiles_sessions(
                 # Same SQL-level blob skip as /api/sessions.
                 compact_rows=not full, include_pinned=True, **scoped)
             totals[name] = db.session_count(exclude_children=True, **scoped)
-            merged.extend(_tag_rows(rows, name, now))
+            merged.extend(stamp_automated(_tag_rows(rows, name, now), home))
         _read_profile_db(name, home, errors, _read)
 
     sort_key = "last_active" if order == "recent" else "started_at"
@@ -612,8 +612,10 @@ def get_profiles_sessions_sidebar(
         # fake a full page (#81484).
         recents_truncated[name] = len(slices["recents"]) >= cap["recents"]
         profile_totals[name] = slices["usage"]
+        automated = automated_session_sources(home)
         for key in slice_scope:
-            rows[key].extend(_tag_rows(slices[key], name, now))
+            rows[key].extend(stamp_automated(
+                _tag_rows(slices[key], name, now), automated_sources=automated))
 
     def _window(key: str) -> list[dict[str, Any]]:
         rows[key].sort(key=_recency, reverse=True)

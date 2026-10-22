@@ -666,6 +666,10 @@ export interface SessionInfo {
   review_wait?: 'parked' | 'stuck'
   /** [daveey] The PR `review_wait` refers to. */
   review_wait_pr?: string
+  /** [daveey] The owning profile's `sessions.automated_sources` matched this
+   *  row (bot / smoke-test traffic). Hidden from the sidebar unless "Show
+   *  automated & test sessions" is on; see store/sidebar-automated.ts. */
+  automated?: boolean
   preview: null | string
   source: null | string
   started_at: number

@@ -172,6 +172,7 @@ export const arChrome = {
       profile: 'الملف الشخصي',
       project: 'المشروع',
       archived: 'مؤرشف',
+      automated: 'إظهار الجلسات الآلية والتجريبية',
       resetToDefaults: 'إعادة تعيين إلى الافتراضي',
       expandAll: 'توسيع الكل',
       collapseAll: 'طي الكل',

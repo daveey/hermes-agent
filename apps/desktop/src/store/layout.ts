@@ -61,6 +61,7 @@ const SIDEBAR_CARD_ROWS_STORAGE_KEY = 'hermes.desktop.sidebarCardRows'
 const SIDEBAR_SHOW_ALL_SESSIONS_STORAGE_KEY = 'hermes.desktop.sidebarShowAllSessions'
 const SIDEBAR_STATUS_FILTER_STORAGE_KEY = 'hermes.desktop.sidebarStatusFilter'
 const SIDEBAR_SHOW_ARCHIVED_STORAGE_KEY = 'hermes.desktop.sidebarShowArchived'
+const SIDEBAR_SHOW_AUTOMATED_STORAGE_KEY = 'hermes.desktop.sidebarShowAutomated'
 const SIDEBAR_PROJECT_FILTER_STORAGE_KEY = 'hermes.desktop.sidebarProjectFilter'
 const SIDEBAR_PROFILE_FILTER_STORAGE_KEY = 'hermes.desktop.sidebarProfileFilter'
 const SIDEBAR_PR_FILTER_STORAGE_KEY = 'hermes.desktop.sidebarPrFilter'
@@ -373,6 +374,12 @@ function sameRowMeta(a: SidebarRowMeta[], b: SidebarRowMeta[]): boolean {
 // flag both filters the list and drives the fetch.
 export const $sidebarShowArchived = persistentAtom(SIDEBAR_SHOW_ARCHIVED_STORAGE_KEY, false, Codecs.bool)
 
+// [daveey] Rows the backend stamps `automated` (the owning profile's
+// `sessions.automated_sources`: bot / smoke-test traffic) stay out of the
+// sidebar unless this is on. Off is the shipped view, so only ON counts as a
+// filter (see `$sidebarFiltersActive`). Predicate: store/sidebar-automated.ts.
+export const $sidebarShowAutomated = persistentAtom(SIDEBAR_SHOW_AUTOMATED_STORAGE_KEY, false, Codecs.bool)
+
 export const $sidebarStatusFilter = persistentAtom<SessionStatusBucket[]>(
   SIDEBAR_STATUS_FILTER_STORAGE_KEY,
   [],
@@ -417,9 +424,16 @@ export const $sidebarOrdering: ReadableAtom<SidebarOrdering> = computed(
 )
 
 export const $sidebarFiltersActive: ReadableAtom<boolean> = computed(
-  [$sidebarStatusFilter, $sidebarProjectFilter, $sidebarProfileFilter, $sidebarPrFilter, $sidebarShowArchived],
-  (statuses, projects, profiles, prs, archived) =>
-    statuses.length > 0 || projects.length > 0 || profiles.length > 0 || prs.length > 0 || archived
+  [
+    $sidebarStatusFilter,
+    $sidebarProjectFilter,
+    $sidebarProfileFilter,
+    $sidebarPrFilter,
+    $sidebarShowArchived,
+    $sidebarShowAutomated
+  ],
+  (statuses, projects, profiles, prs, archived, automated) =>
+    statuses.length > 0 || projects.length > 0 || profiles.length > 0 || prs.length > 0 || archived || automated
 )
 
 /** Anything at all moved off the shipped view — what makes a reset worth
@@ -899,6 +913,10 @@ export function setSidebarShowArchived(show: boolean) {
   $sidebarShowArchived.set(show)
 }
 
+export function setSidebarShowAutomated(show: boolean) {
+  $sidebarShowAutomated.set(show)
+}
+
 function toggleIn<T extends string>($atom: WritableAtom<T[]>, value: T) {
   const current = $atom.get()
 
@@ -931,6 +949,7 @@ function clearSidebarFilters() {
   $sidebarProfileFilter.set([])
   $sidebarPrFilter.set([])
   $sidebarShowArchived.set(false)
+  $sidebarShowAutomated.set(false)
 }
 
 /** Every knob the filter menu owns, back to the sidebar as it ships. Ordering

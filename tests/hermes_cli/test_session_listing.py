@@ -159,3 +159,36 @@ class TestQuerySessionListingLaneScope:
         )
 
         assert [row["id"] for row in rows] == ["foreign_59"]
+
+
+class TestAutomatedSources:
+    """[daveey] ``sessions.automated_sources`` stamps ``automated`` on listing rows."""
+
+    def _home(self, tmp_path, name, cfg):
+        home = tmp_path / name
+        home.mkdir()
+        (home / "config.yaml").write_text(cfg, encoding="utf-8")
+        return home
+
+    def _stamp(self, home):
+        from hermes_cli.session_listing import stamp_automated
+        rows = [{"id": "a", "source": "cli"}, {"id": "b", "source": "slack"}, {"id": "c", "source": None}]
+        return {r["id"]: r["automated"] for r in stamp_automated(rows, home)}
+
+    def test_listed_source_is_automated_unlisted_is_not(self, tmp_path):
+        home = self._home(tmp_path, "p", "sessions:\n  automated_sources: [slack]\n")
+        assert self._stamp(home) == {"a": False, "b": True, "c": False}
+
+    def test_star_marks_every_row(self, tmp_path):
+        home = self._home(tmp_path, "p", "sessions:\n  automated_sources: ['*']\n")
+        assert self._stamp(home) == {"a": True, "b": True, "c": True}
+
+    def test_unset_marks_nothing(self, tmp_path):
+        home = self._home(tmp_path, "p", "{}\n")
+        assert self._stamp(home) == {"a": False, "b": False, "c": False}
+
+    def test_each_store_reads_its_own_home(self, tmp_path):
+        bot = self._home(tmp_path, "bot", "sessions:\n  automated_sources: ['*']\n")
+        human = self._home(tmp_path, "human", "{}\n")
+        assert set(self._stamp(bot).values()) == {True}
+        assert set(self._stamp(human).values()) == {False}

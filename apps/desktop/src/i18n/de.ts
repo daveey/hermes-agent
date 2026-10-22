@@ -3679,6 +3679,7 @@ export const deOverrides = {
       profile: 'Profil',
       project: 'Projekt',
       archived: 'Archiviert',
+      automated: 'Automatisierte & Test-Sitzungen anzeigen',
       resetToDefaults: 'Auf Standard zurücksetzen',
       expandAll: 'Alle ausklappen',
       collapseAll: 'Alle einklappen',

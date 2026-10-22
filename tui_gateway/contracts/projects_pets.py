@@ -236,6 +236,8 @@ class ProjectTreeSession(StoredSessionRow):
     sidebar renders, stamped with the profile it belongs to."""
 
     profile: str | None = None
+    # [daveey] sessions.automated_sources matched this row's source (bot / test traffic).
+    automated: bool = False
 
 
 class ProjectTreeLane(Result):

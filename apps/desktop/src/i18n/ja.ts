@@ -2264,6 +2264,7 @@ export const jaOverrides = {
       profile: 'プロファイル',
       project: 'プロジェクト',
       archived: 'アーカイブ',
+      automated: '自動・テストセッションを表示',
       resetToDefaults: 'デフォルトに戻す',
       expandAll: 'すべて展開',
       collapseAll: 'すべて折りたたむ',

@@ -3673,6 +3673,7 @@ export const esOverrides = {
       profile: 'Perfil',
       project: 'Proyecto',
       archived: 'Archivados',
+      automated: 'Mostrar sesiones automatizadas y de prueba',
       resetToDefaults: 'Restablecer valores predeterminados',
       expandAll: 'Expandir todo',
       collapseAll: 'Contraer todo',
