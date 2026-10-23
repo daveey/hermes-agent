@@ -81,6 +81,17 @@ def test_resume_ignores_changed_defaults_but_explicit_pin_wins(routing_home, str
             "model": "exact-user-pin", "provider": "anthropic", "api_key": "fake", "credential_pool": object()}))
         model, runtime = runner._resolve_session_agent_runtime(user_config=routing_home)
         assert model == "exact-user-pin"
+    # A temporary concrete turn shares the transcript, not the durable class route.
+    with patch("model_tools.get_tool_definitions", return_value=[]):
+        temporary = AIAgent(model="temporary-model", provider="anthropic", api_mode="anthropic_messages",
+                            api_key="sk-ant-oat01-test-only", session_id="stored-class", session_db=db,
+                            skip_context_files=True, skip_memory=True, quiet_mode=True)
+        try:
+            assert temporary.run_conversation("Temporary turn")["final_response"] == "ok"
+            assert temporary.model_routing is None
+            assert stored_class(runner, "test-session-key") == "class:deep"
+        finally:
+            temporary.release_clients()
     agent.release_clients()
     db.close()
 

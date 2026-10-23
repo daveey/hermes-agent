@@ -193,6 +193,10 @@ class GatewayModelCommandsMixin:
         cached_agent = self._cached_agent_for(ctx.session_key)
         if cached_agent is None:
             return None
+        if ctx.one_turn and not picker and getattr(cached_agent, "model_routing", None):
+            # The temporary turn is rebuilt from its override below. Switching the
+            # standing class agent here would durably clear its routing provenance.
+            return None
         try:
             cached_agent.switch_model(
                 new_model=result.new_model, new_provider=result.target_provider,
@@ -221,7 +225,7 @@ class GatewayModelCommandsMixin:
 
         # Persist the new model to the session DB so the dashboard shows the updated model (#34850).
         _sess_db = getattr(self, "_session_db", None)
-        if _sess_db is not None:  # so the dashboard shows the updated model
+        if _sess_db is not None and not one_turn:  # temporary pins must not survive restart
             try:
                 _sess_entry = await self.async_session_store.get_or_create_session(source)
                 # Typed path: consume the auto-reset flag so the next message's cleanup does not
