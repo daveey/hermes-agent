@@ -1,18 +1,20 @@
-"""Respawn-guard hold notice: one kanban comment + Inbox card per unbroken hold. [daveey]
+"""Respawn-guard hold notice: one kanban comment per unbroken hold. [daveey]
 
 Well before the hold cap, a held card must be visible: past
 ``HERMES_KANBAN_GUARD_HOLD_NOTIFY_SECONDS`` (default 30 min) of unbroken hold the dispatcher
-posts ONE kanban comment + Inbox card naming the guard reason and, for ``active_pr``, the PR
-and its failing checks (2026-10-21: t_806b9e8f sat held 360 min on a PR with 11 failing
-checks and nothing said so). Split out of ``kanban_db_dispatch`` (code-health file cap).
+posts ONE kanban comment naming the guard reason and, for ``active_pr``, the PR and its
+failing checks (2026-10-21: t_806b9e8f sat held 360 min on a PR with 11 failing checks and
+nothing said so). No Inbox card: the Inbox is reserved for owner-only decisions (AGENTS.md)
+and a guard hold is agent-fixable board state. Split out of ``kanban_db_dispatch``
+(code-health file cap).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import subprocess
-import sys
 import time
 from typing import Optional
 
@@ -33,6 +35,25 @@ def guard_hold_started_at(conn: sqlite3.Connection, task_id: str) -> Optional[in
     return int(row[0]) if row and row[0] is not None else None
 
 
+def guard_hold_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """The reason of the hold in progress, or None: the newest event (ignoring the dispatcher's own
+    notice comments, as :func:`guard_hold_started_at` does) when it is a ``respawn_guarded`` one.
+    The dispatcher appends a new ``respawn_guarded`` event only when this differs, so an unbroken
+    hold logs one event per reason instead of one per tick."""
+    row = conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? AND NOT (kind = 'commented' AND "
+        "json_extract(payload, '$.author') = 'kanban-dispatcher') ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    if row is None or row[0] != "respawn_guarded":
+        return None
+    try:
+        data = json.loads(row[1] or "{}")
+    except ValueError:
+        return None
+    reason = data.get("reason") if isinstance(data, dict) else None
+    return reason if isinstance(reason, str) else None
+
+
 def _pr_failing_checks(pr_url: str) -> str:
     """Best-effort one-line summary of ``pr_url``'s failing checks ('' if unavailable)."""
     try:
@@ -45,21 +66,8 @@ def _pr_failing_checks(pr_url: str) -> str:
     return f"{len(failing)} failing check(s): " + ", ".join(failing[:12]) if failing else ""
 
 
-def _post_inbox_card(task_id: str, title: str, body: str) -> None:
-    """Best-effort Inbox card via ``hermes inbox post`` (never raises)."""
-    try:
-        subprocess.run([sys.executable, "-m", "hermes_cli.main", "inbox", "post", title[:80], "--body", body,
-                        "--key", f"guard-hold:{task_id}", "--prompt",
-                        f"Look at kanban card {task_id}: it is held by the respawn guard. Read its latest "
-                        f"[respawn-guard] comment, fix the cause (failing PR checks, binding) and unblock it.",
-                        "--poster", "kanban-dispatcher"],
-                       stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=False)
-    except (OSError, subprocess.SubprocessError):
-        logger.warning("kanban: guard-hold inbox post for %s failed", task_id, exc_info=True)
-
-
 def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
-    """Once per unbroken hold, past the notify threshold: comment + Inbox card. [daveey]"""
+    """Once per unbroken hold, past the notify threshold: one kanban comment. [daveey]"""
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
 
@@ -87,7 +95,6 @@ def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
             f"without running.{detail} It will be auto-blocked at the hold cap; fix the cause "
             f"(merge/close the PR, rebind, or unblock) before then.")
     _kb.add_comment(conn, task_id, "kanban-dispatcher", body)
-    _post_inbox_card(task_id, f"Kanban {task_id} held by respawn guard ({reason})", body)
     return True
 
 

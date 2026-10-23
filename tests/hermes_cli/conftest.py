@@ -103,6 +103,20 @@ def _source_channels_resolve_locally(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _pr_state_offline(monkeypatch):
+    """Keep the respawn guard's PR-state lookup off the network: gh "fails", so ``active_pr``
+    holds exactly as before (fail closed). Tests of the lookup re-patch ``_gh_pr_state``. [daveey]"""
+    try:
+        from hermes_cli import kanban_db_dispatch_pr_state as prs
+    except Exception:
+        return
+    prs.clear_cache()
+    monkeypatch.setattr(prs, "_gh_pr_state", lambda url: None)
+    yield
+    prs.clear_cache()
+
+
+@pytest.fixture(autouse=True)
 def _discharge_host_update_obligation():
     """Start and end every ``hermes_cli`` test with NO host update-restart obligation.
 

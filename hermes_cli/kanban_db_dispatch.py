@@ -1766,14 +1766,25 @@ def check_respawn_guard(
     #    sat in ``ready`` for the rest of the 24 h window after its PR merged.
     #    A crash/reclaim is not a handoff, so the worker that opened the PR is
     #    still not re-spawned against it.
-    pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
-                                          cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
-                if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
+    #    Also lifted once EVERY PR named in those comments is MERGED or CLOSED
+    #    (gh, cached; any gh failure keeps the hold): there is nothing left to
+    #    duplicate. t_d507533c sat held 6 h after its PR merged. [daveey]
+    pr_times: list[int] = []
+    pr_urls: list[str] = []
+    for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
+                            cols=", body", unreadable=now):  # duplicate-PR risk: fail closed
+        urls = _RESPAWN_GUARD_PR_URL_RE.findall(_kb._lossy_text(c["body"]) or "")
+        if urls:
+            pr_times.append(t)
+            pr_urls.extend(urls)
     if pr_times:
         # Strictly after: a same-second tie stays guarded (fail closed).
         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
                 conn, "task_events", task_id, max(pr_times),
                 "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')", cols=", kind, payload", strict=True)):
+            return None
+        from hermes_cli.kanban_db_dispatch_pr_state import all_prs_finished
+        if all_prs_finished(pr_urls):
             return None
         return "active_pr"
 
@@ -2235,8 +2246,10 @@ def _dispatch_lane_task(
                 result.auto_blocked.append(task_id)
                 return False
             _guard_notice.notify_guard_hold_safely(conn, task_id, guard_reason)
-            with _kb.write_txn(conn):
-                _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+            # One event per unbroken hold per reason, not one per tick (~1400/card). [daveey]
+            if _guard_notice.guard_hold_reason(conn, task_id) != guard_reason:
+                with _kb.write_txn(conn):
+                    _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
         return False
 
     def _count_spawn(name: str) -> None:
