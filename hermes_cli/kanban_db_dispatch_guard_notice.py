@@ -37,7 +37,7 @@ def _pr_failing_checks(pr_url: str) -> str:
     """Best-effort one-line summary of ``pr_url``'s failing checks ('' if unavailable)."""
     try:
         out = subprocess.run(["gh", "pr", "checks", pr_url], stdin=subprocess.DEVNULL, capture_output=True,
-                             text=True, timeout=30, check=False).stdout
+                             text=True, encoding="utf-8", errors="replace", timeout=30, check=False).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
     failing = [ln.split("\t")[0].strip() for ln in out.splitlines()
