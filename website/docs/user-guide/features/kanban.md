@@ -373,8 +373,24 @@ described above.
 
 `kanban_continue(..., resume_after_seconds=N)` hands off a wait (CI, a release,
 a soak) instead of polling inside the run: the card parks in `scheduled` and
-the dispatcher re-queues it after `N` seconds (at most 24 h). Plain
-`kanban_schedule` parks are never auto-woken.
+the dispatcher re-queues it after `N` seconds (at most 24 h). A plain
+`kanban_schedule` park wakes at its `SCHEDULED_UNTIL=` marker, else after 24 h.
+
+Condition wakes: `kanban_schedule`, `kanban_block(kind="time")` and
+`kanban_continue(resume_after_seconds=N)` accept `wake_check` (a shell command)
+and `check_every` (seconds, default 900, min 120, max 21600). While the card is
+parked the dispatcher runs the probe off-thread (`bash -lc`, 30 s timeout, cwd =
+the task workspace, at most 4 at once) without spawning a worker. Exit 0 wakes
+the card at once with a `condition_met` event carrying the probe's stdout;
+exit 1 means not yet; any other exit (or a timeout) 3 times in a row wakes it
+with `wake_check_broken` so a worker fixes the probe. The wake time stays the
+deadline. A park that wakes more than 2 h out with no `wake_check` is refused
+unless the call passes `clock_only=true` (a pure time wait). A wait on another
+card on the same board is a parent link (`kanban_link`), not a park. CLI:
+`hermes kanban schedule|block <id> --wake-check '<cmd>' [--check-every N] [--clock-only]`.
+Probe state is in the `task_wake_checks` table and shown by `kanban show`,
+the worker context and the board API; `kanban diagnostics` flags failing or
+overdue probes, and parks more than 2 h out that have neither.
 
 Continuations leave `consecutive_failures` and the unblock-loop counter
 untouched, so they never trip the give-up or block-loop limits. Their own

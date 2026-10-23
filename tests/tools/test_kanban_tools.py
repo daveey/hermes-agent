@@ -599,7 +599,8 @@ def test_block_dependency_without_open_parent_is_a_timed_park(worker_env):
     human ``blocked`` bucket: it is a timed wait, and the tool says when it wakes."""
     from tools import kanban_tools as kt
 
-    d = json.loads(kt._handle_block({"reason": "upstream input is missing", "kind": "dependency"}))
+    d = json.loads(kt._handle_block({"reason": "upstream input is missing", "kind": "dependency",
+                                     "clock_only": True}))
     assert (d["ok"], d["status"], d["requested_kind"]) == (True, "scheduled", "dependency")
     assert d["wake_at"] and "not a human block" in d["note"]
 

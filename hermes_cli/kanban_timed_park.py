@@ -83,9 +83,11 @@ def is_timed_park(kind: Optional[str], reason: Optional[str], *, parents_satisfi
 def park(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str], requested_kind: Optional[str],
     source_status: str = "ready", expected_run_id: Optional[int] = None,
+    wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
 ) -> bool:
     """``running``/``ready`` -> ``scheduled`` with a wake time. Caller holds the write txn."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_wake_check as kwc
 
     now = int(time.time())
     wake_at = scheduled_until(reason, now=now) or now + DEFAULT_WAKE_SECONDS
@@ -103,5 +105,7 @@ def park(
     kb._append_event(conn, task_id, "scheduled", {
         "reason": reason, "timed_park": True, "requested_kind": requested_kind,
         "wake_at": wake_at, "resume_status": source_status,
+        **kwc.park_fields(wake_check, check_every, clock_only),
     }, run_id=run_id)
+    kwc.set_check(conn, task_id, wake_check, check_every, now=now)
     return True
