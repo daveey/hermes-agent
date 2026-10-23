@@ -56,14 +56,12 @@ import {
   requestGatewayForAgent,
   retainGatewayForAgent
 } from '@/store/gateway'
-import { $gatewaySwitching } from '@/store/gateway-switch'
 import { clearSessionGoal } from '@/store/goals'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { adoptDraftPreviewTabs, prunePreviewTabsForSession } from '@/store/preview'
 import {
   $activeGatewayProfile,
-  $gatewaySwapTarget,
   $newChatProfile,
   $profiles,
   $showAllProfiles,
@@ -174,6 +172,7 @@ import { branchCreateKey } from './branch-create-key'
 import { sessionCreateOverrideParams, type SessionCreateOverrides, type SessionSeedMessage } from './create-overrides'
 import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this-run'
 import { captureDisplayHydration } from './display-hydration'
+import { goneSessionSwitchInFlight } from './gone-session-switch'
 import {
   dispatchedConnectionId,
   findForeignSessionOwner,
@@ -2631,10 +2630,9 @@ export function useSessionActions({
           return
         }
 
-        // Kanban worker transcript: the gateway refuses to resume it on purpose
-        // (a resumed chat would be a second writer next to the dispatcher's run).
-        // The REST fallback above already painted the history, so open it
-        // read-only and quietly — no "Resume failed" toast, no retry latch.
+        // Kanban worker transcript (4132): resuming it would add a second writer
+        // next to the dispatcher's run. The REST fallback already painted it, so
+        // open it read-only and quietly: no "Resume failed" toast, no retry latch.
         if (isKanbanWorkerResumeRefusal(err) && !fallbackError) {
           markStoredTranscriptReadOnly(storedSessionId)
 
@@ -2709,16 +2707,7 @@ export function useSessionActions({
           const verdict = goneSessionVerdict({
             createdThisRun: sessionCreatedThisRun(storedSessionId),
             stillListed,
-            switchInFlight:
-              $gatewaySwitching.get() ||
-              Boolean($gatewaySwapTarget.get()) ||
-              // Known owner ≠ active gateway: the 404 came from the wrong
-              // backend. An UNKNOWN owner must not count — it would block the
-              // draft fallback for genuinely dead ids on secondary profiles.
-              Boolean(
-                sessionProfile?.trim() &&
-                normalizeProfileKey(sessionProfile) !== normalizeProfileKey($activeGatewayProfile.get())
-              )
+            switchInFlight: goneSessionSwitchInFlight(sessionProfile)
           })
 
           if (verdict === 'retry') {
