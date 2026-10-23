@@ -8,3 +8,24 @@ self-hosted-runner:
     - ubuntu-latest-32-arm-core
     - windows-latest-32-core
     - windows-latest-32-arm-core
+    # fork (daveey/hermes): self-hosted runners on hermes-hub
+    # (scripts/fork-ci-runner.sh).
+    - hermes-hub
+    - docker-ci
+
+# fork (daveey/hermes): known findings that are not bugs. The lint runs in
+# .github/workflows/actionlint.yml. Keep each pattern narrow.
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      # `cache-mode` is a real job key (workflow syntax,
+      # jobs.<job_id>.cache-mode) that actionlint 1.7.12 does not know yet.
+      - 'unexpected key "cache-mode" for "job" section'
+      # A bare `if: false` switches off a lane that has no runner here
+      # (macOS/Windows) or is deferred upstream; ci.yaml says why it must
+      # stay a bare constant.
+      - 'constant expression "false" in condition'
+  .github/workflows/windows-bundle-sdk.yml:
+    ignore:
+      # Upstream runs the cold Windows ARM64 SDK leg twice on purpose.
+      - 'duplicate value "windows-latest-32-arm-core" is found in matrix "runner"'
