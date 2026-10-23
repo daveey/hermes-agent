@@ -52,6 +52,33 @@ def test_api_empty_pool_never_uses_legacy(adapter, routing_home, streaming_route
     sdk.assert_not_called()
 
 
+@pytest.mark.parametrize("selection", ["global", "pin", "incompatible"])
+def test_api_class_default_and_explicit_selection(adapter, routing_home, streaming_route, native_transport,
+                                                  monkeypatch, tmp_path, selection):
+    from hermes_cli.config import atomic_config_write
+    from agent.model_routing import ModelRoutingError
+    routing_home["model"].update(default="class:deep", provider="auto")
+    atomic_config_write(tmp_path / "config.yaml", routing_home)
+    monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "class:deep")
+    kwargs = {"session_id": "selection-" + selection}
+    if selection == "pin":
+        kwargs.update(requested_model="anthropic-deep", requested_provider="anthropic")
+    elif selection == "incompatible":
+        kwargs.update(requested_model="class:deep", requested_provider="openrouter")
+    with patch("gateway.run._resolve_runtime_agent_kwargs", side_effect=AssertionError("paid default")), \
+            patch("model_tools.get_tool_definitions", return_value=[]):
+        if selection == "incompatible":
+            with pytest.raises(ModelRoutingError):
+                adapter._create_agent(**kwargs)
+            assert not native_transport
+            return
+        agent = adapter._create_agent(**kwargs)
+        assert agent.model == "anthropic-deep"
+        assert bool(getattr(agent, "model_routing", None)) is (selection == "global")
+        assert agent.run_conversation("Say ok")["final_response"] == "ok"
+        agent.release_clients()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_completions_http_class(adapter, routing_home, streaming_route, native_transport, stream):
