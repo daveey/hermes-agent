@@ -123,3 +123,49 @@ describe('createPluginContext.os', () => {
     }
   })
 })
+
+describe('createPluginContext.openPreview', () => {
+  it('opens a resolvable file in the preview pane via the shared normalizer', async () => {
+    const preview = await import('@/store/preview')
+    const spy = vi.spyOn(preview, 'openPreview').mockImplementation(() => undefined as never)
+    const target = { kind: 'file', label: 'plan.md', path: '/tmp/plan.md', previewKind: 'text', source: '/tmp/plan.md', url: 'file:///tmp/plan.md' }
+    const normalizePreviewTarget = vi.fn().mockResolvedValue(target)
+    const prev = window.hermesDesktop
+    window.hermesDesktop = { ...(prev ?? {}), normalizePreviewTarget } as never
+
+    try {
+      const ctx = createPluginContext('demo')
+      await expect(ctx.openPreview('~/design/plan.md', { cwd: '/work' })).resolves.toBe(true)
+      expect(normalizePreviewTarget).toHaveBeenCalledWith('~/design/plan.md', '/work')
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0][0]).toMatchObject({ path: '/tmp/plan.md' })
+    } finally {
+      window.hermesDesktop = prev
+      spy.mockRestore()
+    }
+  })
+
+  it('resolves false (no tab) for a missing file, a directory, or an empty target', async () => {
+    const preview = await import('@/store/preview')
+    const spy = vi.spyOn(preview, 'openPreview').mockImplementation(() => undefined as never)
+
+    const normalizePreviewTarget = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ kind: 'file', previewKind: 'directory', path: '/tmp', source: '/tmp', url: 'file:///tmp', label: 'tmp' })
+
+    const prev = window.hermesDesktop
+    window.hermesDesktop = { ...(prev ?? {}), normalizePreviewTarget } as never
+
+    try {
+      const ctx = createPluginContext('demo')
+      await expect(ctx.openPreview('/nope.md')).resolves.toBe(false)
+      await expect(ctx.openPreview('/tmp')).resolves.toBe(false)
+      await expect(ctx.openPreview('   ')).resolves.toBe(false)
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      window.hermesDesktop = prev
+      spy.mockRestore()
+    }
+  })
+})

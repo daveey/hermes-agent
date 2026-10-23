@@ -23,12 +23,15 @@ import {
   type PluginRunActionResult,
   runPluginAppAction
 } from '@/lib/keybinds/plugin-actions'
+import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { readKey, writeKey } from '@/lib/storage'
 import { type ArchiveGuard, registerArchiveGuard } from '@/store/archive-guards'
 import { type ArchiveHotkeyHandler, openNextSessionFrom, registerArchiveHotkeyHandler } from '@/store/archive-hotkey'
 import { dispatchPluginNativeNotification, type PluginNativeNotificationInput } from '@/store/native-notifications'
 import { $petActive } from '@/store/pet'
 import { clearPetMessages, type PetSayOptions, sayPetMessage } from '@/store/pet-plugin-messages'
+import { openPreview } from '@/store/preview'
+import { $focusedWorkspaceCwd } from '@/store/session-states'
 
 import { type GatewayEventListener, onGatewayEvent } from './events'
 import { $pluginRecords } from './plugins-store'
@@ -140,6 +143,13 @@ export interface PluginContext {
    *  neighbour). For plugins that close their own session from a button.
    *  False when there is none. Feature-detect: `ctx.openNextSession?.(id)`. */
   openNextSession: (fromId: string) => boolean
+  /** [daveey] Open a local file path (or http(s) URL) in the app's preview
+   *  pane — the right-rail tab where Markdown renders, same pipeline as the
+   *  file tree. `~` and relative paths resolve against `cwd`, else the focused
+   *  workspace. Resolves false when the target can't be previewed (missing
+   *  file, directory, no Electron shell) so the caller can fall back to
+   *  `os.openExternal`. Feature-detect: `ctx.openPreview?.(path)`. */
+  openPreview: (target: string, options?: { cwd?: string }) => Promise<boolean>
   /** Register an arbitrary cleanup to run on unload/disable — for side effects
    *  that aren't contributions or sockets (store subscriptions, timers). Runs
    *  alongside every other disposer when the plugin deactivates. */
@@ -364,6 +374,30 @@ function createPluginLifetime(track: (dispose: () => void) => () => void) {
   }
 }
 
+// [daveey] The preview door: resolve through the same main-process normalizer
+// the file tree uses, then open the tab. Never throws; false = not previewable.
+async function openPluginPreview(target: string, cwd?: string): Promise<boolean> {
+  try {
+    const raw = String(target || '').trim()
+
+    if (!raw) {
+      return false
+    }
+
+    const preview = await normalizeOrLocalPreviewTarget(raw, cwd || $focusedWorkspaceCwd.get() || undefined)
+
+    if (!preview) {
+      return false
+    }
+
+    openPreview(preview)
+
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Build the scoped context handed to a plugin's `register`. `onDispose`
  *  receives every registration's disposer (the loader's unload/reload hook). */
 export function createPluginContext(pluginId: string, onDispose?: (dispose: () => void) => void): PluginContext {
@@ -384,6 +418,7 @@ export function createPluginContext(pluginId: string, onDispose?: (dispose: () =
     registerArchiveGuard: guard => track(registerArchiveGuard(source, guard)),
     registerArchiveHotkeyHandler: handler => track(registerArchiveHotkeyHandler(source, handler)),
     openNextSession: fromId => openNextSessionFrom(fromId),
+    openPreview: (target, options) => openPluginPreview(target, options?.cwd),
     onDispose: fn => void track(fn),
     onEvent: (type, listener) => track(onGatewayEvent(type, listener)),
     ...createPluginLifetime(track),
