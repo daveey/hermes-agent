@@ -115,11 +115,17 @@ jobs:
         #
         # No --files: the runner discovers the suite itself. The discovered
         # set is identical to the list the removed matrix job used to pass in.
+        # Workers = 2x the CPUs this runner can actually use. hermes-hub
+        # runners are cpuset-pinned to 3 CPUs (nproc=3); the old fixed 32
+        # put ~10 test files per core, which made timing-sensitive tests
+        # fail (barrier timeouts, "11.98 < 10.0") and pushed host load to
+        # ~70 (t_0259fe53). nproc honours cpusets; os.cpu_count() does not.
         run: |
+          export HERMES_TEST_WORKERS="${HERMES_TEST_WORKERS:-$(( $(nproc) * 2 ))}"
+          echo "HERMES_TEST_WORKERS=$HERMES_TEST_WORKERS (nproc=$(nproc))"
           scripts/run_tests.sh
         env:
           HERMES_TEST_SLICE: ${{ matrix.slice }}/2
-          HERMES_TEST_WORKERS: 32
           HERMES_TEST_FILE_TIMEOUT: 600
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
