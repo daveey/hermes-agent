@@ -1,8 +1,8 @@
-"""Respawn-guard hold notice: one kanban comment + Inbox card per unbroken hold. [daveey]
+"""Respawn-guard hold notice: one kanban comment + one fix card per unbroken hold. [daveey]
 
 Well before the hold cap, a held card must be visible: past
 ``HERMES_KANBAN_GUARD_HOLD_NOTIFY_SECONDS`` (default 30 min) of unbroken hold the dispatcher
-posts ONE kanban comment + Inbox card naming the guard reason and, for ``active_pr``, the PR
+posts ONE kanban comment + a fix card (assignee default; never the Inbox) naming the guard reason and, for ``active_pr``, the PR
 and its failing checks (2026-10-21: t_806b9e8f sat held 360 min on a PR with 11 failing
 checks and nothing said so). Split out of ``kanban_db_dispatch`` (code-health file cap).
 """
@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 import subprocess
-import sys
 import time
 from typing import Optional
 
@@ -45,21 +44,23 @@ def _pr_failing_checks(pr_url: str) -> str:
     return f"{len(failing)} failing check(s): " + ", ".join(failing[:12]) if failing else ""
 
 
-def _post_inbox_card(task_id: str, title: str, body: str) -> None:
-    """Best-effort Inbox card via ``hermes inbox post`` (never raises)."""
+def _file_fix_card(conn: sqlite3.Connection, task_id: str, reason: str, body: str) -> None:
+    """Agent-fixable hold -> a Kanban card for the default assignee (never the Inbox: David
+    muted the ``kanban-dispatcher`` poster after 3 unactioned cards). Idempotent per hold."""
+    from hermes_cli import kanban_db as _kb
+
     try:
-        subprocess.run([sys.executable, "-m", "hermes_cli.main", "inbox", "post", title[:80], "--body", body,
-                        "--key", f"guard-hold:{task_id}", "--prompt",
-                        f"Look at kanban card {task_id}: it is held by the respawn guard. Read its latest "
-                        f"[respawn-guard] comment, fix the cause (failing PR checks, binding) and unblock it.",
-                        "--poster", "kanban-dispatcher"],
-                       stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=False)
-    except (OSError, subprocess.SubprocessError):
-        logger.warning("kanban: guard-hold inbox post for %s failed", task_id, exc_info=True)
+        _kb.create_task(
+            conn, title=f"Fix respawn-guard hold ({reason}) on {task_id}"[:120],
+            body=(f"{body}\n\nRead kanban card {task_id}'s latest [respawn-guard] comment, fix the cause "
+                  f"(failing PR checks, binding) and unblock it. Only ask David for a decision he alone can make."),
+            assignee="default", created_by="kanban-dispatcher", idempotency_key=f"guard-hold:{task_id}")
+    except Exception:
+        logger.warning("kanban: guard-hold fix card for %s failed", task_id, exc_info=True)
 
 
 def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
-    """Once per unbroken hold, past the notify threshold: comment + Inbox card. [daveey]"""
+    """Once per unbroken hold, past the notify threshold: comment + fix card. [daveey]"""
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
 
@@ -87,7 +88,7 @@ def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
             f"without running.{detail} It will be auto-blocked at the hold cap; fix the cause "
             f"(merge/close the PR, rebind, or unblock) before then.")
     _kb.add_comment(conn, task_id, "kanban-dispatcher", body)
-    _post_inbox_card(task_id, f"Kanban {task_id} held by respawn guard ({reason})", body)
+    _file_fix_card(conn, task_id, reason, body)
     return True
 
 

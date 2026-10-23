@@ -381,12 +381,12 @@ def test_desktop_relaunch_after_update_gets_scrubbed_env(monkeypatch, tmp_path):
 
 def test_guard_hold_posts_comment_and_inbox_card_once_naming_pr_and_checks(
         kanban_home, monkeypatch, all_assignees_spawnable):
-    """Within 30 min of a hold the card gets ONE comment + Inbox card naming the PR and its
+    """Within 30 min of a hold the card gets ONE comment + fix card naming the PR and its
     failing checks, and the notice does not restart the hold clock (the 6 h cap still fires). [daveey]"""
     pr = "https://github.com/daveey/hermes/pull/19"
     cards = []
     monkeypatch.setattr(kbd._guard_notice, "_pr_failing_checks", lambda url: "2 failing check(s): lint, unit")
-    monkeypatch.setattr(kbd._guard_notice, "_post_inbox_card", lambda tid, title, body: cards.append((tid, title, body)))
+    monkeypatch.setattr(kbd._guard_notice, "_file_fix_card", lambda conn, tid, reason, body: cards.append((tid, reason, body)))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="pr held", assignee="a")
         kb.add_comment(conn, tid, "a", f"opened {pr}")
