@@ -1130,6 +1130,13 @@ def detect_provider_for_model(
     if not name:
         return None
 
+    # An unqualified choice prefers the subscription over the billed first-party API.
+    # Explicit provider choices bypass this detector in switch_model.
+    from hermes_cli.models_detect import preferred_subscription_model
+    if current_provider in {"", "auto", "openai", "openai-api", "anthropic", "openrouter"}:
+        if subscription_model := preferred_subscription_model(name):
+            return ("openai-codex", subscription_model)
+
     # The current provider's LIVE catalog outranks every static guess: a model it already serves
     # (Codex early-access ids, Portal-only slugs, Ollama Cloud models absent from _PROVIDER_MODELS)
     # must never re-route the session to another vendor or to metered OpenRouter.

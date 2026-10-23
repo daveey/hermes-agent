@@ -924,11 +924,14 @@ def _prefer_subscription_rows(rows: list[dict]) -> list[dict]:
     selectable but is marked ``billing="metered"`` and lists ``subscription_overlap_models`` (the
     ids the subscription also serves) so a client can show "billed per token" next to them and never
     pick it by accident. Rows are only labelled/reordered, never dropped."""
-    {_slug(r): r for r in rows}
     sub_rows = [r for r in rows if _slug(r) in SUBSCRIPTION_PROVIDERS]
+    for r in rows:
+        if _slug(r) in METERED_OPENAI_PROVIDERS:
+            r["name"] = "OpenAI API (billed per token)"
     if not sub_rows:
         return rows
     for r in sub_rows:
+        r["name"] = "ChatGPT subscription (Codex)"
         r["billing"] = "subscription"
     sub_models = {str(m).lower() for r in sub_rows for m in (r.get("models") or [])}
     for r in rows:

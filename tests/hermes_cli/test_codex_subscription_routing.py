@@ -101,13 +101,50 @@ def test_picker_defaults_to_subscription_and_labels_metered():
     assert codex["billing"] == "subscription"
     assert metered["billing"] == "metered" and metered["subscription_overlap_models"] == [ASTRA]
     assert ASTRA in metered["models"]  # still explicitly selectable
+    assert "billed per token" in metered["name"]
 
 
-def test_session_create_reroutes_metered_pick_unless_allowed():
+@pytest.mark.parametrize("current", ["openai-api", "anthropic", "auto"])
+def test_unqualified_model_switch_prefers_subscription(current):
+    from hermes_cli.models import detect_provider_for_model
+
+    with patch("hermes_cli.models.cached_provider_model_ids", return_value=[ASTRA]), \
+         patch("hermes_cli.models_detect.provider_has_credentials", return_value=True):
+        assert detect_provider_for_model(ASTRA, current) == ("openai-codex", ASTRA)
+
+
+def test_runtime_uses_pro_token_and_rejects_free_fallback(pool_home):
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_cli.auth import AuthError
+
+    runtime = resolve_runtime_provider(requested="openai-codex", target_model=ASTRA)
+    assert runtime["api_key"] == PRO
+    # An explicit token (and the singleton fallback) must pass the same final guard.
+    with pytest.raises(AuthError, match="entitled"):
+        resolve_runtime_provider(requested="openai-codex", target_model=ASTRA, explicit_api_key=FREE)
+
+
+def test_model_options_rpc_prefers_subscription(monkeypatch):
+    from tui_gateway import server
+    from hermes_cli.inventory import load_picker_context
+
+    rows = [_row("openai-api", [ASTRA]), _row("openai-codex", [ASTRA])]
+    monkeypatch.setattr(server, "_model_picker_context", lambda agent: load_picker_context())
+    monkeypatch.setattr("hermes_cli.model_switch.list_authenticated_providers", lambda **kw: rows)
+    monkeypatch.setattr("hermes_cli.inventory._apply_pricing", lambda *a, **kw: None)
+    monkeypatch.setattr("hermes_cli.inventory._apply_capabilities", lambda *a, **kw: None)
+    monkeypatch.setattr("hermes_cli.inventory._apply_featured", lambda *a, **kw: None)
+    response = server._methods["model.options"](1, {})
+    offered = [r for r in response["result"]["providers"] if ASTRA in r["models"]]
+    assert offered[0]["slug"] == "openai-codex"
+    assert "billed per token" in next(r for r in offered if r["slug"] == "openai-api")["name"]
+
+
+def test_session_create_prefers_subscription_but_honors_explicit_provider():
     from tui_gateway.methods_session_model_guard import create_overrides
 
-    with patch("hermes_cli.models.cached_provider_model_ids", return_value=[ASTRA]):
-        assert create_overrides({"model": ASTRA, "provider": "openai-api"})[0]["provider"] == "openai-codex"
-        assert create_overrides({"model": ASTRA, "provider": "openai-api",
-                                 "allow_metered": True})[0]["provider"] == "openai-api"
+    with patch("hermes_cli.models.cached_provider_model_ids", return_value=[ASTRA]), \
+         patch("hermes_cli.models_detect.provider_has_credentials", return_value=True):
+        assert create_overrides({"model": ASTRA})[0]["provider"] == "openai-codex"
+        assert create_overrides({"model": ASTRA, "provider": "openai-api"})[0]["provider"] == "openai-api"
         assert create_overrides({"model": "gpt-5.5", "provider": "openai-api"})[0]["provider"] == "openai-api"

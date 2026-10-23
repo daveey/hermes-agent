@@ -29,28 +29,18 @@ def model_override_conflict(params: dict, build_scope) -> dict | None:
     return static_model_provider_conflict(model, provider)
 
 
-def _prefer_subscription_route(override: dict, params: dict) -> dict:
-    """Re-route a metered OpenAI API pick to the ChatGPT/Codex subscription when it serves the same
-    model, unless the client says the metered route was a deliberate choice (``allow_metered``).
-    A picker that only offered the metered row once billed ~$330 for chats meant for the subscription."""
-    from utils import is_truthy_value
+def _prefer_subscription_route(override: dict) -> dict:
+    """An unqualified model choice prefers the subscription; an explicit provider is honored.
 
-    provider = (override.get("provider") or "").strip().lower()
-    if provider not in {"openai", "openai-api"} or is_truthy_value(params.get("allow_metered")):
-        return override
-    try:
-        from hermes_cli.models import cached_provider_model_ids
+    The picker labels the API row as billed. No extra, undeclared RPC flag is needed to choose it.
+    """
+    from hermes_cli.models_detect import preferred_subscription_model
 
-        served = {m.lower() for m in cached_provider_model_ids("openai-codex", non_blocking=True)}
-    except Exception:
+    if (override.get("provider") or "").strip().lower() not in {"", "auto"}:
         return override
-    if override["model"].lower() not in served:
-        return override
-    import logging
-    logging.getLogger(__name__).warning(
-        "session.create: %s requested on metered provider %s; subscription provider openai-codex serves it — "
-        "routing there (pass allow_metered to force the billed API)", override["model"], provider)
-    return {**override, "provider": "openai-codex"}
+    if model := preferred_subscription_model(override["model"]):
+        return {**override, "model": model, "provider": "openai-codex"}
+    return override
 
 
 def create_overrides(params: dict) -> tuple:
@@ -62,7 +52,7 @@ def create_overrides(params: dict) -> tuple:
     model = str(params.get("model") or "").strip()
     model_override = {"model": model, "provider": str(params.get("provider") or "").strip() or None} if model else None
     if model_override:
-        model_override = _prefer_subscription_route(model_override, params)
+        model_override = _prefer_subscription_route(model_override)
     reasoning_override = None
     if effort := str(params.get("reasoning_effort") or "").strip():
         with contextlib.suppress(Exception):
