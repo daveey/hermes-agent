@@ -2,13 +2,16 @@
 
 Well before the hold cap, a held card must be visible: past
 ``HERMES_KANBAN_GUARD_HOLD_NOTIFY_SECONDS`` (default 30 min) of unbroken hold the dispatcher
-posts ONE kanban comment + a fix card (assignee default; never the Inbox) naming the guard reason and, for ``active_pr``, the PR
-and its failing checks (2026-10-21: t_806b9e8f sat held 360 min on a PR with 11 failing
-checks and nothing said so). Split out of ``kanban_db_dispatch`` (code-health file cap).
+posts ONE kanban comment + a fix card (assignee default) naming the guard reason and, for
+``active_pr``, the PR and its failing checks (2026-10-21: t_806b9e8f sat held 360 min on a PR
+with 11 failing checks and nothing said so). Never an Inbox card: the Inbox is reserved for
+owner-only decisions (AGENTS.md) and a guard hold is agent-fixable board state. Split out of
+``kanban_db_dispatch`` (code-health file cap).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import subprocess
@@ -30,6 +33,25 @@ def guard_hold_started_at(conn: sqlite3.Connection, task_id: str) -> Optional[in
         "json_extract(payload, '$.author') = 'kanban-dispatcher')), 0)", (task_id, task_id),
     ).fetchone()
     return int(row[0]) if row and row[0] is not None else None
+
+
+def guard_hold_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """The reason of the hold in progress, or None: the newest event (ignoring the dispatcher's own
+    notice comments, as :func:`guard_hold_started_at` does) when it is a ``respawn_guarded`` one.
+    The dispatcher appends a new ``respawn_guarded`` event only when this differs, so an unbroken
+    hold logs one event per reason instead of one per tick."""
+    row = conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? AND NOT (kind = 'commented' AND "
+        "json_extract(payload, '$.author') = 'kanban-dispatcher') ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    if row is None or row[0] != "respawn_guarded":
+        return None
+    try:
+        data = json.loads(row[1] or "{}")
+    except ValueError:
+        return None
+    reason = data.get("reason") if isinstance(data, dict) else None
+    return reason if isinstance(reason, str) else None
 
 
 def _pr_failing_checks(pr_url: str) -> str:
@@ -99,3 +121,15 @@ def notify_guard_hold_safely(conn: sqlite3.Connection, task_id: str, reason: str
     except Exception:
         logger.warning("kanban: guard-hold notice for %s failed", task_id, exc_info=True)
         return False
+
+
+def record_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
+    """Per held tick: the hold notice (past the threshold), then a ``respawn_guarded`` event only
+    when the hold is new or its reason changed — one event per unbroken hold, not one per tick
+    (~1400 per card before). [daveey]"""
+    from hermes_cli import kanban_db as _kb
+
+    notify_guard_hold_safely(conn, task_id, reason)
+    if guard_hold_reason(conn, task_id) != reason:
+        with _kb.write_txn(conn):
+            _kb._append_event(conn, task_id, "respawn_guarded", {"reason": reason})

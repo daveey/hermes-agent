@@ -1756,28 +1756,10 @@ def check_respawn_guard(
             conn, "task_events", task_id, success, "AND kind IN ('status', 'promoted', 'unblocked', 'reclaimed')")):
         return "recent_success"
 
-    # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
-    #    Exception: a handoff AFTER the newest PR comment (operator reassign,
-    #    reviewer changes_requested, review reopen) names the profile that must
-    #    now work on THAT PR — a closer or the implementer finishing it, not a
-    #    duplicate implementation (#111910). So does an ``unblocked`` event: a
-    #    worker that opened its PR and blocked itself waiting for the merge is
-    #    resumed by that unblock to ship/verify THAT PR; without this the card
-    #    sat in ``ready`` for the rest of the 24 h window after its PR merged.
-    #    A crash/reclaim is not a handoff, so the worker that opened the PR is
-    #    still not re-spawned against it.
-    pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
-                                          cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
-                if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
-    if pr_times:
-        # Strictly after: a same-second tie stays guarded (fail closed).
-        if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
-                conn, "task_events", task_id, max(pr_times),
-                "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')", cols=", kind, payload", strict=True)):
-            return None
-        return "active_pr"
-
-    return None
+    # 4. GitHub PR URL in a recent comment — prior worker already opened a PR
+    #    (see :func:`kanban_db_dispatch_pr_state.active_pr_reason` for the exceptions).
+    from hermes_cli.kanban_db_dispatch_pr_state import active_pr_reason
+    return active_pr_reason(conn, task_id, now)
 
 
 _GUARD_TIME_COLS = {"task_runs": "ended_at", "task_events": "created_at", "task_comments": "created_at"}
@@ -2234,9 +2216,7 @@ def _dispatch_lane_task(
             if _block_if_guard_hold_capped(conn, task_id, guard_reason):
                 result.auto_blocked.append(task_id)
                 return False
-            _guard_notice.notify_guard_hold_safely(conn, task_id, guard_reason)
-            with _kb.write_txn(conn):
-                _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+            _guard_notice.record_guard_hold(conn, task_id, guard_reason)
         return False
 
     def _count_spawn(name: str) -> None:

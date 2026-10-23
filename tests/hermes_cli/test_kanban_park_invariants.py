@@ -18,6 +18,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_dispatch_pr_state as _prs_mod
 
 
 @pytest.fixture
@@ -379,13 +380,22 @@ def test_desktop_relaunch_after_update_gets_scrubbed_env(monkeypatch, tmp_path):
     assert not ({"HERMES_KANBAN_TASK", *LEAK} & set(env))
 
 
-def test_guard_hold_posts_comment_and_inbox_card_once_naming_pr_and_checks(
+def test_guard_hold_posts_one_comment_and_no_inbox_card_naming_pr_and_checks(
         kanban_home, monkeypatch, all_assignees_spawnable):
-    """Within 30 min of a hold the card gets ONE comment + fix card naming the PR and its
-    failing checks, and the notice does not restart the hold clock (the 6 h cap still fires). [daveey]"""
+    """Within 30 min of a hold the card gets ONE kanban comment + ONE fix card (assignee default)
+    naming the PR and its failing checks, NO Inbox card (Inbox = owner-only decisions, AGENTS.md),
+    one ``respawn_guarded`` event per hold instead of one per tick, and the notice does not
+    restart the hold clock (the 6 h cap still fires). [daveey]"""
     pr = "https://github.com/daveey/hermes/pull/19"
-    cards = []
+    posted, cards = [], []
     monkeypatch.setattr(kbd._guard_notice, "_pr_failing_checks", lambda url: "2 failing check(s): lint, unit")
+    real_run = kbd._guard_notice.subprocess.run
+
+    def _spy_run(cmd, *a, **k):
+        if "inbox" in cmd:
+            posted.append(cmd)
+        return real_run(["true"], *a, **k)
+    monkeypatch.setattr(kbd._guard_notice.subprocess, "run", _spy_run)
     monkeypatch.setattr(kbd._guard_notice, "_file_fix_card", lambda conn, tid, reason, body: cards.append((tid, reason, body)))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="pr held", assignee="a")
@@ -396,16 +406,104 @@ def test_guard_hold_posts_comment_and_inbox_card_once_naming_pr_and_checks(
         assert (tid, "active_pr") in res.respawn_guarded
         monkeypatch.setattr(kb.time, "time", lambda: now + 600)
         kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
-        assert not cards  # under 30 min: silent
         monkeypatch.setattr(kb.time, "time", lambda: now + 1900)
         kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
         kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)  # second tick: no duplicate
-        assert len(cards) == 1
+        assert not posted and not hasattr(kbd._guard_notice, "_post_inbox_card")
+        assert [(c[0], c[1]) for c in cards] == [(tid, "active_pr")] and pr in cards[0][2]
         notes = [c for c in kb.list_comments(conn, tid) if c.body.startswith("[respawn-guard]")]
         assert len(notes) == 1
         assert pr in notes[0].body and "lint, unit" in notes[0].body and "active_pr" in notes[0].body
-        assert pr in cards[0][2]
+        guarded = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'respawn_guarded'",
+                               (tid,)).fetchone()[0]
+        assert guarded == 1  # 4 ticks, one unbroken hold -> one event
         # The notice must not restart the hold clock: the 6 h cap still blocks.
         monkeypatch.setattr(kb.time, "time", lambda: now + 6 * 3600 + 100)
         res = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
         assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_guard_event_relogged_after_hold_is_broken(kanban_home, monkeypatch, all_assignees_spawnable):
+    """A human comment breaks the hold: the next held tick logs a fresh ``respawn_guarded`` event. [daveey]"""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="pr held", assignee="a")
+        kb.add_comment(conn, tid, "a", "opened https://github.com/daveey/hermes/pull/19")
+        kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
+        kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
+        kb.add_comment(conn, tid, "david", "still waiting on review")
+        kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
+        kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
+        n = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'respawn_guarded'",
+                         (tid,)).fetchone()[0]
+        assert n == 2
+
+
+class _Proc:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def _gh_states(monkeypatch, states):
+    """Route the real ``_gh_pr_state`` through a fake ``gh``: url -> state, or an Exception/int rc."""
+    from hermes_cli import kanban_db_dispatch_pr_state as prs
+    monkeypatch.setattr(prs, "_gh_pr_state", _REAL_GH_PR_STATE)
+    prs.clear_cache()
+    calls = []
+
+    def _run(cmd, *a, **k):
+        calls.append(cmd)
+        st = states[cmd[3]]
+        if isinstance(st, BaseException):
+            raise st
+        if isinstance(st, int):
+            return _Proc(st, stderr="gh: could not resolve host")
+        return _Proc(0, json.dumps({"state": st}))
+    monkeypatch.setattr(prs.subprocess, "run", _run)
+    return calls
+
+
+_REAL_GH_PR_STATE = _prs_mod._gh_pr_state
+PR_A = "https://github.com/Metta-AI/coworld-qwop/pull/1"
+PR_B = "https://github.com/daveey/hermes/pull/19"
+
+
+@pytest.mark.parametrize("states,expected", [
+    ({PR_A: "MERGED"}, None),                         # (b) merged PR -> released
+    ({PR_A: "CLOSED"}, None),                         # closed unmerged -> nothing to duplicate
+    ({PR_A: "OPEN"}, "active_pr"),                    # (c) open PR -> still held
+    ({PR_A: 1}, "active_pr"),                         # (d) gh error exit -> fail closed
+    ({PR_A: OSError("gh not found")}, "active_pr"),   # (d) gh missing -> fail closed
+    ({PR_A: "MERGED", PR_B: "OPEN"}, "active_pr"),    # one PR still open -> held
+    ({PR_A: "MERGED", PR_B: 1}, "active_pr"),         # one PR unknown -> held
+    ({PR_A: "MERGED", PR_B: "CLOSED"}, None),         # every PR finished -> released
+])
+def test_active_pr_guard_checks_pr_state(kanban_home, monkeypatch, states, expected):
+    calls = _gh_states(monkeypatch, states)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="pr card", assignee="a")
+        kb.add_comment(conn, tid, "a", "opened " + " and ".join(states))
+        assert kbd.check_respawn_guard(conn, tid) == expected
+        assert {c[3] for c in calls} <= set(states)
+
+
+def test_pr_state_is_cached(kanban_home, monkeypatch):
+    """Merged is cached for good, so a held tick does not shell out to gh per card per tick."""
+    calls = _gh_states(monkeypatch, {PR_A: "MERGED"})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="pr card", assignee="a")
+        kb.add_comment(conn, tid, "a", f"opened {PR_A}")
+        for _ in range(3):
+            assert kbd.check_respawn_guard(conn, tid) is None
+    assert len(calls) == 1
+
+
+def test_merged_pr_card_gets_a_worker(kanban_home, monkeypatch, all_assignees_spawnable):
+    """End to end: a ready card whose only PR merged is spawned, not held (t_d507533c). [daveey]"""
+    _gh_states(monkeypatch, {PR_A: "MERGED"})
+    spawned = []
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="pr merged", assignee="a")
+        kb.add_comment(conn, tid, "a", f"opened {PR_A}")
+        res = kbd.dispatch_once(conn, spawn_fn=lambda task, *a, **k: spawned.append(task.id) or 1)
+        assert tid not in dict(res.respawn_guarded)
+        assert spawned == [tid]
