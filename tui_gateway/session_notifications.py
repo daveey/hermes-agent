@@ -899,6 +899,76 @@ def _wake_chat_for_readopted_exit(key: str):
     return None
 
 
+def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None = None,
+                       display_metadata: dict | None = None, label: str = "wake", build_timeout: float = 120.0) -> str:
+    """Run ONE agent turn with ``text`` in chat ``session_key`` from this backend: the chat live here is used as is,
+    otherwise it is resumed in-process first (``session.resume``, launch store then each named profile, the same
+    path the re-adopted-exit waker uses). For plugins that must close a loop without the user typing (e.g. a chat
+    whose kanban cards all finished while no backend held it). [daveey]
+
+    Returns ``"started"`` (the turn was admitted and runs on its own thread), ``"busy"`` (a turn is live or the
+    user stopped the last one), ``"refused"`` (another backend owns the chat, or resume was refused),
+    ``"missing"`` (no store has it) or ``"error"``. Blocks for at most ``build_timeout`` while the agent builds.
+    Never raises."""
+    import itertools as _it
+    key = str(session_key or "")
+    if not key or not text:
+        return "error"
+    try:
+        live = _find_live_session_by_key(key)
+        if live is None:
+            handler = _methods.get("session.resume")
+            if handler is None:
+                return "error"
+            resumed = False
+            for n, profile in zip(_it.count(1), _readopt_wake_profiles()):
+                params = {"session_id": key, "omit_messages": True, **({"profile": profile} if profile else {})}
+                env = handler(f"{label}-resume-{n}", params) or {}
+                err = env.get("error") if isinstance(env, dict) else None
+                if not err:
+                    resumed = True
+                    break
+                if not (isinstance(err, dict) and err.get("code") == 4007):
+                    logger.info("%s: resume of %s refused (%s)", label, key, err)
+                    return "refused"
+            if not resumed:
+                return "missing"
+            live = _find_live_session_by_key(key)
+            if live is None:
+                tip = None
+                with contextlib.suppress(Exception):
+                    from hermes_state import SessionDB
+                    tip = SessionDB().get_compression_tip(key)
+                live = _find_live_session_by_key(tip) if tip else None
+            if live is None:
+                logger.warning("%s: %s resumed but no live session holds it", label, key)
+                return "error"
+        sid, session = live
+        rid = f"__{label}__{int(time.time() * 1000)}"
+        _start_agent_build(sid, session)  # idempotent; a resumed chat builds lazily
+        if _wait_agent(session, rid, timeout=build_timeout):
+            logger.warning("%s: agent build failed for %s", label, key)
+            return "error"
+        with session["history_lock"]:
+            if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
+                return "busy"
+            session["running"] = True
+            session["last_active"] = time.time()
+        if _ensure_active_session_slot(sid, session) is not None:
+            _notif_release_turn(session)
+            logger.info("%s: %s has another live owner; not waking it here", label, key)
+            return "refused"
+        kwargs = {k: v for k, v in (("display_kind", display_kind), ("display_metadata", display_metadata)) if v}
+        accepted = _notif_submit(rid, sid, session, text, f"{label} dispatch failed", **kwargs)
+        if accepted is False:
+            return "refused"
+        logger.info("%s: started a turn in chat %s (live sid %s)", label, key, sid)
+        return "started"
+    except Exception:
+        logger.warning("%s: waking %s failed", label, key, exc_info=True)
+        return "error"
+
+
 def _install_readopted_exit_waker(registry=None) -> None:
     """Desktop backend boot: route re-adopted jobs' unknown exits through ``_readopted_exit_deliver``."""
     if registry is None:

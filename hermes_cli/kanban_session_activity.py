@@ -43,6 +43,9 @@ HUMAN_BLOCK_KINDS = ("needs_input", "capability")
 _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, dict[str, int], dict[str, int], dict[str, int]] | None = None
+_waiting_cache: list[dict[str, frozenset[str]]] = [{}]
+_pairs_lock = threading.Lock()
+WAITING_ON_CAP = 50
 
 
 def _board_db_paths() -> list[Path]:
@@ -84,6 +87,11 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
             (*statuses, *HUMAN_BLOCK_KINDS, *HUMAN_BLOCK_KINDS))
 
 
+# Set while ``_all_counts`` reads local boards: collects the (session, task) pairs behind the counts, so the
+# open card ids per session (``waiting_on_task_ids``) cost no extra queries. [daveey]
+_pairs_sink: set[tuple[str, str]] | None = None
+
+
 def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
     """Tasks per session in ``statuses``: tasks the session created, plus tasks
     it is a ``tui`` notify subscriber of (a session asked to shepherd someone
@@ -114,6 +122,8 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
+    if _pairs_sink is not None:
+        _pairs_sink.update(pairs)
     return counts
 
 
@@ -249,6 +259,39 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
     unseen: dict[str, int] = {}
+    pairs = _read_local_pairs_into(active, blocked, unseen)
+    waiting: dict[str, set[str]] = {}
+    for sid, tid in pairs:
+        waiting.setdefault(sid, set()).add(tid)
+    try:
+        hub = _hub_db_path()
+        if hub is not None:
+            r_active, r_blocked = _read_hub_replica(hub)
+            for src, into in ((r_active, active), (r_blocked, blocked)):
+                for sid, n in src.items():
+                    into[sid] = into.get(sid, 0) + n
+    except Exception as exc:  # a corrupt/locked replica must never break the sidebar
+        _log.debug("hermes-hub replica read failed: %s", exc)
+    with _cache_lock:
+        _cache = (now + _CACHE_TTL_S, active, blocked, unseen)
+        _waiting_cache[0] = {sid: frozenset(ids) for sid, ids in waiting.items()}
+    return active, blocked, unseen
+
+
+def _read_local_pairs_into(active: dict[str, int], blocked: dict[str, int],
+                           unseen: dict[str, int]) -> set[tuple[str, str]]:
+    """Fill the three count maps from every local board; return the open (session, task) pairs."""
+    global _pairs_sink
+    with _pairs_lock:
+        _pairs_sink = set()
+        try:
+            _read_local_boards(active, blocked, unseen)
+            return _pairs_sink
+        finally:
+            _pairs_sink = None
+
+
+def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: dict[str, int]) -> None:
     for path in _board_db_paths():
         try:
             for sid, n in _read_unseen(path).items():
@@ -261,18 +304,14 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
                     into[sid] = into.get(sid, 0) + n
             except sqlite3.Error as exc:  # an old schema without session_id, a locked file
                 _log.debug("kanban activity read failed for %s: %s", path, exc)
-    try:
-        hub = _hub_db_path()
-        if hub is not None:
-            r_active, r_blocked = _read_hub_replica(hub)
-            for src, into in ((r_active, active), (r_blocked, blocked)):
-                for sid, n in src.items():
-                    into[sid] = into.get(sid, 0) + n
-    except Exception as exc:  # a corrupt/locked replica must never break the sidebar
-        _log.debug("hermes-hub replica read failed: %s", exc)
+
+
+def waiting_on_task_ids() -> dict[str, frozenset[str]]:
+    """``{session_id: open task ids}`` on this gateway's boards: queued/running cards plus those waiting on a human,
+    created or shepherded by the session — what the chat is waiting on. Same cache as the counts. [daveey]"""
+    _all_counts()
     with _cache_lock:
-        _cache = (now + _CACHE_TTL_S, active, blocked, unseen)
-    return active, blocked, unseen
+        return dict(_waiting_cache[0])
 
 
 def active_task_counts() -> dict[str, int]:
@@ -457,7 +496,7 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
 
 
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_unseen`` (finished cards whose result the
+    """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_waiting_on`` (local open card ids), ``kanban_unseen`` (finished cards whose result the
     session has not been handed yet) and ``kanban_attention`` (done cards a registered check flags) on each session row
     (summed over its whole compression lineage). Never raises: the list must
     render without them."""
@@ -465,6 +504,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         return rows
     try:
         active, blocked, unseen = _all_counts()
+        waiting = waiting_on_task_ids()
     except Exception:
         _log.debug("kanban activity unavailable", exc_info=True)
         return rows
@@ -482,6 +522,12 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 row[key] = n
             else:
                 row.pop(key, None)
+        # [daveey] The open card ids the chat waits on (lineage-wide, capped): the sidebar's "waiting on N cards".
+        ids_waiting = sorted({tid for sid in ids for tid in waiting.get(sid, ())})
+        if ids_waiting:
+            row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
+        else:
+            row.pop("kanban_waiting_on", None)
     return rows
 
 
@@ -490,3 +536,4 @@ def _reset_cache_for_tests() -> None:
     with _cache_lock:
         _cache = None
         _attention_cache = None
+        _waiting_cache[0] = {}

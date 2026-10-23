@@ -313,3 +313,26 @@ def test_hub_platform_subscription_on_a_local_board_is_not_a_tui_shepherd(kanban
     conn.commit()
     conn.close()
     assert ksa.active_task_counts() == {}
+
+
+def test_rows_carry_the_open_card_ids_the_chat_waits_on(kanban_root):
+    """``kanban_waiting_on``: the open (queued/running + human-blocked) card ids over the lineage, the set the
+    sidebar's "waiting on N cards" and the chat-closeout ledger read. Done cards drop out. [daveey]"""
+    _make_board(kanban_root / "kanban.db", [
+        ("t1", "running", "s_root"),
+        ("t2", "blocked", "s_tip"),
+        ("t3", "done", "s_root"),
+        ("t4", "done", "s_done"),
+    ])
+    _make_board(kanban_root / "kanban" / "boards" / "other" / "kanban.db", [("t5", "todo", "s_tip")])
+    rows = [
+        {"id": "s_tip", "_lineage_root_id": "s_root", "_lineage_ids": ["s_root", "s_tip"]},
+        {"id": "s_done", "kanban_waiting_on": ["stale"]},
+    ]
+
+    ksa.annotate_kanban_activity(rows)
+
+    assert rows[0]["kanban_waiting_on"] == ["t1", "t2", "t5"]
+    assert rows[0]["kanban_active"] == 2 and rows[0]["kanban_blocked"] == 1
+    assert "kanban_waiting_on" not in rows[1]
+    assert ksa.waiting_on_task_ids() == {"s_root": frozenset({"t1"}), "s_tip": frozenset({"t2", "t5"})}
