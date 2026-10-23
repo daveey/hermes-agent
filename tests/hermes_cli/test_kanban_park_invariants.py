@@ -385,8 +385,8 @@ def test_guard_hold_posts_comment_and_inbox_card_once_naming_pr_and_checks(
     failing checks, and the notice does not restart the hold clock (the 6 h cap still fires). [daveey]"""
     pr = "https://github.com/daveey/hermes/pull/19"
     cards = []
-    monkeypatch.setattr(kbd, "_pr_failing_checks", lambda url: "2 failing check(s): lint, unit")
-    monkeypatch.setattr(kbd, "_post_inbox_card", lambda tid, title, body: cards.append((tid, title, body)))
+    monkeypatch.setattr(kbd._guard_notice, "_pr_failing_checks", lambda url: "2 failing check(s): lint, unit")
+    monkeypatch.setattr(kbd._guard_notice, "_post_inbox_card", lambda tid, title, body: cards.append((tid, title, body)))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="pr held", assignee="a")
         kb.add_comment(conn, tid, "a", f"opened {pr}")
