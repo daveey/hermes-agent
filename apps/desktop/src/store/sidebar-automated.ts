@@ -52,7 +52,8 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
     row.kanban_blocked ?? 0,
     row.cron_active === true,
     row.review_wait,
-    row.kanban_attention ?? 0
+    row.kanban_attention ?? 0,
+    row.kanban_active ?? 0
   )
 
   return stripe === 'stuck' || stripe === 'blocked' || stripe === 'attention'

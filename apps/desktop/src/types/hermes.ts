@@ -639,6 +639,8 @@ export interface SessionInfo {
    *  workers, so the sidebar paints it like a background job, not "done".
    *  Absent when zero or against a backend predating the field. */
   kanban_active?: number
+  /** [daveey] Open card ids (queued/running + waiting on a human) the chat waits on, over the lineage. */
+  kanban_waiting_on?: string[]
   /** [daveey] Kanban tasks of this conversation (created or subscribed) that
    *  are blocked on a human, summed over its compression lineage. Shown next
    *  to the open count on the sidebar row. Absent when zero. */

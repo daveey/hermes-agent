@@ -227,7 +227,11 @@ export const showsRunningArc = (state: SessionDotState): boolean => state === 's
 //  [daveey] `attention` (amber) replaces `done` when a kanban card this session
 //  made finished with a handoff that admits dropped / deferred / unrun work and
 //  no follow-up card (backend `kanban_attention`): it looks done but isn't.
-export type SessionStatusStripe = 'attention' | 'blocked' | 'done' | 'periodic' | 'stuck'
+//  [daveey] `waiting` (grey, card glyph) when the chat handed its work to
+//  kanban cards that are still open (`kanban_active`): it is not done and not
+//  stuck, it waits on them — never green, never blank. Parked like `periodic`
+//  (⌘] / ⌘[ skip it); a blocked card (red) and a live turn beat it.
+export type SessionStatusStripe = 'attention' | 'blocked' | 'done' | 'periodic' | 'stuck' | 'waiting'
 
 /** [daveey] Backend `review_wait` stamp: the session's latest reply links an
  *  open PR still needing a code review. `stuck` = the review is on the user
@@ -243,7 +247,8 @@ export const sessionStatusStripe = (
   kanbanBlocked = 0,
   periodic = false,
   reviewWait: null | ReviewWait | undefined = null,
-  kanbanAttention = 0
+  kanbanAttention = 0,
+  kanbanWaiting = 0
 ): null | SessionStatusStripe =>
   userBlocked
     ? 'blocked'
@@ -256,6 +261,8 @@ export const sessionStatusStripe = (
     ? 'stuck'
     : reviewWait === 'parked' && state !== 'working'
     ? 'blocked'
+    : (kanbanWaiting ?? 0) > 0 && state !== 'working'
+    ? 'waiting'
     : state === 'unread' || (state === 'idle' && hasTurns)
       ? (kanbanAttention ?? 0) > 0
         ? 'attention'
