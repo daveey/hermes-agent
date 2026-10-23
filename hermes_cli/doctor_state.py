@@ -543,6 +543,26 @@ def _plugin_provenance_rows(plugins_dir) -> list:
     return rows or [("info", "No provenanced plugins found", "")]
 
 
+@doctor_check("Plugin directory conflict check failed: {e}")
+def _check_plugin_dir_conflicts(should_fix: bool, f: Finding) -> None:
+    """[daveey] Warn about plugin dirs discovery ignores: backup-named copies (``*.bak*``/``.orig``/``.old``) and
+    same-name copies shadowed by the basename match. A backup once silently replaced a live plugin."""
+    from hermes_constants import get_hermes_home
+    from hermes_cli.plugins_discovery import plugin_dir_conflicts
+
+    plugins_dir = get_hermes_home() / "plugins"
+    conflicts = plugin_dir_conflicts(plugins_dir) if plugins_dir.is_dir() else []
+    if not conflicts:
+        check_ok("No backup or same-name duplicate plugin directories")
+        return
+    for c in conflicts:
+        if c.kind == "backup":
+            check_warn(f"Backup plugin dir inside plugins/: {c.ignored}", "(never loads; move it to plugin-backups/)")
+        else:
+            check_warn(f"Plugin '{c.name}' has a shadowed copy: {c.ignored}", f"(loading {c.kept})")
+    f.manual_issues.append(f"Move ignored plugin copies out of {plugins_dir} (e.g. to {get_hermes_home() / 'plugin-backups'})")
+
+
 @doctor_check("")
 def _check_update_provenance(should_fix: bool, f: Finding) -> None:
     """Inspect local plugin update provenance without network or writes."""

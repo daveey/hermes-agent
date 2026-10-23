@@ -10,6 +10,7 @@ import contextlib
 import contextvars
 import importlib.metadata
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -131,14 +132,64 @@ def _get_enabled_plugins() -> Optional[set]:
         return None
 
 
+# [daveey] Backup copies left inside a plugins dir (``foo.bak-premacops/``, ``foo.orig/``, ``foo.old/``) are never
+# plugins: one with the live plugin's manifest name sorted after it and silently won discovery, so fixes to the
+# live copy never ran. They are skipped with a warning; move them to ``<home>/plugin-backups/``.
+_BACKUP_DIR_RE = re.compile(r"\.(bak[^/]*|orig|old)$", re.IGNORECASE)
+
+
+def is_backup_plugin_dir(name: str) -> bool:
+    """True for a backup-named directory (``*.bak*``, ``*.orig``, ``*.old``) that discovery must skip."""
+    return bool(_BACKUP_DIR_RE.search(name))
+
+
+@dataclass(frozen=True)
+class PluginDirConflict:
+    """A plugin directory discovery ignored: a backup-named dir, or a same-name copy that lost to *kept*."""
+
+    kind: str  # "backup" | "duplicate"
+    name: str  # manifest key the ignored dir declares ("" when its manifest was not read)
+    ignored: str
+    kept: str = ""
+
+
+def _dedupe_same_name(
+    level: list[PluginManifest], path: Path, conflicts: Optional[list[PluginDirConflict]],
+) -> list[PluginManifest]:
+    """[daveey] Collapse manifests from ONE directory level that share a key: the dir whose basename equals the
+    manifest name wins (else the first in scan order), and every loser is warned about by path. Without this the
+    later sorted dir won silently (``slack-workspace.bak-x`` over ``slack-workspace``)."""
+    groups: dict[str, list[PluginManifest]] = {}
+    for manifest in level:
+        groups.setdefault(manifest_key(manifest), []).append(manifest)
+    keep: dict[str, PluginManifest] = {}
+    for key, group in groups.items():
+        winner = next((m for m in group if m.path and Path(m.path).name == key.rsplit("/", 1)[-1]), group[0])
+        keep[key] = winner
+        for loser in group:
+            if loser is winner:
+                continue
+            if conflicts is not None:
+                conflicts.append(PluginDirConflict("duplicate", key, str(loser.path), str(winner.path)))
+            logger.log(
+                logging.DEBUG if conflicts is not None else logging.WARNING,
+                "Plugin '%s' is declared by two directories in %s: loading %s, ignoring %s (same name; move or "
+                "rename the extra copy)", key, path, winner.path, loser.path,
+            )
+    return [m for m in level if keep.get(manifest_key(m)) is m]
+
+
 def scan_directory(
-    path: Path, source: str, *, skip_names: Optional[set[str]] = None, prefix: str = "", depth: int = 0
+    path: Path, source: str, *, skip_names: Optional[set[str]] = None, prefix: str = "", depth: int = 0,
+    conflicts: Optional[list[PluginDirConflict]] = None,
 ) -> list[PluginManifest]:
     """Read manifests under *path*: flat ``<root>/<name>/plugin.yaml`` (key ``name``) or category
     ``<root>/<cat>/<name>/plugin.yaml`` (key ``cat/name``; a manifest-less directory recurses one level, depth
     capped at two). *skip_names* ignores top-level names; portable ``plugin.json`` packages are accepted
-    alongside YAML manifests."""
+    alongside YAML manifests. Backup-named dirs are skipped and same-name dirs collapse to the basename match
+    (see :func:`_dedupe_same_name`); pass *conflicts* to collect those records (logged at DEBUG instead)."""
     manifests: list[PluginManifest] = []
+    level: list[PluginManifest] = []
     if not path.is_dir():
         return manifests
     try:
@@ -156,6 +207,13 @@ def scan_directory(
         if child.name in _FOREIGN_HARNESS_MANIFEST_DIRS:
             logger.debug("Skipping %s (foreign-harness manifest convention)", child)
             continue
+        if is_backup_plugin_dir(child.name):
+            if conflicts is not None:
+                conflicts.append(PluginDirConflict("backup", _peek_manifest_name(child), str(child)))
+            logger.log(logging.DEBUG if conflicts is not None else logging.WARNING,
+                       "Skipping backup plugin directory %s (backup-named dirs never load; move it to "
+                       "<hermes home>/plugin-backups/)", child)
+            continue
         # pathlib.Path.is_dir() swallows OSError, but injected Path-likes
         # and test doubles can still raise. Fail closed per child.
         try:
@@ -172,18 +230,44 @@ def scan_directory(
         if manifest_file is not None:
             manifest = parse_manifest_file(manifest_file, child, source, prefix)
             if manifest is not None:
+                level.append(manifest)
                 manifests.append(manifest)
         elif has_portable:
             try:
-                manifests.append(portable_plugin_manifest(child, source, prefix))
+                level.append(portable_plugin_manifest(child, source, prefix))
+                manifests.append(level[-1])
             except Exception as exc:
                 logger.warning("Failed to parse %s: %s", portable_file, exc)
         elif depth >= 1:
             logger.debug("Skipping %s (no plugin.yaml, depth cap reached)", child)
         else:
             sub_prefix = f"{prefix}/{child.name}" if prefix else child.name
-            manifests.extend(scan_directory(child, source, prefix=sub_prefix, depth=depth + 1))
-    return manifests
+            manifests.extend(scan_directory(child, source, prefix=sub_prefix, depth=depth + 1, conflicts=conflicts))
+    if len({manifest_key(m) for m in level}) == len(level):
+        return manifests
+    dropped = {id(m) for m in level} - {id(m) for m in _dedupe_same_name(level, path, conflicts)}
+    return [m for m in manifests if id(m) not in dropped]
+
+
+def _peek_manifest_name(plugin_dir: Path) -> str:
+    """Best-effort ``name:`` of a dir's plugin.yaml without full parsing (for conflict reports only)."""
+    for fname in ("plugin.yaml", "plugin.yml"):
+        try:
+            for line in (plugin_dir / fname).read_text(encoding="utf-8", errors="replace").splitlines():
+                m = re.match(r"\s*name\s*:\s*['\"]?([^'\"#\s]+)", line)
+                if m and not line.startswith((" ", "\t")):
+                    return m.group(1)
+        except OSError:
+            continue
+    return ""
+
+
+def plugin_dir_conflicts(path: Path) -> list[PluginDirConflict]:
+    """[daveey] Backup-named and same-name shadowed plugin dirs under *path*, for ``hermes plugins list`` and
+    ``hermes doctor`` (reads manifests only, loads nothing, logs nothing above DEBUG)."""
+    conflicts: list[PluginDirConflict] = []
+    scan_directory(Path(path), "user", conflicts=conflicts)
+    return conflicts
 
 
 def collect_directory_manifests() -> list[PluginManifest]:

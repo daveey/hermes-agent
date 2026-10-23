@@ -7,6 +7,7 @@ imported late here, never at module level).
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,25 @@ def _entry_status(entry: tuple, enabled: set, disabled: set, active: set) -> str
 _STATUS_MARKUP = {"disabled": "[red]disabled[/red]", "enabled": "[green]enabled[/green]"}
 
 
+def _print_dir_conflicts(console: Any, *, plain: bool) -> None:
+    """[daveey] Name every backup-named or same-name shadowed plugin dir (they never load). Plain/JSON
+    modes write to stderr so stdout stays machine-readable."""
+    from hermes_cli.plugins_discovery import plugin_dir_conflicts
+    try:
+        conflicts = plugin_dir_conflicts(_pc()._plugins_dir())
+    except OSError:
+        return
+    for c in conflicts:
+        if c.kind == "backup":
+            msg = f"ignored backup plugin dir {c.ignored} (move it to <hermes home>/plugin-backups/)"
+        else:
+            msg = f"plugin '{c.name}': ignored shadowed copy {c.ignored} (loading {c.kept})"
+        if plain:
+            print(f"warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"[yellow]⚠ {msg}[/yellow]")
+
+
 def cmd_list(args: Any | None = None) -> None:
     """List all plugins (bundled + user) with enabled/disabled state."""
     console = _pc()._console()
@@ -65,6 +85,7 @@ def cmd_list(args: Any | None = None) -> None:
         for name, version, description, source, _dir, key in entries
     ]
 
+    _print_dir_conflicts(console, plain=getattr(args, "json", False) or getattr(args, "plain", False))
     if getattr(args, "json", False):
         keys = ("name", "status", "version", "description", "source", "removed")
         print(json.dumps([dict(zip(keys, row)) for row in rows], indent=2))

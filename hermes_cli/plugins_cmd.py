@@ -844,9 +844,13 @@ def _scan_level(base: Path, source: str, skip_names: set, prefix: str, depth: in
     except OSError as exc:
         logger.warning("Skipping unreadable plugin directory %s: %s", base, exc)
         return
+    from hermes_cli.plugins_discovery import is_backup_plugin_dir
+    level_keys: set = set()
     for d in children:
         try:
             if not d.is_dir() or (depth == 0 and skip_names and d.name in skip_names):
+                continue
+            if is_backup_plugin_dir(d.name):  # [daveey] never loaded; `plugins list` reports it below the table
                 continue
             info = _read_manifest_info(d, prefix)
         except (OSError, PluginOperationError) as exc:
@@ -861,6 +865,10 @@ def _scan_level(base: Path, source: str, skip_names: set, prefix: str, depth: in
         name, version, description, key = info
         if key in seen and source == "bundled":
             continue
+        # [daveey] Same-name dirs in one level: the basename match wins, as in discovery (_dedupe_same_name).
+        if key in level_keys and (Path(seen[key][4]).name == key.rsplit("/", 1)[-1] or d.name != key.rsplit("/", 1)[-1]):
+            continue
+        level_keys.add(key)
         src_label = "git" if source == "user" and (d / ".git").exists() else source
         seen[key] = (name, version, description, src_label, d, key)
 
