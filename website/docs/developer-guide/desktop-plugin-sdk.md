@@ -1084,6 +1084,13 @@ host.state.profile          // ReadableAtom<string>
 host.state.viewport         // ReadableAtom<{ width, height, narrow }>
 ```
 
+hermes-hub replica access (the hub-sync plugin) is exported as named functions:
+`hubReplicaConnectionId`, `hubGatewayForConnection`, `connectionForHubGateway`,
+`learnHubGatewayName`, `hubGet`, `hubGatewayTasks` and `hubRequest`, plus the
+`HubRecord`/`HubTask`/`HubPending`/`HubRequestBody`/`HubRequestResult` types.
+Every read is best-effort (null or `[]` when hub-sync or the hub is absent), so
+keep the live gateway path authoritative.
+
 `host.state.gateway` is the WebSocket connection, not whether a chat turn is
 running. A session can be mid-turn while the socket is `open`; another session
 can be idle at the same time. Disable composer or plugin actions from the

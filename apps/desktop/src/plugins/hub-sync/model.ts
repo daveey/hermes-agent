@@ -3,7 +3,7 @@
  * rows to show, how old they are, and the owner requests their actions send.
  * See ./plugin.tsx and ../../store/hub-sync.ts.
  */
-import type { HubPending, HubRecord, HubRequestBody } from '@/store/hub-sync'
+import type { HubPending, HubRecord, HubRequestBody } from '@hermes/plugin-sdk'
 
 export interface HubSessionRow extends HubRecord {
   id: string

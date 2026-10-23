@@ -4,17 +4,16 @@
  * send. Best-effort throughout: with hub-sync/hermes-hub missing or the hub
  * down every read answers [] and the live sidebar is untouched.
  */
-import { $connectionsRegistry } from '@/store/connection-registry-state'
 import {
   connectionForHubGateway,
+  host,
   hubGatewayForConnection,
   hubGet,
   hubReplicaConnectionId,
   hubRequest,
   type HubRequestResult,
   learnHubGatewayName
-} from '@/store/hub-sync'
-import type { SessionInfo } from '@/types/hermes'
+} from '@hermes/plugin-sdk'
 
 import {
   type HubSessionAction,
@@ -26,7 +25,10 @@ import {
 
 const REPLICA_LIMIT = 300
 
-type LiveRow = Pick<SessionInfo, 'connection_id' | 'id'>
+interface LiveRow {
+  connection_id?: string
+  id: string
+}
 
 /** Hub gateway name of a live row (untagged rows belong to the primary). */
 function liveRowGateway(row: LiveRow, primary: string): string {
@@ -44,7 +46,7 @@ export function liveSessionKeys(live: readonly LiveRow[]): LiveSessionKey[] {
 /** Registered non-primary connections that answer hub-sync `/status` now. */
 export async function reachableConnections(): Promise<Set<string>> {
   const primary = hubReplicaConnectionId()
-  const ids = ($connectionsRegistry.get()?.connections ?? []).map(c => c.id).filter(id => id && id !== primary)
+  const ids = host.state.gateways.get().map(c => c.id).filter(id => id && id !== primary)
   const answers = await Promise.all(ids.map(async id => ((await learnHubGatewayName(id)) ? id : null)))
 
   return new Set(answers.filter((id): id is string => Boolean(id)))
@@ -57,6 +59,7 @@ export async function reachableConnections(): Promise<Set<string>> {
  */
 export async function loadReplicaSidebarRows(live: readonly LiveRow[]): Promise<HubSessionRow[]> {
   const primary = hubReplicaConnectionId()
+
   const [result, reachable] = await Promise.all([
     hubGet<{ sessions?: HubSessionRow[] }>(`/sessions?limit=${REPLICA_LIMIT}`, primary),
     reachableConnections()
@@ -103,7 +106,7 @@ export function replicaRowRoute(row: HubSessionRow) {
   }
 
   const profile = row.profile?.trim() || 'default'
-  const kind = ($connectionsRegistry.get()?.connections ?? []).find(c => c.id === connectionId)?.kind
+  const kind = host.state.gateways.get().find(c => c.id === connectionId)?.kind
   const mode = kind === 'local' ? ('local' as const) : ('remote' as const)
 
   return { connectionId, mode, profile, targetProfile: profile }

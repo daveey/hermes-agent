@@ -19,6 +19,11 @@ import {
   atom,
   captureGatewayFileDownload,
   host,
+  hubGatewayForConnection,
+  hubGatewayTasks,
+  hubRequest,
+  type HubTask,
+  learnHubGatewayName,
   type PluginOs,
   type PluginRestOptions,
   type PluginStorage,
@@ -26,14 +31,6 @@ import {
   queryClient,
   useValue
 } from '@hermes/plugin-sdk'
-
-import {
-  hubGatewayForConnection,
-  hubGatewayTasks,
-  hubRequest,
-  type HubTask,
-  learnHubGatewayName
-} from '@/store/hub-sync'
 
 // Native completion notification.
 import {
