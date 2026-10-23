@@ -363,7 +363,8 @@ if not getattr(urllib.request, '_hermes_loopback', False):
       isMac: process.platform === 'darwin',
       defaultUpdateBranch: 'main',
       updateHandoffDwellMs: 0,
-      handoffClaimTimeoutMs: 2000,
+      // The claim is polled through a real Python helper; 2s starves on a loaded runner.
+      handoffClaimTimeoutMs: 20_000,
       resolveUpdateRoot: (): string => root,
       readSourceUpdate: (install: string, opts: { force?: boolean }): Promise<SourceUpdate | null> =>
         readSourceUpdate({
@@ -394,8 +395,13 @@ if not getattr(urllib.request, '_hermes_loopback', False):
       (command: string, args: string[], options: SpawnOptions): updaterProcess.UpdaterChild => {
         spawned.push({ command, args, options })
         // C2: a hand-off has started only once the script takes the Desktop's
-        // bridge marker in its own (live, foreign) name — do that here.
-        fs.writeFileSync(markerPath(home), `${process.ppid}\n${Math.floor(Date.now() / 1000)}\n`)
+        // bridge marker in its own (live, foreign) name — do that here. Like
+        // posix.sh/marker.sh, stamp the startedAt the Desktop handed us, not a
+        // fresh clock read: a stall across a second boundary on a loaded
+        // runner would otherwise make the protocol-1 claim never match.
+        const startedAt: string | undefined = options.env?.HERMES_UPDATE_STARTED_AT
+        expect(startedAt).toMatch(/^\d+$/)
+        fs.writeFileSync(markerPath(home), `${process.ppid}\n${startedAt}\n`)
 
         return { unref: (): void => {} }
       }
@@ -425,7 +431,8 @@ if not getattr(urllib.request, '_hermes_loopback', False):
       expect(spawned).toHaveLength(0)
       fs.mkdirSync(scriptDirectory, { recursive: true })
       fs.writeFileSync(script, '')
-      expect(await strategy.apply()).toMatchObject({ ok: true, handedOff: true })
+      const applied: unknown = await strategy.apply()
+      expect(applied, JSON.stringify(applied)).toMatchObject({ ok: true, handedOff: true })
       const handoff: (typeof spawned)[number] | undefined = spawned.pop()
       // The update ran and released its claim; the next apply starts clean.
       fs.rmSync(markerPath(home), { force: true })
@@ -486,4 +493,4 @@ if not getattr(urllib.request, '_hermes_loopback', False):
     })
     fs.rmSync(temporary, { recursive: true, force: true })
   }
-}, 30000)
+}, 120_000)

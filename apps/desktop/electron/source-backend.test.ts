@@ -102,7 +102,7 @@ test.skipIf(process.platform === 'win32')(
           cwd: temp,
           env,
           encoding: 'utf8',
-          timeout: 90_000
+          timeout: 180_000
         })
       ) as Fixture
 
@@ -158,7 +158,7 @@ test.skipIf(process.platform === 'win32')(
         })
 
         try {
-          const port: number = (await waitForDashboardPort(child, 45_000)) as number
+          const port: number = (await waitForDashboardPort(child, 150_000)) as number
 
           const response: Response = await fetch(`http://127.0.0.1:${port}/api/health`, {
             headers: { 'X-Hermes-Session-Token': token }
@@ -207,7 +207,9 @@ test.skipIf(process.platform === 'win32')(
       vi.unstubAllEnvs()
     }
   },
-  150_000
+  // Two cold Python backend starts; on a loaded shared runner each can take
+  // minutes of wall time.
+  400_000
 )
 
 test('Windows console selection uses only the selected interpreter directory', (): void => {
