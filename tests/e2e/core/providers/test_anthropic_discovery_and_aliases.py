@@ -164,7 +164,8 @@ def test_oauth_deferred_alias_resolves_through_tool_describe(rig) -> None:
     assert "chat_history_lookup" in catalog["description"], "precondition: alias advertised in the catalog"
     (result,) = _tool_results(mains[1]["body"])
     not_found = "not_found" in result and "chat_history_lookup" in result.split("not_found", 1)[1][:80]
-    described = "chat_history_lookup" in result and ("parameters" in result or "input_schema" in result)
+    # The alias resolves to the canonical tool; its schema may come back keyed by ``session_search``.
+    described = ("chat_history_lookup" in result or "session_search" in result) and ("parameters" in result or "input_schema" in result)
     with known_gate(KNOWN, "alias_describe", raises=AliasNotReverseMapped):
         if not_found or not described:
             raise AliasNotReverseMapped(f"tool_describe did not resolve the advertised alias: {result[:600]}")

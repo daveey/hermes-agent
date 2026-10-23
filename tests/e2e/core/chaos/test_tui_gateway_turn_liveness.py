@@ -284,7 +284,9 @@ def _assert_heartbeat(scn: Scenario, hb: Heartbeat, stats: dict[str, Any], turn_
     stats["heartbeats"] = len(hb.latencies)
     assert stats["heartbeat_max_s"] < HEARTBEAT_MAX_S, (
         f"{scn.id}: dispatcher blocked {stats['heartbeat_max_s']}s during the wedged turn")
-    assert len(hb.latencies) >= MIN_HEARTBEATS or turn_s < 2.0, (
+    # Heartbeat count scales with turn length (~1/s floor): a ~2s turn on a loaded runner can only
+    # fit a few probes, so a fixed 5 flaked right at the old 2.0s cutoff.
+    assert len(hb.latencies) >= min(MIN_HEARTBEATS, int(turn_s)), (
         f"{scn.id}: only {len(hb.latencies)} heartbeats answered in a {turn_s:.1f}s turn")
 
 
