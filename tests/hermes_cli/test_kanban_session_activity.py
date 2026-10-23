@@ -313,3 +313,112 @@ def test_hub_platform_subscription_on_a_local_board_is_not_a_tui_shepherd(kanban
     conn.commit()
     conn.close()
     assert ksa.active_task_counts() == {}
+
+
+# --- one origin-work association for counts AND the task list (cross-gateway ownership) [daveey] ---
+
+def _set_meta(path: Path, **kv) -> None:
+    conn = sqlite3.connect(path)
+    conn.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", [(k, str(v)) for k, v in kv.items()])
+    conn.commit()
+    conn.close()
+
+
+def _dispatch_graph(root_status="running"):
+    """A local chat on 'macbook' dispatched a 13-card graph that runs on 'hub': only the root carries the
+    shepherd link (later cards are its descendants). Root running, 12 waiting on it."""
+    kids = [f"t_c{i:02d}" for i in range(12)]
+    cards = [{"_gw": "hub", "id": "t_root", "title": "P0", "status": root_status, "children": kids,
+              "sessions": [{"session": "hub_orch", "profile": None, "rel": "created"}, _shep("s_origin")]}]
+    cards += [{"_gw": "hub", "id": k, "title": k, "status": "todo", "parents": ["t_root"],
+               "sessions": [{"session": "hub_orch", "profile": None, "rel": "created"}]} for k in kids]
+    return cards
+
+
+def test_remote_dispatch_graph_lists_every_owner_qualified_row_and_counts_the_same(kanban_root):
+    """Dispatcher exited, origin chat keeps all 13 remote rows in its task list, and the sidebar count is the
+    same set (one predicate), so the row cannot paint done."""
+    _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    rows = ksa.session_tasks(["s_origin"])
+    assert len(rows) == 13
+    assert {(r["gateway"], r["board"], r["id"]) for r in rows} == (
+        {("hub", "default", "t_root")} | {("hub", "default", f"t_c{i:02d}") for i in range(12)})
+    root = next(r for r in rows if r["id"] == "t_root")
+    assert root["remote"] is True and root["via"] == "shepherd" and root["status"] == "running"
+    assert next(r for r in rows if r["id"] == "t_c00")["via"] == "descendant"
+    assert all(r["key"] == f"hub/default/{r['id']}" for r in rows)
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 13
+
+
+def test_done_root_still_lists_unfinished_descendants(kanban_root):
+    _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph(root_status="done"))
+    rows = ksa.session_tasks(["s_origin"])
+    assert sorted(r["id"] for r in rows) == [f"t_c{i:02d}" for i in range(12)]
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 12
+
+
+def test_review_is_unfinished_on_local_and_remote_cards(kanban_root):
+    """A card waiting for code review (or a goal completion awaiting verification) is not done."""
+    _make_board(kanban_root / "kanban.db", [("t_l", "review", "s1")])
+    _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_r", "status": "review", "sessions": [_shep("s1")]}])
+    ann = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 2
+    assert {r["id"] for r in ksa.session_tasks(["s1"])} == {"t_l", "t_r"}
+
+
+def test_same_task_id_on_two_gateways_is_two_rows(kanban_root):
+    _make_board(kanban_root / "kanban.db", [("t_same", "running", "s1")])
+    _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_same", "status": "running", "sessions": [_shep("s1")]},
+        {"_gw": "mini", "id": "t_same", "status": "todo", "sessions": [_shep("s1")]}])
+    ann = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 3
+    rows = ksa.session_tasks(["s1"])
+    assert sorted((r.get("gateway"), r["id"]) for r in rows if r.get("remote")) == [("hub", "t_same"), ("mini", "t_same")]
+    assert len({r["key"] for r in rows}) == 3
+
+
+def test_stale_replica_keeps_last_known_unfinished_rows_marked_stale(kanban_root):
+    path = _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    _set_meta(path, last_ok=1.0, offline_since=2.0)  # hub unreachable for ages
+    rows = ksa.session_tasks(["s_origin"])
+    assert len(rows) == 13 and all(r["stale"] for r in rows)
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 13
+    assert ann[0]["kanban_remote_stale"] == 13
+
+
+def test_failed_replica_read_keeps_the_last_good_answer_never_zero(kanban_root):
+    path = _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    import time as _time
+    _set_meta(path, last_ok=_time.time())
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 13 and "kanban_remote_stale" not in ann[0]
+    path.write_bytes(b"not a database" * 100)  # replica now unreadable
+    ksa._reset_cache_for_tests(keep_remote=True)
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 13
+    assert ann[0]["kanban_remote_stale"] == 13
+    assert all(r["stale"] for r in ksa.session_tasks(["s_origin"]))
+
+
+def test_final_completion_clears_the_origin_and_other_sessions_finish_normally(kanban_root):
+    graph = _dispatch_graph(root_status="done")
+    for c in graph:
+        c["status"] = "done"
+    _make_replica(kanban_root / "hub-state", "macbook", graph)
+    _make_board(kanban_root / "kanban.db", [("t_x", "done", "s_other")])
+    ann = [{"id": "s_origin"}, {"id": "s_other"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann == [{"id": "s_origin"}, {"id": "s_other"}]
+    assert ksa.session_tasks(["s_origin"]) == []

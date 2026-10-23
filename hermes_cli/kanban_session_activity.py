@@ -25,10 +25,11 @@ from typing import Any, Callable, Iterable
 
 _log = logging.getLogger(__name__)
 
-# Statuses that mean "work is still queued or running". ``blocked``/``review``
-# wait on a human and ``done``/``archived`` are finished, so neither keeps the
-# creating session busy.
-ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled")
+# Statuses that mean "work is still queued or running". ``done``/``archived``
+# are finished. ``review`` is unfinished too: the card waits for a reviewer
+# (usually a dispatched agent) or for its completion to be verified, so a
+# session whose only open card sits in review must not paint done. [daveey]
+ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled", "review")
 # Waiting on a human. These don't keep the session busy, but the sidebar row
 # shows how many there are next to the open count (``kanban_blocked``) and the
 # row paints red. [daveey]
@@ -43,7 +44,7 @@ HUMAN_BLOCK_KINDS = ("needs_input", "capability")
 
 _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
-_cache: tuple[float, dict[str, int], dict[str, int], dict[str, int]] | None = None
+_cache: tuple[float, dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
 
 
 def _board_db_paths() -> list[Path]:
@@ -184,66 +185,118 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
     return None
 
 
-def _read_hub_replica(path: Path) -> tuple[dict[str, int], dict[str, int]]:
-    """``(active, blocked)`` per local session from replica cards whose ``sessions`` link names this gateway,
-    plus their children (walked transitively on the same gateway and board)."""
+# [daveey] The ONE origin-work association for cards on other gateways. The sidebar counts
+# (``kanban_active``/``kanban_blocked``, which also drive the archive guard) and the session task list
+# (``session_tasks``) both come from ``_remote_links``, so they can never disagree about which remote
+# cards a session owns. A link is a ``rel: shepherd`` entry naming THIS gateway on a replica card (the
+# owner stores it as a ``platform='hub'`` notify subscription: ``hermes-hub create-task`` origin, a
+# ``shepherd`` request, or ``kanban_create`` run with an origin session); every descendant of that card
+# (``children``, transitively, on the owner's same board) is the session's work too. Rows are qualified
+# by gateway/board/id: the same ``t_`` id on two gateways is two cards.
+HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync for this long = stale
+_REMOTE_FIELDS = ("title", "status", "block_kind", "assignee", "created_at", "started_at", "priority")
+_remote_last: list[dict[str, Any]] | None = None  # last good read (process lifetime)
+
+
+def _meta_float(conn: sqlite3.Connection, key: str) -> float | None:
+    try:
+        row = conn.execute("SELECT v FROM meta WHERE k = ?", (key,)).fetchone()
+        return float(row[0]) if row and row[0] not in (None, "") else None
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, Any]]:
+    """Unfinished replica cards linked to a session on this gateway, one row per (session, card)."""
     conn = _open_ro(path)
     try:
         me = _self_gateway(conn)
         if not me:
-            return {}, {}
-        rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'tasks' AND gw != ?", (me,)).fetchall()
+            return []
+        rows = conn.execute("SELECT gw, data, updated_at FROM replica WHERE coll = 'tasks' AND gw != ?",
+                            (me,)).fetchall()
+        last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
     finally:
         conn.close()
+    now = time.time() if now is None else now
+    stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
     tasks: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for gw, data in rows:
+    seen_at: dict[str, float] = {}
+    for gw, data, updated in rows:
         try:
             t = json.loads(data)
         except (TypeError, ValueError):
             continue
         if isinstance(t, dict) and t.get("id"):
+            seen_at[str(gw)] = max(seen_at.get(str(gw), 0.0), (updated or 0) / 1000.0)
             tasks[(str(gw), str(t.get("board") or "default"), str(t["id"]))] = t
-    pairs: dict[str, set[tuple[str, str]]] = {"active": set(), "blocked": set()}
+    found: dict[tuple[str, str], dict[str, Any]] = {}
     for (gw, board, tid), t in tasks.items():
         links = t.get("sessions") if isinstance(t.get("sessions"), list) else []
         sids = {str(l["session"]) for l in links if isinstance(l, dict) and l.get("session") and l.get("gw") == me}
         if not sids:
             continue
-        seen: set[str] = set()
+        owner_seen = seen_at.get(gw) or None
+        synced = min(owner_seen, last_ok) if (owner_seen and last_ok) else (owner_seen or last_ok)
+        done: set[str] = set()
         todo = [tid]
         while todo:
             cur = todo.pop()
-            if cur in seen:
+            if cur in done:
                 continue
-            seen.add(cur)
+            done.add(cur)
             card = tasks.get((gw, board, cur))
             if card is None:
                 continue
-            bucket = _replica_bucket(card)
-            if bucket:
+            if card.get("status") in LISTED_STATUSES:
                 ref = f"{gw}/{board}/{cur}"
-                pairs[bucket].update((sid, ref) for sid in sids)
+                via = "shepherd" if cur == tid else "descendant"
+                for sid in sids:
+                    prev = found.get((sid, ref))
+                    if prev is None or (via == "shepherd" and prev["via"] != "shepherd"):
+                        found[(sid, ref)] = {
+                            **{f: card.get(f) for f in _REMOTE_FIELDS},
+                            "id": cur, "board": board, "gateway": gw, "key": ref, "session": sid,
+                            "via": via, "root": f"{gw}/{board}/{tid}", "remote": True,
+                            "synced_at": synced, "stale": stale,
+                        }
             kids = card.get("children") if isinstance(card.get("children"), list) else []
             todo.extend(str(k) for k in kids if k)
-    out: list[dict[str, int]] = []
-    for bucket in ("active", "blocked"):
-        counts: dict[str, int] = {}
-        for sid, _ref in pairs[bucket]:
-            counts[sid] = counts.get(sid, 0) + 1
-        out.append(counts)
-    return out[0], out[1]
+    return list(found.values())
 
 
-def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
-    """``(active, blocked, unseen)`` per-session task counts across every board, cached."""
+def _remote_links() -> list[dict[str, Any]]:
+    """``_read_remote_links`` of this gateway's replica. A failed read (corrupt/locked/vanished hub.db) is not
+    "no remote work": it returns the last good answer with every row marked stale, so a session never paints
+    done because the replica could not be read. No replica ever seen = not installed = []."""
+    global _remote_last
+    path = _hub_db_path()
+    try:
+        if path is None:
+            raise FileNotFoundError("no hub.db")
+        cards = _read_remote_links(path)
+    except Exception as exc:  # a broken replica must never break the sidebar
+        if _remote_last is None:
+            if path is not None:
+                _log.debug("hermes-hub replica read failed: %s", exc)
+            return []
+        _log.warning("hermes-hub replica read failed, keeping last known remote cards (stale): %s", exc)
+        return [{**c, "stale": True} for c in _remote_last]
+    _remote_last = cards
+    return cards
+
+
+def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
+    """``(active, blocked, unseen, remote_stale)`` per-session task counts across every board, cached."""
     global _cache
     now = time.monotonic()
     with _cache_lock:
         if _cache is not None and now < _cache[0]:
-            return _cache[1], _cache[2], _cache[3]
+            return _cache[1], _cache[2], _cache[3], _cache[4]
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
     unseen: dict[str, int] = {}
+    stale: dict[str, int] = {}
     for path in _board_db_paths():
         try:
             for sid, n in _read_unseen(path).items():
@@ -256,18 +309,18 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
                     into[sid] = into.get(sid, 0) + n
             except sqlite3.Error as exc:  # an old schema without session_id, a locked file
                 _log.debug("kanban activity read failed for %s: %s", path, exc)
-    try:
-        hub = _hub_db_path()
-        if hub is not None:
-            r_active, r_blocked = _read_hub_replica(hub)
-            for src, into in ((r_active, active), (r_blocked, blocked)):
-                for sid, n in src.items():
-                    into[sid] = into.get(sid, 0) + n
-    except Exception as exc:  # a corrupt/locked replica must never break the sidebar
-        _log.debug("hermes-hub replica read failed: %s", exc)
+    for card in _remote_links():
+        bucket = _replica_bucket(card)
+        into = active if bucket == "active" else blocked if bucket == "blocked" else None
+        if into is None:
+            continue
+        sid = card["session"]
+        into[sid] = into.get(sid, 0) + 1
+        if card.get("stale"):
+            stale[sid] = stale.get(sid, 0) + 1
     with _cache_lock:
-        _cache = (now + _CACHE_TTL_S, active, blocked, unseen)
-    return active, blocked, unseen
+        _cache = (now + _CACHE_TTL_S, active, blocked, unseen, stale)
+    return active, blocked, unseen, stale
 
 
 def active_task_counts() -> dict[str, int]:
@@ -282,7 +335,7 @@ def blocked_task_counts() -> dict[str, int]:
 
 # What a session's task strip lists: the sidebar's open + blocked sets, plus
 # ``review`` (also waiting on a human). [daveey]
-LISTED_STATUSES = ACTIVE_STATUSES + BLOCKED_STATUSES + ("review",)
+LISTED_STATUSES = tuple(dict.fromkeys(ACTIVE_STATUSES + BLOCKED_STATUSES + ("review",)))
 _TASK_FIELDS = ("id", "title", "status", "assignee", "session_id", "created_at", "started_at")
 
 
@@ -337,6 +390,15 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
             out.extend(_read_session_tasks(path, ids, statuses))
         except sqlite3.Error as exc:
             _log.debug("kanban session tasks read failed for %s: %s", path, exc)
+    for t in out:
+        t.setdefault("key", f"{t['board']}/{t['id']}")
+    # [daveey] Cards on other gateways this lineage owns: the same rows the counts use, owner-qualified
+    # (gateway/board/id), with ``stale``/``synced_at`` from the replica. One row per card.
+    wanted, seen = set(ids), set()
+    for card in _remote_links():
+        if card["session"] in wanted and card.get("status") in statuses and card["key"] not in seen:
+            seen.add(card["key"])
+            out.append({**card, "session_id": card["session"]})
     return out
 
 
@@ -459,7 +521,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     if not rows:
         return rows
     try:
-        active, blocked, unseen = _all_counts()
+        active, blocked, unseen, remote_stale = _all_counts()
     except Exception:
         _log.debug("kanban activity unavailable", exc_info=True)
         return rows
@@ -471,7 +533,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     for row in rows:
         ids = list(_row_ids(row))
         for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen),
-                            ("kanban_attention", attention)):
+                            ("kanban_attention", attention), ("kanban_remote_stale", remote_stale)):
             n = sum(counts.get(sid, 0) for sid in ids)
             if n:
                 row[key] = n
@@ -480,8 +542,10 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     return rows
 
 
-def _reset_cache_for_tests() -> None:
-    global _cache, _attention_cache
+def _reset_cache_for_tests(keep_remote: bool = False) -> None:
+    global _cache, _attention_cache, _remote_last
     with _cache_lock:
         _cache = None
         _attention_cache = None
+        if not keep_remote:
+            _remote_last = None
