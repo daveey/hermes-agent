@@ -51,7 +51,7 @@ permissions:
   contents: read # default; apply-patch job overrides to write
 
 concurrency:
-  group: ts-autofix-${{ github.ref }}
+  group: ts-autofix-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:

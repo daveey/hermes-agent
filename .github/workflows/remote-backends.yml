@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: remote-backends-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
+  group: remote-backends-${{ (github.ref_type == 'tag' || github.ref == 'refs/heads/main') && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:

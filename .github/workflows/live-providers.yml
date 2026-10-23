@@ -27,7 +27,7 @@ permissions:
 
 # One live run per ref at a time; never cancel a release-tag gate half way.
 concurrency:
-  group: live-providers-${{ github.ref }}
+  group: live-providers-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
   cancel-in-progress: false
 
 jobs:

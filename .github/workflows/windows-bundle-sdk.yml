@@ -18,7 +18,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: windows-bundle-sdk-${{ github.ref }}
+  group: windows-bundle-sdk-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
   cancel-in-progress: true
 jobs:
   windows-bundle-tools:

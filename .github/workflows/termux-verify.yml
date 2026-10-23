@@ -32,7 +32,7 @@ permissions:
 # A workflow_call run (stable release) is never cancelled: its group uses
 # github.run_id so a parent rerun cannot kill this child mid-flight.
 concurrency:
-  group: termux-verify-${{ inputs.release == true && github.run_id || github.ref }}
+  group: termux-verify-${{ (inputs.release == true || github.ref == 'refs/heads/main') && github.run_id || github.ref }}
   cancel-in-progress: ${{ inputs.release != true }}
 
 jobs:

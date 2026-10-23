@@ -38,7 +38,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-install-update-e2e-${{ github.event_name }}-${{ github.ref }}
+  group: windows-install-update-e2e-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:

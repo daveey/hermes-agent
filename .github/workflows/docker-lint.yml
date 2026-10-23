@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: docker-lint-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
+  group: docker-lint-${{ (github.ref_type == 'tag' || github.ref == 'refs/heads/main') && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:

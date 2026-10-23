@@ -32,7 +32,7 @@ permissions:
 # of cancelling this child mid-flight. wine2e push runs keep ref-scoped
 # collapse as before.
 concurrency:
-  group: windows-venv-e2e-${{ inputs.release == true && github.run_id || github.ref }}
+  group: windows-venv-e2e-${{ (inputs.release == true || github.ref == 'refs/heads/main') && github.run_id || github.ref }}
   cancel-in-progress: ${{ inputs.release != true }}
 
 jobs:
