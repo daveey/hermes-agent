@@ -5552,8 +5552,9 @@ def resolve_provider_client(
     return _resolve_registry_branch(req)
 
 
-# ── Public API ──────────────────────────────────────────────────────────────
+from agent.auxiliary_class_readiness import class_readiness
 
+@class_readiness
 def get_text_auxiliary_client(task: str = "", *, main_runtime: Optional[dict[str, Any]] = None) -> tuple[Optional[OpenAI], Optional[str]]:
     """Return (client, default_model_slug) for text-only aux tasks; ``task`` selects auxiliary.<task> overrides."""
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
