@@ -51,6 +51,9 @@ type KanbanMessages = {
   allGateways: string
   createOn: (gateway: string) => string
   gatewayUnreachable: (gateway: string, error: string) => string
+  /** [daveey] Card marker when the owner was unreachable and the card is the hub replica's copy. */
+  fromHub: string
+  fromHubTip: (ago: string) => string
   allTenants: string
   showArchived: string
   groupRunning: string
@@ -290,6 +293,8 @@ export const en: KanbanMessages = {
   allGateways: 'All gateways',
   createOn: gateway => `On ${gateway}`,
   gatewayUnreachable: (gateway, error) => `${gateway} didn't answer, so its cards are missing: ${error}`,
+  fromHub: 'from hub',
+  fromHubTip: ago => `Its gateway didn't answer; this is the hermes-hub copy, synced ${ago}`,
   allTenants: 'All tenants',
   showArchived: 'Show archived',
   groupRunning: 'Group Running by profile',
@@ -530,6 +535,8 @@ const ja: KanbanMessages = {
   allGateways: 'すべてのゲートウェイ',
   createOn: gateway => `${gateway} に作成`,
   gatewayUnreachable: (gateway, error) => `${gateway} が応答しないため、そのカードは表示されていません: ${error}`,
+  fromHub: 'ハブより',
+  fromHubTip: ago => `ゲートウェイが応答しないため、hermes-hub のコピーを表示しています（同期: ${ago}）`,
   allTenants: 'すべてのテナント',
   showArchived: 'アーカイブを表示',
   groupRunning: '実行中をプロフィールでグループ化',
@@ -768,6 +775,8 @@ const zh: KanbanMessages = {
   allGateways: '所有网关',
   createOn: gateway => `创建于 ${gateway}`,
   gatewayUnreachable: (gateway, error) => `${gateway} 未响应，其卡片未显示：${error}`,
+  fromHub: '来自 hub',
+  fromHubTip: ago => `其网关未响应；这是 hermes-hub 的副本，同步于 ${ago}`,
   allTenants: '所有租户',
   showArchived: '显示已归档',
   groupRunning: '按配置档分组运行中',
@@ -1004,6 +1013,8 @@ const zhHant: KanbanMessages = {
   allGateways: '所有閘道',
   createOn: gateway => `建立於 ${gateway}`,
   gatewayUnreachable: (gateway, error) => `${gateway} 未回應，其卡片未顯示：${error}`,
+  fromHub: '來自 hub',
+  fromHubTip: ago => `其閘道未回應；這是 hermes-hub 的副本，同步於 ${ago}`,
   allTenants: '所有租戶',
   showArchived: '顯示已封存',
   groupRunning: '依設定檔分組執行中',

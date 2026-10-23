@@ -250,6 +250,12 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
         <span className="min-w-0 truncate font-mono text-(--ui-text-quaternary)">{shortId(task.id)}</span>
         {/* [daveey] Which gateway owns the card — the sidebar session row's glyph. */}
         {task.gateway && <GatewayDeviceIcon gatewayId={task.gateway} />}
+        {/* [daveey] The owner didn't answer: this is the hermes-hub replica's copy. */}
+        {task.from_hub && (
+          <Tip label={k.fromHubTip(ago(task.hub_synced_at) ?? '?')}>
+            <span className="shrink-0 cursor-help text-(--ui-text-quaternary) italic">{k.fromHub}</span>
+          </Tip>
+        )}
       </div>
     </div>
   )

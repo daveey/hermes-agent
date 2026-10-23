@@ -27,6 +27,14 @@ import {
   useValue
 } from '@hermes/plugin-sdk'
 
+import {
+  hubGatewayForConnection,
+  hubGatewayTasks,
+  hubRequest,
+  type HubTask,
+  learnHubGatewayName
+} from '@/store/hub-sync'
+
 // Native completion notification.
 import {
   bindCompletionNotify,
@@ -471,6 +479,11 @@ interface TaskOwner {
 
 const taskOwners = new Map<string, TaskOwner>()
 
+/** [daveey] Cards read from the hermes-hub replica, by id: their hub gateway
+ *  name and board, so a comment on one becomes a hub request instead of a
+ *  call to a gateway that just failed to answer. */
+const hubTaskRefs = new Map<string, { board: string; hubGateway: string }>()
+
 /** [daveey] Record where a task lives before the board has read it (the
  *  open-task hook: a card opened from a chat on another gateway), so the
  *  drawer's first fetch goes to the owning gateway + board. */
@@ -556,6 +569,9 @@ export interface GatewayBoardPart {
   gateway: string
   board?: KanbanBoard
   error?: unknown
+  /** [daveey] Set when `board` is the hermes-hub replica's copy (the live
+   *  read failed): epoch seconds it is current for, or null when unknown. */
+  hubSyncedAt?: null | number
 }
 
 const TERMINAL_ORDER = new Set(['done', 'archived'])
@@ -580,14 +596,21 @@ export function mergeBoards(parts: GatewayBoardPart[]): KanbanBoard {
   const tenants = new Set<string>()
   const assignees = new Set<string>()
   const gatewayErrors: Record<string, string> = {}
+  const hubGateways: Record<string, null | number> = {}
 
   for (const part of parts) {
-    if (!part.board) {
-      if (part.error && !isMissingBoard(part.error)) {
-        gatewayErrors[part.gateway] = part.error instanceof Error ? part.error.message : String(part.error)
-      }
+    // A replica-filled part still failed live: keep its error on the board
+    // (the header chip says the gateway is down) next to its hub cards.
+    if (part.error && !isMissingBoard(part.error)) {
+      gatewayErrors[part.gateway] = part.error instanceof Error ? part.error.message : String(part.error)
+    }
 
+    if (!part.board) {
       continue
+    }
+
+    if (part.hubSyncedAt !== undefined) {
+      hubGateways[part.gateway] = part.hubSyncedAt
     }
 
     for (const col of part.board.columns ?? []) {
@@ -621,6 +644,7 @@ export function mergeBoards(parts: GatewayBoardPart[]): KanbanBoard {
     assignees: [...assignees].sort(),
     columns: [...columns.values()],
     gateway_errors: Object.keys(gatewayErrors).length ? gatewayErrors : undefined,
+    ...(Object.keys(hubGateways).length ? { hub_gateways: hubGateways } : {}),
     latest_event_id: primary?.latest_event_id ?? 0,
     now: primary?.now ?? answered[0].board!.now,
     tenants: [...tenants].sort()
@@ -633,10 +657,113 @@ function rememberOwners(board: KanbanBoard, slug: string): KanbanBoard {
       if (task.gateway) {
         taskOwners.set(task.id, { board: slug, gateway: task.gateway })
       }
+
+      if (task.from_hub && task.gateway) {
+        const hubGateway = hubGatewayForConnection(task.gateway)
+
+        if (hubGateway) {
+          hubTaskRefs.set(task.id, { board: slug || 'default', hubGateway })
+        }
+      } else {
+        hubTaskRefs.delete(task.id)
+      }
     }
   }
 
   return board
+}
+
+// ── hermes-hub replica fallback [daveey] ──────────────────────────────────────
+//
+// A registered gateway whose live board read fails (asleep, tunnel down,
+// waiting on a login) still shows its cards: the window's own gateway serves
+// its hermes-hub replica (`/api/plugins/hub-sync/tasks`), and those cards carry
+// `from_hub` so the board marks them. The live read stays the primary source;
+// the replica is only consulted for gateways that didn't answer.
+
+const HUB_COLUMN_ORDER = ['triage', 'todo', 'scheduled', 'ready', 'running', 'blocked', 'review', 'done', 'archived']
+
+/** One gateway's replica cards as a board (columns in the board's lane order). */
+export function hubBoardFromTasks(tasks: HubTask[], now: number): KanbanBoard {
+  const columns = new Map<string, KanbanColumn>()
+  const assignees = new Set<string>()
+
+  for (const task of tasks) {
+    const status = task.status || 'todo'
+    const run = task.run ?? null
+    const column = columns.get(status) ?? { name: status, tasks: [] }
+
+    column.tasks.push({
+      assignee: task.assignee ?? null,
+      body: task.body ?? null,
+      comment_count: typeof task.comments === 'number' ? task.comments : undefined,
+      completed_at: task.completed_at ?? null,
+      created_at: task.created_at,
+      current_run_started_at: run?.status === 'running' ? (run.started_at ?? null) : null,
+      from_hub: true,
+      hub_synced_at: task.synced_at,
+      id: task.id,
+      latest_summary: run?.summary ?? null,
+      priority: task.priority,
+      started_at: task.started_at ?? null,
+      status,
+      title: task.title ?? task.id
+    })
+    columns.set(status, column)
+
+    if (task.assignee) {
+      assignees.add(task.assignee)
+    }
+  }
+
+  const rank = (name: string) => {
+    const at = HUB_COLUMN_ORDER.indexOf(name)
+
+    return at < 0 ? HUB_COLUMN_ORDER.length : at
+  }
+
+  return {
+    assignees: [...assignees].sort(),
+    columns: [...columns.values()].sort((a, b) => rank(a.name) - rank(b.name)),
+    latest_event_id: 0,
+    now,
+    tenants: []
+  }
+}
+
+/** Fill failed remote parts from the replica (in place). Parts that answered,
+ *  a missing board, and gateways with no known hub name are left alone. */
+export async function withHubFallback(
+  parts: GatewayBoardPart[],
+  slug: string,
+  archived: boolean
+): Promise<GatewayBoardPart[]> {
+  await Promise.all(
+    parts.map(async (part, index) => {
+      if (index === 0 || part.board || !part.error || isMissingBoard(part.error)) {
+        return
+      }
+
+      const hubGateway = hubGatewayForConnection(part.gateway)
+
+      if (!hubGateway) {
+        return
+      }
+
+      const tasks = await hubGatewayTasks(hubGateway, slug || 'default', archived)
+
+      if (!tasks) {
+        return
+      }
+
+      const synced = tasks.map(task => task.synced_at).filter((at): at is number => typeof at === 'number')
+
+      part.board = hubBoardFromTasks(tasks, Math.floor(Date.now() / 1000))
+      part.hubSyncedAt = synced.length ? Math.min(...synced) : null
+    })
+  )
+
+  return parts
 }
 
 // ── reads ─────────────────────────────────────────────────────────────────────
@@ -659,12 +786,16 @@ export async function fetchBoard(archived: boolean): Promise<KanbanBoard> {
     )
   )
 
-  const board = mergeBoards(
-    settled.map((result, index) => ({
-      gateway: gateways[index],
-      ...(result.status === 'fulfilled' ? { board: result.value } : { error: result.reason })
-    }))
-  )
+  const parts: GatewayBoardPart[] = settled.map((result, index) => ({
+    gateway: gateways[index],
+    ...(result.status === 'fulfilled' ? { board: result.value } : { error: result.reason })
+  }))
+
+  // [daveey] Each gateway that answered says which hub gateway it is (cached
+  // for minutes), so its cards can come from the replica when it is down later.
+  parts.forEach(part => part.board && void learnHubGatewayName(part.gateway))
+
+  const board = mergeBoards(await withHubFallback(parts, slug, archived))
 
   return rememberOwners(board, slug)
 }
@@ -953,6 +1084,20 @@ export async function bulkTasks(ids: string[], patch: Record<string, unknown>): 
 }
 
 export const addComment = (id: string, body: string) => {
+  const hubRef = hubTaskRefs.get(id)
+
+  // [daveey] A replica card's owner is unreachable: queue the comment as a
+  // hermes-hub owner request (applied when that gateway syncs again).
+  if (hubRef) {
+    return hubRequest({
+      action: 'comment',
+      args: { text: body },
+      coll: 'tasks',
+      gateway: hubRef.hubGateway,
+      key: `${hubRef.board}/${id}`
+    })
+  }
+
   const [path, opts] = forTask(id, `/tasks/${id}/comments`)
 
   return call(path, { ...opts, method: 'POST', body: { author: 'desktop', body } })

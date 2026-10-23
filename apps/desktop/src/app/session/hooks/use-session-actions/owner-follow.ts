@@ -2,6 +2,7 @@ import type { JsonRpcGatewayError } from '@hermes/shared'
 
 import { getSession } from '@/hermes'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
+import { hubSessionOwner } from '@/store/hub-sync'
 import {
   $connection,
   forgetSessionOwnerHintsForSession,
@@ -76,8 +77,9 @@ function registryConnectionIds(): string[] {
 /**
  * The owner of `storedSessionId` on a connection OTHER than `excluded`, from
  * the unified session list (every connection's connection-tagged rows), then
- * the persisted owner hints, then a read-only by-id probe of each remaining
- * registry connection. Undefined when no other connection has it — or when
+ * the persisted owner hints, then the hermes-hub replica's session → gateway
+ * map (one local read on the primary gateway, [daveey]), then a read-only by-id
+ * probe of each remaining registry connection. Undefined when no other connection has it — or when
  * there is no other connection at all (single-gateway installs never probe).
  */
 export async function findForeignSessionOwner(
@@ -109,6 +111,18 @@ export async function findForeignSessionOwner(
 
   if (hinted) {
     return hinted
+  }
+
+  // [daveey] The hub replica knows which gateway owns every synced session,
+  // with the owner asleep or the hub down; the probe below is the fallback for
+  // ids the replica hasn't seen. Cheap enough for the 4001 path too (one cached
+  // local read), and it can only name a connection outside `skip`.
+  if (registryConnectionIds().length >= 2) {
+    const viaHub = await hubSessionOwner(id, skip)
+
+    if (viaHub) {
+      return viaHub
+    }
   }
 
   const candidates = registryConnectionIds().filter(connectionId => !skip.has(connectionId))

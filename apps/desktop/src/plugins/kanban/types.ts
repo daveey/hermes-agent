@@ -44,6 +44,11 @@ export interface KanbanTask {
   /** [daveey] Chat managing the card: its latest `tui` notify subscriber,
    *  else `session_id`. Absent on older backends. */
   managing_session_id?: null | string
+  /** [daveey] The owner didn't answer the live read: this card is its
+   *  hermes-hub replica copy (read-only snapshot as of `hub_synced_at`). */
+  from_hub?: boolean
+  /** [daveey] Epoch seconds the replica copy is known current for. */
+  hub_synced_at?: null | number
 }
 
 export interface KanbanColumn {
@@ -59,6 +64,9 @@ export interface KanbanBoard {
   now: number
   /** [daveey] Gateways that failed to answer the merged read (id → message). */
   gateway_errors?: Record<string, string>
+  /** [daveey] Gateways whose cards came from the hermes-hub replica because
+   *  their live read failed (id → epoch seconds the copy is current for). */
+  hub_gateways?: Record<string, null | number>
 }
 
 /** A structured recovery action attached to a diagnostic. */
