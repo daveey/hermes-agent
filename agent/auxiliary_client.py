@@ -8129,25 +8129,13 @@ def call_llm(
         if stream and semaphore is not None:
             stream_semaphore = semaphore
             semaphore = None
-            return _release_sync_semaphore_after_stream(response, stream_semaphore)
+            from agent.auxiliary_stream_watchdog import release_sync_semaphore_after_stream
+            return release_sync_semaphore_after_stream(response, stream_semaphore)
         return response
     finally:
         if latency_info is not None:
             latency_info["summary_generation_ms"] = _elapsed_ms(request_started_at)
         if semaphore is not None:
-            semaphore.release()
-
-
-def _release_sync_semaphore_after_stream(stream: Any, semaphore: threading.BoundedSemaphore):
-    """Release a permit only after a streaming response is consumed or closed."""
-    try:
-        yield from stream
-    finally:
-        try:
-            close = getattr(stream, "close", None)
-            if callable(close):
-                close()
-        finally:
             semaphore.release()
 
 
@@ -8223,6 +8211,10 @@ def _start_recovery_ladder(
         main_runtime=retry_kwargs["main_runtime"], route_info=route_info)
 
 
+from agent.auxiliary_class_routing import class_routed_sync, class_routed_async
+
+
+@class_routed_sync
 def _call_llm_impl(
     task: str | None = None, *, provider: str | None = None, model: str | None = None, base_url: str | None = None,
     api_key: str | None = None, main_runtime: Optional[dict[str, Any]] = None, messages: list,
@@ -8409,6 +8401,7 @@ async def async_call_llm(
             semaphore.release()
 
 
+@class_routed_async
 async def _async_call_llm_impl(
     task: str | None = None, *, provider: str | None = None, model: str | None = None, base_url: str | None = None,
     api_key: str | None = None, main_runtime: Optional[dict[str, Any]] = None, messages: list,

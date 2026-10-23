@@ -17,6 +17,19 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 
+def release_sync_semaphore_after_stream(stream: Any, semaphore: threading.BoundedSemaphore):
+    """Release a permit only after a streaming response is consumed or closed."""
+    try:
+        yield from stream
+    finally:
+        try:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+        finally:
+            semaphore.release()
+
+
 def _stream_socket(stream: Any) -> Any:
     """The raw socket under an SDK chunk stream (``stream.response`` is the ``httpx.Response``)."""
     from agent.agent_runtime_helpers import _socket_from_response
