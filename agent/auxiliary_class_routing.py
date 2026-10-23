@@ -147,6 +147,27 @@ def _stream(task, runtime, client, kwargs, options):
         aux._close_cached_client(client, close_async=True)
 
 
+def _stream_with_recovery(task, options, request):
+    # Lazy allocation: an unconsumed generator must not leak a client or consume
+    # an allocation. Once any chunk escapes, replay would duplicate output.
+    failed = []
+    while True:
+        runtime, client, kwargs = _prepare(task, options, request, failed)
+        delivered = False
+        stream = _stream(task, runtime, client, kwargs, options)
+        try:
+            for chunk in stream:
+                delivered = True
+                yield chunk
+            return
+        except Exception as exc:
+            if delivered or not _retryable(exc):
+                raise
+            failed.append((runtime["provider"], runtime["model"]))
+        finally:
+            stream.close()
+
+
 def class_routed_sync(callback):
     @wraps(callback)
     def wrapped(task=None, **options):
@@ -154,11 +175,11 @@ def class_routed_sync(callback):
         request = _class_request(task, options)
         if request is None:
             return callback(task, **options)
+        if options.get("stream"):
+            return _stream_with_recovery(task, options, request)
         failed = []
         while True:
             runtime, client, kwargs = _prepare(task, options, request, failed)
-            if options.get("stream"):
-                return _stream(task, runtime, client, kwargs, options)
             try:
                 return _complete(task, runtime, client, kwargs)
             except Exception as exc:

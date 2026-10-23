@@ -61,8 +61,9 @@ def test_auxiliary_refuses_transport_bypass(override, routing_home, streaming_ro
     assert native_transport == []
 
 
+@pytest.mark.parametrize("mode", ["sync", "async", "stream"])
 @pytest.mark.parametrize("failure", [401, 429, "timeout"])
-def test_auxiliary_same_class_recovery_on_wire(failure, routing_home, streaming_route,
+def test_auxiliary_same_class_recovery_on_wire(mode, failure, routing_home, streaming_route,
                                                native_transport, monkeypatch, tmp_path):
     import json
     import httpx
@@ -91,10 +92,18 @@ def test_auxiliary_same_class_recovery_on_wire(failure, routing_home, streaming_
     info = {}
     kwargs = dict(messages=[{"role": "user", "content": "ok"}],
                   main_runtime={"session_id": "owner"}, route_info=info)
+    def complete():
+        if mode == "stream":
+            return "".join(chunk.choices[0].delta.content or ""
+                           for chunk in aux.call_llm("title", stream=True, **kwargs))
+        if mode == "async":
+            return asyncio.run(aux.async_call_llm("title", **kwargs)).choices[0].message.content
+        return aux.call_llm("title", **kwargs).choices[0].message.content
+
     with patch.object(aux, "_try_payment_fallback", side_effect=AssertionError("paid bypass")):
-        assert aux.call_llm("title", **kwargs).choices[0].message.content == "ok"
+        assert complete() == "ok"
         assert info["reason"] == "same-class-failover"
-        assert aux.call_llm("title", **kwargs).choices[0].message.content == "ok"
+        assert complete() == "ok"
     assert attempts[0] == "anthropic-deep"
     assert attempts[-2:] == ["z-anthropic-deep", "z-anthropic-deep"]
     assert set(attempts) == {"anthropic-deep", "z-anthropic-deep"}
