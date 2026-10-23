@@ -26,14 +26,14 @@ def _json(value) -> str:
 def validate_binding(binding: dict) -> None:
     """Reject incomplete/ambiguous identities before writing an acknowledgement."""
     try:
-        if set(binding) != {"binding_id", "version", "owner", "origin", "task_record_key", "publication_version"}:
+        if not isinstance(binding, dict) or set(binding) != {"binding_id", "version", "owner", "origin", "task_record_key", "publication_version"}:
             raise ValueError
         for field in ("version", "publication_version"):
             if type(binding[field]) is not int or binding[field] < 1:
                 raise ValueError
         for field, keys in (("owner", {"gateway", "profile", "board", "task_id"}),
                             ("origin", {"gateway", "profile", "session"})):
-            if set(binding[field]) != keys:
+            if not isinstance(binding[field], dict) or set(binding[field]) != keys:
                 raise ValueError
             for value in binding[field].values():
                 if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}", value):

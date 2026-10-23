@@ -149,6 +149,10 @@ _BOARD_SPECS = [
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
+    _cmd("origin-bind", [
+        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
+        _arg("--json", action="store_true", help="Return structured receipt (always JSON)"),
+    ], help="Accept a courier origin obligation and read back its durable receipt"),
     _cmd("boards", children=("boards_action", _BOARD_SPECS),
          help="Manage kanban boards (one board per project / workstream)",
          description=(
