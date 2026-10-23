@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 from hermes_cli import kanban_db_dispatch_guard_notice as _guard_notice
 from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as _guard_hold_started_at
+from hermes_cli import kanban_db_dispatch_quota as _kbq
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -83,7 +84,9 @@ _COMPLETION_GATE_ERROR_PREFIXES = ("PR acceptance ",)
 # saying so (2026-10-21: ``blocker_auth`` held t_10de9798 for hours; a held card never
 # runs, so ``consecutive_failures`` never grows and the breaker never trips). Past the cap
 # the dispatcher blocks the card with the guard reason so it shows as waiting on someone.
-# ``blocker_auth`` gets the short cap: it never clears without a human. Every other guard
+# ``blocker_auth`` gets the short cap: a real auth failure never clears without a human. A
+# quota wall does clear on its own, so it never reaches ``blocker_auth`` and a quota-flavored
+# hold is re-queued at the cap instead of blocked (``kanban_db_dispatch_quota``). Every other guard
 # is time-bounded by design and only hits the long cap when something is wrong.
 # ``shared_blocker`` holds are exempt: they are a declared wall another card is probing.
 # Override via ``HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS`` / ``..._LONG_SECONDS``. [daveey]
@@ -191,6 +194,9 @@ class DispatchResult:
     shared_blocker_released: list[str] = field(default_factory=list)
     """Blocked task ids unblocked because a probe cleared the shared blocker
     they were parked behind (``kanban_shared_blockers``). [daveey]"""
+    quota_block_released: list[str] = field(default_factory=list)
+    """Guard-hold blocks on a quota wall released once another card completed after them
+    (``kanban_db_dispatch_quota.release_recovered_quota_blocks``). [daveey]"""
     rate_limited: list[str] = field(default_factory=list)
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
@@ -1645,10 +1651,17 @@ def _block_if_guard_hold_capped(conn: sqlite3.Connection, task_id: str, reason: 
     if held < cap:
         return False
     row = conn.execute("SELECT last_failure_error FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    err = _kb._first_line(_kb._lossy_text(row["last_failure_error"]) if row else "", 300) or "(no error recorded)"
+    raw_err = _kb._lossy_text(row["last_failure_error"]) if row else ""
+    if reason == "rate_limit_cooldown" or _kbq.is_quota_error(raw_err):
+        # A quota wall clears on its own: never a human block. Drop the stamp (the event it
+        # appends restarts the hold clock) and let the next tick retry. [daveey]
+        if raw_err:
+            _kbq.clear_quota_error(conn, task_id, raw_err)
+        return False
+    err = _kb._first_line(raw_err, 300) or "(no error recorded)"
     minutes = max(1, held // 60)
     message = (f"Held in ready by the respawn guard ({reason}) for {minutes} min without running. "
-               f"Last error: {err} Fix the cause (credentials, quota, PR binding), then unblock.")
+               f"Last error: {err} Fix the cause (credentials, PR binding), then unblock.")
     kind = "capability" if reason in _GUARD_HOLD_SHORT_CAP_REASONS else "needs_input"
     try:
         return bool(_kb.block_task(conn, task_id, reason=message, kind=kind))
@@ -1717,14 +1730,30 @@ def check_respawn_guard(
         # Cooldown elapsed — return early so blocker_auth doesn't catch the
         # stamped rate-limit text; this path intentionally retries forever
         # (spaced by the cooldown) until quota returns or a real run supersedes it.
+        # The stamp is dropped so it cannot outlive this run (see 1b). [daveey]
+        stamp = _kb._lossy_text(row["last_failure_error"])
+        if _kbq.is_quota_error(stamp):
+            _kbq.clear_quota_error(conn, task_id, stamp)
         return None
 
-    # 2. Quota / auth blocker: retrying immediately will not help.  A plain
+    err = _kb._lossy_text(row["last_failure_error"])
+    latest_outcome = latest_run["outcome"] if latest_run is not None else None
+    # 1b. Quota stamp that outlived its ``rate_limited`` run (a later ``blocked`` /
+    #     ``changes_requested`` run is now the latest): still a quota wall, never
+    #     ``blocker_auth``. Same cooldown, measured from the latest run's end; once
+    #     it has elapsed the stamp is dropped and the card retries. (2026-10-23:
+    #     six cards blocked ``capability`` for 13 h on a cleared quota wall.) [daveey]
+    if err and latest_outcome != "crashed" and not _is_completion_gate_error(err) and _kbq.is_quota_error(err):
+        ended_at = _kb._to_epoch(latest_run["ended_at"]) if latest_run is not None else None
+        if rl_cooldown > 0 and ended_at is not None and (now - ended_at) < rl_cooldown:
+            return "rate_limit_cooldown"
+        _kbq.clear_quota_error(conn, task_id, err)
+        err = ""
+
+    # 2. Auth blocker: retrying immediately will not help.  A plain
     # crash is different: its persisted error includes the worker's last
     # captured output, which is context rather than a diagnosis and may contain
     # benign commands such as ``claude auth status`` (#117097).
-    err = _kb._lossy_text(row["last_failure_error"])
-    latest_outcome = latest_run["outcome"] if latest_run is not None else None
     if (err and latest_outcome != "crashed" and not _is_completion_gate_error(err)
             and _RESPAWN_BLOCKER_RE.search(err)):
         return "blocker_auth"
@@ -2355,6 +2384,10 @@ def _run_reclaim_phase(
         result.shared_blocker_released = release_cleared_blockers(conn)
     except Exception:
         _kb._log.warning("kanban: releasing cleared shared blockers failed", exc_info=True)
+    try:
+        result.quota_block_released = _kbq.release_recovered_quota_blocks(conn)
+    except Exception:
+        _kb._log.warning("kanban: releasing recovered quota-wall blocks failed", exc_info=True)
 
 
 def _tick_spawn_budget(

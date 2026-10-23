@@ -97,7 +97,7 @@ def test_respawn_guard_survives_blob_comment_body_and_failure_error(board):
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
-                (sqlite3.Binary(b"429 quota exceeded"), tid),
+                (sqlite3.Binary(b"401 unauthorized"), tid),
             )
-        # BLOB last_failure_error still matches the quota/auth blocker pattern.
+        # BLOB last_failure_error still matches the auth blocker pattern (quota text never does).
         assert kbd.check_respawn_guard(conn, tid) == "blocker_auth"
