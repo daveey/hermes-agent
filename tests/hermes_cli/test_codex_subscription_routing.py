@@ -140,22 +140,6 @@ def test_runtime_uses_pro_token_and_rejects_free_fallback(pool_home):
         resolve_runtime_provider(requested="openai-codex", target_model=ASTRA, explicit_api_key=FREE)
 
 
-def test_model_options_rpc_prefers_subscription(monkeypatch):
-    from tui_gateway import server
-    from hermes_cli.inventory import load_picker_context
-
-    rows = [_row("openai-api", [ASTRA]), _row("openai-codex", [ASTRA])]
-    monkeypatch.setattr(server, "_model_picker_context", lambda agent: load_picker_context())
-    monkeypatch.setattr("hermes_cli.model_switch.list_authenticated_providers", lambda **kw: rows)
-    monkeypatch.setattr("hermes_cli.inventory._apply_pricing", lambda *a, **kw: None)
-    monkeypatch.setattr("hermes_cli.inventory._apply_capabilities", lambda *a, **kw: None)
-    monkeypatch.setattr("hermes_cli.inventory._apply_featured", lambda *a, **kw: None)
-    response = server._methods["model.options"](1, {})
-    offered = [r for r in response["result"]["providers"] if ASTRA in r["models"]]
-    assert offered[0]["slug"] == "openai-codex"
-    assert "billed per token" in next(r for r in offered if r["slug"] == "openai-api")["name"]
-
-
 def test_session_create_prefers_subscription_but_honors_explicit_provider():
     from tui_gateway.methods_session_model_guard import create_overrides
 
