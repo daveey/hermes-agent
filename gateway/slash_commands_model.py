@@ -232,6 +232,7 @@ class GatewayModelCommandsMixin:
                 await _sess_db.update_session_model(
                     _sess_entry.session_id, result.new_model, provider=result.target_provider,
                     base_url=result.base_url, api_mode=result.api_mode,
+                    clear_model_routing=not one_turn,
                 )
             except Exception as exc:
                 logger.debug("Failed to persist model switch to DB: %s", exc)

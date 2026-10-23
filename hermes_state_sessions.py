@@ -760,6 +760,7 @@ class SessionSessionsMixin:
     def update_session_model(
         self, session_id: str, model: str, provider: Optional[str] = None, *,
         base_url: Optional[str] = None, api_mode: Optional[str] = None,
+        clear_model_routing: bool = False,
     ) -> None:
         """Set the model after a mid-session /model switch (unconditionally) and drop any Browser
         runtime lock (lineage markers survive).
@@ -777,6 +778,10 @@ class SessionSessionsMixin:
         # first_accounted_route overwrite and resurrect the old route.
         self.flush_token_counts()
         patch: dict[str, Any] = {"browser_model_lock": None}
+        # Explicit pins clear class provenance in the same transaction as the route.
+        # Automatic route publication must retain it, including same-class failover.
+        if clear_model_routing:
+            patch["model_routing"] = None
         if model:
             patch["model"] = model
         if provider:
