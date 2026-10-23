@@ -82,15 +82,18 @@ def is_timed_park(kind: Optional[str], reason: Optional[str], *, parents_satisfi
 
 def park(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str], requested_kind: Optional[str],
-    source_status: str = "ready", expected_run_id: Optional[int] = None,
+    source_status: str = "ready", expected_run_id: Optional[int] = None, from_untyped_block: bool = False,
 ) -> bool:
-    """``running``/``ready`` -> ``scheduled`` with a wake time. Caller holds the write txn."""
+    """``running``/``ready`` -> ``scheduled`` with a wake time. Caller holds the write txn.
+    ``from_untyped_block``: an untyped ``blocked`` card with no live run (classify-in-place) instead. [daveey]"""
     from hermes_cli import kanban_db as kb
 
     now = int(time.time())
     wake_at = scheduled_until(reason, now=now) or now + DEFAULT_WAKE_SECONDS
+    guard = ("status = 'blocked' AND block_kind IS NULL AND current_run_id IS NULL" if from_untyped_block
+             else "status IN ('running', 'ready')")
     sql = ("UPDATE tasks SET status = 'scheduled', claim_lock = NULL, claim_expires = NULL, "
-           "worker_pid = NULL WHERE id = ? AND status IN ('running', 'ready')")
+           f"worker_pid = NULL WHERE id = ? AND {guard}")
     params: tuple = (task_id,)
     if expected_run_id is not None:
         sql += " AND current_run_id = ?"

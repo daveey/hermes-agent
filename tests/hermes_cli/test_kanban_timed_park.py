@@ -149,3 +149,28 @@ def test_sidebar_counts_only_human_blocks_as_blocked(kanban_home: Path, monkeypa
     active, blocked = _sidebar_counts(kanban_home)
     assert blocked == {"s_human": 1, "s_untyped": 1}
     assert active.get("s_timed") == 1 and active.get("s_flaky") == 1
+
+
+def test_untyped_blocked_card_classified_as_time_parks_scheduled_not_blocked(kanban_home: Path) -> None:
+    """[daveey] A card created blocked (or parked untyped by the breaker) that is then blocked with
+    kind='time' is a wait on a clock: it must leave ``blocked`` for ``scheduled`` (classify-in-place used to
+    stamp block_kind and keep it ``blocked``, which the Desktop showed under For you with an unblock button)."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="tracker", assignee=None, initial_status="blocked", session_id="s1")
+        assert kb.get_task(conn, tid).status == "blocked" and kb.get_task(conn, tid).block_kind is None
+        assert kb.block_task(conn, tid, reason="External-event wait while the remote graph executes", kind="time")
+        task = kb.get_task(conn, tid)
+        assert task.status == "scheduled" and task.block_kind is None
+        park = _last(conn, tid, "scheduled")
+        assert park["timed_park"] and park["requested_kind"] == "time"
+    ksa._reset_cache_for_tests()
+    assert ksa.blocked_task_counts().get("s1", 0) == 0
+    assert ksa.active_task_counts().get("s1") == 1  # still unfinished
+
+
+def test_untyped_blocked_card_classified_as_needs_input_stays_a_human_block(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="ask", assignee=None, initial_status="blocked", session_id="s2")
+        assert kb.block_task(conn, tid, reason="Pick option A or B", kind="needs_input")
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked" and task.block_kind == "needs_input"

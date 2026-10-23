@@ -3199,6 +3199,13 @@ def block_task(
         if cur_row["status"] == "blocked":
             if kind is None or expected_run_id is not None or _row_get(cur_row, "block_kind") is not None:
                 return False
+            # [daveey] A wait on a clock is never a human block, here too: the untyped card parks
+            # ``scheduled`` like a running/ready one would (it stayed ``blocked`` + kind=time, and the
+            # Desktop listed it under "For you" with an unblock button).
+            from hermes_cli import kanban_timed_park as ktp
+            if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=_parents_satisfied(conn, task_id)):
+                return ktp.park(conn, task_id, reason=reason, requested_kind=kind, source_status="ready",
+                                from_untyped_block=True)
             classified = conn.execute(
                 "UPDATE tasks SET block_kind = ?, block_recurrences = 1 "
                 "WHERE id = ? AND status = 'blocked' AND block_kind IS NULL "
