@@ -103,3 +103,12 @@ def test_owner_slot_refusal_releases_the_claim(wired, monkeypatch):
     assert server._wake_session_turn(KEY, "close out") == "refused"
     assert calls["released"] == 1 and live["session"]["running"] is False
     assert calls["submit"] == []
+
+
+def test_wake_goes_through_the_shared_turn_admission(wired, monkeypatch):
+    """A retiring backend (or any refused admission) never starts the close-out turn. [daveey]"""
+    live, calls = wired
+    live.update(sid="s", session=_session())
+    monkeypatch.setattr(server, "_notif_claim_turn", lambda session: False)
+    assert server._wake_session_turn(KEY, "close out") == "busy"
+    assert calls["submit"] == [] and live["session"]["running"] is False

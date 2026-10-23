@@ -949,11 +949,11 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
         if _wait_agent(session, rid, timeout=build_timeout):
             logger.warning("%s: agent build failed for %s", label, key)
             return "error"
-        with session["history_lock"]:
-            if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
-                return "busy"
-            session["running"] = True
-            session["last_active"] = time.time()
+        # The shared admission gate (retirement + history_lock), like every notice turn: no double admission
+        # against a user prompt or another waker, and nothing starts after the user's Stop.
+        if session.get("_finalized") or not _notif_claim_turn(session):
+            return "busy"
+        session["last_active"] = time.time()
         if _ensure_active_session_slot(sid, session) is not None:
             _notif_release_turn(session)
             logger.info("%s: %s has another live owner; not waking it here", label, key)

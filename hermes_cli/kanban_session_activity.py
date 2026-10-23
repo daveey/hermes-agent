@@ -306,6 +306,31 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
                 _log.debug("kanban activity read failed for %s: %s", path, exc)
 
 
+# [daveey] Extra "this chat still waits" sources (plugins): name -> fn() -> {session_id: iterable of task ids}. A
+# chat-closeout plugin registers the cards of a settled batch whose close-out turn has not run yet, so the row
+# stays grey "waiting" between the last notice and the closing answer instead of flashing green.
+_waiting_sources: dict[str, Any] = {}
+
+
+def register_waiting_source(name: str, fn) -> None:
+    """Register (or replace, ``fn=None`` removes) a plugin source of waiting card ids per session. [daveey]"""
+    if fn is None:
+        _waiting_sources.pop(name, None)
+    else:
+        _waiting_sources[name] = fn
+
+
+def _extra_waiting() -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for name, fn in list(_waiting_sources.items()):
+        try:
+            for sid, ids in (fn() or {}).items():
+                out.setdefault(str(sid), set()).update(str(i) for i in ids if i)
+        except Exception:  # a plugin must never break the sidebar
+            _log.debug("waiting source %s failed", name, exc_info=True)
+    return out
+
+
 def waiting_on_task_ids() -> dict[str, frozenset[str]]:
     """``{session_id: open task ids}`` on this gateway's boards: queued/running cards plus those waiting on a human,
     created or shepherded by the session — what the chat is waiting on. Same cache as the counts. [daveey]"""
@@ -505,6 +530,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     try:
         active, blocked, unseen = _all_counts()
         waiting = waiting_on_task_ids()
+        extra = _extra_waiting()
     except Exception:
         _log.debug("kanban activity unavailable", exc_info=True)
         return rows
@@ -523,7 +549,12 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             else:
                 row.pop(key, None)
         # [daveey] The open card ids the chat waits on (lineage-wide, capped): the sidebar's "waiting on N cards".
-        ids_waiting = sorted({tid for sid in ids for tid in waiting.get(sid, ())})
+        open_ids = {tid for sid in ids for tid in waiting.get(sid, ())}
+        # Plugin sources (pending close-outs): count the ids the boards don't already count as open.
+        pending = {tid for sid in ids for tid in extra.get(sid, ())} - open_ids
+        if pending:
+            row["kanban_active"] = int(row.get("kanban_active") or 0) + len(pending)
+        ids_waiting = sorted(open_ids | pending)
         if ids_waiting:
             row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
         else:

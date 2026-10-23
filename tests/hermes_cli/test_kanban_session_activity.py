@@ -336,3 +336,28 @@ def test_rows_carry_the_open_card_ids_the_chat_waits_on(kanban_root):
     assert rows[0]["kanban_active"] == 2 and rows[0]["kanban_blocked"] == 1
     assert "kanban_waiting_on" not in rows[1]
     assert ksa.waiting_on_task_ids() == {"s_root": frozenset({"t1"}), "s_tip": frozenset({"t2", "t5"})}
+
+
+def test_plugin_waiting_source_keeps_a_settled_batch_waiting_until_its_close_out(kanban_root):
+    """A registered source (chat-closeout's pending close-outs) adds its ids to ``kanban_waiting_on`` and to
+    ``kanban_active`` without double-counting ids the boards already report open; a failing source is harmless
+    and unregistering removes it. [daveey]"""
+    _make_board(kanban_root / "kanban.db", [("t1", "running", "s_a"), ("t2", "done", "s_b")])
+
+    def boom():
+        raise RuntimeError("plugin bug")
+
+    ksa.register_waiting_source("closeout", lambda: {"s_b": ["t2"], "s_a": ["t1"]})
+    ksa.register_waiting_source("broken", boom)
+    try:
+        rows = [{"id": "s_a"}, {"id": "s_b"}, {"id": "s_c"}]
+        ksa.annotate_kanban_activity(rows)
+        assert rows[0]["kanban_active"] == 1 and rows[0]["kanban_waiting_on"] == ["t1"]  # not double-counted
+        assert rows[1]["kanban_active"] == 1 and rows[1]["kanban_waiting_on"] == ["t2"]  # grey until close-out
+        assert "kanban_active" not in rows[2]
+    finally:
+        ksa.register_waiting_source("closeout", None)
+        ksa.register_waiting_source("broken", None)
+    rows = [{"id": "s_b"}]
+    ksa.annotate_kanban_activity(rows)
+    assert "kanban_active" not in rows[0] and "kanban_waiting_on" not in rows[0]
