@@ -1068,6 +1068,7 @@ readonly — read with `.get()` in handlers, subscribe with `useValue(atom)` in
 components.
 
 ```ts
+host.sessions.rows         // Readonly atom of loaded sidebar rows, with gateway/profile ownership
 host.state.activeSessionId  // ReadableAtom<string | null>
 host.state.awaitingResponse // ReadableAtom<boolean>  true until the first assistant payload
 host.state.busy             // ReadableAtom<boolean>  focused chat is working after a send

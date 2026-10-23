@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import type { ReactElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -146,6 +146,16 @@ describe('HubSessionsSection', () => {
 
     expect(await screen.findByText('Title s_mini')).toBeTruthy()
     expect(screen.getByText('synced 5m ago')).toBeTruthy()
+  })
+
+  it('removes replica rows when their owner appears in the live sidebar', async () => {
+    hub.sessions = [rec('mini', 's_mini')]
+    render(<HubSessionsSection />)
+
+    await screen.findByText('Title s_mini')
+    act(() => $sessions.set([{ connection_id: 'conn-mini', id: 's_mini' }] as never))
+
+    await waitFor(() => expect(screen.queryByText('Title s_mini')).toBeNull())
   })
 
   it('archive sends a hub request with base_version and marks the row pending', async () => {

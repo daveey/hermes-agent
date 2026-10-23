@@ -13,12 +13,11 @@ import {
   host,
   SidebarSection,
   SidebarSectionRow,
+  Tip,
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
 import { type KeyboardEvent, type MouseEvent, useState } from 'react'
-
-import { $sessions } from '@/store/session'
 
 import { loadReplicaSidebarRows, replicaRowRoute, sendSessionAction } from './api'
 import { type HubSessionAction, type HubSessionRow, isRowPending, markRowPending, syncedAgo } from './model'
@@ -33,23 +32,24 @@ const rowKey = (row: HubSessionRow) => `${row.gateway}\u0000${row.key}`
 
 function ActionButton({ icon, label, onClick }: { icon: string; label: string; onClick: () => void }) {
   return (
-    <button
-      aria-label={label}
-      className="flex size-5 items-center justify-center rounded text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground"
-      onClick={(event: MouseEvent) => {
-        event.stopPropagation()
-        onClick()
-      }}
-      title={label}
-      type="button"
-    >
-      <Codicon name={icon} size="0.75rem" />
-    </button>
+    <Tip label={label}>
+      <button
+        aria-label={label}
+        className="flex size-5 items-center justify-center rounded text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground"
+        onClick={(event: MouseEvent) => {
+          event.stopPropagation()
+          onClick()
+        }}
+        type="button"
+      >
+        <Codicon name={icon} size="0.75rem" />
+      </button>
+    </Tip>
   )
 }
 
 export function HubSessionsSection() {
-  const live = useValue($sessions)
+  const live = useValue(host.sessions.rows)
   const open = useValue($hubSessionsOpen)
   const [visible, setVisible] = useState(INITIAL_ROWS)
   const [optimistic, setOptimistic] = useState<Record<string, HubSessionRow>>({})
