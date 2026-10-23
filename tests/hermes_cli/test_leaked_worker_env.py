@@ -55,6 +55,7 @@ def test_agent_scope_covers_gateway_session_context():
     assert [k for k in _VAR_MAP if not is_agent_scope_env_key(k)] == []
 
 
+@pytest.mark.platforms("macos")
 def test_desktop_relaunch_after_update_drops_session_identity(monkeypatch, tmp_path):
     """Launch path 1: ``hermes update``'s post-rebuild reopen (``_relaunch_stopped_desktops``)."""
     from hermes_cli import main_desktop as md

@@ -356,6 +356,7 @@ def test_main_scrubs_for_top_level_surfaces(monkeypatch, argv, scrubbed):
     assert ("HERMES_DELEGATED_CHILD_CONTEXT" not in os.environ) is scrubbed
 
 
+@pytest.mark.platforms("macos")
 def test_desktop_relaunch_after_update_gets_scrubbed_env(monkeypatch, tmp_path):
     """``hermes update`` run from a worker reopens Desktop with ``open``; the app must not
     inherit the worker's kanban/delegation env (Hermes.app pid 59331, 2026-10-21)."""

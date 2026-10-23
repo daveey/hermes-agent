@@ -67,6 +67,7 @@ def test_strip_agent_scope_env_is_noop_without_worker_marker():
     assert env == before
 
 
+@pytest.mark.platforms("macos")
 def test_relaunch_with_poisoned_environ_passes_clean_env(monkeypatch, tmp_path):
     from hermes_cli import main_desktop as md
     for k, v in {**POISON, **TUNABLES}.items():

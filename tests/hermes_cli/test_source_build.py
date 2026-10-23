@@ -384,7 +384,7 @@ def test_module_cli_builds_the_requested_products(source_products, desktop, monk
     assert (root / "apps/desktop/release/linux-unpacked/hermes").exists() == desktop
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("macos")
 def test_packaged_desktop_is_reused_only_while_it_names_head(tmp_path, monkeypatch):
     """The update skips the desktop build only when the shipped app's baked commit is HEAD
     and its receipt is current; a moved HEAD or an unreadable stamp means build."""
@@ -462,7 +462,7 @@ def _prebuilt_fixture(tmp_path, monkeypatch, *, stamp_commit=None):
     return root, desktop_dir, built
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("macos")
 def test_update_swaps_in_a_prebuilt_desktop_app_that_names_head(tmp_path, monkeypatch, capsys):
     """HERMES_DESKTOP_PREBUILT_APP built from HEAD (hermes-sync's background stage) is swapped in
     through the stage-and-swap path instead of running npm."""
@@ -480,7 +480,7 @@ def test_update_swaps_in_a_prebuilt_desktop_app_that_names_head(tmp_path, monkey
     assert "prebuilt desktop app" in capsys.readouterr().out.lower()
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("macos")
 def test_update_builds_when_the_prebuilt_desktop_app_names_another_commit(tmp_path, monkeypatch, capsys):
     from hermes_cli.source_build import _build_desktop_product
 
@@ -492,7 +492,7 @@ def test_update_builds_when_the_prebuilt_desktop_app_names_another_commit(tmp_pa
     assert "not used" in capsys.readouterr().out
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("macos")
 def test_update_builds_when_the_prebuilt_desktop_app_fails_its_signature(tmp_path, monkeypatch):
     from hermes_cli import main_desktop
     from hermes_cli.source_build import _build_desktop_product
@@ -504,7 +504,7 @@ def test_update_builds_when_the_prebuilt_desktop_app_fails_its_signature(tmp_pat
     assert (desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes").read_text() == "previous app"
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("macos")
 def test_update_builds_without_a_prebuilt_desktop_app(tmp_path, monkeypatch):
     from hermes_cli.source_build import _build_desktop_product
 
