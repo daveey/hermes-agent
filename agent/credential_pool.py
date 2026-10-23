@@ -344,29 +344,6 @@ def _codex_principal_identity(access_token: Any) -> Optional[tuple[str, str]]:
     return account_id.strip(), subject.strip()
 
 
-# ChatGPT plan tiers that cannot run account-gated Codex models (Astra). Unknown/missing plan claims
-# are NOT excluded: only a positively-identified free tier is skipped.
-_CODEX_NON_ENTITLED_PLANS = frozenset({"free", "go", "guest"})
-
-
-def codex_plan_type(access_token: Any) -> Optional[str]:
-    """Lower-cased ``chatgpt_plan_type`` claim of a Codex access token, or None when absent."""
-    claims = _decode_jwt_claims(access_token)
-    auth_claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else None
-    plan = auth_claims.get("chatgpt_plan_type") if isinstance(auth_claims, dict) else None
-    return plan.strip().lower() if isinstance(plan, str) and plan.strip() else None
-
-
-def codex_entry_entitled_for_model(access_token: Any, model: Optional[str]) -> bool:
-    """False when *model* is account-gated (Astra) and the token's plan is a known non-entitled tier.
-    A request for it must never rotate onto such an account: it would 4xx or, worse, silently reroute."""
-    from agent.reasoning_effort import is_astra_model
-
-    if not model or not is_astra_model(model):
-        return True
-    return codex_plan_type(access_token) not in _CODEX_NON_ENTITLED_PLANS
-
-
 def _codex_entry_tracks_singleton(entry: PooledCredential, singleton_tokens: dict[str, Any]) -> bool:
     """Whether a Codex pool entry may adopt the auth.json singleton's token pair.
 
@@ -2140,13 +2117,11 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
     ) -> tuple[list[PooledCredential], list[PooledCredential]]:
         """Return (available, pending_refresh) for entries not in cooldown.
 
-        *clear_expired* resets elapsed cooldowns to STATUS_OK and persists.
-        *refresh* refreshes entries needing a token refresh (skipped on
-        failure) — except single-use-token providers (openai-codex,
-        xai-oauth), which are returned as *pending_refresh* so the caller
-        refreshes them outside the lock instead of stalling every pool
-        consumer during cross-process flock acquisition + OAuth network I/O.
+        *clear_expired* persists elapsed cooldown resets. *refresh* refreshes tokens, skipping failures.
+        Single-use providers (Codex/xAI) return *pending_refresh* for out-of-lock refresh,
+        so cross-process flock acquisition and OAuth I/O cannot stall every pool consumer.
         """
+        from agent.codex_entitlements import codex_entry_entitled_for_model
         now = time.time()
         cleared_any = False
         entries_to_prune: list[str] = []

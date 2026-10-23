@@ -112,7 +112,8 @@ def codex_catalog_credentials() -> list[tuple[str, Optional[str]]]:
     account lists no Astra, so a catalog built from it hides models the pro account in the same pool
     can run (and the picker then offers them only under the metered OpenAI API). Read-only: nothing
     here refreshes, imports or persists a credential; expired tokens are skipped."""
-    from agent.credential_pool import STATUS_DEAD, codex_plan_type
+    from agent.credential_pool import STATUS_DEAD
+    from agent.codex_entitlements import codex_plan_type
     from hermes_cli.auth import _codex_access_token_is_expiring, read_credential_pool, resolve_codex_runtime_credentials
     from hermes_cli.auth_codex import _codex_pool_dicts, _codex_pool_route_base_url
 
@@ -130,7 +131,7 @@ def codex_catalog_credentials() -> list[tuple[str, Optional[str]]]:
         creds = resolve_codex_runtime_credentials(read_only=True)
         _add(creds.get("api_key"), creds.get("base_url"))
     except Exception:  # no/exhausted singleton creds: the pool below may still hold usable rows
-        pass
+        logger.debug("Codex singleton discovery unavailable", exc_info=True)
     try:
         for entry in _codex_pool_dicts(read_credential_pool("openai-codex")):
             if entry.get("last_status") == STATUS_DEAD:
@@ -155,11 +156,13 @@ def codex_catalog_credential_identity() -> str:
     fallback must not outlive the refresh under the healthy principal's key. Opaque non-JWT tokens
     fall back to the token itself (the caller hashes every part before anything is persisted).
     """
-    from agent.credential_pool import _codex_principal_identity, codex_plan_type
+    from agent.credential_pool import _codex_principal_identity
+    from agent.codex_entitlements import codex_plan_type
 
     try:
         creds = codex_catalog_credentials()
-    except Exception:  # AuthError (no/exhausted creds) or the pytest seat belt: no live catalog either way
+    except Exception:
+        logger.debug("Codex catalog identity unavailable", exc_info=True)
         creds = []
     if not creds:
         return "missing"

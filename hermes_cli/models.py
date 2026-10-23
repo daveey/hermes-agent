@@ -1409,25 +1409,9 @@ def _openai_discovery_base_url(provider: str) -> str:
 
 
 def _codex_catalog(normalized: str, force_refresh: bool) -> list[str]:
-    from hermes_cli.codex_models import get_codex_model_ids
-
-    # Live OAuth token so the picker matches what ChatGPT lists for this account; hardcoded
-    # catalog without a token / when unreachable. Read-only (#68004): a picker never imports,
-    # refreshes or persists a credential, so an expired stored token means the hardcoded catalog
-    # until the runtime lease refreshes it.
-    # The token and the host it is routed to come from the same resolution (#121486): a pooled
-    # gateway key is only ever sent to that gateway, never to the chatgpt.com default.
-    # Discovery spans EVERY usable pool entry, not the round-robin cursor: a free-plan account lists
-    # no Astra, and a catalog built from it left Astra offered only under the metered OpenAI API.
+    # Account union discovery is read-only and keeps each token bound to its own host.
     from hermes_cli.codex_models import codex_catalog_credentials, get_codex_model_ids_for_credentials
-
-    try:
-        credentials = codex_catalog_credentials()
-    except Exception:
-        credentials = []
-    if credentials:
-        return get_codex_model_ids_for_credentials(credentials)
-    return get_codex_model_ids(access_token=None, base_url=None)
+    return get_codex_model_ids_for_credentials(codex_catalog_credentials())
 
 
 _COPILOT_ACP_SESSION_MEMO_TTL = 300.0  # 5 min; SWR disk cache handles the rest

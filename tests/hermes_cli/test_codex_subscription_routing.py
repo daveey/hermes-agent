@@ -14,8 +14,8 @@ import pytest
 
 import hermes_cli.auth as auth_mod
 from hermes_cli import codex_models
-from agent.credential_pool import (
-    codex_entry_entitled_for_model, codex_plan_type, load_pool)
+from agent.credential_pool import load_pool
+from agent.codex_entitlements import codex_entry_entitled_for_model, codex_plan_type
 from hermes_cli.inventory import _prefer_subscription_rows
 
 ASTRA = "gpt-6-astra"

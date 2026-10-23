@@ -1022,7 +1022,7 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
     _raise_for_credentialless_bare_custom(requested_provider, runtime)
     # Pool exhaustion must not fall through to a free singleton for an account-gated model.
     if runtime.get("provider") == "openai-codex":
-        from agent.credential_pool import codex_entry_entitled_for_model
+        from agent.codex_entitlements import codex_entry_entitled_for_model
         if not codex_entry_entitled_for_model(runtime.get("api_key"), _effective_model(_get_model_config(), target_model)):
             raise AuthError("No entitled Codex account is available for this model",
                             provider="openai-codex", code="model_not_entitled")
