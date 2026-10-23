@@ -2086,7 +2086,7 @@ def _buffer_fallback_notice(agent, notice: str) -> None:
 def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=None) -> bool:
     """Activate the next eligible fallback at the failed-request boundary."""
     from agent.model_routing_agent import try_class_fallback
-    if getattr(agent, "model_routing", None):
+    if isinstance(getattr(agent, "model_routing", None), dict) and agent.model_routing:
         return try_class_fallback(agent)
     from agent.fallback_cooldown import _arm_rate_limit_cooldown, switch_deferred_by_reset
     if switch_deferred_by_reset(agent, reason, reset_at):

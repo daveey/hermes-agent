@@ -60,6 +60,7 @@ def try_class_fallback(agent):
         requirements["min_context_tokens"] = max(requirements.get("min_context_tokens", 0), context)
     old_model, old_provider, old_url = agent.model, agent.provider, agent.base_url
     old_client = agent.client
+    old_anthropic_client = getattr(agent, "_anthropic_client", None)
     previous = vars(agent).copy()
     building_client = False
 
@@ -86,6 +87,14 @@ def try_class_fallback(agent):
     agent.model_routing = runtime["model_routing"]
     if old_client is not None and old_client is not agent.client:
         agent._retire_shared_openai_client(old_client, reason="class_failover")
+    if old_anthropic_client is not None and old_anthropic_client is not agent._anthropic_client:
+        # Native streams own separate request clients; this idle construction
+        # client is no longer reachable after the new runtime is committed.
+        import logging
+        try:
+            old_anthropic_client.close()
+        except Exception:
+            logging.getLogger(__name__).debug("Retired class client close failed", exc_info=True)
     sync_credential_pool_entry_id(agent)
     if hasattr(agent, "_transport_cache"):
         agent._transport_cache.clear()
