@@ -145,6 +145,13 @@ def test_different_owners_can_reuse_binding_id(world):
     assert len(ledger.obligations(world[0], gateway="origin", profile="default", sessions=["s_old"])) == 2
 
 
+def test_publication_marker_does_not_need_future_server_version(world):
+    _path, replica, binding = world
+    marker = {k: v for k, v in binding.items() if k != "publication_version"}
+    publish(replica, binding, origin_bindings=[marker])
+    assert accept(world)["status"] == "accepted"
+
+
 def test_receipt_requires_publication_and_survives_replica_loss(world):
     path, replica, binding = world
     assert accept(world) == {"status": "pending", "code": "origin_publication_pending"}

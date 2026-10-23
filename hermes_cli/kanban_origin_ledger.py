@@ -135,7 +135,12 @@ def accept_binding(*, path: Path, replica: Path, binding: dict, request_id: str,
     owner = binding["owner"]
     if any(task.get(field) != owner[field] for field in ("gateway", "profile", "board")) or task.get("id") != owner["task_id"]:
         raise ValueError("origin_publication_mismatch")
-    if binding not in task.get("origin_bindings", []):
+    # The immutable marker is published BEFORE the server assigns a record
+    # version. Only the courier envelope adds that publication lower bound.
+    marker = {k: v for k, v in binding.items() if k != "publication_version"}
+    markers = [{k: v for k, v in m.items() if k != "publication_version"}
+               for m in task.get("origin_bindings", []) if isinstance(m, dict)]
+    if marker not in markers:
         return {"status": "pending", "code": "origin_publication_pending"}
     resolved = resolve_session(binding["origin"]["session"])
     if not isinstance(resolved, str) or not resolved:
