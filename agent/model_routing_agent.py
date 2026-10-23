@@ -90,7 +90,32 @@ def try_class_fallback(agent):
     _reset_stale_streak(agent)
     agent._fallback_activated = False
     _snapshot_primary_runtime(agent)
+    persist_class_metadata(agent)
     return True
+
+
+def persist_class_metadata(agent):
+    """Keep the ordinary session row in sync with the durable allocation store."""
+    metadata = getattr(agent, "model_routing", None)
+    config = getattr(agent, "_session_init_model_config", None)
+    if isinstance(config, dict):
+        config["model_routing"] = metadata
+    db = getattr(agent, "_session_db", None)
+    if db and getattr(agent, "_session_db_created", False):
+        db.update_session_model(agent.session_id, agent.model)
+        db.patch_session_model_config(agent.session_id, {"model_routing": metadata})
+
+
+def clear_class_route(agent):
+    if not getattr(agent, "model_routing", None):
+        return
+    agent.model_routing = None
+    persist_class_metadata(agent)
+
+
+def routing_model_config(agent):
+    metadata = getattr(agent, "model_routing", None)
+    return {"model_routing": metadata} if metadata else {}
 
 
 def publish_session_id(session_id):

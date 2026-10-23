@@ -79,6 +79,16 @@ credentials are stored. Per-provider account selection remains inside native poo
 
 ## Implementation status
 
-Core allocator, config structure validation and runtime credential boundary are
-implemented. Entry-path adapters, per-entry tests and outgoing-request failure
-recovery remain required before activation. This document is not rollout proof.
+Core allocator, config validation, runtime credential boundary, and common agent
+construction/recovery are implemented. CLI startup, readiness/lazy credentials,
+agent creation and session restore now preserve selectors and subscription fences.
+The CLI shell retains the selector while the agent sends only the concrete model;
+session `model_config.model_routing` records the selection for restoration. Explicit
+switches clear that metadata, including when selecting the same concrete model.
+CLI integration tests exercise the native Anthropic SDK streaming request through
+an isolated mock HTTP transport, inspect endpoint/model/OAuth headers, and restore
+from a real temporary session DB. This is not a live entitlement probe.
+
+Desktop, messaging, API, delegation, cron, Kanban and auxiliary adapters and their
+per-entry request/recovery tests remain required before activation. This document
+is not rollout proof.

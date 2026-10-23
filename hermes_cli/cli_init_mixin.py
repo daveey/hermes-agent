@@ -119,7 +119,8 @@ class CLIInitMixin:
         self.model = model or _config_model or ""
         _cfg_provider = _model_config.get("provider") or os.getenv("HERMES_INFERENCE_PROVIDER")
         _startup_provider_override = _startup_base_url_override = _startup_api_key_override = ""
-        if self.model:
+        from agent.model_routing import is_class_selector
+        if self.model and not is_class_selector(self.model):
             from hermes_cli.model_switch import resolve_startup_model_route
 
             _startup_route = resolve_startup_model_route(

@@ -226,12 +226,30 @@ def _retire_agent(cli) -> None:
     cli.agent = None
 
 
+def _set_missing_model(cli, provider):
+    if cli.model or not provider:
+        return
+    from cli import logger
+    try:
+        from hermes_cli.models import get_default_model_for_provider
+        model = get_default_model_for_provider(provider)
+        if model:
+            cli.model = model
+            logger.info("No model configured — defaulting to %s for provider %s", model, provider)
+    except Exception:
+        import logging
+        logging.exception("Provider default lookup failed")
+
+
 class CLIAgentSetupMixin:
     """Agent construction + session-resume display methods for ``HermesCLI``."""
 
     def _ensure_runtime_credentials(self) -> bool:
         """Re-resolve provider credentials before agent use so key rotation / token
         refresh are picked up without restarting the CLI. False on auth failure."""
+        from hermes_cli.cli_model_routing import ensure_class_credentials, is_class_selector
+        if is_class_selector(self.model):
+            return ensure_class_credentials(self)
         from cli import ChatConsole, logger
         from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error
         _primary_exc = None
@@ -315,17 +333,7 @@ class CLIAgentSetupMixin:
 
         # Still empty (e.g. `hermes auth add` without `hermes model`): fall back to the
         # provider's first catalog model so the API doesn't reject an empty model.
-        if not self.model and resolved_provider:
-            try:
-                from hermes_cli.models import get_default_model_for_provider
-                _default = get_default_model_for_provider(resolved_provider)
-                if _default:
-                    self.model = _default
-                    logger.info(
-                        "No model configured — defaulting to %s for provider %s",
-                        _default, resolved_provider)
-            except Exception:
-                pass
+        _set_missing_model(self, resolved_provider)
 
         # [daveey] `--provider gemini` without `-m` must not send the config's claude-* model to Gemini
         # (404 on every call): a model that clearly belongs to another vendor falls back to the
@@ -360,7 +368,7 @@ class CLIAgentSetupMixin:
             logger.info("Model moved to %s: reasoning_config resolved: %s", self.model, self.reasoning_config)
 
         # AIAgent/OpenAI client holds auth at init, so rebuild on key/routing/model change.
-        if (credentials_changed or routing_changed or model_changed) and self.agent is not None:
+        if any((credentials_changed, routing_changed, model_changed)) and self.agent is not None:
             _retire_agent(self)
             self._active_agent_route_signature = None
         return True
@@ -435,6 +443,9 @@ class CLIAgentSetupMixin:
         """``(ready, error)``: *error* is the exception that stopped resolution — raised, or
         swallowed by the "auto" ladder and stamped on a keyless fallback — ``None`` when a provider
         resolved (usable or merely keyless). Never prints or mutates CLI state."""
+        from hermes_cli.cli_model_routing import is_class_selector, probe_class_credentials
+        if is_class_selector(getattr(self, "model", None)):
+            return probe_class_credentials(self)
         from hermes_cli.runtime_provider import resolve_runtime_provider
         try:
             runtime = resolve_runtime_provider(
@@ -670,7 +681,9 @@ class CLIAgentSetupMixin:
             return False
         try:
             runtime = runtime_override or _current_runtime(self)
-            effective_model = model_override or self.model
+            route_signature = _route_signature(model_override or self.model, runtime)
+            from hermes_cli.cli_model_routing import agent_route
+            effective_model, runtime = agent_route(model_override or self.model, runtime)
             # -q never builds the prompt_toolkit app, so the clarify modal can't be
             # answered — answer headless instead of polling until clarify_timeout.
             single_query_mode = getattr(self, "_single_query_mode", False)
@@ -741,7 +754,7 @@ class CLIAgentSetupMixin:
                 seed_credits_at_session_start(self.agent)
             except Exception:
                 pass
-            self._active_agent_route_signature = _route_signature(effective_model, runtime)
+            self._active_agent_route_signature = route_signature
 
             # Force-create DB row on /title intent, then apply title.
             if self._pending_title and self._session_db:

@@ -1182,8 +1182,8 @@ def _init_session_state(agent, session_id, session_db, parent_session_id, reason
 
     agent._session_db = session_db  # optional SQLite store (CLI/gateway-provided)
     agent._parent_session_id = parent_session_id
-    agent._session_init_model_config = {
-        "max_iterations": agent.max_iterations,
+    from agent.model_routing_agent import routing_model_config
+    agent._session_init_model_config = {**routing_model_config(agent), "max_iterations": agent.max_iterations,
         "reasoning_config": reasoning_config,
         "max_tokens": max_tokens,
     }

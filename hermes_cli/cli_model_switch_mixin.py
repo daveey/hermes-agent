@@ -441,7 +441,7 @@ class CLIModelSwitchMixin:
             "api_mode": result.api_mode or None}
         try:
             db.update_session_model(sid, result.new_model)
-            db.patch_session_model_config(sid, {"gateway_runtime": route, **route})
+            db.patch_session_model_config(sid, {"gateway_runtime": route, **route, "model_routing": None})
         except Exception:
             logger.debug("Failed to persist model switch to session DB", exc_info=True)
 
@@ -454,7 +454,8 @@ class CLIModelSwitchMixin:
         so the session still opens (the first turn surfaces the auth error).
         """
         from cli import logger
-        if not (session_meta or {}).get("model") or getattr(self, "_explicit_model_override", False):
+        from hermes_cli.cli_model_routing import skip_or_restore_class
+        if skip_or_restore_class(self, session_meta):
             return
         route = stored_session_route(session_meta, current_model=self.model, current_provider=self.provider)
         if route is None:

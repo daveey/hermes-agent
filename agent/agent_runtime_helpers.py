@@ -2450,7 +2450,8 @@ def _finish_switch(agent, new_provider, old_norm, new_norm) -> None:
     agent._provider_fallback_route = None
     agent._fallback_index = 0
     agent._credential_pool_revert_id = None
-    agent.model_routing = None  # Explicit user switches leave the automatic class lane.
+    from agent.model_routing_agent import clear_class_route
+    clear_class_route(agent)
     fallback_chain = list(getattr(agent, "_fallback_chain", []) or [])
     if old_norm and new_norm and old_norm != new_norm:
         fallback_chain = [
