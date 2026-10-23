@@ -29,7 +29,9 @@ class _Cli(CLILoopsMixin):
         return self._mgr
 
 
-def test_idle_hook_queues_the_continuation_when_a_timed_barrier_has_elapsed(hermes_home):
+def test_idle_hook_queues_the_continuation_when_a_timed_barrier_has_elapsed(hermes_home, monkeypatch):
+    # Importing cli on a busy runner can outlast the one-second barrier.
+    monkeypatch.setattr(time, "time", lambda: 1_800_000_000.0)
     mgr = goals.GoalManager(session_id="resume-idle")
     mgr.set("finish the thing")
     mgr.wait_for_seconds(1, reason="cooldown")
