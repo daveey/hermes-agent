@@ -630,15 +630,7 @@ class OpenAICompatRoutesMixin:
                 logger.debug("[api_server] stream on_done hook failed", exc_info=True)
             finally:
                 # EOS must not overtake hops the worker thread scheduled just before returning.
-                if getattr(stream_q, "_hops_pending", 0) > 0:
-                    async def _eos():
-                        try:
-                            await stream_q.flush_hops()
-                        finally:
-                            stream_q.put_nowait(None)
-                    asyncio.ensure_future(_eos())
-                else:
-                    stream_q.put_nowait(None)
+                (getattr(stream_q, "put_after_hops", None) or stream_q.put_nowait)(None)
         agent_task.add_done_callback(_done)
         return agent_task, agent_ref
 

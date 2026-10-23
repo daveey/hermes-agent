@@ -34,7 +34,8 @@ async def test_session_event_queue_flush_waits_for_slow_worker_hop():
     await loop.run_in_executor(None, lambda: events.enqueue("assistant.commentary", {"text": "hi"}))
     assert events.queue.empty()  # the hop has not landed yet: the old code sent "completed" here
     flusher = asyncio.create_task(events.flush_hops())
-    await asyncio.sleep(0.02)
+    for _ in range(10):
+        await asyncio.sleep(0)  # yield; the flusher keeps waiting
     assert not flusher.done()  # flush is really waiting on the hop
     release()
     await flusher
@@ -51,7 +52,8 @@ async def test_threadsafe_queue_flush_waits_for_slow_worker_hop():
     await loop.run_in_executor(None, lambda: q.put_threadsafe("delta"))
     assert q.empty()
     flusher = asyncio.create_task(q.flush_hops())
-    await asyncio.sleep(0.02)
+    for _ in range(10):
+        await asyncio.sleep(0)  # yield; the flusher keeps waiting
     assert not flusher.done()
     release()
     await flusher
@@ -63,3 +65,19 @@ async def test_flush_hops_is_bounded_when_a_hop_never_runs():
     events = _SessionEventQueue("s", "r")
     events._hops_pending = 1
     await events.flush_hops(timeout=0.05)  # returns instead of hanging
+
+
+@pytest.mark.asyncio
+async def test_put_after_hops_waits_for_slow_worker_hop():
+    """The sync done-callback path (chat completions EOS) must not overtake a pending hop."""
+    loop = asyncio.get_running_loop()
+    q = ThreadSafeAsyncQueue()
+    release = _hold_hops(loop)
+    await loop.run_in_executor(None, lambda: q.put_threadsafe("delta"))
+    q.put_after_hops(None)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert q.empty()  # EOS held back while the hop is pending
+    release()
+    assert await asyncio.wait_for(q.get(), 5) == "delta"
+    assert await asyncio.wait_for(q.get(), 5) is None
