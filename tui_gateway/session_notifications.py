@@ -344,13 +344,18 @@ def _kb_timed_out(task, payload: dict, title: str) -> str:
     return " timed out (max_runtime=0s); will retry"
 
 
+def _kb_failure(kind: str, payload: dict, title: str) -> str:
+    """Cause-accurate gave_up/crashed wording; pid/exit/raw output only under ``Details:``. [daveey]"""
+    from hermes_cli.kanban_failure_summary import describe_failure
+    return describe_failure(kind, title, payload)
+
+
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
     "completed": ("✔", _kb_completed),
     "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
-    "gave_up": ("✖", lambda t, p, title: " gave up after repeated spawn failures"
-                + (f"\n{str(p.get('error'))[:200]}" if p.get("error") else "")),
-    "crashed": ("✖", lambda t, p, title: " worker crashed (pid gone); dispatcher will retry"),
+    "gave_up": ("✖", lambda t, p, title: _kb_failure("gave_up", p, title)),
+    "crashed": ("✖", lambda t, p, title: _kb_failure("crashed", p, title)),
     "timed_out": ("⏱", _kb_timed_out),
     "status": ("🔄", lambda t, p, title: f" → {p.get('status') or ''}"),
 }
