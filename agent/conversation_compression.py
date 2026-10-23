@@ -1654,6 +1654,8 @@ def _adopt_live_compression_child(
     confirmed = resolver(session_db, parent_session_id)
     if not confirmed or str(confirmed) != child_session_id:
         return None
+    from agent.model_routing_agent import link_compression_route
+    link_compression_route(agent, parent_session_id, child_session_id)
     agent.session_id = child_session_id
     _rebind_session_context(child_session_id)
     _hand_off_metrics_segment(parent_session_id, child_session_id)
@@ -3300,18 +3302,6 @@ def _carry_session_state_to_child(agent: Any, old_session_id: str, old_title: An
             agent._session_db.set_session_title_source(agent.session_id, _src)
 
 
-def _compression_child_source(agent: Any, parent_session_id: str) -> str:
-    """The parent row's persisted source: a compression child is the same conversation, so a ``--source tool``,
-    ``oneshot`` or inherited ``kanban`` label must not degrade to the bare ``agent.platform`` (#112550)."""
-    parent = None
-    with contextlib.suppress(Exception):
-        parent = agent._session_db.get_session(parent_session_id)
-    if parent and parent.get("source"):
-        return parent["source"]
-    from agent.session_source import session_source_for
-    return session_source_for(getattr(agent, "platform", None))
-
-
 def _publish_rotated_compaction(
     agent: Any, messages: list, compressed: list, *, new_system_prompt: str, lease: _CompressionLease,
     old_session_id: str, compressed_user_turn_outcome: str,
@@ -3345,11 +3335,14 @@ def _publish_rotated_compaction(
     _profile_for_child = None if _profile_for_child == "default" else _profile_for_child
     old_title = agent._session_db.get_session_title(agent.session_id)
     new_session_id = mint_session_id()
+    from agent.model_routing_agent import link_compression_route
+    link_compression_route(agent, old_session_id, new_session_id)
     from agent.context_compressor import _DB_PERSISTED_MARKER
     from tools.approval_yolo import with_session_yolo
+    from agent.conversation_compression_lineage import compression_child_source
     agent._session_db.publish_compression_child(
         parent_session_id=old_session_id, child_session_id=new_session_id,
-        source=_compression_child_source(agent, old_session_id), model=agent.model,
+        source=compression_child_source(agent, old_session_id), model=agent.model,
         model_config=with_session_yolo(agent._session_init_model_config, old_session_id),
         system_prompt=new_system_prompt, messages=compressed,
         cwd=getattr(agent, "working_directory", None), profile_name=_profile_for_child,

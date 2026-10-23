@@ -29,6 +29,30 @@ class RoutingState:
                 db.execute("ROLLBACK")
                 raise
 
+    def link_continuation(self, session, parent):
+        """Bind a proven compression child without consuming an allocation slot.
+
+        Call before publishing the child in SessionDB: a failed publish may leave
+        an unreachable alias, but a visible child must never lack its route.
+        Existing independent allocations cannot be merged retroactively.
+        """
+        from agent.model_routing import ModelRoutingError
+
+        with closing(sqlite3.connect(self.path, timeout=30, isolation_level=None)) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute("SELECT root FROM aliases WHERE session=?", (parent,)).fetchone()
+                if row is None:
+                    raise ModelRoutingError("Compression routing lineage has no allocated parent")
+                existing = db.execute("SELECT root FROM aliases WHERE session=?", (session,)).fetchone()
+                if existing is not None and existing[0] != row[0]:
+                    raise ModelRoutingError("Compression routing lineage conflicts with an independent session")
+                db.execute("INSERT OR IGNORE INTO aliases VALUES (?, ?)", (session, row[0]))
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
     def _allocate(self, db, session, parent, level, candidates, version, excluded):
         from agent.model_routing import ModelRoutingError
 

@@ -7,7 +7,8 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
     """Resolve only class selectors; concrete user pins retain legacy semantics.
 
     Parent sessions here can be delegated jobs, not compression continuations, so
-    they must not automatically share allocations. Compression keeps session_id.
+    they must not automatically share allocations. Compression publication links
+    rotated IDs explicitly before exposing its child in SessionDB.
     """
     agent.model_routing = None
     if not is_class_selector(model):
@@ -92,6 +93,17 @@ def try_class_fallback(agent):
     _snapshot_primary_runtime(agent)
     persist_class_metadata(agent)
     return True
+
+
+def link_compression_route(agent, parent_session_id, child_session_id):
+    """Only compression publication/adoption may join main-agent allocations."""
+    if not getattr(agent, "model_routing", None):
+        return
+    from agent.model_routing_state import RoutingState
+    from hermes_constants import get_hermes_home
+
+    RoutingState(get_hermes_home() / "model-routing.sqlite3").link_continuation(
+        child_session_id, parent_session_id)
 
 
 def persist_class_metadata(agent):
