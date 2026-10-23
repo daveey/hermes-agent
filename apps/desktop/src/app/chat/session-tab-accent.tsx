@@ -27,7 +27,8 @@ export function SessionTabAccent({ children, session, storedSessionId }: Session
         blocked,
         session?.kanban_blocked,
         session?.cron_active,
-        session?.review_wait
+        session?.review_wait,
+        session?.kanban_attention
       )
 
   return (

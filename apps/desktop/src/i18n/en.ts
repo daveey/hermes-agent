@@ -3371,6 +3371,8 @@ export const en: Translations = {
         [open > 0 ? `${open} kanban ${open === 1 ? 'task' : 'tasks'} open` : '', blocked > 0 ? `${blocked} blocked` : '']
           .filter(Boolean)
           .join(', '),
+      kanbanAttention: count =>
+        `${count} done ${count === 1 ? 'card says' : 'cards say'} part of the work was dropped, with no follow-up card`,
       backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
       backgroundProcessUnnamed: 'background process',
       stopProcess: 'Stop',

@@ -23,6 +23,7 @@ type AutomatedRow = Pick<
   | 'automated'
   | 'cron_active'
   | 'id'
+  | 'kanban_attention'
   | 'kanban_blocked'
   | 'message_count'
   | 'pinned'
@@ -50,10 +51,11 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
     userBlocked,
     row.kanban_blocked ?? 0,
     row.cron_active === true,
-    row.review_wait
+    row.review_wait,
+    row.kanban_attention ?? 0
   )
 
-  return stripe === 'stuck' || stripe === 'blocked'
+  return stripe === 'stuck' || stripe === 'blocked' || stripe === 'attention'
 }
 
 export function sessionHiddenAsAutomated(

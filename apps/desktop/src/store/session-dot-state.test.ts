@@ -62,6 +62,18 @@ describe('sessionStatusStripe', () => {
     }
   })
 
+  // [daveey] kanban_attention turns a would-be green into amber, and only that.
+  it('paints attention (amber) instead of done when a finished card dropped work', () => {
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 1)).toBe('attention')
+    expect(sessionStatusStripe('unread', true, false, 0, false, null, 2)).toBe('attention')
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0)).toBe('done')
+    // Louder or quieter states keep their own stripe.
+    expect(sessionStatusStripe('needs-input', true, false, 0, false, null, 1)).toBe('stuck')
+    expect(sessionStatusStripe('idle', true, false, 1, false, null, 1)).toBe('stuck')
+    expect(sessionStatusStripe('idle', true, true, 0, false, null, 1)).toBe('blocked')
+    expect(sessionStatusStripe('working', true, false, 0, false, null, 1)).toBeNull()
+  })
+
   it('paints stuck (red) when an unfinished turn needs help', () => {
     expect(sessionStatusStripe('needs-input', true)).toBe('stuck')
     expect(sessionStatusStripe('stalled', true)).toBe('stuck')

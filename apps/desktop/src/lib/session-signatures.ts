@@ -47,6 +47,7 @@ export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
       session.kanban_active === other.kanban_active &&
       session.kanban_blocked === other.kanban_blocked &&
       session.kanban_unseen === other.kanban_unseen &&
+      session.kanban_attention === other.kanban_attention &&
       session.goal_active === other.goal_active &&
       session.cron_active === other.cron_active &&
       session.background_active === other.background_active &&

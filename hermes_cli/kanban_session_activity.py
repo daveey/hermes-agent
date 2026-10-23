@@ -19,7 +19,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 _log = logging.getLogger(__name__)
 
@@ -230,6 +230,109 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
     return out
 
 
+# [daveey] A "done" card can still need the user: its handoff admits part of the
+# work was dropped, deferred or never run, and no follow-up card carries it.
+# Core has no opinion on what counts; plugins register a check
+# (``register_done_check``) that gets each recently completed card and returns
+# True when its done is suspect. Rows of sessions with such a card get
+# ``kanban_attention`` (count) and paint amber instead of green. Nothing
+# registered = no field, no extra reads (upstream behaviour).
+ATTENTION_WINDOW_S = 24 * 3600
+_ATTENTION_TTL_S = 30.0
+_done_checks: dict[str, Callable[[dict[str, Any]], bool]] = {}
+_attention_cache: tuple[float, dict[str, int]] | None = None
+
+
+def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool]) -> Callable[[], None]:
+    """Register ``fn(card) -> bool`` (True = this completed card needs attention). ``card`` has ``id``, ``title``,
+    ``summary`` (latest run summary, else ``result``), ``completed_at``, ``board`` and ``board_path``. Re-registering a
+    name replaces it; the returned callable unregisters."""
+    global _attention_cache
+    _done_checks[name] = fn
+    _attention_cache = None
+
+    def _dispose() -> None:
+        global _attention_cache
+        if _done_checks.get(name) is fn:
+            _done_checks.pop(name, None)
+            _attention_cache = None
+
+    return _dispose
+
+
+def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any]]]:
+    """``(session_id, card)`` for done cards completed since ``since`` that a session created or shepherds."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+    conn.row_factory = sqlite3.Row
+    try:
+        has_runs = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'").fetchone() is not None
+        summary = ("COALESCE((SELECT r.summary FROM task_runs r WHERE r.task_id = t.id AND r.summary IS NOT NULL "
+                   "AND r.summary != '' ORDER BY r.id DESC LIMIT 1), t.result)") if has_runs else "t.result"
+        fields = f"t.id AS id, t.title AS title, t.completed_at AS completed_at, {summary} AS summary"
+        cond = "t.status = 'done' AND t.completed_at >= ?"
+        pairs = [(str(r["session_id"]), dict(r)) for r in conn.execute(
+            f"SELECT t.session_id AS session_id, {fields} FROM tasks t WHERE t.session_id IS NOT NULL "
+            f"AND t.session_id != '' AND {cond}", (since,))]
+        try:
+            pairs.extend((str(r["chat_id"]), dict(r)) for r in conn.execute(
+                f"SELECT s.chat_id AS chat_id, {fields} FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {cond}", (since,)))
+        except sqlite3.Error:  # board predates notify subscriptions
+            pass
+    finally:
+        conn.close()
+    board = _board_slug(path)
+    out = []
+    for sid, card in pairs:
+        card.pop("session_id", None)
+        card.pop("chat_id", None)
+        out.append((sid, {**card, "board": board, "board_path": str(path)}))
+    return out
+
+
+def attention_task_counts(now: float | None = None) -> dict[str, int]:
+    """``{session_id: completed cards a registered check flags}`` over the last ``ATTENTION_WINDOW_S``. Cached;
+    a check that raises counts as False."""
+    global _attention_cache
+    if not _done_checks:
+        return {}
+    mono = time.monotonic()
+    with _cache_lock:
+        if _attention_cache is not None and mono < _attention_cache[0]:
+            return _attention_cache[1]
+    since = (time.time() if now is None else now) - ATTENTION_WINDOW_S
+    checks = list(_done_checks.values())
+    verdicts: dict[tuple[str, str], bool] = {}
+    pairs: set[tuple[str, str]] = set()
+    for path in _board_db_paths():
+        try:
+            recent = _read_recent_done(path, since)
+        except sqlite3.Error as exc:
+            _log.debug("kanban attention read failed for %s: %s", path, exc)
+            continue
+        for sid, card in recent:
+            key = (str(path), str(card["id"]))
+            if key not in verdicts:
+                flagged = False
+                for check in checks:
+                    try:
+                        if check(card):
+                            flagged = True
+                            break
+                    except Exception:
+                        _log.debug("kanban done check failed on %s", card.get("id"), exc_info=True)
+                verdicts[key] = flagged
+            if verdicts[key]:
+                pairs.add((sid, key[1]))
+    counts: dict[str, int] = {}
+    for sid, _tid in pairs:
+        counts[sid] = counts.get(sid, 0) + 1
+    with _cache_lock:
+        _attention_cache = (mono + _ATTENTION_TTL_S, counts)
+    return counts
+
+
 def _row_ids(row: dict[str, Any]) -> Iterable[str]:
     seen: set[str] = set()
     for sid in (row.get("id"), row.get("_lineage_root_id"), *(row.get("_lineage_ids") or ())):
@@ -239,8 +342,8 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
 
 
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stamp ``kanban_active``, ``kanban_blocked`` and ``kanban_unseen`` (finished cards whose result the
-    session has not been handed yet) on each session row
+    """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_unseen`` (finished cards whose result the
+    session has not been handed yet) and ``kanban_attention`` (done cards a registered check flags) on each session row
     (summed over its whole compression lineage). Never raises: the list must
     render without them."""
     if not rows:
@@ -250,9 +353,15 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     except Exception:
         _log.debug("kanban activity unavailable", exc_info=True)
         return rows
+    try:
+        attention = attention_task_counts()
+    except Exception:
+        _log.debug("kanban attention unavailable", exc_info=True)
+        attention = {}
     for row in rows:
         ids = list(_row_ids(row))
-        for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen)):
+        for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen),
+                            ("kanban_attention", attention)):
             n = sum(counts.get(sid, 0) for sid in ids)
             if n:
                 row[key] = n
@@ -262,6 +371,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _reset_cache_for_tests() -> None:
-    global _cache
+    global _cache, _attention_cache
     with _cache_lock:
         _cache = None
+        _attention_cache = None

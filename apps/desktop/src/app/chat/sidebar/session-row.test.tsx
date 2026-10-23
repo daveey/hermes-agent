@@ -35,6 +35,7 @@ vi.mock('@/i18n', () => ({
           ageMin: 'm',
           ageNow: 'now',
           kanbanTasks: (open: number, blocked: number) => `${open} open, ${blocked} blocked`,
+          kanbanAttention: (count: number) => `${count} dropped`,
           backgroundProcesses: (count: number) => `${count} background processes`,
           backgroundProcessUnnamed: 'background process',
           stopProcess: 'Stop',
@@ -509,6 +510,26 @@ describe('SidebarSessionRow kanban counts', () => {
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stuck')
+  })
+
+  // [daveey] A done card whose handoff admits dropped work: amber, not green.
+  it('paints the amber (attention) stripe and a warning count for a false-done card', () => {
+    const { container } = renderRow(
+      makeSession({ kanban_attention: 1, message_count: 4, title: 'Looks done' } as Partial<SessionInfo> & {
+        title: string
+      })
+    )
+
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('attention')
+    const counts = screen.getByTestId('session-row-kanban-counts')
+    expect(counts.querySelector('[data-kanban-count="attention"]')?.textContent).toBe('1')
+    expect(counts.getAttribute('aria-label')).toBe('1 dropped')
+  })
+
+  it('stays green (done) without kanban_attention', () => {
+    const { container } = renderRow(makeSession({ message_count: 4, title: 'Done' }))
+
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('done')
   })
 
   it('renders nothing when the session has no kanban work', () => {

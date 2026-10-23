@@ -1948,6 +1948,7 @@
   "sidebar.row.continuationOrigin": ["ja","ru","zh-hant"],
   "sidebar.row.hideTabBar": ["ja","zh-hant"],
   "sidebar.row.kanbanTasks": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "sidebar.row.kanbanAttention": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.backgroundProcesses": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.backgroundProcessUnnamed": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.stopProcess": ["ar","de","es","fr","ja","ru","zh","zh-hant"],

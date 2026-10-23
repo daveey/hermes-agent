@@ -649,6 +649,11 @@ export interface SessionInfo {
    *  unloaded-session sweeper writes the notice into the transcript. Absent
    *  when zero. */
   kanban_unseen?: number
+  /** [daveey] Done kanban cards (last 24 h) whose handoff admits dropped,
+   *  deferred or unrun work with no follow-up card, per a plugin-registered
+   *  check. Paints the row amber ("needs attention") instead of green. Absent
+   *  when zero. */
+  kanban_attention?: number
   /** [daveey] True while this conversation's standing `/goal` is still
    *  active (running between turns or parked on a judge `wait` timer). The
    *  goal loop resumes it unasked, so the sidebar paints it like a background

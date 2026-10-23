@@ -42,6 +42,7 @@ describe('sessionHiddenAsAutomated [daveey]', () => {
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'stalled' })).toBe(false)
     expect(sessionHiddenAsAutomated({ ...bot, kanban_blocked: 1 }, false, { dotState: 'idle' })).toBe(false)
     expect(sessionHiddenAsAutomated({ ...bot, review_wait: 'stuck' }, false, { dotState: 'idle' })).toBe(false)
+    expect(sessionHiddenAsAutomated({ ...bot, kanban_attention: 1 }, false, { dotState: 'idle' })).toBe(false)
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'idle', userBlocked: true })).toBe(false)
     $blockedSessionIds.set(['bot'])
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'idle' })).toBe(false)

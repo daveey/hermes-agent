@@ -193,12 +193,21 @@ function SidebarSessionRowImpl({
   // and blocked task counts, after the age and before the gateway glyph.
   const kanbanOpen = session.kanban_active ?? 0
   const kanbanBlocked = session.kanban_blocked ?? 0
+  // [daveey] Done cards whose handoff admits dropped work with no follow-up.
+  const kanbanAttention = session.kanban_attention ?? 0
+
+  const kanbanLabel = [
+    kanbanOpen > 0 || kanbanBlocked > 0 ? r.kanbanTasks(kanbanOpen, kanbanBlocked) : '',
+    kanbanAttention > 0 ? r.kanbanAttention(kanbanAttention) : ''
+  ]
+    .filter(Boolean)
+    .join('; ')
 
   const kanbanCounts =
-    kanbanOpen > 0 || kanbanBlocked > 0 ? (
-      <Tip label={r.kanbanTasks(kanbanOpen, kanbanBlocked)} side="top">
+    kanbanOpen > 0 || kanbanBlocked > 0 || kanbanAttention > 0 ? (
+      <Tip label={kanbanLabel} side="top">
         <span
-          aria-label={r.kanbanTasks(kanbanOpen, kanbanBlocked)}
+          aria-label={kanbanLabel}
           className="pointer-events-auto ml-1 inline-flex items-center gap-1 align-[-1px] tabular-nums"
           data-testid="session-row-kanban-counts"
           role="img"
@@ -213,6 +222,12 @@ function SidebarSessionRowImpl({
             <span className="inline-flex items-center gap-px text-amber-500" data-kanban-count="blocked">
               <Codicon name="question" size="0.625rem" />
               {kanbanBlocked}
+            </span>
+          )}
+          {kanbanAttention > 0 && (
+            <span className="inline-flex items-center gap-px text-amber-500" data-kanban-count="attention">
+              <Codicon name="warning" size="0.625rem" />
+              {kanbanAttention}
             </span>
           )}
         </span>
@@ -357,7 +372,8 @@ function SidebarSessionRowImpl({
         userBlocked,
         kanbanBlocked,
         session.cron_active === true,
-        session.review_wait
+        session.review_wait,
+        session.kanban_attention
       )
 
   // Card header line: the workspace this belongs to — the project when it

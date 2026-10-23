@@ -102,7 +102,8 @@ export function sidebarSessionOrder(): string[] {
  *  session the user parked with ⌘B (grey stripe) is skipped. */
 // Only green / red stripes are stops; grey (parked) and the periodic loop
 // glyph are skipped like a parked session.
-const sessionHasStepStripe = (stripe: null | string | undefined): boolean => stripe === 'done' || stripe === 'stuck'
+const sessionHasStepStripe = (stripe: null | string | undefined): boolean =>
+  stripe === 'done' || stripe === 'stuck' || stripe === 'attention'
 
 export function sessionHasStatusStripe(id: string): boolean {
   if (isSessionBlocked(id)) {
@@ -144,7 +145,8 @@ export function sessionHasStatusStripe(id: string): boolean {
         false,
         session?.kanban_blocked ?? 0,
         session?.cron_active === true,
-        session?.review_wait
+        session?.review_wait,
+        session?.kanban_attention ?? 0
       )
     )
   )

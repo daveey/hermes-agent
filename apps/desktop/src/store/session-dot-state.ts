@@ -224,7 +224,10 @@ export const showsRunningArc = (state: SessionDotState): boolean => state === 's
  *  `periodic` (loop glyph, grey) when the session owns a live cron job: its
  *  work recurs on its own, so it is never "done" — it counts as parked like
  *  `blocked` (⌘] / ⌘[ skip it); only a real prompt (needs-input) beats it. */
-export type SessionStatusStripe = 'blocked' | 'done' | 'periodic' | 'stuck'
+//  [daveey] `attention` (amber) replaces `done` when a kanban card this session
+//  made finished with a handoff that admits dropped / deferred / unrun work and
+//  no follow-up card (backend `kanban_attention`): it looks done but isn't.
+export type SessionStatusStripe = 'attention' | 'blocked' | 'done' | 'periodic' | 'stuck'
 
 /** [daveey] Backend `review_wait` stamp: the session's latest reply links an
  *  open PR still needing a code review. `stuck` = the review is on the user
@@ -239,7 +242,8 @@ export const sessionStatusStripe = (
   userBlocked = false,
   kanbanBlocked = 0,
   periodic = false,
-  reviewWait: null | ReviewWait | undefined = null
+  reviewWait: null | ReviewWait | undefined = null,
+  kanbanAttention = 0
 ): null | SessionStatusStripe =>
   userBlocked
     ? 'blocked'
@@ -253,7 +257,9 @@ export const sessionStatusStripe = (
     : reviewWait === 'parked' && state !== 'working'
     ? 'blocked'
     : state === 'unread' || (state === 'idle' && hasTurns)
-      ? 'done'
+      ? (kanbanAttention ?? 0) > 0
+        ? 'attention'
+        : 'done'
       : null
 
 /** [daveey] Fold the row's OWN backend activity stamps into its resolved state.
