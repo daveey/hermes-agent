@@ -5463,6 +5463,10 @@ _EXPLICIT_PROVIDER_BRANCHES: dict[str, Callable[[_ResolveRequest], _ResolveResul
 }
 
 
+from agent.auxiliary_class_readiness import class_direct_resolver, class_readiness
+
+
+@class_direct_resolver
 def resolve_provider_client(
     provider: str, model: str | None = None, async_mode: bool = False, raw_codex: bool = False,
     explicit_base_url: str | None = None, explicit_api_key: Optional[str | Callable[[], str]] = None,
@@ -5551,8 +5555,6 @@ def resolve_provider_client(
         return _resolve_azure_foundry_branch(req)
     return _resolve_registry_branch(req)
 
-
-from agent.auxiliary_class_readiness import class_readiness
 
 @class_readiness
 def get_text_auxiliary_client(task: str = "", *, main_runtime: Optional[dict[str, Any]] = None) -> tuple[Optional[OpenAI], Optional[str]]:
@@ -5729,6 +5731,7 @@ def _vision_auto_route(
 _ZAI_OPENAI_VISION_URLS = ("https://open.bigmodel.cn/api/paas/v4", "https://api.z.ai/api/paas/v4")
 
 
+@class_direct_resolver
 def resolve_vision_provider_client(
     provider: Optional[str] = None, model: Optional[str] = None, *, base_url: Optional[str] = None,
     api_key: Optional[str] = None, async_mode: bool = False,
