@@ -113,6 +113,13 @@ def clear_class_route(agent):
     persist_class_metadata(agent)
 
 
+def current_main_runtime(agent):
+    runtime = {key: getattr(agent, key, "") or "" for key in (
+        "model", "provider", "base_url", "api_key", "api_mode", "auth_mode", "session_id")}
+    runtime["requested_class"] = (getattr(agent, "model_routing", None) or {}).get("requested_class", "")
+    return runtime
+
+
 def routing_model_config(agent):
     metadata = getattr(agent, "model_routing", None)
     return {"model_routing": metadata} if metadata else {}

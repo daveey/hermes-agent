@@ -544,6 +544,7 @@ def _publish_runtime_main(agent: Any) -> None:
                 "requested_provider", "base_url", "api_key", "api_mode", "auth_mode", "session_id"
             )},
             cache_scope=_cache_scope,
+            requested_class=(getattr(agent, "model_routing", None) or {}).get("requested_class", ""),
         )
 
 

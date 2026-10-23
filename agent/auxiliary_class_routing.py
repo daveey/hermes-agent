@@ -11,16 +11,38 @@ from agent.model_routing import ModelRoutingError, is_class_selector
 from agent.model_routing_runtime import resolve_class_runtime
 
 
+def _requested_model(task_config, options, runtime):
+    from agent import auxiliary_client as aux
+    requested = options.get("model")
+    if requested in (None, "", "auto"):
+        requested = task_config.get("model")
+    if requested not in (None, "", "auto"):
+        return requested
+    # A specialized provider/transport pin is not permission to route its job to
+    # another provider, even when the main agent uses classes.
+    for source in (options, task_config):
+        if source.get("provider") not in (None, "", "auto"):
+            return None
+        if any(source.get(k) for k in ("base_url", "api_key", "api_mode", "key_env", "api_key_env")):
+            return None
+    if runtime.get("requested_class"):
+        return "class:" + runtime["requested_class"]
+    # A live concrete user switch beats configured class defaults. Never infer a
+    # model's class from its name or from another process-global session.
+    if runtime.get("model"):
+        return runtime["model"]
+    return aux._read_main_model()
+
+
 def _class_request(task, options):
     from agent import auxiliary_client as aux
     task_config = aux._get_auxiliary_task_config(task) if task else {}
-    requested = options.get("model")
-    if not requested or requested == "auto":
-        requested = task_config.get("model")
+    runtime = aux._normalize_main_runtime(options.get("main_runtime"))
+    requested = _requested_model(task_config, options, runtime)
     if not is_class_selector(requested):
         return None
     provider, model, base, key, mode = aux._resolve_task_provider_model(
-        task, options.get("provider"), options.get("model"),
+        task, options.get("provider"), requested,
         options.get("base_url"), options.get("api_key"))
     if not is_class_selector(model):
         return None
@@ -36,7 +58,6 @@ def _class_request(task, options):
     headers = options.get("extra_headers") or {}
     if {k.lower() for k in headers} & {"authorization", "x-api-key", "api-key", "host"}:
         raise ModelRoutingError("Auxiliary class headers cannot override authentication or destination")
-    runtime = aux._normalize_main_runtime(options.get("main_runtime"))
     owner = runtime.get("session_id") or str(uuid4())
     # Separate side jobs from the main allocation; retries/restarts of a named
     # session's same task reuse its durable route without pinning unrelated jobs.
