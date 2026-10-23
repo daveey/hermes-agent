@@ -432,6 +432,12 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     values = {k: str(cfg.get(k) or "").strip() or None for k in ("model", "provider", "base_url", "api_key")}
     values["api_mode"] = str(cfg.get("api_mode") or "").strip().lower() or None
     explicit_request_overrides = cfg.get("request_overrides") if isinstance(cfg.get("request_overrides"), dict) else None
+    from tools.delegate_class_routing import child_selector
+    selector = child_selector(values["model"], values["provider"], parent_agent,
+                              base_url=values["base_url"], api_key=values["api_key"],
+                              api_mode=values["api_mode"], command=cfg.get("command"))
+    if selector:
+        return _credential_bundle(selector, "auto", None, None, None, explicit_request_overrides)
     is_native_sdk_provider = (values["provider"] or "").strip().lower() in _NATIVE_SDK_PROVIDERS
 
     if values["base_url"] and not is_native_sdk_provider:
@@ -500,6 +506,11 @@ def _resolve_child_runtime(
     or is Nous Portal (dual-wire); a pinned ``delegation.command`` must exist on PATH or the spawn fails loudly;
     ``override_provider`` clears the parent's ACP transport, fallback chain and OpenRouter routing filters so the
     pinned provider is actually honoured."""
+    from tools.delegate_class_routing import child_selector, child_runtime
+    selector = child_selector(model, override_provider, parent_agent, base_url=override_base_url,
+                              api_key=override_api_key, api_mode=override_api_mode, command=override_acp_command)
+    if selector:
+        return child_runtime(selector, parent_agent, delegation_cfg)
     effective_model = model or parent_agent.model
     # provider/base_url are one bundle: all from the override, or all from the parent. Per-field fallback built
     # children like an override provider pointed at the PARENT's endpoint (e.g. copilot credentials on the
