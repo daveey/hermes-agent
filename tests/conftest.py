@@ -432,8 +432,10 @@ def _host_is_not_a_container_by_default(monkeypatch):
     container behaviour sets HERMES_CONTAINER/HERMES_SKIP_CHMOD or patches ``_detect_container``
     itself, which overrides this default."""
     import hermes_constants
+    from hermes_platform.host import runtime
 
     monkeypatch.setattr(hermes_constants, "_detect_container", lambda: False)
+    monkeypatch.setattr(runtime, "_detect_container", lambda: False)
 
 
 @pytest.fixture(autouse=True)

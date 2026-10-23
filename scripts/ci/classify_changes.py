@@ -322,6 +322,7 @@ _UPDATE_DEPENDENCIES = (
     "hermes_cli/memory_provider_migration.py",
     "hermes_cli/left_core_migration.py",  # source_build migrates plugins that left core
     "hermes_cli/web_build_limits.py",  # source_build caps the dashboard Node build
+    "hermes_cli/top_level_env.py",  # main_desktop.clean_launch_env: scrubs the leaked worker env at launch
     "hermes_cli/desktop_console.py",
     "hermes_cli/bundled_app.py",
     "hermes_cli/gui_uninstall.py",

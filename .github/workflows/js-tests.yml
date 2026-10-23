@@ -87,6 +87,10 @@ jobs:
       # not an empty run, because an empty run reports green after it checks
       # nothing.
       - name: Run all workspace checks
+        # apps/desktop's typecheck (several tsc passes over the whole renderer) peaks past node's
+        # default ~2 GB old-space cap and dies with "heap out of memory"; the runners have 10 GB.
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: node .github/scripts/run-workspace-checks.mjs
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
