@@ -382,12 +382,12 @@ def test_desktop_relaunch_after_update_gets_scrubbed_env(monkeypatch, tmp_path):
 
 def test_guard_hold_posts_one_comment_and_no_inbox_card_naming_pr_and_checks(
         kanban_home, monkeypatch, all_assignees_spawnable):
-    """Within 30 min of a hold the card gets ONE kanban comment naming the PR and its failing
-    checks, NO Inbox card (Inbox = owner-only decisions, AGENTS.md), one ``respawn_guarded``
-    event per hold instead of one per tick, and the notice does not restart the hold clock
-    (the 6 h cap still fires). [daveey]"""
+    """Within 30 min of a hold the card gets ONE kanban comment + ONE fix card (assignee default)
+    naming the PR and its failing checks, NO Inbox card (Inbox = owner-only decisions, AGENTS.md),
+    one ``respawn_guarded`` event per hold instead of one per tick, and the notice does not
+    restart the hold clock (the 6 h cap still fires). [daveey]"""
     pr = "https://github.com/daveey/hermes/pull/19"
-    posted = []
+    posted, cards = [], []
     monkeypatch.setattr(kbd._guard_notice, "_pr_failing_checks", lambda url: "2 failing check(s): lint, unit")
     real_run = kbd._guard_notice.subprocess.run
 
@@ -396,6 +396,7 @@ def test_guard_hold_posts_one_comment_and_no_inbox_card_naming_pr_and_checks(
             posted.append(cmd)
         return real_run(["true"], *a, **k)
     monkeypatch.setattr(kbd._guard_notice.subprocess, "run", _spy_run)
+    monkeypatch.setattr(kbd._guard_notice, "_file_fix_card", lambda conn, tid, reason, body: cards.append((tid, reason, body)))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="pr held", assignee="a")
         kb.add_comment(conn, tid, "a", f"opened {pr}")
@@ -409,6 +410,7 @@ def test_guard_hold_posts_one_comment_and_no_inbox_card_naming_pr_and_checks(
         kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
         kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)  # second tick: no duplicate
         assert not posted and not hasattr(kbd._guard_notice, "_post_inbox_card")
+        assert [(c[0], c[1]) for c in cards] == [(tid, "active_pr")] and pr in cards[0][2]
         notes = [c for c in kb.list_comments(conn, tid) if c.body.startswith("[respawn-guard]")]
         assert len(notes) == 1
         assert pr in notes[0].body and "lint, unit" in notes[0].body and "active_pr" in notes[0].body

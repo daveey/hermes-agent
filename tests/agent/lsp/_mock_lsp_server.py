@@ -89,7 +89,11 @@ def main():
                 "-c",
                 "import os, pathlib, signal, time; "
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                "pathlib.Path(os.environ['MOCK_LSP_CHILD_PID']).write_text(str(os.getpid())); "
+                # Publish readiness atomically: existence must imply a complete PID.
+                "pid_file = pathlib.Path(os.environ['MOCK_LSP_CHILD_PID']); "
+                "pending = pid_file.with_suffix('.pending'); "
+                "pending.write_text(str(os.getpid())); "
+                "pending.replace(pid_file); "
                 "time.sleep(60)",
             ],
             env=os.environ,
