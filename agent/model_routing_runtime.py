@@ -5,7 +5,8 @@ from agent.model_routing import ModelRoutingError, resolve_model_route
 
 
 def resolve_class_runtime(model, provider, *, config=None, session_id=None,
-                          parent_session_id=None, requirements=None, excluded=(), state_path=None):
+                          parent_session_id=None, requirements=None, excluded=(), state_path=None,
+                          prepare_runtime=None):
     from agent.credential_pool import load_pool
     from hermes_cli import runtime_provider as runtime
 
@@ -26,27 +27,38 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         return pools[key].has_available(model=route["model"])
 
     failed = list(excluded)
-    while True:
-        chosen = resolve_model_route(model, provider, config=config, session_id=session_id,
-                                     parent_session_id=parent_session_id, requirements=requirements,
-                                     excluded=failed, eligible=eligible, state_path=state_path)
-        metadata = chosen["metadata"]
-        selected = chosen["provider"]
+    resolved = {}
+
+    class UnavailableCredential(Exception):
+        pass
+
+    def prepare(metadata):
+        selected, selected_model = metadata["selected_provider"], metadata["selected_model"]
         runtime._raise_if_provider_disabled(selected)
         pool = pools[selected, metadata["billing_group"]]
-        entry = pool.select(model=chosen["model"])
+        entry = pool.select(model=selected_model)
         if entry is None:
-            # Refresh/quota can change after the availability probe. Never enter
-            # the legacy ladder (it can consume an environment API key).
-            failed.append((selected, chosen["model"]))
-            continue
-        cfg = {"provider": selected, "default": chosen["model"]}
-        resolved = runtime._resolve_runtime_from_pool_entry(
+            # Roll back the unready selection before trying another same-class
+            # candidate. Never enter the legacy environment-key ladder.
+            failed.append((selected, selected_model))
+            raise UnavailableCredential
+        cfg = {"provider": selected, "default": selected_model}
+        resolved.update(runtime._resolve_runtime_from_pool_entry(
             provider=selected, entry=entry, model_cfg=cfg, pool=pool,
-            requested_provider=selected, target_model=chosen["model"])
+            requested_provider=selected, target_model=selected_model))
         verify_class_runtime(resolved, metadata)
-        resolved.update(model=chosen["model"], model_routing=metadata)
-        return resolved
+        resolved.update(model=selected_model, model_routing=metadata)
+        if prepare_runtime is not None:
+            prepare_runtime(resolved)
+
+    while True:
+        try:
+            resolve_model_route(model, provider, config=config, session_id=session_id,
+                                parent_session_id=parent_session_id, requirements=requirements,
+                                excluded=failed, eligible=eligible, state_path=state_path, prepare=prepare)
+            return resolved
+        except UnavailableCredential:
+            continue
 
 
 def verify_class_runtime(runtime, metadata):

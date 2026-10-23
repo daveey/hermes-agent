@@ -12,7 +12,7 @@ class RoutingState:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def allocate(self, session_id, parent_session_id, level, candidates, version, excluded):
+    def allocate(self, session_id, parent_session_id, level, candidates, version, excluded, prepare=None):
         """Allocate and persist atomically; aliases share one failover decision."""
         with closing(sqlite3.connect(self.path, timeout=30, isolation_level=None)) as db:
             db.execute("PRAGMA busy_timeout=30000")
@@ -23,6 +23,10 @@ class RoutingState:
             db.execute("BEGIN IMMEDIATE")
             try:
                 result = self._allocate(db, session_id, parent_session_id, level, candidates, version, excluded)
+                # Credentials/client must be usable before another process can
+                # observe the replacement. Failure rolls back counters as well.
+                if prepare is not None:
+                    prepare(result)
                 db.execute("COMMIT")
                 return result
             except BaseException:

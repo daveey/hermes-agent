@@ -72,6 +72,9 @@ def test_agent_class_failure_stays_same_class_and_preserves_prompt(routing_home,
                     agent._try_activate_fallback()
             assert agent.model == "anthropic-deep"
             assert agent.model_routing["selected_model"] == agent.model
+            resumed = build_agent(session_id="failover")
+            assert resumed.model_routing == agent.model_routing
+            assert resumed.model == agent.model
             return
         assert agent._try_activate_fallback() is True
         assert agent.model == "z-anthropic-deep"
@@ -101,6 +104,19 @@ def test_explicit_switch_clears_class_policy(routing_home):
                            base_url=agent.base_url, api_mode="anthropic_messages")
     assert agent.model == "explicit-user-model"
     assert agent.model_routing is None
+
+
+def test_rejected_runtime_does_not_publish_initial_allocation(routing_home, tmp_path):
+    import sqlite3
+    from agent.model_routing_runtime import resolve_class_runtime
+
+    with patch("agent.model_routing_runtime.verify_class_runtime", side_effect=ModelRoutingError("rejected")):
+        with pytest.raises(ModelRoutingError, match="rejected"):
+            resolve_class_runtime("class:deep", "auto", session_id="unready")
+    with sqlite3.connect(tmp_path / "model-routing.sqlite3") as db:
+        assert db.execute("SELECT count(*) FROM routes").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM counters").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM aliases").fetchone()[0] == 0
 
 
 def test_agent_empty_class_fails_before_legacy_paid_fallback(routing_home, monkeypatch):

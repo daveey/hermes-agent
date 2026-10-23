@@ -58,24 +58,30 @@ def try_class_fallback(agent):
     context = getattr(getattr(agent, "context_compressor", None), "context_length", 0)
     if isinstance(context, int) and context > 0:
         requirements["min_context_tokens"] = max(requirements.get("min_context_tokens", 0), context)
-    try:
-        runtime = resolve_class_runtime(
-            "class:" + agent.model_routing["requested_class"], "auto",
-            session_id=agent.session_id, requirements=requirements, excluded=failed)
-    except ModelRoutingError:
-        return False
     old_model, old_provider, old_url = agent.model, agent.provider, agent.base_url
     old_client = agent.client
     previous = vars(agent).copy()
-    try:
+    building_client = False
+
+    def prepare(runtime):
+        nonlocal building_client
+        building_client = True
         agent.model, agent.provider = runtime["model"], runtime["provider"]
         agent.base_url, agent.api_mode = runtime["base_url"], runtime["api_mode"]
         agent.requested_provider = "auto"
         agent._credential_pool = runtime["credential_pool"]
         _build_client(agent, runtime["api_key"], runtime["base_url"], [])
+
+    try:
+        runtime = resolve_class_runtime(
+            "class:" + agent.model_routing["requested_class"], "auto",
+            session_id=agent.session_id, requirements=requirements, excluded=failed,
+            prepare_runtime=prepare)
     except Exception as exc:
         vars(agent).clear()
         vars(agent).update(previous)
+        if isinstance(exc, ModelRoutingError) and not building_client:
+            return False
         raise ModelRoutingError("Class failover client construction failed; no legacy fallback permitted") from exc
     agent.model_routing = runtime["model_routing"]
     if old_client is not None and old_client is not agent.client:

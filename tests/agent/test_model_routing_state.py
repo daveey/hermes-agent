@@ -53,6 +53,42 @@ def test_lineage_arriving_before_parent_shares_identity(tmp_path):
     assert resolve_model_route("class:fast", session_id="parent", **args) == first
 
 
+@pytest.mark.parametrize("reject", [False, True])
+def test_prepared_failover_is_invisible_until_commit_and_rolls_back(tmp_path, reject):
+    import json
+
+    path = tmp_path / "routes.db"
+    args = dict(config=policy(), session_id="parent", state_path=path)
+    first = resolve_model_route("class:deep", **args)
+    from agent.model_routing_state import RoutingState
+    RoutingState(path).link_continuation("child", "parent")
+    with sqlite3.connect(path) as db:
+        counters = db.execute("SELECT * FROM counters ORDER BY pool").fetchall()
+
+    def prepare(metadata):
+        assert metadata["selected_provider"] != first["provider"]
+        # Another connection (including a restarted reader) cannot see a
+        # replacement whose credential/client preparation hasn't succeeded.
+        with sqlite3.connect(path) as reader:
+            stored = json.loads(reader.execute("SELECT metadata FROM routes").fetchone()[0])
+            assert stored == first["metadata"]
+        if reject:
+            raise RuntimeError("client failed")
+
+    failure = [(first["provider"], first["model"])]
+    if reject:
+        with pytest.raises(RuntimeError, match="client failed"):
+            resolve_model_route("class:deep", excluded=failure, prepare=prepare, **args)
+        expected = first
+        with sqlite3.connect(path) as db:
+            assert db.execute("SELECT * FROM counters ORDER BY pool").fetchall() == counters
+    else:
+        expected = resolve_model_route("class:deep", excluded=failure, prepare=prepare, **args)
+    assert resolve_model_route("class:deep", **args) == expected
+    args["session_id"] = "child"
+    assert resolve_model_route("class:deep", **args) == expected
+
+
 def test_config_validation_reports_bad_manifest():
     from hermes_cli.config import validate_config_structure
     cfg = policy()

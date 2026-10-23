@@ -92,7 +92,7 @@ def _capable(route, requirements):
 
 def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
                         parent_session_id=None, requirements=None, excluded=(), state_path=None,
-                        eligible=None):
+                        eligible=None, prepare=None):
     """Return concrete model/provider and durable metadata, or unchanged exact pin.
 
     ``excluded`` is a sequence of failed (provider, model) pairs for a new attempt,
@@ -128,5 +128,5 @@ def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
         from hermes_constants import get_hermes_home
         state_path = get_hermes_home() / "model-routing.sqlite3"
     metadata = RoutingState(state_path).allocate(session_id, parent_session_id, level,
-                                                routes, policy.get("policy_version", 1), excluded)
+                                                routes, policy.get("policy_version", 1), excluded, prepare)
     return {"model": metadata["selected_model"], "provider": metadata["selected_provider"], "metadata": metadata}
