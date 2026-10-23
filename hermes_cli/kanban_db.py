@@ -1198,9 +1198,13 @@ def create_task(
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
     validate_workspace: bool = False,
+    origin_intent: Optional[dict] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
+    ``origin_intent`` opts into atomic receipt-workflow creation: immutable
+    request ID/options, task and publication marker commit together. This is
+    owner-side persistence only, never proof of an origin readback or handoff.
     ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project
     ``worktree`` workspace that could never resolve at spawn with
     ``WorktreeWorkspaceConfigError`` naming the fix, instead of letting the
@@ -1219,6 +1223,16 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
+    if origin_intent is not None:
+        # Capture the full immutable caller intent before defaults/derived state
+        # mutate it. New create options automatically participate in retry checks.
+        creation_options = dict(locals())
+        creation_options.pop("conn")
+        creation_options.pop("origin_intent")
+        from hermes_cli.kanban_origin_creation import create_with_origin
+
+        return create_with_origin(conn, origin_intent, creation_options)
+
     from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
     from hermes_cli.kanban_pr_acceptance import validate_contract
 
