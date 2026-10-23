@@ -144,6 +144,7 @@ def build_models_payload(
         _apply_picker_hints(rows)
     if canonical_order:
         rows = _reorder_canonical(rows)
+    rows = _prefer_subscription_rows(rows)
     if pricing:
         _apply_pricing(rows, force_fresh_nous_tier=force_fresh_nous_tier, cached_only=pricing_cache_only)
     # Both metadata decorators consult ``model_overrides``.  Snapshot the
@@ -910,6 +911,41 @@ def _apply_picker_hints(rows: list[dict]) -> None:
         row["key_env"] = key_env
         row["warning"] = (f"paste {key_env} to activate" if auth_type == "api_key" and key_env
                           else f"run `hermes model` to configure ({auth_type})")
+
+
+SUBSCRIPTION_PROVIDERS = frozenset({"openai-codex"})
+METERED_OPENAI_PROVIDERS = frozenset({"openai", "openai-api"})
+
+
+def _prefer_subscription_rows(rows: list[dict]) -> list[dict]:
+    """Label billing and put the ChatGPT/Codex subscription ahead of the metered OpenAI API.
+
+    A model both can run (gpt-6-astra) must default to the subscription: the metered row stays
+    selectable but is marked ``billing="metered"`` and lists ``subscription_overlap_models`` (the
+    ids the subscription also serves) so a client can show "billed per token" next to them and never
+    pick it by accident. Rows are only labelled/reordered, never dropped."""
+    {_slug(r): r for r in rows}
+    sub_rows = [r for r in rows if _slug(r) in SUBSCRIPTION_PROVIDERS]
+    if not sub_rows:
+        return rows
+    for r in sub_rows:
+        r["billing"] = "subscription"
+    sub_models = {str(m).lower() for r in sub_rows for m in (r.get("models") or [])}
+    for r in rows:
+        if _slug(r) in METERED_OPENAI_PROVIDERS:
+            r["billing"] = "metered"
+            r["subscription_overlap_models"] = [m for m in (r.get("models") or []) if str(m).lower() in sub_models]
+    metered_idx = [i for i, r in enumerate(rows) if _slug(r) in METERED_OPENAI_PROVIDERS]
+    if not metered_idx:
+        return rows
+    first_metered = min(metered_idx)
+    codex_idx = [i for i, r in enumerate(rows) if _slug(r) in SUBSCRIPTION_PROVIDERS]
+    if all(i < first_metered for i in codex_idx):
+        return rows
+    moved = [rows[i] for i in codex_idx]
+    rest = [r for i, r in enumerate(rows) if i not in set(codex_idx)]
+    insert_at = min(i for i, r in enumerate(rest) if _slug(r) in METERED_OPENAI_PROVIDERS)
+    return rest[:insert_at] + moved + rest[insert_at:]
 
 
 def _reorder_canonical(rows: list[dict]) -> list[dict]:

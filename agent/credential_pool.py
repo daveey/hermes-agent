@@ -344,6 +344,29 @@ def _codex_principal_identity(access_token: Any) -> Optional[tuple[str, str]]:
     return account_id.strip(), subject.strip()
 
 
+# ChatGPT plan tiers that cannot run account-gated Codex models (Astra). Unknown/missing plan claims
+# are NOT excluded: only a positively-identified free tier is skipped.
+_CODEX_NON_ENTITLED_PLANS = frozenset({"free", "go", "guest"})
+
+
+def codex_plan_type(access_token: Any) -> Optional[str]:
+    """Lower-cased ``chatgpt_plan_type`` claim of a Codex access token, or None when absent."""
+    claims = _decode_jwt_claims(access_token)
+    auth_claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else None
+    plan = auth_claims.get("chatgpt_plan_type") if isinstance(auth_claims, dict) else None
+    return plan.strip().lower() if isinstance(plan, str) and plan.strip() else None
+
+
+def codex_entry_entitled_for_model(access_token: Any, model: Optional[str]) -> bool:
+    """False when *model* is account-gated (Astra) and the token's plan is a known non-entitled tier.
+    A request for it must never rotate onto such an account: it would 4xx or, worse, silently reroute."""
+    from agent.reasoning_effort import is_astra_model
+
+    if not model or not is_astra_model(model):
+        return True
+    return codex_plan_type(access_token) not in _CODEX_NON_ENTITLED_PLANS
+
+
 def _codex_entry_tracks_singleton(entry: PooledCredential, singleton_tokens: dict[str, Any]) -> bool:
     """Whether a Codex pool entry may adopt the auth.json singleton's token pair.
 
@@ -2160,6 +2183,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                         cleared_any = True
                 continue
             if model_cooldown_until(entry, model) is not None:
+                continue
+            if self.provider == "openai-codex" and not codex_entry_entitled_for_model(entry.access_token, model):
                 continue
             if entry.last_status == STATUS_EXHAUSTED:
                 exhausted_until = _exhausted_until(entry, sole_credential=sole_credential)

@@ -1410,17 +1410,17 @@ def _codex_catalog(normalized: str, force_refresh: bool) -> list[str]:
     # until the runtime lease refreshes it.
     # The token and the host it is routed to come from the same resolution (#121486): a pooled
     # gateway key is only ever sent to that gateway, never to the chatgpt.com default.
-    base_url = None
-    try:
-        from hermes_cli.auth import _codex_access_token_is_expiring, resolve_codex_runtime_credentials
+    # Discovery spans EVERY usable pool entry, not the round-robin cursor: a free-plan account lists
+    # no Astra, and a catalog built from it left Astra offered only under the metered OpenAI API.
+    from hermes_cli.codex_models import codex_catalog_credentials, get_codex_model_ids_for_credentials
 
-        creds = resolve_codex_runtime_credentials(read_only=True)
-        access_token, base_url = creds.get("api_key"), creds.get("base_url")
-        if _codex_access_token_is_expiring(access_token, 0):
-            access_token = None
+    try:
+        credentials = codex_catalog_credentials()
     except Exception:
-        access_token = None
-    return get_codex_model_ids(access_token=access_token, base_url=base_url)
+        credentials = []
+    if credentials:
+        return get_codex_model_ids_for_credentials(credentials)
+    return get_codex_model_ids(access_token=None, base_url=None)
 
 
 _COPILOT_ACP_SESSION_MEMO_TTL = 300.0  # 5 min; SWR disk cache handles the rest

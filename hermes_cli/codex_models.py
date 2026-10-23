@@ -105,32 +105,70 @@ def _drop_undiscovered_astra(model_ids: list[str]) -> list[str]:
     return [model for model in model_ids if not is_astra_model(model)]
 
 
-def codex_catalog_credential_identity() -> str:
-    """Identity of the credential live discovery would use right now, for the catalog cache key.
+def codex_catalog_credentials() -> list[tuple[str, Optional[str]]]:
+    """``[(access_token, base_url)]`` for every usable Codex credential, strongest plan first.
 
-    Access/refresh tokens rotate in place while the account-scoped catalog stays authoritative for
-    the same ChatGPT principal and route, so the key includes the principal and resolved base URL,
-    not the rotating token. An expired token is its own state (per route): ``_codex_catalog`` serves
-    the static fallback for it, and that fallback must not outlive the refresh under the healthy
-    principal's key. Opaque non-JWT tokens
-    fall back to the token itself (the caller hashes every part before anything is persisted).
-    """
-    from hermes_cli.auth import _codex_access_token_is_expiring, resolve_codex_runtime_credentials
+    Discovery must not depend on which pool entry round-robin happens to point at: a free-plan
+    account lists no Astra, so a catalog built from it hides models the pro account in the same pool
+    can run (and the picker then offers them only under the metered OpenAI API). Read-only: nothing
+    here refreshes, imports or persists a credential; expired tokens are skipped."""
+    from agent.credential_pool import STATUS_DEAD, codex_plan_type
+    from hermes_cli.auth import _codex_access_token_is_expiring, read_credential_pool, resolve_codex_runtime_credentials
+    from hermes_cli.auth_codex import _codex_pool_dicts, _codex_pool_route_base_url
+
+    found: list[tuple[str, Optional[str]]] = []
+    seen: set[str] = set()
+
+    def _add(token: object, base_url: object) -> None:
+        tok = str(token or "").strip()
+        if not tok or tok in seen or _codex_access_token_is_expiring(tok, 0):
+            return
+        seen.add(tok)
+        found.append((tok, (str(base_url).strip() if base_url else "") or _codex_pool_route_base_url("") or None))
 
     try:
         creds = resolve_codex_runtime_credentials(read_only=True)
-        token = str(creds.get("api_key") or "")
-        route = normalize_route_base_url(str(creds.get("base_url") or "").strip())
-    except Exception:  # AuthError (no/exhausted creds) or the pytest seat belt: no live catalog either way
-        token = ""
-    if not token:
-        return "missing"
-    if _codex_access_token_is_expiring(token, 0):
-        return "expired\n" + route
-    from agent.credential_pool import _codex_principal_identity
+        _add(creds.get("api_key"), creds.get("base_url"))
+    except Exception:  # no/exhausted singleton creds: the pool below may still hold usable rows
+        pass
+    try:
+        for entry in _codex_pool_dicts(read_credential_pool("openai-codex")):
+            if entry.get("last_status") == STATUS_DEAD:
+                continue
+            _add(entry.get("access_token"), _codex_pool_route_base_url(entry.get("base_url")))
+    except Exception:
+        logger.debug("Codex pool catalog credential scan failed", exc_info=True)
 
-    principal = _codex_principal_identity(token)
-    return ("/".join(principal) if principal else token) + "\n" + route
+    _plan_rank = {"pro": 0, "prolite": 1, "team": 2, "business": 2, "enterprise": 2, "plus": 3}
+    found.sort(key=lambda item: _plan_rank.get(codex_plan_type(item[0]) or "", 4))  # stable
+    return found
+
+
+def codex_catalog_credential_identity() -> str:
+    """Identity of the credential SET live discovery would use right now, for the catalog cache key.
+
+    Access/refresh tokens rotate in place while the account-scoped catalog stays authoritative for
+    the same ChatGPT principal and route, so the key includes the principals and resolved base URLs,
+    not the rotating tokens. The key covers every usable pool entry (not the round-robin cursor), so
+    moving the cursor never changes it while adding/removing/upgrading an account does. An expired
+    token is its own state (per route): ``_codex_catalog`` serves the static fallback for it, and that
+    fallback must not outlive the refresh under the healthy principal's key. Opaque non-JWT tokens
+    fall back to the token itself (the caller hashes every part before anything is persisted).
+    """
+    from agent.credential_pool import _codex_principal_identity, codex_plan_type
+
+    try:
+        creds = codex_catalog_credentials()
+    except Exception:  # AuthError (no/exhausted creds) or the pytest seat belt: no live catalog either way
+        creds = []
+    if not creds:
+        return "missing"
+    parts = []
+    for token, base_url in creds:
+        principal = _codex_principal_identity(token)
+        ident = ("/".join(principal) if principal else token) + "#" + (codex_plan_type(token) or "")
+        parts.append(ident + "\n" + normalize_route_base_url(str(base_url or "").strip()))
+    return "\n".join(sorted(parts))
 
 
 def _ranked_slugs(entries: object) -> list[str]:
@@ -209,6 +247,20 @@ def _read_cache_models(codex_home: Path) -> list[str]:
 
     entries = raw.get("models") if isinstance(raw, dict) else None
     return _ranked_slugs(entries if isinstance(entries, list) else [])
+
+
+def get_codex_model_ids_for_credentials(credentials: list[tuple[str, Optional[str]]]) -> list[str]:
+    """Union of the live catalogs of every credential (strongest plan first), so an entitled account's
+    models are listed whichever account is current. With no live answer from any, falls back to the
+    offline hints exactly like :func:`get_codex_model_ids`."""
+    merged: list[str] = []
+    for token, base_url in credentials:
+        api_models = _fetch_models_from_api(token, base_url=base_url)
+        if api_models:
+            merged.extend(m for m in _finalize_codex_models(api_models) if m not in merged)
+    if merged:
+        return merged
+    return get_codex_model_ids()
 
 
 def get_codex_model_ids(access_token: Optional[str] = None, base_url: Optional[str] = None) -> list[str]:
