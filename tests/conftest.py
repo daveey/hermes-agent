@@ -425,6 +425,18 @@ def _isolate_hermes_home(_hermetic_environment):
 
 
 @pytest.fixture(autouse=True)
+def _host_is_not_a_container_by_default(monkeypatch):
+    """Tests assert the bare-host permission policy (owner-only 0700/0600 modes), which the
+    product deliberately skips inside containers. Self-hosted CI runs in a container (it has
+    /.dockerenv), so the ambient container signal must not leak into tests; a test that wants
+    container behaviour sets HERMES_CONTAINER/HERMES_SKIP_CHMOD or patches ``_detect_container``
+    itself, which overrides this default."""
+    import hermes_constants
+
+    monkeypatch.setattr(hermes_constants, "_detect_container", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_foreground_exit_fence():
     """A test that drives a hard-exit path raises the one-way foreground-spawn fence; lower it after."""
     yield
