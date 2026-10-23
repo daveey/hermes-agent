@@ -1714,38 +1714,16 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
         overrides["reasoning_config_override"] = reasoning_config
     if service_tier:  # None = "inherit the profile" at _make_agent; "" = real override "no priority tier"
         overrides["service_tier_override"] = "" if service_tier.lower() == "normal" else service_tier
-    return overrides
+    from tui_gateway.class_routing import restore_class_overrides
+    return restore_class_overrides(model, model_config, overrides)
 
 
 def _runtime_model_config(agent, existing: dict | None = None) -> dict:
     """Merge the agent's CURRENT runtime identity onto the row's persisted ``model_config``. Falsy agent
     attributes DELETE the key rather than skip the write: resume reads provider/endpoint from this JSON
     (model column written separately), so a stale provider would route the resumed chat to the wrong endpoint."""
-    config = dict(existing or {})
-    agent = session_runtime_view(agent)
-    attr = lambda k: str(getattr(agent, k, "") or "").strip()
-    model, provider, base_url = attr("model"), attr("provider"), attr("base_url")
-    if provider.lower() == "custom":
-        # ``agent.provider`` resolves every named custom entry to the literal "custom", losing the entry
-        # identity (api_key is never persisted): recover ``custom:<name>`` from the endpoint URL.
-        try:
-            from hermes_cli.runtime_provider import canonical_custom_identity
-            provider = canonical_custom_identity(base_url=base_url, model=model or None) or provider
-        except Exception:
-            logger.debug("custom provider identity lookup failed", exc_info=True)
-    reasoning_config = getattr(agent, "reasoning_config", None)
-    live = {
-        "model": model, "provider": provider, "base_url": base_url, "api_mode": attr("api_mode"),
-        # An empty dict is still a real (present) reasoning config.
-        "reasoning_config": reasoning_config if isinstance(reasoning_config, dict) else None,
-        "service_tier": getattr(agent, "service_tier", None),
-    }
-    for key, value in live.items():
-        if value or isinstance(value, dict):
-            config[key] = value
-        else:
-            config.pop(key, None)
-    return config
+    from tui_gateway.class_routing import runtime_model_config
+    return runtime_model_config(agent, existing, session_runtime_view, logger)
 
 
 def _persist_live_session_runtime(session: dict | None) -> None:
@@ -2578,6 +2556,9 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
             requested_provider = provider_override
         resolve_kwargs = {"requested": requested_provider, "target_model": model or None}
         overrides = {}
+    from tui_gateway.class_routing import deferred_runtime
+    if (deferred := deferred_runtime(model, requested_provider, _load_cfg())) is not None:
+        return model, deferred
     resolution = _resolve_runtime_with_fallback(resolve_kwargs)
     if resolution.used_fallback:
         if not resolution.selected_model:

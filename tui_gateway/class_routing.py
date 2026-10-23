@@ -1,0 +1,52 @@
+"""Class selectors stay intact until AIAgent owns a durable session identity."""
+from agent.model_routing import is_class_selector
+
+
+def deferred_runtime(model, provider, config):
+    if not is_class_selector(model):
+        return None
+    model_config = config.get("model") or {}
+    configured = model_config.get("provider") if isinstance(model_config, dict) else None
+    # AIAgent validates the selector and provider and fences credentials atomically.
+    requested = provider or configured or "auto"
+    return {"provider": requested, "requested_provider": requested}
+
+
+def restore_class_overrides(model, config, overrides):
+    route = config.get("model_routing")
+    if not isinstance(route, dict) or route.get("selected_model") != model:
+        return overrides
+    level = route.get("requested_class")
+    if level not in ("deep", "standard", "fast"):
+        return overrides
+    overrides["model_override"] = {"model": f"class:{level}", "provider": "auto"}
+    overrides["provider_override"] = "auto"
+    return overrides
+
+
+def runtime_model_config(agent, existing, runtime_view, logger):
+    """Persist concrete display identity and class policy, clearing stale explicit-switch metadata."""
+    config = dict(existing or {})
+    route = getattr(agent, "model_routing", None)
+    agent = runtime_view(agent)
+    attr = lambda k: str(getattr(agent, k, "") or "").strip()
+    model, provider, base_url = attr("model"), attr("provider"), attr("base_url")
+    if provider.lower() == "custom":
+        try:
+            from hermes_cli.runtime_provider import canonical_custom_identity
+            provider = canonical_custom_identity(base_url=base_url, model=model or None) or provider
+        except Exception:
+            logger.debug("custom provider identity lookup failed", exc_info=True)
+    reasoning_config = getattr(agent, "reasoning_config", None)
+    live = {
+        "model": model, "provider": provider, "base_url": base_url, "api_mode": attr("api_mode"),
+        "reasoning_config": reasoning_config if isinstance(reasoning_config, dict) else None,
+        "service_tier": getattr(agent, "service_tier", None),
+        "model_routing": route,
+    }
+    for key, value in live.items():
+        if value or isinstance(value, dict):
+            config[key] = value
+        else:
+            config.pop(key, None)
+    return config

@@ -89,6 +89,13 @@ CLI integration tests exercise the native Anthropic SDK streaming request throug
 an isolated mock HTTP transport, inspect endpoint/model/OAuth headers, and restore
 from a real temporary session DB. This is not a live entitlement probe.
 
-Desktop, messaging, API, delegation, cron, Kanban and auxiliary adapters and their
-per-entry request/recovery tests remain required before activation. This document
-is not rollout proof.
+Desktop/TUI construction defers class credential resolution until AIAgent has its
+durable session key. Runtime persistence/restoration retains the class while showing
+the concrete model; explicit switches clear the metadata. Config sync does not
+rebalance existing conversations when a class default changes. Desktop tests cover
+construction, restoration, explicit pinning, empty-pool zero sends, and the native
+Anthropic streaming SDK request via mock HTTP transport (not live entitlement).
+
+Messaging, API, delegation, cron, Kanban and auxiliary adapters and their per-entry
+request/recovery tests remain required before activation. Desktop background/preview
+agents and startup readiness also require audit. This document is not rollout proof.

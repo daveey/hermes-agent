@@ -456,6 +456,9 @@ def _sync_agent_model_with_config(sid: str, session: dict) -> None:
     target = _config_model_target()
     if not target[0]:
         return
+    from agent.model_routing import is_class_selector
+    if is_class_selector(target[0]):
+        return  # Class defaults apply to new sessions, never rebalance existing conversations.
     seen = session.get("config_model_seen")
     if target == seen:
         return
