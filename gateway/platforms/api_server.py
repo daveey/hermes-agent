@@ -2198,6 +2198,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     ) -> Optional[dict[str, Any]]:
         """Runtime kwargs for ``provider``, falling back to the gateway's resolver; ``required``
         raises ``_ProviderAuthResolutionError`` (controlled response, not a raw 500), not None."""
+        from gateway.platforms.api_server_class_routing import deferred_runtime
+        deferred = deferred_runtime(target_model, provider)
+        if deferred is not None:
+            return deferred
         provider_name = _clean_request_string(provider)
         if not provider_name:
             return None
@@ -2338,20 +2342,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         ``route`` / ``session_model`` are mutually exclusive; ``confirmed_runtime_lock`` beats the
         session ``/model`` override, disables the fallback chain and fails closed."""
         from run_agent import AIAgent
-        from gateway.run import (
-            _checkpoint_agent_kwargs, _current_max_iterations, _resolve_runtime_agent_kwargs,
-            _resolve_gateway_model, _load_gateway_config, GatewayRunner)
+        from gateway.run import _checkpoint_agent_kwargs, _current_max_iterations, _load_gateway_config, GatewayRunner
+        from gateway.platforms.api_server_class_routing import prepare_runtime
         from hermes_cli.tools_config import _get_platform_tools
-        # RuntimeError is caught ONLY here (sole provider-auth raiser); the typed subclass keeps
-        # run_conversation() errors distinct.
-        try:
-            runtime_kwargs = _resolve_runtime_agent_kwargs()
-        except RuntimeError as exc:
-            raise _ProviderAuthResolutionError(str(exc)) from exc
-        # A fallback-provider runtime carries its own ``model``: pop it (overrides config, and
-        # must not collide with the ``**runtime_kwargs`` spread).
-        model = runtime_kwargs.pop("model", None) or _resolve_gateway_model()
-        runtime_kwargs.pop("_fallback_notice", None)  # raw API surface: the switch is already logged
+        model, runtime_kwargs, session_model = prepare_runtime(
+            self, session_id, session_model, confirmed_runtime_lock, requested_model, route, gateway_session_key)
         request_reasoning_config = _request_reasoning_config(model_options)
         request_service_tier = _request_service_tier(model_options)
         model, session_override, request_model, request_provider = self._select_agent_runtime(
@@ -2404,7 +2399,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             else "session_model_override" if session_override
             else "raw_request" if route or request_model or request_provider else "global")
         agent._hermes_api_runtime = {
-            "provider": runtime_kwargs.get("provider") or getattr(agent, "provider", "") or "",
+            "provider": getattr(agent, "provider", "") or runtime_kwargs.get("provider") or "",
             "model": getattr(agent, "model", None) or model,
             "route_source": route_source}
         return agent

@@ -101,5 +101,12 @@ no durable allocation slots. Background and preview jobs inherit the parent's cl
 with independent durable job IDs, never its concrete credential pin; their SDK requests
 are covered by the same mock-transport test.
 
-Messaging, API, delegation, cron, Kanban and auxiliary adapters and their per-entry
-request/recovery tests remain required before activation. This document is not rollout proof.
+API construction defers class credentials until the durable agent identity exists,
+without authenticating a legacy default first. Persisted class metadata restores the
+selector, while explicit session locks retain their existing precedence. Tests drive
+both streaming/nonstreaming `/v1/chat/completions` and `/v1/runs` through HTTP ingress
+to native SDK mock HTTP requests and verify concrete runtime reports.
+
+Messaging, delegation, cron, Kanban and auxiliary adapters and their per-entry
+request/recovery tests remain required before activation. Cross-provider failure and
+workload capability propagation still require audit. This document is not rollout proof.
