@@ -1764,14 +1764,13 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
 
     model = jc.model
     requested = job.get("provider") or jc.cron_default_provider or None
+    from cron.scheduler_class_routing import deferred_runtime
+    deferred = deferred_runtime(model, requested, job)
+    if deferred is not None:
+        return deferred, model
     try:
-        # Do NOT pass HERMES_INFERENCE_PROVIDER as `requested`: it would override persisted config
-        # and resurrect stale providers for unpinned jobs.
-        runtime_kwargs = {
-            "requested": requested,
-            # api_mode must derive from the model actually run, not the stale persisted default.
-            "target_model": model,
-        }
+        # Persisted config wins over stale HERMES_INFERENCE_PROVIDER; derive wire from this model.
+        runtime_kwargs = {"requested": requested, "target_model": model}
         if job.get("base_url"):
             runtime_kwargs["explicit_base_url"] = job.get("base_url")
         return resolve_runtime_provider(**runtime_kwargs), model
@@ -1826,7 +1825,7 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
 
 def _load_credential_pool(runtime: dict, job_id: str):
     runtime_provider = str(runtime.get("provider") or "").strip().lower()
-    if not runtime_provider:
+    if not runtime_provider or runtime_provider == "auto":
         return None
     try:
         from agent.credential_pool import load_pool
@@ -2555,7 +2554,6 @@ def run_job(
     logger.info("Prompt: %s", prompt[:100])
 
     agent = None
-    model = ""
     _session_db = None
     _audit: Optional[_FireAudit] = None
     _worker_state: dict = {}
@@ -2568,18 +2566,16 @@ def run_job(
 
         jc = _load_cron_job_config(job, job_id, job_name)
         _cfg = jc.cfg
-        model = jc.model
         setup = _resolve_cron_agent_setup(job, job_id, job_name, jc)
         if setup.blocked is not None:
             return setup.blocked
-        model = setup.model
 
         # Open state.db only after every early-return gate has passed.
         _session_db = _open_cron_session_db(job)
         agent = _construct_cron_agent(
             AIAgent, job, _cfg, setup, workdir=scope.workdir, session_id=_cron_session_id,
             session_db=_session_db)
-        _audit = _FireAudit(job, job_id, model)
+        _audit = _FireAudit(job, job_id, agent.model if setup.runtime.get("provider") == "auto" else setup.model)
 
         result = _run_agent_with_watchdog(
             agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,

@@ -88,6 +88,9 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
     requested-provider computation. Skipped when the job has a fallback chain — auth-fallback may
     legitimately rescue a missing primary key. A pinned job has none (``_job_fallback_chain``), so
     its missing key blocks even when the global chain is configured."""
+    from cron.scheduler_class_routing import preflight_is_class
+    if preflight_is_class(job, cfg):
+        return None
     try:
         if _sched._job_fallback_chain(job, cfg):
             return None
