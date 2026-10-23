@@ -62,6 +62,22 @@ def test_pool_selection_for_astra_skips_free_entries(pool_home):
     assert pool.select(model="gpt-5.5").label == "free"  # ungated models still use the head entry
 
 
+@pytest.mark.parametrize("status", [401, 402, 429, 500])
+def test_astra_retry_never_rotates_to_free(pool_home, status):
+    pool = load_pool("openai-codex")
+    entry = pool.select(model=ASTRA)
+    assert entry.access_token == PRO
+    rotated = pool.mark_exhausted_and_rotate(status_code=status, credential_id=entry.id, model=ASTRA)
+    assert rotated is None or rotated.access_token == PRO
+    assert pool.reclaim("free1", model=ASTRA) is None
+
+
+def test_astra_unknown_failed_identity_never_rotates_to_free(pool_home):
+    pool = load_pool("openai-codex")
+    rotated = pool.mark_exhausted_and_rotate(status_code=401, api_key_hint="unknown-key", model=ASTRA)
+    assert rotated is None or rotated.access_token == PRO
+
+
 def test_codex_catalog_unions_all_pool_entries_when_current_is_free(pool_home):
     def fake_fetch(token, base_url=None):
         return ["gpt-5.5", ASTRA] if token == PRO else ["gpt-5.5", "luna"]
