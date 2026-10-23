@@ -25,9 +25,8 @@ from typing import Any, Callable, Iterable
 
 _log = logging.getLogger(__name__)
 
-# Statuses that mean "work is still queued or running". ``blocked``/``review``
-# wait on a human and ``done``/``archived`` are finished, so neither keeps the
-# creating session busy.
+# Base queued/running statuses. _status_filter also counts nonhuman blocked
+# and triage work as active; only explicit human-kind triage paints red.
 ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled")
 # Waiting on a human. These don't keep the session busy, but the sidebar row
 # shows how many there are next to the open count (``kanban_blocked``) and the
@@ -64,20 +63,25 @@ def _board_db_paths() -> list[Path]:
 
 
 def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple[str, tuple]:
-    """SQL predicate on ``t`` for "in ``statuses``", splitting ``blocked`` by its kind:
-    the human set (``BLOCKED_STATUSES``) keeps only human-kind blocks, the active set
-    gains the ``transient``/``time`` ones. A board without ``block_kind`` is unchanged."""
+    """Split open work by human responsibility, including escalated triage.
+
+    Legacy boards have no explicit human triage kinds, so triage stays active.
+    """
     ph = ",".join("?" for _ in statuses)
     if not {r[1] for r in conn.execute("PRAGMA table_info(tasks)")} >= {"block_kind"}:
         if statuses == BLOCKED_STATUSES:
             return "t.status = 'blocked'", ()
-        return f"t.status IN ({ph})", statuses
+        return f"(t.status IN ({ph}) OR t.status = 'triage')", statuses
     kinds = ",".join("?" for _ in HUMAN_BLOCK_KINDS)
     human = f"(t.block_kind IS NULL OR t.block_kind IN ({kinds}))"
     if statuses == BLOCKED_STATUSES:
         escalated = f"(t.status = 'triage' AND t.block_kind IN ({kinds}))"
         return f"((t.status = 'blocked' AND {human}) OR {escalated})", (*HUMAN_BLOCK_KINDS, *HUMAN_BLOCK_KINDS)
-    return f"(t.status IN ({ph}) OR (t.status = 'blocked' AND NOT {human}))", (*statuses, *HUMAN_BLOCK_KINDS)
+    # Triage is unfinished even without a worker. Only explicit human kinds
+    # belong to the blocked bucket; NULL triage awaits an agent specifier.
+    triage = f"(t.status = 'triage' AND (t.block_kind IS NULL OR t.block_kind NOT IN ({kinds})))"
+    return (f"(t.status IN ({ph}) OR (t.status = 'blocked' AND NOT {human}) OR {triage})",
+            (*statuses, *HUMAN_BLOCK_KINDS, *HUMAN_BLOCK_KINDS))
 
 
 def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
@@ -177,7 +181,8 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
     """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards."""
     status, kind = task.get("status"), task.get("block_kind")
     human = kind is None or kind in HUMAN_BLOCK_KINDS
-    if status in ACTIVE_STATUSES or (status == "blocked" and not human):
+    if (status in ACTIVE_STATUSES or (status == "blocked" and not human)
+            or (status == "triage" and kind not in HUMAN_BLOCK_KINDS)):
         return "active"
     if (status == "blocked" and human) or (status == "triage" and kind in HUMAN_BLOCK_KINDS):
         return "blocked"
