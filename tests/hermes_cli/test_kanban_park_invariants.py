@@ -377,3 +377,35 @@ def test_desktop_relaunch_after_update_gets_scrubbed_env(monkeypatch, tmp_path):
     env = calls[0][1].get("env")
     assert env is not None
     assert not ({"HERMES_KANBAN_TASK", *LEAK} & set(env))
+
+
+def test_guard_hold_posts_comment_and_inbox_card_once_naming_pr_and_checks(
+        kanban_home, monkeypatch, all_assignees_spawnable):
+    """Within 30 min of a hold the card gets ONE comment + Inbox card naming the PR and its
+    failing checks, and the notice does not restart the hold clock (the 6 h cap still fires). [daveey]"""
+    pr = "https://github.com/daveey/hermes/pull/19"
+    cards = []
+    monkeypatch.setattr(kbd, "_pr_failing_checks", lambda url: "2 failing check(s): lint, unit")
+    monkeypatch.setattr(kbd, "_post_inbox_card", lambda tid, title, body: cards.append((tid, title, body)))
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="pr held", assignee="a")
+        kb.add_comment(conn, tid, "a", f"opened {pr}")
+        now = int(time.time())
+        monkeypatch.setattr(kb.time, "time", lambda: now)
+        res = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
+        assert (tid, "active_pr") in res.respawn_guarded
+        monkeypatch.setattr(kb.time, "time", lambda: now + 600)
+        kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
+        assert not cards  # under 30 min: silent
+        monkeypatch.setattr(kb.time, "time", lambda: now + 1900)
+        kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
+        kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)  # second tick: no duplicate
+        assert len(cards) == 1
+        notes = [c for c in kb.list_comments(conn, tid) if c.body.startswith("[respawn-guard]")]
+        assert len(notes) == 1
+        assert pr in notes[0].body and "lint, unit" in notes[0].body and "active_pr" in notes[0].body
+        assert pr in cards[0][2]
+        # The notice must not restart the hold clock: the 6 h cap still blocks.
+        monkeypatch.setattr(kb.time, "time", lambda: now + 6 * 3600 + 100)
+        res = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
+        assert kb.get_task(conn, tid).status == "blocked"
