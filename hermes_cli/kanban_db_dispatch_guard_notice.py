@@ -105,3 +105,15 @@ def notify_guard_hold_safely(conn: sqlite3.Connection, task_id: str, reason: str
     except Exception:
         logger.warning("kanban: guard-hold notice for %s failed", task_id, exc_info=True)
         return False
+
+
+def record_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
+    """Per held tick: the hold notice (past the threshold), then a ``respawn_guarded`` event only
+    when the hold is new or its reason changed — one event per unbroken hold, not one per tick
+    (~1400 per card before). [daveey]"""
+    from hermes_cli import kanban_db as _kb
+
+    notify_guard_hold_safely(conn, task_id, reason)
+    if guard_hold_reason(conn, task_id) != reason:
+        with _kb.write_txn(conn):
+            _kb._append_event(conn, task_id, "respawn_guarded", {"reason": reason})

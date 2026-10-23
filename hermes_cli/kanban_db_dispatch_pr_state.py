@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import subprocess
 import time
 from typing import Iterable, Optional
@@ -73,6 +74,42 @@ def all_prs_finished(urls: Iterable[str]) -> bool:
     if not seen:
         return False
     return all(pr_state(u) in TERMINAL_STATES for u in seen.values())
+
+
+def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Optional[str]:
+    """Respawn-guard step 4: ``"active_pr"`` when a comment in the last 24 h names a PR, else None.
+
+    Exception: a handoff AFTER the newest PR comment (operator reassign, reviewer
+    changes_requested, review reopen) names the profile that must now work on THAT PR — a
+    closer or the implementer finishing it, not a duplicate implementation (#111910). So does
+    an ``unblocked`` event: a worker that opened its PR and blocked itself waiting for the
+    merge is resumed by that unblock to ship/verify THAT PR. A crash/reclaim is not a
+    handoff, so the worker that opened the PR is still not re-spawned against it.
+    Also lifted once EVERY PR named in those comments is MERGED or CLOSED (gh, cached; any
+    gh failure keeps the hold): there is nothing left to duplicate. [daveey]
+    """
+    from hermes_cli import kanban_db as _kb
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    pr_times: list[int] = []
+    pr_urls: list[str] = []
+    for t, c in _kbd._rows_since(conn, "task_comments", task_id, now - _kbd._RESPAWN_GUARD_PR_WINDOW,
+                                 cols=", body", unreadable=now):  # duplicate-PR risk: fail closed
+        urls = _kbd._RESPAWN_GUARD_PR_URL_RE.findall(_kb._lossy_text(c["body"]) or "")
+        if urls:
+            pr_times.append(t)
+            pr_urls.extend(urls)
+    if not pr_times:
+        return None
+    # Strictly after: a same-second tie stays guarded (fail closed).
+    if any(_kbd._is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
+            conn, "task_events", task_id, max(pr_times),
+            "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')",
+            cols=", kind, payload", strict=True)):
+        return None
+    if all_prs_finished(pr_urls):
+        return None
+    return "active_pr"
 
 
 def clear_cache() -> None:
