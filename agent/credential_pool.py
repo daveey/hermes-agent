@@ -200,11 +200,7 @@ _CLEAR_STATUS: dict[str, Any] = {
 _MARK_OK: dict[str, Any] = {**_CLEAR_STATUS, "last_status": STATUS_OK}
 
 
-def _normalize_pool_auth_type(provider: str, token: Any, auth_type: Any) -> str:
-    """Infer pool auth metadata for token formats with one unambiguous meaning."""
-    if provider == "anthropic" and isinstance(token, str) and token.startswith("sk-ant-oat"):
-        return AUTH_TYPE_OAUTH
-    return str(auth_type or AUTH_TYPE_API_KEY)
+from agent.credential_pool_values import normalize_pool_auth_type, next_priority
 
 
 @dataclass
@@ -243,7 +239,7 @@ class PooledCredential:
     def __post_init__(self):
         if self.extra is None:
             self.extra = {}
-        self.auth_type = _normalize_pool_auth_type(self.provider, self.access_token, self.auth_type)
+        self.auth_type = normalize_pool_auth_type(self.provider, self.access_token, self.auth_type)
 
     def __getattr__(self, name: str):
         if name in _EXTRA_KEYS:
@@ -359,10 +355,6 @@ def _codex_entry_tracks_singleton(entry: PooledCredential, singleton_tokens: dic
         return False
     entry_identity = _codex_principal_identity(entry.access_token)
     return entry_identity is not None and entry_identity == _codex_principal_identity(singleton_tokens.get("access_token"))
-
-
-def _next_priority(entries: list[PooledCredential]) -> int:
-    return max((entry.priority for entry in entries), default=-1) + 1
 
 
 def _is_manual_source(source: str) -> bool:
@@ -1005,8 +997,11 @@ class _RefreshDone(Exception):
 
 
 class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin):
-    def __init__(self, provider: str, entries: list[PooledCredential]):
+    def __init__(self, provider: str, entries: list[PooledCredential], *, allowed_auth_types=None):
         self.provider = provider
+        # Per-runtime funding fence. Keep all rows for persistence; only selection
+        # is restricted, so an OAuth-only consumer cannot rotate onto a paid key.
+        self._allowed_auth_types = frozenset(allowed_auth_types) if allowed_auth_types is not None else None
         self._entries = sorted(entries, key=lambda entry: entry.priority)
         self._current_id: Optional[str] = None
         # Ids of rows read via the global-root fallback (single-use OAuth
@@ -2129,6 +2124,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         pending_refresh: list[PooledCredential] = []
         sole_credential = self._is_sole_credential()
         for entry in self._entries:
+            if self._allowed_auth_types is not None and entry.auth_type not in self._allowed_auth_types:
+                continue
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load; never lease an
             # unhydrated duplicate as an empty key.
@@ -2189,6 +2186,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 # A borrowed OAuth row that failed to hydrate (or a sanitized
                 # row read straight off disk); leasing it would send an empty
                 # bearer. The API-key guard above does not cover it.
+                continue
+            if self._allowed_auth_types is not None and entry.auth_type not in self._allowed_auth_types:
                 continue
             available.append(entry)
         if entries_to_prune:
@@ -2518,7 +2517,7 @@ def _upsert_entry(entries: list[PooledCredential], provider: str, source: str, p
 
     if existing_idx is None:
         payload.setdefault("id", uuid.uuid4().hex[:6])
-        payload.setdefault("priority", _next_priority(entries))
+        payload.setdefault("priority", next_priority(entries))
         payload.setdefault("label", payload.get("label") or source)
         entries.append(PooledCredential.from_dict(provider, payload))
         return True
@@ -3105,7 +3104,7 @@ def _seed_custom_pool(pool_key: str, entries: list[PooledCredential]) -> tuple[b
     return seed.result
 
 
-def load_pool(provider: str) -> CredentialPool:
+def load_pool(provider: str, *, allowed_auth_types=None) -> CredentialPool:
     provider = (provider or "").strip().lower()
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS:
         # One-time heal for installs that forked this grant across profiles
@@ -3122,7 +3121,7 @@ def load_pool(provider: str) -> CredentialPool:
     entries = [PooledCredential.from_dict(provider, payload) for payload in raw_entries]
     raw_needs_auth_normalization = any(
         isinstance(payload, dict)
-        and _normalize_pool_auth_type(
+        and normalize_pool_auth_type(
             provider, payload.get("access_token"), payload.get("auth_type", AUTH_TYPE_API_KEY),
         ) != payload.get("auth_type", AUTH_TYPE_API_KEY)
         for payload in raw_entries
@@ -3164,7 +3163,7 @@ def load_pool(provider: str) -> CredentialPool:
             )
         changed |= _normalize_pool_priorities(provider, entries)
 
-    pool = CredentialPool(provider, entries)
+    pool = CredentialPool(provider, entries, allowed_auth_types=allowed_auth_types)
     pool._persisted_token_pairs = auth_mod._token_pairs_by_id(raw_entries)
     if changed:
         pool._persist(removed_ids=sorted(disk_ids - {entry.id for entry in entries}))

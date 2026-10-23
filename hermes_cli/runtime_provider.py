@@ -993,7 +993,9 @@ def _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url
 
 
 def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
-                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None) -> dict[str, Any]:
+                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
+                             routing_session_id=None, routing_parent_session_id=None,
+                             routing_requirements=None, routing_config=None, routing_excluded=()) -> dict[str, Any]:
     """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
     rung returns or raises, else falls to the next):
       1. disabled-provider guard (``providers.<name>.enabled: false``)
@@ -1010,6 +1012,17 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
          api_mode to ``codex_app_server``; the rung's credential/endpoint is then not used
     target_model overrides model_cfg["default"] when computing provider-specific api_mode (e.g.
     OpenCode Zen/Go where different models route through different API surfaces)."""
+    from agent.model_routing import ModelRoutingError, is_class_selector
+    if is_class_selector(target_model):
+        from agent.model_routing_runtime import resolve_class_runtime
+        if explicit_api_key or explicit_base_url:
+            raise ModelRoutingError("Class selectors cannot use explicit credentials or endpoint overrides")
+        try:
+            return resolve_class_runtime(target_model, requested or "auto", config=routing_config,
+                                         session_id=routing_session_id, parent_session_id=routing_parent_session_id,
+                                         requirements=routing_requirements, excluded=routing_excluded)
+        except AuthError as exc:
+            raise ModelRoutingError("Class routing credentials unavailable; legacy fallback is prohibited") from exc
     requested_provider = resolve_requested_provider(requested)
     _raise_if_provider_disabled(requested_provider)
     # Same alias expansion the auxiliary client applies, so ``provider: openai`` means one thing on
@@ -1112,6 +1125,7 @@ def format_runtime_provider_error(error: Exception) -> str:
 def resolve_runtime_with_fallback(config: Optional[dict[str, Any]], *, requested: Optional[str] = None,
                                   target_model: Optional[str] = None, explicit_base_url: Optional[str] = None,
                                   explicit_api_key: Optional[str] = None,
+                                  routing_session_id=None, routing_parent_session_id=None, routing_requirements=None,
                                   ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
     """``resolve_runtime_provider`` plus resolution-time fallback: ``(runtime, fallback_entry_or_None)``.
 
@@ -1124,6 +1138,13 @@ def resolve_runtime_with_fallback(config: Optional[dict[str, Any]], *, requested
     ``model`` is the model the caller must send.
     """
     from hermes_cli.auth import AuthError, primary_failure_wording
+    from agent.model_routing import is_class_selector
+    if is_class_selector(target_model):
+        return resolve_runtime_provider(requested=requested, target_model=target_model,
+                                        explicit_base_url=explicit_base_url, explicit_api_key=explicit_api_key,
+                                        routing_config=config, routing_session_id=routing_session_id,
+                                        routing_parent_session_id=routing_parent_session_id,
+                                        routing_requirements=routing_requirements), None
     try:
         return resolve_runtime_provider(requested=requested, target_model=target_model,
                                         explicit_base_url=explicit_base_url, explicit_api_key=explicit_api_key), None

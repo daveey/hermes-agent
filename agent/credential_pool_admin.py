@@ -112,15 +112,16 @@ class CredentialPoolAdminMixin:
             return None, None, f'No credential matching "{raw}".'
 
     def add_entry(self, entry: PooledCredential) -> PooledCredential:
+        from agent.credential_pool_values import next_priority
         from agent.credential_pool import (
-            _borrowed_single_use_pool_root, _next_priority, _profile_owns_pool_provider,
+            _borrowed_single_use_pool_root, _profile_owns_pool_provider,
             write_credential_pool,
         )
         from hermes_cli import auth as auth_mod
         from hermes_cli.auth_oauth_grants import SINGLE_USE_REFRESH_POOL_PROVIDERS
 
         with self._lock:
-            entry = replace(entry, priority=_next_priority(self._entries))
+            entry = replace(entry, priority=next_priority(self._entries))
             self._entries.append(entry)
             borrowed_ids = self._borrowed_root_ids
             # Decided now, not from load_pool()'s snapshot: a profile with no
