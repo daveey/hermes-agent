@@ -2428,7 +2428,8 @@ class GatewayTurnMixin:
         try:
             user_config = _load_gateway_config()
             model, runtime_kwargs = self._resolve_session_agent_runtime(source=source, user_config=user_config)
-            if not runtime_kwargs.get("api_key"):
+            from agent.model_routing import is_class_selector
+            if not runtime_kwargs.get("api_key") and not is_class_selector(model):
                 await adapter.send(source.chat_id, t("gateway.background.no_credentials"), metadata=_thread_metadata)
                 return
 
