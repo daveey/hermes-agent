@@ -558,6 +558,11 @@ class GatewayConfigLoadersMixin:
         """
         if agent is None:
             return
+        if isinstance(getattr(agent, "model_routing", None), dict):
+            # Class recovery alone owns billing/class policy, including cached turns.
+            agent._fallback_chain = []
+            agent._fallback_model = None
+            return
         new_chain = list(chain or [])
         rate_limited_until = getattr(agent, "_rate_limited_until", 0) or 0
         if getattr(agent, "_fallback_activated", False) and rate_limited_until > time.monotonic():
