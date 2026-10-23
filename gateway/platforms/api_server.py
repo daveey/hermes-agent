@@ -241,15 +241,61 @@ MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 RESPONSES_AUTO_TRUNCATION_HISTORY_LIMIT = 100
 
 
-class ThreadSafeAsyncQueue(asyncio.Queue):
+class _ThreadHops:
+    """Tracks ``call_soon_threadsafe`` hops from worker threads onto the owning loop.
+
+    A hop scheduled by the executor thread is NOT guaranteed to run before the loop observes
+    that same thread's ``run_in_executor`` future as done (reproduced on CPython 3.14.7: roughly
+    1 in 7000 under load). A terminal event or EOS sentinel enqueued right after the worker
+    returns could therefore overtake the worker's last event, which the SSE writer then never
+    sends. The counter is bumped synchronously in the worker thread, so after the worker returns
+    ``flush_hops`` waits for every hop it scheduled.
+    """
+
+    _hops_pending = 0
+
+    def _init_hops(self) -> None:
+        self._hops_lock = threading.Lock()
+        self._hops_pending = 0
+
+    def _hop(self, loop: asyncio.AbstractEventLoop, fn, *args) -> None:
+        with self._hops_lock:
+            self._hops_pending += 1
+
+        def _run() -> None:
+            try:
+                fn(*args)
+            finally:
+                with self._hops_lock:
+                    self._hops_pending -= 1
+
+        try:
+            loop.call_soon_threadsafe(_run)
+        except BaseException:
+            with self._hops_lock:
+                self._hops_pending -= 1
+            raise
+
+    async def flush_hops(self, timeout: float = 5.0) -> None:
+        """Wait (bounded) until every hop scheduled so far has run on the loop."""
+        deadline = time.monotonic() + timeout
+        spins = 0
+        while self._hops_pending > 0 and time.monotonic() < deadline:
+            spins += 1
+            await asyncio.sleep(0 if spins < 50 else 0.002)
+
+
+class ThreadSafeAsyncQueue(_ThreadHops, asyncio.Queue):
     """``asyncio.Queue`` a non-loop thread (run_conversation's executor) can push into via
-    ``put_threadsafe``; the SSE consumer's ``await get()`` is woken by ``call_soon_threadsafe``."""
+    ``put_threadsafe``; the SSE consumer's ``await get()`` is woken by ``call_soon_threadsafe``.
+    Writers must ``await flush_hops()`` once the worker is done and before enqueueing EOS."""
 
     def put_threadsafe(self, item, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
-        (loop or self._loop_ref).call_soon_threadsafe(self.put_nowait, item)
+        self._hop(loop or self._loop_ref, self.put_nowait, item)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._init_hops()
         # Always constructed inside a running async handler (the SSE
         # request handlers below), so get_running_loop() is safe here.
         self._loop_ref = asyncio.get_running_loop()
@@ -1118,11 +1164,12 @@ class _ProviderAuthResolutionError(RuntimeError):
         return t("platform.api_server.provider_error_line", label=label, error=self)
 
 
-class _SessionEventQueue:
+class _SessionEventQueue(_ThreadHops):
     """Ordered SSE event queue for one /api/sessions/{id}/chat/stream run. ``payload`` stamps
     session_id/run_id/seq/ts; ``enqueue`` is executor-thread safe (hops onto the owning loop)."""
 
     def __init__(self, session_id: str, run_id: str):
+        self._init_hops()
         self.loop = asyncio.get_running_loop()
         self.queue: asyncio.Queue[Optional[tuple[str, dict[str, Any]]]] = asyncio.Queue()
         self.session_id = session_id
@@ -1147,7 +1194,7 @@ class _SessionEventQueue:
             if running_loop is self.loop:
                 self.queue.put_nowait(event)
             else:
-                self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
+                self._hop(self.loop, self.queue.put_nowait, event)
 
 
 def _room_grant_delegate(name: str):
@@ -3677,6 +3724,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     tool_progress_callback=_tool_progress, interim_assistant_callback=_commentary,
                     active_run_id=run_id, approval_notify_callback=approval_notify,
                     approval_session_key=run_id, **ctx["run_kwargs"])
+                # The worker's last commentary/tool hops must land before assistant.completed.
+                await events.flush_hops()
                 is_dict = isinstance(result, dict)
                 final_response = _resolve_media_to_data_urls(result.get("final_response", "") if is_dict else "")
                 effective_session_id = result.get("session_id", session_id) if is_dict else session_id
@@ -3709,6 +3758,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 self._active_run_agents.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
                 self._release_run_owner_if_forgotten(run_id)
+                await events.flush_hops()
                 await queue.put(_event_payload("done", {}))
                 await queue.put(None)
 
