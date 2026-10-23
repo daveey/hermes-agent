@@ -145,12 +145,17 @@ class TestNodeToolRunnable:
         assert node_tool_runnable("") is False
 
 
+# Captured at import (collection), before conftest's autouse fixture stubs it to "not a container".
+_REAL_DETECT_CONTAINER = host_runtime._detect_container
+
+
 class TestIsContainer:
     """Tests for is_container() — Docker/Podman detection."""
 
     def _reset_cache(self, monkeypatch):
-        """Reset the cached detection result before each test."""
+        """Reset the cached result and undo conftest's host-by-default stub so the real probes run."""
         monkeypatch.setattr(host_runtime, "_container_detected", None)
+        monkeypatch.setattr(host_runtime, "_detect_container", _REAL_DETECT_CONTAINER)
 
     def test_detects_dockerenv(self, monkeypatch, tmp_path):
         """/.dockerenv triggers container detection."""

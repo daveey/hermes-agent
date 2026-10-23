@@ -118,7 +118,6 @@
   "security.protected_instruction_extra_patterns",
   "security.protected_instruction_files",
   "sessions.auto_archive_days",
-  "sessions.automated_sources",
   "sessions.fts_optimize_notice",
   "sessions.show_subagents",
   "sessions.sidebar_exclude_sources",

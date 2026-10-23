@@ -614,6 +614,32 @@ once it is live again — when it is resumed, or when new activity compresses it
 into a fresh continuation. A chat you archived yourself (sidebar, API, or
 `hermes sessions archive`) stays archived until you unarchive it.
 
+### Hiding Automated Sessions from the Desktop Sidebar
+
+Bot, eval and smoke-test traffic can write sessions into a profile you also
+chat in. Sessions marked `automated` stay out of the desktop sidebar unless
+"Show automated & test sessions" is on (pinned and blocked / needs-input rows
+always stay visible). Three `sessions` keys decide what counts as automated:
+
+```yaml
+sessions:
+  # Deny-list: these sources are automated in this profile ("*" = every session).
+  automated_sources: ["api_server"]
+  # Allow-list: when non-empty, any source NOT listed is automated too, so a new
+  # bot source writing into a human profile stays hidden by default.
+  # Sessions with no recorded source are never flagged by this list. [] = off.
+  interactive_sources: ["cli", "tui", "telegram"]
+  # ROOT config only (~/.hermes/config.yaml; ignored in a profile's own config):
+  # the profiles whose sessions belong in the sidebar. A profile not listed is
+  # treated as automated_sources: ["*"] unless its own config sets
+  # automated_sources or interactive_sources explicitly (even []). [] = off.
+  sidebar_profiles: ["default", "work"]
+```
+
+`sessions.automated_sources` and `sessions.interactive_sources` are read from
+each profile's own config. `sessions.sidebar_profiles` is read only from the
+root home, so a new bot profile starts hidden without any per-profile setup.
+
 ### Session Statistics
 
 ```bash
