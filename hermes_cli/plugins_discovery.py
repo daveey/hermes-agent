@@ -253,7 +253,7 @@ def _peek_manifest_name(plugin_dir: Path) -> str:
     """Best-effort ``name:`` of a dir's plugin.yaml without full parsing (for conflict reports only)."""
     for fname in ("plugin.yaml", "plugin.yml"):
         try:
-            for line in (plugin_dir / fname).read_text(encoding="utf-8", errors="replace").splitlines():
+            for line in (plugin_dir / fname).read_text(encoding="utf-8-sig", errors="replace").splitlines():
                 m = re.match(r"\s*name\s*:\s*['\"]?([^'\"#\s]+)", line)
                 if m and not line.startswith((" ", "\t")):
                     return m.group(1)

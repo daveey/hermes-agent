@@ -168,7 +168,7 @@ def _self_gateway(conn: sqlite3.Connection) -> str:
         pass
     try:
         cfg = Path(os.environ.get("HERMES_MAIL_CONFIG") or Path.home() / ".config" / "hermes-mail" / "config.json")
-        return str(json.loads(cfg.read_text()).get("gateway") or "")
+        return str(json.loads(cfg.read_text(encoding="utf-8-sig")).get("gateway") or "")
     except (OSError, ValueError, AttributeError):
         return ""
 
