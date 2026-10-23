@@ -87,6 +87,11 @@ def _visible(*, to_env_worker: bool) -> bool:
         return False
     if os.environ.get("HERMES_KANBAN_TASK") and _is_dispatcher_owned_worker():
         return to_env_worker
+    # [daveey] A session started for a chat on another gateway (``hermes chat --origin-session``) exists to
+    # create that chat's cards: it always gets the real tools, never a private-handler fallback.
+    from hermes_cli.kanban_origin import ambient_origin_ref
+    if ambient_origin_ref():
+        return True
     return _profile_has_kanban_toolset()
 
 
@@ -1280,6 +1285,13 @@ def _handle_create(args: dict, **kw) -> str:
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
+    # [daveey] Validate the origin binding BEFORE the card exists: a binding the origin gateway can never
+    # read back is the silent "cards exist but the chat shows none" failure.
+    from hermes_cli import kanban_origin
+    try:
+        origin = kanban_origin.resolve(args.get("origin_session"))
+    except kanban_origin.OriginError as exc:
+        return tool_error(f"{exc.code}: {exc}")
     with _board(args.get("board")) as (kb, conn):
         from gateway.session_context import get_session_env
         from tools.async_delegation import _current_origin_session_id
@@ -1320,8 +1332,11 @@ def _handle_create(args: dict, **kw) -> str:
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
         wait = [e for e in kb.list_events(conn, new_tid) if e.kind == "dependency_wait"]
         gate = {"gated": True, "gated_by": wait[-1].payload["parent"]} if wait else {"gated": False}
+        extra = {}
+        if origin is not None:
+            extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
         return _ok(task_id=new_tid, **landed, **gate,
-                   subscribed=_maybe_auto_subscribe(conn, new_tid))
+                   subscribed=_maybe_auto_subscribe(conn, new_tid), **extra)
 
 
 def _live_tui_session_key(session_key: str, profile: Optional[str]) -> str:

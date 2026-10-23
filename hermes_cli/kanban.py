@@ -386,6 +386,14 @@ def _cmd_create(args: argparse.Namespace) -> int:
         session_id = (_persisted_session_id(session_key)
                       or _persisted_session_id(os.environ.get("HERMES_SESSION_ID")))
     idem_key = getattr(args, "idempotency_key", None)
+    # [daveey] Bind cards made for a chat on another gateway ($HERMES_ORIGIN_SESSION / --origin-session),
+    # validated before the card exists. See hermes_cli/kanban_origin.py.
+    from hermes_cli import kanban_origin
+    try:
+        origin = kanban_origin.resolve(getattr(args, "origin_session", None))
+    except kanban_origin.OriginError as exc:
+        return _err(f"kanban: {exc.code}: {exc}", 2)
+    origin_binding = None
     with kbc.connect_closing() as conn:
         # An --idempotency-key hit returns an existing card: never re-stamp/re-subscribe it.
         idem_hit = bool(idem_key) and conn.execute(
@@ -418,6 +426,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             # that shelled out hears when the card lands (and its row stays busy).
             from tools.kanban_tools import _maybe_auto_subscribe
             _maybe_auto_subscribe(conn, task_id)
+        if origin is not None:  # idempotent, so a retried create still (re)binds
+            origin_binding = kanban_origin.bind(conn, task_id, origin, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
     if not in_worker and not session_id and not idem_hit and _agent_invoked():
         # An agent shelled out but no chat could be stamped (unknown/missing session env:
@@ -429,9 +439,15 @@ def _cmd_create(args: argparse.Namespace) -> int:
               f"hermes kanban notify-subscribe {task_id} --platform tui --chat-id <session_id>",
               file=sys.stderr)
     if getattr(args, "json", False):
-        _print_json(_task_to_dict(task))
+        out = _task_to_dict(task)
+        if origin_binding:
+            out["origin_binding"] = origin_binding
+        _print_json(out)
     else:
         print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
+        if origin_binding:
+            print(f"Bound to {origin_binding['origin']} (readback pending: on the origin gateway run "
+                  f"`{origin_binding['verify_on_origin']}`)")
         # Warn only for ready+assigned tasks that would sit without a dispatcher (triage/todo idle
         # by design, unassigned can't dispatch); skipped under --json so stdout stays parseable.
         if task.status == "ready" and task.assignee:

@@ -532,6 +532,14 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "exists, return that task's id instead of creating "
                 "a duplicate. Useful for retry-safe automation."
         )),
+        "origin_session": _prop("string", (
+                "Chat on ANOTHER gateway this card is work for "
+                "(@session:<profile>@<gateway>/<id>). Defaults to the "
+                "session's $HERMES_ORIGIN_SESSION. The card (and its "
+                "children) then shows in that chat's task list and keeps "
+                "it unfinished; the result's origin_binding says how to "
+                "read the binding back on the origin gateway."
+        )),
         "max_runtime_seconds": _prop("integer", (
                 "Per-task runtime cap. When exceeded, the "
                 "dispatcher SIGTERMs the worker and re-queues the "
