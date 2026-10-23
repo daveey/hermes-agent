@@ -94,6 +94,23 @@ def register_worker_session(session_db, session_id: str) -> bool:
         return False
 
 
+def worker_session_ids(conn: sqlite3.Connection, task_id: str) -> dict[int, str]:
+    """``{run_id: worker_session_id}`` for a task, newest registration winning.
+
+    Registration happens when the worker's session is created (and again on compression
+    rotation), so a *running* run already has its session here, unlike
+    ``metadata.worker_session_id`` which is only stamped at completion. Never raises.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT run_id, session_id FROM worker_recovery_sessions "
+            "WHERE task_id=? ORDER BY registered_at ASC", (task_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {int(r[0]): str(r[1]) for r in rows}
+
+
 def build_recovery_context(conn: sqlite3.Connection, task_id: str) -> str:
     """Return bounded notes from the latest closed run of this task/profile.
 

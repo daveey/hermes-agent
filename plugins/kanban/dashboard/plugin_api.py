@@ -428,6 +428,24 @@ async def get_board_endpoint(
 
 # --- GET /tasks/:id ---------------------------------------------------------
 
+def _runs_with_worker_sessions(conn, task_id: str, runs) -> list[dict]:
+    """Run dicts plus ``worker_session_id``: the session the worker actually runs in.
+
+    ``tasks.session_id`` is the chat that CREATED the card, so clients must use this to open
+    the worker transcript. Registered at worker start; completed runs also carry it in metadata.
+    """
+    from hermes_cli.kanban_worker_recovery import worker_session_ids
+    registered = worker_session_ids(conn, task_id)
+    out = []
+    for r in runs:
+        d = asdict(r)
+        meta = d.get("metadata")
+        d["worker_session_id"] = registered.get(r.id) or (
+            meta.get("worker_session_id") if isinstance(meta, dict) else None) or None
+        out.append(d)
+    return out
+
+
 @router.get("/tasks/{task_id}")
 def get_task(
     task_id: str,
@@ -458,7 +476,8 @@ def get_task(
             "child_results": [
                 {"id": c.id, "title": c.title, "status": c.status, "latest_summary": child_summaries.get(c.id), "result": c.result}
                 for c in children],
-            "runs": [asdict(r) for r in kanban_db.list_runs(conn, task_id, state_type=run_state_type, state_name=run_state_name)]}
+            "runs": _runs_with_worker_sessions(
+                conn, task_id, kanban_db.list_runs(conn, task_id, state_type=run_state_type, state_name=run_state_name))}
 
 
 # --- POST /tasks ------------------------------------------------------------

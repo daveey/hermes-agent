@@ -222,3 +222,20 @@ def test_compression_rotation_uses_latest_registered_session(worker):
     result = recovery.build_recovery_context(worker.conn, "t_one")
     assert "Compressed progress and next actions" in result
     assert "Implemented parser" not in result
+
+
+def test_worker_session_ids_maps_running_run_to_its_worker_session(worker):
+    assert recovery.worker_session_ids(worker.conn, "t_one") == {}  # no table yet: never raises
+    assert recovery.register_worker_session(worker, "worker")
+    assert recovery.worker_session_ids(worker.conn, "t_one") == {1: "worker"}
+    assert recovery.worker_session_ids(worker.conn, "t_other") == {}
+
+
+def test_dashboard_runs_expose_worker_session_id(worker, monkeypatch):
+    import plugins.kanban.dashboard.plugin_api as api
+    assert recovery.register_worker_session(worker, "worker")
+    runs = [SimpleNamespace(id=1), SimpleNamespace(id=2, metadata={"worker_session_id": "from-meta"}),
+            SimpleNamespace(id=3, metadata=None)]
+    monkeypatch.setattr(api, "asdict", lambda r: dict(vars(r)))  # stand-ins, not Run dataclasses
+    out = api._runs_with_worker_sessions(worker.conn, "t_one", runs)
+    assert [r["worker_session_id"] for r in out] == ["worker", "from-meta", None]
