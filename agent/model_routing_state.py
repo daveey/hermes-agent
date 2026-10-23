@@ -33,6 +33,16 @@ class RoutingState:
                 db.execute("ROLLBACK")
                 raise
 
+    def peek(self, session, level):
+        """Read the latest lineage selection without creating state or advancing it."""
+        if not self.path.exists():
+            return None
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
+            row = db.execute(
+                "SELECT r.metadata FROM routes r JOIN aliases a ON a.root=r.root "
+                "WHERE a.session=? AND r.class=?", (session, level)).fetchone()
+            return json.loads(row[0]) if row else None
+
     def link_continuation(self, session, parent):
         """Bind a proven compression child without consuming an allocation slot.
 

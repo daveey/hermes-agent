@@ -90,6 +90,16 @@ def _capable(route, requirements):
     return True
 
 
+def eligible_routes(policy, level, requirements=None, excluded=(), eligible=None):
+    """Shared billing/capability filter for allocation and non-allocating probes."""
+    return [r for r in policy.get("routes", {}).get(level, [])
+            if r.get("eligible") is True and r.get("funding_verified") is True
+            and (r["provider"], r["model"]) not in excluded
+            and _capable(r, requirements or {})
+            and (r["billing"] == "subscription" or policy.get("allow_metered", False))
+            and (eligible is None or eligible(r))]
+
+
 def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
                         parent_session_id=None, requirements=None, excluded=(), state_path=None,
                         eligible=None, prepare=None):
@@ -116,12 +126,7 @@ def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
     if not isinstance(session_id, str) or not session_id:
         raise ModelRoutingError("Class routing requires a durable session/job identity")
     excluded = set(tuple(pair) for pair in excluded)
-    routes = [r for r in policy.get("routes", {}).get(level, [])
-              if r.get("eligible") is True and r.get("funding_verified") is True
-              and (r["provider"], r["model"]) not in excluded
-              and _capable(r, requirements or {})
-              and (r["billing"] == "subscription" or policy.get("allow_metered", False))
-              and (eligible is None or eligible(r))]
+    routes = eligible_routes(policy, level, requirements, excluded, eligible)
     # Keep the full policy-approved set for sticky lookup. New allocations prefer
     # subscriptions; returning to a healthy paid session must not silently switch it.
     if state_path is None:

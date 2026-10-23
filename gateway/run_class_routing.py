@@ -60,6 +60,42 @@ def stored_class(runner, session_key):
     return None
 
 
+def class_context_length(model, *, config=None, runner=None, session_key=None, provider="auto"):
+    """Read the sticky window, or the conservative eligible window before allocation.
+
+    Registry limits are transport-specific (Codex can be smaller than the generic
+    model catalog). Never authenticate or advance allocation from a context probe.
+    """
+    from agent.model_routing import CLASSES, ModelRoutingError, eligible_routes, validate_policy
+    from agent.model_routing_state import RoutingState
+    from hermes_constants import get_hermes_home
+    from hermes_cli.config_effective import load_user_config_effective
+
+    if not is_class_selector(model):
+        return None
+    level = model.removeprefix("class:")
+    config = config if config is not None else load_user_config_effective()
+    policy = config.get("model_routing", {})
+    validate_policy(policy)
+    if level not in CLASSES or not policy.get("enabled") or provider not in (None, "", "auto"):
+        raise ModelRoutingError("Invalid or disabled class context request")
+    requirements = {"tools": True, "streaming": True, "min_context_tokens": 1}
+    model_config = config.get("model", {})
+    if isinstance(model_config, dict) and model_config.get("context_length"):
+        requirements["min_context_tokens"] = int(model_config["context_length"])
+    routes = eligible_routes(policy, level, requirements)
+    entry = getattr(getattr(runner, "session_store", None), "_entries", {}).get(session_key)
+    metadata = RoutingState(get_hermes_home() / "model-routing.sqlite3").peek(entry.session_id, level) if entry else None
+    if metadata:
+        routes = [r for r in routes if (r["provider"], r["model"], r["billing"]) == (
+            metadata["selected_provider"], metadata["selected_model"], metadata["billing_group"])]
+    else:
+        routes = [r for r in routes if r["billing"] == "subscription"] or routes
+    if not routes:
+        raise ModelRoutingError("No eligible class context window; refusing generic catalog fallback")
+    return min(r["capabilities"]["context_tokens"] for r in routes)
+
+
 def channel_override(runner, source):
     from gateway.run import _get_channel_override
     cfg = getattr(runner, "config", None)

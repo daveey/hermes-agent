@@ -1619,61 +1619,8 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
     async def _inbound_model_context_length(self, source: SessionSource, session_key: str) -> int:
         """Context length of the model this turn runs on. A global ``model.context_length`` pin
         belongs to the configured model, not a /model or channel override; custom-provider limits win."""
-        from gateway.run import _load_gateway_config
-        from agent.model_metadata import get_model_context_length_async
-
-        _msg_config_ctx = None
-        _msg_cfg = None
-        _msg_model_cfg = {}
-        _msg_custom_providers = []
-        with suppress(Exception):
-            _msg_cfg = _load_gateway_config()
-            _msg_model_cfg = _msg_cfg.get("model", {})
-            if isinstance(_msg_model_cfg, dict):
-                _msg_raw_ctx = _msg_model_cfg.get("context_length")
-                if _msg_raw_ctx is not None:
-                    _msg_config_ctx = int(_msg_raw_ctx)
-            try:
-                from hermes_cli.config import get_compatible_custom_providers
-
-                _msg_custom_providers = get_compatible_custom_providers(_msg_cfg)
-            except Exception:
-                _msg_custom_providers = _msg_cfg.get("custom_providers") or []
-        # GatewayRunner has no self._model/self._base_url; resolve the session's actual runtime.
-        _msg_model, _msg_runtime = self._resolve_session_agent_runtime(
-            source=source, session_key=session_key, user_config=_msg_cfg,
-        )
-        _msg_base_url = _msg_runtime.get("base_url") or ""
-        if isinstance(_msg_model_cfg, dict):
-            _msg_configured_model = _msg_model_cfg.get("default") or _msg_model_cfg.get("model")
-        else:
-            _msg_configured_model = _msg_model_cfg  # (no dict → no pin was read; ctx is already None)
-        if _msg_model != _msg_configured_model:
-            _msg_config_ctx = None
-        if _msg_config_ctx is not None:
-            try:
-                from hermes_cli.route_identity import should_clear_context_pin_async
-
-                if await should_clear_context_pin_async(
-                    None, None,  # model match already checked above
-                    _msg_model_cfg.get("base_url"), _msg_base_url,
-                    _msg_model_cfg.get("provider"), _msg_runtime.get("provider"),
-                ):
-                    _msg_config_ctx = None
-            except Exception:
-                _msg_config_ctx = None
-        if _msg_custom_providers and _msg_base_url:
-            with suppress(Exception):
-                from hermes_cli.config import get_custom_provider_context_length
-
-                _msg_config_ctx = get_custom_provider_context_length(
-                    model=_msg_model, base_url=_msg_base_url, custom_providers=_msg_custom_providers,
-                ) or _msg_config_ctx
-        return await get_model_context_length_async(
-            _msg_model, base_url=_msg_base_url, api_key=_msg_runtime.get("api_key") or "",
-            config_context_length=_msg_config_ctx, provider=_msg_runtime.get("provider") or "",
-            custom_providers=_msg_custom_providers,
-        )
+        from gateway.run_model_context import inbound_model_context_length
+        return await inbound_model_context_length(self, source, session_key)
 
     async def _expand_inbound_context_references(
         self, source: SessionSource, session_key: str, message_text: str

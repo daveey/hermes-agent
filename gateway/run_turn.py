@@ -723,13 +723,19 @@ class GatewayTurnMixin:
                         hs.config_context_length = int(_hyg_custom_ctx)
         except Exception:
             pass
+        from gateway.run_class_routing import class_context_length
+        class_window = class_context_length(hs.model, config=hs.data, runner=self,
+                                            session_key=session_key, provider=hs.provider)
+        if class_window is not None:
+            hs.config_context_length = class_window
         return hs
 
     async def _hmwa_hygiene_plan(self, hs, history, session_entry, session_key):
         """Decide whether hygiene compression fires this turn (token/message thresholds, DB-backed
         failure cooldown, in-flight compression)."""
         from agent.model_metadata import estimate_messages_tokens_rough, get_model_context_length_async
-        _hyg_context_length = await get_model_context_length_async(
+        from agent.model_routing import is_class_selector
+        _hyg_context_length = hs.config_context_length if is_class_selector(hs.model) else await get_model_context_length_async(
             hs.model, base_url=hs.base_url or "", api_key=hs.api_key or "",
             config_context_length=hs.config_context_length, provider=hs.provider or "",
         )
@@ -1341,6 +1347,7 @@ class GatewayTurnMixin:
         histories don't cause repeated truncation/context failures. Token source: the API's
         prompt_tokens from the last turn, else a char/4 estimate."""
         from gateway.run import HygieneTurnHoldExceeded
+        from agent.model_routing import is_class_selector
         if not history or len(history) < 4:
             return history
 
@@ -1362,7 +1369,7 @@ class GatewayTurnMixin:
             )
             if str(_hyg_runtime.get("api_mode") or "").lower() == "codex_app_server":
                 await self._hmwa_hygiene_codex_compaction(hs, plan, history, session_entry, session_key, _hyg_runtime)
-            elif _hyg_runtime.get("api_key"):
+            elif _hyg_runtime.get("api_key") or is_class_selector(_hyg_model):
                 # Pass the FULL transcript (tool results included) as the agent loop does: filtering
                 # to user/assistant starved the compressor (tool results are the bulk of context).
                 _hyg_msgs = [m for m in history if m.get("role") in {"user", "assistant", "tool"}]
