@@ -102,6 +102,14 @@ def build_api_request(
         _moa_client_consumes_prepared_request, _redecorate_prompt_cache_for_provider,
     )
 
+    # Check original multimodal input before provider adapters can replace images
+    # with auxiliary descriptions or strip unsupported content.
+    from agent.model_routing_request import validate_class_request
+    if getattr(agent, "model_routing", None):
+        validate_class_request(agent, {
+            "model": agent.model, "messages": api_messages, "tools": tools_for_api,
+            "max_tokens": agent.max_tokens,
+        }, streaming=not getattr(agent, "_disable_streaming", False))
     agent._reset_stream_delivery_tracking()
     # Per-attempt first-chunk timestamp so a stale value never leaks into post_api_request.
     agent._last_api_first_chunk_at = None
@@ -116,7 +124,9 @@ def build_api_request(
         )
     )
     # A model that rejected image content gets text only; history keeps the images.
-    strip_images_for_rejecting_model(agent, api_messages)
+    # Class requests must reject unsupported images, not silently erase them.
+    if not getattr(agent, "model_routing", None):
+        strip_images_for_rejecting_model(agent, api_messages)
     observe_request_tools(agent, tools_for_api)
     if tools_for_api == agent.tools:
         api_kwargs = agent._build_api_kwargs(api_messages)
