@@ -92,11 +92,34 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
 _pairs_sink: set[tuple[str, str]] | None = None
 
 
+# Subscription reasons that make a ``tui`` subscriber own the card's progress (stamped in
+# ``delivery_metadata.reason``): ``create`` (kanban_create's auto-sub) and ``shepherd``
+# (explicit ``notify-subscribe``). ``touch`` (auto-sub on comment/unblock/link) and legacy rows
+# with no reason still get completion pings, but never keep a session busy or paint it red unless
+# the chat owns the card (``tasks.session_id``). [daveey]
+COUNTED_SUB_REASONS = ("create", "shepherd")
+
+
+def _counted_sub_clause(conn: sqlite3.Connection) -> str:
+    """SQL predicate (aliases ``s`` subs, ``t`` tasks) for a ``tui`` sub that counts as the chat's work."""
+    owner = "s.chat_id = COALESCE(t.session_id, '')"
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(kanban_notify_subs)")}
+    except sqlite3.Error:
+        cols = set()
+    if "delivery_metadata" not in cols:
+        return f"({owner})"
+    reasons = ", ".join(f"'{r}'" for r in COUNTED_SUB_REASONS)
+    return (f"({owner} OR (json_valid(s.delivery_metadata) "
+            f"AND json_extract(s.delivery_metadata, '$.reason') IN ({reasons})))")
+
+
 def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
     """Tasks per session in ``statuses``: tasks the session created, plus tasks
-    it is a ``tui`` notify subscriber of (a session asked to shepherd someone
-    else's card subscribes to it, and is just as "still working" until it
-    lands). Each (session, task) pair counts once."""
+    it shepherds (a ``tui`` notify sub stamped ``create``/``shepherd``, see
+    ``COUNTED_SUB_REASONS``): it is just as "still working" until they land.
+    A touch-only sub (one comment on someone else's card) does not count.
+    Each (session, task) pair counts once."""
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
     try:
         match, params = _status_filter(conn, statuses)
@@ -111,7 +134,7 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
             pairs.update(
                 (str(sid), str(tid)) for sid, tid in conn.execute(
                     f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {match}",
+                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}",
                     params,
                 )
             )
@@ -381,7 +404,7 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         try:
             for row in conn.execute(
                     f"SELECT {select}, {run_start} AS current_run_started_at FROM kanban_notify_subs s "
-                    f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' "
+                    f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' AND {_counted_sub_clause(conn)} "
                     f"AND s.chat_id IN ({sid_ph}) AND t.status IN ({st_ph})", (*ids, *statuses)):
                 found.setdefault(row["id"], {**dict(row), "via": "subscribed"})
         except sqlite3.Error:  # board predates notify subscriptions
@@ -456,7 +479,8 @@ def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any
         try:
             pairs.extend((str(r["chat_id"]), dict(r)) for r in conn.execute(
                 f"SELECT s.chat_id AS chat_id, {fields} FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {cond}", (since,)))
+                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {cond}",
+                (since,)))
         except sqlite3.Error:  # board predates notify subscriptions
             pass
     finally:

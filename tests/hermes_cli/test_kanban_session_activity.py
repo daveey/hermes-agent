@@ -1,5 +1,6 @@
 """kanban_active stamping on session-list rows (sidebar 'still working' state)."""
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -82,13 +83,14 @@ def test_counts_tasks_a_session_subscribed_to_but_did_not_create(kanban_root):
         ("t3", "ready", None),
     ])
     conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT)")
-    conn.executemany("INSERT INTO kanban_notify_subs VALUES (?, ?, ?)", [
-        ("t1", "tui", "s_creator"),    # creator's own auto-sub: counted once, not twice
-        ("t1", "tui", "s_watcher"),
-        ("t3", "tui", "s_watcher"),
-        ("t2", "tui", "s_late"),       # finished card keeps nobody busy
-        ("t1", "telegram", "chat-9"),  # gateway chats are not sidebar sessions
+    conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT, delivery_metadata TEXT)")
+    shepherd = '{"reason": "shepherd"}'
+    conn.executemany("INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?)", [
+        ("t1", "tui", "s_creator", '{"reason": "create"}'),  # creator's own auto-sub: counted once, not twice
+        ("t1", "tui", "s_watcher", shepherd),
+        ("t3", "tui", "s_watcher", shepherd),
+        ("t2", "tui", "s_late", shepherd),       # finished card keeps nobody busy
+        ("t1", "telegram", "chat-9", shepherd),  # gateway chats are not sidebar sessions
     ])
     conn.commit()
     conn.close()
@@ -122,10 +124,10 @@ def _make_full_board(path: Path, tasks: list[tuple], subs: list[tuple[str, str, 
         "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, status TEXT NOT NULL, assignee TEXT, "
         "session_id TEXT, created_at INTEGER, started_at INTEGER, current_run_id INTEGER)")
     conn.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, started_at INTEGER)")
-    conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT)")
+    conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT, delivery_metadata TEXT)")
     conn.executemany("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?)", tasks)
     conn.executemany("INSERT INTO task_runs VALUES (?, ?, ?)", [(t[7], t[0], 500) for t in tasks if t[7]])
-    conn.executemany("INSERT INTO kanban_notify_subs VALUES (?, ?, ?)", subs)
+    conn.executemany("INSERT INTO kanban_notify_subs VALUES (?, ?, ?, '{\"reason\": \"shepherd\"}')", subs)
     conn.commit()
     conn.close()
 
@@ -361,3 +363,54 @@ def test_plugin_waiting_source_keeps_a_settled_batch_waiting_until_its_close_out
     rows = [{"id": "s_b"}]
     ksa.annotate_kanban_activity(rows)
     assert "kanban_active" not in rows[0] and "kanban_waiting_on" not in rows[0]
+
+
+def _make_subs_board(path: Path, tasks: list[tuple], subs: list[tuple[str, str, str | None]]) -> None:
+    """Board with a real-shape ``kanban_notify_subs`` (incl. ``delivery_metadata``); subs are (task, chat, reason)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, session_id TEXT, block_kind TEXT)")
+    conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT, "
+                 "delivery_metadata TEXT)")
+    conn.executemany("INSERT INTO tasks VALUES (?, ?, ?, ?)", tasks)
+    conn.executemany("INSERT INTO kanban_notify_subs VALUES (?, 'tui', ?, ?)", [
+        (tid, chat, json.dumps({"reason": reason}) if reason else None) for tid, chat, reason in subs])
+    conn.commit()
+    conn.close()
+
+
+def test_touch_subscription_to_someone_elses_card_never_keeps_the_toucher_busy_or_red(kanban_root):
+    """[daveey] A one-off comment/unblock/link auto-subscribes the chat (``reason: touch``). That must not
+    count the card as the toucher's work: not a scheduled soak (busy) and not a needs_input block (red).
+    Owners always count; an explicit shepherd (notify-subscribe) still counts."""
+    _make_subs_board(kanban_root / "kanban.db", [
+        ("t_soak", "scheduled", "s_owner", None),
+        ("t_ask", "blocked", "s_owner", "needs_input"),
+        ("t_run", "running", "s_owner2", None),
+    ], subs=[
+        ("t_soak", "s_toucher", "touch"),
+        ("t_ask", "s_toucher", "touch"),
+        ("t_soak", "s_owner", "create"),
+        ("t_run", "s_shepherd", "shepherd"),
+    ])
+    rows = [{"id": "s_toucher"}, {"id": "s_owner"}, {"id": "s_shepherd"}]
+
+    ksa.annotate_kanban_activity(rows)
+
+    assert "kanban_active" not in rows[0] and "kanban_blocked" not in rows[0]
+    assert rows[1]["kanban_active"] == 1 and rows[1]["kanban_blocked"] == 1
+    assert rows[2]["kanban_active"] == 1
+    assert "s_toucher" not in ksa.active_task_counts() and "s_toucher" not in ksa.blocked_task_counts()
+    assert ksa.session_tasks(["s_toucher"]) == []
+    assert [t["id"] for t in ksa.session_tasks(["s_shepherd"])] == ["t_run"]
+
+
+def test_legacy_non_owner_subscription_without_a_reason_stops_counting(kanban_root):
+    """[daveey] Backfill: subs written before reasons were stamped are touches unless the chat owns the card."""
+    _make_subs_board(kanban_root / "kanban.db", [
+        ("t1", "running", "s_owner", None),
+        ("t2", "blocked", "s_owner", "needs_input"),
+    ], subs=[("t1", "s_old_toucher", None), ("t2", "s_old_toucher", None), ("t1", "s_owner", None)])
+
+    assert ksa.active_task_counts() == {"s_owner": 1}
+    assert ksa.blocked_task_counts() == {"s_owner": 1}

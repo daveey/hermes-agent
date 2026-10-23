@@ -1397,7 +1397,7 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
 
 
 def _maybe_auto_subscribe(conn: Any, task_id: str, *, gate: str = "auto_subscribe_on_create",
-                          gate_default: bool = True) -> bool:
+                          gate_default: bool = True, reason: str = "create") -> bool:
     """Subscribe the calling session to completion/block events; True iff a row was
     written (surfaced as ``subscribed`` so an orchestrator can fall back to explicit
     ``kanban_notify-subscribe``). Gated by ``kanban.<gate>`` (``auto_subscribe_on_create``,
@@ -1419,6 +1419,10 @@ def _maybe_auto_subscribe(conn: Any, task_id: str, *, gate: str = "auto_subscrib
                and (sub["thread_id"] or "") == (target["thread_id"] or "")
                for sub in _kbn.list_notify_subs(conn, task_id)):
             return True
+        # ``reason`` decides whether the sub keeps the chat's sidebar row busy/red
+        # (kanban_session_activity.COUNTED_SUB_REASONS): ``create`` does, ``touch`` doesn't. [daveey]
+        if target["platform"] == "tui":
+            target = {**target, "delivery_metadata": {**(target.get("delivery_metadata") or {}), "reason": reason}}
         _kbn.add_notify_sub(conn, task_id=task_id, **target)
         return True
     except Exception as _exc:
@@ -1431,13 +1435,16 @@ def _maybe_auto_subscribe(conn: Any, task_id: str, *, gate: str = "auto_subscrib
 def _maybe_subscribe_on_touch(conn: Any, task_id: str) -> bool:
     """A chat session that comments on, unblocks or links an existing card is
     shepherding it, so subscribe it like ``kanban_create`` does: it then wakes when
-    the card completes or blocks, and the sidebar shows it busy (``kanban_active``)
-    instead of "done" while the card still runs. Dispatcher workers
+    the card completes or blocks. The sub is stamped ``reason: touch``, so it does NOT
+    keep the chat's sidebar row busy or red (a one-off comment on someone else's
+    scheduled soak or human block is not this chat's work); ``hermes kanban
+    notify-subscribe`` marks an explicit shepherd that does count. Dispatcher workers
     (``HERMES_KANBAN_TASK`` set) never subscribe this way. Gated by
     ``kanban.auto_subscribe_on_touch`` (default False). [daveey]"""
     if os.environ.get("HERMES_KANBAN_TASK"):
         return False
-    return _maybe_auto_subscribe(conn, task_id, gate="auto_subscribe_on_touch", gate_default=False)
+    return _maybe_auto_subscribe(conn, task_id, gate="auto_subscribe_on_touch", gate_default=False,
+                                 reason="touch")
 
 
 @_kanban_handler("kanban_unblock")

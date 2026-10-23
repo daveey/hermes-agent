@@ -1214,6 +1214,10 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         )
         if value
     }
+    if args.platform == "tui":
+        # An explicit subscribe is a shepherd: the chat's sidebar row stays busy until the card
+        # lands (kanban_session_activity.COUNTED_SUB_REASONS). Upgrades an earlier touch sub. [daveey]
+        delivery_metadata["reason"] = "shepherd"
     with kbc.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
             return _err(f"no such task: {args.task_id}")

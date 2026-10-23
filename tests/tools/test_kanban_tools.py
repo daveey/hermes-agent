@@ -1524,6 +1524,8 @@ def test_comment_on_existing_card_subscribes_shepherding_session(monkeypatch, wo
     assert d["ok"] is True and d.get("subscribed") is True, d
     subs = _list_subs_for_task(worker_env)
     assert [(s["platform"], s["chat_id"]) for s in subs] == [("tui", "tui-shepherd")]
+    # Stamped as a touch: it gets completion pings but never keeps the row busy/red. [daveey]
+    assert subs[0]["delivery_metadata"]["reason"] == "touch"
     # Commenting again does not duplicate the subscription.
     kt._handle_comment({"task_id": worker_env, "body": "still watching"})
     assert len(_list_subs_for_task(worker_env)) == 1
