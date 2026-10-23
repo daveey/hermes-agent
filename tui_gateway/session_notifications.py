@@ -339,9 +339,12 @@ def _kb_completed(task, payload: dict, title: str) -> str:
 
 
 def _kb_timed_out(task, payload: dict, title: str) -> str:
+    from hermes_cli.kanban_failure_summary import retry_promised
+    limit = 0
     with contextlib.suppress(TypeError, ValueError):
-        return f" timed out (max_runtime={int(payload.get('limit_seconds') or 0)}s); will retry"
-    return " timed out (max_runtime=0s); will retry"
+        limit = int(payload.get("limit_seconds") or 0)
+    tail = "; will retry" if retry_promised(payload) else "; retry state was not recorded"
+    return f" timed out (max_runtime={limit}s){tail}"
 
 
 def _kb_failure(kind: str, payload: dict, title: str) -> str:

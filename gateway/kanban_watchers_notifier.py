@@ -449,20 +449,24 @@ def _fmt_block_loop_detected(ev, n) -> tuple:
     return msg, None, None
 
 
-def _fmt_gave_up(ev, n) -> tuple:
-    # The dispatcher auto-blocked the task after ``failures`` consecutive non-success attempts
-    # (spawn failure, crash, or timeout alike): it is now Blocked and waiting for a human.
-    failures = _payload(ev, "failures")
-    count = (t("gateway.kanban.ping.failed_n_times", count=int(failures)) if failures
-             else t("gateway.kanban.ping.kept_failing"))
-    last = _clip(ev, "error", "gateway.kanban.ping.last_error", 160)
-    return t("gateway.kanban.ping.gave_up", head=n.head, count=count, last=last, task_id=n.task_id), None, None
+def _fmt_failure(kind: str):
+    """gave_up / crashed notice via the shared classifier: real cause, recorded retry state, no
+    unsupported promises. [daveey]"""
+    def fmt(ev, n) -> tuple:
+        from hermes_cli.kanban_failure_summary import describe_failure
+        body = describe_failure(kind, n.title, ev.payload or {})
+        return f"✖ {n.head}{body}\nLogs: `hermes kanban log {n.task_id}`.", None, None
+    return fmt
 
 
 def _fmt_timed_out(ev, n) -> tuple:
     limit = int(_payload(ev, "limit_seconds") or 0)
     minutes = max(1, round(limit / 60)) if limit else 0
     span = t("gateway.kanban.ping.limit_minutes", minutes=minutes) if minutes else t("gateway.kanban.ping.limit_generic")
+    from hermes_cli.kanban_failure_summary import retry_promised
+    if not retry_promised(ev.payload or {}):
+        # The localized notice promises an automatic retry; only the recorded retry policy may.
+        return f"⏱ {n.head} ran past {span} and was stopped; retry state was not recorded.", None, None
     return t("gateway.kanban.ping.timed_out", head=n.head, span=span), None, None
 
 
@@ -475,8 +479,8 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
         t("gateway.kanban.ping.blocked", head=n.head, reason=_clip(ev, "reason", "gateway.kanban.ping.reason_suffix", 160)),
         None, None,
     ),
-    "gave_up": _fmt_gave_up,
-    "crashed": lambda ev, n: (t("gateway.kanban.ping.crashed", head=n.head), None, None),
+    "gave_up": _fmt_failure("gave_up"),
+    "crashed": _fmt_failure("crashed"),
     "timed_out": _fmt_timed_out,
     "status": lambda ev, n: (t("gateway.kanban.ping.status", head=n.head, status=_payload(ev, "status") or ""), None, None),
     "review_requested": _fmt_review_requested,

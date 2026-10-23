@@ -63,7 +63,7 @@ def classify_failure(kind: str, payload: Mapping[str, Any]) -> str:
 
 _CAUSE = {
     "provider_refusal": "the model refused the request (provider safety refusal), not a launch failure",
-    "provider_config": "the provider rejected this profile's credential or model",
+    "provider_config": "the provider reported an unrecoverable configuration problem for this profile",
     "protocol_violation": "the worker finished without reporting a result to the board",
     "spawn_failed": "the worker could not be launched",
     "timed_out": "the worker hit its time limit",
@@ -86,6 +86,11 @@ def _details(payload: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
+def retry_promised(payload: Mapping[str, Any]) -> bool:
+    """True only when the event records that the task went back to a dispatchable phase."""
+    return str(payload.get("retry_status") or "") in ("ready", "review")
+
+
 def describe_failure(kind: str, title: str, payload: Mapping[str, Any]) -> str:
     """Notice body (everything after ``Kanban <id>``) for a ``gave_up`` or ``crashed`` event."""
     cls = classify_failure(kind, payload)
@@ -96,18 +101,24 @@ def describe_failure(kind: str, title: str, payload: Mapping[str, Any]) -> str:
     if failures:
         attempts = f"{failures} of {limit}" if limit else str(failures)
 
+    retry = str(payload.get("retry_status") or "")
     if kind == "gave_up":
-        state = f"stopped after {attempts} failed attempt(s); task is Blocked, no automatic retries left" \
-            if attempts else "stopped after repeated failed attempts; task is Blocked, no automatic retries left"
+        state = (f"stopped after {attempts} failed attempt(s); task is Blocked" if attempts
+                 else "stopped after repeated failed attempts; task is Blocked")
+    elif retry == "blocked" or cls == "provider_config":
+        state = "task is Blocked"
+    elif retry_promised(payload):
+        # Only the recorded retry policy may promise a retry.
+        state = f"task returned to {retry}; the dispatcher's normal retry policy applies"
     else:
-        retry = str(payload.get("retry_status") or "")
-        state = ("dispatcher will retry automatically" if retry != "blocked"
-                 else "task is Blocked")
+        state = "retry state was not recorded"
 
     if cls == "provider_config":
-        who = "Fix the provider credential/model in this profile's config, then unblock the task."
+        # Exit 78 is raised for several provider reasons (auth, model not found, TLS, upstream
+        # block) and the event does not record which one, so do not name a specific cause.
+        who = "Check this profile's provider configuration (the worker log has the exact reason), then unblock the task."
     elif cls == "provider_refusal":
-        who = (f"{NO_USER_ACTION} The refusal is kept as-is; no alternate provider is tried automatically.")
+        who = "The model's refusal needs review before this task is retried; it is reported as-is."
     else:
         who = NO_USER_ACTION
 
