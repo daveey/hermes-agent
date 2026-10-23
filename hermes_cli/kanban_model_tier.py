@@ -13,6 +13,8 @@ and a later run re-decides. Cards keep the profile's model when:
 * its assignee is not in ``kanban.default_model_profiles`` (empty = every profile).
 
 Unset ``kanban.default_model`` (the default) = upstream behaviour: every card runs on its profile's model.
+With a class default, review/retry/keep-pattern work explicitly requests ``class:deep`` rather than
+inheriting a potentially weaker profile default. Explicit card pins and out-of-scope profiles are unchanged.
 Each decision is recorded as a ``model_tier`` task event on the run so tier effects can be measured later.
 """
 
@@ -88,20 +90,26 @@ def resolve_model_tier(
     profiles = _as_list(cfg.get("default_model_profiles"))
     if profiles and _str(getattr(task, "assignee", None)) not in profiles:
         return None, None, "profile_out_of_scope"
+    # Class defaults opt into class-preserving routing. Strong work must not
+    # fall back to a profile that may itself now default to standard/fast.
+    from agent.model_routing import is_class_selector
+    strong: tuple[Optional[str], Optional[str]] = (
+        ("class:deep", "auto") if is_class_selector(default_model) else (None, None)
+    )
     if lane == "review" or REVIEW_SKILL in (getattr(task, "skills", None) or []):
-        return None, None, "review"
+        return *strong, "review"
     try:
         failure = _prior_failure(conn, task.id, getattr(task, "current_run_id", None))
     except sqlite3.Error as exc:
         logger.debug("kanban model tier: prior-failure lookup failed for %s (%s)", task.id, exc)
         failure = None
     if failure:
-        return None, None, f"retry_after_{failure}"
+        return *strong, f"retry_after_{failure}"
     text = f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'body', '') or ''}"
     for pattern in _as_list(cfg.get("default_model_keep_patterns")):
         try:
             if re.search(pattern, text, re.IGNORECASE):
-                return None, None, f"pattern:{pattern}"
+                return *strong, f"pattern:{pattern}"
         except re.error as exc:
             logger.warning("kanban model tier: bad default_model_keep_patterns entry %r (%s)", pattern, exc)
     return default_model, _str(cfg.get("default_provider")) or infer_provider(default_model), "default"
@@ -119,6 +127,23 @@ def infer_provider(model: str) -> Optional[str]:
     except Exception as exc:  # never break dispatch over the catalog
         logger.debug("kanban model tier: provider lookup failed for %s (%s)", model, exc)
     return "anthropic" if model.lower().startswith("claude") else None
+
+
+def worker_model_args(model: str, provider: Optional[str]) -> list[str]:
+    """Keep class allocation inside the owning worker, never the dispatcher.
+
+    An explicit auto provider prevents the worker profile's concrete provider
+    from turning a class request into a backend pin.
+    """
+    from agent.model_routing import ModelRoutingError, is_class_selector
+    if is_class_selector(model):
+        if provider and provider != "auto":
+            raise ModelRoutingError("Class model selectors require provider auto")
+        provider = "auto"
+    args = ["-m", model]
+    if provider:
+        args.extend(["--provider", provider])
+    return args
 
 
 def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:

@@ -1977,6 +1977,8 @@ DEFAULT_CONFIG = {
         # Cards keep the profile model when pinned, in the review lane, retried after a failed run or
         # changes_requested, or matching a keep pattern. default_model_profiles limits it to those
         # assignees ([] = all); default_model_keep_patterns are case-insensitive regexes on title+body.
+        # With a class default, review/retry/keep-pattern work requests class:deep instead;
+        # exact card pins remain unchanged. Class providers must be auto (or unset).
         "default_model": "",
         "default_provider": "",
         "default_model_profiles": [],

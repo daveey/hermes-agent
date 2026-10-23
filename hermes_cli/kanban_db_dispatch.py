@@ -2908,11 +2908,8 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
         if sk:
             cmd.extend(["--skills", sk])
     if task.model_override:
-        cmd.extend(["-m", task.model_override])
-        # Pin the provider too so the worker resolves the model against the
-        # intended backend (model X with provider Y is the classic board-stall).
-        if task.provider_override:
-            cmd.extend(["--provider", task.provider_override])
+        from hermes_cli.kanban_model_tier import worker_model_args
+        cmd.extend(worker_model_args(task.model_override, task.provider_override))
     # Independent of the model override — a task can run the profile's own
     # model at a different depth.
     if task.reasoning_effort:
