@@ -1678,7 +1678,7 @@ def _pr_failing_checks(pr_url: str) -> str:
     import subprocess
     try:
         out = subprocess.run(["gh", "pr", "checks", pr_url], stdin=subprocess.DEVNULL, capture_output=True,
-                             text=True, timeout=30).stdout
+                             text=True, timeout=30, check=False).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
     failing = [ln.split("\t")[0].strip() for ln in out.splitlines()
@@ -1688,14 +1688,15 @@ def _pr_failing_checks(pr_url: str) -> str:
 
 def _post_inbox_card(task_id: str, title: str, body: str) -> None:
     """Best-effort Inbox card via ``hermes inbox post`` (never raises)."""
-    import subprocess, sys
+    import subprocess
+    import sys
     try:
         subprocess.run([sys.executable, "-m", "hermes_cli.main", "inbox", "post", title[:80], "--body", body,
                         "--key", f"guard-hold:{task_id}", "--prompt",
                         f"Look at kanban card {task_id}: it is held by the respawn guard. Read its latest "
                         f"[respawn-guard] comment, fix the cause (failing PR checks, binding) and unblock it.",
                         "--poster", "kanban-dispatcher"],
-                       stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=False)
     except (OSError, subprocess.SubprocessError):
         _kb._log.warning("kanban: guard-hold inbox post for %s failed", task_id, exc_info=True)
 
