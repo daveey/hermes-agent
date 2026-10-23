@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pytest
 import run_agent  # bootstrap before real-home guard
+import hermes_cli.main  # readiness lazily imports CLI bootstrap
 from tui_gateway import server
 from tests.agent import test_model_routing_agent
 
@@ -41,7 +42,8 @@ def native_transport(monkeypatch):
     return sent
 
 
-def test_desktop_construct_resume_and_pin(routing_home, streaming_route, native_transport, monkeypatch):
+def test_desktop_construct_resume_and_pin(routing_home, streaming_route, native_transport, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     from hermes_cli.config import load_config
     monkeypatch.setattr(server, "_load_cfg", load_config)
     monkeypatch.setattr(server, "_resolve_startup_runtime", lambda: ("class:deep", "auto"))
@@ -61,6 +63,16 @@ def test_desktop_construct_resume_and_pin(routing_home, streaming_route, native_
         assert all(headers.get("authorization", "").startswith("Bearer sk-ant-oat")
                    and "x-api-key" not in headers for _, headers, _ in native_transport)
         config = server._runtime_model_config(agent)
+        for builder in (server._background_agent_kwargs, server._ephemeral_preview_agent_kwargs):
+            kwargs = builder(agent, "side-" + builder.__name__)
+            assert kwargs["model"] == "class:deep"
+            assert kwargs["provider"] == "auto" and kwargs["api_key"] is None
+            child = run_agent.AIAgent(**kwargs)
+            assert child.model_routing["requested_class"] == "deep"
+            assert child.run_conversation("Say ok")["final_response"] == "ok"
+            child.release_clients()
+        assert all(body["model"] == "anthropic-deep" and headers.get("authorization", "").startswith("Bearer sk-ant-oat")
+                   and "x-api-key" not in headers for _, headers, body in native_transport)
         overrides = server._stored_session_runtime_overrides({"model": agent.model, "model_config": config})
         assert overrides["model_override"]["model"] == "class:deep"
         assert overrides["provider_override"] == "auto"
@@ -78,6 +90,24 @@ def test_desktop_construct_resume_and_pin(routing_home, streaming_route, native_
         assert "model_routing" not in server._runtime_model_config(agent, config)
         agent.release_clients()
         resumed.release_clients()
+
+
+def test_desktop_readiness_uses_native_fence_without_allocation(routing_home, streaming_route, monkeypatch):
+    from hermes_constants import get_hermes_home
+    from agent.model_routing import ModelRoutingError
+    monkeypatch.setattr(server, "_load_cfg", lambda: routing_home)
+    monkeypatch.setattr(server, "_resolve_startup_runtime", lambda: ("class:deep", "auto"))
+    monkeypatch.setattr(hermes_cli.main, "_has_any_provider_configured", lambda **kw: True)
+    monkeypatch.setattr(server, "_readiness_check", lambda rid, params, probe, **kw: probe(None, {}))
+    result = server._methods["setup.runtime_check"]("probe", {})
+    assert result["ok"] is True
+    assert result["provider"] == "anthropic"
+    assert result["model"] == "anthropic-deep"
+    assert not (get_hermes_home() / "model-routing.sqlite3").exists()
+    monkeypatch.setattr("agent.credential_pool.CredentialPool.has_available", lambda *a, **kw: False)
+    from tui_gateway.class_routing import probe_class_runtime
+    with pytest.raises(ModelRoutingError):
+        probe_class_runtime("class:deep", "auto", routing_home)
 
 
 def test_desktop_exhaustion_cannot_enter_paid_fallback(routing_home, streaming_route, monkeypatch):

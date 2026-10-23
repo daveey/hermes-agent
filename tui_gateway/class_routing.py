@@ -12,6 +12,28 @@ def deferred_runtime(model, provider, config):
     return {"provider": requested, "requested_provider": requested}
 
 
+def child_class_kwargs(agent):
+    """Independent side jobs inherit the workload class, not a paid-capable concrete pin."""
+    route = getattr(agent, "model_routing", None)
+    if not isinstance(route, dict):
+        return {}
+    return {"model": f"class:{route['requested_class']}", "provider": "auto", "requested_provider": "auto",
+            "base_url": None, "api_key": None, "api_mode": None, "credential_pool": None,
+            "request_overrides": None, "fallback_model": [], "acp_command": None, "acp_args": None}
+
+
+def probe_class_runtime(model, provider, config):
+    """Check real native credentials without consuming a durable allocation slot."""
+    from agent.model_routing_runtime import resolve_class_runtime
+    requirements: dict[str, bool | int] = {"tools": True, "streaming": True}
+    model_config = config.get("model") or {}
+    if isinstance(model_config, dict) and model_config.get("context_length"):
+        requirements["min_context_tokens"] = int(model_config["context_length"])
+    runtime = resolve_class_runtime(model, provider, config=config, session_id="readiness",
+                                    requirements=requirements, state_path=":memory:")
+    return runtime["model"], runtime
+
+
 def restore_class_overrides(model, config, overrides):
     route = config.get("model_routing")
     if not isinstance(route, dict) or route.get("selected_model") != model:

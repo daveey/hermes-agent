@@ -5,7 +5,7 @@ from agent.model_routing import ModelRoutingError, resolve_model_route
 
 
 def resolve_class_runtime(model, provider, *, config=None, session_id=None,
-                          parent_session_id=None, requirements=None, excluded=()):
+                          parent_session_id=None, requirements=None, excluded=(), state_path=None):
     from agent.credential_pool import load_pool
     from hermes_cli import runtime_provider as runtime
 
@@ -29,7 +29,7 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
     while True:
         chosen = resolve_model_route(model, provider, config=config, session_id=session_id,
                                      parent_session_id=parent_session_id, requirements=requirements,
-                                     excluded=failed, eligible=eligible)
+                                     excluded=failed, eligible=eligible, state_path=state_path)
         metadata = chosen["metadata"]
         selected = chosen["provider"]
         runtime._raise_if_provider_disabled(selected)

@@ -441,11 +441,15 @@ def _(rid, params: dict) -> dict:
 
         def probe(profile, scoped):
             startup_model, startup_provider = _resolve_startup_runtime()
+            from agent.model_routing import is_class_selector
             if requested:
                 model, runtime = startup_model, resolve_runtime_provider(
-                    requested=requested, target_model=startup_model or None)
+                    requested=requested, target_model=None if is_class_selector(startup_model) else startup_model or None)
             else:
                 model, runtime = _resolve_agent_model_runtime(None, None)
+                from tui_gateway.class_routing import probe_class_runtime
+                if is_class_selector(model):
+                    model, runtime = probe_class_runtime(model, runtime.get("provider"), _load_cfg())
             provider_configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
             provider = runtime.get("provider") or "provider"
             source = str(runtime.get("source") or "")

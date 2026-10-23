@@ -96,6 +96,10 @@ rebalance existing conversations when a class default changes. Desktop tests cov
 construction, restoration, explicit pinning, empty-pool zero sends, and the native
 Anthropic streaming SDK request via mock HTTP transport (not live entitlement).
 
+Readiness validates native credentials using an in-memory allocator, so polls consume
+no durable allocation slots. Background and preview jobs inherit the parent's class
+with independent durable job IDs, never its concrete credential pin; their SDK requests
+are covered by the same mock-transport test.
+
 Messaging, API, delegation, cron, Kanban and auxiliary adapters and their per-entry
-request/recovery tests remain required before activation. Desktop background/preview
-agents and startup readiness also require audit. This document is not rollout proof.
+request/recovery tests remain required before activation. This document is not rollout proof.

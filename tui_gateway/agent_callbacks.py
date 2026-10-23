@@ -392,6 +392,7 @@ def _sync_agent_fallback_with_config(sid: str, session: dict) -> None:
 
 
 def _background_agent_kwargs(agent, task_id: str) -> dict:
+    from tui_gateway.class_routing import child_class_kwargs
     cfg = _load_cfg()
 
     def g(name, default=None):
@@ -421,7 +422,7 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         # The side agent persists into the PARENT's store: a named-profile chat's ``bg_*`` rows
         # belong to that profile's state.db, not the launch handle.
         "platform": "tui", "session_db": getattr(agent, "_session_db", None) or _get_db(), "fallback_model": fallback,
-        "side_agent": True}
+        "side_agent": True, **child_class_kwargs(agent)}
 
 
 def _ephemeral_preview_agent_kwargs(agent, task_id: str) -> dict:
