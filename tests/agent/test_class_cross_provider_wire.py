@@ -22,14 +22,14 @@ def add_codex_subscription(routing_home, tmp_path):
     routing_home["model_routing"]["routes"]["deep"].append(codex)
     atomic_config_write(tmp_path / "config.yaml", routing_home)
     auth_path = tmp_path / "auth.json"
-    auth = json.loads(auth_path.read_text())
+    auth = json.loads(auth_path.read_text(encoding="utf-8-sig"))
     token = _jwt()
     auth["credential_pool"]["openai-codex"] = [{
         "id": "codex-subscription", "label": "codex-subscription", "priority": 0,
         "auth_type": "oauth", "source": "manual", "access_token": token,
         "base_url": "https://chatgpt.com/backend-api/codex",
     }]
-    auth_path.write_text(json.dumps(auth))
+    auth_path.write_text(json.dumps(auth), encoding="utf-8")
     return token
 
 
@@ -39,11 +39,11 @@ def test_account_count_does_not_change_provider_share(routing_home, streaming_ro
 
     add_codex_subscription(routing_home, tmp_path)
     auth_path = tmp_path / "auth.json"
-    auth = json.loads(auth_path.read_text())
+    auth = json.loads(auth_path.read_text(encoding="utf-8-sig"))
     entries = auth["credential_pool"]["anthropic"]
     subscription = next(entry for entry in entries if entry["auth_type"] == "oauth")
     entries.extend(dict(subscription, id=f"extra-{i}", label=f"extra-{i}") for i in range(3))
-    auth_path.write_text(json.dumps(auth))
+    auth_path.write_text(json.dumps(auth), encoding="utf-8")
     counts = Counter(resolve_runtime_provider(
         requested="auto", target_model="class:deep", routing_session_id=f"account-share-{i}"
     )["provider"] for i in range(12))
