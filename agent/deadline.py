@@ -361,6 +361,12 @@ def run_bounded_sync(
 # --- Whole-tree process termination --------------------------------------------
 
 
+# Budget for stopping a hard-kill target tree. It bounds a target stuck in
+# uninterruptible sleep, not scheduling latency: on a loaded or CPU-throttled host a
+# runnable target can take well over a second to be scheduled and act on SIGSTOP.
+_TREE_STOP_DEADLINE_S = 5.0
+
+
 @contextmanager
 def _process_tree_snapshot(pid: int, *, hard_kill: bool):
     """Stop each hard-kill target before discovering its children: a running
@@ -379,7 +385,7 @@ def _process_tree_snapshot(pid: int, *, hard_kill: bool):
                 pending = [root]
                 seen = {os.getpid()}
                 known = {process.pid: process for process in descendants}
-                stop_deadline = time.monotonic() + 1.0
+                stop_deadline = time.monotonic() + _TREE_STOP_DEADLINE_S
                 while pending:
                     for process in pending:
                         if process.pid in seen:
@@ -410,6 +416,17 @@ def _process_tree_snapshot(pid: int, *, hard_kill: bool):
             # Preserve the existing best-effort group fallback when discovery or
             # stopping is unavailable; never strand a successfully stopped target.
             logger.debug("kill_process_tree: snapshot incomplete for pid %s", pid, exc_info=True)
+            # Never fall back to the stale first snapshot: a descendant forked while we
+            # were stopping the tree would escape the signal (and a detached one escapes
+            # the group sweep too). Re-read the live tree, merging what we already know.
+            try:
+                import psutil
+                known = {process.pid: process for process in descendants}
+                for process in psutil.Process(pid).children(recursive=True):
+                    known.setdefault(process.pid, process)
+                descendants = list(known.values())
+            except Exception:
+                logger.debug("kill_process_tree: fallback rescan failed for pid %s", pid, exc_info=True)
         yield descendants
     finally:
         for process in stopped:

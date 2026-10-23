@@ -24,6 +24,11 @@ def main():
         os.environ["HERMES_CRON_SCRIPT_TIMEOUT"] = "2"
         from cron.scheduler_script import _run_job_script
 
+        starved = os.environ.get("CRON_FORK_RACE_STOP_DEADLINE_S")
+        if starved is not None:  # model a host too loaded to stop the tree in time
+            import agent.deadline
+            agent.deadline._TREE_STOP_DEADLINE_S = float(starved)
+
         scripts = Path(root, "scripts")
         scripts.mkdir()
         release, marker = Path(root, "release"), Path(root, "pids.json")
