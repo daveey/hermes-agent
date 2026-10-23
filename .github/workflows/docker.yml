@@ -65,7 +65,7 @@ jobs:
   # the parent stable-release workflow on the tagged candidate commit.
   mode:
     name: Resolve release phase
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, docker-ci]
     timeout-minutes: 5
     outputs:
       phase: ${{ steps.resolve.outputs.phase }}
@@ -94,7 +94,7 @@ jobs:
     name: Detect affected areas
     needs: [mode]
     if: needs.mode.outputs.release != 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, docker-ci]
     timeout-minutes: 10
     outputs:
       build: ${{ steps.gate.outputs.build }}
@@ -137,7 +137,7 @@ jobs:
     needs: [mode, detect]
     if: >-
       !cancelled() && needs.mode.result == 'success' &&
-      ((needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && needs.detect.outputs.build == 'true') || needs.mode.outputs.phase == 'test')
+      ((needs.mode.outputs.release != 'true' && (github.repository == 'NousResearch/hermes-agent' || github.repository == 'daveey/hermes') && needs.detect.outputs.build == 'true') || needs.mode.outputs.phase == 'test')
     strategy:
       fail-fast: false
       matrix:
@@ -145,20 +145,15 @@ jobs:
         # adds the Bot Screen packages and distro Chromium fallback for the
         # tier that offers a screen. PM's pinned full Chromium is in both.
         # Both are built on a PR so gated-layer failures cannot reach publish.
-        arch: [amd64, arm64]
+        arch: [amd64]  # fork: no arm64 runner
         variant: [slim, desktop]
         include:
           - arch: amd64
-            runner: ubuntu-latest-32-core
+            runner: docker-ci
             platform: linux/amd64
-          # arm64 builds on the native arm64 larger runner. A build of
-          # linux/arm64 on an x64 host uses emulation.
-          - arch: arm64
-            runner: ubuntu-latest-32-arm-core
-            platform: linux/arm64
 
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 120  # fork: shared hub runner
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -307,6 +302,7 @@ jobs:
       - name: Upload tested image archive (release test)
         if: needs.mode.outputs.phase == 'test'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
         with:
           name: docker-test-image-${{ matrix.variant }}-${{ matrix.arch }}-${{ inputs.tag }}
           path: |
@@ -336,16 +332,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        arch: [amd64]  # fork: no arm64 runner
         variant: [slim, desktop]
         include:
           - arch: amd64
-            runner: ubuntu-latest-32-core
+            runner: docker-ci
             platform: linux/amd64
-          # Native arm64 for the same reason as the build matrix above.
-          - arch: arm64
-            runner: ubuntu-latest-32-arm-core
-            platform: linux/arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -416,6 +408,7 @@ jobs:
 
       - name: Upload digest artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
         with:
           name: digest-${{ matrix.variant }}-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -434,7 +427,7 @@ jobs:
     # `needs` is the whole 4-leg matrix: only publish both :main variants
     # after every arch and variant publisher succeeds.
     if: ${{ !cancelled() && needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, docker-ci]
     needs: [mode, publish]
     timeout-minutes: 10
     environment: container-publish
@@ -526,9 +519,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        arch: [amd64]  # fork: no arm64 runner
         variant: [slim, desktop]
-    runs-on: ubuntu-latest-32-core
+    runs-on: [self-hosted, docker-ci]
     timeout-minutes: 45
     env:
       ARCH: ${{ matrix.arch }}
@@ -607,6 +600,7 @@ jobs:
 
       - name: Upload per-arch digest artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
         with:
           name: docker-publish-digest-${{ matrix.variant }}-${{ matrix.arch }}-${{ inputs.tag }}
           path: /tmp/digests/${{ matrix.arch }}.digest
@@ -619,7 +613,7 @@ jobs:
     name: Assemble versioned manifest and digest receipt
     if: needs.mode.outputs.phase == 'publish'
     needs: [mode, release-publish]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, docker-ci]
     outputs:
       digest: ${{ steps.list.outputs.digest }}
     timeout-minutes: 15
@@ -737,6 +731,7 @@ jobs:
 
       - name: Upload release manifest artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
         with:
           name: docker-publish-manifest-${{ inputs.tag }}
           path: /tmp/manifest/manifest.json
@@ -751,7 +746,7 @@ jobs:
     name: Docker phase requirements met
     if: always() && inputs.release-phase != ''
     needs: [mode, build, release-publish, release-publish-manifest]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, docker-ci]
     timeout-minutes: 5
     steps:
       - name: Validate phase job results

@@ -23,7 +23,7 @@ concurrency:
 jobs:
   lint-docker-and-shell:
     name: Lint Dockerfile (hadolint)
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: [self-hosted, docker-ci]
     timeout-minutes: 5
     steps:
       - name: Checkout code
