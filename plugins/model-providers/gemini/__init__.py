@@ -36,6 +36,65 @@ class GeminiProfile(ProviderProfile):
         budget = long_decode_max_output_tokens(context.get("model") or "", context.get("reasoning_config"))
         return {"thinking_config": raw, **({"max_output_tokens": budget} if budget and is_native_gemini_base_url(base_url) else {})}
 
+    def fetch_models(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout: float = 8.0,
+    ) -> list[str] | None:
+        """[daveey] Native AI Studio ``/models`` rejects Bearer auth (401) and returns
+        ``{"models": [{"name": "models/<id>", "supportedGenerationMethods": [...]}]}``, so list it
+        with ``x-goog-api-key`` and parse that shape. ``/openai`` bases, Vertex express and custom
+        proxies keep the OpenAI-compatible base implementation."""
+        from agent.gemini_native_adapter import is_native_gemini_base_url
+
+        base = ((base_url or "").strip() or self.base_url or "").rstrip("/")
+        if not (is_native_gemini_base_url(base) and "generativelanguage.googleapis.com" in base.lower()):
+            return super().fetch_models(api_key=api_key, base_url=base_url, timeout=timeout)
+        if not api_key or not self.supports_model_listing:
+            return None
+
+        import json
+        import urllib.parse
+        import urllib.request
+
+        from hermes_cli.chat_catalog import chat_catalog_ids
+        from hermes_cli.urllib_security import open_credentialed_url
+        from providers.base import _profile_user_agent
+
+        items: list[dict[str, Any]] = []
+        page_token = ""
+        try:
+            for _ in range(20):  # pagination guard
+                query = {"pageSize": "1000", **({"pageToken": page_token} if page_token else {})}
+                req = urllib.request.Request(f"{base}/models?{urllib.parse.urlencode(query)}")
+                req.add_header("x-goog-api-key", api_key)
+                req.add_header("Accept", "application/json")
+                req.add_header("User-Agent", _profile_user_agent())
+                for k, v in self.default_headers.items():
+                    req.add_header(k, v)
+                with open_credentialed_url(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode())
+                for model in data.get("models") or []:
+                    if not isinstance(model, dict):
+                        continue
+                    if "generateContent" not in (model.get("supportedGenerationMethods") or []):
+                        continue
+                    name = str(model.get("name") or "").strip()
+                    mid = name.removeprefix("models/")
+                    if mid:
+                        items.append({"id": mid})
+                page_token = str(data.get("nextPageToken") or "")
+                if not page_token:
+                    break
+        except Exception as exc:  # never log the key: exc carries status/reason only
+            import logging
+
+            logging.getLogger(__name__).debug("fetch_models(%s): %s", self.name, exc)
+            return None
+        return chat_catalog_ids(items)
+
 
 gemini = GeminiProfile(
     name="gemini", aliases=("google", "google-gemini", "google-ai-studio"), api_mode="chat_completions",
