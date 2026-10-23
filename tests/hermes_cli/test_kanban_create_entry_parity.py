@@ -100,7 +100,30 @@ def _via_execute_code(title: str, monkeypatch) -> str:
     return _run_cli_in(env, title, monkeypatch)
 
 
-PATHS = {"kanban_create tool": _via_tool, "terminal: hermes kanban create": _via_terminal,
+def _via_origin_courier(title: str, monkeypatch) -> str:
+    import io
+    from hermes_constants import get_hermes_home
+    from tools import kanban_tools
+    home = get_hermes_home()
+    cfg = home / 'mail.json'
+    cfg.write_text(json.dumps({'gateway': 'owner'}))
+    monkeypatch.setenv('HERMES_MAIL_CONFIG', str(cfg))
+    monkeypatch.setenv('HERMES_HUB_STATE', str(home / 'hub'))
+    monkeypatch.setattr(kanban_tools, '_profile_has_kanban_toolset', lambda: True)
+    request = {'id': 'request-parity-001', 'from': 'gw:origin', 'to_gw': 'owner',
+               'coll': 'tasks', 'key': 'default/default', 'action': 'create',
+               'args': {'origin': {'gateway': 'origin', 'profile': 'default', 'session': 'original'},
+                        'create': {'title': title, 'assignee': 'default', 'session_id': SID}}}
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps(request)))
+    root = argparse.ArgumentParser(prog='hermes')
+    kc.build_parser(root.add_subparsers())
+    assert kc.kanban_command(root.parse_args(['kanban', 'origin-create', '--request-file', '-'])) == 0
+    with kbc.connect_closing() as conn:
+        return next(t for t in kb.list_tasks(conn) if t.title == title).id
+
+
+PATHS = {"origin courier CLI": _via_origin_courier,
+         "kanban_create tool": _via_tool, "terminal: hermes kanban create": _via_terminal,
          "execute_code: hermes kanban create": _via_execute_code}
 
 

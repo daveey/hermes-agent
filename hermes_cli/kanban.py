@@ -161,6 +161,10 @@ def kanban_command(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_origin_adapter import command
         return command(args)
 
+    if action == "origin-create":
+        from hermes_cli.kanban_origin_owner import command
+        return command(args)
+
     # `boards …` manages board metadata and the current-board pointer itself, so it must ignore
     # the `--board` routing override (else `--board beta boards show` reports beta).
     if action == "boards":
@@ -230,7 +234,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
-    "gc", "origin-bind",
+    "gc", "origin-bind", "origin-create",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
