@@ -71,6 +71,16 @@ def current_provider_owns_vendor(model_name: str, current_provider: str) -> bool
     return native == {vendor}
 
 
+def preferred_subscription_model(model: str) -> Optional[str]:
+    """Exact account-discovered match for an unqualified model choice; never guess entitlement."""
+    name = (model or "").strip()
+    if not name or "/" in name or not name.lower().startswith(("gpt-", "o1", "o3", "o4")):
+        return None
+    if not provider_has_credentials("openai-codex"):
+        return None
+    return current_provider_catalog_match(name, "openai-codex")
+
+
 def provider_has_credentials(provider: str) -> bool:
     """Whether *provider* can be switched to without the user typing a key: env/.env key, auth
     store login, or a usable credential-pool entry. ``custom``/``custom:*`` targets only come out

@@ -1130,6 +1130,13 @@ def detect_provider_for_model(
     if not name:
         return None
 
+    # An unqualified choice prefers the subscription over the billed first-party API.
+    # Explicit provider choices bypass this detector in switch_model.
+    from hermes_cli.models_detect import preferred_subscription_model
+    if current_provider in {"", "auto", "openai", "openai-api", "anthropic", "openrouter"}:
+        if subscription_model := preferred_subscription_model(name):
+            return ("openai-codex", subscription_model)
+
     # The current provider's LIVE catalog outranks every static guess: a model it already serves
     # (Codex early-access ids, Portal-only slugs, Ollama Cloud models absent from _PROVIDER_MODELS)
     # must never re-route the session to another vendor or to metered OpenRouter.
@@ -1402,25 +1409,9 @@ def _openai_discovery_base_url(provider: str) -> str:
 
 
 def _codex_catalog(normalized: str, force_refresh: bool) -> list[str]:
-    from hermes_cli.codex_models import get_codex_model_ids
-
-    # Live OAuth token so the picker matches what ChatGPT lists for this account; hardcoded
-    # catalog without a token / when unreachable. Read-only (#68004): a picker never imports,
-    # refreshes or persists a credential, so an expired stored token means the hardcoded catalog
-    # until the runtime lease refreshes it.
-    # The token and the host it is routed to come from the same resolution (#121486): a pooled
-    # gateway key is only ever sent to that gateway, never to the chatgpt.com default.
-    base_url = None
-    try:
-        from hermes_cli.auth import _codex_access_token_is_expiring, resolve_codex_runtime_credentials
-
-        creds = resolve_codex_runtime_credentials(read_only=True)
-        access_token, base_url = creds.get("api_key"), creds.get("base_url")
-        if _codex_access_token_is_expiring(access_token, 0):
-            access_token = None
-    except Exception:
-        access_token = None
-    return get_codex_model_ids(access_token=access_token, base_url=base_url)
+    # Account union discovery is read-only and keeps each token bound to its own host.
+    from hermes_cli.codex_models import codex_catalog_credentials, get_codex_model_ids_for_credentials
+    return get_codex_model_ids_for_credentials(codex_catalog_credentials())
 
 
 _COPILOT_ACP_SESSION_MEMO_TTL = 300.0  # 5 min; SWR disk cache handles the rest
