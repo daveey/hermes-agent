@@ -1,0 +1,59 @@
+name: Workflow lint
+
+# fork (daveey/hermes): lints every workflow file with actionlint.
+#
+# A workflow file GitHub cannot parse never starts a single job. On main that
+# looked like a silent red run with 0 jobs ("This run likely failed because of
+# a workflow file issue"): a duplicate key in lockfile-diff.yml stopped every
+# CI run on main (runs 39882449610, 39883176284) until #30. This workflow has
+# its own triggers on purpose. It is NOT called from ci.yaml, so a broken
+# ci.yaml or a broken callee still gets a named, failing check on the PR.
+#
+# Scope: workflow structure, expressions, contexts, needs/outputs and runner
+# labels. shellcheck and pyflakes on `run:` scripts are off: they flag style
+# in upstream scripts that this fork does not own. Exceptions live in
+# .github/actionlint.yaml, each with its reason.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: actionlint-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: [self-hosted, hermes-hub]
+    timeout-minutes: 5
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned actionlint
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          dest="$RUNNER_TEMP/actionlint"
+          mkdir -p "$dest"
+          curl -fsSL --retry 3 -o "$dest/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  $dest/$tarball" | sha256sum -c -
+          tar -xzf "$dest/$tarball" -C "$dest" actionlint
+          echo "$dest" >> "$GITHUB_PATH"
+
+      - name: Lint every workflow
+        # One ::error annotation per finding, so the PR shows file and line.
+        run: |
+          actionlint -shellcheck= -pyflakes= \
+            -format '{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}},col={{$err.Column}}::{{$err.Message}} [{{$err.Kind}}]\n{{end}}'
