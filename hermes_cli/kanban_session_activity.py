@@ -14,7 +14,9 @@ seconds because the sidebar polls.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -133,6 +135,105 @@ def _read_unseen(path: Path) -> dict[str, int]:
     return {str(sid): int(n) for sid, n in rows}
 
 
+# [daveey] Cards on ANOTHER gateway. A session here can own work that runs elsewhere (``hermes-hub create-task``,
+# a ``shepherd`` request, ``cross_task`` read/comment): the owner publishes it as a ``sessions`` link
+# ``{session, gw: <this gateway>, rel: "shepherd"}`` on the card, and hermes-hub keeps a local replica of every
+# gateway's cards in ``hub.db``. Those cards (and their children, transitively) count for the session too, so it
+# doesn't paint green while its remote work runs. Read-only; no replica = no-op.
+def _hub_db_path() -> Path | None:
+    base = os.environ.get("HERMES_HUB_STATE") or str(Path.home() / ".local" / "state" / "hermes-hub")
+    path = Path(base) / "hub.db"
+    return path if path.is_file() else None
+
+
+def _open_ro(path: Path) -> sqlite3.Connection:
+    """Read-only open that survives a WAL db whose -wal/-shm were just removed (plain ``mode=ro`` then fails);
+    never creates the file."""
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+        return conn
+    except sqlite3.OperationalError:
+        conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=0.5)
+        conn.execute("PRAGMA query_only = ON")
+        return conn
+
+
+def _self_gateway(conn: sqlite3.Connection) -> str:
+    try:
+        row = conn.execute("SELECT v FROM meta WHERE k = 'gateway'").fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except sqlite3.Error:
+        pass
+    try:
+        cfg = Path(os.environ.get("HERMES_MAIL_CONFIG") or Path.home() / ".config" / "hermes-mail" / "config.json")
+        return str(json.loads(cfg.read_text()).get("gateway") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _replica_bucket(task: dict[str, Any]) -> str | None:
+    """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards."""
+    status, kind = task.get("status"), task.get("block_kind")
+    human = kind is None or kind in HUMAN_BLOCK_KINDS
+    if status in ACTIVE_STATUSES or (status == "blocked" and not human):
+        return "active"
+    if (status == "blocked" and human) or (status == "triage" and kind in HUMAN_BLOCK_KINDS):
+        return "blocked"
+    return None
+
+
+def _read_hub_replica(path: Path) -> tuple[dict[str, int], dict[str, int]]:
+    """``(active, blocked)`` per local session from replica cards whose ``sessions`` link names this gateway,
+    plus their children (walked transitively on the same gateway and board)."""
+    conn = _open_ro(path)
+    try:
+        me = _self_gateway(conn)
+        if not me:
+            return {}, {}
+        rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'tasks' AND gw != ?", (me,)).fetchall()
+    finally:
+        conn.close()
+    tasks: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for gw, data in rows:
+        try:
+            t = json.loads(data)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(t, dict) and t.get("id"):
+            tasks[(str(gw), str(t.get("board") or "default"), str(t["id"]))] = t
+    pairs: dict[str, set[tuple[str, str]]] = {"active": set(), "blocked": set()}
+    for (gw, board, tid), t in tasks.items():
+        links = t.get("sessions") if isinstance(t.get("sessions"), list) else []
+        sids = {str(l["session"]) for l in links if isinstance(l, dict) and l.get("session") and l.get("gw") == me}
+        if not sids:
+            continue
+        seen: set[str] = set()
+        todo = [tid]
+        while todo:
+            cur = todo.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            card = tasks.get((gw, board, cur))
+            if card is None:
+                continue
+            bucket = _replica_bucket(card)
+            if bucket:
+                ref = f"{gw}/{board}/{cur}"
+                pairs[bucket].update((sid, ref) for sid in sids)
+            kids = card.get("children") if isinstance(card.get("children"), list) else []
+            todo.extend(str(k) for k in kids if k)
+    out: list[dict[str, int]] = []
+    for bucket in ("active", "blocked"):
+        counts: dict[str, int] = {}
+        for sid, _ref in pairs[bucket]:
+            counts[sid] = counts.get(sid, 0) + 1
+        out.append(counts)
+    return out[0], out[1]
+
+
 def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
     """``(active, blocked, unseen)`` per-session task counts across every board, cached."""
     global _cache
@@ -155,6 +256,15 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
                     into[sid] = into.get(sid, 0) + n
             except sqlite3.Error as exc:  # an old schema without session_id, a locked file
                 _log.debug("kanban activity read failed for %s: %s", path, exc)
+    try:
+        hub = _hub_db_path()
+        if hub is not None:
+            r_active, r_blocked = _read_hub_replica(hub)
+            for src, into in ((r_active, active), (r_blocked, blocked)):
+                for sid, n in src.items():
+                    into[sid] = into.get(sid, 0) + n
+    except Exception as exc:  # a corrupt/locked replica must never break the sidebar
+        _log.debug("hermes-hub replica read failed: %s", exc)
     with _cache_lock:
         _cache = (now + _CACHE_TTL_S, active, blocked, unseen)
     return active, blocked, unseen

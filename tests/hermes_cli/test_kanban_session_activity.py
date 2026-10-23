@@ -20,6 +20,7 @@ def _make_board(path: Path, rows: list[tuple[str, str, str | None]]) -> None:
 @pytest.fixture
 def kanban_root(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "hub-state"))  # never the real hermes-hub replica
     ksa._reset_cache_for_tests()
     yield tmp_path
     ksa._reset_cache_for_tests()
@@ -207,3 +208,108 @@ def test_kanban_unseen_counts_subscriptions_trailing_a_terminal_event(kanban_roo
     ksa.annotate_kanban_activity(rows)
     assert rows[0]["kanban_unseen"] == 1
     assert all("kanban_unseen" not in r for r in rows[1:])
+
+
+# --- cards on ANOTHER gateway, seen through the hermes-hub replica (hub.db) [daveey] ---
+
+import json as _json
+
+
+def _make_replica(state_dir: Path, me: str, tasks: list[dict]) -> Path:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / "hub.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);"
+        "CREATE TABLE replica (gw TEXT, coll TEXT, key TEXT, version INTEGER, seq INTEGER, data TEXT,"
+        " updated_at INTEGER, PRIMARY KEY (gw, coll, key));"
+    )
+    conn.execute("INSERT INTO meta VALUES ('gateway', ?)", (me,))
+    for t in tasks:
+        gw = t.pop("_gw")
+        data = {"board": "default", "children": [], "parents": [], "sessions": [], "block_kind": None, **t}
+        conn.execute("INSERT INTO replica VALUES (?, 'tasks', ?, 1, 1, ?, 0)",
+                     (gw, f"{data['board']}/{data['id']}", _json.dumps(data, sort_keys=True)))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _shep(session, gw="macbook"):
+    return {"session": session, "profile": "default", "gw": gw, "rel": "shepherd"}
+
+
+def test_replica_card_shepherded_by_a_local_session_keeps_it_busy(kanban_root):
+    _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_r1", "status": "running", "children": ["t_r2"], "sessions": [
+            {"session": "hub_oneshot", "profile": None, "rel": "created"}, _shep("s_mac")]},
+        {"_gw": "hub", "id": "t_r2", "status": "todo", "children": ["t_r3"]},  # child: counts via children
+        {"_gw": "hub", "id": "t_r3", "status": "blocked", "block_kind": "needs_input"},  # grandchild waits on a human
+        {"_gw": "hub", "id": "t_r4", "status": "done", "sessions": [_shep("s_mac")]},
+    ])
+    rows = [{"id": "s_mac"}, {"id": "hub_oneshot"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0]["kanban_active"] == 2
+    assert rows[0]["kanban_blocked"] == 1
+    assert "kanban_active" not in rows[1]  # a session on the owning gateway is not ours
+
+
+def test_replica_link_for_another_gateway_does_not_count(kanban_root):
+    _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_r1", "status": "running", "sessions": [_shep("s_mac", gw="mini")]},
+        {"_gw": "mini", "id": "t_r2", "status": "running", "sessions": [{"session": "s_mac", "rel": "created"}]},
+        # our own published records in the replica are already counted from the local boards
+        {"_gw": "macbook", "id": "t_r3", "status": "running", "sessions": [_shep("s_mac")]},
+    ])
+    rows = [{"id": "s_mac"}]
+    ksa.annotate_kanban_activity(rows)
+    assert "kanban_active" not in rows[0]
+
+
+def test_replica_counts_add_to_local_boards_and_follow_lineage(kanban_root):
+    _make_board(kanban_root / "kanban.db", [("t1", "running", "s_root")])
+    _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_r1", "status": "ready", "sessions": [_shep("s_root")]},
+        {"_gw": "hub", "id": "t_r2", "status": "blocked", "block_kind": "transient", "sessions": [_shep("s_tip")]},
+    ])
+    rows = [{"id": "s_tip", "_lineage_root_id": "s_root", "_lineage_ids": ["s_root", "s_tip"]}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0]["kanban_active"] == 3
+    assert "kanban_blocked" not in rows[0]
+
+
+def test_missing_or_corrupt_replica_is_harmless(kanban_root):
+    _make_board(kanban_root / "kanban.db", [("t1", "running", "s1")])
+    rows = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(rows)  # no hub-state dir at all
+    assert rows[0]["kanban_active"] == 1
+    assert not (kanban_root / "hub-state" / "hub.db").exists()  # the read never creates the file
+    (kanban_root / "hub-state").mkdir()
+    (kanban_root / "hub-state" / "hub.db").write_bytes(b"not a database" * 100)
+    ksa._reset_cache_for_tests()
+    rows = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0]["kanban_active"] == 1
+    # a replica row with junk data is skipped, not fatal
+    (kanban_root / "hub-state" / "hub.db").unlink()
+    path = _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_ok", "status": "running", "sessions": [_shep("s1")]}])
+    conn = sqlite3.connect(path)
+    conn.execute("INSERT INTO replica VALUES ('hub', 'tasks', 'default/t_bad', 1, 1, '{not json', 0)")
+    conn.commit()
+    conn.close()
+    ksa._reset_cache_for_tests()
+    rows = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0]["kanban_active"] == 2
+
+
+def test_hub_platform_subscription_on_a_local_board_is_not_a_tui_shepherd(kanban_root):
+    """The owning gateway stores a remote shepherd as platform 'hub'; its own sidebar must not count it."""
+    _make_board(kanban_root / "kanban.db", [("t1", "running", None)])
+    conn = sqlite3.connect(kanban_root / "kanban.db")
+    conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT)")
+    conn.execute("INSERT INTO kanban_notify_subs VALUES ('t1', 'hub', 'macbook/default/s_mac')")
+    conn.commit()
+    conn.close()
+    assert ksa.active_task_counts() == {}
