@@ -177,6 +177,7 @@ import { captureDisplayHydration } from './display-hydration'
 import {
   dispatchedConnectionId,
   findForeignSessionOwner,
+  isKanbanWorkerResumeRefusal,
   isStoredSessionNotFound,
   pinSessionOwner
 } from './owner-follow'
@@ -2627,6 +2628,16 @@ export function useSessionActions({
         }
 
         if (!isCurrentResume()) {
+          return
+        }
+
+        // Kanban worker transcript: the gateway refuses to resume it on purpose
+        // (a resumed chat would be a second writer next to the dispatcher's run).
+        // The REST fallback above already painted the history, so open it
+        // read-only and quietly — no "Resume failed" toast, no retry latch.
+        if (isKanbanWorkerResumeRefusal(err) && !fallbackError) {
+          markStoredTranscriptReadOnly(storedSessionId)
+
           return
         }
 
