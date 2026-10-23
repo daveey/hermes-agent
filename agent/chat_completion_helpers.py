@@ -2084,9 +2084,10 @@ def _buffer_fallback_notice(agent, notice: str) -> None:
 
 
 def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=None) -> bool:
-    """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
-    model slug and provider in place so the retry loop continues on the new backend; client
-    construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
+    """Activate the next eligible fallback at the failed-request boundary."""
+    from agent.model_routing_agent import try_class_fallback
+    if getattr(agent, "model_routing", None):
+        return try_class_fallback(agent)
     from agent.fallback_cooldown import _arm_rate_limit_cooldown, switch_deferred_by_reset
     if switch_deferred_by_reset(agent, reason, reset_at):
         return False
@@ -2123,8 +2124,6 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
                 remaining = max(0, math.ceil(agent._rate_limited_until - time.monotonic()))
                 notice += f" Primary retry eligible in ~{remaining} s; recovery is not guaranteed."
             _buffer_fallback_notice(agent, notice)
-            # ``_fallback_activated`` is also reused by `/model --once` restoration; separate
-            # provenance so the restore path only emits a recovery notice after a real fallback.
             agent._provider_fallback_active = True
             agent._provider_fallback_route = (str(fb_model), str(fb_provider))
             _log_fallback_activated(agent, reason, old_model, old_provider, fb_model, fb_provider)

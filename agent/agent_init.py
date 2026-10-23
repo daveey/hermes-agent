@@ -1160,30 +1160,12 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
         print(f"💾 Prompt caching: ENABLED ({source}, {agent._cache_ttl} TTL)")
 
 
-def _publish_session_id(session_id: str) -> None:
-    """Expose the session ID to tools via ContextVar (+ legacy os.environ fallback).
-
-    If the ContextVar bridge fails to import, keep the root-agent env fallback but never let
-    delegated construction publish a child ID process-wide.
-    """
-    try:
-        from gateway.session_context import set_current_session_id
-        set_current_session_id(session_id)
-    except Exception:
-        try:
-            from agent.delegation_context import is_delegated_child_context
-            delegated_child = is_delegated_child_context()
-        except Exception:
-            delegated_child = False
-        if not delegated_child:
-            os.environ["HERMES_SESSION_ID"] = session_id
-
-
 def _init_session_state(agent, session_id, session_db, parent_session_id, reasoning_config, max_tokens,
     checkpoints_enabled, checkpoint_max_snapshots, checkpoint_max_total_size_mb, checkpoint_max_file_size_mb):
     agent.session_start = datetime.now()
     agent.session_id = session_id or new_session_id(agent.session_start)
-    _publish_session_id(agent.session_id)
+    from agent.model_routing_agent import publish_session_id
+    publish_session_id(agent.session_id)
 
     # ~/.hermes/sessions/ — kept unconditionally for request_dump_*.json debug breadcrumbs.
     agent.logs_dir = get_hermes_home() / "sessions"
@@ -2397,6 +2379,9 @@ def init_agent(
     tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
 ):
     _install_safe_stdio()
+    from agent.model_routing_agent import prepare_agent_route
+    model, provider, session_id, api_key, base_url, api_mode, credential_pool, fallback_model = prepare_agent_route(
+        agent, model, provider, session_id, api_key, base_url, api_mode, credential_pool, fallback_model)
 
     _params = locals()
     for _name in _PASSTHROUGH_PARAMS:
