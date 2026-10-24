@@ -10,26 +10,101 @@ from tests.hermes_cli.test_kanban_origin_creation import board
 from tests.hermes_cli.test_kanban_origin_ledger import world, publish, accept
 
 
+def create_bound(conn, binding, **options):
+    tid = kb.create_task(conn, title='Build', assignee='default', completion_contract='local-only',
+                         origin_intent={'request_id': 'evidence-create-001',
+                                        'owner': {'gateway': 'owner', 'profile': 'default', 'board': 'default'},
+                                        'origin': binding['origin']}, **options)
+    marker = json.loads(conn.execute('SELECT binding_json FROM origin_creation_intents WHERE task_id=?', (tid,)).fetchone()[0])
+    binding.clear()
+    binding.update(marker, publication_version=3)
+    return tid
+
+
+@pytest.mark.parametrize('change', ['session', 'missing', 'duplicate', 'owner'])
+def test_same_status_stale_binding_cannot_receive_fresh_evidence(world, board, change):
+    _, _, binding = world
+    with kbc.connect_closing() as conn:
+        tid = create_bound(conn, binding)
+        task = {'id': tid, 'status': 'ready', **{k: binding['owner'][k] for k in ('gateway', 'profile', 'board')},
+                'origin_bindings': [binding]}
+        if change == 'session':
+            task['origin_bindings'] = [{**binding, 'origin': {**binding['origin'], 'session': 'stale'}}]
+        elif change == 'missing':
+            task['origin_bindings'] = []
+        elif change == 'duplicate':
+            task['origin_bindings'] = [binding, binding]
+        else:
+            task['profile'] = 'foreign'
+        conn.execute('BEGIN')
+        with pytest.raises(ValueError, match='origin_observation_binding_changed'):
+            ledger.observe_owner_task(conn, task, now=1000)
+
+
+def test_owner_evidence_requires_existing_snapshot(board):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title='Build', assignee='default')
+        assert not conn.in_transaction
+        with pytest.raises(ValueError, match='origin_observation_snapshot_required'):
+            ledger.observe_owner_task(conn, {'id': tid, 'status': 'ready'}, now=1000)
+
+
 def publish_observed(conn, replica, binding, *, version, now=1000):
+    conn.execute('SAVEPOINT observation')
     status = conn.execute('SELECT status FROM tasks WHERE id=?', (binding['owner']['task_id'],)).fetchone()[0]
     publish(replica, binding, status=status)
     with sqlite3.connect(replica) as db:
         task = json.loads(db.execute("SELECT data FROM replica WHERE coll='tasks'").fetchone()[0])
         task = ledger.observe_owner_task(conn, task, now=now)
+        conn.execute('RELEASE observation')
         db.execute("UPDATE replica SET version=?,data=? WHERE coll='tasks'", (version, json.dumps(task)))
         db.execute('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)')
         db.execute("INSERT OR REPLACE INTO meta VALUES ('last_ok',?)", (str(now),))
         db.execute("INSERT INTO replica VALUES ('owner','gateway','info',6,?)",
                    (json.dumps({'gateway': 'owner', 'task_scopes': [
-                       {'profile': 'work', 'board': 'build', 'state': 'ok'}]}),))
+                       {'profile': binding['owner']['profile'], 'board': binding['owner']['board'], 'state': 'ok'}]}),))
+
+
+@pytest.mark.parametrize('completed', [False, True])
+def test_archive_releases_only_previously_verified_completion(world, board, completed):
+    path, replica, binding = world
+    with kbc.connect_closing() as conn:
+        tid = create_bound(conn, binding)
+        publish_observed(conn, replica, binding, version=3)
+        accept(world)
+        if completed:
+            assert kb.complete_task(conn, tid, summary='Built and tested')
+        assert kb.archive_task(conn, tid)
+        publish_observed(conn, replica, binding, version=4)
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)[0]
+    assert row['reported_status'] == 'archived'
+    assert row['unfinished'] is not completed
+    assert row['status'] == ('archived' if completed else 'unknown')
+
+
+@pytest.mark.parametrize('fault', ['reopened', 'legacy', 'null', 'malformed'])
+def test_archive_without_current_completion_proof_stays_unknown(world, board, fault):
+    path, replica, binding = world
+    with kbc.connect_closing() as conn:
+        tid = create_bound(conn, binding)
+        publish_observed(conn, replica, binding, version=3)
+        accept(world)
+        assert kb.complete_task(conn, tid, summary='Built and tested')
+        if fault == 'reopened':
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        assert kb.archive_task(conn, tid)
+        if fault != 'reopened':
+            payload = {'legacy': None, 'null': 'null', 'malformed': '[]'}[fault]
+            conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='archived'", (payload, tid))
+        publish_observed(conn, replica, binding, version=4)
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)[0]
+    assert row['status'] == 'unknown' and row['unfinished']
 
 
 def test_current_owner_verified_completion_releases(world, board):
     path, replica, binding = world
     with kbc.connect_closing() as conn:
-        tid = kb.create_task(conn, title='Build', assignee='default', completion_contract='local-only')
-        binding['owner']['task_id'] = tid
-        binding['task_record_key'] = f'work/build/{tid}'
+        tid = create_bound(conn, binding)
         publish_observed(conn, replica, binding, version=3)
         accept(world)
         assert kb.complete_task(conn, tid, summary='Built and tested')
@@ -45,9 +120,7 @@ def test_current_owner_verified_completion_releases(world, board):
 def test_fresh_transport_cannot_refresh_an_offline_owner(world, board, terminal):
     path, replica, binding = world
     with kbc.connect_closing() as conn:
-        tid = kb.create_task(conn, title='Build', assignee='default', completion_contract='local-only')
-        binding['owner']['task_id'] = tid
-        binding['task_record_key'] = f'work/build/{tid}'
+        tid = create_bound(conn, binding)
         publish_observed(conn, replica, binding, version=3)
         accept(world)
         if terminal:
@@ -66,9 +139,7 @@ def test_fresh_transport_cannot_refresh_an_offline_owner(world, board, terminal)
 def test_complete_but_unverified_stays_unfinished(world, board, goal_mode, migrated_release):
     path, replica, binding = world
     with kbc.connect_closing() as conn:
-        tid = kb.create_task(conn, title='Build', assignee='default', completion_contract='local-only', goal_mode=goal_mode)
-        binding['owner']['task_id'] = tid
-        binding['task_record_key'] = f'work/build/{tid}'
+        tid = create_bound(conn, binding, goal_mode=goal_mode)
         publish_observed(conn, replica, binding, version=3)
         accept(world)
         if goal_mode:
@@ -111,9 +182,7 @@ def test_activity_consumers_share_live_verified_release(world, board, monkeypatc
         return cards, stamped
 
     with kbc.connect_closing() as conn:
-        tid = kb.create_task(conn, title='Build', assignee='default', completion_contract='local-only')
-        binding['owner']['task_id'] = tid
-        binding['task_record_key'] = f'work/build/{tid}'
+        tid = create_bound(conn, binding)
         publish_observed(conn, replica, binding, version=3)
         accept(world)
         destination.parent.mkdir(exist_ok=True)
@@ -148,6 +217,7 @@ def test_missing_run_end_is_unverified_not_a_collection_error(board):
         assert kb.complete_task(conn, tid, summary='Built and tested')
         conn.execute('UPDATE task_runs SET ended_at=NULL WHERE task_id=?', (tid,))
         task = {'id': tid, 'status': 'done', 'gateway': 'owner', 'profile': 'default', 'board': 'default'}
+        conn.execute('BEGIN')
         assert ledger.observe_owner_task(conn, task, now=1000)['origin_observation']['verified'] is False
 
 
@@ -158,6 +228,7 @@ def test_owner_observation_proves_current_local_completion(board):
         task = {'id': tid, 'status': 'done', 'gateway': 'owner', 'profile': 'default', 'board': 'default'}
         observe = getattr(ledger, 'observe_owner_task', None)
         assert callable(observe), 'owner observation producer is missing'
+        conn.execute('BEGIN')
         observed = observe(conn, task, now=1000)
         assert observed['origin_observation']['verified'] is True, (
             tuple(conn.execute('SELECT status,completed_at,current_run_id,goal_mode,completion_contract FROM tasks WHERE id=?', (tid,)).fetchone()),

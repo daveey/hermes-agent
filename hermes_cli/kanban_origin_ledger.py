@@ -116,18 +116,38 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
     archive) is not. Goal-mode lacks a persisted judge-success record today, so
     those completions deliberately remain unverified.
     """
+    if not conn.in_transaction:
+        raise ValueError('origin_observation_snapshot_required')
     row = conn.execute(
         "SELECT status,completed_at,current_run_id,goal_mode,completion_contract FROM tasks WHERE id=?",
         (task['id'],)).fetchone()
     if row is None or row[0] != task.get('status'):
         raise ValueError('origin_observation_task_changed')
+    supplied = task.get('origin_bindings', [])
+    has_intents = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='origin_creation_intents'").fetchone()
+    authoritative = [json.loads(r[0]) for r in conn.execute(
+        'SELECT binding_json FROM origin_creation_intents WHERE task_id=?', (task['id'],))] if has_intents else []
+    if (not isinstance(supplied, list) or any(not isinstance(m, dict) for m in supplied)
+            or sorted(_json({k: v for k, v in m.items() if k != 'publication_version'}) for m in supplied)
+            != sorted(_json(m) for m in authoritative)
+            or any(m.get('owner') != {**{k: task.get(k) for k in ('gateway', 'profile', 'board')},
+                                       'task_id': task['id']} for m in authoritative)):
+        raise ValueError('origin_observation_binding_changed')
     event = conn.execute(
         "SELECT id,run_id,created_at FROM task_events WHERE task_id=? AND kind='completed' ORDER BY id DESC LIMIT 1",
         (task['id'],)).fetchone()
     run = conn.execute(
         "SELECT id,status,outcome,ended_at FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
         (task['id'],)).fetchone()
-    verified = bool(row[0] == 'done' and row[2] is None and not row[3] and row[4] == 'local-only'
+    terminal = row[0] == 'done'
+    if row[0] == 'archived' and event:
+        archived = conn.execute(
+            "SELECT id,payload FROM task_events WHERE task_id=? AND kind='archived' ORDER BY id DESC LIMIT 1",
+            (task['id'],)).fetchone()
+        archive_payload = json.loads(archived[1] or '{}') if archived else None
+        terminal = bool(archived and archived[0] > event[0] and isinstance(archive_payload, dict)
+                        and archive_payload.get('source_status') == 'done')
+    verified = bool(terminal and row[2] is None and not row[3] and row[4] == 'local-only'
                     and event and run and event[1] == run[0] and run[1] in ('done', 'completed') and run[2] == 'completed'
                     and row[1] is not None and event[2] >= row[1] and run[3] is not None and run[3] >= row[1])
     payload = {k: v for k, v in task.items() if k != 'origin_observation'}

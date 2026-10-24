@@ -73,15 +73,13 @@ def test_projection_unavailable_replica_never_exposes_released_as_done(world):
 
 def test_projection_current_release_and_reopen(world, board):
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
-    from tests.hermes_cli.test_kanban_origin_evidence import publish_observed
+    from tests.hermes_cli.test_kanban_origin_evidence import publish_observed, create_bound
 
     path, replica, binding = world
     def rows():
         return ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)
     with kbc.connect_closing() as conn:
-        tid = kb.create_task(conn, title='Build', assignee='default', completion_contract='local-only')
-        binding['owner']['task_id'] = tid
-        binding['task_record_key'] = f'work/build/{tid}'
+        tid = create_bound(conn, binding)
         publish_observed(conn, replica, binding, version=3)
         accept(world)
         assert rows()[0]['status'] == 'ready'
