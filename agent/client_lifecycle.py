@@ -516,6 +516,8 @@ class ClientLifecycleMixin:
         """
         if self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
+        from agent.model_routing_runtime import verify_agent_class_credentials
+        verify_agent_class_credentials(self)
         key = self._request_anthropic_client_key()
         cached, stale = self._checkout_request_slot(_ANTHROPIC_SLOT, key)
         if cached is not None:
@@ -898,7 +900,9 @@ class ClientLifecycleMixin:
             return False
         try:
             from agent.anthropic_credentials import resolve_anthropic_token
-            new_token = resolve_anthropic_token(model=self.model)
+            from agent.model_routing_runtime import refresh_class_anthropic_token
+            new_token = (refresh_class_anthropic_token(self) if getattr(self, "model_routing", None)
+                         else resolve_anthropic_token(model=self.model))
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
             return False
@@ -1032,6 +1036,8 @@ class ClientLifecycleMixin:
         # A supplied request-local client was already refreshed in _create_request_anthropic_client.
         if client is None and self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
+        from agent.model_routing_runtime import verify_agent_class_credentials
+        verify_agent_class_credentials(self)
         # Strips Responses-only kwargs that leak in under an api_mode-flip race.
         from agent.anthropic_adapter import create_anthropic_message
         # on_response: rate-limit + credits state live in response headers, which the parsed Message drops.

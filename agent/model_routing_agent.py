@@ -36,6 +36,23 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
             runtime["credential_pool"], [])
 
 
+def begin_recovery_episode(agent):
+    """Reset turn-local attempts, without reallocating a sticky class route.
+
+    Return true when the primary is already active and needs no restoration.
+    Pool cooldowns remain authoritative even though previous attempts are reset.
+    """
+    if getattr(agent, "model_routing", None):
+        agent._model_routing_failed = set()
+    if agent._fallback_activated:
+        return False
+    from agent.agent_runtime_helpers import _revert_credential_rotation
+    # Even failed fallback walks advance the legacy index; reset at the next turn.
+    agent._fallback_index = 0
+    _revert_credential_rotation(agent)
+    return True
+
+
 def try_class_fallback(agent):
     """Called only at the existing failed-request recovery boundary, never per tool.
 

@@ -61,6 +61,42 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
             continue
 
 
+def refresh_class_anthropic_token(agent):
+    """Refresh within the selected billing pool, never the legacy env-key ladder.
+
+    This resolves credentials only: it neither allocates nor changes the sticky
+    provider/model. Native pool resolution retains refresh-grant ownership.
+    """
+    from agent.credential_pool import load_pool
+    from hermes_cli.runtime_provider import _resolve_runtime_from_pool_entry
+
+    metadata = agent.model_routing
+    pool = load_pool("anthropic", allowed_auth_types=
+                     {"oauth"} if metadata["billing_group"] == "subscription" else None)
+    entry = pool.select(model=agent.model)
+    if entry is None:
+        return None
+    runtime = _resolve_runtime_from_pool_entry(
+        provider="anthropic", entry=entry,
+        model_cfg={"provider": "anthropic", "default": agent.model},
+        pool=pool, requested_provider="anthropic", target_model=agent.model)
+    verify_class_runtime(runtime, metadata)
+    agent._credential_pool = pool
+    return runtime["api_key"]
+
+
+def verify_agent_class_credentials(agent):
+    """Recheck the actual native credential immediately before client checkout."""
+    metadata = getattr(agent, "model_routing", None)
+    if metadata:
+        verify_class_runtime({
+            "provider": agent.provider, "api_mode": agent.api_mode,
+            "api_key": agent._anthropic_api_key,
+            "base_url": agent._anthropic_base_url,
+            "credential_pool": agent._credential_pool,
+        }, metadata)
+
+
 def verify_class_runtime(runtime, metadata):
     """Check the actual credential/transport, not only manifest labels."""
     from hermes_cli.auth import DEFAULT_CODEX_BASE_URL, DEFAULT_XAI_OAUTH_BASE_URL

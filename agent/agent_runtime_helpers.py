@@ -1449,11 +1449,8 @@ def _primary_quota_reopened_early(agent, primary_provider, primary_model, matche
 def restore_primary_runtime(agent) -> bool:
     """Restore the primary runtime at the start of a new turn so fallback stays turn-scoped
     (long-lived CLI agents and the gateway's cached agents)."""
-    if not agent._fallback_activated:
-        # Reset the index even without activation: a failed _try_activate_fallback() can strand
-        # _fallback_index past the chain end and silently block future fallbacks (#20465).
-        agent._fallback_index = 0
-        _revert_credential_rotation(agent)
+    from agent.model_routing_agent import begin_recovery_episode
+    if begin_recovery_episode(agent):
         return False
     rt = agent._primary_runtime
     primary_provider = str((rt or {}).get("provider") or "").strip().lower()
