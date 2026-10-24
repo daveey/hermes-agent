@@ -30,6 +30,7 @@ from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 from hermes_cli import kanban_db_dispatch_guard_notice as _guard_notice
 from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as _guard_hold_started_at
 from hermes_cli import kanban_db_dispatch_quota as _kbq
+from hermes_cli import kanban_worker_scope as _worker_scope
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -1134,7 +1135,7 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
     lines = []
     for ln in raw.splitlines():
         ln = _LOG_CHROME.sub("", ln).strip()
-        if ln and not ln.startswith(_log_noise_prefixes()):
+        if ln and not ln.startswith((*_log_noise_prefixes(), _worker_scope.SNAPSHOT_PREFIX)):
             lines.append(ln)
     return " ".join(lines)[-400:]
 
@@ -1156,6 +1157,8 @@ class _DeadWorker:
 
     @property
     def run_outcome(self) -> str:
+        if self.event_kind in {"oom_killed", "signaled"}:
+            return self.kind
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
         # doesn't show a phantom crash for a quota wall.
         return "rate_limited" if self.rate_limited else "crashed"
@@ -1163,6 +1166,7 @@ class _DeadWorker:
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -1170,7 +1174,14 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board)
+    log = _kb.read_worker_log(task_id, tail_bytes=4000, board=board) if task_id and run_id else ""
+    failure = _worker_scope.read_failure(task_id, run_id, log or "") if task_id else None
+    if failure:
+        kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
+        dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
+                           {"pid": pid, "claimer": claimer, **failure})
+    else:
+        dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board)
     if task_id and not dead.rate_limited:
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
@@ -1265,7 +1276,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee "
+            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, current_run_id "
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
@@ -1283,7 +1294,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 continue
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
+            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board,
+                                         run_id=row["current_run_id"])
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1423,6 +1435,8 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     sweep = _reclaim_dead_workers(conn, board=board)
     # Outside the main txn: account each crash and maybe trip the breaker.
     auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
+    for _, _, _, dead in sweep.crash_details:
+        _worker_scope.release_failure(dead.event_payload)
     # Side-channel attributes keep the public ``list[str]`` return stable;
     # ``dispatch_once`` reads them to populate ``DispatchResult``. Rate-limited
     # requeues did NOT count a failure and are NOT crashes.
@@ -1435,22 +1449,7 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
         for hook_fields in sweep.exited_hook_payloads:
             hook_fields = dict(hook_fields)
             _kb._fire_kanban_lifecycle_hook(
-                # Kanban worker-lifecycle, task-mutation, and dispatcher-tick observers (RFC #58548,
-                # accepted as the design basis in the #64231 batch disposition; on_kanban_dispatch_tick is
-                # the re-port of PR #56066). All five are observers only: return values are ignored, and
-                # every fire site is fully best-effort, so a broken callback can never break dispatch or a
-                # task mutation. Cost rule: every call site short-circuits on has_hook(), so when nothing
-                # subscribes no payload is built and the hot paths (each dispatcher tick, each task write)
-                # pay one dict probe. WHICH PROCESS: worker spawn/exit/stale-claim and the dispatch tick
-                # fire in the DISPATCHER process (gateway-embedded dispatcher or ``hermes kanban
-                # dispatch``); on_kanban_task_updated fires in whichever process committed the mutation
-                # (CLI, worker, or the gateway-embedded dashboard API). Common kwargs (task-scoped hooks):
-                # task_id: str, profile_name: str, board: str | None, assignee: str | None, run_id: int |
-                # None. on_kanban_worker_spawned fires after ``spawn_fn`` returns AND the worker PID (when
-                # one was reported) is durably persisted, per the RFC timing contract; like
-                # kanban_task_claimed it runs inside the board's dispatch lock, so callbacks must stay fast.
-                # Adds: worker_pid: int | None, workspace_path: str. Privacy: workspace_path is a filesystem
-                # path and may reveal project layout or usernames.
+                # Best-effort observer in the dispatcher, after durable accounting.
                 "on_kanban_worker_exited",
                 hook_fields.pop("task_id"),
                 board=_board,
@@ -3005,12 +3004,12 @@ def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
             )
         return command
 
-    return restart_safe_gateway_child_argv(
+    return _worker_scope.retain_failed_scope(restart_safe_gateway_child_argv(
         command,
         unit_suffix=f"kanban-{task.id}-run-{task.current_run_id}",
         require_restart_safe_scope=True,
         outlives_parent=True,
-    ).argv
+    ).argv)
 
 
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:

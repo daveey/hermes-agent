@@ -639,7 +639,17 @@ That final terminal board call (`kanban_complete` / `kanban_request_review` /
 is part of the worker
 protocol. If the worker process exits with status 0 while the task is still
 `running`, the dispatcher treats that as a protocol violation and emits a
-`protocol_violation` event. A dispatcher-spawned worker whose turn failed
+`protocol_violation` event, unless the worker's systemd scope records an OOM
+or signal death. Scope `oom-kill` is recorded as `oom_killed`, and `signal` as
+`signaled`, even when the agent handled SIGTERM and exited 0. These consume the
+existing crash retry budget, not the protocol-violation budget. Run metadata and
+the next worker's context carry the memory limit, peak, and remedy. Failed scopes
+are retained until the reaper commits the diagnosis, then reset for collection.
+Workers also snapshot cgroup memory counters on exit: older systemd releases do
+not retain peak memory after cgroup deletion. If the worker itself takes SIGKILL
+and systemd cannot report a peak, it is explicitly `unknown`, never estimated.
+
+A dispatcher-spawned worker whose turn failed
 therefore exits non-zero: `1` for an ordinary failure, `75`
 (`EX_TEMPFAIL`) when the provider was rate-limited, overloaded, returning
 5xx or timing out, or the account hit a billing/quota wall — the dispatcher records that run as `rate_limited` and
