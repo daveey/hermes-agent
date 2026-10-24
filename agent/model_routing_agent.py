@@ -137,7 +137,8 @@ def try_class_fallback(agent):
 
 def link_compression_route(agent, parent_session_id, child_session_id):
     """Only compression publication/adoption may join main-agent allocations."""
-    if not getattr(agent, "model_routing", None):
+    from agent.agent_runtime_once import standing_runtime
+    if not getattr(standing_runtime(agent), "model_routing", None):
         return
     from agent.model_routing_state import RoutingState
     from hermes_constants import get_hermes_home
