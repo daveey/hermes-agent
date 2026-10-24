@@ -1547,6 +1547,8 @@ class _CodexCompletionsAdapter:
 
     def create(self, **kwargs) -> Any:
         from hermes_cli.providers import is_actual_route
+        from agent.model_routing_auxiliary_guard import verify_adapter_request
+        verify_adapter_request(self._client, kwargs)
 
         if is_actual_route(
             getattr(self._client, "_hermes_aux_effective_provider", ""),
@@ -1672,28 +1674,6 @@ class AsyncCodexAuxiliaryClient(_AsyncAuxiliaryClientBase):
     pass
 
 
-def _translate_anthropic_response_format(anthropic_kwargs: dict[str, Any], response_format: Any) -> None:
-    """Merge an OpenAI response format into Anthropic ``output_config``."""
-    if not isinstance(response_format, dict):
-        return
-    format_type = response_format.get("type")
-    if format_type == "json_schema":
-        json_schema = response_format.get("json_schema")
-        if not isinstance(json_schema, dict) or "schema" not in json_schema:
-            return
-        schema = json_schema["schema"]
-    elif format_type == "json_object":
-        # Anthropic SDK has no schema-less JSON mode; only ``json_schema``.
-        schema = {"type": "object"}
-    else:
-        return
-    output_config = anthropic_kwargs.get("output_config")
-    if not isinstance(output_config, dict):
-        output_config = {}
-        anthropic_kwargs["output_config"] = output_config
-    output_config["format"] = {"type": "json_schema", "schema": schema}
-
-
 class _AnthropicCompletionsAdapter:
     """OpenAI-client-compatible adapter for Anthropic Messages API."""
 
@@ -1715,6 +1695,9 @@ class _AnthropicCompletionsAdapter:
     def create(self, **kwargs) -> Any:
         from agent.anthropic_adapter import build_anthropic_kwargs, create_anthropic_message
         from agent.transports import get_transport
+        from agent.auxiliary_wire import translate_anthropic_response_format
+        from agent.model_routing_auxiliary_guard import verify_adapter_request
+        verify_adapter_request(self._client, kwargs)
         model = kwargs.get("model", self._model)
         # ZAI's Anthropic endpoint rejects max_tokens on vision models (code 1210);
         # callers signal this via _skip_zai_max_tokens.
@@ -1770,10 +1753,10 @@ class _AnthropicCompletionsAdapter:
         # contract silently became prompt compliance (#85626 review, point 2).
         top_level_response_format = kwargs.get("response_format")
         if top_level_response_format is not None:
-            _translate_anthropic_response_format(anthropic_kwargs, top_level_response_format)
+            translate_anthropic_response_format(anthropic_kwargs, top_level_response_format)
         caller_extra_body = kwargs.get("extra_body")
         if caller_extra_body and isinstance(caller_extra_body, dict):
-            _translate_anthropic_response_format(anthropic_kwargs, caller_extra_body.get("response_format"))
+            translate_anthropic_response_format(anthropic_kwargs, caller_extra_body.get("response_format"))
             passthrough = {
                 k: v for k, v in caller_extra_body.items()
                 if k not in {"reasoning", "response_format"} and not str(k).startswith("_")
@@ -2626,6 +2609,8 @@ def _relay_sync_completion(
 ) -> Any:
     from agent.auxiliary_wire import prepare_chat_messages
 
+    from agent.model_routing_managed import verify_managed_auxiliary
+    verify_managed_auxiliary(client, kwargs, provider)
     kwargs = prepare_chat_messages(client, kwargs)
     # The progress hook is installed per TASK, so every attempt (retries, recovery rungs, fallbacks)
     # must stream through _create_with_progress or the compression watchdog sees silence (#98466).
@@ -2665,6 +2650,8 @@ async def _relay_async_completion(
 ) -> Any:
     from agent.auxiliary_wire import prepare_chat_messages
 
+    from agent.model_routing_managed import verify_managed_auxiliary
+    verify_managed_auxiliary(client, kwargs, provider)
     kwargs = prepare_chat_messages(client, kwargs)
     # Async twin of the seam default above (#98466).
     callback = create or (lambda request: _acreate_with_progress(client, request))
@@ -2694,6 +2681,8 @@ def _relay_sync_stream(
 ) -> Any:
     from agent.auxiliary_wire import prepare_chat_messages
 
+    from agent.model_routing_managed import verify_managed_auxiliary
+    verify_managed_auxiliary(client, kwargs, provider)
     kwargs = prepare_chat_messages(client, kwargs)
     # The bypass runs inside the provider callback, AFTER Relay has seen (and possibly
     # rewritten) the real conversation; applying it to `kwargs` would hand Relay an empty one.

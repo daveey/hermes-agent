@@ -13,9 +13,10 @@ def class_session_runtime(runner, model, override, source, user_config, session_
 
     channel = channel_override(runner, source)
     if not override:
-        restored = stored_class(runner, session_key)
+        restored = stored_route(runner, session_key)
         if restored:
-            return restored, {"provider": "auto", "requested_provider": "auto"}
+            selected_model, selected_provider = restored
+            return selected_model, {"provider": selected_provider, "requested_provider": selected_provider}
     candidate = (override or {}).get("model") or (channel.model if channel else None) or model
     if not (is_class_selector(candidate) or is_class_selector(model)):
         return None
@@ -36,8 +37,13 @@ def class_session_runtime(runner, model, override, source, user_config, session_
 
 
 def stored_class(runner, session_key):
+    restored = stored_route(runner, session_key)
+    return restored[0] if restored else None
+
+
+def stored_route(runner, session_key):
     """Resume class provenance, not a new global/channel default, after restart."""
-    import json
+    from agent.model_routing_restore import restore_route
     store = getattr(runner, "session_store", None)
     entry = getattr(store, "_entries", {}).get(session_key) if session_key else None
     db = getattr(runner, "_session_db", None)
@@ -47,17 +53,7 @@ def stored_class(runner, session_key):
     row = db.get_session(entry.session_id)
     if not isinstance(row, dict):
         return None
-    config = row.get("model_config") or {}
-    if isinstance(config, str):
-        try:
-            config = json.loads(config)
-        except (ValueError, TypeError):
-            return None
-    metadata = config.get("model_routing") if isinstance(config, dict) else None
-    if (isinstance(metadata, dict) and metadata.get("requested_class") in {"deep", "standard", "fast"}
-            and metadata.get("selected_model") == row.get("model")):
-        return "class:" + metadata["requested_class"]
-    return None
+    return restore_route(row.get("model"), row.get("model_config"))
 
 
 def class_context_length(model, *, config=None, runner=None, session_key=None, provider="auto"):

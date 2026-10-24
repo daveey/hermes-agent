@@ -35,14 +35,13 @@ def probe_class_runtime(model, provider, config):
 
 
 def restore_class_overrides(model, config, overrides):
-    route = config.get("model_routing")
-    if not isinstance(route, dict) or route.get("selected_model") != model:
+    from agent.model_routing_restore import restore_route
+    restored = restore_route(model, config)
+    if restored is None:
         return overrides
-    level = route.get("requested_class")
-    if level not in ("deep", "standard", "fast"):
-        return overrides
-    overrides["model_override"] = {"model": f"class:{level}", "provider": "auto"}
-    overrides["provider_override"] = "auto"
+    model, provider = restored
+    overrides["model_override"] = {"model": model, "provider": provider}
+    overrides["provider_override"] = provider
     return overrides
 
 

@@ -18,6 +18,7 @@ LEGACY_VERCEL_RUNTIME = "node24"  # the seeded pre-49 default, never a user choi
 
 
 from hermes_cli.config_defaults_aux import auxiliary_defaults as _aux
+from hermes_cli.config_defaults_routing import routing_defaults
 
 
 DEFAULT_CONFIG = {
@@ -26,12 +27,7 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     # Opt-in class selectors; exact pins retain legacy behavior. Empty manifests
     # fail closed. Eligibility/funding attestations are host-specific, not keys.
-    "model_routing": {
-        "enabled": False,
-        "policy_version": 1,
-        "allow_metered": False,
-        "routes": {"deep": [], "standard": [], "fast": []},
-    },
+    "model_routing": routing_defaults(),
     # min_switch_reset_seconds: opt-in (0 = off). When a rate-limited primary declares a reset
     # sooner than this many seconds, stay on it (the retry backoff rides out the window) instead
     # of switching the turn to a fallback model.

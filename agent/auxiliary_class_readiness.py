@@ -48,13 +48,13 @@ def class_readiness(callback):
         request = _class_request(task or None, {'main_runtime': main_runtime})
         if request is None:
             return callback(task, main_runtime=main_runtime)
-        model, _, requirements = request
+        model, _, requirements, config, declared_model = request
         # Availability checks neither consume round-robin slots nor create sticky
         # sessions. Re-check the actual request at create() time, including images,
         # tools and context, rather than trusting this earlier readiness result.
-        resolve_class_runtime(model, 'auto', session_id='aux-readiness',
+        resolve_class_runtime(model, 'auto', config=config, session_id='aux-readiness',
                               requirements=requirements, state_path=':memory:')
-        return DeferredClassClient(task or None, model, main_runtime), model
+        return DeferredClassClient(task or None, declared_model, main_runtime), declared_model
     return wrapped
 
 
@@ -75,11 +75,11 @@ def class_direct_resolver(callback):
             return callback(*args, **kwargs)
         if options.get('raw_codex'):
             raise ModelRoutingError('Class clients require normalized completions, not raw provider access')
-        model, _, requirements = request
-        resolve_class_runtime(model, 'auto', session_id='aux-readiness',
+        model, _, requirements, config, declared_model = request
+        resolve_class_runtime(model, 'auto', config=config, session_id='aux-readiness',
                               requirements=requirements, state_path=':memory:')
-        client = DeferredClassClient(task, model, options.get('main_runtime'), options.get('async_mode', False))
+        client = DeferredClassClient(task, declared_model, options.get('main_runtime'), options.get('async_mode', False))
         # Provider is deliberately unresolved until create knows the request's
         # capabilities; the concrete route is recorded by the shared allocator.
-        return ('auto', client, model) if vision_resolver else (client, model)
+        return ('auto', client, declared_model) if vision_resolver else (client, declared_model)
     return wrapped

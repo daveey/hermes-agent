@@ -12,7 +12,8 @@ class RoutingState:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def allocate(self, session_id, parent_session_id, level, candidates, version, excluded, prepare=None):
+    def allocate(self, session_id, parent_session_id, level, candidates, version, excluded, prepare=None,
+                 exact_pin=False, replace=False):
         """Allocate and persist atomically; aliases share one failover decision."""
         with closing(sqlite3.connect(self.path, timeout=30, isolation_level=None)) as db:
             db.execute("PRAGMA busy_timeout=30000")
@@ -22,7 +23,8 @@ class RoutingState:
             db.execute("CREATE TABLE IF NOT EXISTS counters (pool TEXT PRIMARY KEY, position INTEGER NOT NULL)")
             db.execute("BEGIN IMMEDIATE")
             try:
-                result = self._allocate(db, session_id, parent_session_id, level, candidates, version, excluded)
+                result = self._allocate(db, session_id, parent_session_id, level, candidates, version, excluded,
+                                        exact_pin, replace)
                 # Credentials/client must be usable before another process can
                 # observe the replacement. Failure rolls back counters as well.
                 if prepare is not None:
@@ -67,12 +69,12 @@ class RoutingState:
                 db.execute("ROLLBACK")
                 raise
 
-    def _allocate(self, db, session, parent, level, candidates, version, excluded):
+    def _allocate(self, db, session, parent, level, candidates, version, excluded, exact_pin=False, replace=False):
         from agent.model_routing import ModelRoutingError
 
         root = self._root(db, session, parent)
         row = db.execute("SELECT metadata FROM routes WHERE root=? AND class=?", (root, level)).fetchone()
-        if row:
+        if row and not replace:
             previous = json.loads(row[0])
             identity = previous["selected_provider"], previous["selected_model"]
             allowed = any((r["provider"], r["model"]) == identity and
@@ -80,13 +82,23 @@ class RoutingState:
             if identity not in excluded:
                 if not allowed:
                     raise ModelRoutingError("Sticky route is no longer eligible; explicit failure selection required")
+                if exact_pin and not previous.get("exact_pin"):
+                    previous["exact_pin"] = True
+                    db.execute("UPDATE routes SET metadata=? WHERE root=? AND class=?",
+                               (json.dumps(previous), root, level))
                 return previous
+            if previous.get("exact_pin"):
+                raise ModelRoutingError("Exact pinned route cannot fail over")
         if not candidates:
             raise ModelRoutingError(f"No eligible {level} routes under billing/capability policy")
         route = self._choose(db, level, candidates, version)
         metadata = {"requested_class": level, "policy_version": version,
                     "selected_provider": route["provider"], "selected_model": route["model"],
                     "billing_group": route["billing"], "reason": "same-class-failover" if row else "allocation"}
+        if exact_pin:
+            metadata["exact_pin"] = True
+        if replace:
+            metadata["reason"] = "explicit-switch"
         db.execute("INSERT OR REPLACE INTO routes VALUES (?, ?, ?)", (root, level, json.dumps(metadata)))
         return metadata
 

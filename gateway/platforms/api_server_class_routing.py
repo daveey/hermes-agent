@@ -8,21 +8,18 @@ def deferred_runtime(model, provider=None):
     return {"provider": provider or "auto", "requested_provider": provider or "auto"}
 
 
-def restore_session_class(adapter, session_id, session_model, confirmed_runtime_lock):
-    """A concrete persisted selection is not an explicit pin when it carries class provenance."""
+def restore_session_route(adapter, session_id, session_model, confirmed_runtime_lock):
+    """Restore the persisted selector and provider without widening exact pins."""
+    from agent.model_routing_restore import restore_route
     if not session_id or confirmed_runtime_lock:
-        return session_model
+        return None
     db = adapter._ensure_session_db()
     row = db.get_session(session_id) if db is not None else None
     if not isinstance(row, dict):
-        return session_model
-    config = adapter._parse_session_model_config(row.get("model_config"))
-    metadata = config.get("model_routing") or {}
-    if (metadata.get("selected_model") == row.get("model")
-            and metadata.get("requested_class") in {"deep", "standard", "fast"}
-            and (not session_model or session_model == row.get("model"))):
-        return "class:" + metadata["requested_class"]
-    return session_model
+        return None
+    if session_model and session_model != row.get("model"):
+        return None
+    return restore_route(row.get("model"), row.get("model_config"))
 
 
 def initial_runtime(adapter, *, default_model, requested_model,
@@ -49,13 +46,17 @@ def prepare_runtime(adapter, session_id, session_model, confirmed_runtime_lock,
                     requested_model, route, gateway_session_key):
     from gateway.run import _resolve_gateway_model
     from gateway.platforms.api_server import _ProviderAuthResolutionError
-    session_model = restore_session_class(adapter, session_id, session_model, confirmed_runtime_lock)
+    restored = restore_session_route(adapter, session_id, session_model, confirmed_runtime_lock)
+    session_model = restored[0] if restored else session_model
     model = _resolve_gateway_model()
     try:
-        runtime = initial_runtime(
-            adapter, default_model=model, requested_model=requested_model, route=route,
-            session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
-            session_key=gateway_session_key or session_id)
+        if restored and not adapter._session_model_override_for(gateway_session_key or session_id):
+            runtime = {"provider": restored[1], "requested_provider": restored[1]}
+        else:
+            runtime = initial_runtime(
+                adapter, default_model=model, requested_model=requested_model, route=route,
+                session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
+                session_key=gateway_session_key or session_id)
     except RuntimeError as exc:
         raise _ProviderAuthResolutionError(str(exc)) from exc
     model = runtime.pop("model", None) or model

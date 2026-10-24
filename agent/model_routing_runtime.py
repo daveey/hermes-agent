@@ -6,7 +6,7 @@ from agent.model_routing import ModelRoutingError, resolve_model_route
 
 def resolve_class_runtime(model, provider, *, config=None, session_id=None,
                           parent_session_id=None, requirements=None, excluded=(), state_path=None,
-                          prepare_runtime=None):
+                          prepare_runtime=None, exact_pin=False, replace=False):
     from agent.credential_pool import load_pool
     from hermes_cli import runtime_provider as runtime
 
@@ -55,7 +55,8 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         try:
             resolve_model_route(model, provider, config=config, session_id=session_id,
                                 parent_session_id=parent_session_id, requirements=requirements,
-                                excluded=failed, eligible=eligible, state_path=state_path, prepare=prepare)
+                                excluded=failed, eligible=eligible, state_path=state_path, prepare=prepare,
+                                exact_pin=exact_pin, replace=replace)
             return resolved
         except UnavailableCredential:
             continue
@@ -85,6 +86,23 @@ def refresh_class_anthropic_token(agent):
     return runtime["api_key"]
 
 
+def refresh_class_responses_token(agent):
+    """Refresh only the active OAuth pool entry; never consult a singleton fallback."""
+    from hermes_cli.runtime_provider import _resolve_runtime_from_pool_entry
+    pool = agent._credential_pool
+    entry = pool.try_refresh_current() if pool else None
+    if entry is None:
+        return False
+    runtime = _resolve_runtime_from_pool_entry(
+        provider=agent.provider, entry=entry, model_cfg={"default": agent.model, "provider": agent.provider},
+        pool=pool, requested_provider=agent.provider, target_model=agent.model)
+    verify_class_runtime(runtime, agent.model_routing)
+    if runtime['api_key'] == agent.api_key:
+        return False
+    return agent._adopt_openai_credentials(runtime['api_key'], runtime['base_url'],
+                                            reason='class_oauth_refresh')
+
+
 def verify_agent_class_credentials(agent):
     """Recheck the actual native credential immediately before client checkout."""
     metadata = getattr(agent, "model_routing", None)
@@ -110,6 +128,9 @@ def verify_class_runtime(runtime, metadata):
     entry = pool.current() if pool else None
     if entry is None or entry.auth_type != "oauth":
         raise ModelRoutingError("Subscription routing requires an OAuth credential, never a paid API key")
+    from hermes_cli.runtime_provider import _pool_entry_api_key
+    if runtime["api_key"] != _pool_entry_api_key(entry):
+        raise ModelRoutingError("Subscription credential differs from the selected OAuth token in the pool entry")
     expected = {
         "anthropic": ("api.anthropic.com", "anthropic_messages"),
         "openai-codex": (base_url_hostname(DEFAULT_CODEX_BASE_URL), "codex_responses"),

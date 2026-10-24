@@ -40,6 +40,8 @@ def validate_class_request(agent, request, *, streaming):
     Capability failures are explicit rather than discarding images or changing the
     model halfway through a tool round. Failure recovery retains these requirements.
     """
+    from agent.model_routing_managed import verify_managed_agent
+    verify_managed_agent(agent, request)
     metadata = getattr(agent, "model_routing", None)
     if not metadata:
         return

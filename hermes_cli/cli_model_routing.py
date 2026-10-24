@@ -3,7 +3,6 @@
 Keep the selector on the shell, concrete route on the agent. Reconstructing an
 agent from a bare concrete model would lose the subscription-only failure fence.
 """
-import json
 import logging
 import sys
 
@@ -72,18 +71,10 @@ def skip_or_restore_class(cli, session_meta):
 def restore_class_route(cli, session_meta):
     if getattr(cli, "_explicit_model_override", False):
         return False
-    config = session_meta.get("model_config") or {}
-    if isinstance(config, str):
-        try:
-            config = json.loads(config)
-        except (ValueError, TypeError):
-            return False
-    metadata = config.get("model_routing") if isinstance(config, dict) else None
-    if not isinstance(metadata, dict) or metadata.get("selected_model") != session_meta.get("model"):
+    from agent.model_routing_restore import restore_route
+    restored = restore_route(session_meta.get("model"), session_meta.get("model_config"))
+    if restored is None:
         return False
-    selector = "class:" + str(metadata.get("requested_class", ""))
-    if not is_class_selector(selector):
-        return False
-    cli.model, cli.requested_provider = selector, "auto"
+    cli.model, cli.requested_provider = restored
     cli._explicit_api_key = cli._explicit_base_url = None
     return True

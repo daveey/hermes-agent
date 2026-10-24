@@ -39,13 +39,18 @@ def _class_request(task, options):
     task_config = aux._get_auxiliary_task_config(task) if task else {}
     runtime = aux._normalize_main_runtime(options.get("main_runtime"))
     requested = _requested_model(task_config, options, runtime)
-    if not is_class_selector(requested):
+    from agent.model_routing_managed import managed_config, pin_policy
+    config = managed_config()
+    if not is_class_selector(requested) and config is None:
         return None
     provider, model, base, key, mode = aux._resolve_task_provider_model(
         task, options.get("provider"), requested,
         options.get("base_url"), options.get("api_key"))
-    if not is_class_selector(model):
-        return None
+    declared_model = model
+    pinned = not is_class_selector(model)
+    if pinned:
+        level, config = pin_policy(model, provider, config)
+        model, provider = "class:" + level, "auto"
     overrides = (base, key, mode, options.get("api_mode"), options.get("api_key"),
                  task_config.get("base_url"), task_config.get("api_key"),
                  task_config.get("key_env"), task_config.get("api_key_env"))
@@ -61,9 +66,9 @@ def _class_request(task, options):
     owner = runtime.get("session_id") or str(uuid4())
     # Separate side jobs from the main allocation; retries/restarts of a named
     # session's same task reuse its durable route without pinning unrelated jobs.
-    identity = f"aux:{owner}:{task or 'call'}:{model}"
+    identity = f"aux:{owner}:{task or 'call'}:{declared_model}"
     requirements = _requirements(task, options, extra)
-    return model, identity, requirements
+    return model, identity, requirements, config, declared_model
 
 
 def _requirements(task, options, extra):
@@ -109,10 +114,13 @@ def _client(runtime):
 
 def _prepare(task, options, request, failed):
     from agent import auxiliary_client as aux
-    model, identity, requirements = request
-    runtime = resolve_class_runtime(model, "auto", session_id=identity,
+    model, identity, requirements, config, _ = request
+    runtime = resolve_class_runtime(model, "auto", config=config, session_id=identity,
                                     requirements=requirements, excluded=failed)
     client = _client(runtime)
+    client._managed_subscription_runtime = runtime
+    if hasattr(client, "_real_client"):
+        client._real_client._managed_subscription_runtime = runtime
     extra = aux._get_task_extra_body(task)
     extra.update(options.get("extra_body") or {})
     kwargs = aux._build_call_kwargs(
@@ -223,6 +231,7 @@ def class_routed_async(callback):
         while True:
             runtime, sync_client, kwargs = _prepare(task, options, request, failed)
             client, _ = aux._to_async_client(sync_client, runtime["model"])
+            client._managed_subscription_runtime = runtime
             try:
                 async def create(request_kwargs):
                     return await aux._acreate_with_progress(

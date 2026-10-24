@@ -55,6 +55,8 @@ def validate_policy(policy):
         raise ModelRoutingError("model_routing must be a mapping")
     if type(policy.get("enabled", False)) is not bool or type(policy.get("allow_metered", False)) is not bool:
         raise ModelRoutingError("model_routing enabled/allow_metered must be boolean")
+    if type(policy.get("enforce_subscription_only", False)) is not bool:
+        raise ModelRoutingError("model_routing enforce_subscription_only must be boolean")
     if type(policy.get("policy_version", 1)) is not int or policy.get("policy_version", 1) != 1:
         raise ModelRoutingError("Unsupported model_routing policy_version")
     routes = policy.get("routes", {})
@@ -96,13 +98,14 @@ def eligible_routes(policy, level, requirements=None, excluded=(), eligible=None
             if r.get("eligible") is True and r.get("funding_verified") is True
             and (r["provider"], r["model"]) not in excluded
             and _capable(r, requirements or {})
-            and (r["billing"] == "subscription" or policy.get("allow_metered", False))
+            and (r["billing"] == "subscription" or
+                 (policy.get("allow_metered", False) and not policy.get("enforce_subscription_only", False)))
             and (eligible is None or eligible(r))]
 
 
 def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
                         parent_session_id=None, requirements=None, excluded=(), state_path=None,
-                        eligible=None, prepare=None):
+                        eligible=None, prepare=None, exact_pin=False, replace=False):
     """Return concrete model/provider and durable metadata, or unchanged exact pin.
 
     ``excluded`` is a sequence of failed (provider, model) pairs for a new attempt,
@@ -110,6 +113,10 @@ def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
     permissible after ModelRoutingError. Caller must validate actual credentials.
     """
     if not is_class_selector(model):
+        from agent.model_routing_managed import managed_config, pin_policy
+        managed = managed_config(config)
+        if managed is not None:
+            pin_policy(model, provider, managed)
         return {"model": model, "provider": provider, "metadata": None}
     level = model.removeprefix("class:")
     if level not in CLASSES:
@@ -133,5 +140,6 @@ def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
         from hermes_constants import get_hermes_home
         state_path = get_hermes_home() / "model-routing.sqlite3"
     metadata = RoutingState(state_path).allocate(session_id, parent_session_id, level,
-                                                routes, policy.get("policy_version", 1), excluded, prepare)
+                                                routes, policy.get("policy_version", 1), excluded, prepare,
+                                                exact_pin=exact_pin, replace=replace)
     return {"model": metadata["selected_model"], "provider": metadata["selected_provider"], "metadata": metadata}

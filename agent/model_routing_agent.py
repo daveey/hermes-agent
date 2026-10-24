@@ -11,14 +11,16 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
     rotated IDs explicitly before exposing its child in SessionDB.
     """
     agent.model_routing = None
-    if not is_class_selector(model):
+    from agent.model_routing_managed import managed_config
+    managed = managed_config()
+    if not is_class_selector(model) and managed is None:
         return (model, provider, session_id, api_key, base_url, api_mode,
                 credential_pool, fallback_model)
     from hermes_state_ids import new_session_id
     from hermes_cli.config_effective import load_user_config_effective
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
-    config = load_user_config_effective()
+    config = managed or load_user_config_effective()
     model_config = config.get("model", {})
     requirements = {"tools": True, "streaming": True}
     if isinstance(model_config, dict) and model_config.get("context_length"):
@@ -26,7 +28,7 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
     session_id = session_id or new_session_id()
     runtime = resolve_runtime_provider(
         requested=provider or "auto", target_model=model,
-        explicit_api_key=api_key, explicit_base_url=base_url,
+        explicit_api_key=None if managed else api_key, explicit_base_url=None if managed else base_url,
         routing_session_id=session_id, routing_config=config,
         routing_requirements=requirements)
     agent.model_routing = runtime["model_routing"]
@@ -68,6 +70,8 @@ def try_class_fallback(agent):
         _reresolve_fallback_reasoning_config, _rescope_fallback_extra_body,
     )
 
+    if agent.model_routing.get("exact_pin"):
+        return False
     failed = getattr(agent, "_model_routing_failed", set())
     failed.add((agent.provider, agent.model))
     agent._model_routing_failed = failed

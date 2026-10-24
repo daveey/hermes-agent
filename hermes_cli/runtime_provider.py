@@ -1013,6 +1013,18 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
     target_model overrides model_cfg["default"] when computing provider-specific api_mode (e.g.
     OpenCode Zen/Go where different models route through different API surfaces)."""
     from agent.model_routing import ModelRoutingError, is_class_selector
+    from agent.model_routing_managed import managed_config, resolve_managed_runtime
+    managed = managed_config(routing_config)
+    if managed is not None and not target_model:
+        model_config = managed.get("model", {})
+        target_model = model_config.get("default") if isinstance(model_config, dict) else model_config
+        if not requested and isinstance(model_config, dict):
+            requested = model_config.get("provider")
+    if managed is not None and not is_class_selector(target_model):
+        if explicit_api_key or explicit_base_url:
+            raise ModelRoutingError("Managed subscription pins cannot override credentials or endpoint")
+        return resolve_managed_runtime(target_model, requested, config=managed,
+                                       session_id=routing_session_id, requirements=routing_requirements)
     if is_class_selector(target_model):
         from agent.model_routing_runtime import resolve_class_runtime
         if explicit_api_key or explicit_base_url:

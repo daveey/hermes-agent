@@ -572,6 +572,9 @@ class ClientLifecycleMixin:
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
             return False
+        if getattr(self, "model_routing", None):
+            from agent.model_routing_runtime import refresh_class_responses_token
+            return refresh_class_responses_token(self)
         # No silent account swap: a non-singleton credential (manual pool entry, explicit api_key=) must not be
         # replaced by the device_code singleton's tokens — the pool's reactive recovery owns that case.
         try:
@@ -1038,6 +1041,8 @@ class ClientLifecycleMixin:
             self._try_refresh_anthropic_client_credentials()
         from agent.model_routing_runtime import verify_agent_class_credentials
         verify_agent_class_credentials(self)
+        from agent.model_routing_managed import verify_main_sdk
+        verify_main_sdk(self, client or self._anthropic_client, api_kwargs)
         # Strips Responses-only kwargs that leak in under an api_mode-flip race.
         from agent.anthropic_adapter import create_anthropic_message
         # on_response: rate-limit + credits state live in response headers, which the parsed Message drops.

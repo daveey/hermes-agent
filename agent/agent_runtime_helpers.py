@@ -2282,7 +2282,7 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
     agent.client = agent._create_openai_client(dict(agent._client_kwargs), reason="switch_model", shared=True)
 
 
-def _swap_switch_runtime(agent, new_model, new_provider, api_key, base_url, api_mode, old_provider, old_norm, new_norm) -> None:
+def _swap_switch_runtime(agent, new_model, new_provider, api_key, base_url, api_mode, old_provider, old_norm, new_norm, managed=None) -> None:
     """Swap identity/transport fields, reload the pool, rebuild the client (rolled back by the caller on error)."""
     # Clear the per-config override so the new model's context window is re-resolved.
     agent._config_context_length = None
@@ -2311,7 +2311,10 @@ def _swap_switch_runtime(agent, new_model, new_provider, api_key, base_url, api_
         agent.api_key = api_key
     # Reload the credential pool on provider change: a pool with a mismatched provider makes
     # recover_with_credential_pool short-circuit. Reload failure is non-fatal.
-    if old_norm != new_norm or getattr(agent, "_credential_pool", None) is None:
+    if managed is not None:
+        agent._credential_pool = managed['credential_pool']
+        agent.model_routing = managed['model_routing']
+    elif old_norm != new_norm or getattr(agent, "_credential_pool", None) is None:
         # A pool bound to the old provider is worse than none: the recovery guard rejects it.
         agent._credential_pool = None
         agent._credential_pool_entry_id = None
@@ -2440,7 +2443,7 @@ def _build_primary_runtime_snapshot(agent, api_mode) -> dict[str, Any]:
     return rt
 
 
-def _finish_switch(agent, new_provider, old_norm, new_norm) -> None:
+def _finish_switch(agent, new_provider, old_norm, new_norm, managed=None) -> None:
     """Post-switch bookkeeping: fallback reset/prune, request_overrides, billing route."""
     agent._fallback_activated = False
     agent._provider_fallback_active = False
@@ -2448,7 +2451,8 @@ def _finish_switch(agent, new_provider, old_norm, new_norm) -> None:
     agent._fallback_index = 0
     agent._credential_pool_revert_id = None
     from agent.model_routing_agent import clear_class_route
-    clear_class_route(agent)
+    if managed is None:
+        clear_class_route(agent)
     fallback_chain = list(getattr(agent, "_fallback_chain", []) or [])
     if old_norm and new_norm and old_norm != new_norm:
         fallback_chain = [
@@ -2464,29 +2468,21 @@ def _finish_switch(agent, new_provider, old_norm, new_norm) -> None:
         logger.debug("switch_model: request_overrides re-derivation failed", exc_info=True)
 
 
-def _persist_switch_billing_route(agent) -> None:
-    """Persist the billing route so dashboard Model cards show the post-switch provider."""
-    # _session_db / session_id may be unset (tests, bare agents).
-    session_db = getattr(agent, "_session_db", None)
-    session_id = getattr(agent, "session_id", None)
-    if session_db is None or not session_id:
-        return
-    try:
-        session_db.update_session_billing_route(
-            session_id, provider=agent.provider, base_url=agent.base_url,
-            billing_mode=getattr(agent, "api_mode", None),
-        )
-    except Exception:
-        logger.warning("Failed to persist billing route after model switch", exc_info=True)
-
-
 def switch_model(
     agent, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None
+):
+    from agent.agent_runtime_switch import switch_runtime
+    return switch_runtime(agent, new_model, new_provider, api_key, base_url, api_mode, capabilities)
+
+
+def _switch_model_runtime(
+    agent, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None, managed=None
 ):
     """Switch the model/provider in-place for a live agent (rebuild clients, caching flags,
     compressor). Mirrors ``_try_activate_fallback()`` but also updates ``_primary_runtime`` so
     the change persists across turns. A failed swap/rebuild rolls back to the pre-switch
     snapshot and re-raises (callers catch)."""
+
     old_model = agent.model
     old_provider = agent.provider
     # ── Reload credential pool for the new provider (issue #52727) ── Without this,
@@ -2503,7 +2499,7 @@ def switch_model(
     snapshot = _snapshot_switch_state(agent)
     try:
         _swap_switch_runtime(
-            agent, new_model, new_provider, api_key, base_url, api_mode, old_provider, old_norm, new_norm
+            agent, new_model, new_provider, api_key, base_url, api_mode, old_provider, old_norm, new_norm, managed
         )
     except Exception:
         _restore_switch_snapshot(agent, snapshot)
@@ -2528,7 +2524,7 @@ def switch_model(
             "switch_model: reasoning_config resolved for %s: %s", agent.model, agent.reasoning_config
         )
     except Exception as _reasoning_err:
-        logger.debug("switch_model: could not re-resolve reasoning_config: %s", _reasoning_err)
+        logger.debug("switch_model: could not re-resolve reasoning_config: %s", _reasoning_err, exc_info=True)
     # Invalidate the cached system prompt so it rebuilds next turn.
     agent._cached_system_prompt = None
     # Publish the destination capability map only after every runtime setup above has succeeded.
@@ -2538,13 +2534,16 @@ def switch_model(
     # short-circuiting the freshly selected healthy provider.
     from agent.chat_completion_helpers import _reset_stale_streak
     _reset_stale_streak(agent)
+    _finish_switch(agent, new_provider, old_norm, new_norm, managed)
+    from agent.model_routing_managed import finish_managed_switch
+    finish_managed_switch(agent, managed)
     agent._primary_runtime = _build_primary_runtime_snapshot(agent, api_mode)
-    _finish_switch(agent, new_provider, old_norm, new_norm)
     logger.info(
         "Model switched in-place: %s (%s) -> %s (%s)",
         old_model, old_provider, new_model, new_provider,
     )
-    _persist_switch_billing_route(agent)
+    from agent.agent_runtime_switch import persist_switch_billing_route
+    persist_switch_billing_route(agent)
 
 
 def _pre_tool_block_message(agent, function_name, function_args, effective_task_id, tool_call_id, middleware_trace):

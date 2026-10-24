@@ -1236,6 +1236,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             raise ValueError(
                 "Actual requests require Chat Completions; refusing to call /responses."
             )
+        from agent.model_routing_managed import verify_main_sdk
+        verify_main_sdk(agent, active_client, next_api_kwargs)
         stream_kwargs = _sanitize_consumer_codex_request(agent, next_api_kwargs)
         stream_kwargs["stream"] = True
         return active_client.responses.create(**bypass_sdk_request_transform(stream_kwargs))
