@@ -106,6 +106,50 @@ def obligations(path: Path, *, gateway: str, profile: str, sessions: list[str]) 
     return result
 
 
+def refresh_observations(path: Path, replica: Path) -> None:
+    """Advance durable observations only from newer, exactly bound owner records.
+
+    Disappearance is not completion. Corrupt/unreadable stores raise to let callers
+    display unknown, rather than returning an empty successful projection. A newer
+    nonterminal publication reopens a previously released obligation.
+    """
+    if not path.is_file() or not replica.is_file():
+        return
+    from hermes_cli.kanban_origin import _ro
+
+    source = _ro(replica)
+    try:
+        with _db(path) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for key, raw, observed in conn.execute(
+                    "SELECT binding_id,binding_json,observation_version FROM origin_obligations").fetchall():
+                binding = json.loads(raw)
+                validate_binding(binding)
+                row = source.execute(
+                    "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
+                    (binding['owner']['gateway'], binding['task_record_key'])).fetchone()
+                if not row or type(row[0]) is not int or row[0] <= observed:
+                    continue
+                task = json.loads(row[1])
+                owner = binding['owner']
+                if (not isinstance(task, dict)
+                        or any(task.get(f) != owner[f] for f in ('gateway', 'profile', 'board'))
+                        or task.get('id') != owner['task_id']):
+                    continue
+                marker = {k: v for k, v in binding.items() if k != 'publication_version'}
+                markers = task.get('origin_bindings')
+                if not isinstance(markers, list) or marker not in [
+                        {k: v for k, v in m.items() if k != 'publication_version'}
+                        for m in markers if isinstance(m, dict)]:
+                    continue
+                released = task.get('status') in ('done', 'archived')
+                conn.execute(
+                    "UPDATE origin_obligations SET task_json=?,observation_version=?,released=? WHERE binding_id=?",
+                    (_json(task), row[0], int(released), key))
+    finally:
+        source.close()
+
+
 def accept_binding(*, path: Path, replica: Path, binding: dict, request_id: str,
                    sender: str, gateway: str, profile: str,
                    resolve_session: Callable[[str], str]) -> dict:
