@@ -79,6 +79,19 @@ def _bulk_ids(verb: str):
 
 
 _TASK_ID = _arg("task_id")
+
+
+def _WAKE_CHECK_ARGS():
+    """Condition-wake flags shared by ``block`` and ``schedule`` (``kanban_wake_check``). [daveey]"""
+    return (
+        _arg("--wake-check", dest="wake_check", default=None,
+             help="Shell probe run while parked (bash -lc, 30 s timeout): exit 0 wakes the card at "
+                  "once, exit 1 = not yet. Required for a park more than 2 h out unless --clock-only."),
+        _arg("--check-every", dest="check_every", type=int, default=None,
+             help="Seconds between --wake-check probes (default 900, min 120, max 21600)"),
+        _arg("--clock-only", dest="clock_only", action="store_true",
+             help="A pure time wait with nothing to probe (soak window, calendar date)"),
+    )
 _TASK_IDS = _arg("task_ids", nargs="+")
 _SLUG = _arg("slug")
 _TENANT = _arg("--tenant", help="Tenant namespace")
@@ -322,11 +335,13 @@ _SPECS = [
                   "blocked for a human; 'transient' marks a maybe-flaky failure. "
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
+        *_WAKE_CHECK_ARGS(),
     ], help="Mark one or more tasks blocked"),
     _cmd("schedule", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason/timing note (also appended as a comment)"),
         _bulk_ids("schedule"),
+        *_WAKE_CHECK_ARGS(),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),

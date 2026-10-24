@@ -818,6 +818,78 @@ def _rule_scheduled_without_wake(task, events, runs, now, cfg) -> list[Diagnosti
     )]
 
 
+def _rule_clock_only_park(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """A ``scheduled`` card waiting more than 2 h on a clock with no ``wake_check`` and no
+    ``clock_only``: parked before condition wakes existed, so a condition that came true
+    early sits unnoticed until the clock (t_9be6b361). [daveey]"""
+    from hermes_cli import kanban_continuation as kc
+    from hermes_cli.kanban_wake_check import GUARD_SECONDS
+
+    if _task_field(task, "status") != "scheduled" or cfg.get("_wake_check"):
+        return []
+    ev = _latest_parking_event(events)
+    if ev is None:
+        return []
+    payload = _parse_payload(ev)
+    if kc.pending_wake_payload(_event_kind(ev), payload) is None:
+        return []
+    if payload.get("wake_check") or payload.get("clock_only"):
+        return []
+    wake_at = int(payload["wake_at"])
+    if wake_at - now <= GUARD_SECONDS:
+        return []
+    task_id = str(_task_field(task, "id") or "")
+    left = (wake_at - now) / 3600
+    return [Diagnostic(
+        kind="clock_only_park", severity="warning",
+        title=f"Parked {left:.1f}h behind a clock with no wake check",
+        detail=("This card waits on a clock with no wake_check probe and was not marked "
+                "clock_only. If it waits on a readable fact (a DB row, a tag, a file, a log line), "
+                "re-park it with a wake_check so it wakes when the fact turns true; if it waits on "
+                "another card, link it as a parent instead."),
+        actions=[_cli_hint("Re-park with a probe",
+                           f"hermes kanban schedule {task_id} --wake-check '<cmd: exit 0 when ready>'",
+                           suggested=True)],
+        first_seen_at=_event_ts(ev), last_seen_at=_event_ts(ev), count=1,
+        data={"wake_at": wake_at},
+    )]
+
+
+def _rule_wake_check_health(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """A parked card's ``wake_check`` that is failing (not exit 0/1), or has not run long after
+    it was due (dispatcher down or probe pool wedged). [daveey]"""
+    state = cfg.get("_wake_check")
+    if not state or _task_field(task, "status") != "scheduled":
+        return []
+    task_id = str(_task_field(task, "id") or "")
+    out: list[Diagnostic] = []
+    fails = int(state.get("fails") or 0)
+    if fails:
+        out.append(Diagnostic(
+            kind="wake_check_failing", severity="warning",
+            title=f"Wake check failing ({fails} in a row, rc {state.get('last_rc')})",
+            detail=(f"The probe `{state.get('cmd')}` exited with neither 0 nor 1. After 3 failures "
+                    f"in a row the card wakes so a worker can fix it. Last output: "
+                    f"{(state.get('last_out') or '(none)')[-200:]}"),
+            actions=[_cli_hint("Inspect the card", f"hermes kanban show {task_id}", suggested=True)],
+            first_seen_at=state.get("last_at") or now, last_seen_at=state.get("last_at") or now,
+            count=fails, data={"cmd": state.get("cmd"), "last_rc": state.get("last_rc")},
+        ))
+    late = now - int(state.get("next_at") or now)
+    grace = max(600, int(state.get("every") or 0))
+    if late > grace:
+        out.append(Diagnostic(
+            kind="wake_check_overdue", severity="error",
+            title=f"Wake check {late // 60}m overdue",
+            detail=("The probe was due but has not run. Check that the dispatcher is running "
+                    "(`hermes kanban diagnostics`), or resume the task now."),
+            actions=[DiagnosticAction(kind="unblock", label="Resume the task now", suggested=True)],
+            first_seen_at=int(state["next_at"]), last_seen_at=int(state["next_at"]), count=1,
+            data={"next_at": state.get("next_at"), "late_seconds": late},
+        ))
+    return out
+
+
 def _block_loop_ask(events) -> Optional[str]:
     """Reason of the newest ``block_loop_detected`` event with no human input after it."""
     latest = None
@@ -892,6 +964,8 @@ _RULES: list[RuleFn] = [
     _rule_stranded_in_ready,
     _rule_overdue_wake,
     _rule_scheduled_without_wake,
+    _rule_clock_only_park,
+    _rule_wake_check_health,
     _rule_escalated_waiting_on_user,
     _rule_waiting_behind_user,
 ]
@@ -956,6 +1030,7 @@ def compute_task_diagnostics(
     now: Optional[int] = None,
     config: Optional[dict] = None,
     graph: Optional[dict] = None,
+    wake_check: Optional[dict] = None,
 ) -> list[Diagnostic]:
     """Run every rule for one task; critical first, then error, warning; ties
     broken by most-recent ``last_seen_at``."""
@@ -964,6 +1039,7 @@ def compute_task_diagnostics(
     cfg = {**DEFAULT_CONFIG, **config}
     if graph is not None:
         cfg["_graph"] = graph
+    cfg["_wake_check"] = wake_check
     if not _has_explicit_threshold(config) and "failure_limit" in config:
         cfg["failure_threshold"] = _positive_int(
             config.get("failure_limit"), DEFAULT_CONFIG["failure_threshold"],

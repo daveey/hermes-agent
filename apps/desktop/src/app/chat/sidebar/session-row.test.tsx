@@ -544,7 +544,7 @@ describe('SidebarSessionRow kanban counts', () => {
 describe('SidebarSessionRow own activity stamps', () => {
   const stripe = (c: HTMLElement) => c.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe') ?? null
 
-  for (const stamp of [{ goal_active: true }, { kanban_active: 2 }, { background_active: 1 }]) {
+  for (const stamp of [{ goal_active: true }, { background_active: 1 }]) {
     it(`keeps the row off green while ${Object.keys(stamp)[0]} is set`, () => {
       const { container } = renderRow(
         makeSession({ id: 'old-proj', message_count: 9, title: 'Old', ...stamp } as Partial<SessionInfo> & {
@@ -555,6 +555,31 @@ describe('SidebarSessionRow own activity stamps', () => {
       expect(stripe(container)).toBeNull()
     })
   }
+
+  // [daveey] Open kanban cards: never green and never blank — the grey
+  // `waiting` card glyph (parked: ⌘] / ⌘[ skip it).
+  it('shows the grey waiting glyph while kanban_active is set', () => {
+    const { container } = renderRow(
+      makeSession({ id: 'old-proj', kanban_active: 2, message_count: 9, title: 'Old' } as Partial<SessionInfo> & {
+        title: string
+      })
+    )
+
+    expect(stripe(container)).toBe('waiting')
+    const glyph = container.querySelector('[data-slot="session-status-stripe"]')
+    expect(glyph?.getAttribute('data-status-stripe')).toBe('waiting')
+    expect(glyph?.querySelector('.codicon-project')).not.toBeNull()
+  })
+
+  it('a blocked card beats waiting (red)', () => {
+    const { container } = renderRow(
+      makeSession({ kanban_active: 1, kanban_blocked: 1, message_count: 9, title: 'Old' } as Partial<SessionInfo> & {
+        title: string
+      })
+    )
+
+    expect(stripe(container)).toBe('stuck')
+  })
 
   it('still paints done (green) with no activity stamps', () => {
     const { container } = renderRow(makeSession({ id: 'old-proj', message_count: 9, title: 'Old' }))

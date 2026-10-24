@@ -51,6 +51,29 @@ describe('showsRunningArc', () => {
 })
 
 describe('sessionStatusStripe', () => {
+  // [daveey] A chat that handed its work to kanban cards waits on them: grey
+  // `waiting`, never green and never blank, until they finish.
+  it('is waiting (grey) while the chat has open kanban cards', () => {
+    for (const state of ['background', 'idle', 'unread', 'draft'] as const) {
+      expect(sessionStatusStripe(state, true, false, 0, false, null, 0, 1)).toBe('waiting')
+    }
+
+    expect(sessionStatusStripe('working', true, false, 0, false, null, 0, 1)).toBeNull()
+    expect(sessionStatusStripe('needs-input', true, false, 0, false, null, 0, 1)).toBe('stuck')
+    // A card blocked on the user → red with it.
+    expect(sessionStatusStripe('background', true, false, 1, false, null, 0, 1)).toBe('stuck')
+    expect(sessionStatusStripe('idle', true, true, 0, false, null, 0, 1)).toBe('blocked')
+    expect(sessionStatusStripe('idle', true, false, 0, true, null, 0, 1)).toBe('periodic')
+  })
+
+  it('all cards done with results unseen → green (unread); none open, all done → green', () => {
+    const unseenRow = { kanban_unseen: 1 }
+    const state = withRowActivity('idle', unseenRow)
+    expect(state).toBe('unread')
+    expect(sessionStatusStripe(state, true, false, 0, false, null, 0, 0)).toBe('done')
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0)).toBe('done')
+  })
+
   it('paints done (green) when a finished turn waits on the user, read or not', () => {
     expect(sessionStatusStripe('unread', true)).toBe('done')
     expect(sessionStatusStripe('idle', true)).toBe('done')

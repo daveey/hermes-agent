@@ -27,6 +27,7 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from subprocess import Popen as _GUARD_POPEN
 
 import pytest
 
@@ -466,6 +467,98 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
     except Exception:
         return
     monkeypatch.setattr(_kbd_mod, "_system_memory_sample", dict, raising=False)
+
+
+_LIVE_GIT_CONFIGS: list | None = None
+
+
+def _live_git_config_paths() -> list:
+    """Shared ``.git/config`` files of the checkout under test and the live install.
+
+    Resolved once with plain subprocesses: the per-test home-I/O guard refuses
+    in-process file access to the real ``~/.hermes`` tree, and this guard must
+    still watch it.
+    """
+    global _LIVE_GIT_CONFIGS
+    if _LIVE_GIT_CONFIGS is not None:
+        return _LIVE_GIT_CONFIGS
+    paths: dict = {}
+    for root in (PROJECT_ROOT, Path.home() / ".hermes" / "hermes-agent"):
+        try:
+            rc, raw = _plain_run(
+                ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"]
+            )
+            out = raw.decode().strip() if rc == 0 else ""
+        except Exception:
+            continue
+        if out:
+            paths[out] = Path(out) / "config"
+    _LIVE_GIT_CONFIGS = list(paths.values())
+    return _LIVE_GIT_CONFIGS
+
+
+def _plain_run(argv: list):
+    """``(returncode, stdout)`` independent of per-test subprocess mocks."""
+    import subprocess
+
+    # Capture Popen at conftest import: teardown can precede monkeypatch undo.
+    # Capturing subprocess.run instead would still look up the mocked Popen.
+    proc = _GUARD_POPEN(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    out, _ = proc.communicate()
+    return proc.returncode, out
+
+
+def _read_bytes_or_none(path: Path):
+    """Identity (``user.*``) entries of a git config file, or None if it is absent.
+
+    Read through ``git config --file`` so the in-process home-I/O guard is not
+    involved. Only ``user.*`` is compared: branch/remote entries in the shared
+    config legitimately change whenever any worktree or branch is created.
+    """
+    import subprocess
+
+    if _plain_run(["test", "-f", str(path)])[0] != 0:
+        return None
+    return _plain_run(["git", "config", "--file", str(path), "--get-regexp", r"^user\."])[1]
+
+
+def _assert_git_configs_unchanged(snapshots: dict) -> None:
+    """Remove identity entries added to a config since *snapshots* and fail naming it."""
+    changed = []
+    for path, before in snapshots.items():
+        after = _read_bytes_or_none(path)
+        if after == before:
+            continue
+        changed.append(str(path))
+        before_keys = {ln.split(b" ", 1)[0] for ln in (before or b"").splitlines()}
+        for ln in (after or b"").splitlines():
+            key = ln.split(b" ", 1)[0]
+            if key not in before_keys:
+                _plain_run(["git", "config", "--file", str(path), "--unset-all", key.decode()])
+    if changed:
+        pytest.fail(
+            "test wrote user.* into a live checkout's git config (removed): "
+            + ", ".join(changed)
+            + " - run git config only inside a tmp_path repo",
+            pytrace=False,
+        )
+
+
+@pytest.fixture(autouse=True)
+def _live_git_config_guard(request):
+    """Fail (and undo) any test that rewrites a real checkout's ``.git/config``.
+
+    A test that runs ``git config user.email t@example.com`` with a cwd inside
+    the live checkout writes the identity into the config every linked worktree
+    shares, so later commits get authored as the fixture. Such a test must init
+    its own repo under ``tmp_path``.
+    """
+    if request.node.get_closest_marker("allow_live_git_config"):
+        yield
+        return
+    snapshots = {path: _read_bytes_or_none(path) for path in _live_git_config_paths()}
+    yield
+    _assert_git_configs_unchanged(snapshots)
 
 
 @pytest.fixture(autouse=True)
@@ -1173,6 +1266,10 @@ def pytest_configure(config):
         "require_symlinks: skip the test if symbolic links cannot be "
         "created in the current environment (needs admin/developer mode "
         "on Windows).",
+    )
+    config.addinivalue_line(
+        "markers",
+        "allow_live_git_config: bypass the autouse guard that fails tests changing the live checkout .git/config",
     )
     config.addinivalue_line(
         "markers",

@@ -373,7 +373,8 @@ function SidebarSessionRowImpl({
         kanbanBlocked,
         session.cron_active === true,
         session.review_wait,
-        session.kanban_attention
+        session.kanban_attention,
+        kanbanOpen
       )
 
   // Card header line: the workspace this belongs to — the project when it
@@ -553,7 +554,7 @@ function SidebarSessionRowImpl({
         {isSelected && <span aria-hidden="true" className="arc-border arc-row" />}
         {/* [daveey] A session that owns a live cron job: a tiny grey loop
             glyph in the stripe's place — it recurs, so it is never "done". */}
-        {statusStripe === 'periodic' && (
+        {(statusStripe === 'periodic' || statusStripe === 'waiting') && (
           <span
             aria-hidden="true"
             className={cn(
@@ -563,10 +564,11 @@ function SidebarSessionRowImpl({
             data-slot="session-status-stripe"
             data-status-stripe={statusStripe}
           >
-            <Codicon name="sync" size="0.5625rem" />
+            {/* [daveey] `waiting`: open kanban cards hold it — the card glyph. */}
+            <Codicon name={statusStripe === 'waiting' ? 'project' : 'sync'} size="0.5625rem" />
           </span>
         )}
-        {statusStripe && statusStripe !== 'periodic' && (
+        {statusStripe && statusStripe !== 'periodic' && statusStripe !== 'waiting' && (
           <span
             aria-hidden="true"
             className={cn(

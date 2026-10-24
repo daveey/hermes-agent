@@ -108,6 +108,8 @@ def _is_sensitive_path(path: Path) -> bool:
 
 
 _FS_TEXT_SOURCE_MAX_BYTES = 64 * 1024 * 1024
+# ``read-text?full=1`` (inline ::preview documents): whole file up to this cap, 413 above it, never truncated.
+_FS_TEXT_FULL_MAX_BYTES = 16 * 1024 * 1024
 _FS_TEXT_PREVIEW_MAX_BYTES = 512 * 1024
 # Spot-editor save ceiling: the editor only opens non-truncated text (<= the
 # preview cap), so this guards against a pasted megablob, not expected payloads.
@@ -790,15 +792,17 @@ async def fs_list(path: str, request: Request, profile: Optional[str] = None):
 
 
 @router.get("/api/fs/read-text")
-async def fs_read_text(path: str, request: Request = None, profile: Optional[str] = None):
+async def fs_read_text(path: str, request: Request = None, profile: Optional[str] = None, full: bool = False):
+    source_max = _FS_TEXT_FULL_MAX_BYTES if full else _FS_TEXT_SOURCE_MAX_BYTES
+    read_limit = _FS_TEXT_FULL_MAX_BYTES if full else _FS_TEXT_PREVIEW_MAX_BYTES
     backend = await asyncio.to_thread(_fs_backend, profile)
     if backend is not None:
         try:
             data, size, target = await asyncio.to_thread(
                 backend.read_bytes,
                 path,
-                max_bytes=_FS_TEXT_SOURCE_MAX_BYTES,
-                read_limit=_FS_TEXT_PREVIEW_MAX_BYTES,
+                max_bytes=source_max,
+                read_limit=read_limit,
             )
         except Exception as exc:
             _raise_fs_backend_error(exc)
@@ -810,15 +814,15 @@ async def fs_read_text(path: str, request: Request = None, profile: Optional[str
             "mimeType": _fs_mime_type(target_path),
             "path": target,
             "text": data.decode("utf-8", errors="replace"),
-            "truncated": size > _FS_TEXT_PREVIEW_MAX_BYTES,
+            "truncated": size > read_limit,
         }
     target = _fs_path(path)
     _hosted_fs_read_guard(target, request)
     target, st = _fs_regular_file(target)
-    if st.st_size > _FS_TEXT_SOURCE_MAX_BYTES:
+    if st.st_size > source_max:
         raise HTTPException(status_code=413, detail="File too large")
     data = await asyncio.to_thread(
-        _fs_read_bytes, target, min(st.st_size, _FS_TEXT_PREVIEW_MAX_BYTES),
+        _fs_read_bytes, target, min(st.st_size, read_limit),
     )
     return {
         "binary": _fs_looks_binary(data[:4096]),
@@ -827,7 +831,7 @@ async def fs_read_text(path: str, request: Request = None, profile: Optional[str
         "mimeType": _fs_mime_type(target),
         "path": str(target),
         "text": data.decode("utf-8", errors="replace"),
-        "truncated": st.st_size > _FS_TEXT_PREVIEW_MAX_BYTES,
+        "truncated": st.st_size > read_limit,
     }
 
 

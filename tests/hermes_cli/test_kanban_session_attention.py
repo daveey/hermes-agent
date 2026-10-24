@@ -16,12 +16,15 @@ def _make_board(path: Path, rows, runs=(), subs=()) -> None:
         CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, status TEXT NOT NULL, session_id TEXT,
                             completed_at INTEGER, result TEXT);
         CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, summary TEXT);
-        CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT, last_event_id INTEGER DEFAULT 0);
+        CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT, last_event_id INTEGER DEFAULT 0,
+                                         delivery_metadata TEXT);
         CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, kind TEXT);
     """)
     conn.executemany("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)", rows)
     conn.executemany("INSERT INTO task_runs (task_id, summary) VALUES (?, ?)", runs)
-    conn.executemany("INSERT INTO kanban_notify_subs (task_id, platform, chat_id) VALUES (?, 'tui', ?)", subs)
+    # Explicit shepherds: touch-only subs never count (test_kanban_session_activity). [daveey]
+    conn.executemany("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, delivery_metadata) "
+                     "VALUES (?, 'tui', ?, '{\"reason\": \"shepherd\"}')", subs)
     conn.commit()
     conn.close()
 

@@ -147,7 +147,7 @@ def test_keep_patterns_and_profile_scope(board):
     assert got["sec"][0] is None and got["sec"][2].startswith("pattern:")
     assert got["core"][0] is None and got["core"][2] == "pattern:hermes-core-wt"
     assert got["other"] == (None, None, "profile_out_of_scope")
-    assert got["plain"] == (SONNET, None, "default")
+    assert got["plain"] == (SONNET, "anthropic", "default")
 
 
 def test_bad_pattern_is_ignored_not_fatal(board):
@@ -155,7 +155,7 @@ def test_bad_pattern_is_ignored_not_fatal(board):
         t = kb.get_task(conn, kb.create_task(conn, title="routine", assignee="default"))
         got = tier.resolve_model_tier(conn, t, lane="ready",
                                       cfg={"default_model": SONNET, "default_model_keep_patterns": ["("]})
-    assert got == (SONNET, None, "default")
+    assert got == (SONNET, "anthropic", "default")
 
 
 def test_tier_pin_reaches_worker_argv(board, monkeypatch):
@@ -167,3 +167,18 @@ def test_tier_pin_reaches_worker_argv(board, monkeypatch):
     argv = kbd._worker_argv(t, "default", None)
     assert argv[argv.index("-m") + 1] == SONNET
     assert argv[argv.index("--provider") + 1] == "anthropic"
+
+
+def test_unset_default_provider_is_inferred_not_the_profiles(board):
+    """default_model claude-* with no default_provider ran on the profile's provider (openai-codex after the
+    profile switched to a GPT): HTTP 400 on every card. The tier now names the model's own provider."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="plain job", assignee="default")
+        task = kb.get_task(conn, tid)
+        model, prov, reason = tier.resolve_model_tier(conn, task, lane="ready", cfg={"default_model": SONNET})
+        assert (model, prov, reason) == (SONNET, "anthropic", "default")
+        # An explicit default_provider still wins.
+        _m, prov, _r = tier.resolve_model_tier(conn, task, lane="ready",
+                                               cfg={"default_model": SONNET, "default_provider": "openrouter"})
+        assert prov == "openrouter"
+    assert tier.infer_provider("some-unknown-model") is None

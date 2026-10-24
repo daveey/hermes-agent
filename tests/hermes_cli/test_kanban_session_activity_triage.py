@@ -43,9 +43,9 @@ def test_triage_is_unfinished_and_visible_for_owner_and_subscriber(tmp_path, mon
     path = tmp_path / "kanban.db"
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE tasks (id TEXT, status TEXT, session_id TEXT, block_kind TEXT)")
-        conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT)")
+        conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT, delivery_metadata TEXT)")
         conn.execute("INSERT INTO tasks VALUES ('card', 'triage', 'ancestor', ?)", (kind,))
-        conn.execute("INSERT INTO kanban_notify_subs VALUES ('card', 'tui', 'watcher')")
+        conn.execute("INSERT INTO kanban_notify_subs VALUES ('card', 'tui', 'watcher', ?)", ('{"reason": "shepherd"}',))
     monkeypatch.setattr(ksa, "_board_db_paths", lambda: [path])
     monkeypatch.setattr(ksa, "_hub_db_path", lambda: None)
     ksa._reset_cache_for_tests()

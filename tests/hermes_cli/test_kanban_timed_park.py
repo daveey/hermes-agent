@@ -120,7 +120,8 @@ def test_kanban_block_tool_time_kind_on_goal_mode_card(kanban_home: Path, monkey
         run_id = kb.get_task(conn, tid).current_run_id
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
-    out = json.loads(kt._handle_block({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z nightly run", "kind": "time"}))
+    out = json.loads(kt._handle_block({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z nightly run", "kind": "time",
+                                       "clock_only": True}))
     assert out.get("status") == "scheduled", out
     assert out.get("wake_at")
 

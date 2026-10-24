@@ -48,7 +48,12 @@ import { localPreviewTarget } from '@/lib/local-preview'
  */
 
 const MIN_HEIGHT = 120
-const MAX_HEIGHT = 1200
+/** Tall enough for a whole design board or report: a frame that clamps
+ *  shorter hides everything below the fold behind an inner scrollbar, which
+ *  reads as "only the first section rendered". Viewport-coupled pages (a
+ *  `100vh` body plus margin) would chase any cap, so growth that repeats the
+ *  same step is stopped by `nextFrameHeight` instead of by a low ceiling. */
+const MAX_HEIGHT = 16000
 const DEFAULT_HEIGHT = 280
 /** The transcript column cap the frame renders inside (`max-w-160` = 40rem). */
 const MAX_COLUMN_WIDTH = 640
@@ -334,7 +339,47 @@ export function frameSizeFromMessage(data: unknown, token: string): FrameSizeRep
   }
 }
 
+/** The frame's next height for a size report, or `prev` to stay put.
+ *  Ignores rounding churn (RESIZE_TOLERANCE), and stops a viewport-coupled
+ *  page from growing without end: such a page answers every resize with
+ *  "frame + k px", so two consecutive grows by the same step (±2 px) are a
+ *  feedback loop, not content. `lastGrow` is the previous grow step (0 when
+ *  the last change was not a grow). */
+export function nextFrameHeight(
+  prev: number,
+  reported: number,
+  lastGrow: number
+): { height: number; grow: number } {
+  if (Math.abs(reported - prev) <= RESIZE_TOLERANCE) {
+    return { height: prev, grow: lastGrow }
+  }
+
+  const grow = reported > prev ? reported - prev : 0
+
+  if (grow > 0 && lastGrow > 0 && Math.abs(grow - lastGrow) <= 2) {
+    return { height: prev, grow: lastGrow }
+  }
+
+  return { height: reported, grow }
+}
+
 const HTML_FILE_RE = /\.(?:html?|xhtml)$/i
+
+/** The whole document for the frame, or null (render the card instead).
+ *  A FULL read: the preview read stops at 512 KiB, and a cut document renders
+ *  as garbage (the cut lands inside an inlined image's data URI, so the
+ *  injected chrome script is parsed as attribute text and every section after
+ *  it is gone). An older shell ignores `full`; a result it still marks
+ *  truncated falls back to the card rather than a broken frame. */
+export async function readInlineDoc(path: string): Promise<string | null> {
+  const result = await readDesktopFileText(path, { full: true })
+
+  if (!result || isReadFileErrorResult(result) || result.binary || !result.text || result.truncated) {
+    return null
+  }
+
+  return result.text
+}
 
 export function InlinePreviewDirective({
   attrs,
@@ -378,7 +423,10 @@ function InlineHtmlFrame({
 
   const [doc, setDoc] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
-  const [measured, setMeasured] = useState<number | null>(null)
+  // Measured height plus the last grow step (nextFrameHeight's loop check),
+  // in one state so the updater stays pure under a double-invoke.
+  const [sizing, setSizing] = useState<{ grow: number; measured: number | null }>({ grow: 0, measured: null })
+  const measured = sizing.measured
   const [contentWidth, setContentWidth] = useState<number | null>(null)
 
   // One token per mount: the message listener only trusts reports from the
@@ -399,22 +447,16 @@ function InlineHtmlFrame({
 
     let alive = true
 
-    void Promise.resolve(readDesktopFileText(path))
-      .then(result => {
+    void readInlineDoc(path)
+      .then(text => {
         if (!alive) {
           return
         }
 
-        if (!result || isReadFileErrorResult(result)) {
-          setFailed(true)
-
-          return
-        }
-
-        if (result.binary || !result.text) {
+        if (text === null) {
           setFailed(true)
         } else {
-          setDoc(result.text)
+          setDoc(text)
         }
       })
       .catch(() => alive && setFailed(true))
@@ -471,9 +513,16 @@ function InlineHtmlFrame({
       // shadow ref: same-value sets bail out in React, and the tolerance
       // keeps a vh-sized page (which measures what it's given) from
       // oscillating.
-      setMeasured(prev =>
-        Math.abs(next.height - (prev ?? initialHeight ?? DEFAULT_HEIGHT)) > RESIZE_TOLERANCE ? next.height : prev
-      )
+      setSizing(prev => {
+        const current = prev.measured ?? initialHeight ?? DEFAULT_HEIGHT
+        const step = nextFrameHeight(current, next.height, prev.grow)
+
+        if (step.height === current && step.grow === prev.grow) {
+          return prev
+        }
+
+        return { grow: step.grow, measured: step.height === current ? prev.measured : step.height }
+      })
 
       // Width adopts ONCE, from the first report — measured at full column
       // width, so it is the content's intrinsic span. Tracking width live
