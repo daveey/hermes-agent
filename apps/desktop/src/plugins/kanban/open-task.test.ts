@@ -47,6 +47,35 @@ describe('installOpenTaskHook', () => {
     expect(rememberOwner).not.toHaveBeenCalled()
   })
 
+  it('retains a qualified owner in the parked request and forwards its profile', () => {
+    const target: Record<string, unknown> = {}
+    const rememberOwner = vi.fn()
+    installOpenTaskHook({ navigate: vi.fn(), rememberOwner }, target)
+    const hook = target[OPEN_TASK_HOOK] as (...args: string[]) => boolean
+
+    expect(hook('t_abcdef01', 'ops', 'remote', 'worker')).toBe(true)
+    expect(rememberOwner).toHaveBeenCalledWith('t_abcdef01', 'ops', 'remote', 'worker')
+    expect($openTaskRequest.get()).toEqual({
+      board: 'ops', taskId: 't_abcdef01', owner: { gateway: 'remote', profile: 'worker', board: 'ops' }
+    })
+    // Do not advertise support until the drawer/actions consume the identity.
+    expect((hook as unknown as { supportsQualifiedOwners?: boolean }).supportsQualifiedOwners).not.toBe(true)
+  })
+
+  it.each([null, '', 'worker'])('rejects incomplete explicit owner routes (%s)', profile => {
+    const target: Record<string, unknown> = {}
+    const navigate = vi.fn()
+    const rememberOwner = vi.fn()
+    installOpenTaskHook({ navigate, rememberOwner }, target)
+    $openTaskRequest.set(null)
+    const hook = target[OPEN_TASK_HOOK] as (id: string, board: string, gateway: string | null, profile: string | null) => boolean
+
+    expect(hook('t_abcdef01', 'ops', profile === 'worker' ? null : 'remote', profile)).toBe(false)
+    expect(navigate).not.toHaveBeenCalled()
+    expect(rememberOwner).not.toHaveBeenCalled()
+    expect($openTaskRequest.get()).toBeNull()
+  })
+
   it('disposer removes only its own hook', () => {
     const target: Record<string, unknown> = {}
     const dispose = installOpenTaskHook({ navigate: vi.fn() }, target)

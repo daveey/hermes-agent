@@ -13,6 +13,7 @@ import { atom } from '@hermes/plugin-sdk'
 export interface OpenTaskRequest {
   board: string
   taskId: string
+  owner?: { gateway: string; profile: string; board: string }
 }
 
 export const $openTaskRequest = atom<null | OpenTaskRequest>(null)
@@ -20,12 +21,12 @@ export const $openTaskRequest = atom<null | OpenTaskRequest>(null)
 /** [daveey] Global name of the cross-plugin "open this card" hook. */
 export const OPEN_TASK_HOOK = '__hermesKanbanOpenTask'
 
-type OpenTaskHook = (taskId: string, board?: null | string, gateway?: null | string) => boolean
+type OpenTaskHook = (taskId: string, board?: null | string, gateway?: null | string, profile?: null | string) => boolean
 
 export interface OpenTaskHookDeps {
   navigate: (path: string) => void
   /** Seed the task's owning gateway + board (api.ts `rememberTaskOwner`). */
-  rememberOwner?: (taskId: string, board: string, gateway: string) => void
+  rememberOwner?: (taskId: string, board: string, gateway: string, profile?: string) => void
 }
 
 /**
@@ -40,18 +41,28 @@ export function installOpenTaskHook(
   deps: OpenTaskHookDeps,
   target: Record<string, unknown> = globalThis as unknown as Record<string, unknown>
 ): () => void {
-  const hook: OpenTaskHook = (taskId, board, gateway) => {
+  const hook: OpenTaskHook = (taskId, board, gateway, profile) => {
     if (typeof taskId !== 'string' || !taskId) {
       return false
     }
 
     const slug = typeof board === 'string' ? board : ''
 
-    if (typeof gateway === 'string' && gateway) {
+    const owner = typeof gateway === 'string' && gateway && typeof profile === 'string' && profile
+      ? { gateway, profile, board: slug }
+      : undefined
+
+    if (profile !== undefined && !owner) {
+      return false
+    }
+
+    if (owner) {
+      deps.rememberOwner?.(taskId, slug, owner.gateway, owner.profile)
+    } else if (typeof gateway === 'string' && gateway) {
       deps.rememberOwner?.(taskId, slug, gateway)
     }
 
-    $openTaskRequest.set({ board: slug, taskId })
+    $openTaskRequest.set({ board: slug, taskId, ...(owner ? { owner } : {}) })
     deps.navigate('/kanban')
 
     return true
