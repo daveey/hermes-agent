@@ -146,7 +146,8 @@ export function sessionHasStatusStripe(id: string): boolean {
         session?.kanban_blocked ?? 0,
         session?.cron_active === true,
         session?.review_wait,
-        session?.kanban_attention ?? 0
+        session?.kanban_attention ?? 0,
+        session?.kanban_active ?? 0
       )
     )
   )

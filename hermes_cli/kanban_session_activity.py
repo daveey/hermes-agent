@@ -43,6 +43,9 @@ HUMAN_BLOCK_KINDS = ("needs_input", "capability")
 _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, dict[str, int], dict[str, int], dict[str, int]] | None = None
+_waiting_cache: list[dict[str, frozenset[str]]] = [{}]
+_pairs_lock = threading.Lock()
+WAITING_ON_CAP = 50
 
 
 def _board_db_paths() -> list[Path]:
@@ -84,11 +87,39 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
             (*statuses, *HUMAN_BLOCK_KINDS, *HUMAN_BLOCK_KINDS))
 
 
+# Set while ``_all_counts`` reads local boards: collects the (session, task) pairs behind the counts, so the
+# open card ids per session (``waiting_on_task_ids``) cost no extra queries. [daveey]
+_pairs_sink: set[tuple[str, str]] | None = None
+
+
+# Subscription reasons that make a ``tui`` subscriber own the card's progress (stamped in
+# ``delivery_metadata.reason``): ``create`` (kanban_create's auto-sub) and ``shepherd``
+# (explicit ``notify-subscribe``). ``touch`` (auto-sub on comment/unblock/link) and legacy rows
+# with no reason still get completion pings, but never keep a session busy or paint it red unless
+# the chat owns the card (``tasks.session_id``). [daveey]
+COUNTED_SUB_REASONS = ("create", "shepherd")
+
+
+def _counted_sub_clause(conn: sqlite3.Connection) -> str:
+    """SQL predicate (aliases ``s`` subs, ``t`` tasks) for a ``tui`` sub that counts as the chat's work."""
+    owner = "s.chat_id = COALESCE(t.session_id, '')"
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(kanban_notify_subs)")}
+    except sqlite3.Error:
+        cols = set()
+    if "delivery_metadata" not in cols:
+        return f"({owner})"
+    reasons = ", ".join(f"'{r}'" for r in COUNTED_SUB_REASONS)
+    return (f"({owner} OR (json_valid(s.delivery_metadata) "
+            f"AND json_extract(s.delivery_metadata, '$.reason') IN ({reasons})))")
+
+
 def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
     """Tasks per session in ``statuses``: tasks the session created, plus tasks
-    it is a ``tui`` notify subscriber of (a session asked to shepherd someone
-    else's card subscribes to it, and is just as "still working" until it
-    lands). Each (session, task) pair counts once."""
+    it shepherds (a ``tui`` notify sub stamped ``create``/``shepherd``, see
+    ``COUNTED_SUB_REASONS``): it is just as "still working" until they land.
+    A touch-only sub (one comment on someone else's card) does not count.
+    Each (session, task) pair counts once."""
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
     try:
         match, params = _status_filter(conn, statuses)
@@ -103,7 +134,7 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
             pairs.update(
                 (str(sid), str(tid)) for sid, tid in conn.execute(
                     f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {match}",
+                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}",
                     params,
                 )
             )
@@ -114,6 +145,8 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
+    if _pairs_sink is not None:
+        _pairs_sink.update(pairs)
     return counts
 
 
@@ -249,6 +282,39 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
     unseen: dict[str, int] = {}
+    pairs = _read_local_pairs_into(active, blocked, unseen)
+    waiting: dict[str, set[str]] = {}
+    for sid, tid in pairs:
+        waiting.setdefault(sid, set()).add(tid)
+    try:
+        hub = _hub_db_path()
+        if hub is not None:
+            r_active, r_blocked = _read_hub_replica(hub)
+            for src, into in ((r_active, active), (r_blocked, blocked)):
+                for sid, n in src.items():
+                    into[sid] = into.get(sid, 0) + n
+    except Exception as exc:  # a corrupt/locked replica must never break the sidebar
+        _log.debug("hermes-hub replica read failed: %s", exc)
+    with _cache_lock:
+        _cache = (now + _CACHE_TTL_S, active, blocked, unseen)
+        _waiting_cache[0] = {sid: frozenset(ids) for sid, ids in waiting.items()}
+    return active, blocked, unseen
+
+
+def _read_local_pairs_into(active: dict[str, int], blocked: dict[str, int],
+                           unseen: dict[str, int]) -> set[tuple[str, str]]:
+    """Fill the three count maps from every local board; return the open (session, task) pairs."""
+    global _pairs_sink
+    with _pairs_lock:
+        _pairs_sink = set()
+        try:
+            _read_local_boards(active, blocked, unseen)
+            return _pairs_sink
+        finally:
+            _pairs_sink = None
+
+
+def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: dict[str, int]) -> None:
     for path in _board_db_paths():
         try:
             for sid, n in _read_unseen(path).items():
@@ -261,18 +327,39 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
                     into[sid] = into.get(sid, 0) + n
             except sqlite3.Error as exc:  # an old schema without session_id, a locked file
                 _log.debug("kanban activity read failed for %s: %s", path, exc)
-    try:
-        hub = _hub_db_path()
-        if hub is not None:
-            r_active, r_blocked = _read_hub_replica(hub)
-            for src, into in ((r_active, active), (r_blocked, blocked)):
-                for sid, n in src.items():
-                    into[sid] = into.get(sid, 0) + n
-    except Exception as exc:  # a corrupt/locked replica must never break the sidebar
-        _log.debug("hermes-hub replica read failed: %s", exc)
+
+
+# [daveey] Extra "this chat still waits" sources (plugins): name -> fn() -> {session_id: iterable of task ids}. A
+# chat-closeout plugin registers the cards of a settled batch whose close-out turn has not run yet, so the row
+# stays grey "waiting" between the last notice and the closing answer instead of flashing green.
+_waiting_sources: dict[str, Any] = {}
+
+
+def register_waiting_source(name: str, fn) -> None:
+    """Register (or replace, ``fn=None`` removes) a plugin source of waiting card ids per session. [daveey]"""
+    if fn is None:
+        _waiting_sources.pop(name, None)
+    else:
+        _waiting_sources[name] = fn
+
+
+def _extra_waiting() -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for name, fn in list(_waiting_sources.items()):
+        try:
+            for sid, ids in (fn() or {}).items():
+                out.setdefault(str(sid), set()).update(str(i) for i in ids if i)
+        except Exception:  # a plugin must never break the sidebar
+            _log.debug("waiting source %s failed", name, exc_info=True)
+    return out
+
+
+def waiting_on_task_ids() -> dict[str, frozenset[str]]:
+    """``{session_id: open task ids}`` on this gateway's boards: queued/running cards plus those waiting on a human,
+    created or shepherded by the session — what the chat is waiting on. Same cache as the counts. [daveey]"""
+    _all_counts()
     with _cache_lock:
-        _cache = (now + _CACHE_TTL_S, active, blocked, unseen)
-    return active, blocked, unseen
+        return dict(_waiting_cache[0])
 
 
 def active_task_counts() -> dict[str, int]:
@@ -317,7 +404,7 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         try:
             for row in conn.execute(
                     f"SELECT {select}, {run_start} AS current_run_started_at FROM kanban_notify_subs s "
-                    f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' "
+                    f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' AND {_counted_sub_clause(conn)} "
                     f"AND s.chat_id IN ({sid_ph}) AND t.status IN ({st_ph})", (*ids, *statuses)):
                 found.setdefault(row["id"], {**dict(row), "via": "subscribed"})
         except sqlite3.Error:  # board predates notify subscriptions
@@ -392,7 +479,8 @@ def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any
         try:
             pairs.extend((str(r["chat_id"]), dict(r)) for r in conn.execute(
                 f"SELECT s.chat_id AS chat_id, {fields} FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {cond}", (since,)))
+                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {cond}",
+                (since,)))
         except sqlite3.Error:  # board predates notify subscriptions
             pass
     finally:
@@ -457,7 +545,7 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
 
 
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_unseen`` (finished cards whose result the
+    """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_waiting_on`` (local open card ids), ``kanban_unseen`` (finished cards whose result the
     session has not been handed yet) and ``kanban_attention`` (done cards a registered check flags) on each session row
     (summed over its whole compression lineage). Never raises: the list must
     render without them."""
@@ -465,6 +553,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         return rows
     try:
         active, blocked, unseen = _all_counts()
+        waiting = waiting_on_task_ids()
+        extra = _extra_waiting()
     except Exception:
         _log.debug("kanban activity unavailable", exc_info=True)
         return rows
@@ -482,6 +572,17 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 row[key] = n
             else:
                 row.pop(key, None)
+        # [daveey] The open card ids the chat waits on (lineage-wide, capped): the sidebar's "waiting on N cards".
+        open_ids = {tid for sid in ids for tid in waiting.get(sid, ())}
+        # Plugin sources (pending close-outs): count the ids the boards don't already count as open.
+        pending = {tid for sid in ids for tid in extra.get(sid, ())} - open_ids
+        if pending:
+            row["kanban_active"] = int(row.get("kanban_active") or 0) + len(pending)
+        ids_waiting = sorted(open_ids | pending)
+        if ids_waiting:
+            row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
+        else:
+            row.pop("kanban_waiting_on", None)
     return rows
 
 
@@ -490,3 +591,4 @@ def _reset_cache_for_tests() -> None:
     with _cache_lock:
         _cache = None
         _attention_cache = None
+        _waiting_cache[0] = {}

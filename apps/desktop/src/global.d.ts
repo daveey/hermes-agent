@@ -313,7 +313,13 @@ declare global {
         get: () => Promise<{ defaultMaxMb: number; maxBytes: number; maxMb: number }>
         set: (maxMb: number) => Promise<{ defaultMaxMb: number; maxBytes: number; maxMb: number }>
       }
-      readFileText: (filePath: string) => Promise<HermesReadFileTextResult | HermesReadFileErrorResult>
+      /** Preview read: truncates at 512 KiB (`truncated: true`). `{ full: true }`
+       *  reads the whole file up to 16 MiB and fails EFBIG above that. Older
+       *  shells ignore the option, so full callers must still reject `truncated`. */
+      readFileText: (
+        filePath: string,
+        options?: { full?: boolean }
+      ) => Promise<HermesReadFileTextResult | HermesReadFileErrorResult>
       /** Full-source read for runtime desktop plugins (readFileText truncates
        *  at the 512 KiB preview cap). Absent on older shells — callers fall
        *  back to readFileText and must reject a `truncated` result. */

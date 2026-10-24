@@ -3368,7 +3368,10 @@ export const en: Translations = {
       ageHour: 'h',
       ageMin: 'm',
       kanbanTasks: (open, blocked) =>
-        [open > 0 ? `${open} kanban ${open === 1 ? 'task' : 'tasks'} open` : '', blocked > 0 ? `${blocked} blocked` : '']
+        [
+          open > 0 ? `Waiting on ${open} ${open === 1 ? 'card' : 'cards'}` : '',
+          blocked > 0 ? `${blocked} blocked` : ''
+        ]
           .filter(Boolean)
           .join(', '),
       kanbanAttention: count =>

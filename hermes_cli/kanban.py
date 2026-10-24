@@ -520,6 +520,18 @@ def _print_section(title: str, lines) -> None:
         print(line)
 
 
+def _print_max_retries(task) -> None:
+    """Effective retry threshold (task > config > default); it explains auto-blocks."""
+    if task.max_retries is not None:
+        print(f"  max-retries: {task.max_retries} (task)")
+        return
+    cfg_val = _kanban_config().get("failure_limit")
+    if cfg_val is not None and int(cfg_val) != kb.DEFAULT_FAILURE_LIMIT:
+        print(f"  max-retries: {int(cfg_val)} (config kanban.failure_limit)")
+    else:
+        print(f"  max-retries: {kb.DEFAULT_FAILURE_LIMIT} (default)")
+
+
 def _cmd_show(args: argparse.Namespace) -> int:
     rsk, rc = _run_state_kwargs(args, "show")
     if rc:
@@ -537,6 +549,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         runs = kb.list_runs(conn, args.task_id, **rsk)
         # Workers hand off via task_runs.summary; tasks.result stays NULL unless set.
         latest_summary = kb.latest_summary(conn, args.task_id)
+        from hermes_cli import kanban_wake_check as kwc
+        wake_check = kwc.get_state(conn, args.task_id)
         if not want_json:
             graph = kb.task_graph_context(conn, task.id)
 
@@ -546,6 +560,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "comments": [_obj_dict(c, ("author", "body", "created_at")) for c in comments],
             "events": [_obj_dict(e, ("kind", "payload", "created_at", "run_id")) for e in events],
             "runs": [_obj_dict(r, _SHOW_RUN_FIELDS) for r in runs],
+            "wake_check": wake_check,
         })
         return 0
 
@@ -565,23 +580,17 @@ def _cmd_show(args: argparse.Namespace) -> int:
     if task.model_override:
         _prov = f" (provider: {task.provider_override})" if task.provider_override else ""
         field("model", f"{task.model_override}{_prov}")
-    # Effective retry threshold (task > config > default) explains auto-blocks.
-    if task.max_retries is not None:
-        print(f"  max-retries: {task.max_retries} (task)")
-    else:
-        cfg_val = _kanban_config().get("failure_limit")
-        if cfg_val is not None and int(cfg_val) != kb.DEFAULT_FAILURE_LIMIT:
-            print(f"  max-retries: {int(cfg_val)} (config kanban.failure_limit)")
-        else:
-            print(f"  max-retries: {kb.DEFAULT_FAILURE_LIMIT} (default)")
+    _print_max_retries(task)
     field("created", f"{_fmt_ts(task.created_at)} by {task.created_by or '-'}")
 
     # Diagnostics up top so CLI users see distress signals before scrolling.
     from hermes_cli import kanban_diagnostics as kd
-    diags = kd.compute_task_diagnostics(task, events, runs, graph=graph)
+    diags = kd.compute_task_diagnostics(task, events, runs, graph=graph, wake_check=wake_check)
     if diags:
         print(f"\n  Diagnostics ({len(diags)}):")
         _print_diagnostics(diags, "    ", with_kind=False)
+    if wake_check:
+        field("wake check", kwc.describe_state(wake_check))
     if task.started_at:
         field("started", _fmt_ts(task.started_at))
     if task.completed_at:
@@ -693,9 +702,11 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
             task = kb.get_task(conn, args.task)
             if task is None:
                 return _err(f"no such task: {args.task}")
+            from hermes_cli import kanban_wake_check as kwc
             diags_by_task = {args.task: kd.compute_task_diagnostics(
                 task, kb.list_events(conn, args.task), kb.list_runs(conn, args.task),
-                graph=kb.task_graph_context(conn, args.task), config=diag_config)}
+                graph=kb.task_graph_context(conn, args.task), config=diag_config,
+                wake_check=kwc.get_state(conn, args.task))}
         else:
             # Fleet mode: pull all non-archived tasks + their events/runs.
             rows = list(conn.execute("SELECT * FROM tasks WHERE status != 'archived'").fetchall())
@@ -705,10 +716,13 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
                 ev_by = _rows_by_task(conn, "task_events", ids)
                 run_by = _rows_by_task(conn, "task_runs", ids)
                 graph_by = kb.task_graph_contexts(conn, ids)
+                from hermes_cli import kanban_wake_check as kwc
+                wake_by = kwc.load_states(conn)
                 for r in rows:
                     tid = r["id"]
                     dl = kd.compute_task_diagnostics(r, ev_by.get(tid, []), run_by.get(tid, []),
-                                                     graph=graph_by.get(tid), config=diag_config)
+                                                     graph=graph_by.get(tid), config=diag_config,
+                                                     wake_check=wake_by.get(tid))
                     if dl:
                         diags_by_task[tid] = dl
 
@@ -1030,6 +1044,29 @@ def _commented(conn, reason: Optional[str], author, prefix: str, op):
     return run
 
 
+def _cli_wake_check(args: argparse.Namespace):
+    """``(wake_check, check_every, clock_only)`` from ``--wake-check/--check-every/--clock-only``."""
+    from hermes_cli import kanban_wake_check as kwc
+
+    cmd = kwc.normalize_cmd(getattr(args, "wake_check", None))
+    every = kwc.normalize_every(getattr(args, "check_every", None)) if cmd else None
+    return cmd, every, bool(getattr(args, "clock_only", False))
+
+
+def _guarded_park(conn, op: str, wake, refused: dict, park, **plan):
+    """Per-task op: refuse a park > 2 h out with no probe (``kanban_wake_check.guard_error``). [daveey]"""
+    from hermes_cli import kanban_wake_check as kwc
+
+    def run(tid):
+        err = kwc.guard_error(wake_at=kwc.planned_wake(conn, tid, op=op, **plan),
+                              wake_check=wake[0], clock_only=wake[2])
+        if err:
+            refused[tid] = f"cannot {op} {tid}: {err}"
+            return False
+        return park(tid)
+    return run
+
+
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)
@@ -1052,9 +1089,17 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 return f"{tid} → triage (unblock loop detected — {verdict}){suffix}"
             return f"Blocked {tid}{suffix}"
 
-        op = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
-            conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid)))
-        return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
+        try:
+            wake = _cli_wake_check(args)
+        except ValueError as exc:
+            return _err(f"kanban block: {exc}", 2)
+        refused: dict = {}
+        op = _guarded_park(conn, "block", wake, refused, _commented(
+            conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
+                conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid),
+                wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
+            reason=reason, kind=kind)
+        return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}")
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
@@ -1063,9 +1108,18 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
-        op = _commented(conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
-            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid)))
-        return _bulk_apply(ids, op, lambda tid: f"Scheduled {tid}{suffix}", lambda tid: f"cannot schedule {tid}")
+        try:
+            wake = _cli_wake_check(args)
+        except ValueError as exc:
+            return _err(f"kanban schedule: {exc}", 2)
+        refused: dict = {}
+        op = _guarded_park(conn, "schedule", wake, refused, _commented(
+            conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
+                conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid),
+                wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
+            reason=reason)
+        return _bulk_apply(ids, op, lambda tid: f"Scheduled {tid}{suffix}",
+                           lambda tid: refused.get(tid) or f"cannot schedule {tid}")
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
@@ -1214,6 +1268,10 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         )
         if value
     }
+    if args.platform == "tui":
+        # An explicit subscribe is a shepherd: the chat's sidebar row stays busy until the card
+        # lands (kanban_session_activity.COUNTED_SUB_REASONS). Upgrades an earlier touch sub. [daveey]
+        delivery_metadata["reason"] = "shepherd"
     with kbc.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
             return _err(f"no such task: {args.task_id}")

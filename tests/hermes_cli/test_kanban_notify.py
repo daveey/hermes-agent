@@ -100,6 +100,25 @@ def test_notify_subscribe_cli_records_discord_multiplex_anchors(kanban_home):
         "chat_type": "thread", "existing": "keep", "parent_chat_id": "parent", "guild_id": "guild",
     }
 
+def test_notify_subscribe_cli_marks_tui_sub_as_shepherd_upgrading_a_touch(kanban_home):
+    """[daveey] An explicit tui notify-subscribe is a shepherd (keeps the chat's row busy), even when the
+    chat already had a touch-only auto-sub on the card."""
+    import argparse
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="watched", assignee="worker")
+        kbn.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="s1", delivery_metadata={"reason": "touch"})
+
+    parser = argparse.ArgumentParser()
+    kc.build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["kanban", "notify-subscribe", tid, "--platform", "tui", "--chat-id", "s1"])
+    assert kc.kanban_command(args) == 0
+
+    with kbc.connect() as conn:
+        subs = kbn.list_notify_subs(conn, tid)
+    assert len(subs) == 1 and subs[0]["delivery_metadata"] == {"reason": "shepherd"}
+
+
 def test_notify_sub_chat_type_persists_and_last_write_wins(kanban_home):
     """chat_type persists, defaults to 'dm', an explicit re-subscribe is
     last-write-wins, and a None re-subscribe leaves it untouched. The

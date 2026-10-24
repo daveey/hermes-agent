@@ -599,7 +599,8 @@ def test_block_dependency_without_open_parent_is_a_timed_park(worker_env):
     human ``blocked`` bucket: it is a timed wait, and the tool says when it wakes."""
     from tools import kanban_tools as kt
 
-    d = json.loads(kt._handle_block({"reason": "upstream input is missing", "kind": "dependency"}))
+    d = json.loads(kt._handle_block({"reason": "upstream input is missing", "kind": "dependency",
+                                     "clock_only": True}))
     assert (d["ok"], d["status"], d["requested_kind"]) == (True, "scheduled", "dependency")
     assert d["wake_at"] and "not a human block" in d["note"]
 
@@ -1524,6 +1525,8 @@ def test_comment_on_existing_card_subscribes_shepherding_session(monkeypatch, wo
     assert d["ok"] is True and d.get("subscribed") is True, d
     subs = _list_subs_for_task(worker_env)
     assert [(s["platform"], s["chat_id"]) for s in subs] == [("tui", "tui-shepherd")]
+    # Stamped as a touch: it gets completion pings but never keeps the row busy/red. [daveey]
+    assert subs[0]["delivery_metadata"]["reason"] == "touch"
     # Commenting again does not duplicate the subscription.
     kt._handle_comment({"task_id": worker_env, "body": "still watching"})
     assert len(_list_subs_for_task(worker_env)) == 1
