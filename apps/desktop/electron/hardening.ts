@@ -19,6 +19,24 @@ const DEFAULT_FETCH_TIMEOUT_MS = 30_000
 // after base64 + framing. Preview stays on the Settings-configurable path.
 const ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 const TEXT_PREVIEW_SOURCE_MAX_BYTES = 64 * 1024 * 1024
+const TEXT_PREVIEW_MAX_BYTES = 512 * 1024
+/** `readFileText(path, { full: true })`: inline `::preview` documents are
+ *  rendered, not skimmed, so they are read whole up to this cap (an HTML board
+ *  with inlined images is routinely 0.5–5 MB). Over it the read fails EFBIG
+ *  instead of handing back a cut document. */
+const TEXT_FULL_READ_MAX_BYTES = 16 * 1024 * 1024
+
+/** Byte limits for `hermes:readFileText`: `maxBytes` rejects the file outright
+ *  (EFBIG), `readLimit` is how much is returned (`truncated` past it). The
+ *  default preview read skims the head of any file up to 64 MiB; a full read
+ *  never truncates. */
+function textReadLimits(options) {
+  const full = options?.full === true
+
+  return full
+    ? { full, maxBytes: TEXT_FULL_READ_MAX_BYTES, readLimit: TEXT_FULL_READ_MAX_BYTES }
+    : { full, maxBytes: TEXT_PREVIEW_SOURCE_MAX_BYTES, readLimit: TEXT_PREVIEW_MAX_BYTES }
+}
 
 function dataUrlReadMaxBytesFromMb(maxMb) {
   return clampDataUrlReadMaxMb(maxMb) * 1024 * 1024
@@ -651,7 +669,10 @@ export {
   SAFE_STORAGE_ENCODING,
   SECRET_FILE_MODE,
   sensitiveFileBlockReason,
+  TEXT_FULL_READ_MAX_BYTES,
+  TEXT_PREVIEW_MAX_BYTES,
   TEXT_PREVIEW_SOURCE_MAX_BYTES,
+  textReadLimits,
   tightenSecretFileMode,
   writeSecretFileAtomic
 }

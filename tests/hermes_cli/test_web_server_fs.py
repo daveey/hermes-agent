@@ -349,6 +349,26 @@ def test_fs_endpoints_require_auth(tmp_path):
     assert default_response.status_code == 401
 
 
+def test_fs_read_text_full_returns_whole_document(client, tmp_path, monkeypatch):
+    """Inline ::preview documents read with full=1: a 700 KB board comes back whole (the
+    preview read cut it at 512 KiB inside an inlined image, rendering garbage)."""
+    board = tmp_path / "board.html"
+    board.write_text("<html><body>" + "x" * (700 * 1024) + "<h2>Section C</h2></body></html>")
+
+    skim = client.get("/api/fs/read-text", params={"path": str(board)}).json()
+    assert skim["truncated"] is True
+    assert "Section C" not in skim["text"]
+
+    full = client.get("/api/fs/read-text", params={"path": str(board), "full": "1"}).json()
+    assert full["truncated"] is False
+    assert full["text"].endswith("<h2>Section C</h2></body></html>")
+
+    from hermes_cli.web_routers import files as fs_router
+    monkeypatch.setattr(fs_router, "_FS_TEXT_FULL_MAX_BYTES", 600 * 1024)
+    over = client.get("/api/fs/read-text", params={"path": str(board), "full": "1"})
+    assert over.status_code == 413
+
+
 def test_fs_read_text_decodes_double_encoded_non_ascii_path(client, tmp_path):
     target = tmp_path / "半导体行业运营分享会纪要.md"
     target.write_text("hello")
