@@ -27,6 +27,7 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from subprocess import Popen as _GUARD_POPEN
 
 import pytest
 
@@ -497,10 +498,12 @@ def _live_git_config_paths() -> list:
 
 
 def _plain_run(argv: list):
-    """``(returncode, stdout)`` via Popen, immune to tests that fake ``subprocess.run``."""
+    """``(returncode, stdout)`` independent of per-test subprocess mocks."""
     import subprocess
 
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # Capture Popen at conftest import: teardown can precede monkeypatch undo.
+    # Capturing subprocess.run instead would still look up the mocked Popen.
+    proc = _GUARD_POPEN(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     out, _ = proc.communicate()
     return proc.returncode, out
 
