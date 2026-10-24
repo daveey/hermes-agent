@@ -60,10 +60,13 @@ def _eval_js(task_id: str, expression: str) -> dict[str, Any]:
     embed secret values — the fallback places the expression in subprocess
     argv. Use :func:`_eval_js_secret` for secret-bearing expressions.
     """
+    selected = task_id
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY
+        from tools.browser_agent_lifecycle import supervisor_task
 
-        supervisor = SUPERVISOR_REGISTRY.get(task_id)
+        selected = supervisor_task(task_id)
+        supervisor = SUPERVISOR_REGISTRY.get(selected)
         if supervisor is not None:
             sup = supervisor.evaluate_runtime(expression)
             if sup.get("ok"):
@@ -71,10 +74,14 @@ def _eval_js(task_id: str, expression: str) -> dict[str, Any]:
             err = str(sup.get("error") or "")
             if "supervisor" not in err.lower():
                 return {"success": False, "error": err}
+        if selected != task_id:
+            return {"success": False, "error": "Managed browser supervisor unavailable; run browser_exec in the selected session again"}
     except ImportError:
         pass
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("vault fill: supervisor eval unavailable (%s)", exc)
+        if selected != task_id:
+            return {"success": False, "error": "Managed browser supervisor unavailable; reconnect the selected session"}
 
     from tools.browser_tool import _last_session_key
     from tools.browser_tool_session import _run_browser_command
@@ -94,10 +101,14 @@ def _ensure_supervisor(task_id: str):
     for the packaged Chromium's endpoint (``get cdp-url``: same daemon, same reaper) and attach.
     Returns None when no endpoint is reachable; the fill then refuses rather than touching argv."""
     from tools.browser_supervisor import SUPERVISOR_REGISTRY
+    from tools.browser_agent_lifecycle import supervisor_task
 
-    supervisor = SUPERVISOR_REGISTRY.get(task_id)
+    selected = supervisor_task(task_id)
+    supervisor = SUPERVISOR_REGISTRY.get(selected)
     if supervisor is not None:
         return supervisor
+    if selected != task_id:
+        return None  # Never widen a managed vault lookup to an unscoped local browser.
     from tools.browser_tool import _last_session_key
     from tools.browser_tool_cdp import _get_dialog_policy_config, _resolve_cdp_override
     from tools.browser_tool_session import _run_browser_command

@@ -55,7 +55,8 @@ def managed(tmp_path, monkeypatch):
     executions = []
 
     def run(cmd, code, env, timeout):
-        executions.append((code, dict(env), timeout))
+        if '--reload' not in cmd:
+            executions.append((code, dict(env), timeout))
         return subprocess.CompletedProcess(cmd, 0, 'ok', '')
 
     monkeypatch.setattr(cli, '_run_cli_killing_process_group', run)

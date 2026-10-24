@@ -579,9 +579,14 @@ def _attach_vault_supervisor(env: dict, task_id: Optional[str]) -> None:
         return
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY
+        from tools.browser_agent_lifecycle import supervisor_identity
         from tools.browser_tool_cdp import _get_dialog_policy_config, _resolve_cdp_override
         policy, timeout_s = _get_dialog_policy_config()
-        SUPERVISOR_REGISTRY.get_or_start(task_id=task_id or "default", cdp_url=_resolve_cdp_override(cdp),
+        owner = task_id or "default"
+        name = env.get("BU_NAME", "")
+        if name.startswith("lease-") and cdp.endswith("/lease/" + name[6:]):
+            owner = supervisor_identity(owner, name[6:])
+        SUPERVISOR_REGISTRY.get_or_start(task_id=owner, cdp_url=_resolve_cdp_override(cdp),
                                          dialog_policy=policy, dialog_timeout_s=timeout_s)
     except Exception as exc:
         logger.debug("browser_exec: CDP supervisor attach failed (non-fatal): %s", exc)
