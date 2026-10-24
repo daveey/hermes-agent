@@ -48,6 +48,13 @@ describe('sessionHiddenAsAutomated [daveey]', () => {
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'idle' })).toBe(false)
   })
 
+  it('hides automated rows waiting on cards unless they need human attention', () => {
+    expect(sessionHiddenAsAutomated({ ...bot, kanban_active: 1 }, false, { dotState: 'idle' })).toBe(true)
+    expect(sessionHiddenAsAutomated({ ...bot, kanban_active: 1, kanban_blocked: 1 }, false, { dotState: 'idle' })).toBe(false)
+    expect(sessionHiddenAsAutomated({ ...bot, kanban_active: 0 }, false, { dotState: 'idle' })).toBe(true)
+    expect(sessionHiddenAsAutomated(bot, false, { dotState: 'idle' })).toBe(true)
+  })
+
   it('still hides a working or finished automated row', () => {
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'working' })).toBe(true)
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'unread' })).toBe(true)
