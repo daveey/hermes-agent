@@ -30,3 +30,32 @@ def test_shell_runner_executes_tests_and_propagates_failure(tmp_path):
     assert marker.read_text(encoding="utf-8") == "executed", result.stdout + result.stderr
     assert result.returncode != 0, result.stdout + result.stderr
     assert "runner failure propagation canary" in result.stdout + result.stderr
+
+
+@pytest.mark.platforms("posix")
+def test_shell_runner_forwards_the_flaky_report_path(tmp_path):
+    """CI sets HERMES_TEST_FLAKY_REPORT on the step; the hermetic env -i must keep it (t_94f2c8ba)."""
+    marker = tmp_path / "failed-once"
+    case = tmp_path / "test_flaky_canary.py"
+    case.write_text(
+        "from pathlib import Path\n"
+        "def test_flaky_canary():\n"
+        f"    m = Path({str(marker)!r})\n"
+        "    if not m.exists():\n"
+        "        m.write_text('x')\n"
+        "        assert False, 'first attempt flake'\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "out" / "flaky.json"
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["bash", str(root / "scripts/run_tests.sh"), "-j", "1", str(case)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=180,
+        env={**os.environ, "HERMES_PYTHON": sys.executable, "HERMES_TEST_FILE_RETRIES": "1",
+             "HERMES_TEST_FLAKY_REPORT": str(report)},
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    import json
+    ids = [e["test_id"] for e in json.loads(report.read_text(encoding="utf-8"))["flaky"]]
+    assert len(ids) == 1 and ids[0].endswith("test_flaky_canary.py::test_flaky_canary"), ids

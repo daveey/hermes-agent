@@ -590,21 +590,131 @@ def _run_one_file(
         retries = 0
     while rc != 0 and attempt < retries:
         attempt += 1
-        first_output = output
-        file, rc, output, summary, subproc_wall2 = _run_one_file_once(
-            file, pytest_args, repo_root, file_timeout
+        first_output, first_summary = output, summary
+        # Retry only the test ids that failed, not the whole file: a 300 s
+        # file with one flaky test used to pay 300 s again (t_94f2c8ba).
+        node_ids = _failed_node_ids(first_output, first_summary)
+        retried: list[str] | None = None
+        if node_ids:
+            targets = [_reroot_node_id(n, file) for n in node_ids]
+            _f, rc, output, retry_summary, subproc_wall2 = _run_one_file_once(
+                file, pytest_args, repo_root, file_timeout, targets=targets
+            )
+            subproc_wall += subproc_wall2
+            if rc in (4, 5) or not retry_summary:
+                # The ids did not resolve (odd parametrize ids, usage error):
+                # fall through to the whole-file retry below.
+                node_ids = None
+            else:
+                retried = node_ids
+                summary = _merge_retry_summary(first_summary, retry_summary)
+        if not node_ids:
+            file, rc, output, summary, subproc_wall2 = _run_one_file_once(
+                file, pytest_args, repo_root, file_timeout
+            )
+            subproc_wall += subproc_wall2
+        scope = (
+            f"{len(retried)} failed test id{'s' if len(retried) != 1 else ''}"
+            if retried else "whole file"
         )
-        subproc_wall += subproc_wall2
         if rc == 0:
             output = (
-                f"⚠ FLAKY: failed on attempt 1, passed on retry "
-                f"(attempt {attempt + 1}). Fix the flake — do not ignore this.\n"
+                f"\u26a0 FLAKY: failed on attempt 1, passed on retry "
+                f"(attempt {attempt + 1}, retried {scope}). Fix the flake \u2014 do not ignore this.\n"
                 f"--- first-attempt output ---\n{first_output}\n"
                 f"--- retry output ---\n{output}"
             )
+            ids = retried or [_repo_relative(file, repo_root)]
             with _flaky_lock:
                 _FLAKY_RESULTS.append((file, output))
+                for test_id in ids:
+                    _FLAKY_TESTS.append({
+                        "test_id": test_id,
+                        "file": _repo_relative(file, repo_root),
+                        "retried": "tests" if retried else "file",
+                        "first_attempt_excerpt": _failure_excerpt(first_output),
+                    })
+        else:
+            output = (
+                f"--- first-attempt output ---\n{first_output}\n"
+                f"--- retry output (retried {scope}; still failing) ---\n{output}"
+            )
     return file, rc, output, summary, subproc_wall
+
+
+# Short-summary lines pytest prints for each failed/erroring test (default -rfE).
+_SUMMARY_HEADER_RE = re.compile(r"^=+ short test summary info =+$")
+# A node id has no spaces outside its parametrize brackets, which may hold " - ".
+_FAILED_LINE_RE = re.compile(r"^(?:FAILED|ERROR) (\S+?::[^\[\s]*(?:\[.*?\])?)(?: - .*)?$")
+
+
+def _failed_node_ids(output: str, summary: dict[str, int]) -> list[str] | None:
+    """Node ids from the LAST short test summary in ``output``, or None.
+
+    None means "cannot pin the failure to test ids" and the caller retries the
+    whole file: a collection error (``ERROR file.py`` has no ``::``), a crash
+    with no summary, ``-rN``, or an id count that disagrees with the counts
+    line (a nested pytest in a test can print its own FAILED lines).
+    """
+    lines = output.splitlines()
+    starts = [i for i, line in enumerate(lines) if _SUMMARY_HEADER_RE.match(line.strip())]
+    if not starts:
+        return None
+    ids: list[str] = []
+    for line in lines[starts[-1] + 1:]:
+        line = line.rstrip()
+        if line.startswith("="):
+            break
+        if line.startswith(("FAILED ", "ERROR ")):
+            m = _FAILED_LINE_RE.match(line)
+            if not m:
+                return None
+            ids.append(m.group(1))
+    ids = list(dict.fromkeys(ids))
+    expected = summary.get("failed", 0) + summary.get("errors", 0)
+    if not ids or len(ids) != expected:
+        return None
+    return ids
+
+
+def _reroot_node_id(node_id: str, file: Path) -> str:
+    """Point ``path::rest`` at ``file`` so the retry never depends on rootdir."""
+    return f"{file}::{node_id.split('::', 1)[1]}"
+
+
+def _merge_retry_summary(first: dict[str, int], retry: dict[str, int]) -> dict[str, int]:
+    """File-level counts after a test-id retry: attempt-1 passes plus the retry's outcome."""
+    merged = dict(first)
+    merged["passed"] = first.get("passed", 0) + retry.get("passed", 0)
+    merged["failed"] = retry.get("failed", 0)
+    merged["errors"] = retry.get("errors", 0)
+    for key in ("crashed",):
+        if retry.get(key):
+            merged[key] = retry[key]
+    return {k: v for k, v in merged.items() if v or k in ("passed", "failed")}
+
+
+def _repo_relative(file: Path, repo_root: Path) -> str:
+    try:
+        return Path(file).resolve().relative_to(Path(repo_root).resolve()).as_posix()
+    except ValueError:
+        return Path(file).as_posix()
+
+
+def _failure_excerpt(output: str, limit: int = 4000) -> str:
+    """The first attempt's tail (assertion + short summary), bounded for the report."""
+    return output[-limit:]
+
+
+def _write_flaky_report(path: str, repo_root: Path) -> None:
+    """JSON report of pass-on-retry tests for scripts/ci/flaky_kanban.py.
+
+    Written even when empty, so CI can upload it unconditionally and the card
+    filer can tell "no flakes" from "no report".
+    """
+    payload = {"version": 1, "flaky": sorted(_FLAKY_TESTS, key=lambda e: e["test_id"])}
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 # Files that failed once and passed on retry, with both attempts' output.
@@ -612,6 +722,9 @@ def _run_one_file(
 # failing assertion is only a filename, which forces another expensive full
 # run to rediscover the race.
 _FLAKY_RESULTS: list[tuple[Path, str]] = []
+# One entry per flaky TEST id (or file, when the retry had to rerun the whole
+# file); written by --flaky-report so CI can file one deflake card per id.
+_FLAKY_TESTS: list[dict[str, str]] = []
 _flaky_lock = threading.Lock()
 
 
@@ -620,9 +733,13 @@ def _run_one_file_once(
     pytest_args: list[str],
     repo_root: Path,
     file_timeout: float,
+    targets: list[str] | None = None,
 ) -> tuple[Path, int, str, dict[str, int], float]:
-    """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
+    """Single attempt of a per-file pytest subprocess (see _run_one_file).
+
+    ``targets`` narrows the run to those node ids of ``file`` (the retry).
+    """
+    cmd = [sys.executable, "-m", "pytest", *(targets or [str(file)]), *pytest_args]
 
     # Give this subprocess its own pytest temp root.
     #
@@ -1249,6 +1366,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--flaky-report",
+        metavar="PATH",
+        default=os.environ.get("HERMES_TEST_FLAKY_REPORT") or None,
+        help=(
+            "Write a JSON list of tests that failed once and passed on the "
+            "retry to PATH (written even when empty). CI uploads it and "
+            "scripts/ci/flaky_kanban.py files one deflake card per test id. "
+            "Env: HERMES_TEST_FLAKY_REPORT."
+        ),
+    )
+    parser.add_argument(
         "--fail-on-skip",
         action="store_true",
         help=(
@@ -1286,7 +1414,7 @@ def main() -> int:
     OUR_FLAGS = {
         "-h", "--help", "-j", "--jobs", "--paths", "--include-integration",
         "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
-        "--files-from", "--fail-on-skip",
+        "--files-from", "--fail-on-skip", "--flaky-report",
     }
     # pytest short flags that consume the NEXT token as their value.
     PYTEST_VALUE_FLAGS = {"-k", "-m", "-p", "-o", "-c", "-r", "-W"}
@@ -1611,6 +1739,11 @@ def main() -> int:
         for f, output in _FLAKY_RESULTS:
             print(f"  {_format_file(f, repo_root)}")
             print(output.rstrip())
+
+    if args.flaky_report:
+        _write_flaky_report(args.flaky_report, repo_root)
+        if _FLAKY_TESTS:
+            print(f"  Flaky test ids written to {args.flaky_report} ({len(_FLAKY_TESTS)})")
 
     # Save durations for future runs (LPT slicing and the per-file timeout
     # scaler, see _effective_file_timeout). _save_durations merges with any
