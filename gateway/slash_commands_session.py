@@ -534,6 +534,7 @@ class GatewaySessionCommandsMixin:
         from agent.conversation_compression import finalize_context_engine_compression_notification
         from agent.conversation_compression_manual import compress_now, render_compress_result
         from gateway.run import _platform_config_key
+        from gateway.run_class_routing import runtime_credentials_deferred
 
         session_key = self._session_key_for_source(source)
         # Platform + stable gateway session key bind this agent (for external context engines) to
@@ -544,7 +545,7 @@ class GatewaySessionCommandsMixin:
             # Context lives in the server-side thread of the LIVE cached agent; a temporary agent
             # has none (and finally-eviction would destroy the real context).
             return await self._compress_codex_app_server_session(session_key, session_entry.session_id)
-        if not runtime_kwargs.get("api_key"):
+        if not runtime_kwargs.get("api_key") and not runtime_credentials_deferred(model):
             return t("gateway.compress.no_provider")
         # FULL transcript (tool results included), like auto-compress: user/assistant-only starves
         # tool-result pruning and can trip the protect-first/last early-return.

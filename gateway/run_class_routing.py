@@ -2,6 +2,16 @@
 from agent.model_routing import is_class_selector
 
 
+def runtime_credentials_deferred(model):
+    """Let the common agent boundary authenticate classes and managed exact pins.
+
+    This is not billing authorization: AIAgent still validates the current
+    profile's policy and native credentials before constructing a client.
+    """
+    from agent.model_routing_managed import managed_config
+    return is_class_selector(model) or managed_config() is not None
+
+
 def class_session_runtime(runner, model, override, source, user_config, session_key=None):
     """Honor session/channel precedence before authenticating the global default.
 
