@@ -205,6 +205,23 @@ describe('gateway routing', () => {
     ])
   })
 
+  it('partitions bulk writes by owner board and profile even on the active gateway', async () => {
+    registry('local')
+    await bind(call => call.path.startsWith('/tasks/bulk')
+      ? { results: (call.opts?.body as { ids: string[] }).ids.map(id => ({ id, ok: true })) }
+      : board({ ready: [] }))
+    api.rememberTaskOwner('bulk-a', 'ops', 'local', 'worker-a')
+    api.rememberTaskOwner('bulk-b', 'ops', 'local', 'worker-b')
+    api.rememberTaskOwner('bulk-c', 'other', 'local', 'worker-a')
+    calls = []
+    await bulkTasks(['bulk-a', 'bulk-b', 'bulk-c'], { status: 'todo' })
+    expect(calls).toEqual([
+      { path: '/tasks/bulk?board=ops', opts: { connectionId: 'local', profile: 'worker-a', method: 'POST', body: { ids: ['bulk-a'], status: 'todo' } } },
+      { path: '/tasks/bulk?board=ops', opts: { connectionId: 'local', profile: 'worker-b', method: 'POST', body: { ids: ['bulk-b'], status: 'todo' } } },
+      { path: '/tasks/bulk?board=other', opts: { connectionId: 'local', profile: 'worker-a', method: 'POST', body: { ids: ['bulk-c'], status: 'todo' } } }
+    ])
+  })
+
   it('keeps the single-gateway path byte-identical', async () => {
     registry('local')
     await bind(() => board({ ready: [task('a')] }))

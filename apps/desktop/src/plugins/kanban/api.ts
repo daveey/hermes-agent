@@ -1051,22 +1051,23 @@ type BulkResult = { results: Array<{ id: string; ok: boolean; error?: string }> 
  *  outcomes so the UI can toast partial failures. [daveey] Split per owning
  *  gateway (and board); a whole gateway failing reports each of its ids. */
 export async function bulkTasks(ids: string[], patch: Record<string, unknown>): Promise<BulkResult> {
-  const groups = new Map<string, string[]>()
+  const groups = new Map<string, { ids: string[]; path: string; opts: PluginRestOptions; gateway: string }>()
 
   for (const id of ids) {
-    const owner = taskOwners.get(id)
-    const key = owner && owner.gateway !== routedScope() ? `${owner.gateway}\0${owner.board}` : ''
-    groups.set(key, [...(groups.get(key) ?? []), id])
+    // Capture the complete route before starting any asynchronous writes.
+    const [path, opts] = forTask(id, '/tasks/bulk')
+    const gateway = taskGateway(id)
+    const key = JSON.stringify([gateway, opts.profile, path])
+    const group = groups.get(key) ?? { ids: [], path, opts, gateway }
+    group.ids.push(id)
+    groups.set(key, group)
   }
 
   const outcomes = await Promise.all(
-    [...groups.entries()].map(async ([key, group]) => {
-      const [gateway, board] = key ? key.split('\0') : [routedScope(), '']
-      const path = key ? withSlug('/tasks/bulk', board) : withBoard('/tasks/bulk')
-
+    [...groups.values()].map(async ({ ids: group, path, opts, gateway }) => {
       try {
         return await nudged(
-          call<BulkResult>(path, { ...(key ? via(gateway) : {}), method: 'POST', body: { ids: group, ...patch } }),
+          call<BulkResult>(path, { ...opts, method: 'POST', body: { ids: group, ...patch } }),
           gateway
         )
       } catch (err) {
