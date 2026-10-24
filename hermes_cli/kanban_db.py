@@ -3227,6 +3227,10 @@ def block_task(
             return True
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
         requested_kind, rekind_reason = kind, None
+        from hermes_cli.kanban_continuation_recovery import is_exhausted_budget_block
+        exhausted_budget = is_exhausted_budget_block(conn, task_id, kind, reason)
+        if exhausted_budget:
+            kind, rekind_reason = "transient", "continuation_exhausted"
         no_open_parent = _parents_satisfied(conn, task_id)
         from hermes_cli import kanban_timed_park as ktp
         if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent):
@@ -3237,7 +3241,8 @@ def block_task(
         if kind == "dependency" and no_open_parent:
             kind = "needs_input"
             rekind_reason = "no_open_parent"
-        new_status, event_kind, set_sql, params, payload = _route_block(
+        from hermes_cli.kanban_block_routing import route_block
+        new_status, event_kind, set_sql, params, payload = route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
             prev_reason=_latest_block_reason(conn, task_id),
@@ -3245,6 +3250,8 @@ def block_task(
             # human question: its rewording is no progress.
             compare_reason=requested_kind == "needs_input",
         )
+        if exhausted_budget:
+            new_status, event_kind = "triage", "blocked"
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
@@ -3320,48 +3327,6 @@ def _latest_block_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str
         return None
     value = _json_dict(_row_get(row, "payload")).get("reason")
     return value if isinstance(value, str) else None
-
-
-def _normalized_reason(reason: Optional[str]) -> str:
-    return " ".join((reason or "").split()).casefold()
-
-
-def _route_block(
-    kind: Optional[str], reason: Optional[str], source_status: str, *,
-    prev_kind: Optional[str], prev_recurrences: int, prev_reason: Optional[str] = None,
-    compare_reason: bool = False,
-) -> tuple[str, str, str, tuple, dict]:
-    """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
-
-    ``dependency`` never enters the human ``blocked`` bucket: it waits in
-    ``todo`` for ``recompute_ready``, so a cron never sees a dependency-wait
-    as something to "unblock". Callers that pass ``dependency`` with no
-    incomplete parent are re-kinded to ``needs_input`` before this runs
-    (see :func:`block_task`). Every other kind counts unblock-loop
-    recurrences: block_task only fires from running/ready (AFTER an unblock
-    returned the task to the pool), so a stored ``block_kind`` equal to the
-    incoming one means blocked -> unblocked -> re-block for the same cause
-    (un-typed None compares equal to a prior un-typed block). At
-    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
-
-    A ``needs_input`` re-block whose reason differs from the previous block's
-    is progress (the human answered one question, the worker asks the next),
-    not a loop, so it restarts the count at 1. [daveey]
-    """
-    payload = {"reason": reason, "kind": kind, "source_status": source_status}
-    if kind == "dependency":
-        return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
-    same_cause = prev_kind == kind and (
-        not (compare_reason and kind == "needs_input")
-        or _normalized_reason(reason) == _normalized_reason(prev_reason)
-    )
-    recurrences = prev_recurrences + 1 if same_cause else 1
-    set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
-    payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    if recurrences >= BLOCK_RECURRENCE_LIMIT:
-        payload["limit"] = BLOCK_RECURRENCE_LIMIT
-        return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
-    return "blocked", "blocked", set_sql, (kind, recurrences), payload
 
 
 def redact_review_value(value: Any) -> Any:
