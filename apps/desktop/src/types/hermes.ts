@@ -639,6 +639,15 @@ export interface SessionInfo {
    *  workers, so the sidebar paints it like a background job, not "done".
    *  Absent when zero or against a backend predating the field. */
   kanban_active?: number
+  /** [daveey] The backend could not read this conversation's kanban cards (a
+   *  local board or another gateway's hermes-hub replica failed). Unknown is
+   *  not "no work": the row stays off done until a read succeeds. Absent when
+   *  the read worked. */
+  kanban_unknown?: boolean
+  /** [daveey] How many of `kanban_active`/`kanban_blocked` are cards on another
+   *  gateway known only from a stale hermes-hub replica (last-known status).
+   *  Absent when zero. */
+  kanban_remote_stale?: number
   /** [daveey] Kanban tasks of this conversation (created or subscribed) that
    *  are blocked on a human, summed over its compression lineage. Shown next
    *  to the open count on the sidebar row. Absent when zero. */

@@ -79,7 +79,9 @@ export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions], (
 
   for (const rows of [sessions, messaging]) {
     for (const row of rows) {
-      if ((row.kanban_active ?? 0) > 0) {
+      // [daveey] `kanban_unknown`: the backend could not read the session's cards (local boards or another
+      // gateway's replica). Unknown is not "no work", so the row stays off done until a read succeeds.
+      if ((row.kanban_active ?? 0) > 0 || row.kanban_unknown === true) {
         ids.push(row.id)
       }
     }
@@ -271,10 +273,13 @@ export const sessionStatusStripe = (
 export const withRowActivity = (
   state: SessionDotState,
   row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active'> &
-    Partial<Pick<SessionInfo, 'kanban_unseen'>>
+    Partial<Pick<SessionInfo, 'kanban_unknown' | 'kanban_unseen'>>
 ): SessionDotState =>
   (state === 'idle' || state === 'unread' || state === 'draft') &&
-  (row.goal_active === true || (row.kanban_active ?? 0) > 0 || (row.background_active ?? 0) > 0)
+  (row.goal_active === true ||
+    (row.kanban_active ?? 0) > 0 ||
+    row.kanban_unknown === true ||
+    (row.background_active ?? 0) > 0)
     ? 'background'
     : (state === 'idle' || state === 'draft') && (row.kanban_unseen ?? 0) > 0
     ? 'unread'

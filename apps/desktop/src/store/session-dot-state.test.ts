@@ -353,6 +353,21 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
     expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
   })
 
+  it('keeps a row whose kanban read failed (kanban_unknown) off done, and a stale remote count busy', () => {
+    setSessions([
+      storedRow('s1', { kanban_unknown: true, unread: true }),
+      storedRow('s2', { kanban_active: 13, kanban_remote_stale: 13 }),
+      storedRow('s3')
+    ])
+
+    expect($kanbanBusySessionIds.get()).toEqual(['s1', 's2'])
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBeNull()
+    expect(withRowActivity('idle', { kanban_unknown: true })).toBe('background')
+    // Control: a session with no kanban stamps still finishes green.
+    expect(sessionStatusStripe($sessionDotStateById.get()['s3'] ?? 'idle', true)).toBe('done')
+  })
+
   it('yields to a live turn', () => {
     setSessions([storedRow('s1', { kanban_active: 1 })])
     publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
