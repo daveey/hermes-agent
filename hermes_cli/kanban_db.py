@@ -2694,7 +2694,7 @@ def complete_task(
     conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
     summary: Optional[str] = None, metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
-    fire_lifecycle_hook: bool = True, force: bool = False,
+    fire_lifecycle_hook: bool = True, force: bool = False, goal_verification=None,
 ) -> bool:
     """``running|ready|blocked|review -> done``; records ``result``.
 
@@ -2732,6 +2732,8 @@ def complete_task(
         # reopened while this task waited.
         if not _parents_satisfied(conn, task_id):
             return False
+        from hermes_cli.kanban_goal_receipt import record as record_goal
+        goal_event_id = record_goal(conn, task_id, goal_verification, (summary or result or '').strip())
         acceptance_event_id = record_acceptance(conn, task_id, acceptance) if acceptance is not None else None
         if acceptance is not None and not acceptance_event_id:
             return False
@@ -2783,6 +2785,10 @@ def complete_task(
         if prior_status == "review" and not event_summary:
             event_summary = _REVIEW_APPROVED_NOTE
         completion_payload = _completed_event_payload(result, event_summary, verified_cards, metadata)
+        if goal_event_id is not None:
+            conn.execute('UPDATE task_events SET run_id=? WHERE id=? AND task_id=?',
+                         (run_id, goal_event_id, task_id))
+            completion_payload['goal_verified_event_id'] = goal_event_id
         if acceptance_event_id is not None:
             conn.execute("UPDATE task_events SET run_id=? WHERE id=? AND task_id=?",
                          (run_id, acceptance_event_id, task_id))

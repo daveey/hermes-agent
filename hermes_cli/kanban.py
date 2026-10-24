@@ -904,7 +904,7 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
 
 
 def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
-                                 handoff_tool: str = "kanban_complete"):
+                                 handoff_tool: str = "kanban_complete", *, verified=None):
     """Goal judge for every terminal worker handoff (including review).
 
     Returns ``(verdict, reason_or_None)``: ``"done"`` allows; ``"blocked"`` = judge ruled the goal
@@ -936,7 +936,7 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
         from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{task.id}")
         try:
-            verdict, reason, _, _, transport_failed = judge_goal(
+            verdict, reason, parse_failed, _, transport_failed = judge_goal(
                 goal=handoff_judge_goal(task.title, task.body, handoff_tool),
                 last_response=evidence.strip())
         finally:
@@ -947,6 +947,7 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
 
         _logging.getLogger(__name__).warning("goal judge check failed, allowing lifecycle handoff: %s",
                                              judge_exc, exc_info=True)
+        return ("done", None)
     if transport_failed:
         # ``judge_goal`` fails open to ``continue`` on transport errors (relay 400, auth, timeout);
         # an unreachable judge is not a human "not done" and must not reject the handoff (#83610).
@@ -954,16 +955,19 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
 
         _logging.getLogger(__name__).warning("goal judge unreachable (%s), allowing lifecycle handoff", reason)
         return ("done", None)
+    if verdict == 'done' and not parse_failed and verified is not None and handoff_tool == 'kanban_complete':
+        from hermes_cli.kanban_goal_receipt import GoalVerification
+        verified.append(GoalVerification.for_handoff(task, evidence))
     return (verdict, None if verdict == "done" else reason)
 
 
 def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: str,
-                     continue_hint: str) -> Optional[str]:
+                     continue_hint: str, *, verified=None) -> Optional[str]:
     """Goal-mode judge gate shared by ``complete`` / ``request-review`` (mirrors tools/kanban_tools.py);
     applied to every terminal handoff so request-review can't bypass it. Returns the error line, or
     None to allow."""
     tool = "kanban_request_review" if handoff.startswith("review") else "kanban_complete"
-    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence, tool)
+    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence, tool, verified=verified)
     if verdict == "blocked":
         return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
                 f"the goal unachievable — {rejection}. {blocked_hint}")
@@ -990,16 +994,18 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
+            verified = []
             gate_err = _goal_gate_error(
                 conn, tid, (summary or args.result or "").strip(), "completion",
                 "Re-scope with kanban edit, or record the block with kanban block instead of completing.",
-                "Provide evidence matching the task's acceptance criteria.")
+                "Provide evidence matching the task's acceptance criteria.", verified=verified)
             if gate_err:
                 fail_msg[tid] = gate_err
                 return False
             fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
+                                        goal_verification=verified[0] if verified else None,
                                         expected_run_id=_worker_run_id_for(tid),
                                         force=bool(getattr(args, "force", False)))
             except kb.LiveClaimError:

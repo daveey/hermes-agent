@@ -113,8 +113,8 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
 
     The collector must call this on the owner, never on a replica. A completion
     event is evidence of the core lifecycle gate; status alone (including an
-    archive) is not. Goal-mode lacks a persisted judge-success record today, so
-    those completions deliberately remain unverified.
+    archive) is not. Goal-mode also requires a current, completion-bound
+    judge-success receipt; unavailable judges never supply release evidence.
     """
     if not conn.in_transaction:
         raise ValueError('origin_observation_snapshot_required')
@@ -161,7 +161,24 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
                                      and receipt.get('pr_url') == row[4]
                                      and isinstance(receipt.get('head_sha'), str)
                                      and re.fullmatch(r'[0-9a-f]{40}', receipt['head_sha']))
-    verified = bool(terminal and row[2] is None and not row[3] and contract_verified
+    goal_verified = not row[3]
+    if row[3] and event:
+        completed = json.loads(event[3] or '{}')
+        receipt_id = completed.get('goal_verified_event_id') if isinstance(completed, dict) else None
+        receipt = conn.execute(
+            "SELECT payload,run_id FROM task_events WHERE id=? AND task_id=? AND kind='goal_verified' AND id<?",
+            (receipt_id, task['id'], event[0])).fetchone() if type(receipt_id) is int else None
+        if receipt and receipt[1] is not None and receipt[1] == event[1]:
+            from hermes_cli.kanban_goal_receipt import digest
+            proof = json.loads(receipt[0] or '{}')
+            subject = proof.get('subject') if isinstance(proof, dict) else None
+            current = conn.execute('SELECT title,body FROM tasks WHERE id=?', (task['id'],)).fetchone()
+            goal_verified = bool(isinstance(subject, dict) and proof.get('snapshot') == digest(subject)
+                                 and subject.get('task_id') == task['id']
+                                 and subject.get('title') == current[0] and subject.get('body') == current[1]
+                                 and subject.get('contract') == row[4]
+                                 and subject.get('evidence') == (completed.get('summary') or completed.get('result') or '').strip())
+    verified = bool(terminal and row[2] is None and goal_verified and contract_verified
                     and event and run and event[1] == run[0] and run[1] in ('done', 'completed') and run[2] == 'completed'
                     and row[1] is not None and event[2] >= row[1] and run[3] is not None and run[3] >= row[1])
     payload = {k: v for k, v in task.items() if k != 'origin_observation'}
