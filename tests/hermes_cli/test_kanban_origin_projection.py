@@ -1,5 +1,7 @@
 """Authoritative receipt projections survive replica loss and isolate owners."""
 import sqlite3
+import json
+import pytest
 
 from tests.hermes_cli.test_kanban_origin_ledger import world, publish, accept
 from hermes_cli import kanban_origin_ledger as ledger
@@ -76,6 +78,13 @@ def test_projection_current_release_and_reopen(world):
         db.execute('CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)')
         db.execute("INSERT INTO meta VALUES ('last_ok','1000')")
     def rows():
+        # Source contract: collect_all publishes scope health at gateway/info.
+        # publish() replaces the replica, so restore inventory on each observation.
+        with sqlite3.connect(replica) as db:
+            db.execute("DELETE FROM replica WHERE coll='gateway'")
+            db.execute("INSERT INTO replica VALUES ('owner','gateway','info',6,?)",
+                       (json.dumps({'gateway': 'owner', 'task_scopes': [
+                           {'profile': 'work', 'board': 'build', 'state': 'ok'}]}),))
         return ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)
     assert rows()[0]['status'] == 'running'
     publish(replica, binding, status='done')
@@ -88,3 +97,22 @@ def test_projection_current_release_and_reopen(world):
         db.execute('UPDATE replica SET version=5')
     assert rows()[0]['unfinished'] is True
     assert rows()[0]['status'] == 'running'
+
+
+@pytest.mark.parametrize('scopes', [None, [], [{'profile': 'work', 'board': 'build', 'state': 'unknown'}],
+                                   [{'profile': 'other', 'board': 'build', 'state': 'ok'}]])
+def test_fresh_origin_sync_does_not_make_unreadable_owner_scope_current(world, scopes):
+    path, replica, binding = world
+    publish(replica, binding)
+    accept(world)
+    publish(replica, binding, status='done')
+    with sqlite3.connect(replica) as db:
+        db.execute('UPDATE replica SET version=4')
+        db.execute('CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)')
+        db.execute("INSERT INTO meta VALUES ('last_ok','1000')")
+        if scopes is not None:
+            db.execute("INSERT INTO replica VALUES ('owner','gateway','info',5,?)",
+                       (json.dumps({'gateway': 'owner', 'task_scopes': scopes}),))
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)[0]
+    assert row['status'] == 'unknown'
+    assert row['unfinished'] and row['stale']

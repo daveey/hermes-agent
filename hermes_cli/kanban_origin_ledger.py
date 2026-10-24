@@ -195,6 +195,24 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                         "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
                         (owner['gateway'], binding['task_record_key'])).fetchone()
                     current = bool(row and row[0] == version and json.loads(row[1]) == task)
+                    # A successful origin pull does not prove the owner could
+                    # read this board. Consume the collector's qualified scope
+                    # inventory; missing/ambiguous inventory is not healthy.
+                    inventory = source.execute(
+                        "SELECT data FROM replica WHERE gw=? AND coll='gateway' AND key='info'",
+                        (owner['gateway'],)).fetchone()
+                    try:
+                        info = json.loads(inventory[0]) if inventory else {}
+                        scopes = info.get('task_scopes')
+                        if not isinstance(scopes, list):
+                            scopes = []
+                        matching = [s for s in scopes if isinstance(s, dict)
+                                    and (s.get('profile'), s.get('board')) == (owner['profile'], owner['board'])]
+                        readable = (info.get('gateway') == owner['gateway'] and len(matching) == 1
+                                    and matching[0].get('state') == 'ok')
+                    except (ValueError, TypeError, AttributeError):
+                        readable = False
+                    current = current and readable
                 status = task.get('status')
                 # Acceptance alone is not a release, including an initially
                 # terminal publication. Unknown status also remains unfinished.
