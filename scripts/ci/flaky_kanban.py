@@ -83,7 +83,7 @@ class CliBoard:
 
 def load_state(path: Path) -> dict[str, Any]:
     try:
-        state = json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         state = {}
     state.setdefault("cards", {})       # test id -> {"card": id, "generation": n}
@@ -226,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         if not path.is_file():
             print(f"flaky_kanban: no flaky report at {path} (the test step did not get that far)")
             return 0
-        entries = read_report(path.read_text(encoding="utf-8"))
+        entries = read_report(path.read_text(encoding="utf-8-sig"))
         for line in annotations(entries):
             print(line)
         print(f"flaky_kanban: {len(entries)} flaky test id(s)")
@@ -243,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         entries: list[dict[str, str]] = []
         for path in args.report:
-            entries += read_report(Path(path).read_text(encoding="utf-8"))
+            entries += read_report(Path(path).read_text(encoding="utf-8-sig"))
         log = file_cards(entries, run_url=args.run_url, branch=args.branch, board=board, state=state)
     save_state(args.state, state)
     for line in log:  # silent when nothing flaked (no-agent cron delivers stdout)

@@ -27,7 +27,7 @@ def test_shell_runner_executes_tests_and_propagates_failure(tmp_path):
              "PATHEXT": ".COM;.EXE;.BAT;.CMD"},
              check=False,
     )
-    assert marker.read_text(encoding="utf-8") == "executed", result.stdout + result.stderr
+    assert marker.read_text(encoding="utf-8-sig") == "executed", result.stdout + result.stderr
     assert result.returncode != 0, result.stdout + result.stderr
     assert "runner failure propagation canary" in result.stdout + result.stderr
 
@@ -57,5 +57,5 @@ def test_shell_runner_forwards_the_flaky_report_path(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     import json
-    ids = [e["test_id"] for e in json.loads(report.read_text(encoding="utf-8"))["flaky"]]
+    ids = [e["test_id"] for e in json.loads(report.read_text(encoding="utf-8-sig"))["flaky"]]
     assert len(ids) == 1 and ids[0].endswith("test_flaky_canary.py::test_flaky_canary"), ids

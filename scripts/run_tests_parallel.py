@@ -1267,6 +1267,34 @@ def _print_failure_report(
             print(f"  {_format_file(file, repo_root)}")
 
 
+def _print_off_host_note(files: list[Path]) -> None:
+    """Say which platforms(...) tests were skipped on this host and where they run."""
+    off_host = _off_host_marker_files(files)
+    if not off_host:
+        return
+    print()
+    for spec, n in sorted(off_host.items()):
+        lanes = ", ".join(_LANES[lane] for lane in sorted(spec_hosts(spec)))
+        print(
+            f"  note: platforms({spec!r}) tests (in {n} file{'s' if n != 1 else ''}) were "
+            f"SKIPPED on this host ({sys.platform}); they run on {lanes}."
+        )
+
+
+def _report_flaky(flaky_report: str | None, repo_root: Path) -> None:
+    """Print pass-on-retry files with both attempts; write the --flaky-report JSON."""
+    if _FLAKY_RESULTS:
+        print()
+        print(f"=== \u26a0 {len(_FLAKY_RESULTS)} FLAKY file{'s' if len(_FLAKY_RESULTS) != 1 else ''} (failed once, passed on retry \u2014 fix these) ===")
+        for f, output in _FLAKY_RESULTS:
+            print(f"  {_format_file(f, repo_root)}")
+            print(output.rstrip())
+    if flaky_report:
+        _write_flaky_report(flaky_report, repo_root)
+        if _FLAKY_TESTS:
+            print(f"  Flaky test ids written to {flaky_report} ({len(_FLAKY_TESTS)})")
+
+
 def main() -> int:
     _make_stdio_glyph_safe()
     parser = argparse.ArgumentParser(
@@ -1700,15 +1728,7 @@ def main() -> int:
     # conftest hook, not run. Say so explicitly — a green local run on Linux
     # proves nothing about the platforms("windows") tests, and the reader
     # should know where they DO run rather than misreading skips as coverage.
-    off_host = _off_host_marker_files(files)
-    if off_host:
-        print()
-        for spec, n in sorted(off_host.items()):
-            lanes = ", ".join(_LANES[lane] for lane in sorted(spec_hosts(spec)))
-            print(
-                f"  note: platforms({spec!r}) tests (in {n} file{'s' if n != 1 else ''}) were "
-                f"SKIPPED on this host ({sys.platform}); they run on {lanes}."
-            )
+    _print_off_host_note(files)
 
     # Zero tests collected across the WHOLE run is NOT a pass. Per-file rc=5
     # is deliberately tolerated above (platform-gated files), but if NOTHING
@@ -1733,17 +1753,7 @@ def main() -> int:
 
     # Flaky files: failed once, passed on the automatic retry. Green, but
     # loudly reported so they get fixed instead of silently re-flaking.
-    if _FLAKY_RESULTS:
-        print()
-        print(f"=== ⚠ {len(_FLAKY_RESULTS)} FLAKY file{'s' if len(_FLAKY_RESULTS) != 1 else ''} (failed once, passed on retry — fix these) ===")
-        for f, output in _FLAKY_RESULTS:
-            print(f"  {_format_file(f, repo_root)}")
-            print(output.rstrip())
-
-    if args.flaky_report:
-        _write_flaky_report(args.flaky_report, repo_root)
-        if _FLAKY_TESTS:
-            print(f"  Flaky test ids written to {args.flaky_report} ({len(_FLAKY_TESTS)})")
+    _report_flaky(args.flaky_report, repo_root)
 
     # Save durations for future runs (LPT slicing and the per-file timeout
     # scaler, see _effective_file_timeout). _save_durations merges with any

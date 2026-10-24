@@ -170,7 +170,7 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
             }}))
             assert child.pid > 0
     """).strip()
-    probe.write_text(probe_src + "\n")
+    probe.write_text(probe_src + "\n", encoding="utf-8")
 
     # Run the parallel runner against just the probe file. The runner
     # discovers under ``tests/`` by default, so we override via --paths.
@@ -202,7 +202,7 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
     assert handoff.exists(), (
         f"probe never wrote handoff file; runner output:\n{proc.stdout}"
     )
-    handoff_data = json.loads(handoff.read_text())
+    handoff_data = json.loads(handoff.read_text(encoding="utf-8-sig"))
     grandchild_pid = handoff_data["pid"]
     diag = handoff_data.get("diag", "(no diag)")
     test_pid = handoff_data.get("test_pid")
@@ -446,7 +446,7 @@ def _run_probe_file(tmp_path: Path, body: str, *extra: str) -> tuple[subprocess.
         cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, timeout=120, check=False,
     )
-    return proc, json.loads(report.read_text(encoding="utf-8"))
+    return proc, json.loads(report.read_text(encoding="utf-8-sig"))
 
 
 def test_retry_reruns_only_the_failed_test_and_reports_it_flaky(tmp_path: Path) -> None:
@@ -475,7 +475,7 @@ def test_retry_reruns_only_the_failed_test_and_reports_it_flaky(tmp_path: Path) 
     assert "FLAKY" in proc.stdout and "retried 1 failed test id" in proc.stdout
     assert "simulated load flake" in proc.stdout
     # The passing test ran once: only the failed id was retried.
-    assert runs.read_text().split() == ["steady", "flaky", "flaky"]
+    assert runs.read_text(encoding="utf-8-sig").split() == ["steady", "flaky", "flaky"]
     assert [e["test_id"].rsplit("/", 1)[-1] for e in report["flaky"]] == [
         "test_retry_probe.py::TestGroup::test_flaky_once"
     ]
@@ -718,7 +718,7 @@ def test_files_from_runs_exactly_the_listed_files(tmp_path: Path) -> None:
     probe_dir = _make_probe_dir(tmp_path)
     extra = tmp_path / "probe_extra"
     extra.mkdir()
-    (extra / "test_extra.py").write_text("def test_extra():\n    assert True\n")
+    (extra / "test_extra.py").write_text("def test_extra():\n    assert True\n", encoding="utf-8")
 
     list_file = tmp_path / "files.txt"
     list_file.write_text(
