@@ -34,6 +34,13 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for name in ("alice", "bob", "orchestrator"):
+        profile = home / "profiles" / name
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text(
+            "platform_toolsets:\n  cli: [terminal, file]\nterminal:\n  backend: local\n",
+            encoding="utf-8",
+        )
     kb.init_db()
     return home
 
