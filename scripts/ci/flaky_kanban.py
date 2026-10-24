@@ -3,38 +3,41 @@
 
 scripts/run_tests_parallel.py retries a failed test once in the same job. A
 test that passes only on that retry keeps the job green but must never pass
-silently: the runner writes it to ``--flaky-report`` JSON, CI uploads that as
-a ``flaky-tests-*`` artifact, and this script turns each test id into a card.
+silently: the runner writes it to ``--flaky-report`` JSON, the CI step
+``flaky_kanban.py --annotate <report>`` turns each entry into a warning
+annotation titled ``FLAKY (passed only on retry)`` (first message line = test
+id, then the failure tail), and the hub cron reads those annotations back and
+files one card per test id.
 
 * first flake of a test id: create a card (idempotency key ``deflake:<id>``)
 * later flakes while that card is open: append a comment to it
 * flake after its card was closed (done/archived): open a new card that links
   the old one, since the fix did not hold
 
-Two input modes:
+Modes:
 
+  flaky_kanban.py --annotate flaky.json               # CI step: emit annotations
   flaky_kanban.py --report flaky.json [--report ...] --run-url URL [--branch B]
-  flaky_kanban.py --from-github --repo OWNER/NAME     # hub cron: poll artifacts
+  flaky_kanban.py --from-github --repo OWNER/NAME     # hub cron: poll annotations
 
-``--from-github`` reads ``GH_TOKEN``/``GITHUB_TOKEN`` and remembers processed
-artifact ids in ``--state`` so each run is filed once. Cards go through the
-``hermes kanban`` CLI of the host it runs on (the hub's board).
+``--from-github`` reads ``GH_TOKEN``/``GITHUB_TOKEN``, walks recently completed
+workflow runs, and remembers processed run attempts in ``--state`` so each run
+is filed once. Cards go through the ``hermes kanban`` CLI of the host it runs
+on (the hub's board).
 """
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
 import subprocess
 import sys
 import time
 import urllib.request
-import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
-ARTIFACT_PREFIX = "flaky-tests-"
+ANNOTATION_TITLE = "FLAKY (passed only on retry)"
 CLOSED = {"done", "archived"}
 DEFAULT_STATE = Path(os.path.expanduser("~/.hermes/state/ci-flaky-cards.json"))
 EXCERPT_LIMIT = 3000
@@ -84,13 +87,13 @@ def load_state(path: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         state = {}
     state.setdefault("cards", {})       # test id -> {"card": id, "generation": n}
-    state.setdefault("artifacts", [])   # processed artifact ids
+    state.setdefault("runs", [])        # processed "<run id>/<attempt>"
     return state
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    state["artifacts"] = state["artifacts"][-500:]
+    state["runs"] = state["runs"][-1000:]
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
@@ -148,40 +151,66 @@ def read_report(raw: bytes | str) -> list[dict[str, str]]:
     return list(data.get("flaky") or [])
 
 
-# --- GitHub polling (hub cron) -------------------------------------------------
+# --- CI side: report -> annotations --------------------------------------------
 
 
-def _gh(url: str, token: str, *, raw: bool = False) -> Any:
+def _escape(text: str) -> str:
+    """Workflow-command escaping for an annotation message."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def annotations(entries: Iterable[dict[str, str]], excerpt_limit: int = 1500) -> list[str]:
+    lines = []
+    for e in entries:
+        tail = (e.get("first_attempt_excerpt") or "").strip()[-excerpt_limit:]
+        msg = e["test_id"] + ("\n" + tail if tail else "")
+        lines.append(f"::warning title={ANNOTATION_TITLE}::{_escape(msg)}")
+    return lines
+
+
+def parse_annotation(message: str) -> dict[str, str]:
+    test_id, _, excerpt = message.partition("\n")
+    return {"test_id": test_id.strip(), "first_attempt_excerpt": excerpt, "retried": "tests" if "::" in test_id else "file"}
+
+
+# --- Hub side: annotations -> cards (cron) ---------------------------------------
+
+
+def _gh(url: str, token: str) -> Any:
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "hermes-ci-flaky-cards"})
     with urllib.request.urlopen(req, timeout=60) as resp:
-        body = resp.read()
-    return body if raw else json.loads(body)
+        return json.loads(resp.read())
 
 
-def poll_github(repo: str, token: str, board: Board, state: dict[str, Any]) -> list[str]:
+def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *, runs: int = 40) -> list[str]:
+    """File cards for FLAKY annotations on recently completed runs not seen before."""
+    api = f"https://api.github.com/repos/{repo}"
     log: list[str] = []
-    page = _gh(f"https://api.github.com/repos/{repo}/actions/artifacts?per_page=100", token)
-    done = set(state["artifacts"])
-    for art in sorted(page.get("artifacts", []), key=lambda a: a["id"]):
-        if not art["name"].startswith(ARTIFACT_PREFIX) or art["id"] in done or art.get("expired"):
+    done = set(state["runs"])
+    page = _gh(f"{api}/actions/runs?status=completed&per_page={runs}", token)
+    for run in sorted(page.get("workflow_runs", []), key=lambda r: r["id"]):
+        key = f"{run['id']}/{run.get('run_attempt', 1)}"
+        if key in done:
             continue
-        run = art.get("workflow_run") or {}
-        run_url = f"https://github.com/{repo}/actions/runs/{run.get('id')}"
-        blob = _gh(art["archive_download_url"], token, raw=True)
-        entries: list[dict[str, str]] = []
-        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-            for name in zf.namelist():
-                if name.endswith(".json"):
-                    entries += read_report(zf.read(name))
-        log += file_cards(entries, run_url=run_url, branch=run.get("head_branch") or "?", board=board, state=state)
-        state["artifacts"].append(art["id"])
+        jobs = _gh(f"{api}/actions/runs/{run['id']}/attempts/{run.get('run_attempt', 1)}/jobs?per_page=100", token)
+        for job in jobs.get("jobs", []):
+            if "Run tests" not in job.get("name", ""):
+                continue
+            entries = [parse_annotation(a.get("message", ""))
+                       for a in _gh(f"{api}/check-runs/{job['id']}/annotations?per_page=100", token)
+                       if a.get("title") == ANNOTATION_TITLE]
+            if entries:
+                log += file_cards(entries, run_url=job.get("html_url") or run["html_url"],
+                                  branch=run.get("head_branch") or "?", board=board, state=state)
+        state["runs"].append(key)
     return log
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--annotate", metavar="REPORT", help="CI: print one FLAKY annotation per report entry")
     ap.add_argument("--report", action="append", default=[], help="flaky report JSON (repeatable)")
     ap.add_argument("--run-url", default="(local run)")
     ap.add_argument("--branch", default="?")
@@ -191,6 +220,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hermes", default=os.environ.get("HERMES_BIN", "hermes"))
     ap.add_argument("--assignee", default="default")
     args = ap.parse_args(argv)
+
+    if args.annotate:
+        path = Path(args.annotate)
+        if not path.is_file():
+            print(f"flaky_kanban: no flaky report at {path} (the test step did not get that far)")
+            return 0
+        entries = read_report(path.read_text(encoding="utf-8"))
+        for line in annotations(entries):
+            print(line)
+        print(f"flaky_kanban: {len(entries)} flaky test id(s)")
+        return 0
 
     board = CliBoard(args.hermes, args.assignee)
     state = load_state(args.state)

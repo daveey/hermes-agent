@@ -143,30 +143,16 @@ jobs:
 
       - name: Report flaky tests
         # Runs after a green AND a red test step: a red slice can still carry
-        # flakes in other files. Only a non-empty report is uploaded.
-        id: flaky
+        # flakes in other files. Each pass-on-retry test becomes one warning
+        # annotation titled "FLAKY (passed only on retry)": first message line
+        # = test id, then the first attempt's failure tail. The hub's
+        # ci-flaky-cards cron (scripts/ci/flaky_kanban.py --from-github) reads
+        # these annotations and files one deflake card per test id.
+        # Annotations, not artifacts: artifact storage is not reliable here.
         if: ${{ !cancelled() }}
         env:
           REPORT: ${{ runner.temp }}/flaky-tests/slice-${{ matrix.slice }}.json
-        run: |
-          if [ ! -s "$REPORT" ]; then echo "no flaky report"; exit 0; fi
-          python3 - "$REPORT" <<'PY'
-          import json, os, sys
-          flaky = json.load(open(sys.argv[1]))["flaky"]
-          for e in flaky:
-              print(f"::warning title=FLAKY (passed only on retry)::{e['test_id']}")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f"count={len(flaky)}\n")
-          PY
-
-      - name: Upload flaky report
-        if: ${{ !cancelled() && steps.flaky.outputs.count != '' && steps.flaky.outputs.count != '0' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: flaky-tests-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slice }}
-          path: ${{ runner.temp }}/flaky-tests/slice-${{ matrix.slice }}.json
-          retention-days: 7
-          if-no-files-found: ignore
+        run: python3 scripts/ci/flaky_kanban.py --annotate "$REPORT"
 
       - name: Save per-file duration cache (main only)
         # Only green first-attempt durations are written by the runner, so

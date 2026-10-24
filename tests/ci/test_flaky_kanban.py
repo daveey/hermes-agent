@@ -81,11 +81,55 @@ def test_flake_after_the_card_was_closed_opens_a_linked_new_card():
     assert board.cards[first]["comments"] == []
 
 
+def test_annotations_round_trip_through_the_github_poll(monkeypatch):
+    """CI prints FLAKY annotations; the hub poll reads them back into one card per id."""
+    excerpt = "E   AssertionError: 100% starved\nline two"
+    lines = fk.annotations([_entry("tests/x.py::test_a", excerpt), _entry("tests/y.py")])
+    assert lines[0].startswith("::warning title=FLAKY (passed only on retry)::tests/x.py::test_a%0A")
+    assert "100%25 starved" in lines[0]                      # workflow-command escaping
+    messages = [line.split("::", 2)[2].replace("%0A", "\n").replace("%25", "%") for line in lines]
+
+    api = "https://api.github.com/repos/o/r"
+    calls = []
+
+    def fake_gh(url, token):
+        calls.append(url)
+        if url.startswith(f"{api}/actions/runs?"):
+            return {"workflow_runs": [{"id": 5, "run_attempt": 1, "head_branch": "main",
+                                       "html_url": "https://github.com/o/r/actions/runs/5"}]}
+        if url.startswith(f"{api}/actions/runs/5/attempts/1/jobs"):
+            return {"jobs": [{"id": 9, "name": "Python tests / Run tests (1/2)", "html_url": "https://job/9"},
+                             {"id": 10, "name": "Lint", "html_url": "https://job/10"}]}
+        if url.startswith(f"{api}/check-runs/9/annotations"):
+            return [{"title": "FLAKY (passed only on retry)", "message": m} for m in messages] + [
+                {"title": "other warning", "message": "tests/z.py::nope"}]
+        raise AssertionError(url)
+
+    monkeypatch.setattr(fk, "_gh", fake_gh)
+    board, state = FakeBoard(), fk.load_state(Path("/nonexistent/state.json"))
+    log = fk.poll_github("o/r", "tok", board, state)
+    assert [line.split()[0] for line in log] == ["opened", "opened"]
+    assert sorted(c["title"] for c in board.cards.values()) == ["Deflake tests/x.py::test_a", "Deflake tests/y.py"]
+    card_a = board.cards[state["cards"]["tests/x.py::test_a"]["card"]]
+    assert "100% starved" in card_a["body"] and "https://job/9" in card_a["body"]
+    assert state["cards"]["tests/y.py"] and state["runs"] == ["5/1"]
+    assert not any("check-runs/10" in u for u in calls)      # only test jobs are read
+
+    # The same run attempt is never filed twice.
+    assert fk.poll_github("o/r", "tok", board, state) == []
+    assert len(board.cards) == 2
+
+
+def test_annotate_mode_tolerates_a_missing_report(tmp_path, capsys):
+    assert fk.main(["--annotate", str(tmp_path / "absent.json")]) == 0
+    assert "no flaky report" in capsys.readouterr().out
+
+
 def test_state_round_trips_and_rejects_unknown_report_versions(tmp_path):
     path = tmp_path / "s.json"
     state = fk.load_state(path)
     state["cards"]["t"] = {"card": "t_1", "generation": 0}
-    state["artifacts"].append(7)
+    state["runs"].append("7/1")
     fk.save_state(path, state)
     assert fk.load_state(path)["cards"]["t"]["card"] == "t_1"
     with pytest.raises(ValueError):
