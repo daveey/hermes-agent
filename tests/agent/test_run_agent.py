@@ -26,6 +26,11 @@ from agent.memory_manager import MemoryManager
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 from tui_gateway import server as tui_server
 
+# Upper bound for one thread to observe another (event set, redirect seen,
+# join). Generous on purpose: the waits return as soon as the event fires, and
+# a loaded CI host can take seconds to schedule a thread (t_94f2c8ba).
+_CROSS_THREAD_TIMEOUT_S = 30.0
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -4009,8 +4014,10 @@ class TestRunConversation:
             if calls == 1:
                 agent._fire_reasoning_delta("Following the original approach.")
                 entered.set()
-                deadline = time.time() + 2
-                while not agent._interrupt_requested and time.time() < deadline:
+                # Wait for the redirect itself, not a wall-clock guess: on a
+                # loaded CI host the turn took >2 s just to reach this call.
+                deadline = time.monotonic() + _CROSS_THREAD_TIMEOUT_S
+                while not agent._interrupt_requested and time.monotonic() < deadline:
                     time.sleep(0.01)
                 raise InterruptedError("request cancelled by redirect")
             return final
@@ -4027,9 +4034,9 @@ class TestRunConversation:
                 )
             )
             worker.start()
-            assert entered.wait(timeout=2)
+            assert entered.wait(timeout=_CROSS_THREAD_TIMEOUT_S)
             assert agent.redirect("Use the corrected approach.") is True
-            worker.join(timeout=5)
+            worker.join(timeout=_CROSS_THREAD_TIMEOUT_S)
 
         assert worker.is_alive() is False
         assert calls == 2

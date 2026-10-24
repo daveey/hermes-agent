@@ -422,6 +422,11 @@ def _runtime(
     )
 
 
+# Event waits that return the moment the condition holds; the bound only
+# matters on a starved host, where a few seconds is not enough.
+_LOADED_HOST_TIMEOUT_S = 30.0
+
+
 def _wait_for(predicate, *, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1509,7 +1514,11 @@ def test_transient_remote_stop_failure_stays_pending_and_retries(db: Path):
     identity = _identity()
     _admit(db, identity)
     rpc = FakeSessionRPC(auto_complete=False)
-    runtime = _runtime(db, rpc)
+    # Lease expiry is not under test here. The default 0.4 s lease lapsed
+    # between retries on a CPU-throttled CI runner, and the cancel never
+    # settled within the wait (t_94f2c8ba). A long lease takes wall-clock
+    # scheduling out of the outcome.
+    runtime = _runtime(db, rpc, lease_ttl_seconds=30.0)
     original_interrupt = rpc.interrupt
     attempts = 0
     retry_allowed = threading.Event()
@@ -1519,18 +1528,21 @@ def test_transient_remote_stop_failure_stays_pending_and_retries(db: Path):
         attempts += 1
         if attempts == 1:
             raise RuntimeError("temporary stop transport failure")
-        assert retry_allowed.wait(1.0)
+        assert retry_allowed.wait(_LOADED_HOST_TIMEOUT_S)
         return original_interrupt(**kwargs)
 
     rpc.interrupt = flaky_interrupt
     runtime.start()
-    assert rpc.submitted.wait(1.0)
+    assert rpc.submitted.wait(_LOADED_HOST_TIMEOUT_S)
     stopping = runtime.cancel(identity, cancel_id="cancel-retry")
     assert stopping["status"] == "stopping"
     assert state.get_task(db, identity)["status"] == "stopping"
     retry_allowed.set()
     runtime.wakeup()
-    _wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled")
+    _wait_for(
+        lambda: state.get_task(db, identity)["status"] == "cancelled",
+        timeout=_LOADED_HOST_TIMEOUT_S,
+    )
     assert attempts >= 2
     assert runtime.stop(timeout=5.0)
     assert state.get_task(db, identity)["status"] == "cancelled"
