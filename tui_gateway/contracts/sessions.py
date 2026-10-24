@@ -15,6 +15,48 @@ from .connectors_operation import ConnectionRequestPayload
 from .registry import method
 
 
+# ── durable plugin-authorized starts ─────────────────────────────────────────
+
+
+class SessionStartRequestParams(Params):
+    profile: str = Field(min_length=1, max_length=256)
+    namespace: str = Field(min_length=1, max_length=256)
+    start_request_id: str = Field(min_length=1, max_length=256)
+
+
+class FirstTurnState(WireEnum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class StartReconciliation(WireEnum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+    unknown_outcome = "unknown_outcome"
+
+
+class SessionStartRequestResult(Result):
+    gateway_id: str
+    profile: str
+    stored_session_id: str
+    resolved_session_id: str
+    first_turn_id: str
+    first_turn_state: FirstTurnState
+    exists: bool
+    archived: bool
+    active_turn: bool
+    reconciliation: StartReconciliation
+
+
+method("session.start_request", params=SessionStartRequestParams, result=SessionStartRequestResult)
+
+
 # ── shared live-session snapshot ──────────────────────────────────────────────────────────────
 
 
