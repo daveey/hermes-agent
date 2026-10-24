@@ -95,10 +95,14 @@ def try_class_fallback(agent):
         _build_client(agent, runtime["api_key"], runtime["base_url"], [])
 
     try:
-        runtime = resolve_class_runtime(
-            "class:" + agent.model_routing["requested_class"], "auto",
-            session_id=agent.session_id, requirements=requirements, excluded=failed,
-            prepare_runtime=prepare)
+        from contextlib import nullcontext
+        from agent.model_routing_runtime import temporary_resolution
+        scope = temporary_resolution() if isinstance(getattr(agent, '_one_turn_runtime', None), dict) else nullcontext()
+        with scope:
+            runtime = resolve_class_runtime(
+                "class:" + agent.model_routing["requested_class"], "auto",
+                session_id=agent.session_id, requirements=requirements, excluded=failed,
+                prepare_runtime=prepare)
     except Exception as exc:
         vars(agent).clear()
         vars(agent).update(previous)
@@ -144,6 +148,8 @@ def link_compression_route(agent, parent_session_id, child_session_id):
 
 def persist_class_metadata(agent):
     """Keep the ordinary session row in sync with the durable allocation store."""
+    if isinstance(getattr(agent, '_one_turn_runtime', None), dict):
+        return
     metadata = getattr(agent, "model_routing", None)
     config = getattr(agent, "_session_init_model_config", None)
     if isinstance(config, dict):

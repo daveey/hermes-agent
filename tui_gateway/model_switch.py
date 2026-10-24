@@ -17,7 +17,9 @@ _RUNTIME_KEYS = ("model", "provider", "api_key", "base_url", "api_mode")
 
 def _snapshot_agent_model_runtime(agent) -> dict:
     """Capture the current agent model runtime for a one-turn restore."""
+    from agent.agent_runtime_once import snapshot_runtime
     return {**{k: getattr(agent, k, "") for k in _RUNTIME_KEYS},
+            "runtime": snapshot_runtime(agent),
             "reasoning_config": copy.deepcopy(getattr(agent, "reasoning_config", None)),
             "primary_runtime": copy.deepcopy(getattr(agent, "_primary_runtime", None))}
 
@@ -25,6 +27,10 @@ def _snapshot_agent_model_runtime(agent) -> dict:
 def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
     """Restore an agent model runtime captured before a one-turn override."""
     if not snapshot or agent is None:
+        return
+    if "runtime" in snapshot:
+        from agent.agent_runtime_once import restore_runtime
+        restore_runtime(agent, snapshot["runtime"])
         return
     # `/model X --reasoning high --once`: the effort leaves with the model. Set before the
     # runtime restore paths below (primary_runtime may predate a session /reasoning change).
@@ -279,14 +285,24 @@ def _expensive_model_confirm(result, current_base_url: str, current_api_key, age
 
 def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: str, snapshot):
     """Swap the live agent in place, then restart/persist/mark/announce; a failed swap aborts."""
+    previous_once = getattr(agent, '_one_turn_runtime', None)
+    if snapshot is not None:
+        if hasattr(agent, '_ensure_db_session'):
+            agent._ensure_db_session()
+        agent._one_turn_runtime = snapshot['runtime']
+    else:
+        agent.__dict__.pop('_one_turn_runtime', None)
     try:
         agent.switch_model(
             new_model=result.new_model, new_provider=result.target_provider, api_key=result.api_key,
             base_url=result.base_url, api_mode=result.api_mode,
             capabilities=getattr(result, "runtime_capabilities", None))
     except Exception as exc:
-        # The in-place swap rolled the agent back and re-raised. Abort the whole commit (worker
-        # restart, persist, marker, override, config write) or the session pins a broken model.
+        if previous_once is None:
+            agent.__dict__.pop('_one_turn_runtime', None)
+        else:
+            agent._one_turn_runtime = previous_once
+        # The in-place swap rolled back; restore its temporary ownership too.
         # Abort the commit: do NOT restart the slash worker, persist runtime, append the switch marker, set
         # a session model_override, or persist to config — all of which would otherwise leave the session
         # pinned to a broken model and kill the conversation on the next turn (#50163). A failed switch is a
@@ -296,7 +312,8 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
                          f"staying on {getattr(agent, 'model', current_model)}.") from exc
     _restart_slash_worker(sid, session)
     _persist_live_session_runtime(session)
-    _persist_live_session_system_prompt(session)
+    if snapshot is None:
+        _persist_live_session_system_prompt(session)
     _append_model_switch_marker(session, model=result.new_model, provider=result.target_provider)
     _emit_session_info(sid, session)
     if snapshot is not None:
@@ -327,19 +344,39 @@ def _apply_model_switch(
         cfg = load_config()
         user_provs = cfg.get("providers")
         custom_provs = get_compatible_custom_providers(cfg)
-    result = switch_model(
-        raw_input=model_input, current_provider=current_provider, current_model=current_model,
-        current_base_url=current_base_url, current_api_key=current_api_key, is_global=persist_global,
-        explicit_provider=explicit_provider, user_providers=user_provs,
-        custom_providers=custom_provs)
+    from agent.model_routing_runtime import temporary_resolution
+    from agent.model_routing import is_class_selector
+    # Preflight validates credentials but must not allocate before confirmation.
+    with temporary_resolution():
+        if is_class_selector(model_input):
+            from hermes_cli.model_switch import ModelSwitchResult
+            from agent.model_routing_runtime import resolve_class_runtime
+            preview = resolve_class_runtime(model_input, explicit_provider or 'auto', session_id='switch-preflight',
+                                            requirements=getattr(agent, '_model_routing_requirements', {}))
+            result = ModelSwitchResult(success=True, new_model=model_input, target_provider='auto',
+                                       is_global=persist_global)
+            from dataclasses import replace
+            guard_result = replace(result, new_model=preview['model'], target_provider=preview['provider'],
+                                   base_url=preview['base_url'], api_key=preview['api_key'], api_mode=preview['api_mode'])
+        else:
+            result = switch_model(
+                raw_input=model_input, current_provider=current_provider, current_model=current_model,
+                current_base_url=current_base_url, current_api_key=current_api_key, is_global=persist_global,
+                explicit_provider=explicit_provider, user_providers=user_provs,
+                custom_providers=custom_provs)
+            guard_result = result
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")
-    restore_snapshot = _snapshot_agent_model_runtime(agent) if (one_turn and agent) else None
+    restore_snapshot = None
+    if one_turn and agent:
+        restore_snapshot = session.get('one_turn_model_restore') or _snapshot_agent_model_runtime(agent)
     if agent:
-        _merge_preflight_warning(result, agent, session, cfg, custom_provs)
+        _merge_preflight_warning(guard_result, agent, session, cfg, custom_provs)
+        result.warning_message = guard_result.warning_message
     if not confirm_expensive_model:
-        confirm = _expensive_model_confirm(result, current_base_url, current_api_key, agent)
+        confirm = _expensive_model_confirm(guard_result, current_base_url, current_api_key, agent)
         if confirm is not None:
+            confirm['value'] = result.new_model
             return confirm
     records_composer_override = (
         pin_session_override and isinstance(session, dict) and not one_turn

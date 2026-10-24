@@ -1,6 +1,7 @@
 """Session bookkeeping for explicit runtime switches."""
 import logging
 from copy import copy
+from contextlib import nullcontext
 
 
 class _DeferredSessionWrites:
@@ -45,7 +46,12 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
     from agent.model_routing_agent import persist_class_metadata
 
     config = managed_config()
-    if config is None:
+    from agent.model_routing import is_class_selector
+    if config is None and is_class_selector(model):
+        from hermes_cli.config_effective import load_user_config_effective
+        config = load_user_config_effective()
+    temporary = isinstance(getattr(agent, '_one_turn_runtime', None), dict)
+    if config is None and not temporary:
         return _switch_model_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities)
     staged = copy(agent)
     # Switch helpers mutate these containers in place. Never expose partial work
@@ -61,25 +67,31 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
         _switch_model_runtime(staged, runtime['model'], runtime['provider'], runtime['api_key'],
                               runtime['base_url'], runtime['api_mode'], capabilities, managed=runtime)
 
-    from agent.model_routing import is_class_selector
     from agent.model_routing_runtime import resolve_class_runtime
     resolver = resolve_class_runtime if is_class_selector(model) else resolve_managed_runtime
-    resolver(model, provider, config=config, session_id=agent.session_id,
-             requirements=getattr(agent, '_model_routing_requirements', {}),
-             prepare_runtime=prepare, replace=True)
+    from agent.model_routing_runtime import temporary_resolution
+    with temporary_resolution() if temporary else nullcontext():
+        if config is None:
+            _switch_model_runtime(staged, model, provider, api_key, base_url, api_mode, capabilities)
+        else:
+            resolver(model, provider, config=config, session_id=agent.session_id,
+                     requirements=getattr(agent, '_model_routing_requirements', {}),
+                     prepare_runtime=prepare, replace=True)
     staged._session_db = getattr(agent, '_session_db', None)
     backend = getattr(staged.context_compressor, '_session_db', None)
     if isinstance(backend, _DeferredSessionWrites):
         staged.context_compressor._session_db = backend.backend
     vars(agent).update(vars(staged))
     persist_class_metadata(agent)
-    for method, args, kwargs in compressor_writes:
+    for method, args, kwargs in ([] if temporary else compressor_writes):
         method(*args, **kwargs)
     persist_switch_billing_route(agent)
 
 
 def persist_switch_billing_route(agent) -> None:
     """Persist the billing route so dashboard Model cards show the post-switch provider."""
+    if isinstance(getattr(agent, '_one_turn_runtime', None), dict):
+        return
     session_db = getattr(agent, "_session_db", None)
     session_id = getattr(agent, "session_id", None)
     if session_db is None or not session_id:

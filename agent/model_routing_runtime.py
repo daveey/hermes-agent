@@ -2,6 +2,20 @@
 from __future__ import annotations
 
 from agent.model_routing import ModelRoutingError, resolve_model_route
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_temporary_resolution = ContextVar("temporary_model_resolution", default=False)
+
+
+@contextmanager
+def temporary_resolution():
+    """Validate/select normally, but never allocate a standing session or counter."""
+    token = _temporary_resolution.set(True)
+    try:
+        yield
+    finally:
+        _temporary_resolution.reset(token)
 
 
 def resolve_class_runtime(model, provider, *, config=None, session_id=None,
@@ -14,6 +28,8 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         from hermes_cli.config_effective import load_user_config_effective
         config = load_user_config_effective()
     pools = {}
+    if _temporary_resolution.get():
+        state_path = ":memory:"
 
     def eligible(route):
         from hermes_cli.config import is_provider_enabled

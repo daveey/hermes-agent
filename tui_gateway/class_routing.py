@@ -48,6 +48,8 @@ def restore_class_overrides(model, config, overrides):
 def runtime_model_config(agent, existing, runtime_view, logger):
     """Persist concrete display identity and class policy, clearing stale explicit-switch metadata."""
     config = dict(existing or {})
+    from agent.agent_runtime_once import standing_runtime
+    agent = standing_runtime(agent)
     route = getattr(agent, "model_routing", None)
     agent = runtime_view(agent)
     attr = lambda k: str(getattr(agent, k, "") or "").strip()

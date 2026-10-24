@@ -56,6 +56,15 @@ that tuple even within the same class. Replacement clients and compressor state
 are prepared before allocation commit. Preparation failure preserves the previous
 live runtime and durable selection. Native pool account refresh remains supported.
 
+Desktop `/model --once` uses an isolated in-memory allocation for preflight,
+switching, and any temporary same-class recovery. It does not replace the standing
+SQLite allocation or its counters. Persistence and restart retain the standing
+class/exact pin; turn cleanup restores matching runtime, provenance, pool, native
+client and compressor. Compression children also inherit the standing allocation.
+Manual gateway compression and background tasks accept deferred class/managed-pin
+runtimes, then authenticate through the same guarded AIAgent constructor; an empty
+preflight credential is not permission to skip the billing fence.
+
 Managed send fences validate current policy, selected OAuth credential, actual SDK
 endpoint/token/headers, and request identity after Relay processing. Cached clients
 without subscription provenance must be recreated; enabling policy does not bless
