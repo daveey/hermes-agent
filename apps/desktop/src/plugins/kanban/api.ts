@@ -19,6 +19,11 @@ import {
   atom,
   captureGatewayFileDownload,
   host,
+  hubGatewayForConnection,
+  hubGatewayTasks,
+  hubRequest,
+  type HubTask,
+  learnHubGatewayName,
   type PluginOs,
   type PluginRestOptions,
   type PluginStorage,
@@ -26,14 +31,6 @@ import {
   queryClient,
   useValue
 } from '@hermes/plugin-sdk'
-
-import {
-  hubGatewayForConnection,
-  hubGatewayTasks,
-  hubRequest,
-  type HubTask,
-  learnHubGatewayName
-} from '@/store/hub-sync'
 
 // Native completion notification.
 import {
@@ -475,6 +472,7 @@ function remoteRead<T>(gateway: string, path: string): Promise<T> {
 interface TaskOwner {
   gateway: string
   board: string
+  profile?: string
 }
 
 const taskOwners = new Map<string, TaskOwner>()
@@ -487,8 +485,8 @@ const hubTaskRefs = new Map<string, { board: string; hubGateway: string }>()
 /** [daveey] Record where a task lives before the board has read it (the
  *  open-task hook: a card opened from a chat on another gateway), so the
  *  drawer's first fetch goes to the owning gateway + board. */
-export function rememberTaskOwner(id: string, board: string, gateway: string): void {
-  taskOwners.set(id, { board, gateway })
+export function rememberTaskOwner(id: string, board: string, gateway: string, profile?: string): void {
+  taskOwners.set(id, { board, gateway, ...(profile === undefined ? {} : { profile }) })
 }
 
 /** Registry ids of every gateway, the routed (active) one first. A single
@@ -535,8 +533,11 @@ function withSlug(path: string, slug: string, params: Record<string, string> = {
 function forTask(id: string, path: string, params: Record<string, string> = {}): [string, PluginRestOptions] {
   const owner = taskOwners.get(id)
 
-  return owner && owner.gateway !== routedScope()
-    ? [withSlug(path, owner.board, params), via(owner.gateway)]
+  return owner
+    ? [
+        withSlug(path, owner.board, params),
+        owner.profile === undefined ? via(owner.gateway) : { connectionId: owner.gateway, profile: owner.profile }
+      ]
     : [withBoard(path, params), {}]
 }
 

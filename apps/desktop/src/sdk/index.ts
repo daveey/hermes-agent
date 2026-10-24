@@ -63,6 +63,9 @@ import {
   type SpawnPriority
 } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+
+/** Pane, status bar and titlebar slots; see `./areas` for the mount rules. */
+export { PANES_AREA, STATUSBAR_AREAS, TITLEBAR_AREAS } from './areas'
 import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
@@ -115,8 +118,8 @@ import { planPluginOpenSession } from './plugin-open-session-plan'
 import { sessionsHost } from './sessions'
 import { desktopSettings } from './settings'
 
-/** Pane, status bar and titlebar slots; see `./areas` for the mount rules. */
-export { PANES_AREA, STATUSBAR_AREAS, TITLEBAR_AREAS } from './areas'
+/** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
+export type * from './plugin-contract'
 
 // -- state: readonly views over the app's live atoms -------------------------
 
@@ -1668,12 +1671,10 @@ export const host = {
 
 // -- react bridge -------------------------------------------------------------
 
-/** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
-export type * from './plugin-contract'
+export type { DesktopSettingKey, DesktopSettingValues } from './settings'
 
 // -- ui: the design language --------------------------------------------------
 
-export type { DesktopSettingKey, DesktopSettingValues } from './settings'
 /** THE whole Capabilities surface (Skills / Tools / MCP tabs, installed
  *  lists, full-skill detail pane, embedded hub picker with one-click
  *  installs). For plugin dialogs pass `embedded` (tab state stays local —
@@ -1771,7 +1772,6 @@ export {
   PanelRowMenu,
   PanelSectionLabel
 } from '@/app/overlays/panel'
-
 export {
   type ProfileGroupHeaderContribution,
   type ProfileGroupRoute,
@@ -1783,6 +1783,7 @@ export {
   type SidebarNavContribution,
   WORKSPACE_PAGE_HEADER_AREA
 } from '@/app/routes'
+
 /** Appearance settings' plugin seam: register a render contribution at
  *  `APPEARANCE_AREAS.extra` to add controls at the end of the Appearance page.
  *  `ColorSwatches` is the app's own swatch grid (profile rail / project dialog
@@ -1919,11 +1920,11 @@ export type { GatewayEventListener } from '@/contrib/events'
  *  `ctx.register` stays the door for permanent contributions. Namespace the
  *  id with your plugin slug (`kanban:board-switcher`). */
 export { Contribute, type ContributeProps } from '@/contrib/react/contribute'
+/** Settings ▸ Plugins entries (`ctx.registerSettingsPage`); `pluginSettingsHref` deep-links one. */
+export { pluginSettingsHref, SETTINGS_PLUGINS_AREA } from '@/contrib/settings-pages'
 
 // -- contracts ----------------------------------------------------------------
 
-/** Settings ▸ Plugins entries (`ctx.registerSettingsPage`); `pluginSettingsHref` deep-links one. */
-export { pluginSettingsHref, SETTINGS_PLUGINS_AREA } from '@/contrib/settings-pages'
 export type { Contribution } from '@/contrib/types'
 /** The live gateway instance type — for typing the `gateway` prop `ConnectorsTab`
  *  takes; obtain the instance from `host.getGateway()`. */
@@ -2004,7 +2005,6 @@ export { PROFILE_SWATCHES, profileColor, profileColorSoft } from '@/lib/profile-
  *  `ctx.socket` frame invalidating a query). Inside components keep using
  *  `useQueryClient`. */
 export { queryClient } from '@/lib/query-client'
-
 /** Compact labels for the reasoning levels exported from @hermes/shared, so a
  *  plugin surfacing a thinking depth uses the same spelling as the app. */
 export { reasoningEffortLabel } from '@/lib/reasoning-effort'
@@ -2013,6 +2013,7 @@ export { reasoningEffortLabel } from '@/lib/reasoning-effort'
  *  setup.runtime_check, reconciled) — pass `host.request`. Don't hand-roll
  *  readiness from raw RPC shapes. */
 export { evaluateRuntimeReadiness, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
+
 /** Row-decoration slots: register a `data` contribution with a `render` for
  *  `SESSION_ROW_AREAS.leading` / `.trailing` to decorate sidebar session rows
  *  (the props carry the row's stored session id). */
@@ -2035,6 +2036,14 @@ export {
   type TranscriptDirectiveProps
 } from '@/lib/transcript-directives'
 export { cn } from '@/lib/utils'
+// [daveey] Shared hub owner routing for bundled and disk task projections.
+export {
+  hubGatewayForConnection,
+  hubGatewayTasks,
+  hubRequest,
+  type HubTask,
+  learnHubGatewayName
+} from '@/store/hub-sync'
 /** THE unread store behind `SessionStatusDot`'s emerald dot. A plugin that
  *  learns out-of-band that a session produced something the user hasn't seen
  *  (a roster poll's activity watermark, say) writes HERE rather than keeping

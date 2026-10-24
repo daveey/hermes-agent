@@ -172,6 +172,39 @@ describe('mergeBoardLists', () => {
 })
 
 describe('gateway routing', () => {
+  it('keeps a remembered board when its owner is the active gateway', async () => {
+    registry('local')
+    await bind(() => board({ ready: [] }))
+    api.rememberTaskOwner('pinned-board', 'owner-board', 'local')
+    calls = []
+
+    await api.fetchTask('pinned-board')
+    await patchTask('pinned-board', { status: 'todo' })
+
+    expect(calls.map(call => call.path)).toEqual([
+      '/tasks/pinned-board?board=owner-board',
+      '/tasks/pinned-board?board=owner-board'
+    ])
+  })
+
+  it('pins an explicit owner profile for task reads and writes on the active gateway', async () => {
+    registry('local')
+    await bind(() => board({ ready: [] }))
+    api.rememberTaskOwner('pinned-profile', 'ops', 'local', 'worker')
+    calls = []
+
+    await api.fetchTask('pinned-profile')
+    await patchTask('pinned-profile', { status: 'todo' })
+
+    expect(calls).toEqual([
+      { path: '/tasks/pinned-profile?board=ops', opts: { connectionId: 'local', profile: 'worker' } },
+      {
+        path: '/tasks/pinned-profile?board=ops',
+        opts: { connectionId: 'local', profile: 'worker', method: 'PATCH', body: { status: 'todo' } }
+      }
+    ])
+  })
+
   it('keeps the single-gateway path byte-identical', async () => {
     registry('local')
     await bind(() => board({ ready: [task('a')] }))
