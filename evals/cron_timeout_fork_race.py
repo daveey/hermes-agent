@@ -75,11 +75,19 @@ def main():
         owned = psutil.Process().children(recursive=True)
         try:
             ids = json.loads(marker.read_text(encoding="utf-8"))
-            for pid in ids:
-                try:
-                    states[pid] = psutil.Process(pid).status()
-                except psutil.NoSuchProcess:
-                    states[pid] = "gone"
+            # A delivered SIGKILL is only observable once the target is scheduled; on a
+            # CPU-throttled host that can lag the kill call. Wait for death, bounded well
+            # below the 15s sleepers so a genuine escape (never signalled) still fails.
+            settle = time.monotonic() + 5
+            while True:
+                for pid in ids:
+                    try:
+                        states[pid] = psutil.Process(pid).status()
+                    except psutil.NoSuchProcess:
+                        states[pid] = "gone"
+                if all(s in ("gone", psutil.STATUS_ZOMBIE) for s in states.values()) or time.monotonic() >= settle:
+                    break
+                time.sleep(0.01)
             print(json.dumps({"result": result, "elapsed": elapsed, "states": states,
                               "real_snapshot_sizes": schedules}), flush=True)
             assert result[1].startswith("Script timed out after 2s:"), result
