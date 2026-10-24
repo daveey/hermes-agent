@@ -81,6 +81,8 @@ def _emergency_cleanup_all_sessions():
         # origin's fresh import fails, e.g. #112437): no resolvable state, nothing to clean.
         return
 
+    from tools.browser_agent_lifecycle import release_all
+    _best_effort("Managed browser release on exit", release_all)
     # Own sessions first so their owner_pid files are gone before the reaper scans.
     # Real-profile Chrome is launched directly (not by agent-browser), so the
     # session cleanup never reaps it.
@@ -621,6 +623,8 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
     if task_id is None:
         task_id = "default"
 
+    from tools.browser_agent_lifecycle import release_task
+    _best_effort("Managed browser task release", lambda: release_task(task_id))
     session_keys = [task_id]
     sidecar_key = f"{task_id}{_bt._LOCAL_SUFFIX}"
     with _bt._cleanup_lock:
@@ -742,8 +746,13 @@ def _cleanup_single_browser_session(task_id: str) -> None:
     _bt.logger.debug("Removed task %s from active sessions", task_id)
 
 
-def cleanup_all_browsers() -> None:
+def cleanup_all_browsers(*, process_shutdown: bool = False) -> None:
     """Clean up all active browser sessions (shutdown) and reset cached lookups."""
+    from tools.browser_agent_lifecycle import release_all
+    # /browser connect also calls this legacy reset seam from a single chat.
+    # It must not revoke managed capabilities belonging to sibling sessions.
+    if process_shutdown:
+        _best_effort("Managed browser release", release_all)
     with _bt._cleanup_lock:
         task_ids = list(_bt._active_sessions.keys())
     for task_id in task_ids:

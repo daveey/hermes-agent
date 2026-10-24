@@ -692,6 +692,18 @@ def stop_harness_daemons() -> None:
             _run_cli_killing_process_group([*cmd, "--reload"], "", {**env, "BU_NAME": name}, 15)
 
 
+def _resolve_exec_route(env, session, task_id, local, local_sidecar):
+    from tools import browser_agent_lifecycle as managed_browser
+    try:
+        managed = managed_browser.configured_route(_read_browser_cfg(), env)
+    except managed_browser.ManagedBrowserError as exc:
+        return None, str(exc)
+    # Match before discovery: an idle browser has no /json/version yet.
+    if managed:
+        return managed, None
+    return None, _route_backend(env, session, task_id, bool(local), force_local_sidecar=local_sidecar)
+
+
 def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT_S,
                  task_id: Optional[str] = None, local: bool = False):
     """Run Python code through the browser-use CLI, and return its output"""
@@ -721,7 +733,8 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
             return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
                               "dashes, or underscores (e.g. 'r7k2').")
         env["BU_NAME"] = session
-    route_err = _route_backend(env, session, task_id, bool(local), force_local_sidecar=local_sidecar)
+    from tools import browser_agent_lifecycle as managed_browser
+    managed, route_err = _resolve_exec_route(env, session, task_id, local, local_sidecar)
     if route_err:
         return tool_error(route_err)
     if local_sidecar:
@@ -732,7 +745,7 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     # SHARED browser (/browser connect CDP override): pin each named session to its own tab (see
     # _OWN_TAB_PREAMBLE). Private per-name browsers skip this — nothing to collide with.
     private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
-    if session and not private_browser:
+    if session and not private_browser and not managed:
         code = _OWN_TAB_PREAMBLE + code
 
     workspace = _workspace_dir(task_id)
@@ -748,11 +761,17 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     started = time.time()
 
     def dispatch() -> dict[str, Any]:
-        _attach_vault_supervisor(env, task_id)
-        with _driven_daemons_lock:
-            _driven_daemons.add(env.get("BU_NAME", "default"))
         try:
-            return {"proc": _run_cli_killing_process_group(cmd, code, env, timeout)}
+            lease = (managed_browser.request_lease(managed, task_id, session, timeout, env)
+                     if managed else contextlib.nullcontext())
+            with lease:
+                _attach_vault_supervisor(env, task_id)
+                if not managed:
+                    with _driven_daemons_lock:
+                        _driven_daemons.add(env.get("BU_NAME", "default"))
+                return {"proc": _run_cli_killing_process_group(cmd, code, env, timeout)}
+        except managed_browser.ManagedBrowserError as exc:
+            return {"error_result": tool_error(str(exc))}
         except subprocess.TimeoutExpired:
             return {"error_result": tool_error(
                 f"browser-use exec timed out after {timeout}s. The daemon may still be working; retry "
