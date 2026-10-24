@@ -115,22 +115,58 @@ jobs:
         #
         # No --files: the runner discovers the suite itself. The discovered
         # set is identical to the list the removed matrix job used to pass in.
-        # Workers = 2x the CPUs this runner can actually use. hermes-hub
-        # runners are cpuset-pinned to 3 CPUs (nproc=3); the old fixed 32
-        # put ~10 test files per core, which made timing-sensitive tests
-        # fail (barrier timeouts, "11.98 < 10.0") and pushed host load to
-        # ~70 (t_0259fe53). nproc honours cpusets; os.cpu_count() does not.
+        # Workers come from the CPU budget of the runners' shared systemd
+        # slice divided by the shards that run at once, not from nproc
+        # (scripts/ci/test_workers.py; the host passes HERMES_CI_SLICE_CPUS,
+        # HERMES_CI_CONCURRENT_SHARDS and HERMES_CI_RUNNER_CPUS into each
+        # runner container). 2 x nproc per shard put 36 test processes on an
+        # 8-core budget, load ~70, and timing tests failed (t_94f2c8ba).
+        #
+        # A failed test is retried ONCE in this job, by test id only
+        # (run_tests_parallel.py). A pass on that retry stays green but is
+        # written to the flaky report; the hub's ci-flaky-cards cron turns
+        # each id into one deflake Kanban card. A test that fails twice fails
+        # the job.
         run: |
-          export HERMES_TEST_WORKERS="${HERMES_TEST_WORKERS:-$(( $(nproc) * 2 ))}"
+          HERMES_TEST_WORKERS="$(python3 scripts/ci/test_workers.py)"
+          export HERMES_TEST_WORKERS
           echo "HERMES_TEST_WORKERS=$HERMES_TEST_WORKERS (nproc=$(nproc))"
           scripts/run_tests.sh
         env:
           HERMES_TEST_SLICE: ${{ matrix.slice }}/2
           HERMES_TEST_FILE_TIMEOUT: 600
+          HERMES_TEST_FLAKY_REPORT: ${{ runner.temp }}/flaky-tests/slice-${{ matrix.slice }}.json
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+
+      - name: Report flaky tests
+        # Runs after a green AND a red test step: a red slice can still carry
+        # flakes in other files. Only a non-empty report is uploaded.
+        id: flaky
+        if: ${{ !cancelled() }}
+        env:
+          REPORT: ${{ runner.temp }}/flaky-tests/slice-${{ matrix.slice }}.json
+        run: |
+          if [ ! -s "$REPORT" ]; then echo "no flaky report"; exit 0; fi
+          python3 - "$REPORT" <<'PY'
+          import json, os, sys
+          flaky = json.load(open(sys.argv[1]))["flaky"]
+          for e in flaky:
+              print(f"::warning title=FLAKY (passed only on retry)::{e['test_id']}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"count={len(flaky)}\n")
+          PY
+
+      - name: Upload flaky report
+        if: ${{ !cancelled() && steps.flaky.outputs.count != '' && steps.flaky.outputs.count != '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flaky-tests-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slice }}
+          path: ${{ runner.temp }}/flaky-tests/slice-${{ matrix.slice }}.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Save per-file duration cache (main only)
         # Only green first-attempt durations are written by the runner, so
