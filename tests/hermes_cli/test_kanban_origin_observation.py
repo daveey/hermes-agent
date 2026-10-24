@@ -5,7 +5,7 @@ from tests.hermes_cli.test_kanban_origin_ledger import world, publish, accept
 from hermes_cli import kanban_origin_ledger as ledger
 
 
-def test_verified_terminal_observation_releases_and_newer_reopen_restores(world):
+def test_unverified_terminal_observation_retained_and_newer_reopen_restores(world):
     path, replica, binding = world
     publish(replica, binding)
     accept(world)
@@ -14,7 +14,7 @@ def test_verified_terminal_observation_releases_and_newer_reopen_restores(world)
         db.execute('UPDATE replica SET version=4')
     ledger.refresh_observations(path, replica)
     rows = ledger.obligations(path, gateway='origin', profile='default', sessions=['s_current'])
-    assert rows[0]['unfinished'] is False
+    assert rows[0]['unfinished'] is True  # a newer done report is not verification
     assert rows[0]['observation_version'] == 4
     publish(replica, binding, status='running')
     with sqlite3.connect(replica) as db:

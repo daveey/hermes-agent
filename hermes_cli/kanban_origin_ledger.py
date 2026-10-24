@@ -101,9 +101,51 @@ def obligations(path: Path, *, gateway: str, profile: str, sessions: list[str]) 
             origin = binding["origin"]
             if (origin["gateway"] == gateway and origin["profile"] == profile
                     and (origin["session"] in sessions or resolved in sessions)):
-                result.append({**binding, "resolved_session": resolved, "task": json.loads(task),
-                               "observation_version": version, "unfinished": not bool(released)})
+                payload = json.loads(task)
+                released = bool(released and _owner_evidence(payload).get('verified') is True)
+                result.append({**binding, "resolved_session": resolved, "task": payload,
+                               "observation_version": version, "unfinished": not released})
     return result
+
+
+def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> dict:
+    """Attach owner evidence during the collector's existing read transaction.
+
+    The collector must call this on the owner, never on a replica. A completion
+    event is evidence of the core lifecycle gate; status alone (including an
+    archive) is not. Goal-mode lacks a persisted judge-success record today, so
+    those completions deliberately remain unverified.
+    """
+    row = conn.execute(
+        "SELECT status,completed_at,current_run_id,goal_mode,completion_contract FROM tasks WHERE id=?",
+        (task['id'],)).fetchone()
+    if row is None or row[0] != task.get('status'):
+        raise ValueError('origin_observation_task_changed')
+    event = conn.execute(
+        "SELECT id,run_id,created_at FROM task_events WHERE task_id=? AND kind='completed' ORDER BY id DESC LIMIT 1",
+        (task['id'],)).fetchone()
+    run = conn.execute(
+        "SELECT id,status,outcome,ended_at FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+        (task['id'],)).fetchone()
+    verified = bool(row[0] == 'done' and row[2] is None and not row[3] and row[4] == 'local-only'
+                    and event and run and event[1] == run[0] and run[1] in ('done', 'completed') and run[2] == 'completed'
+                    and row[1] is not None and event[2] >= row[1] and run[3] is not None and run[3] >= row[1])
+    payload = {k: v for k, v in task.items() if k != 'origin_observation'}
+    return {**payload, 'origin_observation': {
+        'schema': 1, 'observed_at': now,
+        'task_hash': hashlib.sha256(_json(payload).encode()).hexdigest(),
+        'verified': verified,
+    }}
+
+
+def _owner_evidence(task: dict) -> dict:
+    evidence = task.get('origin_observation')
+    if not isinstance(evidence, dict) or type(evidence.get('schema')) is not int or evidence['schema'] != 1:
+        return {}
+    payload = {k: v for k, v in task.items() if k != 'origin_observation'}
+    if evidence.get('task_hash') != hashlib.sha256(_json(payload).encode()).hexdigest():
+        return {}
+    return evidence
 
 
 def refresh_observations(path: Path, replica: Path) -> None:
@@ -142,7 +184,8 @@ def refresh_observations(path: Path, replica: Path) -> None:
                         {k: v for k, v in m.items() if k != 'publication_version'}
                         for m in markers if isinstance(m, dict)]:
                     continue
-                released = task.get('status') in ('done', 'archived')
+                released = (task.get('status') in ('done', 'archived')
+                            and _owner_evidence(task).get('verified') is True)
                 conn.execute(
                     "UPDATE origin_obligations SET task_json=?,observation_version=?,released=? WHERE binding_id=?",
                     (_json(task), row[0], int(released), key))
@@ -189,6 +232,9 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 if (origin['gateway'], origin['profile']) != (gateway, profile):
                     continue
                 task = json.loads(payload)
+                # Old ledgers set released from status alone. Recheck evidence
+                # even when the replica version has not advanced.
+                released = bool(released and _owner_evidence(task).get('verified') is True)
                 current = False
                 if fresh and source is not None:
                     row = source.execute(
@@ -212,7 +258,10 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                                     and matching[0].get('state') == 'ok')
                     except (ValueError, TypeError, AttributeError):
                         readable = False
-                    current = current and readable
+                    evidence = _owner_evidence(task)
+                    observed_at = evidence.get('observed_at')
+                    live = (type(observed_at) in (int, float) and 0 <= now - observed_at <= 180)
+                    current = current and readable and live
                 status = task.get('status')
                 # Acceptance alone is not a release, including an initially
                 # terminal publication. Unknown status also remains unfinished.

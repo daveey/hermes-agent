@@ -237,6 +237,24 @@ export function dispatchNativeNotification(input: NativeNotificationInput): bool
     return false
   }
 
+  // A turn ending is not completion of the work it dispatched. These stamps
+  // are the backend's shared origin-ledger projection, also consumed by the
+  // task strip, sidebar finish state and archive guard. Never reconstruct owner
+  // status from a terminal event or from an absent replica row here.
+  if (input.kind === 'turnDone' && input.sessionId) {
+    const storedId = storedSessionIdForRuntimeId(input.sessionId) ?? input.sessionId
+
+    const unfinished = ownerLookupSessionRows().some(row =>
+      sessionMatchesStoredId(row, storedId) &&
+      (row.kanban_unknown === true || (row.kanban_active ?? 0) > 0 ||
+        (row.kanban_blocked ?? 0) > 0 || (row.kanban_remote_stale ?? 0) > 0)
+    )
+
+    if (unfinished) {
+      return false
+    }
+  }
+
   if (throttled(`${input.kind}:${input.sessionId ?? input.tag ?? (input.global ? 'global' : '')}`, Date.now())) {
     return false
   }

@@ -4,6 +4,7 @@ import json
 import pytest
 
 from tests.hermes_cli.test_kanban_origin_ledger import world, publish, accept
+from tests.hermes_cli.test_kanban_origin_creation import board
 from hermes_cli import kanban_origin_ledger as ledger
 
 
@@ -70,33 +71,43 @@ def test_projection_unavailable_replica_never_exposes_released_as_done(world):
     assert row['reported_status'] == 'done'
 
 
-def test_projection_current_release_and_reopen(world):
+def test_projection_current_release_and_reopen(world, board):
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+    from tests.hermes_cli.test_kanban_origin_evidence import publish_observed
+
+    path, replica, binding = world
+    def rows():
+        return ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title='Build', assignee='default', completion_contract='local-only')
+        binding['owner']['task_id'] = tid
+        binding['task_record_key'] = f'work/build/{tid}'
+        publish_observed(conn, replica, binding, version=3)
+        accept(world)
+        assert rows()[0]['status'] == 'ready'
+        assert kb.complete_task(conn, tid, summary='Built and tested')
+        publish_observed(conn, replica, binding, version=4)
+        assert rows()[0]['unfinished'] is False
+        assert rows()[0]['status'] == 'done'
+        conn.execute("UPDATE tasks SET status='running',completed_at=NULL WHERE id=?", (tid,))
+        publish_observed(conn, replica, binding, version=5)
+        assert rows()[0]['unfinished'] is True
+        assert rows()[0]['status'] == 'running'
+
+
+def test_readable_inventory_without_owner_liveness_is_unknown(world):
     path, replica, binding = world
     publish(replica, binding)
     accept(world)
     with sqlite3.connect(replica) as db:
         db.execute('CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)')
         db.execute("INSERT INTO meta VALUES ('last_ok','1000')")
-    def rows():
-        # Source contract: collect_all publishes scope health at gateway/info.
-        # publish() replaces the replica, so restore inventory on each observation.
-        with sqlite3.connect(replica) as db:
-            db.execute("DELETE FROM replica WHERE coll='gateway'")
-            db.execute("INSERT INTO replica VALUES ('owner','gateway','info',6,?)",
-                       (json.dumps({'gateway': 'owner', 'task_scopes': [
-                           {'profile': 'work', 'board': 'build', 'state': 'ok'}]}),))
-        return ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)
-    assert rows()[0]['status'] == 'running'
-    publish(replica, binding, status='done')
-    with sqlite3.connect(replica) as db:
-        db.execute('UPDATE replica SET version=4')
-    assert rows()[0]['unfinished'] is False
-    assert rows()[0]['status'] == 'done'
-    publish(replica, binding, status='running')
-    with sqlite3.connect(replica) as db:
-        db.execute('UPDATE replica SET version=5')
-    assert rows()[0]['unfinished'] is True
-    assert rows()[0]['status'] == 'running'
+        db.execute("INSERT INTO replica VALUES ('owner','gateway','info',5,?)",
+                   (json.dumps({'gateway': 'owner', 'task_scopes': [
+                       {'profile': 'work', 'board': 'build', 'state': 'ok'}]}),))
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)[0]
+    assert row['status'] == 'unknown'
+    assert row['unfinished'] and row['stale']
 
 
 @pytest.mark.parametrize('scopes', [None, [], [{'profile': 'work', 'board': 'build', 'state': 'unknown'}],

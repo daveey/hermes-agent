@@ -18,7 +18,7 @@ import {
 import { __resetNativeNotifyBaselineForTests, markNativeNotifyBaseline } from './notify-baseline'
 import { $approvalRequest, APPROVAL_RESPOND_REQUEST_TIMEOUT_MS, clearAllPrompts, setApprovalRequest } from './prompts'
 import { markSessionGone, resetBackgroundPollingGuard } from './runtime-gone'
-import { setActiveSessionId } from './session'
+import { setActiveSessionId, setSessions } from './session'
 import { dropSessionState, publishSessionState } from './session-states'
 
 const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDesktop'] }
@@ -83,6 +83,32 @@ it('captures durable navigation identity while keeping the runtime id for approv
 })
 
 describe('dispatchNativeNotification focus gating', () => {
+  it.each([
+    { kanban_active: 1 },
+    { kanban_blocked: 1 },
+    { kanban_unknown: true },
+    { kanban_remote_stale: 1 }
+  ])('does not announce finished while the origin projection is unresolved: %o', stamp => {
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    setActiveSessionId(runtime)
+    publishSessionState(runtime, createClientSessionState(stored))
+
+    try {
+      setSessions([{ id: stored, ...stamp } as never])
+      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done' })).toBe(false)
+      expect(notify).not.toHaveBeenCalled()
+      // A later authoritative release is eligible; suppression must not consume
+      // the notification throttle. Error/attention paths remain independent.
+      setSessions([{ id: stored } as never])
+      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done' })).toBe(true)
+      expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+    }
+  })
+
   it('fires a completion notification for the active session when the window is hidden', () => {
     const sessionId = freshSession()
     setActiveSessionId(sessionId)
