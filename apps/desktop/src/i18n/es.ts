@@ -5654,6 +5654,7 @@ export const esOverrides = {
     archiveLinkedCancel: 'Conservar chat',
     archiveLinkedTasksLabel: 'Tareas de Kanban',
     archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} abiertas` : '', blocked ? `${blocked} bloqueadas` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksUnknown: 'Estado de las tareas no disponible; puede que el trabajo siga sin terminar.',
     restored: 'Restaurado',
     unarchiveFailed: 'No se pudo desarchivar',
     cwdChangeFailed: 'No se pudo cambiar el directorio de trabajo',

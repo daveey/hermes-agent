@@ -141,6 +141,19 @@ describe('archiveSession linked-work confirmation', () => {
     expect($sessions.get().map(session => session.id)).toEqual(['s-1'])
   })
 
+  it('asks when remote task status is unknown despite zero known counts', async () => {
+    setSessions([row({ kanban_unknown: true, kanban_active: 0, kanban_blocked: 0 })])
+    const handle = await mountHarness()
+    let done: Promise<void> | undefined
+    act(() => { done = handle.archiveSession('s-1') })
+    await waitFor(() => expect($confirmRequest.get()).not.toBeNull())
+    expect($confirmRequest.get()!.details).toEqual([
+      { label: 'Kanban tasks', value: 'Task status unavailable; work may still be unfinished.' }
+    ])
+    await act(async () => { settleConfirm(false); await done })
+    expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled()
+  })
+
   it('archives after the user confirms', async () => {
     setSessions([row({ kanban_blocked: 1 })])
     const handle = await mountHarness()

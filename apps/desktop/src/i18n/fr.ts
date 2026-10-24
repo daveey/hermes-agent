@@ -5670,6 +5670,7 @@ export const frOverrides = {
     archiveLinkedCancel: 'Garder le chat',
     archiveLinkedTasksLabel: 'Tâches Kanban',
     archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} ouvertes` : '', blocked ? `${blocked} bloquées` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksUnknown: 'État des tâches indisponible ; le travail peut être encore inachevé.',
     restored: 'Restauré',
     unarchiveFailed: 'Échec de la restauration',
     cwdChangeFailed: 'Échec du changement de répertoire de travail',

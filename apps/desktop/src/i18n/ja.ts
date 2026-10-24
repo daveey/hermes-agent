@@ -3849,6 +3849,7 @@ export const jaOverrides = {
     archiveLinkedCancel: '残す',
     archiveLinkedTasksLabel: 'Kanban タスク',
     archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `未完了 ${open}` : '', blocked ? `ブロック中 ${blocked}` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksUnknown: 'タスクの状態を取得できません。作業が未完了の可能性があります。',
     restored: '復元しました',
     unarchiveFailed: 'アーカイブ解除に失敗しました',
     cwdChangeFailed: '作業ディレクトリの変更に失敗しました',

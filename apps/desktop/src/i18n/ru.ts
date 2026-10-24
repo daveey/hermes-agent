@@ -4032,6 +4032,7 @@ export const ruOverrides = {
     archiveLinkedCancel: 'Оставить чат',
     archiveLinkedTasksLabel: 'Задачи Kanban',
     archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `открыто: ${open}` : '', blocked ? `заблокировано: ${blocked}` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksUnknown: 'Статус задач недоступен; работа может быть ещё не завершена.',
     restored: 'Восстановлено',
     unarchiveFailed: 'Не удалось восстановить',
     cwdChangeFailed: 'Изменение рабочего каталога не удалось',

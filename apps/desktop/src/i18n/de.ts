@@ -5661,6 +5661,7 @@ export const deOverrides = {
     archiveLinkedCancel: 'Chat behalten',
     archiveLinkedTasksLabel: 'Kanban-Aufgaben',
     archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} offen` : '', blocked ? `${blocked} blockiert` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksUnknown: 'Aufgabenstatus nicht verfügbar; die Arbeit ist möglicherweise noch nicht abgeschlossen.',
     restored: 'Wiederhergestellt',
     unarchiveFailed: 'Archivierung aufheben fehlgeschlagen',
     cwdChangeFailed: 'Arbeitsverzeichnis-Änderung fehlgeschlagen',

@@ -5115,6 +5115,7 @@ export const en: Translations = {
     archiveLinkedCancel: 'Keep chat',
     archiveLinkedTasksLabel: 'Kanban tasks',
     archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} open` : '', blocked ? `${blocked} blocked` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksUnknown: 'Task status unavailable; work may still be unfinished.',
     restored: 'Restored',
     unarchiveFailed: 'Unarchive failed',
     cwdChangeFailed: 'Working directory change failed',

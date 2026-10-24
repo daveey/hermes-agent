@@ -102,8 +102,12 @@ export async function collectArchiveLinks(
  *  so the caller owns the copy. */
 export function kanbanArchiveLinks(
   session: SessionInfo | undefined,
-  copy: { label: string; value: (open: number, blocked: number) => string }
+  copy: { label: string; unknown: string; value: (open: number, blocked: number) => string }
 ): ArchiveLinkedItem[] {
+  if (session?.kanban_unknown) {
+    return [{ label: copy.label, value: copy.unknown }]
+  }
+
   const open = Math.max(0, Number(session?.kanban_active) || 0)
   const blocked = Math.max(0, Number(session?.kanban_blocked) || 0)
 

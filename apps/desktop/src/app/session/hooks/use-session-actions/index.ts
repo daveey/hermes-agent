@@ -3480,6 +3480,7 @@ export function useSessionActions({
         const linked = [
           ...kanbanArchiveLinks(archived, {
             label: copy.archiveLinkedTasksLabel,
+            unknown: copy.archiveLinkedTasksUnknown,
             value: copy.archiveLinkedTasksValue
           }),
           ...(await collectArchiveLinks({

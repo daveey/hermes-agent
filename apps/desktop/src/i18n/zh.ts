@@ -4834,6 +4834,7 @@ export const zhOverrides = {
     archiveLinkedCancel: '保留对话',
     archiveLinkedTasksLabel: '看板任务',
     archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} 个未完成` : '', blocked ? `${blocked} 个受阻` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksUnknown: '无法获取任务状态；工作可能尚未完成。',
     restored: '已恢复',
     unarchiveFailed: '取消归档失败',
     cwdChangeFailed: '工作目录更改失败',

@@ -441,6 +441,7 @@ export const arChat = {
     archiveLinkedCancel: 'إبقاء المحادثة',
     archiveLinkedTasksLabel: 'مهام كانبان',
     archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} مفتوحة` : '', blocked ? `${blocked} محظورة` : ''].filter(Boolean).join(' · '),
+    archiveLinkedTasksUnknown: 'حالة المهام غير متاحة؛ قد يكون العمل غير مكتمل بعد.',
     restored: 'تمت الاستعادة',
     unarchiveFailed: 'فشل إلغاء الأرشفة',
     cwdChangeFailed: 'فشل تغيير مجلد العمل',
