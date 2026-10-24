@@ -1,0 +1,122 @@
+"""Declared chat jobs keep routing identity, not server-managed message history."""
+from unittest.mock import patch
+
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
+from tests.gateway import test_api_class_routing
+
+adapter = test_api_class_routing.adapter
+native_transport = test_api_class_routing.native_transport
+routing_home = test_api_class_routing.routing_home
+streaming_route = test_api_class_routing.streaming_route
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_declared_job_stays_sticky_without_appending_history(
+    adapter, routing_home, streaming_route, native_transport, stream,
+):
+    adapter._api_key = "test-key"
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
+    seen = []
+    real = adapter._run_agent
+
+    async def capture(**kwargs):
+        seen.append(kwargs)
+        return await real(**kwargs)
+
+    adapter._run_agent = capture
+    with patch("model_tools.get_tool_definitions", return_value=[]):
+        async with TestClient(TestServer(app)) as client:
+            for key, text in [("doc-a", "page one"), ("doc-a", "page two"), ("doc-b", "page two")]:
+                response = await client.post("/v1/chat/completions", headers={
+                    "Authorization": "Bearer test-key", "X-Hermes-Session-Key": key,
+                }, json={"model": "class:deep", "provider": "auto", "stream": stream,
+                         "messages": [{"role": "user", "content": text}]})
+                assert response.status == 200, await response.text()
+                assert "ok" in await response.text()
+    assert seen[0]["session_id"] == seen[1]["session_id"]
+    assert seen[1]["session_id"] != seen[2]["session_id"]
+    assert all(call["conversation_history"] == [] for call in seen)
+    assert all(not call["session_history_delivery"] for call in seen)
+    assert adapter._declared_conversation_session("doc-a") == seen[0]["session_id"]
+    assert adapter._declared_conversation_session("doc-b") == seen[2]["session_id"]
+    db = adapter._ensure_session_db()
+    first = db.get_session(seen[0]["session_id"])
+    assert first["model"] == "anthropic-deep"
+    assert all(body["model"] == first["model"] for _, _, body in native_transport)
+    assert len(native_transport) == 3
+
+
+@pytest.mark.asyncio
+async def test_declared_identity_is_profile_scoped_and_requires_auth(adapter, tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from tests.gateway.test_api_server_declared_conversation import _spy_run_agent
+
+    @web.middleware
+    async def scope(request, handler):
+        token = set_hermes_home_override(tmp_path / request.headers.get("X-Test-Profile", "a"))
+        try:
+            return await handler(request)
+        finally:
+            reset_hermes_home_override(token)
+
+    adapter._api_key = "test-key"
+    seen = []
+    adapter._run_agent = _spy_run_agent(adapter, seen)
+    app = web.Application(middlewares=[scope])
+    app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
+    async with TestClient(TestServer(app)) as client:
+        for profile in ["a", "b", "a"]:
+            response = await client.post("/v1/chat/completions", headers={
+                "Authorization": "Bearer test-key",
+                "X-Hermes-Session-Key": "same-key", "X-Test-Profile": profile,
+            }, json={"model": "class:deep", "messages": [{"role": "user", "content": "same"}]})
+            assert response.status == 200, await response.text()
+        adapter._api_key = ""
+        response = await client.post("/v1/chat/completions", headers={
+            "X-Hermes-Session-Key": "same-key",
+        }, json={"messages": [{"role": "user", "content": "same"}]})
+        assert response.status == 403
+    assert len(seen) == 3
+    assert seen[0]["session_id"] == seen[2]["session_id"]
+    assert seen[0]["session_id"] != seen[1]["session_id"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_id_wins_and_follows_compression_without_rebinding(adapter):
+    from tests.gateway.test_api_server_declared_conversation import _spy_run_agent
+
+    adapter._api_key = "test-key"
+    db = adapter._ensure_session_db()
+    db.create_session("original", "api_server", session_key="original-key")
+    db.publish_compression_child(
+        parent_session_id="original", child_session_id="tip", source="api_server",
+        messages=[{"role": "user", "content": "compressed history"}],
+        require_compression_lease=False,
+    )
+    adapter._bind_declared_conversation("tip", "original-key")
+    seen = []
+    adapter._run_agent = _spy_run_agent(adapter, seen)
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
+    async with TestClient(TestServer(app)) as client:
+        for headers in [
+            {"X-Hermes-Session-Id": "original", "X-Hermes-Session-Key": "other-key"},
+            {"X-Hermes-Session-Key": "original-key"},
+        ]:
+            headers["Authorization"] = "Bearer test-key"
+            response = await client.post("/v1/chat/completions", headers=headers, json={
+                "model": "class:deep", "messages": [{"role": "user", "content": "new page"}],
+            })
+            assert response.status == 200, await response.text()
+    assert [call["session_id"] for call in seen] == ["tip", "tip"]
+    assert [(m["role"], m["content"]) for m in seen[0]["conversation_history"]] == [
+        ("user", "compressed history")]
+    assert seen[0]["bind_declared_conversation"] is False
+    assert seen[0]["session_history_delivery"] == "1"
+    assert seen[1]["conversation_history"] == []
+    assert adapter._declared_conversation_session("other-key") is None
