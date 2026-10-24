@@ -95,7 +95,9 @@ def release_recovered_quota_blocks(conn: sqlite3.Connection) -> list[str]:
     ).fetchall()
     for row in rows:
         task_id = row["id"]
-        parsed = _parse_hold_block(_kb._latest_block_reason(conn, task_id))
+        from hermes_cli.kanban_block_routing import latest_block_reason
+
+        parsed = _parse_hold_block(latest_block_reason(conn, task_id))
         if parsed is None:
             continue
         guard_reason, err = parsed

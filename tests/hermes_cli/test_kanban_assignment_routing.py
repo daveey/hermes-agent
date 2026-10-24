@@ -63,14 +63,30 @@ def test_routes_real_mismatch_to_durable_supervisor(board, kind):
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 2
 
 
+@pytest.mark.parametrize('parked', [False, True], ids=['ready', 'breaker-parked'])
 @pytest.mark.parametrize('kind', ['capability', 'assignment'])
 @pytest.mark.parametrize('reason', ['Need credentials', 'Please sign in to GitHub', 'Need API key',
                                   'Need user approval', 'Payment method expired', 'Policy decision required'])
-def test_real_human_access_request_not_rekinded(board, reason, kind):
+def test_real_human_access_request_not_rekinded(board, reason, kind, parked):
     conn, _ = board
     tid = task_with_drift(board)
+    if parked:
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+        conn.commit()
     assert kb.block_task(conn, tid, kind=kind, reason=reason)
-    assert kb.get_task(conn, tid).block_kind == 'capability'
+    task = kb.get_task(conn, tid)
+    assert task is not None
+    assert task.block_kind == 'capability'
+    assert task.status == 'blocked'
+    assert task.assignee == 'worker'
+    audit = payload(conn, tid)
+    assert audit['kind'] == 'capability'
+    assert 'supervisor_task_id' not in audit
+    if kind == 'assignment':
+        assert audit['requested_kind'] == 'assignment'
+        assert audit['rekind_reason'] == 'human_access_request'
+    if parked:
+        assert audit['classified_in_place'] is True
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
 
 

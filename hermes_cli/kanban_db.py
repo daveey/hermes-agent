@@ -3223,6 +3223,7 @@ def block_task(
         ).fetchone()
         if cur_row is None:
             return False
+        from hermes_cli import kanban_assignment_routing as assignment_routing
         # The breaker (``_record_task_failure``) parks cards ``blocked`` with no
         # ``block_kind`` and no ``blocked`` event -- the policy is the
         # supervisor's, not the kernel's -- but the transition guard below only
@@ -3233,6 +3234,9 @@ def block_task(
         if cur_row["status"] == "blocked":
             if kind is None or expected_run_id is not None or _row_get(cur_row, "block_kind") is not None:
                 return False
+            requested_kind, rekind_reason = kind, None
+            if kind == "assignment":
+                kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason)
             classified = conn.execute(
                 "UPDATE tasks SET block_kind = ?, block_recurrences = 1 "
                 "WHERE id = ? AND status = 'blocked' AND block_kind IS NULL "
@@ -3242,15 +3246,14 @@ def block_task(
             if classified != 1:
                 return False
             payload = {"kind": kind, "reason": reason, "classified_in_place": True}
+            if requested_kind == "assignment":
+                payload.update(requested_kind=requested_kind, rekind_reason=rekind_reason)
             if kind == "assignment":
-                from hermes_cli import kanban_assignment_routing as assignment_routing
-                payload.update(requested_kind=kind, rekind_reason=None)
                 assignment_routing.route(conn, get_task(conn, task_id), payload)
             _append_event(conn, task_id, "blocked", payload)
             return True
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
         requested_kind, rekind_reason = kind, None
-        from hermes_cli import kanban_assignment_routing as assignment_routing
         if kind in {"capability", "assignment"} and not blocker_id:
             kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason)
         no_open_parent = _parents_satisfied(conn, task_id)
