@@ -45,6 +45,18 @@ HUMAN_BLOCK_KINDS = ("needs_input", "capability")
 _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
+_cache_scope: tuple[str, ...] | None = None
+
+
+def _origin_scope() -> tuple[str, ...]:
+    """Namespace cached projections by origin profile and configured storage roots."""
+    from hermes_constants import get_hermes_home
+    from hermes_cli import kanban_db
+    from hermes_cli.profiles import get_active_profile_name
+
+    return (str(get_hermes_home()), get_active_profile_name(), str(kanban_db.kanban_home()),
+            os.environ.get('HERMES_HUB_STATE', str(Path.home() / '.local/state/hermes-hub')),
+            os.environ.get('HERMES_MAIL_CONFIG', str(Path.home() / '.config/hermes-mail/config.json')))
 
 
 def _board_db_paths() -> list[Path]:
@@ -201,6 +213,7 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
 HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync for this long = stale
 _REMOTE_FIELDS = ("title", "status", "block_kind", "assignee", "created_at", "started_at", "priority")
 _remote_last: list[dict[str, Any]] | None = None  # last good read (process lifetime)
+_remote_scope: tuple[str, ...] | None = None
 
 
 def _meta_float(conn: sqlite3.Connection, key: str) -> float | None:
@@ -312,14 +325,23 @@ def _remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(path, timeout=0.5)
     try:
+        scope = json.dumps(_origin_scope())
         if cards is not None:
             with conn:
-                conn.execute("CREATE TABLE IF NOT EXISTS snapshot (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)")
-                conn.execute("INSERT OR REPLACE INTO snapshot VALUES (1, ?)", (json.dumps(cards),))
+                conn.execute("CREATE TABLE IF NOT EXISTS scoped_snapshot (scope TEXT PRIMARY KEY, data TEXT NOT NULL)")
+                conn.execute("INSERT OR REPLACE INTO scoped_snapshot VALUES (?, ?)", (scope, json.dumps(cards)))
             return cards
-        row = conn.execute("SELECT data FROM snapshot WHERE id=1").fetchone()
+        # Historical snapshots omitted the origin profile. Never adopt or erase
+        # their obligations merely because a new scoped projection is available.
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshot'").fetchone():
+            old = conn.execute("SELECT data FROM snapshot WHERE id=1").fetchone()
+            if old is None or json.loads(old[0]) != []:
+                raise ValueError("unqualified origin-work snapshot requires explicit reconciliation")
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scoped_snapshot'").fetchone():
+            return None
+        row = conn.execute("SELECT data FROM scoped_snapshot WHERE scope=?", (scope,)).fetchone()
         if row is None:
-            raise ValueError("origin-work snapshot is missing")
+            return None
         saved = json.loads(row[0])
         if not isinstance(saved, list) or any(not isinstance(c, dict) or not c.get("session") or not c.get("id") for c in saved):
             raise ValueError("invalid origin-work snapshot")
@@ -360,16 +382,19 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     """``_read_remote_links`` of this gateway's replica. A failed read (corrupt/locked/vanished hub.db) is not
     "no remote work": it returns the last good answer with every row marked stale, so a session never paints
     done because the replica could not be read. No replica ever seen = not installed = []."""
-    global _remote_last
-    if _remote_last is None:
-        _remote_last = _remote_snapshot()
+    global _remote_last, _remote_scope
+    scope = _origin_scope()
+    with _cache_lock:
+        previous = _remote_last if _remote_scope == scope else None
+    if previous is None:
+        previous = _remote_snapshot()
     path = _hub_db_path()
     try:
         if path is None:
             raise FileNotFoundError("no hub.db")
         cards = _read_remote_links(path)
     except Exception as exc:  # a broken replica must never break the sidebar
-        if _remote_last is None:
+        if previous is None:
             if path is not None:
                 # Cold-start failures have no safe last-known answer. Propagate so the
                 # row annotator marks unknown and the task API fails, rather than []
@@ -377,21 +402,24 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                 raise
             return []
         _log.warning("hermes-hub replica read failed, keeping last known remote cards (stale): %s", exc)
-        return [{**c, "stale": True} for c in _remote_last]
+        return [{**c, "stale": True} for c in previous]
     present = {(c["session"], c["key"]) for c in cards}
-    cards.extend({**c, "stale": True} for c in (_remote_last or [])
+    cards.extend({**c, "stale": True} for c in (previous or [])
                  if (c["session"], c["key"]) not in present)
     _remote_snapshot(cards)
-    _remote_last = cards
+    with _cache_lock:
+        _remote_scope = scope
+        _remote_last = cards
     return cards
 
 
 def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
     """``(active, blocked, unseen, remote_stale)`` per-session task counts across every board, cached."""
-    global _cache
+    global _cache, _cache_scope
+    scope = _origin_scope()
     now = time.monotonic()
     with _cache_lock:
-        if _cache is not None and now < _cache[0]:
+        if _cache is not None and _cache_scope == scope and now < _cache[0]:
             return _cache[1], _cache[2], _cache[3], _cache[4]
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
@@ -416,6 +444,7 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[
         if card.get("stale"):
             stale[sid] = stale.get(sid, 0) + 1
     with _cache_lock:
+        _cache_scope = scope
         _cache = (now + _CACHE_TTL_S, active, blocked, unseen, stale)
     return active, blocked, unseen, stale
 
@@ -511,6 +540,7 @@ ATTENTION_WINDOW_S = 24 * 3600
 _ATTENTION_TTL_S = 30.0
 _done_checks: dict[str, Callable[[dict[str, Any]], bool]] = {}
 _attention_cache: tuple[float, dict[str, int]] | None = None
+_attention_scope: tuple[str, ...] | None = None
 
 
 def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool]) -> Callable[[], None]:
@@ -564,12 +594,13 @@ def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any
 def attention_task_counts(now: float | None = None) -> dict[str, int]:
     """``{session_id: completed cards a registered check flags}`` over the last ``ATTENTION_WINDOW_S``. Cached;
     a check that raises counts as False."""
-    global _attention_cache
+    global _attention_cache, _attention_scope
     if not _done_checks:
         return {}
+    scope = _origin_scope()
     mono = time.monotonic()
     with _cache_lock:
-        if _attention_cache is not None and mono < _attention_cache[0]:
+        if _attention_cache is not None and _attention_scope == scope and mono < _attention_cache[0]:
             return _attention_cache[1]
     since = (time.time() if now is None else now) - ATTENTION_WINDOW_S
     checks = list(_done_checks.values())
@@ -599,6 +630,7 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
     with _cache_lock:
+        _attention_scope = scope
         _attention_cache = (mono + _ATTENTION_TTL_S, counts)
     return counts
 
