@@ -196,7 +196,8 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
 # owner stores it as a ``platform='hub'`` notify subscription: ``hermes-hub create-task`` origin, a
 # ``shepherd`` request, or ``kanban_create`` run with an origin session); every descendant of that card
 # (``children``, transitively, on the owner's same board) is the session's work too. Rows are qualified
-# by gateway/board/id: the same ``t_`` id on two gateways is two cards.
+# by gateway/profile/board/id: equal task IDs in different owner profiles are separate cards.
+# Historical board/id records retain unknown ownership rather than default-profile inference.
 HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync for this long = stale
 _REMOTE_FIELDS = ("title", "status", "block_kind", "assignee", "created_at", "started_at", "priority")
 _remote_last: list[dict[str, Any]] | None = None  # last good read (process lifetime)
@@ -217,27 +218,48 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
         me = _self_gateway(conn)
         if not me:
             return []
-        rows = conn.execute("SELECT gw, data, updated_at FROM replica WHERE coll = 'tasks' AND gw != ?",
+        rows = conn.execute("SELECT gw, key, data, updated_at FROM replica WHERE coll = 'tasks' AND gw != ?",
                             (me,)).fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
     finally:
         conn.close()
     now = time.time() if now is None else now
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
-    tasks: dict[tuple[str, str, str], dict[str, Any]] = {}
+    tasks: dict[tuple[str, str | None, str, str], dict[str, Any]] = {}
     seen_at: dict[str, float] = {}
-    for gw, data, updated in rows:
+    for gw, record_key, data, updated in rows:
         try:
             t = json.loads(data)
-        except (TypeError, ValueError):
-            continue
+        except (TypeError, ValueError) as exc:
+            raise ValueError('invalid replica task data') from exc
+        if not isinstance(t, dict) or not t.get('id'):
+            raise ValueError('invalid replica task data')
         if isinstance(t, dict) and t.get("id"):
             seen_at[str(gw)] = max(seen_at.get(str(gw), 0.0), (updated or 0) / 1000.0)
-            tasks[(str(gw), str(t.get("board") or "default"), str(t["id"]))] = t
+            parts = str(record_key).split('/')
+            if len(parts) == 3:
+                owner_profile, board, tid = parts
+            elif len(parts) == 2:
+                owner_profile = None
+                board, tid = parts
+            else:
+                raise ValueError('invalid replica task key')
+            if not all(parts) or tid != str(t['id']):
+                raise ValueError('replica task identity mismatch')
+            if owner_profile is None:
+                # Historical keys lack provenance; even a terminal report cannot
+                # prove that a colliding qualified task replaced this obligation.
+                t = {**t, 'reported_status': t.get('status'), 'status': 'unknown', 'unfinished': True}
+            tasks[(str(gw), owner_profile, board, tid)] = t
+    from hermes_cli.profiles import get_active_profile_name
+
+    origin_profile = get_active_profile_name()
     found: dict[tuple[str, str], dict[str, Any]] = {}
-    for (gw, board, tid), t in tasks.items():
+    for (gw, owner_profile, board, tid), t in tasks.items():
         links = t.get("sessions") if isinstance(t.get("sessions"), list) else []
-        sids = {str(l["session"]) for l in links if isinstance(l, dict) and l.get("session") and l.get("gw") == me}
+        sids = {str(link['session']) for link in links
+                if isinstance(link, dict) and link.get('session') and link.get('gw') == me
+                and link.get('profile') == origin_profile and link.get('rel') == 'shepherd'}
         if not sids:
             continue
         owner_seen = seen_at.get(gw) or None
@@ -249,11 +271,12 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
             if cur in done:
                 continue
             done.add(cur)
-            card = tasks.get((gw, board, cur))
+            card = tasks.get((gw, owner_profile, board, cur))
             if card is None:
                 continue
-            if card.get("status") in LISTED_STATUSES:
-                ref = f"{gw}/{board}/{cur}"
+            if card.get("status") in LISTED_STATUSES or card.get('unfinished'):
+                prefix = f'{gw}/{owner_profile}/{board}' if owner_profile is not None else f'{gw}/{board}'
+                ref = f'{prefix}/{cur}'
                 via = "shepherd" if cur == tid else "descendant"
                 for sid in sids:
                     prev = found.get((sid, ref))
@@ -261,7 +284,10 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
                         found[(sid, ref)] = {
                             **{f: card.get(f) for f in _REMOTE_FIELDS},
                             "id": cur, "board": board, "gateway": gw, "key": ref, "session": sid,
-                            "via": via, "root": f"{gw}/{board}/{tid}", "remote": True,
+                            "via": via, "root": f"{prefix}/{tid}", "remote": True,
+                            "profile": owner_profile, "owner_profile": owner_profile,
+                            "ownership_state": 'unknown' if owner_profile is None else 'qualified',
+                            "unfinished": True, "reported_status": card.get('reported_status', card.get('status')),
                             "synced_at": synced, "stale": stale,
                         }
             kids = card.get("children") if isinstance(card.get("children"), list) else []

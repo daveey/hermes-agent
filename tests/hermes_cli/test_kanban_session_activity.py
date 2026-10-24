@@ -236,9 +236,9 @@ def _make_replica(state_dir: Path, me: str, tasks: list[dict]) -> Path:
     conn.execute("INSERT INTO meta VALUES ('gateway', ?)", (me,))
     for t in tasks:
         gw = t.pop("_gw")
-        data = {"board": "default", "children": [], "parents": [], "sessions": [], "block_kind": None, **t}
+        data = {"profile": "default", "board": "default", "children": [], "parents": [], "sessions": [], "block_kind": None, **t}
         conn.execute("INSERT INTO replica VALUES (?, 'tasks', ?, 1, 1, ?, 0)",
-                     (gw, f"{data['board']}/{data['id']}", _json.dumps(data, sort_keys=True)))
+                     (gw, f"{data['profile']}/{data['board']}/{data['id']}", _json.dumps(data, sort_keys=True)))
     conn.commit()
     conn.close()
     return path
@@ -302,7 +302,7 @@ def test_absent_replica_is_optional_but_corrupt_replica_is_unknown(kanban_root):
     assert "kanban_active" not in rows[0]
     with pytest.raises(sqlite3.DatabaseError):
         ksa.session_tasks(["s1"])
-    # a replica row with junk data is skipped, not fatal
+    # Junk data is an unknown projection, never a successful partial list.
     (kanban_root / "hub-state" / "hub.db").unlink()
     path = _make_replica(kanban_root / "hub-state", "macbook", [
         {"_gw": "hub", "id": "t_ok", "status": "running", "sessions": [_shep("s1")]}])
@@ -313,7 +313,7 @@ def test_absent_replica_is_optional_but_corrupt_replica_is_unknown(kanban_root):
     ksa._reset_cache_for_tests()
     rows = [{"id": "s1"}]
     ksa.annotate_kanban_activity(rows)
-    assert rows[0]["kanban_active"] == 2
+    assert rows[0].get("kanban_unknown") is True
 
 
 def test_hub_platform_subscription_on_a_local_board_is_not_a_tui_shepherd(kanban_root):
@@ -358,7 +358,7 @@ def test_remote_dispatch_graph_lists_every_owner_qualified_row_and_counts_the_sa
     root = next(r for r in rows if r["id"] == "t_root")
     assert root["remote"] is True and root["via"] == "shepherd" and root["status"] == "running"
     assert next(r for r in rows if r["id"] == "t_c00")["via"] == "descendant"
-    assert all(r["key"] == f"hub/default/{r['id']}" for r in rows)
+    assert all(r["key"] == f"hub/default/default/{r['id']}" for r in rows)
     ann = [{"id": "s_origin"}]
     ksa.annotate_kanban_activity(ann)
     assert ann[0]["kanban_active"] == 13
