@@ -433,8 +433,8 @@ export async function downloadGatewayFileWithFeedback(path: string, origin?: Gat
  *  a cached resource belongs to the connection/profile that returned it, not
  *  to whichever backend is focused when the user clicks. The path stays on the
  *  gateway; only Electron's authenticated save bridge sees it. */
-export function captureGatewayFileDownload() {
-  const { connectionId, profile } = capabilityScoped()
+export function captureGatewayFileDownload(owner?: { connectionId?: string; profile?: string }) {
+  const { connectionId, profile } = owner ?? capabilityScoped()
 
   return (path: string, suggestedName: string) =>
     downloadGatewayFileWithFeedback(path, { owner: { connectionId, profile }, suggestedName })

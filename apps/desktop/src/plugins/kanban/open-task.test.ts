@@ -58,8 +58,8 @@ describe('installOpenTaskHook', () => {
     expect($openTaskRequest.get()).toEqual({
       board: 'ops', taskId: 't_abcdef01', owner: { gateway: 'remote', profile: 'worker', board: 'ops' }
     })
-    // Do not advertise support until the drawer/actions consume the identity.
-    expect((hook as unknown as { supportsQualifiedOwners?: boolean }).supportsQualifiedOwners).not.toBe(true)
+    expect(Object.isFrozen($openTaskRequest.get()?.owner)).toBe(true)
+    expect((hook as unknown as { supportsQualifiedOwners?: boolean }).supportsQualifiedOwners).toBe(true)
   })
 
   it.each([null, '', 'worker'])('rejects incomplete explicit owner routes (%s)', profile => {
@@ -74,6 +74,15 @@ describe('installOpenTaskHook', () => {
     expect(navigate).not.toHaveBeenCalled()
     expect(rememberOwner).not.toHaveBeenCalled()
     expect($openTaskRequest.get()).toBeNull()
+  })
+
+  it('rejects a qualified request without an explicit board', () => {
+    const target: Record<string, unknown> = {}
+    const navigate = vi.fn()
+    installOpenTaskHook({ navigate }, target)
+    const hook = target[OPEN_TASK_HOOK] as (...args: string[]) => boolean
+    expect(hook('t_x', '', 'remote', 'work')).toBe(false)
+    expect(navigate).not.toHaveBeenCalled()
   })
 
   it('disposer removes only its own hook', () => {

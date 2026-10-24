@@ -13,7 +13,7 @@ import { atom } from '@hermes/plugin-sdk'
 export interface OpenTaskRequest {
   board: string
   taskId: string
-  owner?: { gateway: string; profile: string; board: string }
+  owner?: Readonly<{ gateway: string; profile?: string; board: string }>
 }
 
 export const $openTaskRequest = atom<null | OpenTaskRequest>(null)
@@ -49,10 +49,10 @@ export function installOpenTaskHook(
     const slug = typeof board === 'string' ? board : ''
 
     const owner = typeof gateway === 'string' && gateway && typeof profile === 'string' && profile
-      ? { gateway, profile, board: slug }
+      ? Object.freeze({ gateway, profile, board: slug })
       : undefined
 
-    if (profile !== undefined && !owner) {
+    if (profile !== undefined && (!owner || !slug)) {
       return false
     }
 
@@ -68,6 +68,9 @@ export function installOpenTaskHook(
     return true
   }
 
+  // Advertised only now that board, drawer, cache keys and file saves retain
+  // the complete route (board-owner.test.tsx exercises the mounted path).
+  Object.defineProperty(hook, 'supportsQualifiedOwners', { value: true })
   target[OPEN_TASK_HOOK] = hook
 
   return () => {

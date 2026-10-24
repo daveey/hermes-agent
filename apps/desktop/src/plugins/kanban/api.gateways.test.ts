@@ -90,6 +90,74 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+describe('qualified task routes', () => {
+  it('keeps the delayed dispatcher nudge on the immutable owner profile and board', async () => {
+    await bind(() => board({ ready: [] }))
+    const owner = { gateway: 'nudge-owner', profile: 'work', board: 'ops' }
+    calls = []
+    await api.patchTask('nudge-task', { priority: 1 }, owner)
+    routed.id = 'elsewhere'
+    $boardSlug.set('other')
+    await vi.waitFor(() => expect(calls).toContainEqual({ path: '/dispatch?board=ops', opts: { connectionId: 'nudge-owner', profile: 'work', method: 'POST', body: {} } }))
+  })
+
+  it('rejects ambiguous legacy ids rather than using whichever owner was remembered last', async () => {
+    await bind(() => board({ ready: [] }))
+    api.rememberTaskOwner('ambiguous', 'ops', 'a', 'p')
+    api.rememberTaskOwner('ambiguous', 'ops', 'b', 'p')
+    calls = []
+    await expect(api.fetchTask('ambiguous')).rejects.toThrow(/ambiguous/i)
+    expect(calls).toEqual([])
+    await api.fetchTask('ambiguous', { gateway: 'a', profile: 'p', board: 'ops' })
+    expect(calls[0]).toMatchObject({ opts: { connectionId: 'a', profile: 'p' } })
+  })
+
+  it('pins every drawer action, log and delayed attachment download to the supplied owner', async () => {
+    const save = vi.fn().mockResolvedValue({ saved: true })
+    vi.stubGlobal('hermesDesktop', { saveGatewayFile: save })
+    await bind(() => board({ ready: [] }))
+    const owner = { gateway: 'drawer-owner', profile: 'work', board: 'private' }
+    api.rememberTaskOwner('drawer-id', 'wrong', 'other', 'default')
+    calls = []
+    await api.fetchLog('drawer-id', owner)
+    await api.addComment('drawer-id', 'hello', owner)
+    await api.reclaimTask('drawer-id', owner)
+    await api.reassignTask('drawer-id', 'worker', owner)
+    await api.estimateTask('drawer-id', owner)
+    await api.uploadAttachment('drawer-id', { filename: 'a', bytes: new ArrayBuffer(0) }, owner)
+    await api.deleteTask('drawer-id', owner)
+    const detail = await api.fetchTask('drawer-id', owner)
+    routed.id = 'other'
+    await detail.downloadAttachment('/stored/a', 'a')
+
+    for (const call of calls) {
+      expect(call.opts).toMatchObject({ connectionId: owner.gateway, profile: owner.profile })
+      expect(new URL(call.path, 'http://example.com').searchParams.get('board')).toBe(owner.board)
+    }
+
+    expect(save).toHaveBeenCalledWith({ connectionId: owner.gateway, profile: owner.profile, path: '/stored/a', suggestedName: 'a' })
+    expect(api.logKey('local', '', 'drawer-id', owner)).not.toEqual(api.logKey('local', '', 'drawer-id', { ...owner, profile: 'other' }))
+    vi.unstubAllGlobals()
+  })
+
+  it('keeps colliding task reads and writes on the explicit owner after ambient and registry changes', async () => {
+    await bind(() => board({ ready: [] }))
+    const owner = { gateway: 'owner-a', profile: 'research', board: 'ops' }
+    api.rememberTaskOwner('collision', 'other', 'owner-b', 'default')
+    routed.id = 'owner-b'
+    calls = []
+    await api.fetchTask('collision', owner)
+    await api.patchTask('collision', { priority: 2 }, owner)
+    expect(calls).toEqual([
+      { path: '/tasks/collision?board=ops', opts: { connectionId: 'owner-a', profile: 'research' } },
+      { path: '/tasks/collision?board=ops', opts: { connectionId: 'owner-a', profile: 'research', method: 'PATCH', body: { priority: 2 } } }
+    ])
+    expect(api.taskKey('local', '', 'collision', owner)).not.toEqual(
+      api.taskKey('local', '', 'collision', { ...owner, profile: 'default' })
+    )
+  })
+})
+
 describe('mergeBoards', () => {
   it('tags every card with its gateway and keeps the dispatch order across gateways', () => {
     const merged = mergeBoards([
