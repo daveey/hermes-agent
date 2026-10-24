@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
 import sqlite3
 import subprocess
 import threading
@@ -232,9 +231,9 @@ def _shutdown_for_tests() -> None:
 
 
 def _kill(proc: subprocess.Popen) -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    from agent.deadline import kill_process_tree
+
+    if not kill_process_tree(proc.pid):
         try:
             proc.kill()
         except OSError:
