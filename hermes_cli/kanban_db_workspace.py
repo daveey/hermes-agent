@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import time
 import unicodedata
@@ -359,10 +360,44 @@ def _is_managed_scratch_path(p: Path) -> bool:
     return _managed_scratch_path_info(p)[0]
 
 
+def _scratch_tree_removable(path: Path) -> bool:
+    """Only remove scratch proven free of Git metadata and scan uncertainty.
+
+    Managed storage is not proof that its contents are disposable: workers can
+    clone repositories or create linked worktrees anywhere below it. Preserve
+    the WHOLE scratch tree, even for clean/pushed repositories; repository-aware
+    teardown belongs to their owner, not generic scratch cleanup. Never follow
+    symlinks or execute Git/config/hooks while inspecting untrusted contents.
+    """
+    pending = [path]
+    try:
+        while pending:
+            directory = pending.pop()
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                return False
+            with os.scandir(directory) as entries:
+                names = set()
+                for entry in entries:
+                    names.add(entry.name)
+                    if entry.name == ".git" or entry.is_symlink():
+                        return False
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                    if stat.S_ISDIR(mode):
+                        pending.append(Path(entry.path))
+                # Bare repositories (including reftable storage) have no .git.
+                # Names alone deliberately err towards preserving uncertain data.
+                if {"HEAD", "objects"} <= names and names & {"refs", "reftable"}:
+                    return False
+    except OSError:
+        return False
+    return True
+
+
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
     Called from :func:`complete_task` after the transaction commits; best-effort
-    so cleanup never blocks completion. ``scratch`` is removed; ``worktree``
+    so cleanup never blocks completion. ``scratch`` is removed only when its
+    entire tree is free of Git metadata and scan uncertainty; ``worktree``
     only when provably free of work (clean tree, every commit reachable from a
     remote-tracking ref); ``dir`` is intentionally preserved."""
     try:
@@ -402,7 +437,9 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # See #28818. Containment runs first so an unmanaged dir that is
             # never removed does not pay for (or log) the shared-use scan.
             if _is_managed_scratch_path(wp):
-                if not _defer_shared_workspace_cleanup(conn, task_id, path):
+                if not _scratch_tree_removable(wp):
+                    _kb._log.info("Preserving scratch workspace with Git metadata or scan uncertainty: %s", wp)
+                elif not _defer_shared_workspace_cleanup(conn, task_id, path):
                     release_lsp_clients(str(wp))
                     shutil.rmtree(wp, ignore_errors=True)
                     _kb._log.debug("Removed scratch workspace: %s", wp)
@@ -528,6 +565,9 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             if not wp.is_dir():
                 continue
             if _is_managed_scratch_path(wp):
+                if not _scratch_tree_removable(wp):
+                    _kb._log.info("Preserving parent scratch workspace with Git metadata or scan uncertainty: %s", wp)
+                    continue
                 if _defer_shared_workspace_cleanup(conn, parent_id, ws_path):
                     continue
                 release_lsp_clients(str(wp))
