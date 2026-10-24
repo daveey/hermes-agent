@@ -17,6 +17,12 @@ FILES=(ci.yaml tests.yml lint.yml js-tests.yml rust-tests.yml remote-backends.ym
 sed -i.bak -E 's/^([[:space:]]*runs-on:[[:space:]]*)(ubuntu-latest(-32-core)?|ubuntu-24\.04)[[:space:]]*$/\1[self-hosted, hermes-hub]/' "${FILES[@]}"
 rm -f ./*.bak
 
+# Long-lived pollers go to the poll-only runners (label `hermes-hub-poll` ONLY,
+# 0.5 CPU each; hosts/hermes-hub/gh-runner/ci-slice.sh install-poll), so they
+# never hold one of the test runners.
+sed -i.bak -E 's/^([[:space:]]*runs-on:[[:space:]]*)(\[self-hosted, hermes-hub\]|ubuntu-latest|ubuntu-24\.04)[[:space:]]*$/\1[self-hosted, hermes-hub-poll]/' ci-review-comment.yml
+rm -f ./*.bak
+
 # Docker-dependent jobs go to the rootless-docker runners (label `docker-ci`
 # ONLY, so plain [self-hosted, hermes-hub] jobs never land on them;
 # hosts/hermes-hub/gh-runner/setup-ci-docker.sh). Plain ubuntu jobs above stay
