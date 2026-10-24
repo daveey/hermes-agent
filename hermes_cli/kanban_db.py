@@ -2732,7 +2732,8 @@ def complete_task(
         # reopened while this task waited.
         if not _parents_satisfied(conn, task_id):
             return False
-        if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
+        acceptance_event_id = record_acceptance(conn, task_id, acceptance) if acceptance is not None else None
+        if acceptance is not None and not acceptance_event_id:
             return False
         trow = conn.execute(
             "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
@@ -2781,9 +2782,13 @@ def complete_task(
         event_summary = handoff_summary
         if prior_status == "review" and not event_summary:
             event_summary = _REVIEW_APPROVED_NOTE
+        completion_payload = _completed_event_payload(result, event_summary, verified_cards, metadata)
+        if acceptance_event_id is not None:
+            conn.execute("UPDATE task_events SET run_id=? WHERE id=? AND task_id=?",
+                         (run_id, acceptance_event_id, task_id))
+            completion_payload["pr_acceptance_event_id"] = acceptance_event_id
         _append_event(
-            conn, task_id, "completed",
-            _completed_event_payload(result, event_summary, verified_cards, metadata),
+            conn, task_id, "completed", completion_payload,
             run_id=run_id,
         )
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)

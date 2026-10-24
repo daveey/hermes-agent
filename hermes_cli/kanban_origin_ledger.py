@@ -134,7 +134,7 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
                                        'task_id': task['id']} for m in authoritative)):
         raise ValueError('origin_observation_binding_changed')
     event = conn.execute(
-        "SELECT id,run_id,created_at FROM task_events WHERE task_id=? AND kind='completed' ORDER BY id DESC LIMIT 1",
+        "SELECT id,run_id,created_at,payload FROM task_events WHERE task_id=? AND kind='completed' ORDER BY id DESC LIMIT 1",
         (task['id'],)).fetchone()
     run = conn.execute(
         "SELECT id,status,outcome,ended_at FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
@@ -147,7 +147,21 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
         archive_payload = json.loads(archived[1] or '{}') if archived else None
         terminal = bool(archived and archived[0] > event[0] and isinstance(archive_payload, dict)
                         and archive_payload.get('source_status') == 'done')
-    verified = bool(terminal and row[2] is None and not row[3] and row[4] == 'local-only'
+    contract_verified = row[4] == 'local-only'
+    if event and not contract_verified:
+        completed = json.loads(event[3] or '{}')
+        acceptance_id = completed.get('pr_acceptance_event_id') if isinstance(completed, dict) else None
+        acceptance = conn.execute(
+            "SELECT payload,run_id FROM task_events WHERE id=? AND task_id=? AND kind='pr_acceptance' AND id<?",
+            (acceptance_id, task['id'], event[0])).fetchone() if type(acceptance_id) is int else None
+        if acceptance and acceptance[1] is not None and acceptance[1] == event[1]:
+            receipt = json.loads(acceptance[0] or '{}')
+            contract_verified = bool(isinstance(receipt, dict) and receipt.get('ok') is True
+                                     and receipt.get('classification') == 'success'
+                                     and receipt.get('pr_url') == row[4]
+                                     and isinstance(receipt.get('head_sha'), str)
+                                     and re.fullmatch(r'[0-9a-f]{40}', receipt['head_sha']))
+    verified = bool(terminal and row[2] is None and not row[3] and contract_verified
                     and event and run and event[1] == run[0] and run[1] in ('done', 'completed') and run[2] == 'completed'
                     and row[1] is not None and event[2] >= row[1] and run[3] is not None and run[3] >= row[1])
     payload = {k: v for k, v in task.items() if k != 'origin_observation'}

@@ -131,6 +131,44 @@ def test_acceptance_receipts_and_terminal_write_share_run_ownership(github):
             github.pop("race")
 
 
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("claimed", [False, True])
+def test_origin_release_requires_completion_bound_pr_receipt(github, claimed):
+    from hermes_cli.kanban_origin_ledger import observe_owner_task
+
+    with connect() as conn:
+        tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
+        run = kb.claim_task(conn, tid).current_run_id if claimed else None
+        assert kb.complete_task(conn, tid, summary="verified", expected_run_id=run,
+                                metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+
+        def verified():
+            conn.execute("SAVEPOINT observation")
+            try:
+                return observe_owner_task(conn, {"id": tid, "status": "done"}, now=123)["origin_observation"]["verified"]
+            finally:
+                conn.execute("RELEASE observation")
+
+        assert verified()
+        event = conn.execute("SELECT id,payload FROM task_events WHERE task_id=? AND kind='completed'", (tid,)).fetchone()
+        payload = json.loads(event["payload"])
+        receipt_id = payload["pr_acceptance_event_id"]
+        receipt = conn.execute("SELECT payload FROM task_events WHERE id=?", (receipt_id,)).fetchone()
+        assert json.loads(receipt[0])["head_sha"] == "a" * 40
+        conn.execute("UPDATE task_events SET run_id=NULL WHERE id=?", (receipt_id,))
+        assert not verified()  # even synthesized completion runs must own their receipt
+        completion_run = conn.execute("SELECT run_id FROM task_events WHERE id=?", (event["id"],)).fetchone()[0]
+        conn.execute("UPDATE task_events SET run_id=? WHERE id=?", (completion_run, receipt_id))
+        assert verified()
+        conn.execute("UPDATE tasks SET completion_contract='https://github.com/acme/repo/pull/8' WHERE id=?", (tid,))
+        assert not verified()
+        conn.execute("UPDATE tasks SET completion_contract='https://github.com/acme/repo/pull/7' WHERE id=?", (tid,))
+        assert verified()
+        payload.pop("pr_acceptance_event_id")
+        conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(payload), event["id"]))
+        assert not verified()  # legacy completions cannot borrow a nearby receipt
+
+
 # --- #122689: acceptance must read the repo as the ASSIGNEE profile's gh login ---
 
 @pytest.mark.platforms("posix")
