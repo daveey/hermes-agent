@@ -61,6 +61,15 @@ def test_annotates_rows_by_whole_compression_lineage(kanban_root):
     assert "kanban_active" not in rows[2]
 
 
+def test_corrupt_local_board_is_unknown_not_successful_empty(kanban_root):
+    (kanban_root / "kanban.db").write_bytes(b"not a database" * 100)
+    rows = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0].get("kanban_unknown") is True
+    with pytest.raises(sqlite3.DatabaseError):
+        ksa.session_tasks(["s1"])
+
+
 def test_missing_or_old_board_never_breaks_the_list(kanban_root):
     old = kanban_root / "kanban.db"
     conn = sqlite3.connect(old)
@@ -278,7 +287,7 @@ def test_replica_counts_add_to_local_boards_and_follow_lineage(kanban_root):
     assert "kanban_blocked" not in rows[0]
 
 
-def test_missing_or_corrupt_replica_is_harmless(kanban_root):
+def test_absent_replica_is_optional_but_corrupt_replica_is_unknown(kanban_root):
     _make_board(kanban_root / "kanban.db", [("t1", "running", "s1")])
     rows = [{"id": "s1"}]
     ksa.annotate_kanban_activity(rows)  # no hub-state dir at all
@@ -289,7 +298,10 @@ def test_missing_or_corrupt_replica_is_harmless(kanban_root):
     ksa._reset_cache_for_tests()
     rows = [{"id": "s1"}]
     ksa.annotate_kanban_activity(rows)
-    assert rows[0]["kanban_active"] == 1
+    assert rows[0].get("kanban_unknown") is True
+    assert "kanban_active" not in rows[0]
+    with pytest.raises(sqlite3.DatabaseError):
+        ksa.session_tasks(["s1"])
     # a replica row with junk data is skipped, not fatal
     (kanban_root / "hub-state" / "hub.db").unlink()
     path = _make_replica(kanban_root / "hub-state", "macbook", [
@@ -412,6 +424,36 @@ def test_failed_replica_read_keeps_the_last_good_answer_never_zero(kanban_root):
     assert all(r["stale"] for r in ksa.session_tasks(["s_origin"]))
 
 
+def test_missing_replica_after_restart_retains_origin_work(kanban_root):
+    path = _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    import time as _time
+    _set_meta(path, last_ok=_time.time())
+    assert len(ksa.session_tasks(["s_origin"])) == 13
+    path.unlink()
+    ksa._reset_cache_for_tests()  # all process memory gone, as after restart
+    rows = [{"id": "s_origin"}, {"id": "s_unrelated"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0].get("kanban_active") == 13
+    assert rows[0].get("kanban_remote_stale") == 13
+    assert rows[1] == {"id": "s_unrelated"}
+    cards = ksa.session_tasks(["s_origin"])
+    assert len(cards) == 13
+    assert all(card["stale"] for card in cards)
+
+
+def test_empty_replica_does_not_erase_obligations_after_restart(kanban_root):
+    path = _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    import time as _time
+    _set_meta(path, last_ok=_time.time())
+    assert len(ksa.session_tasks(["s_origin"])) == 13
+    with sqlite3.connect(path) as conn:
+        conn.execute("DELETE FROM replica")
+    ksa._reset_cache_for_tests()
+    cards = ksa.session_tasks(["s_origin"])
+    assert len(cards) == 13
+    assert all(card["stale"] for card in cards)
+
+
 def test_final_completion_clears_the_origin_and_other_sessions_finish_normally(kanban_root):
     graph = _dispatch_graph(root_status="done")
     for c in graph:
@@ -422,3 +464,20 @@ def test_final_completion_clears_the_origin_and_other_sessions_finish_normally(k
     ksa.annotate_kanban_activity(ann)
     assert ann == [{"id": "s_origin"}, {"id": "s_other"}]
     assert ksa.session_tasks(["s_origin"]) == []
+
+
+def test_failed_activity_read_stamps_unknown_not_idle(kanban_root, monkeypatch):
+    """A failed kanban read is not "no work": the row says ``kanban_unknown`` so the sidebar can't paint it
+    done, and the stamp clears once a read succeeds. [daveey]"""
+    def boom():
+        raise RuntimeError("replica and boards unreadable")
+
+    monkeypatch.setattr(ksa, "_all_counts", boom)
+    rows = [{"id": "s1", "kanban_active": 3}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0].get("kanban_unknown") is True
+    assert "kanban_active" not in rows[0]  # no stale count presented as fresh
+    monkeypatch.undo()
+    ksa._reset_cache_for_tests()
+    ksa.annotate_kanban_activity(rows)
+    assert "kanban_unknown" not in rows[0]

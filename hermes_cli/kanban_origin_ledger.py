@@ -150,6 +150,76 @@ def refresh_observations(path: Path, replica: Path) -> None:
         source.close()
 
 
+def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
+            now: float | None = None) -> list[dict]:
+    """Owner-qualified receipt rows, including explicit unknown and released rows.
+
+    Consumers filter this single projection, never infer release from an absent
+    replica row. Old and resolved session aliases remain available for lineage
+    joins. Replica failures are stale observations; ledger failures propagate.
+    """
+    import time
+    from hermes_cli.kanban_origin import _ro
+
+    if not path.exists():
+        return []
+    now = time.time() if now is None else now
+    source = None
+    fresh = False
+    last_ok = None
+    try:
+        if replica is not None and replica.is_file():
+            refresh_observations(path, replica)
+            source = _ro(replica)
+            meta = dict(source.execute("SELECT k,v FROM meta"))
+            last_ok = float(meta.get('last_ok') or 0)
+            fresh = (0 <= now - last_ok <= 180 and not meta.get('offline_since'))
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        # A failed refresh never erases a receipt. Reading the ledger below
+        # still raises if the authoritative store itself is broken.
+        fresh = False
+    result = []
+    try:
+        with _db(path) as conn:
+            for raw, resolved, payload, version, released in conn.execute(
+                    "SELECT binding_json,resolved_session,task_json,observation_version,released FROM origin_obligations"):
+                binding = json.loads(raw)
+                validate_binding(binding)
+                origin, owner = binding['origin'], binding['owner']
+                if (origin['gateway'], origin['profile']) != (gateway, profile):
+                    continue
+                task = json.loads(payload)
+                current = False
+                if fresh and source is not None:
+                    row = source.execute(
+                        "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
+                        (owner['gateway'], binding['task_record_key'])).fetchone()
+                    current = bool(row and row[0] == version and json.loads(row[1]) == task)
+                status = task.get('status')
+                # Acceptance alone is not a release, including an initially
+                # terminal publication. Unknown status also remains unfinished.
+                known = status in ('todo', 'ready', 'running', 'scheduled', 'review',
+                                   'blocked', 'triage', 'done', 'archived')
+                if not current or not known or (status in ('done', 'archived') and not released):
+                    status = 'unknown'
+                result.append({
+                    **{k: task.get(k) for k in ('title', 'assignee', 'block_kind', 'created_at', 'started_at', 'priority')},
+                    **owner, 'id': owner['task_id'],
+                    'key': '/'.join(owner[k] for k in ('gateway', 'profile', 'board', 'task_id')),
+                    'session': resolved, 'origin_session': origin['session'],
+                    'origin_profile': origin['profile'], 'origin_gateway': origin['gateway'],
+                    'binding_id': binding['binding_id'], 'observation_version': version,
+                    'status': status, 'reported_status': task.get('status'),
+                    'unfinished': not (current and released and status in ('done', 'archived')),
+                    'stale': not current, 'synced_at': last_ok,
+                    'remote': True, 'via': 'origin',
+                })
+        return result
+    finally:
+        if source is not None:
+            source.close()
+
+
 def accept_binding(*, path: Path, replica: Path, binding: dict, request_id: str,
                    sender: str, gateway: str, profile: str,
                    resolve_session: Callable[[str], str]) -> dict:
