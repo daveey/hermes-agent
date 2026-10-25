@@ -29,6 +29,20 @@ def model_override_conflict(params: dict, build_scope) -> dict | None:
     return static_model_provider_conflict(model, provider)
 
 
+def _prefer_subscription_route(override: dict) -> dict:
+    """An unqualified model choice prefers the subscription; an explicit provider is honored.
+
+    The picker labels the API row as billed. No extra, undeclared RPC flag is needed to choose it.
+    """
+    from hermes_cli.models_detect import preferred_subscription_model
+
+    if (override.get("provider") or "").strip().lower() not in {"", "auto"}:
+        return override
+    if model := preferred_subscription_model(override["model"]):
+        return {**override, "model": model, "provider": "openai-codex"}
+    return override
+
+
 def create_overrides(params: dict) -> tuple:
     """PER-SESSION (model, reasoning, service_tier) overrides from the composer — never a global config
     write. An explicit ``service_tier`` wins over legacy ``fast`` (an unknown word raises ``ValueError``);
@@ -37,6 +51,8 @@ def create_overrides(params: dict) -> tuple:
 
     model = str(params.get("model") or "").strip()
     model_override = {"model": model, "provider": str(params.get("provider") or "").strip() or None} if model else None
+    if model_override:
+        model_override = _prefer_subscription_route(model_override)
     reasoning_override = None
     if effort := str(params.get("reasoning_effort") or "").strip():
         with contextlib.suppress(Exception):

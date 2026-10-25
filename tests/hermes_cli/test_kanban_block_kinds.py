@@ -128,7 +128,9 @@ def test_dependency_block_with_terminal_parents_is_a_timed_park(
         child = _running_task(conn, title="child-of-done", parents=(parent,))
 
         # `hermes kanban block <child> --kind dependency waiting on upstream`
-        args = argparse.Namespace(task_id=child, ids=None, reason=["waiting", "on", "upstream"], kind="dependency")
+        # A 24 h wait with nothing to probe must say so (kanban_wake_check guard). [daveey]
+        args = argparse.Namespace(task_id=child, ids=None, reason=["waiting", "on", "upstream"], kind="dependency",
+                                  clock_only=True)
         assert kanban_cli._cmd_block(args) == 0
         capsys.readouterr()
         parked = kb.get_task(conn, child)

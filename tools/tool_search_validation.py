@@ -266,6 +266,23 @@ def not_deferrable_error(name: str, in_session: bool = True) -> str:
     if name in _core_tool_names() or _registry_entry(name) is not None:
         return (f"'{name}' is a directly-listed tool, not a deferred one. "
                 "Call it directly instead of via tool_call. The tool was NOT invoked.")
+    # [daveey] A configured disabled MCP server cannot be recovered by trying
+    # alternate tool spellings. Inspect configuration only; never connect or enable it.
+    if name.startswith("mcp__"):
+        try:
+            from tools.mcp_tool_config import _load_mcp_config
+            from tools.mcp_tool_common import mcp_server_enabled
+            from tools.mcp_tool_schema import sanitize_mcp_name_component
+            matches = [(server, cfg) for server, cfg in _load_mcp_config().items()
+                       if name.startswith(f"mcp__{sanitize_mcp_name_component(server)}__")]
+            if len(matches) == 1 and not mcp_server_enabled(matches[0][1]):
+                server = matches[0][0]
+                return (f"'{name}' belongs to configured MCP server '{server}', which is disabled "
+                        f"(mcp_servers.{server}.enabled). Tool search cannot expose its tools while "
+                        "disabled. Check why the server was disabled and repair its configuration "
+                        "if appropriate, then start a new session. The tool was NOT invoked.")
+        except Exception:
+            pass  # Diagnostic failure must not change tool authorization.
     suffix = f"__{name}"
     try:
         from tools.registry import registry

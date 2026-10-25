@@ -27,6 +27,10 @@ from typing import Optional
 from typing import TYPE_CHECKING
 
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+from hermes_cli import kanban_db_dispatch_guard_notice as _guard_notice
+from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as _guard_hold_started_at
+from hermes_cli import kanban_db_dispatch_quota as _kbq
+from hermes_cli import kanban_worker_scope as _worker_scope
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -81,7 +85,9 @@ _COMPLETION_GATE_ERROR_PREFIXES = ("PR acceptance ",)
 # saying so (2026-10-21: ``blocker_auth`` held t_10de9798 for hours; a held card never
 # runs, so ``consecutive_failures`` never grows and the breaker never trips). Past the cap
 # the dispatcher blocks the card with the guard reason so it shows as waiting on someone.
-# ``blocker_auth`` gets the short cap: it never clears without a human. Every other guard
+# ``blocker_auth`` gets the short cap: a real auth failure never clears without a human. A
+# quota wall does clear on its own, so it never reaches ``blocker_auth`` and a quota-flavored
+# hold is re-queued at the cap instead of blocked (``kanban_db_dispatch_quota``). Every other guard
 # is time-bounded by design and only hits the long cap when something is wrong.
 # ``shared_blocker`` holds are exempt: they are a declared wall another card is probing.
 # Override via ``HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS`` / ``..._LONG_SECONDS``. [daveey]
@@ -106,16 +112,6 @@ def guard_hold_cap_seconds(reason: str) -> Optional[int]:
         return _env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS", DEFAULT_GUARD_HOLD_CAP_SECONDS)
     return _env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_LONG_SECONDS", DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS)
 
-
-def _guard_hold_started_at(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
-    """When the current unbroken run of ``respawn_guarded`` events began: the first one
-    after the newest event of any other kind (a claim, a block, an unblock, a comment...)."""
-    row = conn.execute(
-        "SELECT MIN(created_at) FROM task_events WHERE task_id = ? AND kind = 'respawn_guarded' "
-        "AND id > COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ? "
-        "AND kind != 'respawn_guarded'), 0)", (task_id, task_id),
-    ).fetchone()
-    return int(row[0]) if row and row[0] is not None else None
 
 
 def _is_completion_gate_error(err: str) -> bool:
@@ -199,6 +195,9 @@ class DispatchResult:
     shared_blocker_released: list[str] = field(default_factory=list)
     """Blocked task ids unblocked because a probe cleared the shared blocker
     they were parked behind (``kanban_shared_blockers``). [daveey]"""
+    quota_block_released: list[str] = field(default_factory=list)
+    """Guard-hold blocks on a quota wall released once another card completed after them
+    (``kanban_db_dispatch_quota.release_recovered_quota_blocks``). [daveey]"""
     rate_limited: list[str] = field(default_factory=list)
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
@@ -741,7 +740,10 @@ def heartbeat_worker(
     """
     now = int(time.time())
     with _kb.write_txn(conn):
-        sql = "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ? AND status = 'running'"
+        # Healthy progress supersedes the prior attempt's dispatch diagnostic.
+        # Keep failure counters/history intact; stale workers cannot clear it.
+        sql = ("UPDATE tasks SET last_heartbeat_at = ?, last_failure_error = NULL "
+               "WHERE id = ? AND status = 'running'")
         params: tuple = (now, task_id)
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
@@ -1136,7 +1138,7 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
     lines = []
     for ln in raw.splitlines():
         ln = _LOG_CHROME.sub("", ln).strip()
-        if ln and not ln.startswith(_log_noise_prefixes()):
+        if ln and not ln.startswith((*_log_noise_prefixes(), _worker_scope.SNAPSHOT_PREFIX)):
             lines.append(ln)
     return " ".join(lines)[-400:]
 
@@ -1158,6 +1160,8 @@ class _DeadWorker:
 
     @property
     def run_outcome(self) -> str:
+        if self.event_kind in {"oom_killed", "signaled"}:
+            return self.kind
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
         # doesn't show a phantom crash for a quota wall.
         return "rate_limited" if self.rate_limited else "crashed"
@@ -1165,6 +1169,7 @@ class _DeadWorker:
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -1172,7 +1177,14 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board)
+    log = _kb.read_worker_log(task_id, tail_bytes=4000, board=board) if task_id and run_id else ""
+    failure = _worker_scope.read_failure(task_id, run_id, log or "") if task_id else None
+    if failure:
+        kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
+        dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
+                           {"pid": pid, "claimer": claimer, **failure})
+    else:
+        dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board)
     if task_id and not dead.rate_limited:
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
@@ -1267,7 +1279,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee "
+            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, current_run_id "
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
@@ -1285,7 +1297,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 continue
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
+            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board,
+                                         run_id=row["current_run_id"])
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1425,6 +1438,8 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     sweep = _reclaim_dead_workers(conn, board=board)
     # Outside the main txn: account each crash and maybe trip the breaker.
     auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
+    for _, _, _, dead in sweep.crash_details:
+        _worker_scope.release_failure(dead.event_payload)
     # Side-channel attributes keep the public ``list[str]`` return stable;
     # ``dispatch_once`` reads them to populate ``DispatchResult``. Rate-limited
     # requeues did NOT count a failure and are NOT crashes.
@@ -1437,22 +1452,7 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
         for hook_fields in sweep.exited_hook_payloads:
             hook_fields = dict(hook_fields)
             _kb._fire_kanban_lifecycle_hook(
-                # Kanban worker-lifecycle, task-mutation, and dispatcher-tick observers (RFC #58548,
-                # accepted as the design basis in the #64231 batch disposition; on_kanban_dispatch_tick is
-                # the re-port of PR #56066). All five are observers only: return values are ignored, and
-                # every fire site is fully best-effort, so a broken callback can never break dispatch or a
-                # task mutation. Cost rule: every call site short-circuits on has_hook(), so when nothing
-                # subscribes no payload is built and the hot paths (each dispatcher tick, each task write)
-                # pay one dict probe. WHICH PROCESS: worker spawn/exit/stale-claim and the dispatch tick
-                # fire in the DISPATCHER process (gateway-embedded dispatcher or ``hermes kanban
-                # dispatch``); on_kanban_task_updated fires in whichever process committed the mutation
-                # (CLI, worker, or the gateway-embedded dashboard API). Common kwargs (task-scoped hooks):
-                # task_id: str, profile_name: str, board: str | None, assignee: str | None, run_id: int |
-                # None. on_kanban_worker_spawned fires after ``spawn_fn`` returns AND the worker PID (when
-                # one was reported) is durably persisted, per the RFC timing contract; like
-                # kanban_task_claimed it runs inside the board's dispatch lock, so callbacks must stay fast.
-                # Adds: worker_pid: int | None, workspace_path: str. Privacy: workspace_path is a filesystem
-                # path and may reveal project layout or usernames.
+                # Best-effort observer in the dispatcher, after durable accounting.
                 "on_kanban_worker_exited",
                 hook_fields.pop("task_id"),
                 board=_board,
@@ -1653,10 +1653,17 @@ def _block_if_guard_hold_capped(conn: sqlite3.Connection, task_id: str, reason: 
     if held < cap:
         return False
     row = conn.execute("SELECT last_failure_error FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    err = _kb._first_line(_kb._lossy_text(row["last_failure_error"]) if row else "", 300) or "(no error recorded)"
+    raw_err = _kb._lossy_text(row["last_failure_error"]) if row else ""
+    if reason == "rate_limit_cooldown" or _kbq.is_quota_error(raw_err):
+        # A quota wall clears on its own: never a human block. Drop the stamp (the event it
+        # appends restarts the hold clock) and let the next tick retry. [daveey]
+        if raw_err:
+            _kbq.clear_quota_error(conn, task_id, raw_err)
+        return False
+    err = _kb._first_line(raw_err, 300) or "(no error recorded)"
     minutes = max(1, held // 60)
     message = (f"Held in ready by the respawn guard ({reason}) for {minutes} min without running. "
-               f"Last error: {err} Fix the cause (credentials, quota, PR binding), then unblock.")
+               f"Last error: {err} Fix the cause (credentials, PR binding), then unblock.")
     kind = "capability" if reason in _GUARD_HOLD_SHORT_CAP_REASONS else "needs_input"
     try:
         return bool(_kb.block_task(conn, task_id, reason=message, kind=kind))
@@ -1725,14 +1732,30 @@ def check_respawn_guard(
         # Cooldown elapsed — return early so blocker_auth doesn't catch the
         # stamped rate-limit text; this path intentionally retries forever
         # (spaced by the cooldown) until quota returns or a real run supersedes it.
+        # The stamp is dropped so it cannot outlive this run (see 1b). [daveey]
+        stamp = _kb._lossy_text(row["last_failure_error"])
+        if _kbq.is_quota_error(stamp):
+            _kbq.clear_quota_error(conn, task_id, stamp)
         return None
 
-    # 2. Quota / auth blocker: retrying immediately will not help.  A plain
+    err = _kb._lossy_text(row["last_failure_error"])
+    latest_outcome = latest_run["outcome"] if latest_run is not None else None
+    # 1b. Quota stamp that outlived its ``rate_limited`` run (a later ``blocked`` /
+    #     ``changes_requested`` run is now the latest): still a quota wall, never
+    #     ``blocker_auth``. Same cooldown, measured from the latest run's end; once
+    #     it has elapsed the stamp is dropped and the card retries. (2026-10-23:
+    #     six cards blocked ``capability`` for 13 h on a cleared quota wall.) [daveey]
+    if err and latest_outcome != "crashed" and not _is_completion_gate_error(err) and _kbq.is_quota_error(err):
+        ended_at = _kb._to_epoch(latest_run["ended_at"]) if latest_run is not None else None
+        if rl_cooldown > 0 and ended_at is not None and (now - ended_at) < rl_cooldown:
+            return "rate_limit_cooldown"
+        _kbq.clear_quota_error(conn, task_id, err)
+        err = ""
+
+    # 2. Auth blocker: retrying immediately will not help.  A plain
     # crash is different: its persisted error includes the worker's last
     # captured output, which is context rather than a diagnosis and may contain
     # benign commands such as ``claude auth status`` (#117097).
-    err = _kb._lossy_text(row["last_failure_error"])
-    latest_outcome = latest_run["outcome"] if latest_run is not None else None
     if (err and latest_outcome != "crashed" and not _is_completion_gate_error(err)
             and _RESPAWN_BLOCKER_RE.search(err)):
         return "blocker_auth"
@@ -1764,28 +1787,10 @@ def check_respawn_guard(
             conn, "task_events", task_id, success, "AND kind IN ('status', 'promoted', 'unblocked', 'reclaimed')")):
         return "recent_success"
 
-    # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
-    #    Exception: a handoff AFTER the newest PR comment (operator reassign,
-    #    reviewer changes_requested, review reopen) names the profile that must
-    #    now work on THAT PR — a closer or the implementer finishing it, not a
-    #    duplicate implementation (#111910). So does an ``unblocked`` event: a
-    #    worker that opened its PR and blocked itself waiting for the merge is
-    #    resumed by that unblock to ship/verify THAT PR; without this the card
-    #    sat in ``ready`` for the rest of the 24 h window after its PR merged.
-    #    A crash/reclaim is not a handoff, so the worker that opened the PR is
-    #    still not re-spawned against it.
-    pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
-                                          cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
-                if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
-    if pr_times:
-        # Strictly after: a same-second tie stays guarded (fail closed).
-        if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
-                conn, "task_events", task_id, max(pr_times),
-                "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')", cols=", kind, payload", strict=True)):
-            return None
-        return "active_pr"
-
-    return None
+    # 4. GitHub PR URL in a recent comment — prior worker already opened a PR
+    #    (see :func:`kanban_db_dispatch_pr_state.active_pr_reason` for the exceptions).
+    from hermes_cli.kanban_db_dispatch_pr_state import active_pr_reason
+    return active_pr_reason(conn, task_id, now)
 
 
 _GUARD_TIME_COLS = {"task_runs": "ended_at", "task_events": "created_at", "task_comments": "created_at"}
@@ -2242,8 +2247,7 @@ def _dispatch_lane_task(
             if _block_if_guard_hold_capped(conn, task_id, guard_reason):
                 result.auto_blocked.append(task_id)
                 return False
-            with _kb.write_txn(conn):
-                _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+            _guard_notice.record_guard_hold(conn, task_id, guard_reason)
         return False
 
     def _count_spawn(name: str) -> None:
@@ -2382,6 +2386,10 @@ def _run_reclaim_phase(
         result.shared_blocker_released = release_cleared_blockers(conn)
     except Exception:
         _kb._log.warning("kanban: releasing cleared shared blockers failed", exc_info=True)
+    try:
+        result.quota_block_released = _kbq.release_recovered_quota_blocks(conn)
+    except Exception:
+        _kb._log.warning("kanban: releasing recovered quota-wall blocks failed", exc_info=True)
 
 
 def _tick_spawn_budget(
@@ -2999,12 +3007,12 @@ def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
             )
         return command
 
-    return restart_safe_gateway_child_argv(
+    return _worker_scope.retain_failed_scope(restart_safe_gateway_child_argv(
         command,
         unit_suffix=f"kanban-{task.id}-run-{task.current_run_id}",
         require_restart_safe_scope=True,
         outlives_parent=True,
-    ).argv
+    ).argv)
 
 
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:

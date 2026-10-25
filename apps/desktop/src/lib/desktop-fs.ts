@@ -109,9 +109,12 @@ export async function readDesktopDir(path: string): Promise<HermesReadDirResult>
   return remoteFsApi<HermesReadDirResult>(fsPath('list', path))
 }
 
-export async function readDesktopFileText(path: string): Promise<HermesReadFileTextResult> {
+export async function readDesktopFileText(
+  path: string,
+  options?: { full?: boolean }
+): Promise<HermesReadFileTextResult> {
   if (!isDesktopFsRemoteMode()) {
-    const result = await bridge().readFileText(path)
+    const result = await (options?.full ? bridge().readFileText(path, { full: true }) : bridge().readFileText(path))
 
     if (isReadFileErrorResult(result)) {
       throwForReadErrorResult(result)
@@ -120,7 +123,7 @@ export async function readDesktopFileText(path: string): Promise<HermesReadFileT
     return result
   }
 
-  return remoteFsApi<HermesReadFileTextResult>(fsPath('read-text', path))
+  return remoteFsApi<HermesReadFileTextResult>(fsPath('read-text', path) + (options?.full ? '&full=1' : ''))
 }
 
 // Save UTF-8 text back to a file. Local writes go through the hardened Electron

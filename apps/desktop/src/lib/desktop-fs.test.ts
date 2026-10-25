@@ -98,6 +98,10 @@ describe('desktop filesystem facade', () => {
     expect(readDir).toHaveBeenCalledWith('/work')
     expect(readFileText).toHaveBeenCalledWith('/work/file.txt')
     expect(readFileDataUrl).toHaveBeenCalledWith('/work/file.txt')
+
+    // Full reads (inline ::preview documents) pass the option to the IPC.
+    await readDesktopFileText('/work/board.html', { full: true })
+    expect(readFileText).toHaveBeenCalledWith('/work/board.html', { full: true })
     expect(gitRoot).toHaveBeenCalledWith('/work')
     expect(selectPaths).toHaveBeenCalledWith({ directories: true, profile: 'team-local' })
     expect(api).not.toHaveBeenCalled()
@@ -117,6 +121,10 @@ describe('desktop filesystem facade', () => {
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/read-data-url?path=%2Fhome%2Fuser%2Fproject%2Fa%20b.txt' })
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/git-root?path=%2Fhome%2Fuser%2Fproject' })
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/default-cwd' })
+
+    // Full reads ask the backend for the whole file.
+    await readDesktopFileText('/home/user/board.html', { full: true })
+    expect(api).toHaveBeenCalledWith({ path: '/api/fs/read-text?path=%2Fhome%2Fuser%2Fboard.html&full=1' })
     expect(readDir).not.toHaveBeenCalled()
     expect(readFileText).not.toHaveBeenCalled()
     expect(readFileDataUrl).not.toHaveBeenCalled()

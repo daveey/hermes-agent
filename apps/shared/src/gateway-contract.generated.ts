@@ -3043,6 +3043,25 @@ export interface WakeFeedResult {
   reason?: string | null
   fed: boolean
 }
+export interface SessionStartRequestParams {
+  profile: string
+  namespace: string
+  start_request_id: string
+}
+export interface SessionStartRequestResult {
+  gateway_id: string
+  profile: string
+  stored_session_id: string
+  resolved_session_id: string
+  first_turn_id: string
+  first_turn_state: FirstTurnState
+  exists: boolean
+  archived: boolean
+  active_turn: boolean
+  reconciliation: StartReconciliation
+}
+export type FirstTurnState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type StartReconciliation = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown_outcome'
 export interface SessionCreateParams {
   profile?: string | null
   cols?: number | null
@@ -5492,6 +5511,7 @@ export interface RpcMethods {
   'session.set_hidden': { params: SessionSetHiddenParams; result: SessionSetHiddenResult }
   /** Run a start_chat request again from the session that made it (the handoff card's Retry). */
   'session.start_chat': { params: SessionStartChatParams; result: SessionStartChatResult }
+  'session.start_request': { params: SessionStartRequestParams; result: SessionStartRequestResult }
   /** Rendered /status text for the session. */
   'session.status': { params: SessionStatusParams; result: SessionStatusResult }
   /** Inject text into the next tool result without interrupting the turn. */
@@ -5817,6 +5837,7 @@ export const RPC_METHODS = [
   'session.save',
   'session.set_hidden',
   'session.start_chat',
+  'session.start_request',
   'session.status',
   'session.steer',
   'session.take_over',

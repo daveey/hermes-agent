@@ -49,7 +49,6 @@ import type { WorkspaceMode } from '@/contrib/types'
 import { deleteProfile, getLogs, getStatus, hermesApi, type HermesGateway } from '@/hermes'
 import { traceIdentityChange } from '@/lib/identity-trace'
 import { completeMcpDesktopOAuth } from '@/lib/mcp-dashboard-oauth'
-import { $connectionsRegistry } from '@/store/connection-registry-state'
 import {
   $gateway,
   activeGatewayConnectionId,
@@ -113,13 +112,13 @@ import type { PaginatedSessions, UsageStats } from '@/types/hermes'
 
 import { pluginDecisions, profiles, skills, toolsets } from './bridge'
 import { composerHost } from './composer'
+import { $gateways, type PluginGateway } from './gateways'
 import { i18nHost } from './i18n'
 import { planPluginOpenSession } from './plugin-open-session-plan'
 import { sessionsHost } from './sessions'
 import { desktopSettings } from './settings'
 
-/** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
-export type * from './plugin-contract'
+export type { PluginGateway } from './gateways'
 
 // -- state: readonly views over the app's live atoms -------------------------
 
@@ -351,19 +350,6 @@ if (typeof window !== 'undefined') {
 /** Live usage of the FOCUSED session, projected out of the streamed session
  *  state — the same readout the core statusbar's context chip paints. */
 const $focusedUsage = computed($focusedSessionState, state => state?.usage ?? null)
-
-/** [daveey] Every registered gateway (id, kind, label), registry order. Token
- *  bytes and ssh details never cross into plugins. Empty on legacy
- *  profile-only Desktop builds. */
-export interface PluginGateway {
-  id: string
-  kind: string
-  label: string
-}
-
-const $gateways = computed($connectionsRegistry, (registry): PluginGateway[] =>
-  (registry?.connections ?? []).map(({ id, kind, label }) => ({ id, kind, label }))
-)
 
 const $activeConnectionId = computed($connection, connection => {
   if (!connection) {
@@ -1671,6 +1657,11 @@ export const host = {
 
 // -- react bridge -------------------------------------------------------------
 
+export * from './hub-sync'
+/** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
+export type * from './plugin-contract'
+/** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
+export type * from './plugin-contract'
 export type { DesktopSettingKey, DesktopSettingValues } from './settings'
 
 // -- ui: the design language --------------------------------------------------

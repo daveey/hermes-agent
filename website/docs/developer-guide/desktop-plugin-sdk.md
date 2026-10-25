@@ -1068,6 +1068,7 @@ readonly — read with `.get()` in handlers, subscribe with `useValue(atom)` in
 components.
 
 ```ts
+host.sessions.rows         // Readonly atom of loaded sidebar rows, with gateway/profile ownership
 host.state.activeSessionId  // ReadableAtom<string | null>
 host.state.awaitingResponse // ReadableAtom<boolean>  true until the first assistant payload
 host.state.busy             // ReadableAtom<boolean>  focused chat is working after a send
@@ -1082,6 +1083,13 @@ host.state.model            // ReadableAtom<string>
 host.state.profile          // ReadableAtom<string>
 host.state.viewport         // ReadableAtom<{ width, height, narrow }>
 ```
+
+hermes-hub replica access (the hub-sync plugin) is exported as named functions:
+`hubReplicaConnectionId`, `hubGatewayForConnection`, `connectionForHubGateway`,
+`learnHubGatewayName`, `hubGet`, `hubGatewayTasks` and `hubRequest`, plus the
+`HubRecord`/`HubTask`/`HubPending`/`HubRequestBody`/`HubRequestResult` types.
+Every read is best-effort (null or `[]` when hub-sync or the hub is absent), so
+keep the live gateway path authoritative.
 
 `host.state.gateway` is the WebSocket connection, not whether a chat turn is
 running. A session can be mid-turn while the socket is `open`; another session

@@ -231,11 +231,14 @@ def _compute_task_diagnostics(conn: sqlite3.Connection, task_ids: Optional[list[
     events_by_task = _rows_by_task("task_events")
     runs_by_task = _rows_by_task("task_runs")
     graph_by_task = kanban_db.task_graph_contexts(conn, row_ids)
+    from hermes_cli import kanban_wake_check as kwc
+    wake_by_task = kwc.load_states(conn, row_ids)
     out: dict[str, list[dict]] = {}
     for r in rows:
         tid = r["id"]
         diags = kd.compute_task_diagnostics(
-            r, events_by_task[tid], runs_by_task[tid], config=diag_config, graph=graph_by_task.get(tid))
+            r, events_by_task[tid], runs_by_task[tid], config=diag_config, graph=graph_by_task.get(tid),
+            wake_check=wake_by_task.get(tid))
         if diags:
             out[tid] = [d.to_dict() for d in diags]
     return out
@@ -466,6 +469,8 @@ def get_task(
         child_summaries = kanban_db.latest_summaries(conn, links["children"])
         children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))
         _attach_diagnostics(task_d, _compute_task_diagnostics(conn, task_ids=[task_id]).get(task_id) or [])
+        from hermes_cli import kanban_wake_check as kwc
+        task_d["wake_check"] = kwc.get_state(conn, task_id)  # condition wake probe [daveey]
         return {
             "task": task_d,
             "comments": [asdict(c) for c in kanban_db.list_comments(conn, task_id)],
@@ -609,6 +614,9 @@ class UpdateTaskBody(BaseModel):
     body: Optional[str] = None
     result: Optional[str] = None
     block_reason: Optional[str] = None
+    wake_check: Optional[str] = None
+    check_every: Optional[int] = None
+    clock_only: bool = False
     # Handoff fields forwarded to complete_task on -> 'done' (parity with ``hermes kanban complete``).
     summary: Optional[str] = None
     metadata: Optional[dict] = None
@@ -632,6 +640,10 @@ class BulkTaskBody(BaseModel):
     summary: Optional[str] = None
     metadata: Optional[dict] = None
     reclaim_first: bool = False
+    block_reason: Optional[str] = None
+    wake_check: Optional[str] = None
+    check_every: Optional[int] = None
+    clock_only: bool = False
     # Same semantics as UpdateTaskBody.
     model_override: Optional[str] = None
     provider_override: Optional[str] = None
@@ -665,8 +677,12 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
 _STATUS_HANDLERS: dict[str, Any] = {
     "done": lambda conn, tid, p: kanban_db.complete_task(
         conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True),
-    "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
-    "scheduled": lambda conn, tid, p: kanban_db.schedule_task(conn, tid, reason=getattr(p, "block_reason", None)),
+    "blocked": lambda conn, tid, p: kanban_db.block_task(
+        conn, tid, reason=p.block_reason, wake_check=p.wake_check,
+        check_every=p.check_every, clock_only=p.clock_only),
+    "scheduled": lambda conn, tid, p: kanban_db.schedule_task(
+        conn, tid, reason=p.block_reason, wake_check=p.wake_check,
+        check_every=p.check_every, clock_only=p.clock_only),
     "review": lambda conn, tid, p: kanban_db.request_review(
         conn, tid, summary=p.summary, metadata=p.metadata, reviewer=(p.assignee or None), force=True),
     "ready": lambda conn, tid, p: _drag_to(conn, tid, "ready"),

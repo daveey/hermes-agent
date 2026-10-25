@@ -167,6 +167,26 @@ KANBAN_COMPLETE_SCHEMA = _schema(
     [],
 )
 
+_WAKE_CHECK_PROPS = {
+    "wake_check": _prop("string", (
+        "Shell command probed by the dispatcher while the card is parked (bash -lc, 30 s "
+        "timeout, cwd = the task workspace): exit 0 = the condition holds and the card wakes "
+        "at once (its stdout reaches the next run), exit 1 = not yet. Any other exit 3 times in "
+        "a row wakes the card to fix the probe. REQUIRED for a wait on any readable fact (a DB "
+        "row, a git tag, a file, a log line, a service state) that wakes more than 2 h out, e.g. "
+        "`gh api repos/O/R/tags --jq '.[].name' | grep -q '^v2'`. A wait on another card on "
+        "this board is a parent link (kanban_link), not a park."
+    )),
+    "check_every": {"type": "integer", "description": (
+        "Seconds between wake_check probes (default 900, min 120, max 21600)."
+    )},
+    "clock_only": {"type": "boolean", "description": (
+        "Set true only for a pure time wait with no fact to probe (a soak window, a calendar "
+        "date, a timed re-measure). A park more than 2 h out needs wake_check or clock_only."
+    )},
+}
+
+
 KANBAN_BLOCK_SCHEMA = _schema(
     "kanban_block",
     (
@@ -186,7 +206,11 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "block on things you can resolve yourself. Waiting on time or an "
         "external event (a cap, a soak, a release window) is not a block: use "
         "kind='time' (put SCHEDULED_UNTIL=<ISO8601> in the reason to set the wake; "
-        "default 24h), since a blocked card marks its chat as needing a human."
+        "default 24h), since a blocked card marks its chat as needing a human. "
+        "A timed wait on any readable fact needs ``wake_check`` (a shell probe; "
+        "the card wakes the moment it exits 0); a park more than 2 h out without "
+        "one is refused unless ``clock_only`` is true. A wait on another card on "
+        "this board is a parent link (kanban_link), not a park."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
@@ -219,6 +243,7 @@ KANBAN_BLOCK_SCHEMA = _schema(
             "dispatcher then holds every card behind it and runs one probe card per "
             "interval; a run that ends without the id clears it and releases the rest."
         )),
+        **_WAKE_CHECK_PROPS,
     },
     ["reason"],
 )
@@ -229,7 +254,11 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
         "Park your current task in the 'scheduled' state while it waits for "
         "time or an external event. This ends the current run and makes the "
         "task non-dispatchable until an orchestrator unblocks it, or until the "
-        "time named by a ``SCHEDULED_UNTIL=<ISO8601>`` marker in ``reason``."
+        "time named by a ``SCHEDULED_UNTIL=<ISO8601>`` marker in ``reason`` "
+        "(default 24h), or until ``wake_check`` exits 0. A wait on any readable "
+        "fact needs ``wake_check``; a park more than 2 h out without one is "
+        "refused unless ``clock_only`` is true. A wait on another card on this "
+        "board is a parent link (kanban_link), not a park."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
@@ -237,6 +266,7 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
             "Optional reason or machine-readable wake-up marker recorded on "
             "the completed run and scheduled event."
         )),
+        **_WAKE_CHECK_PROPS,
     },
     [],
 )
@@ -270,8 +300,10 @@ KANBAN_CONTINUE_SCHEMA = _schema(
         "resume_after_seconds": {"type": "integer", "description": (
             "Optional. 0 (default) re-queues immediately. N > 0 parks the card in "
             "'scheduled' and the dispatcher re-queues it after N seconds (max "
-            "86400): use this to hand off a wait instead of polling."
+            "86400): use this to hand off a wait instead of polling. Over 7200 "
+            "needs wake_check (or clock_only for a pure time wait)."
         )},
+        **_WAKE_CHECK_PROPS,
         "metadata": {"type": "object", "description": (
             "Optional machine-readable state (e.g. {\"pids\": [...], \"ci_run\": ...})."
         )},

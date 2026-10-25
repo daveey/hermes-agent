@@ -30,6 +30,7 @@ _log = logging.getLogger(__name__)
 # (usually a dispatched agent) or for its completion to be verified, so a
 # session whose only open card sits in review must not paint done. [daveey]
 ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled", "review")
+
 # Waiting on a human. These don't keep the session busy, but the sidebar row
 # shows how many there are next to the open count (``kanban_blocked``) and the
 # row paints red. [daveey]
@@ -46,6 +47,9 @@ _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
 _cache_scope: tuple[str, ...] | None = None
+_waiting_cache: list[dict[str, frozenset[str]]] = [{}]
+_pairs_lock = threading.Lock()
+WAITING_ON_CAP = 50
 
 
 def _origin_scope() -> tuple[str, ...]:
@@ -57,6 +61,7 @@ def _origin_scope() -> tuple[str, ...]:
     return (str(get_hermes_home()), get_active_profile_name(), str(kanban_db.kanban_home()),
             os.environ.get('HERMES_HUB_STATE', str(Path.home() / '.local/state/hermes-hub')),
             os.environ.get('HERMES_MAIL_CONFIG', str(Path.home() / '.config/hermes-mail/config.json')))
+
 
 
 def _board_db_paths() -> list[Path]:
@@ -77,27 +82,63 @@ def _board_db_paths() -> list[Path]:
 
 
 def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple[str, tuple]:
-    """SQL predicate on ``t`` for "in ``statuses``", splitting ``blocked`` by its kind:
-    the human set (``BLOCKED_STATUSES``) keeps only human-kind blocks, the active set
-    gains the ``transient``/``time`` ones. A board without ``block_kind`` is unchanged."""
+    """Split open work by human responsibility, including escalated triage.
+
+    Legacy boards have no explicit human triage kinds, so triage stays active.
+    """
     ph = ",".join("?" for _ in statuses)
     if not {r[1] for r in conn.execute("PRAGMA table_info(tasks)")} >= {"block_kind"}:
         if statuses == BLOCKED_STATUSES:
             return "t.status = 'blocked'", ()
-        return f"t.status IN ({ph})", statuses
+        return f"(t.status IN ({ph}) OR t.status = 'triage')", statuses
     kinds = ",".join("?" for _ in HUMAN_BLOCK_KINDS)
     human = f"(t.block_kind IS NULL OR t.block_kind IN ({kinds}))"
     if statuses == BLOCKED_STATUSES:
         escalated = f"(t.status = 'triage' AND t.block_kind IN ({kinds}))"
         return f"((t.status = 'blocked' AND {human}) OR {escalated})", (*HUMAN_BLOCK_KINDS, *HUMAN_BLOCK_KINDS)
-    return f"(t.status IN ({ph}) OR (t.status = 'blocked' AND NOT {human}))", (*statuses, *HUMAN_BLOCK_KINDS)
+    # Triage is unfinished even without a worker. Only explicit human kinds
+    # belong to the blocked bucket; NULL triage awaits an agent specifier.
+    triage = f"(t.status = 'triage' AND (t.block_kind IS NULL OR t.block_kind NOT IN ({kinds})))"
+    return (f"(t.status IN ({ph}) OR (t.status = 'blocked' AND NOT {human}) OR {triage})",
+            (*statuses, *HUMAN_BLOCK_KINDS, *HUMAN_BLOCK_KINDS))
+
+
+# Set while ``_all_counts`` reads local boards: collects the (session, task) pairs behind the counts, so the
+# open card ids per session (``waiting_on_task_ids``) cost no extra queries. [daveey]
+_pairs_sink: set[tuple[str, str]] | None = None
+
+
+# Subscription reasons that make a ``tui`` subscriber own the card's progress (stamped in
+# ``delivery_metadata.reason``): ``create`` (kanban_create's auto-sub) and ``shepherd``
+# (explicit ``notify-subscribe``). Explicit ``touch`` (auto-sub on comment/unblock/link)
+# does not own progress. Legacy/invalid metadata cannot distinguish a shepherd from a
+# touch: preserve that obligation until provenance is reconciled, never silently release it.
+# [daveey]
+COUNTED_SUB_REASONS = ("create", "shepherd")
+
+
+def _counted_sub_clause(conn: sqlite3.Connection) -> str:
+    """SQL predicate (aliases ``s`` subs, ``t`` tasks) for a ``tui`` sub that counts as the chat's work."""
+    owner = "s.chat_id = COALESCE(t.session_id, '')"
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(kanban_notify_subs)")}
+    except sqlite3.Error:
+        cols = set()
+    if "delivery_metadata" not in cols:
+        return "1"
+    # CASE avoids json_extract on invalid legacy metadata (SQLite need not
+    # short-circuit boolean OR expressions). Only proven incidental touches release.
+    return (f"({owner} OR CASE WHEN json_valid(s.delivery_metadata) "
+            "THEN COALESCE(json_extract(s.delivery_metadata, '$.reason'), '') != 'touch' "
+            "ELSE 1 END)")
 
 
 def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
     """Tasks per session in ``statuses``: tasks the session created, plus tasks
-    it is a ``tui`` notify subscriber of (a session asked to shepherd someone
-    else's card subscribes to it, and is just as "still working" until it
-    lands). Each (session, task) pair counts once."""
+    it shepherds (a ``tui`` notify sub stamped ``create``/``shepherd``, see
+    ``COUNTED_SUB_REASONS``): it is just as "still working" until they land.
+    A touch-only sub (one comment on someone else's card) does not count.
+    Each (session, task) pair counts once."""
     conn = _open_ro(path)
     try:
         if "session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
@@ -114,7 +155,7 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
             pairs.update(
                 (str(sid), str(tid)) for sid, tid in conn.execute(
                     f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {match}",
+                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}",
                     params,
                 )
             )
@@ -125,6 +166,8 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
+    if _pairs_sink is not None:
+        _pairs_sink.update(pairs)
     return counts
 
 
@@ -183,7 +226,7 @@ def _self_gateway(conn: sqlite3.Connection) -> str:
         pass
     try:
         cfg = Path(os.environ.get("HERMES_MAIL_CONFIG") or Path.home() / ".config" / "hermes-mail" / "config.json")
-        return str(json.loads(cfg.read_text()).get("gateway") or "")
+        return str(json.loads(cfg.read_text(encoding="utf-8-sig")).get("gateway") or "")
     except (OSError, ValueError, AttributeError):
         return ""
 
@@ -194,7 +237,8 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
     human = kind is None or kind in HUMAN_BLOCK_KINDS
     if status == 'unknown' and task.get('unfinished'):
         return 'active'
-    if status in ACTIVE_STATUSES or (status == "blocked" and not human):
+    if (status in ACTIVE_STATUSES or (status == "blocked" and not human)
+            or (status == "triage" and kind not in HUMAN_BLOCK_KINDS)):
         return "active"
     if (status == "blocked" and human) or (status == "triage" and kind in HUMAN_BLOCK_KINDS):
         return "blocked"
@@ -451,15 +495,10 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[
     blocked: dict[str, int] = {}
     unseen: dict[str, int] = {}
     stale: dict[str, int] = {}
-    for path in _board_db_paths():
-        try:
-            for sid, n in _read_unseen(path).items():
-                unseen[sid] = unseen.get(sid, 0) + n
-        except sqlite3.Error as exc:
-            _log.debug("kanban unseen read failed for %s: %s", path, exc)
-        for statuses, into in ((ACTIVE_STATUSES, active), (BLOCKED_STATUSES, blocked)):
-            for sid, n in _read_counts(path, statuses).items():
-                into[sid] = into.get(sid, 0) + n
+    pairs = _read_local_pairs_into(active, blocked, unseen)
+    waiting: dict[str, set[str]] = {}
+    for sid, tid in pairs:
+        waiting.setdefault(sid, set()).add(tid)
     for card in _remote_links():
         bucket = _replica_bucket(card)
         into = active if bucket == "active" else blocked if bucket == "blocked" else None
@@ -472,7 +511,67 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[
     with _cache_lock:
         _cache_scope = scope
         _cache = (now + _CACHE_TTL_S, active, blocked, unseen, stale)
+        _waiting_cache[0] = {sid: frozenset(ids) for sid, ids in waiting.items()}
     return active, blocked, unseen, stale
+
+
+def _read_local_pairs_into(active: dict[str, int], blocked: dict[str, int],
+                           unseen: dict[str, int]) -> set[tuple[str, str]]:
+    """Fill the three count maps from every local board; return the open (session, task) pairs."""
+    global _pairs_sink
+    with _pairs_lock:
+        _pairs_sink = set()
+        try:
+            _read_local_boards(active, blocked, unseen)
+            return _pairs_sink
+        finally:
+            _pairs_sink = None
+
+
+def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: dict[str, int]) -> None:
+    for path in _board_db_paths():
+        try:
+            for sid, n in _read_unseen(path).items():
+                unseen[sid] = unseen.get(sid, 0) + n
+        except sqlite3.Error as exc:
+            _log.debug("kanban unseen read failed for %s: %s", path, exc)
+        for statuses, into in ((ACTIVE_STATUSES, active), (BLOCKED_STATUSES, blocked)):
+            for sid, n in _read_counts(path, statuses).items():
+                into[sid] = into.get(sid, 0) + n
+
+
+# [daveey] Extra "this chat still waits" sources (plugins): name -> fn() -> {session_id: iterable of task ids}. A
+# chat-closeout plugin registers the cards of a settled batch whose close-out turn has not run yet, so the row
+# stays grey "waiting" between the last notice and the closing answer instead of flashing green.
+_waiting_sources: dict[str, Any] = {}
+
+
+def register_waiting_source(name: str, fn) -> None:
+    """Register (or replace, ``fn=None`` removes) a plugin source of waiting card ids per session. [daveey]"""
+    if fn is None:
+        _waiting_sources.pop(name, None)
+    else:
+        _waiting_sources[name] = fn
+
+
+def _extra_waiting() -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for name, fn in list(_waiting_sources.items()):
+        try:
+            for sid, ids in (fn() or {}).items():
+                out.setdefault(str(sid), set()).update(str(i) for i in ids if i)
+        except Exception:  # annotation catches this and stamps unknown, including cold starts
+            _log.debug("waiting source %s failed", name, exc_info=True)
+            raise
+    return out
+
+
+def waiting_on_task_ids() -> dict[str, frozenset[str]]:
+    """``{session_id: open task ids}`` on this gateway's boards: queued/running cards plus those waiting on a human,
+    created or shepherded by the session — what the chat is waiting on. Same cache as the counts. [daveey]"""
+    _all_counts()
+    with _cache_lock:
+        return dict(_waiting_cache[0])
 
 
 def active_task_counts() -> dict[str, int]:
@@ -519,7 +618,7 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         try:
             for row in conn.execute(
                     f"SELECT {select}, {run_start} AS current_run_started_at FROM kanban_notify_subs s "
-                    f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' "
+                    f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' AND {_counted_sub_clause(conn)} "
                     f"AND s.chat_id IN ({sid_ph}) AND t.status IN ({st_ph})", (*ids, *statuses)):
                 found.setdefault(row["id"], {**dict(row), "via": "subscribed"})
         except sqlite3.Error:  # board predates notify subscriptions
@@ -603,7 +702,8 @@ def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any
         try:
             pairs.extend((str(r["chat_id"]), dict(r)) for r in conn.execute(
                 f"SELECT s.chat_id AS chat_id, {fields} FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {cond}", (since,)))
+                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {cond}",
+                (since,)))
         except sqlite3.Error:  # board predates notify subscriptions
             pass
     finally:
@@ -670,7 +770,7 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
 
 
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_unseen`` (finished cards whose result the
+    """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_waiting_on`` (local open card ids), ``kanban_unseen`` (finished cards whose result the
     session has not been handed yet) and ``kanban_attention`` (done cards a registered check flags) on each session row
     (summed over its whole compression lineage). Never raises: the list must
     render without them."""
@@ -681,6 +781,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     observed_at = time.time() - _CACHE_TTL_S
     try:
         active, blocked, unseen, remote_stale = _all_counts()
+        waiting = waiting_on_task_ids()
+        extra = _extra_waiting()
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
         # row off done) and drop the counts rather than present them as fresh.
@@ -689,6 +791,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             for key in ("kanban_active", "kanban_blocked", "kanban_unseen", "kanban_attention", "kanban_remote_stale"):
                 row.pop(key, None)
             row.pop("kanban_observed_at", None)
+            row.pop("kanban_waiting_on", None)
             row["kanban_unknown"] = True
         return rows
     try:
@@ -707,6 +810,17 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 row[key] = n
             else:
                 row.pop(key, None)
+        # [daveey] The open card ids the chat waits on (lineage-wide, capped): the sidebar's "waiting on N cards".
+        open_ids = {tid for sid in ids for tid in waiting.get(sid, ())}
+        # Plugin sources (pending close-outs): count the ids the boards don't already count as open.
+        pending = {tid for sid in ids for tid in extra.get(sid, ())} - open_ids
+        if pending:
+            row["kanban_active"] = int(row.get("kanban_active") or 0) + len(pending)
+        ids_waiting = sorted(open_ids | pending)
+        if ids_waiting:
+            row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
+        else:
+            row.pop("kanban_waiting_on", None)
     return rows
 
 
@@ -717,3 +831,4 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
         _attention_cache = None
         if not keep_remote:
             _remote_last = None
+        _waiting_cache[0] = {}

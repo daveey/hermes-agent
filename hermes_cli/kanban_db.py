@@ -1005,6 +1005,20 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
+-- Condition-wake probe of a ``scheduled`` card (``kanban_wake_check``): one row per
+-- card, rewritten per probe instead of one event per probe. [daveey]
+CREATE TABLE IF NOT EXISTS task_wake_checks (
+    task_id   TEXT PRIMARY KEY,
+    cmd       TEXT NOT NULL,
+    every     INTEGER NOT NULL,
+    next_at   INTEGER NOT NULL,
+    last_at   INTEGER,
+    last_rc   INTEGER,
+    last_out  TEXT,
+    fails     INTEGER NOT NULL DEFAULT 0,
+    generation TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
@@ -3189,7 +3203,8 @@ def edit_task(
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
-    blocker_id: Optional[str] = None,
+    blocker_id: Optional[str] = None, wake_check: Optional[str] = None,
+    check_every: Optional[int] = None, clock_only: bool = False,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`_route_block`). A wait on time -- ``kind='time'``, a ``dependency``
@@ -3230,7 +3245,8 @@ def block_task(
             from hermes_cli import kanban_timed_park as ktp
             if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=_parents_satisfied(conn, task_id)):
                 return ktp.park(conn, task_id, reason=reason, requested_kind=kind, source_status="ready",
-                                from_untyped_block=True)
+                                from_untyped_block=True, wake_check=wake_check,
+                                check_every=check_every, clock_only=clock_only)
             classified = conn.execute(
                 "UPDATE tasks SET block_kind = ?, block_recurrences = 1 "
                 "WHERE id = ? AND status = 'blocked' AND block_kind IS NULL "
@@ -3249,7 +3265,8 @@ def block_task(
         from hermes_cli import kanban_timed_park as ktp
         if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent):
             return ktp.park(conn, task_id, reason=reason, requested_kind=kind,
-                            source_status=source_status, expected_run_id=expected_run_id)
+                            source_status=source_status, expected_run_id=expected_run_id,
+                            wake_check=wake_check, check_every=check_every, clock_only=clock_only)
         # Parent-less ``dependency`` behind a shared blocker: sticky ``needs_input`` (todo would respawn it).
         if kind == "dependency" and no_open_parent:
             kind = "needs_input"
@@ -4044,6 +4061,8 @@ def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:
     conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
     for table in ("task_comments", "task_events", "task_runs", "kanban_notify_subs"):
         conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (task_id,))
+    with contextlib.suppress(sqlite3.OperationalError):  # board predating condition wakes
+        conn.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (task_id,))
 
 
 def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -4066,40 +4085,6 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
         _delete_task_relations(conn, task_id)
     recompute_ready(conn)
     return True
-
-
-def schedule_task(
-    conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    expected_run_id: Optional[int] = None,
-) -> bool:
-    """Park in ``scheduled`` (waiting on time, not a human; not dispatchable) until its wake
-    (``SCHEDULED_UNTIL=`` in the reason, else ``kanban_timed_park.DEFAULT_WAKE_SECONDS``) or an
-    ``unblock_task``. Refused (False) while the card waits on a human answer: ``scheduled`` is
-    not on any needs-me surface, so such a park hid the ask (t_6feb6afd). [daveey]"""
-    with write_txn(conn):
-        if _awaiting_human_answer(conn, task_id):
-            return False
-        params: list[Any] = [task_id]
-        sql = """
-            UPDATE tasks
-               SET status       = 'scheduled',
-                   claim_lock   = NULL,
-                   claim_expires= NULL,
-                   worker_pid   = NULL
-             WHERE id = ?
-               AND status IN ('todo', 'ready', 'running', 'blocked')
-        """
-        if expected_run_id is not None:
-            sql += " AND current_run_id = ?"
-            params.append(int(expected_run_id))
-        if conn.execute(sql, params).rowcount != 1:
-            return False
-        run_id = _end_or_synthesize_run(
-            conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
-        )
-        from hermes_cli.kanban_timed_park import scheduled_payload  # SCHEDULED_UNTIL= wakes it [daveey]
-        _append_event(conn, task_id, "scheduled", scheduled_payload(reason), run_id=run_id)
-        return True
 
 
 def _awaiting_human_answer(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -4138,6 +4123,8 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     checkpoint = render_checkpoint_context(conn, task_id)
     if checkpoint:
         lines.append(checkpoint)
+    from hermes_cli.kanban_wake_check import render_wake_context
+    lines += [w for w in (render_wake_context(conn, task_id),) if w]  # condition wake [daveey]
     from hermes_cli.kanban_shared_blockers import render_blocker_context
     try:
         blockers = render_blocker_context(conn, task_id)
@@ -4641,6 +4628,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 
 
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
+from hermes_cli.kanban_db_schedule import schedule_task
 from hermes_cli.kanban_db_boards import (
     _default_board_display_name,
     _dir_holds_board,

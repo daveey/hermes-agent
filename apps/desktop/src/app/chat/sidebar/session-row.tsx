@@ -55,11 +55,11 @@ import {
   SidebarRowLeadGlyph,
   SidebarRowShell
 } from './chrome'
-import { GatewayDeviceIcon } from './gateway-device-icon'
 import { shellOwnsPress } from './reorderable-list'
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
+import { gatewayMarks } from './session-row-offline'
 import { SessionRowSlot } from './session-row-slots'
 import { useProfilePrewarm } from './use-profile-prewarm'
 
@@ -179,10 +179,7 @@ function SidebarSessionRowImpl({
   const gatewayRegistry = useStore($connectionsRegistry)
   const gatewayId = sessionGatewayId(session, gatewayRegistry)
 
-  const gatewayIcon =
-    (gatewayRegistry?.connections.length ?? 0) > 1 ? (
-      <GatewayDeviceIcon className="ml-1 align-[-2px]" gatewayId={gatewayId} />
-    ) : null
+  const gatewayIcon = gatewayMarks(session, gatewayRegistry, gatewayId)
 
   // [daveey] Kanban work this session is waiting on: open (queued/running)
   // and blocked task counts, after the age and before the gateway glyph.
@@ -365,7 +362,8 @@ function SidebarSessionRowImpl({
         kanbanBlocked,
         session.cron_active === true,
         session.review_wait,
-        session.kanban_attention
+        session.kanban_attention,
+        kanbanOpen
       )
 
   // Card header line: the workspace this belongs to — the project when it
@@ -545,7 +543,7 @@ function SidebarSessionRowImpl({
         {isSelected && <span aria-hidden="true" className="arc-border arc-row" />}
         {/* [daveey] A session that owns a live cron job: a tiny grey loop
             glyph in the stripe's place — it recurs, so it is never "done". */}
-        {statusStripe === 'periodic' && (
+        {(statusStripe === 'periodic' || statusStripe === 'waiting') && (
           <span
             aria-hidden="true"
             className={cn(
@@ -555,10 +553,11 @@ function SidebarSessionRowImpl({
             data-slot="session-status-stripe"
             data-status-stripe={statusStripe}
           >
-            <Codicon name="sync" size="0.5625rem" />
+            {/* [daveey] `waiting`: open kanban cards hold it — the card glyph. */}
+            <Codicon name={statusStripe === 'waiting' ? 'project' : 'sync'} size="0.5625rem" />
           </span>
         )}
-        {statusStripe && statusStripe !== 'periodic' && (
+        {statusStripe && statusStripe !== 'periodic' && statusStripe !== 'waiting' && (
           <span
             aria-hidden="true"
             className={cn(

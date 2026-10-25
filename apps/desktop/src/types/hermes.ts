@@ -639,6 +639,7 @@ export interface SessionInfo {
    *  workers, so the sidebar paints it like a background job, not "done".
    *  Absent when zero or against a backend predating the field. */
   kanban_active?: number
+
   /** [daveey] The backend could not read this conversation's kanban cards (a
    *  local board or another gateway's hermes-hub replica failed). Unknown is
    *  not "no work": the row stays off done until a read succeeds. Absent when
@@ -650,6 +651,8 @@ export interface SessionInfo {
    *  gateway known only from a stale hermes-hub replica (last-known status).
    *  Absent when zero. */
   kanban_remote_stale?: number
+  /** [daveey] Open card ids (queued/running + waiting on a human) the chat waits on, over the lineage. */
+  kanban_waiting_on?: string[]
   /** [daveey] Kanban tasks of this conversation (created or subscribed) that
    *  are blocked on a human, summed over its compression lineage. Shown next
    *  to the open count on the sidebar row. Absent when zero. */
@@ -719,6 +722,17 @@ export interface SessionInfo {
    *  rows served by the primary/local backend. Opens must route through the
    *  connection-scoped gateway (`ensureGatewayAgent`) when present. */
   connection_id?: string
+  /** [daveey] Row comes from the hermes-hub replica of a gateway that is not
+   *  reachable right now (never from a live listing). Everything below is the
+   *  owner's last-known state: `is_active` is always false, `last_active` is the
+   *  session's own last activity, not the sync time. */
+  offline_cached?: boolean
+  /** Hub gateway name that owns this cached row. */
+  offline_gateway?: string
+  /** Epoch seconds: when the replica last heard from the owner. */
+  offline_synced_at?: null | number
+  /** Replica record version (optimistic-concurrency base for owner requests). */
+  offline_version?: null | number
 }
 
 /** [daveey] One live background process a session row owns (backend stamp). */

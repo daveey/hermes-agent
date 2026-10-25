@@ -655,7 +655,7 @@ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: dict[s
         pool = None
     if not (pool and pool.has_credentials()):
         return None
-    entry = pool.select(model=target_model or None)
+    entry = pool.select(model=_effective_model(model_cfg, target_model) or None)
     if entry is None:
         return None
     pool_api_key = _pool_entry_api_key(entry)
@@ -1020,6 +1020,12 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
     _raise_if_local_alias_missing_endpoint(requested_provider, explicit_base_url)
     runtime = next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
     _raise_for_credentialless_bare_custom(requested_provider, runtime)
+    # Pool exhaustion must not fall through to a free singleton for an account-gated model.
+    if runtime.get("provider") == "openai-codex":
+        from agent.codex_entitlements import codex_entry_entitled_for_model
+        if not codex_entry_entitled_for_model(runtime.get("api_key"), _effective_model(_get_model_config(), target_model)):
+            raise AuthError("No entitled Codex account is available for this model",
+                            provider="openai-codex", code="model_not_entitled")
     # model.openai_runtime is applied ONCE, after the ladder: every rung (pool, OAuth store,
     # explicit --api-key/--base-url, env key) hardcodes the wire api_mode for openai/openai-codex,
     # so applying the opt-in inside one rung left the others on codex_responses (#115169).

@@ -139,6 +139,7 @@ from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
+from gateway.platforms.api_server_thread_hops import ThreadSafeAsyncQueue, _ThreadHops
 from gateway.platforms.api_server_memory_sessions import ApiServerMemorySessions
 from gateway.platforms.base import (
     MEDIA_TAG_CLEANUP_RE, BasePlatformAdapter, SendResult, _terminal_sentinel_start, is_network_accessible,
@@ -240,19 +241,6 @@ MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 RESPONSES_AUTO_TRUNCATION_HISTORY_LIMIT = 100
 
-
-class ThreadSafeAsyncQueue(asyncio.Queue):
-    """``asyncio.Queue`` a non-loop thread (run_conversation's executor) can push into via
-    ``put_threadsafe``; the SSE consumer's ``await get()`` is woken by ``call_soon_threadsafe``."""
-
-    def put_threadsafe(self, item, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
-        (loop or self._loop_ref).call_soon_threadsafe(self.put_nowait, item)
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Always constructed inside a running async handler (the SSE
-        # request handlers below), so get_running_loop() is safe here.
-        self._loop_ref = asyncio.get_running_loop()
 
 
 def _sse_frame(
@@ -1118,11 +1106,12 @@ class _ProviderAuthResolutionError(RuntimeError):
         return t("platform.api_server.provider_error_line", label=label, error=self)
 
 
-class _SessionEventQueue:
+class _SessionEventQueue(_ThreadHops):
     """Ordered SSE event queue for one /api/sessions/{id}/chat/stream run. ``payload`` stamps
     session_id/run_id/seq/ts; ``enqueue`` is executor-thread safe (hops onto the owning loop)."""
 
     def __init__(self, session_id: str, run_id: str):
+        self._init_hops()
         self.loop = asyncio.get_running_loop()
         self.queue: asyncio.Queue[Optional[tuple[str, dict[str, Any]]]] = asyncio.Queue()
         self.session_id = session_id
@@ -1147,7 +1136,7 @@ class _SessionEventQueue:
             if running_loop is self.loop:
                 self.queue.put_nowait(event)
             else:
-                self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
+                self._hop(self.loop, self.queue.put_nowait, event)
 
 
 def _room_grant_delegate(name: str):
@@ -3677,6 +3666,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     tool_progress_callback=_tool_progress, interim_assistant_callback=_commentary,
                     active_run_id=run_id, approval_notify_callback=approval_notify,
                     approval_session_key=run_id, **ctx["run_kwargs"])
+                # The worker's last commentary/tool hops must land before assistant.completed.
+                await events.flush_hops()
                 is_dict = isinstance(result, dict)
                 final_response = _resolve_media_to_data_urls(result.get("final_response", "") if is_dict else "")
                 effective_session_id = result.get("session_id", session_id) if is_dict else session_id
@@ -3709,6 +3700,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 self._active_run_agents.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
                 self._release_run_owner_if_forgotten(run_id)
+                await events.flush_hops()
                 await queue.put(_event_payload("done", {}))
                 await queue.put(None)
 

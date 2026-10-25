@@ -19,16 +19,16 @@ from agent import delegation_context as dc
 REPO = Path(__file__).resolve().parents[2]
 
 PROBE = (
-    "import json,os,sys;sys.path.insert(0,%r);"
+    f"import json,os,sys;sys.path.insert(0,{str(REPO)!r});"
     "from agent import delegation_context as dc;"
     "fenced=dc.is_delegated_child_process_context();"
     "print(json.dumps({'fenced':fenced,'marker':os.environ.get(dc.DELEGATED_CHILD_ENV_MARKER),"
-    "'owner':os.environ.get(dc.DELEGATED_CHILD_OWNER_ENV)}))" % str(REPO)
+    "'owner':os.environ.get(dc.DELEGATED_CHILD_OWNER_ENV)}))"
 )
 
 
 def _probe(env):
-    out = subprocess.run([sys.executable, "-c", PROBE], env=env, capture_output=True, text=True, timeout=60)
+    out = subprocess.run([sys.executable, "-c", PROBE], env=env, capture_output=True, text=True, timeout=60, check=False)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout.strip().splitlines()[-1])
 

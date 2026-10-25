@@ -22,7 +22,6 @@ import { useI18n } from '@/i18n'
 import {
   type ChatMessage,
   preserveLocalAssistantErrors,
-  QUESTION_CARD_TOOLS,
   restorePendingClarifyToolCall,
   settlePendingClarifyToolCall,
   stripPendingClarifyProjectionForCache,
@@ -56,14 +55,13 @@ import {
   requestGatewayForAgent,
   retainGatewayForAgent
 } from '@/store/gateway'
-import { $gatewaySwitching } from '@/store/gateway-switch'
 import { clearSessionGoal } from '@/store/goals'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
+import { archiveIfOfflineCached } from '@/store/offline-session-actions'
 import { adoptDraftPreviewTabs, prunePreviewTabsForSession } from '@/store/preview'
 import {
   $activeGatewayProfile,
-  $gatewaySwapTarget,
   $newChatProfile,
   $profiles,
   $showAllProfiles,
@@ -174,9 +172,12 @@ import { branchCreateKey } from './branch-create-key'
 import { sessionCreateOverrideParams, type SessionCreateOverrides, type SessionSeedMessage } from './create-overrides'
 import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this-run'
 import { captureDisplayHydration } from './display-hydration'
+import { withoutEarlyClarifyProjection } from './early-clarify-projection'
+import { goneSessionSwitchInFlight } from './gone-session-switch'
 import {
   dispatchedConnectionId,
   findForeignSessionOwner,
+  isKanbanWorkerResumeRefusal,
   isStoredSessionNotFound,
   pinSessionOwner
 } from './owner-follow'
@@ -312,39 +313,6 @@ interface FreshSessionDraftOptions {
   replaceRoute?: boolean
   rotateFreshDraftKey?: boolean
   workspaceTarget?: NewChatWorkspaceTarget
-}
-
-/** Drop the pre-hydration request-id row without copying the other messages.
- *  A copied clarify row looks like a concurrent edit and hydration keeps both. */
-function withoutEarlyClarifyProjection(messages: ChatMessage[], requestId: string): ChatMessage[] {
-  let changed = false
-  const next: ChatMessage[] = []
-
-  for (const message of messages) {
-    const parts = message.parts.filter(
-      part =>
-        !(
-          part.type === 'tool-call' &&
-          QUESTION_CARD_TOOLS.has(part.toolName) &&
-          part.result === undefined &&
-          part.toolCallId === requestId
-        )
-    )
-
-    if (parts.length === message.parts.length) {
-      next.push(message)
-
-      continue
-    }
-
-    changed = true
-
-    if (parts.length > 0) {
-      next.push({ ...message, parts })
-    }
-  }
-
-  return changed ? next : messages
 }
 
 /** Session-state patch for a restored blocking prompt row; the first non-null projection is used. */
@@ -2630,6 +2598,15 @@ export function useSessionActions({
           return
         }
 
+        // Kanban worker transcript (4132): resuming it would add a second writer
+        // next to the dispatcher's run. The REST fallback already painted it, so
+        // open it read-only and quietly: no "Resume failed" toast, no retry latch.
+        if (isKanbanWorkerResumeRefusal(err) && !fallbackError) {
+          markStoredTranscriptReadOnly(storedSessionId)
+
+          return
+        }
+
         // #94724 no-owner recovery: the owner ladder failed closed — which is
         // CORRECT under registry topology — but the stored transcript may be
         // fully intact in some backend's state.db. If the ambient REST
@@ -2698,16 +2675,7 @@ export function useSessionActions({
           const verdict = goneSessionVerdict({
             createdThisRun: sessionCreatedThisRun(storedSessionId),
             stillListed,
-            switchInFlight:
-              $gatewaySwitching.get() ||
-              Boolean($gatewaySwapTarget.get()) ||
-              // Known owner ≠ active gateway: the 404 came from the wrong
-              // backend. An UNKNOWN owner must not count — it would block the
-              // draft fallback for genuinely dead ids on secondary profiles.
-              Boolean(
-                sessionProfile?.trim() &&
-                normalizeProfileKey(sessionProfile) !== normalizeProfileKey($activeGatewayProfile.get())
-              )
+            switchInFlight: goneSessionSwitchInFlight(sessionProfile)
           })
 
           if (verdict === 'retry') {
@@ -3457,6 +3425,10 @@ export function useSessionActions({
     // `skipLinkedConfirm` archives without the linked-work prompt.
     async (storedSessionId: string, options?: { onDeselect?: () => void; skipLinkedConfirm?: boolean }) => {
       clearNotifications()
+
+      if (await archiveIfOfflineCached(storedSessionId, copy)) {
+        return
+      }
 
       const listed = findListedSession(storedSessionId)
       const archived = listed?.session

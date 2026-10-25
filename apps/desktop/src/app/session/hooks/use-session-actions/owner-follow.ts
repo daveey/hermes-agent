@@ -40,6 +40,20 @@ export const SESSION_NOT_FOUND_CODE = 4007
 /** JSON-RPC 4001 — the gateway holds no live runtime by that id ("not in memory"). */
 export const SESSION_NOT_IN_MEMORY_CODE = 4001
 
+/** JSON-RPC 4132 — the gateway refuses to resume a Kanban worker transcript
+ *  (tui_gateway _resume_guard): a resumed chat would be a second, unsupervised
+ *  writer next to the dispatcher-owned run. The stored transcript is still
+ *  readable over REST, so Desktop opens it read-only instead of erroring. */
+export const KANBAN_WORKER_RESUME_REFUSED_CODE = 4132
+
+export function isKanbanWorkerResumeRefusal(error: unknown): boolean {
+  return (
+    Boolean(error) &&
+    typeof error === 'object' &&
+    (error as Partial<JsonRpcGatewayError>).code === KANBAN_WORKER_RESUME_REFUSED_CODE
+  )
+}
+
 /** True for a gateway's "no such stored session" answer to `session.resume`.
  *  A bare 4001 (live runtime reaped) is a different signal and does not
  *  qualify: the stored session exists there, only its runtime is gone. */

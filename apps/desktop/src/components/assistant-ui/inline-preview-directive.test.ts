@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+const readText = vi.hoisted(() => vi.fn())
+
+vi.mock('@/lib/desktop-fs', async importOriginal => ({
+  ...(await importOriginal<object>()),
+  readDesktopFileText: readText
+}))
+
 import {
   collectThemeBridge,
   directiveFrameHeight,
@@ -9,6 +16,8 @@ import {
   intentAckMessage,
   intentScript,
   MAX_INTENT_LENGTH,
+  nextFrameHeight,
+  readInlineDoc,
   themePrelude,
   withInlineChrome
 } from './inline-preview-directive'
@@ -24,7 +33,56 @@ describe('directiveFrameHeight', () => {
   it('clamps an explicit height to the sane band', () => {
     expect(directiveFrameHeight('50')).toBe(120)
     expect(directiveFrameHeight('480')).toBe(480)
-    expect(directiveFrameHeight('99999')).toBe(1200)
+    expect(directiveFrameHeight('99999')).toBe(16000)
+  })
+})
+
+describe('readInlineDoc', () => {
+  afterEach(() => readText.mockReset())
+
+  it('asks for the WHOLE file and returns it', async () => {
+    const big = '<html><body>' + 'x'.repeat(700 * 1024) + '<h2>Section C</h2></body></html>'
+    readText.mockResolvedValue({ byteSize: big.length, path: '/b.html', text: big, truncated: false })
+
+    await expect(readInlineDoc('/b.html')).resolves.toBe(big)
+    expect(readText).toHaveBeenCalledWith('/b.html', { full: true })
+  })
+
+  it('never frames a truncated document (older shell ignored `full`)', async () => {
+    readText.mockResolvedValue({ byteSize: 700 * 1024, path: '/b.html', text: '<img src="data:image/png;base64,iVBOR', truncated: true })
+
+    await expect(readInlineDoc('/b.html')).resolves.toBeNull()
+  })
+
+  it('falls back on read errors and binary files', async () => {
+    readText.mockResolvedValue({ error: 'too-large', message: 'File too large' })
+    await expect(readInlineDoc('/b.html')).resolves.toBeNull()
+    readText.mockResolvedValue({ binary: true, byteSize: 4, path: '/b.html', text: 'abcd' })
+    await expect(readInlineDoc('/b.html')).resolves.toBeNull()
+  })
+})
+
+describe('nextFrameHeight', () => {
+  it('follows real content growth and shrink', () => {
+    expect(nextFrameHeight(280, 4800, 0)).toEqual({ height: 4800, grow: 4520 })
+    expect(nextFrameHeight(4800, 5200, 4520)).toEqual({ height: 5200, grow: 400 })
+    expect(nextFrameHeight(5200, 900, 400)).toEqual({ height: 900, grow: 0 })
+  })
+
+  it('ignores rounding churn', () => {
+    expect(nextFrameHeight(500, 503, 0)).toEqual({ height: 500, grow: 0 })
+  })
+
+  it('stops a viewport-coupled page (100vh + margin) from growing forever', () => {
+    let height = 280
+    let grow = 0
+
+    // The page always answers "frame + 16 px".
+    for (let i = 0; i < 50; i++) {
+      ;({ height, grow } = nextFrameHeight(height, height + 16, grow))
+    }
+
+    expect(height).toBe(296)
   })
 })
 
@@ -124,7 +182,9 @@ describe('frameSizeFromMessage', () => {
   it('accepts our message with our token, height clamped', () => {
     expect(frameSizeFromMessage(msg(), 'tok')).toEqual({ height: 500, width: 300 })
     expect(frameSizeFromMessage(msg({ height: 12 }), 'tok')?.height).toBe(120)
-    expect(frameSizeFromMessage(msg({ height: 5000 }), 'tok')?.height).toBe(1200)
+    // A tall board keeps its full height (the old 1200 px cap hid everything below section one).
+    expect(frameSizeFromMessage(msg({ height: 5000 }), 'tok')?.height).toBe(5000)
+    expect(frameSizeFromMessage(msg({ height: 99999 }), 'tok')?.height).toBe(16000)
     expect(frameSizeFromMessage(msg({ height: 500.7 }), 'tok')?.height).toBe(501)
   })
 

@@ -207,7 +207,15 @@ def build_write_denied_paths(home: str) -> set[str]:
 
 
 # Home-relative credential directories (POSIX paths). Also dropped from profile exports (hermes_cli.profiles).
-HOME_CREDENTIAL_DIRS = (".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh", ".config/gcloud")
+HOME_CREDENTIAL_DIRS = (
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh", ".config/gcloud", ".config/token-broker",
+)
+
+# Home-relative directories that are READ-denied too (a subset of HOME_CREDENTIAL_DIRS): pure secret
+# stores with nothing an agent needs to read. ~/.config/token-broker holds the enrolled broker client
+# token (+ rotated token.expired-*); holding it lets anyone `token-broker exec` auto-tier scopes with no
+# approval. The token-broker CLI reads it itself. [daveey]
+HOME_READ_DENIED_DIRS = (".config/token-broker",)
 
 
 def build_write_denied_prefixes(home: str) -> list[str]:
@@ -406,6 +414,15 @@ def get_read_block_error(path: str) -> Optional[str]:
                     break
             if reason:
                 break
+        if reason is None:
+            for home in _guard_homes(path):
+                for rel in HOME_READ_DENIED_DIRS:
+                    blocked_dir = Path(os.path.realpath(os.path.join(home, *rel.split("/"))))
+                    if _is_under(resolved, blocked_dir):
+                        reason = f"is inside ~/{rel} (a credential store) and cannot be read directly." + _DID_SUFFIX
+                        break
+                if reason:
+                    break
         if reason is None and resolved.name.lower() in _BLOCKED_PROJECT_ENV_BASENAMES:
             reason = (
                 "is a secret-bearing environment file and cannot be read to prevent credential "

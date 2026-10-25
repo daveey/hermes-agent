@@ -373,8 +373,24 @@ described above.
 
 `kanban_continue(..., resume_after_seconds=N)` hands off a wait (CI, a release,
 a soak) instead of polling inside the run: the card parks in `scheduled` and
-the dispatcher re-queues it after `N` seconds (at most 24 h). Plain
-`kanban_schedule` parks are never auto-woken.
+the dispatcher re-queues it after `N` seconds (at most 24 h). A plain
+`kanban_schedule` park wakes at its `SCHEDULED_UNTIL=` marker, else after 24 h.
+
+Condition wakes: `kanban_schedule`, `kanban_block(kind="time")` and
+`kanban_continue(resume_after_seconds=N)` accept `wake_check` (a shell command)
+and `check_every` (seconds, default 900, min 120, max 21600). While the card is
+parked the dispatcher runs the probe off-thread (`bash -lc`, 30 s timeout, cwd =
+the task workspace, at most 4 at once) without spawning a worker. Exit 0 wakes
+the card at once with a `condition_met` event carrying the probe's stdout;
+exit 1 means not yet; any other exit (or a timeout) 3 times in a row wakes it
+with `wake_check_broken` so a worker fixes the probe. The wake time stays the
+deadline. A park that wakes more than 2 h out with no `wake_check` is refused
+unless the call passes `clock_only=true` (a pure time wait). A wait on another
+card on the same board is a parent link (`kanban_link`), not a park. CLI:
+`hermes kanban schedule|block <id> --wake-check '<cmd>' [--check-every N] [--clock-only]`.
+Probe state is in the `task_wake_checks` table and shown by `kanban show`,
+the worker context and the board API; `kanban diagnostics` flags failing or
+overdue probes, and parks more than 2 h out that have neither.
 
 Continuations leave `consecutive_failures` and the unblock-loop counter
 untouched, so they never trip the give-up or block-loop limits. Their own
@@ -623,7 +639,17 @@ That final terminal board call (`kanban_complete` / `kanban_request_review` /
 is part of the worker
 protocol. If the worker process exits with status 0 while the task is still
 `running`, the dispatcher treats that as a protocol violation and emits a
-`protocol_violation` event. A dispatcher-spawned worker whose turn failed
+`protocol_violation` event, unless the worker's systemd scope records an OOM
+or signal death. Scope `oom-kill` is recorded as `oom_killed`, and `signal` as
+`signaled`, even when the agent handled SIGTERM and exited 0. These consume the
+existing crash retry budget, not the protocol-violation budget. Run metadata and
+the next worker's context carry the memory limit, peak, and remedy. Failed scopes
+are retained until the reaper commits the diagnosis, then reset for collection.
+Workers also snapshot cgroup memory counters on exit: older systemd releases do
+not retain peak memory after cgroup deletion. If the worker itself takes SIGKILL
+and systemd cannot report a peak, it is explicitly `unknown`, never estimated.
+
+A dispatcher-spawned worker whose turn failed
 therefore exits non-zero: `1` for an ordinary failure, `75`
 (`EX_TEMPFAIL`) when the provider was rate-limited, overloaded, returning
 5xx or timing out, or the account hit a billing/quota wall — the dispatcher records that run as `rate_limited` and
@@ -1047,9 +1073,34 @@ hermes kanban notify-unsubscribe <id>
 hermes kanban context <id>                             # what a worker sees
 hermes kanban specify [<id> | --all] [--tenant T]      # flesh out a triage-column idea
         [--author NAME] [--json]                       #   into a full spec and promote to todo
-hermes kanban gc [--event-retention-days N]            # workspaces + old events + old logs
+hermes kanban gc [--event-retention-days N] [--worktree-retention-days N] # workspaces + old events + old logs
         [--log-retention-days N]                       #   (negative N is rejected; 0 disables that sweep)
 ```
+
+Worktree GC also covers done, failed, and cancelled tasks. After
+`kanban.worktree_retention_days` (default 7, overridden by the GC flag), clean
+worktrees may be removed even with unpushed commits: their HEAD and history are
+first retained in the repository at `refs/hermes/kanban-archive/<task-id>/<commit>`.
+Zero disables this age-based archival; legacy clean, fully-pushed cleanup remains.
+Dirty trees, locked trees, active tasks, active children and live shared workspaces
+are preserved. Custom branches remain; generated `wt/` branches are pruned only
+when their tip still matches the archived commit.
+
+CLI worktree startup maintenance applies the same policy across the current home's
+boards. Registered `t_<hex>` worktrees with no known owning workspace are not
+silently deleted: they receive JSON tombstones in
+`<hermes-home>/archive/kanban-orphans/` for manual review. Unreadable boards abort
+the startup task sweep rather than treating their workspaces as orphans.
+
+To recover archived committed work, run these commands in the original repository:
+
+```bash
+git for-each-ref refs/hermes/kanban-archive/
+git worktree add -b recovered-task ../recovered-task refs/hermes/kanban-archive/<task-id>/<commit>
+```
+
+Recovery refs do not expire automatically and survive ordinary `git gc`. They
+are local references, not remote backups; retain the original repository.
 
 All commands are also available as a slash command in the interactive CLI and in the messaging gateway (see [`/kanban` slash command](#kanban-slash-command) below).
 
@@ -1083,7 +1134,7 @@ hermes kanban create "nightly backup audit" \
 
 ### Respawn guard
 
-The dispatcher refuses to re-spawn a ready task when it hit a quota/auth/429 error on the previous run (`blocker_auth`), or completed a run successfully within the guard window (`recent_success`), or a recent task comment links to a GitHub PR (`active_pr`). Two cooldowns hold a card without ever counting against it: `rate_limit_cooldown` after a quota-wall requeue and `infrastructure_cooldown` after the host refused to place the worker (no restart-safe systemd scope — see [Workers and systemd cgroups](#workers-and-systemd-cgroups)); both share the `HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS` window (default 300 s). This prevents repeat worker storms on the same bug or task while a human catches up. See the `respawn_guarded` row in the [event reference](#event-reference).
+The dispatcher refuses to re-spawn a ready task when it hit an auth error (401, invalid API key, unauthorized, billing) on the previous run (`blocker_auth`), or completed a run successfully within the guard window (`recent_success`), or a recent task comment links to a GitHub PR (`active_pr`). Two cooldowns hold a card without ever counting against it: `rate_limit_cooldown` after a quota-wall requeue and `infrastructure_cooldown` after the host refused to place the worker (no restart-safe systemd scope — see [Workers and systemd cgroups](#workers-and-systemd-cgroups)); both share the `HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS` window (default 300 s). Quota / rate-limit / 429 text in `last_failure_error` always takes the `rate_limit_cooldown` path, even when a later non-failure run superseded the `rate_limited` one; once the cooldown elapses the stamp is cleared and the card retries. A quota wall is never `blocker_auth` and never escalates to a human block kind, and a legacy guard-hold block on a quota error is released automatically once another card completes after it. This prevents repeat worker storms on the same bug or task while a human catches up. See the `respawn_guarded` row in the [event reference](#event-reference).
 
 To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` — the output lists `Guarded (<reason>): <task id>` per held card (and `respawn_guarded`, `rate_limited`, `skipped_locked`, `memory_pressure` with `--json`). The gateway's and the standalone daemon's "dispatcher stuck" warning also names what the last tick held back, e.g. `Last tick held back: active_pr=1`.
 
@@ -1485,7 +1536,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `timed_out` | `{pid, elapsed_seconds, limit_seconds, sigkill}` | `max_runtime_seconds` exceeded; dispatcher SIGTERM'd (then SIGKILL'd after 5 s grace) and re-queued. |
 | `stale` | `{elapsed_seconds, last_heartbeat_at, heartbeat_age_seconds, timeout_seconds, pid, terminated}` | Task ran longer than `kanban.dispatch_stale_timeout_seconds` (default 4 h) AND no `kanban_heartbeat` arrived in the last hour. Dispatcher SIGTERM'd the host-local worker (if any), reset the task to `ready` for re-dispatch. Does NOT tick the failure counter (stale is dispatcher-side absence detection, not a worker fault). Workers running long operations should call `kanban_heartbeat` at least once an hour to avoid this. |
 | `reconciled` | `{reason, claim_lock, claim_expires, worker_pid}` | Orphaned-card reconciliation: the card was `running` with broken claim bookkeeping (`claim_lock` or `claim_expires` NULL — crash mid-claim, manual SQL, DB restore) and no live worker, so none of the TTL/crash/stale paths could ever recover it. The dispatcher requeued it to `ready` with an explanatory comment. Gated by `kanban.reconcile_orphans` in config.yaml (default `true`). |
-| `respawn_guarded` | `{reason}` | Dispatcher refused to re-spawn this ready task this tick. Reasons: `infrastructure_cooldown` (the host refused the last spawn — no restart-safe systemd scope — and the cooldown has not elapsed; never counted against the card), `rate_limit_cooldown` (the last run hit a quota wall; same cooldown, never counted), `blocker_auth` (last failure was a quota/auth/429 error — wait for the rate window to reset), `recent_success` (a completed run happened in the last hour — wait for review before re-running), `active_pr` (a GitHub PR URL appears in a recent comment — a prior worker already opened a PR). The task stays in `ready`; the next tick gets another chance to spawn. If the underlying condition persists, the normal `consecutive_failures` circuit breaker will auto-block via `gave_up` after `failure_limit` failures. |
+| `respawn_guarded` | `{reason}` | Dispatcher refused to re-spawn this ready task this tick. Reasons: `infrastructure_cooldown` (the host refused the last spawn — no restart-safe systemd scope — and the cooldown has not elapsed; never counted against the card), `rate_limit_cooldown` (the last failure was a quota wall / rate limit / 429; same cooldown, never counted), `blocker_auth` (last failure was an auth error — a person must fix credentials), `recent_success` (a completed run happened in the last hour — wait for review before re-running), `active_pr` (a GitHub PR URL appears in a recent comment — a prior worker already opened a PR). The task stays in `ready`; the next tick gets another chance to spawn. If the underlying condition persists, the normal `consecutive_failures` circuit breaker will auto-block via `gave_up` after `failure_limit` failures. |
 | `spawn_failed` | `{error, failures}` | One spawn attempt failed (missing PATH, workspace unmountable, …). Counter increments; task returns to `ready` for retry. |
 | `skipped_nonspawnable` | `{assignee}` | Dispatcher refused to spawn because the assignee profile does not exist in this home (or is not in `kanban.dispatch_profiles`). Written once per card — repeated only when another event landed in between — so `show`/`tail` name the missing profile without a row per tick. The card stays in `ready`; reassign it or install the profile. |
 | `protocol_violation` | `{pid, claimer, exit_code, protocol_violation, worker_output?}` | Worker exited successfully while the task was still `running`, usually because it answered without a terminal board call (`kanban_complete`, `kanban_request_review` or `kanban_block`). Emitted on every violation (the payload's `protocol_violation: true` marker is copied into the run metadata and feeds the violation-only retry budget). Below the budget — up to `_PROTOCOL_VIOLATION_FAILURE_LIMIT` (default 3) *consecutive* violations, per-task `max_retries` overriding — the task simply returns to `ready` for another attempt; when the streak reaches the bound the dispatcher also emits `gave_up` and auto-blocks. `worker_output` carries the worker's own last printed text (usually its explanation of why it stopped), also folded into `last_failure_error` and shown to the retry worker as the prior-attempt error. |

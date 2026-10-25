@@ -27,9 +27,39 @@ import {
   SAFE_STORAGE_ENCODING,
   SECRET_FILE_MODE,
   sensitiveFileBlockReason,
+  TEXT_FULL_READ_MAX_BYTES,
+  TEXT_PREVIEW_MAX_BYTES,
+  TEXT_PREVIEW_SOURCE_MAX_BYTES,
+  textReadLimits,
   tightenSecretFileMode,
   writeSecretFileAtomic
 } from './hardening'
+
+// hermes:readFileText — the preview read skims 512 KiB; `{ full: true }` (inline
+// ::preview documents) returns the whole file or rejects it, never a cut one.
+test('textReadLimits: preview skims, full never truncates', async () => {
+  assert.deepEqual(textReadLimits(undefined), {
+    full: false,
+    maxBytes: TEXT_PREVIEW_SOURCE_MAX_BYTES,
+    readLimit: TEXT_PREVIEW_MAX_BYTES
+  })
+  assert.deepEqual(textReadLimits({ full: 'yes' }), textReadLimits(undefined), 'only a literal true opts in')
+
+  const full = textReadLimits({ full: true })
+  assert.equal(full.full, true)
+  assert.equal(full.readLimit, full.maxBytes, 'a full read returns everything it accepts')
+  assert.equal(full.maxBytes, TEXT_FULL_READ_MAX_BYTES)
+  assert.ok(full.readLimit > 5 * 1024 * 1024, 'room for a multi-MB design board')
+
+  // A 700 KB board (the size that broke) is accepted whole and over the cap is rejected outright.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-fullread-'))
+  const board = path.join(dir, 'board.html')
+  fs.writeFileSync(board, 'x'.repeat(700 * 1024))
+  const ok = await resolveReadableFileForIpc(board, { maxBytes: full.maxBytes, purpose: 'Full text read' })
+  assert.ok(ok.stat.size <= full.readLimit)
+  await assert.rejects(resolveReadableFileForIpc(board, { maxBytes: 600 * 1024, purpose: 'Full text read' }), /too large/)
+  fs.rmSync(dir, { force: true, recursive: true })
+})
 
 /**
  * Real temp dir per test: the property under test IS the on-disk mode after a

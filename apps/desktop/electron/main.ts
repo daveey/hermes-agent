@@ -306,7 +306,8 @@ import {
   resolveRequestedPathForIpc,
   resolveTimeoutMs,
   SAFE_STORAGE_ENCODING,
-  TEXT_PREVIEW_SOURCE_MAX_BYTES,
+  TEXT_PREVIEW_MAX_BYTES,
+  textReadLimits,
   tightenSecretFileMode,
   writeSecretFileAtomic
 } from './hardening'
@@ -1754,7 +1755,6 @@ const MEDIA_MIME_TYPES = {
 const PREVIEW_HTML_EXTENSIONS = new Set(['.html', '.htm'])
 const PREVIEW_PDF_EXTENSIONS = new Set(['.pdf'])
 const PREVIEW_WATCH_DEBOUNCE_MS = 120
-const TEXT_PREVIEW_MAX_BYTES = 512 * 1024
 
 const PREVIEW_LANGUAGE_BY_EXT = {
   '.c': 'c',
@@ -17841,16 +17841,18 @@ ipcMain.handle('hermes:readFileDataUrlForAttach', async (_event, filePath) => {
   }
 })
 
-ipcMain.handle('hermes:readFileText', async (_event, filePath) => {
+ipcMain.handle('hermes:readFileText', async (_event, filePath, options?: { full?: unknown }) => {
+  const { full, maxBytes, readLimit } = textReadLimits(options)
+
   try {
     const { resolvedPath, stat } = await resolveReadableFileForIpc(resolveIpcFileReadPath(filePath), {
-      maxBytes: TEXT_PREVIEW_SOURCE_MAX_BYTES,
-      purpose: 'Text preview'
+      maxBytes,
+      purpose: full ? 'Full text read' : 'Text preview'
     })
 
     const ext = path.extname(resolvedPath).toLowerCase()
     const handle = await fs.promises.open(resolvedPath, 'r')
-    const bytesToRead = Math.min(stat.size, TEXT_PREVIEW_MAX_BYTES)
+    const bytesToRead = Math.min(stat.size, readLimit)
 
     try {
       const buffer = Buffer.alloc(bytesToRead)
@@ -17863,7 +17865,7 @@ ipcMain.handle('hermes:readFileText', async (_event, filePath) => {
         mimeType: mimeTypeForPath(resolvedPath),
         path: resolvedPath,
         text: buffer.subarray(0, bytesRead).toString('utf8'),
-        truncated: stat.size > TEXT_PREVIEW_MAX_BYTES
+        truncated: stat.size > readLimit
       }
     } finally {
       await handle.close()

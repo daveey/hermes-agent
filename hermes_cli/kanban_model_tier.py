@@ -104,7 +104,21 @@ def resolve_model_tier(
                 return None, None, f"pattern:{pattern}"
         except re.error as exc:
             logger.warning("kanban model tier: bad default_model_keep_patterns entry %r (%s)", pattern, exc)
-    return default_model, _str(cfg.get("default_provider")) or None, "default"
+    return default_model, _str(cfg.get("default_provider")) or infer_provider(default_model), "default"
+
+
+def infer_provider(model: str) -> Optional[str]:
+    """Provider for a tier model when ``default_provider`` is unset. Without one the worker pairs the tier model
+    with the PROFILE's provider, so ``claude-sonnet-5-5`` was sent to openai-codex (HTTP 400, every card dead on
+    its first run) after the profile model was switched to a GPT. Static catalog first, then the model family."""
+    try:
+        from hermes_cli.models import detect_static_provider_for_model
+        hit = detect_static_provider_for_model(model, "")
+        if hit:
+            return hit[0]
+    except Exception as exc:  # never break dispatch over the catalog
+        logger.debug("kanban model tier: provider lookup failed for %s (%s)", model, exc)
+    return "anthropic" if model.lower().startswith("claude") else None
 
 
 def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:

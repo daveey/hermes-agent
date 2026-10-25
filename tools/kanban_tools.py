@@ -942,6 +942,37 @@ def _blocker_id_arg(args: dict) -> Optional[str]:
     return bid
 
 
+def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
+    """``(wake_check, check_every, clock_only)`` from a park call, validated. [daveey]"""
+    from hermes_cli import kanban_wake_check as kwc
+
+    raw_every = args.get("check_every")
+    _check(raw_every is None or (isinstance(raw_every, (int, float)) and not isinstance(raw_every, bool)),
+           "check_every must be an integer number of seconds")
+    clock_only = args.get("clock_only", False)
+    _check(isinstance(clock_only, bool), "clock_only must be true or false")
+    try:
+        cmd = kwc.normalize_cmd(args.get("wake_check"))
+        every = kwc.normalize_every(raw_every) if cmd else None
+    except ValueError as exc:
+        _check(False, str(exc))
+    return (_redact(cmd) if cmd else None), every, clock_only
+
+
+def _wake_check_echo(wake: tuple) -> dict:
+    """Result fields echoing the park's probe (none when it has no probe)."""
+    return {"wake_check": wake[0], "check_every": wake[1]} if wake[0] else {}
+
+
+def _park_guard(conn, tid: str, op: str, wake: tuple, **plan: Any) -> None:
+    """Refuse a park that wakes > 2 h away with no wake_check and no clock_only. [daveey]"""
+    from hermes_cli import kanban_wake_check as kwc
+
+    wake_at = kwc.planned_wake(conn, tid, op=op, **plan)
+    err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
+    _check(err is None, f"kanban_{op} {err}", "invalid_args")
+
+
 @_kanban_handler("kanban_block")
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
@@ -969,8 +1000,11 @@ def _handle_block(args: dict, **kw) -> str:
                f"finished or cannot proceed for another reason, call kanban_complete instead — "
                f"the completion judge will evaluate it.")
         blocker_id = _blocker_id_arg(args)
+        wake = _wake_check_args(args)
+        _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id)
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
-                           blocker_id=blocker_id)
+                           blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1],
+                           clock_only=wake[2])
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
         landed_kind = kb.get_task(conn, tid).block_kind
         extra: dict = {"block_kind": landed_kind}
@@ -980,10 +1014,11 @@ def _handle_block(args: dict, **kw) -> str:
         if landed_status == "scheduled":
             # A wait on time, not on a human: parked with a wake time (kanban_timed_park). [daveey]
             from hermes_cli.kanban_continuation import pending_wake
-            wake = pending_wake(conn, tid) or {}
-            return _ok_landed(kb, conn, tid, "scheduled", requested_kind=kind, wake_at=wake.get("wake_at"),
-                              note=("Parked as a timed wait (scheduled), not a human block: it wakes at "
-                                    "wake_at, or earlier on `hermes kanban unblock`."))
+            parked = pending_wake(conn, tid) or {}
+            return _ok_landed(kb, conn, tid, "scheduled", requested_kind=kind, wake_at=parked.get("wake_at"),
+                              **_wake_check_echo(wake),
+                              note=("Parked as a timed wait (scheduled), not a human block: it wakes when "
+                                    "wake_check exits 0, at wake_at, or earlier on `hermes kanban unblock`."))
         if kind == "dependency" and landed_kind != kind:
             # block_task re-kinds a dependency wait that no open parent can satisfy.
             extra["requested_kind"] = kind
@@ -1010,11 +1045,14 @@ def _handle_schedule(args: dict, **kw) -> str:
                "goal_mode tasks cannot be scheduled: for a wait on time or a cron use "
                "kanban_block with kind='time' (SCHEDULED_UNTIL=<ISO8601> in the reason sets "
                "the wake), or kanban_complete so the completion judge can evaluate it.")
+        wake = _wake_check_args(args)
+        _park_guard(conn, tid, "schedule", wake, reason=reason)
         ok = kb.schedule_task(
-            conn, tid, reason=reason, expected_run_id=_worker_run_id(tid))
+            conn, tid, reason=reason, expected_run_id=_worker_run_id(tid),
+            wake_check=wake[0], check_every=wake[1], clock_only=wake[2])
         _check(ok, f"could not schedule {tid} (unknown id, not in todo/ready/running/blocked, or it "
                    "waits on a human answer: needs_input/capability asks stay blocked, never scheduled)")
-        return _ok_landed(kb, conn, tid, "scheduled", reason=reason)
+        return _ok_landed(kb, conn, tid, "scheduled", reason=reason, **_wake_check_echo(wake))
 
 
 @_kanban_handler("kanban_continue")
@@ -1038,8 +1076,11 @@ def _handle_continue(args: dict, **kw) -> str:
         metadata = {**(metadata or {}), "blocker_id": blocker_id}
     from hermes_cli.kanban_continuation import continue_task
     with _board(args.get("board")) as (kb, conn):
+        wake = _wake_check_args(args)
+        _park_guard(conn, tid, "continue", wake, resume_after=int(raw_after or 0))
         res = continue_task(conn, tid, checkpoint=checkpoint, resume_after_seconds=int(raw_after or 0),
-                            expected_run_id=_worker_run_id(tid), metadata=metadata)
+                            expected_run_id=_worker_run_id(tid), metadata=metadata,
+                            wake_check=wake[0], check_every=wake[1], clock_only=wake[2])
         _check(res.get("ok"), f"could not continue {tid}: {res.get('error')}")
         note = ("Checkpoint saved; a fresh run will resume this card"
                 + (f" after {int(raw_after)}s" if raw_after else " now")
@@ -1445,7 +1486,7 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
 
 
 def _maybe_auto_subscribe(conn: Any, task_id: str, *, gate: str = "auto_subscribe_on_create",
-                          gate_default: bool = True) -> bool:
+                          gate_default: bool = True, reason: str = "create") -> bool:
     """Subscribe the calling session to completion/block events; True iff a row was
     written (surfaced as ``subscribed`` so an orchestrator can fall back to explicit
     ``kanban_notify-subscribe``). Gated by ``kanban.<gate>`` (``auto_subscribe_on_create``,
@@ -1467,6 +1508,10 @@ def _maybe_auto_subscribe(conn: Any, task_id: str, *, gate: str = "auto_subscrib
                and (sub["thread_id"] or "") == (target["thread_id"] or "")
                for sub in _kbn.list_notify_subs(conn, task_id)):
             return True
+        # ``reason`` decides whether the sub keeps the chat's sidebar row busy/red
+        # (kanban_session_activity.COUNTED_SUB_REASONS): ``create`` does, ``touch`` doesn't. [daveey]
+        if target["platform"] == "tui":
+            target = {**target, "delivery_metadata": {**(target.get("delivery_metadata") or {}), "reason": reason}}
         _kbn.add_notify_sub(conn, task_id=task_id, **target)
         return True
     except Exception as _exc:
@@ -1479,13 +1524,16 @@ def _maybe_auto_subscribe(conn: Any, task_id: str, *, gate: str = "auto_subscrib
 def _maybe_subscribe_on_touch(conn: Any, task_id: str) -> bool:
     """A chat session that comments on, unblocks or links an existing card is
     shepherding it, so subscribe it like ``kanban_create`` does: it then wakes when
-    the card completes or blocks, and the sidebar shows it busy (``kanban_active``)
-    instead of "done" while the card still runs. Dispatcher workers
+    the card completes or blocks. The sub is stamped ``reason: touch``, so it does NOT
+    keep the chat's sidebar row busy or red (a one-off comment on someone else's
+    scheduled soak or human block is not this chat's work); ``hermes kanban
+    notify-subscribe`` marks an explicit shepherd that does count. Dispatcher workers
     (``HERMES_KANBAN_TASK`` set) never subscribe this way. Gated by
     ``kanban.auto_subscribe_on_touch`` (default False). [daveey]"""
     if os.environ.get("HERMES_KANBAN_TASK"):
         return False
-    return _maybe_auto_subscribe(conn, task_id, gate="auto_subscribe_on_touch", gate_default=False)
+    return _maybe_auto_subscribe(conn, task_id, gate="auto_subscribe_on_touch", gate_default=False,
+                                 reason="touch")
 
 
 @_kanban_handler("kanban_unblock")

@@ -85,6 +85,7 @@ def continue_task(
     conn: sqlite3.Connection, task_id: str, *, checkpoint: str,
     resume_after_seconds: int = 0, expected_run_id: Optional[int] = None,
     max_continuations: Optional[int] = None, metadata: Optional[dict] = None,
+    wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
 ) -> dict[str, Any]:
     """End the running run as ``continued`` and re-queue the card.
 
@@ -126,9 +127,18 @@ def continue_task(
         source_status = kb._retry_status_for_run(conn, task_id)
         new_status = "scheduled" if resume_after > 0 else source_status
         wake_at = now + resume_after if resume_after > 0 else None
+        from hermes_cli import kanban_wake_check as kwc
+        try:
+            wake_check, check_every = kwc.validate_park(
+                wake_at=wake_at, wake_check=wake_check,
+                check_every=check_every, clock_only=clock_only)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        # A successful checkpoint supersedes stale auth/quota diagnostics, not counters.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, "
-            "worker_pid = NULL, worker_started_at = NULL, last_heartbeat_at = NULL "
+            "worker_pid = NULL, worker_started_at = NULL, last_heartbeat_at = NULL, "
+            "last_failure_error = NULL "
             "WHERE id = ? AND status = 'running' AND current_run_id = ?",
             (new_status, task_id, int(row["current_run_id"])),
         )
@@ -152,9 +162,12 @@ def continue_task(
         payload = {"continuation": streak + 1, "status": new_status, "resume_status": source_status}
         if meta.get("blocker_id"):
             payload["blocker_id"] = meta["blocker_id"]
+        from hermes_cli import kanban_wake_check as kwc  # condition wake [daveey]
         if wake_at is not None:
             payload["wake_at"] = wake_at
+            payload.update(kwc.park_fields(wake_check, check_every, clock_only))
         kb._append_event(conn, task_id, CONTINUED_OUTCOME, payload, run_id=run_id)
+        kwc.set_check(conn, task_id, wake_check if wake_at is not None else None, check_every, now=now)
     return {"ok": True, "status": new_status, "run_id": run_id,
             "continuation": streak + 1, "wake_at": wake_at}
 
@@ -197,7 +210,9 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
     reset ``consecutive_failures``).
     """
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_wake_check import run_due_wake_checks
 
+    run_due_wake_checks(conn)  # condition wakes: start due probes off-thread, never waits [daveey]
     now = int(time.time()) if now is None else int(now)
     woken: list[str] = []
     for row in conn.execute("SELECT id, block_kind FROM tasks WHERE status = 'scheduled'").fetchall():

@@ -34,6 +34,8 @@ def exit_single_query(code: int) -> None:
     """``sys.exit(code)`` for a one-shot turn; a Kanban worker first writes the exit trailer to its log."""
     if os.environ.get("HERMES_KANBAN_TASK"):
         with contextlib.suppress(Exception):
+            from hermes_cli.kanban_worker_scope import emit_exit_snapshot
+            emit_exit_snapshot()
             # stderr: stdout may be the ``--stream-json`` record stream, and the worker log
             # captures both streams.
             print(f"\n{KANBAN_WORKER_EXIT_TRAILER}{int(code)}", file=sys.stderr, flush=True)

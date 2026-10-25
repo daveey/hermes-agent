@@ -1,3 +1,5 @@
+import type { ReadableAtom } from 'nanostores'
+
 import {
   pinSession,
   setPinnedSessionOrder,
@@ -38,6 +40,8 @@ function liveSessionId(storedSessionId: string): string {
  *  session ids as a sidebar row slot carries them; a live id is resolved to
  *  the same row through the app's lineage matcher. */
 export const sessionsHost = {
+  /** Loaded sidebar rows, retaining each row's gateway/profile ownership. */
+  rows: $sessions as ReadableAtom<ReturnType<typeof $sessions.get>>,
   /** Pin or unpin a session — the row's ⇧-click / context-menu action. A
    *  pinned session moves into the Pinned section on the next render.
    *  `index` slots the pin at that position in the Pinned list (a drop
