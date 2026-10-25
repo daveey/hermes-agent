@@ -1,7 +1,6 @@
 /**
- * [daveey] Data side of the hub-sync sidebar section: replica session rows for
- * gateways that are not live right now, and the owner requests their actions
- * send. Best-effort throughout: with hub-sync/hermes-hub missing or the hub
+ * [daveey] Data side of the hub-sync fallback: replica session records of
+ * gateways that are not live right now (the ordinary sidebar filters them). Best-effort throughout: with hub-sync/hermes-hub missing or the hub
  * down every read answers [] and the live sidebar is untouched.
  */
 import {
@@ -10,18 +9,10 @@ import {
   hubGatewayForConnection,
   hubGet,
   hubReplicaConnectionId,
-  hubRequest,
-  type HubRequestResult,
   learnHubGatewayName
 } from '@hermes/plugin-sdk'
 
-import {
-  type HubSessionAction,
-  type HubSessionRow,
-  type LiveSessionKey,
-  replicaSessionsToShow,
-  sessionRequestBody
-} from './model'
+import { type HubSessionRow, type LiveSessionKey, replicaSessionsToShow } from './model'
 
 const REPLICA_LIMIT = 300
 
@@ -85,29 +76,4 @@ export async function loadReplicaSidebarRows(live: readonly LiveRow[]): Promise<
   }
 
   return replicaSessionsToShow(rows, liveSessionKeys(live), isGatewayLive)
-}
-
-/** Queue `action` on the row's owning gateway (offline-safe on the primary). */
-export function sendSessionAction(
-  row: HubSessionRow,
-  action: HubSessionAction,
-  args?: Record<string, unknown>
-): Promise<HubRequestResult> {
-  return hubRequest(sessionRequestBody(row, action, args))
-}
-
-/** Owner route for opening a replica row; null when this Desktop has no
- *  connection for the row's gateway. */
-export function replicaRowRoute(row: HubSessionRow) {
-  const connectionId = connectionForHubGateway(row.gateway)
-
-  if (!connectionId) {
-    return null
-  }
-
-  const profile = row.profile?.trim() || 'default'
-  const kind = host.state.gateways.get().find(c => c.id === connectionId)?.kind
-  const mode = kind === 'local' ? ('local' as const) : ('remote' as const)
-
-  return { connectionId, mode, profile, targetProfile: profile }
 }
