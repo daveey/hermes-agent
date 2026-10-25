@@ -69,7 +69,9 @@ describe('sessionStatusStripe', () => {
   })
 
   it('all cards done with results unseen → green (unread); none open, all done → green', () => {
-    const unseenRow = { kanban_unseen: 1 }
+    // Completion is green only with a fresh authoritative observation.
+    expect(withRowActivity('idle', { kanban_unseen: 1 })).toBe('background')
+    const unseenRow = { kanban_observed_at: Date.now() / 1000, kanban_unseen: 1 }
     const state = withRowActivity('idle', unseenRow)
     expect(state).toBe('unread')
     expect(sessionStatusStripe(state, true, false, 0, false, null, 0, 0)).toBe('done')
