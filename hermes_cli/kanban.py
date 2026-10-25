@@ -407,6 +407,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 goal_max_turns=getattr(args, "goal_max_turns", None),
                 completion_contract=getattr(args, "completion_contract", None),
                 initial_status=getattr(args, "initial_status", "running"),
+                human_request=getattr(args, "human_request", None),
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
                 validate_workspace=True,
@@ -1070,6 +1071,11 @@ def _guarded_park(conn, op: str, wake, refused: dict, park, **plan):
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)
+    from hermes_cli.kanban_human_request import validate_human_request
+    request = validate_human_request(getattr(args, "human_request", None), kind=kind)
+    if getattr(args, "metadata_only", False):
+        from hermes_cli.kanban_human_request_migration import classify_cli_request
+        return classify_cli_request(args, request, reason)
     author = _profile_author()
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
@@ -1083,8 +1089,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
             if kind == "dependency" and where == "blocked":
                 return f"Blocked {tid} as needs_input (no open parent to wait on){suffix}"
             if where == "triage":
-                # Only a typed owner-input block carries a question for a human.
-                verdict = ("needs a human decision" if (landed.block_kind if landed else kind) == "needs_input"
+                verdict = ("has an explicit human request" if (landed.human_request if landed else request)
                            else "orchestration attention needed")
                 return f"{tid} → triage (unblock loop detected — {verdict}){suffix}"
             return f"Blocked {tid}{suffix}"
@@ -1097,6 +1102,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
         op = _guarded_park(conn, "block", wake, refused, _commented(
             conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
                 conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid),
+                human_request=request,
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
             reason=reason, kind=kind)
         return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}")

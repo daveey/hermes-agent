@@ -187,6 +187,28 @@ _WAKE_CHECK_PROPS = {
 }
 
 
+HUMAN_REQUEST = {
+    "type": "object",
+    "description": (
+        "Explicit actionable human request. Omit for operational problems: missing metadata, "
+        "capability failure or sudo authentication failure alone is NOT a new approval ask. "
+        "Supply a concrete action/decision, why the agent cannot do it, supported interaction, "
+        "scope and observed evidence. Standing authorization is not OS authentication; use a "
+        "supported user-terminal flow when required, never request passwords in chat. This "
+        "metadata never grants execution permission or completes/unblocks the task."
+    ),
+    "properties": {
+        "action": {"type": "string", "minLength": 1},
+        "why_human": {"type": "string", "minLength": 1},
+        "interaction": {"type": "string", "enum": ["approval", "reply", "user_terminal", "physical", "external"]},
+        "scope": {"type": "string", "minLength": 1},
+        "evidence": {"type": "string", "minLength": 1},
+    },
+    "required": ["action", "why_human", "interaction", "scope", "evidence"],
+    "additionalProperties": False,
+}
+
+
 KANBAN_BLOCK_SCHEMA = _schema(
     "kanban_block",
     (
@@ -224,6 +246,7 @@ KANBAN_BLOCK_SCHEMA = _schema(
                 "and the options. Keep it short; the human has the board and "
                 "can ask follow-ups via comments."
         )),
+        "human_request": HUMAN_REQUEST,
         "kind": {
             "type": "string",
             "enum": ["dependency", "needs_input", "capability", "transient", "time"],
@@ -569,6 +592,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "dispatcher SIGTERMs the worker and re-queues the "
                 "task with outcome='timed_out'."
         )),
+        "human_request": HUMAN_REQUEST,
         "initial_status": {
             "type": "string",
             "enum": ["running", "blocked"],

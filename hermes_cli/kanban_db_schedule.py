@@ -33,6 +33,7 @@ def schedule_task(
         sql = """
             UPDATE tasks
                SET status       = 'scheduled',
+                   human_request = NULL,
                    claim_lock   = NULL,
                    claim_expires= NULL,
                    worker_pid   = NULL
