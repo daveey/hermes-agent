@@ -19,7 +19,7 @@ import { __resetNativeNotifyBaselineForTests, markNativeNotifyBaseline } from '.
 import { $approvalRequest, APPROVAL_RESPOND_REQUEST_TIMEOUT_MS, clearAllPrompts, setApprovalRequest } from './prompts'
 import { markSessionGone, resetBackgroundPollingGuard } from './runtime-gone'
 import { setActiveSessionId, setSessions } from './session'
-import { dropSessionState, publishSessionState } from './session-states'
+import { dropSessionState, publishSessionState, recordSessionEventScope } from './session-states'
 
 const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDesktop'] }
 const initialHermesDesktop = desktopWindow.hermesDesktop
@@ -83,6 +83,154 @@ it('captures durable navigation identity while keeping the runtime id for approv
 })
 
 describe('dispatchNativeNotification focus gating', () => {
+  it.each(['missing', 'unstamped', 'stale', 'future', 'ambiguous'])('fails closed on %s projection', state => {
+    const sessionId = freshSession()
+    setActiveSessionId(sessionId)
+    const observed = Date.now() / 1000
+    const row = { id: sessionId, kanban_observed_at: observed }
+    setSessions((state === 'missing' ? [] : state === 'unstamped' ? [{ id: sessionId }]
+      : state === 'ambiguous' ? [row, { ...row, profile: 'other' }]
+        : [{ ...row, kanban_observed_at: observed + (state === 'future' ? 60 : -181) }]) as never)
+    expect(dispatchNativeNotification({ kind: 'turnDone', sessionId, title: 'done' })).toBe(false)
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('delivers once when a post-turn projection verifies release, not on an older zero', () => {
+    vi.useFakeTimers()
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    publishSessionState(runtime, createClientSessionState(stored))
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    try {
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt - 1 } as never])
+      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
+        projectionAfter: endedAt } as never)).toBe(false)
+      expect(notify).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(5000)
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000,
+        kanban_active: 1 } as never])
+      expect(notify).not.toHaveBeenCalled()
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000 } as never])
+      expect(notify).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(5000)
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000 } as never])
+      expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+      vi.useRealTimers()
+    }
+  })
+
+  it('refreshes the projection while backgrounded until verified release', async () => {
+    vi.useFakeTimers()
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    publishSessionState(runtime, createClientSessionState(stored))
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    const refreshProjection = vi.fn(async () => {
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000 } as never])
+    })
+
+    try {
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt - 1 } as never])
+      dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
+        projectionAfter: endedAt, refreshProjection } as never)
+      await vi.advanceTimersByTimeAsync(15000)
+      expect(refreshProjection).toHaveBeenCalledTimes(1)
+      expect(notify).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(30000)
+      expect(refreshProjection).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a failed background read unfinished and retries without duplicate delivery', async () => {
+    vi.useFakeTimers()
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    publishSessionState(runtime, createClientSessionState(stored))
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    const refreshProjection = vi.fn().mockRejectedValueOnce(new Error('owner offline')).mockImplementation(async () => {
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000 } as never])
+    })
+
+    try {
+      setSessions([{ id: stored, profile: 'default', kanban_unknown: true } as never])
+      dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
+        projectionAfter: endedAt, refreshProjection })
+      await vi.advanceTimersByTimeAsync(15000)
+      expect(notify).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(15000)
+      expect(refreshProjection).toHaveBeenCalledTimes(2)
+      expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+      vi.useRealTimers()
+    }
+  })
+
+  it('retains a missing projection using the independently recorded runtime owner', () => {
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    publishSessionState(runtime, createClientSessionState(stored))
+    recordSessionEventScope({ session_id: runtime, connectionId: 'owner-a', profile: 'work' })
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    try {
+      setSessions([])
+      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
+        projectionAfter: endedAt })).toBe(false)
+      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt } as never])
+      expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+    }
+  })
+
+  it.each(['new-turn', 'owner-change', 'runtime-gone'])('cancels a deferred completion on %s', reason => {
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    const state = createClientSessionState(stored)
+    publishSessionState(runtime, state)
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    try {
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt,
+        kanban_active: 1 } as never])
+      dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
+
+      if (reason === 'new-turn') {
+        publishSessionState(runtime, { ...state, busy: true, turnLive: true })
+        publishSessionState(runtime, state)
+      } else if (reason === 'runtime-gone') {
+        dropSessionState(runtime)
+        publishSessionState(runtime, state)
+      } else {
+        setSessions([{ id: stored, profile: 'other', kanban_observed_at: endedAt } as never])
+      }
+
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt } as never])
+      expect(notify).not.toHaveBeenCalled()
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+    }
+  })
+
   it.each([
     { kanban_active: 1 },
     { kanban_blocked: 1 },
@@ -100,7 +248,7 @@ describe('dispatchNativeNotification focus gating', () => {
       expect(notify).not.toHaveBeenCalled()
       // A later authoritative release is eligible; suppression must not consume
       // the notification throttle. Error/attention paths remain independent.
-      setSessions([{ id: stored } as never])
+      setSessions([{ id: stored, kanban_observed_at: Date.now() / 1000 } as never])
       expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done' })).toBe(true)
       expect(notify).toHaveBeenCalledTimes(1)
     } finally {
@@ -112,6 +260,7 @@ describe('dispatchNativeNotification focus gating', () => {
   it('fires a completion notification for the active session when the window is hidden', () => {
     const sessionId = freshSession()
     setActiveSessionId(sessionId)
+    setSessions([{ id: sessionId, kanban_observed_at: Date.now() / 1000 } as never])
     dispatchNativeNotification({ kind: 'turnDone', sessionId, title: 'done' })
     expect(notify).toHaveBeenCalledTimes(1)
   })
@@ -119,6 +268,7 @@ describe('dispatchNativeNotification focus gating', () => {
   it('fires a completion notification when the window is visible but unfocused (alt-tab)', () => {
     const sessionId = freshSession()
     setActiveSessionId(sessionId)
+    setSessions([{ id: sessionId, kanban_observed_at: Date.now() / 1000 } as never])
     setWindowState({ focused: false, hidden: false })
     dispatchNativeNotification({ kind: 'turnDone', sessionId, title: 'done' })
     expect(notify).toHaveBeenCalledTimes(1)
@@ -311,6 +461,7 @@ describe('dispatchNativeNotification throttle', () => {
   it('collapses duplicate kind+session within the throttle window', () => {
     const sessionId = freshSession()
     setActiveSessionId(sessionId)
+    setSessions([{ id: sessionId, kanban_observed_at: Date.now() / 1000 } as never])
     dispatchNativeNotification({ kind: 'turnDone', sessionId, title: 'done' })
     dispatchNativeNotification({ kind: 'turnDone', sessionId, title: 'done again' })
     expect(notify).toHaveBeenCalledTimes(1)

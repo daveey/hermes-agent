@@ -650,6 +650,9 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     render without them."""
     if not rows:
         return rows
+    # Conservative lower bound: counts may come from the short monotonic cache.
+    # Never re-date a cached zero as a new owner observation.
+    observed_at = time.time() - _CACHE_TTL_S
     try:
         active, blocked, unseen, remote_stale = _all_counts()
     except Exception:
@@ -659,6 +662,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         for row in rows:
             for key in ("kanban_active", "kanban_blocked", "kanban_unseen", "kanban_attention", "kanban_remote_stale"):
                 row.pop(key, None)
+            row.pop("kanban_observed_at", None)
             row["kanban_unknown"] = True
         return rows
     try:
@@ -667,6 +671,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         _log.debug("kanban attention unavailable", exc_info=True)
         attention = {}
     for row in rows:
+        row["kanban_observed_at"] = observed_at
         row.pop("kanban_unknown", None)
         ids = list(_row_ids(row))
         for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen),

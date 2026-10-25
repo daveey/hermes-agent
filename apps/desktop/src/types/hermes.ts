@@ -644,6 +644,8 @@ export interface SessionInfo {
    *  not "no work": the row stays off done until a read succeeds. Absent when
    *  the read worked. */
   kanban_unknown?: boolean
+  /** Origin projection observation lower bound (epoch seconds), including known zero work. */
+  kanban_observed_at?: number
   /** [daveey] How many of `kanban_active`/`kanban_blocked` are cards on another
    *  gateway known only from a stale hermes-hub replica (last-known status).
    *  Absent when zero. */

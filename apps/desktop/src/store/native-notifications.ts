@@ -15,8 +15,11 @@ import {
   sessionApprovalRequests
 } from './prompts'
 import { isSessionGone, isSessionGoneForBackgroundPolling, markSessionGone } from './runtime-gone'
-import { $activeSessionId, ownerLookupSessionRows, sessionMatchesStoredId } from './session'
-import { storedSessionIdForRuntimeId } from './session-states'
+import {
+  $activeSessionId, $cronSessions, $messagingSessions, $sessions,
+  ownerLookupSessionRows, sessionMatchesStoredId
+} from './session'
+import { $sessionStates, knownOwnerForSession, storedSessionIdForRuntimeId } from './session-states'
 
 export type { HermesOpenTarget }
 
@@ -194,6 +197,10 @@ export interface NativeNotificationInput {
   title: string
   body?: string
   sessionId?: null | string
+  /** Wait for an origin projection observed after this turn ended (epoch seconds). */
+  projectionAfter?: number
+  /** Existing session-list refresh, retained for background release checks. */
+  refreshProjection?: () => Promise<void>
   /**
    * Not tied to a chat session (e.g. pet generation). Fires whenever the user
    * is away, bypassing the session-match gate that completion kinds normally
@@ -217,6 +224,101 @@ export interface NativeNotificationInput {
   activate?: string
   /** Renderer-side handle so click/action can invoke registered callbacks. */
   notifyId?: string
+}
+
+type DeferredCompletion = { input: NativeNotificationInput; storedId: string; owner: string }
+const deferredCompletions = new Map<string, DeferredCompletion>()
+let stopCompletionWatch: (() => void) | undefined
+
+function projectionOwner(row: { connection_id?: string; profile?: string }): string {
+  return JSON.stringify([row.connection_id ?? null, row.profile ?? null])
+}
+
+function deferCompletion(input: NativeNotificationInput, storedId: string, owner: string): void {
+  const runtime = input.sessionId
+
+  if (!runtime || !$sessionStates.get()[runtime]) {
+    return
+  }
+
+  // Bounded, in-memory pending notices; never restore an old turn on app restart.
+  if (deferredCompletions.size >= 128 && !deferredCompletions.has(runtime)) {
+    return
+  }
+
+  deferredCompletions.set(runtime, { input: { ...input }, storedId, owner })
+
+  if (stopCompletionWatch) {
+    return
+  }
+
+  const retry = () => {
+    for (const [id, pending] of [...deferredCompletions]) {
+      const state = $sessionStates.get()[id]
+
+      if (!state || state.busy || state.awaitingResponse || state.turnLive ||
+          storedSessionIdForRuntimeId(id) !== pending.storedId) {
+        deferredCompletions.delete(id)
+
+        continue
+      }
+
+      const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, pending.storedId))
+
+      if (rows.length !== 1) {
+        continue
+      }
+
+      if (projectionOwner(rows[0]) !== pending.owner) {
+        deferredCompletions.delete(id)
+
+        continue
+      }
+
+      // Delete before dispatch: it may requeue only if the projection is still
+      // unfinished. Preference/focus changes intentionally discard the notice.
+      deferredCompletions.delete(id)
+      dispatchNativeNotification(pending.input)
+    }
+
+    if (!deferredCompletions.size) {
+      stopCompletionWatch?.()
+      stopCompletionWatch = undefined
+    }
+  }
+
+  const stops = [$sessions.listen(retry), $cronSessions.listen(retry),
+    $messagingSessions.listen(retry), $sessionStates.listen(retry)]
+
+  let stopped = false
+  let timer: ReturnType<typeof setTimeout>
+
+  const refresh = async () => {
+    retry()
+
+    if (stopped) {
+      return
+    }
+
+    const callbacks = new Set([...deferredCompletions.values()].map(p => p.input.refreshProjection))
+    await Promise.allSettled([...callbacks].filter(Boolean).map(callback => Promise.resolve().then(() => callback?.())))
+
+    if (!stopped) {
+      retry()
+
+      if (!stopped) {
+        timer = setTimeout(() => { void refresh() }, 15000)
+      }
+    }
+  }
+
+  timer = setTimeout(() => { void refresh() }, 15000)
+
+  stopCompletionWatch = () => {
+    stopped = true
+    clearTimeout(timer)
+    stops.forEach(stop => stop())
+  }
 }
 
 /** Returns true when the notification passed every guard and was handed to the
@@ -244,15 +346,34 @@ export function dispatchNativeNotification(input: NativeNotificationInput): bool
   if (input.kind === 'turnDone' && input.sessionId) {
     const storedId = storedSessionIdForRuntimeId(input.sessionId) ?? input.sessionId
 
-    const unfinished = ownerLookupSessionRows().some(row =>
-      sessionMatchesStoredId(row, storedId) &&
-      (row.kanban_unknown === true || (row.kanban_active ?? 0) > 0 ||
-        (row.kanban_blocked ?? 0) > 0 || (row.kanban_remote_stale ?? 0) > 0)
-    )
+    const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, storedId))
+    const row = rows.length === 1 ? rows[0] : undefined
+    const observed = row?.kanban_observed_at
+    const age = typeof observed === 'number' ? Date.now() / 1000 - observed : NaN
+
+    const known = Number.isFinite(age) && age >= 0 && age <= 180 &&
+      (input.projectionAfter === undefined || (typeof observed === 'number' && observed >= input.projectionAfter))
+
+    const unfinished = !row || !known || row.kanban_unknown === true ||
+      (row.kanban_active ?? 0) > 0 || (row.kanban_blocked ?? 0) > 0 ||
+      (row.kanban_remote_stale ?? 0) > 0
 
     if (unfinished) {
+      if (input.projectionAfter !== undefined) {
+        const owner = knownOwnerForSession(input.sessionId)
+
+        const pin = row ? projectionOwner(row) : owner && typeof owner === 'object'
+          ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
+
+        if (pin !== undefined) {
+          deferCompletion(input, storedId, pin)
+        }
+      }
+
       return false
     }
+
+    deferredCompletions.delete(input.sessionId)
   }
 
   if (throttled(`${input.kind}:${input.sessionId ?? input.tag ?? (input.global ? 'global' : '')}`, Date.now())) {

@@ -26,6 +26,22 @@ def kanban_root(tmp_path, monkeypatch):
     ksa._reset_cache_for_tests()
 
 
+def test_successful_empty_projection_has_explicit_observation_time(kanban_root, monkeypatch):
+    monkeypatch.setattr(ksa.time, 'time', lambda: 1234.5)
+    rows = [{'id': 's_empty'}]
+    ksa.annotate_kanban_activity(rows)
+    assert 1234.5 - ksa._CACHE_TTL_S <= rows[0]['kanban_observed_at'] <= 1234.5
+    assert 'kanban_unknown' not in rows[0]
+
+
+def test_failed_projection_clears_previous_observation_time(kanban_root):
+    (kanban_root / 'kanban.db').write_bytes(b'not sqlite')
+    rows = [{'id': 's_empty', 'kanban_observed_at': 1234.5}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0]['kanban_unknown'] is True
+    assert 'kanban_observed_at' not in rows[0]
+
+
 def test_counts_only_pending_and_running_tasks_across_boards(kanban_root):
     _make_board(kanban_root / "kanban.db", [
         ("t1", "running", "s_parent"),
@@ -78,7 +94,10 @@ def test_missing_or_old_board_never_breaks_the_list(kanban_root):
     conn.close()
     rows = [{"id": "s1"}]
 
-    assert ksa.annotate_kanban_activity(rows) == [{"id": "s1"}]
+    assert ksa.annotate_kanban_activity(rows) is rows
+    assert rows[0]['id'] == 's1'
+    assert 'kanban_observed_at' in rows[0]
+    assert 'kanban_unknown' not in rows[0]
 
 
 def test_counts_tasks_a_session_subscribed_to_but_did_not_create(kanban_root):
@@ -435,7 +454,7 @@ def test_missing_replica_after_restart_retains_origin_work(kanban_root):
     ksa.annotate_kanban_activity(rows)
     assert rows[0].get("kanban_active") == 13
     assert rows[0].get("kanban_remote_stale") == 13
-    assert rows[1] == {"id": "s_unrelated"}
+    assert {k: v for k, v in rows[1].items() if k != 'kanban_observed_at'} == {"id": "s_unrelated"}
     cards = ksa.session_tasks(["s_origin"])
     assert len(cards) == 13
     assert all(card["stale"] for card in cards)
@@ -462,7 +481,8 @@ def test_final_completion_clears_the_origin_and_other_sessions_finish_normally(k
     _make_board(kanban_root / "kanban.db", [("t_x", "done", "s_other")])
     ann = [{"id": "s_origin"}, {"id": "s_other"}]
     ksa.annotate_kanban_activity(ann)
-    assert ann == [{"id": "s_origin"}, {"id": "s_other"}]
+    assert [{k: v for k, v in row.items() if k != 'kanban_observed_at'} for row in ann] == [
+        {"id": "s_origin"}, {"id": "s_other"}]
     assert ksa.session_tasks(["s_origin"]) == []
 
 
