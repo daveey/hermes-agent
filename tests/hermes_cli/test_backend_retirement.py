@@ -2,10 +2,15 @@
 
 from fastapi.testclient import TestClient
 
+# Bootstrap is process startup, not test work. Import the real server during
+# collection, before the per-test real-home I/O guard is installed; otherwise
+# its lazy bootstrap inspects the worktree's external gitdir during a test.
+from tui_gateway import server
+
 
 def test_retirement_reserves_admission_until_cancel_or_permanent_commit(monkeypatch):
     from hermes_cli import web_server
-    from tui_gateway import server
+
     from hermes_cli import backend_retirement
 
     monkeypatch.setattr(backend_retirement, "retirement", backend_retirement.RetirementFence())
@@ -75,3 +80,35 @@ def test_only_uncommitted_permits_expire_and_unreadable_work_never_grants(monkey
         assert not admitted
     monkeypatch.setattr(web_server_idle_proof, "idle_proof", lambda: {"idle": None})
     assert RetirementFence().prepare() == {"ok": False, "idle": None}
+
+
+def test_prepare_freezes_new_work_before_idle_probe_finishes(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from hermes_cli.backend_retirement import RetirementFence
+    from hermes_cli import web_server_idle_proof
+
+    fence = RetirementFence()
+    probing, finish_probe = Event(), Event()
+
+    def idle_probe():
+        probing.set()
+        assert finish_probe.wait(5)
+        return {"idle": True}
+
+    monkeypatch.setattr(web_server_idle_proof, "idle_proof", idle_probe)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        preparing = pool.submit(fence.prepare)
+        try:
+            assert probing.wait(5)
+            # Admission must already be frozen, not just after an idle sample.
+            with fence.work() as admitted:
+                assert not admitted
+        finally:
+            finish_probe.set()
+        permit = preparing.result(timeout=5)["token"]
+    assert fence.cancel(permit) == {"ok": True}
+    with fence.work() as admitted:
+        assert admitted
+        assert fence.prepare() == {"ok": False, "idle": False}
