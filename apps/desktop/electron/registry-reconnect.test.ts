@@ -12,6 +12,7 @@ function fixture() {
     prepare: vi.fn(async (): Promise<string | null> => 'permit'),
     commit: vi.fn(async () => true),
     cancel: vi.fn(async () => {}),
+    recoverStopped: vi.fn(async () => false),
     terminate: vi.fn(async () => {}),
     reopen: vi.fn(async () => 'hub-2')
   }
@@ -105,6 +106,30 @@ test('an ambiguous commit keeps the scope fenced for retry, never cancelling a p
   expect(() => reconnect.assertCanDial('hub', 'default')).not.toThrow()
 })
 
+test('lost commit plus serve exit recovers without invoking any live terminator', async () => {
+  const { deps, reconnect } = fixture()
+  deps.commit.mockRejectedValueOnce(new Error('response lost'))
+  await expect(reconnect.run(target)).rejects.toThrow('response lost')
+  deps.proveOwned.mockRejectedValue(new Error('HTTP offline'))
+  deps.recoverStopped.mockResolvedValue(true)
+  expect(await reconnect.run(target)).toEqual({ ok: true, generation: 'hub-2' })
+  expect(deps.terminate).not.toHaveBeenCalled()
+  expect(() => reconnect.assertCanDial('hub', 'default')).not.toThrow()
+})
+
+test.each(['live', 'unknown'] as const)('uncertain %s owner never grants kill authority', async status => {
+  const { deps, reconnect } = fixture()
+  deps.commit.mockRejectedValueOnce(new Error('response lost'))
+  await expect(reconnect.run(target)).rejects.toThrow('response lost')
+  deps.proveOwned.mockRejectedValue(new Error('HTTP offline'))
+
+  if (status === 'unknown') { deps.recoverStopped.mockRejectedValue(new Error('SSH offline')) }
+  await expect(reconnect.run(target)).rejects.toThrow(/offline/)
+  expect(deps.terminate).not.toHaveBeenCalled()
+  expect(deps.reopen).not.toHaveBeenCalled()
+  expect(() => reconnect.assertCanDial('hub', 'default')).toThrow()
+})
+
 test('an uncertain committed resident cannot grant retry authority over a replacement', async () => {
   const { deps, reconnect, replace } = fixture()
   deps.commit.mockRejectedValueOnce(new Error('response lost'))
@@ -154,6 +179,7 @@ test('reconnects only the generation-qualified registry default, never the prima
     current: (connectionId: string, profile: string) => entries.get(`conn:${connectionId}::${profile}`),
     generation: (entry: typeof target) => entry.generation,
     proveOwned: async () => true,
+    recoverStopped: async () => false,
     prepare, commit, cancel, terminate,
     reopen
   })

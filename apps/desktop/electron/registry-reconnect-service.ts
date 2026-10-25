@@ -19,6 +19,7 @@ interface ServiceDeps<D, E extends PoolEntry<D>, S extends OwnedState> {
   isSsh: (connectionId: string) => boolean
   inFlight: (key: string) => boolean
   request: Parameters<typeof createRegistryRetirementClient<D>>[0]
+  proveStopped: (state: S) => Promise<boolean>
   terminate: (state: S) => Promise<void>
   close: (key: string, state: S) => Promise<void>
   onCleanupError: (error: unknown) => void
@@ -60,6 +61,22 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
     return resident
   }
 
+  async function cleanup(resident: Resident) {
+    if (deps.pool.get(resident.key) !== resident.entry || deps.states.get(resident.key) !== resident.state ||
+        resident.entry.connectionPromise !== resident.descriptor) {
+      throw new Error('Registry backend changed during termination')
+    }
+
+    deps.pool.delete(resident.key)
+    deps.states.delete(resident.key)
+
+    try {
+      await deps.close(resident.key, resident.state)
+    } catch (error) {
+      deps.onCleanupError(error)
+    }
+  }
+
   const coordinator = createRegistryReconnector<Resident>({
     current,
     generation: resident => resident.generation,
@@ -67,25 +84,15 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
     prepare: async resident => client.prepare(await resident.descriptor),
     commit: async (resident, token) => client.commit(await resident.descriptor, token),
     cancel: async (resident, token) => client.cancel(await resident.descriptor, token),
+    recoverStopped: async resident => {
+      if (!(await deps.proveStopped(resident.state))) { return false }
+      await cleanup(resident)
+
+      return true
+    },
     terminate: async resident => {
       await deps.terminate(resident.state)
-
-      // Only remove the captured resident. Close is transport-only, never a
-      // generic teardown that could signal a replacement process.
-      if (deps.pool.get(resident.key) !== resident.entry || deps.states.get(resident.key) !== resident.state) {
-        throw new Error('Registry backend changed during termination')
-      }
-
-      deps.pool.delete(resident.key)
-      deps.states.delete(resident.key)
-
-      // Exit is already confirmed. A transport-only cleanup error cannot
-      // retain an uncertain-process fence after its resident was removed.
-      try {
-        await deps.close(resident.key, resident.state)
-      } catch (error) {
-        deps.onCleanupError(error)
-      }
+      await cleanup(resident)
     },
     reopen: async (connectionId, profile) => {
       await deps.reopen(connectionId, profile, correlations.get(connectionId)!)
