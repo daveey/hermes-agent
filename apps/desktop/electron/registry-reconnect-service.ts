@@ -40,9 +40,10 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
     const entry = deps.pool.get(key)
     const state = deps.states.get(key)
 
-    // POSIX owned termination deliberately refuses Darwin (no pidfd).
-    // Refuse here, before committing an irreversible backend admission fence.
-    if (!state || !['Linux', 'Windows'].includes(state.remotePlatform)) { return undefined }
+    // Only Linux has runtime-independent, identity-bound termination today.
+    // Windows uses the possibly deleted managed Python; Darwin lacks pidfd.
+    // Refuse before committing an irreversible backend admission fence.
+    if (!state || state.remotePlatform !== 'Linux') { return undefined }
 
     if (!deps.isSsh(connectionId) || !entry || !state || state.primaryRegistryScope ||
         state.registryConnectionId !== connectionId || !state.spawnNonce || deps.inFlight(key)) {
@@ -102,16 +103,18 @@ export function createRegistryReconnectService<D, E extends PoolEntry<D>, S exte
 
       return resident ? { connectionId, profile, generation: resident.generation } : null
     },
-    assertCanStop: (key: string) => {
-      const entry = deps.pool.get(key)
-      const resident = entry && residents.get(entry)
+    assertCanDispatch: (connectionId: string, profile: string, correlation = '') => {
+      // Our connection-wide claim protects configuration and new publication,
+      // not dispatch to already resident, unrelated profiles (including primary).
+      const held = correlations.get(connectionId)
 
-      if (resident) {
-        // The key is opaque; retain the exact route instead of parsing ids.
-        for (const [connectionId] of correlations) {
-          if (resident.state.registryConnectionId === connectionId) {
-            throw new Error('Registry backend reconnect in progress')
-          }
+      if (held && deps.gate.owner(connectionId) === held && claimedProfiles.get(connectionId) !== profile) { return }
+      deps.gate.assertCanDial(connectionId, correlation)
+    },
+    assertCanStop: (key: string) => {
+      for (const [connectionId, profile] of claimedProfiles) {
+        if (deps.key(connectionId, profile) === key) {
+          throw new Error('Registry backend reconnect in progress')
         }
       }
     },
