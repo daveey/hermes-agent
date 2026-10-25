@@ -1306,6 +1306,8 @@ def create_task(
     from hermes_cli.kanban_capabilities import validate_assignment
     required = validate_assignment(assignee, requires=requires, workspace_kind=workspace_kind,
                                    workspace_path=workspace_path)
+    from hermes_cli.kanban_model_assignment import validate_model_assignment
+    validate_model_assignment(assignee, model_override, provider_override)
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -3252,7 +3254,7 @@ def block_task(
                 assignment_routing.route(conn, get_task(conn, task_id), payload)
             _append_event(conn, task_id, "blocked", payload)
             return True
-        source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
+        source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else cur_row["status"]
         requested_kind, rekind_reason = kind, None
         if kind in {"capability", "assignment"} and not blocker_id:
             kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason)
@@ -3303,9 +3305,9 @@ def block_task(
                        worker_pid    = NULL,
                        {set_sql}
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND (status IN ('running', 'ready') OR (status = 'review' AND ? = 'assignment'))
                 """
-        params = (*params, task_id)
+        params = (*params, task_id, kind)
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params = (*params, int(expected_run_id))

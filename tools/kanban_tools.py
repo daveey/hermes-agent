@@ -213,7 +213,8 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
             except Exception as e:
                 from hermes_cli.kanban_capabilities import CapabilityMismatchError
                 from hermes_cli.kanban_assignment_routing import AssignmentRoutingError
-                if isinstance(e, AssignmentRoutingError):
+                from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
+                if isinstance(e, (AssignmentRoutingError, ModelProviderMismatchError)):
                     return tool_error(str(e), code=e.code)
                 if isinstance(e, CapabilityMismatchError):
                     return tool_error(str(e), code=e.code, assignee=e.assignee, missing=e.missing)
