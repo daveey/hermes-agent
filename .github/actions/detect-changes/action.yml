@@ -109,12 +109,32 @@ runs:
           # die with "cannot iterate over: null", which fails every retry
           # and forces the fail-open path (seen on stacked PRs). The full
           # file list (up to the API's 300-file cap) is on page one.
+          #
+          # Self-hosted runners may not ship the gh CLI. Without it every
+          # attempt died with "command not found" and the retry sleeps ate the
+          # job's whole timeout, cancelling Detect and skipping every lane.
+          # Fall back to curl against the same endpoint (the compare API caps
+          # the file list at 300, 100 per page, so pages 1-3 cover it).
+          compare_files() {
+            if command -v gh >/dev/null 2>&1; then
+              gh api --paginate \
+                "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}" \
+                --jq '.files[]?.filename'
+              return
+            fi
+            local page
+            for page in 1 2 3; do
+              curl -fsS --max-time 20 \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}?per_page=100&page=${page}" |
+                python3 -c 'import json,sys; [print(f["filename"]) for f in (json.load(sys.stdin).get("files") or [])]' ||
+                return 1
+            done
+          }
           CHANGED=""
           for i in 1 2 3; do
-            if CHANGED="$(gh api \
-              --paginate \
-              "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}" \
-              --jq '.files[]?.filename')"; then
+            if CHANGED="$(compare_files)"; then
               break
             fi
             if [ "$i" = 3 ]; then
