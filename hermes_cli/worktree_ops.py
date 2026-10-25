@@ -973,6 +973,8 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
     -> ``_prune_orphaned_branches``.
     """
     try:
+        from hermes_cli.kanban_worktree_gc import sweep_repo
+        sweep_repo(repo_root)
         _prune_stale_worktree_trees(repo_root, max_age_hours)
     finally:
         _reclaim_orphan_install_states()

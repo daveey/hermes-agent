@@ -134,9 +134,18 @@ def continue_task(
         source_status = kb._retry_status_for_run(conn, task_id)
         new_status = "scheduled" if resume_after > 0 else source_status
         wake_at = now + resume_after if resume_after > 0 else None
+        from hermes_cli import kanban_wake_check as kwc
+        try:
+            wake_check, check_every = kwc.validate_park(
+                wake_at=wake_at, wake_check=wake_check,
+                check_every=check_every, clock_only=clock_only)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        # A successful checkpoint supersedes stale auth/quota diagnostics, not counters.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, "
-            "worker_pid = NULL, worker_started_at = NULL, last_heartbeat_at = NULL "
+            "worker_pid = NULL, worker_started_at = NULL, last_heartbeat_at = NULL, "
+            "last_failure_error = NULL "
             "WHERE id = ? AND status = 'running' AND current_run_id = ?",
             (new_status, task_id, int(row["current_run_id"])),
         )

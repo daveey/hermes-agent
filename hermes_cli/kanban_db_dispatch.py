@@ -740,7 +740,10 @@ def heartbeat_worker(
     """
     now = int(time.time())
     with _kb.write_txn(conn):
-        sql = "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ? AND status = 'running'"
+        # Healthy progress supersedes the prior attempt's dispatch diagnostic.
+        # Keep failure counters/history intact; stale workers cannot clear it.
+        sql = ("UPDATE tasks SET last_heartbeat_at = ?, last_failure_error = NULL "
+               "WHERE id = ? AND status = 'running'")
         params: tuple = (now, task_id)
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"

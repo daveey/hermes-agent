@@ -920,6 +920,8 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after v1 to legacy DBs (called via ``init_db``)."""
+    if _table_exists(conn, "task_wake_checks"):
+        _add_column_if_missing(conn, "task_wake_checks", "generation", "generation TEXT")
     cols = _column_names(conn, "tasks")
     for name, ddl in _BASE_TASK_COLUMNS + _EARLY_TASK_COLUMNS:
         if name not in cols:

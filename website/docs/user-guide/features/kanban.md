@@ -1084,9 +1084,34 @@ hermes kanban notify-unsubscribe <id>
 hermes kanban context <id>                             # what a worker sees
 hermes kanban specify [<id> | --all] [--tenant T]      # flesh out a triage-column idea
         [--author NAME] [--json]                       #   into a full spec and promote to todo
-hermes kanban gc [--event-retention-days N]            # workspaces + old events + old logs
+hermes kanban gc [--event-retention-days N] [--worktree-retention-days N] # workspaces + old events + old logs
         [--log-retention-days N]                       #   (negative N is rejected; 0 disables that sweep)
 ```
+
+Worktree GC also covers done, failed, and cancelled tasks. After
+`kanban.worktree_retention_days` (default 7, overridden by the GC flag), clean
+worktrees may be removed even with unpushed commits: their HEAD and history are
+first retained in the repository at `refs/hermes/kanban-archive/<task-id>/<commit>`.
+Zero disables this age-based archival; legacy clean, fully-pushed cleanup remains.
+Dirty trees, locked trees, active tasks, active children and live shared workspaces
+are preserved. Custom branches remain; generated `wt/` branches are pruned only
+when their tip still matches the archived commit.
+
+CLI worktree startup maintenance applies the same policy across the current home's
+boards. Registered `t_<hex>` worktrees with no known owning workspace are not
+silently deleted: they receive JSON tombstones in
+`<hermes-home>/archive/kanban-orphans/` for manual review. Unreadable boards abort
+the startup task sweep rather than treating their workspaces as orphans.
+
+To recover archived committed work, run these commands in the original repository:
+
+```bash
+git for-each-ref refs/hermes/kanban-archive/
+git worktree add -b recovered-task ../recovered-task refs/hermes/kanban-archive/<task-id>/<commit>
+```
+
+Recovery refs do not expire automatically and survive ordinary `git gc`. They
+are local references, not remote backups; retain the original repository.
 
 All commands are also available as a slash command in the interactive CLI and in the messaging gateway (see [`/kanban` slash command](#kanban-slash-command) below).
 

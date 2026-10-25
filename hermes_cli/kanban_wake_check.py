@@ -27,11 +27,11 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
 import sqlite3
 import subprocess
 import threading
 import time
+import uuid
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
@@ -104,6 +104,17 @@ def guard_error(*, wake_at: Optional[int], wake_check: Optional[str], clock_only
             f"that comes true early would sit unnoticed until then. {GUARD_HELP}")
 
 
+def validate_park(*, wake_at: Optional[int], wake_check: Optional[str],
+                  check_every: Optional[int], clock_only: bool) -> tuple[Optional[str], int]:
+    """Shared transition invariant, checked before writes, not just by UI wrappers."""
+    cmd = normalize_cmd(wake_check)
+    every = normalize_every(check_every)
+    error = guard_error(wake_at=wake_at, wake_check=cmd, clock_only=clock_only)
+    if error:
+        raise ValueError(error)
+    return cmd, every
+
+
 def planned_wake(conn: sqlite3.Connection, task_id: str, *, op: str, reason: Optional[str] = None,
                  kind: Optional[str] = None, blocker_id: Optional[str] = None,
                  resume_after: int = 0, now: Optional[int] = None) -> Optional[int]:
@@ -147,16 +158,17 @@ def set_check(conn: sqlite3.Connection, task_id: str, cmd: Optional[str], every:
         return
     now = int(time.time()) if now is None else int(now)
     conn.execute(
-        "INSERT INTO task_wake_checks (task_id, cmd, every, next_at, fails) VALUES (?, ?, ?, ?, 0)",
-        (task_id, cmd, normalize_every(every), now))
+        "INSERT INTO task_wake_checks (task_id, cmd, every, next_at, fails, generation) "
+        "VALUES (?, ?, ?, ?, 0, ?)",
+        (task_id, cmd, normalize_every(every), now, uuid.uuid4().hex))
 
 
 def _row_dict(row) -> dict:
-    keys = ("task_id", "cmd", "every", "next_at", "last_at", "last_rc", "last_out", "fails")
+    keys = ("task_id", "cmd", "every", "next_at", "last_at", "last_rc", "last_out", "fails", "generation")
     return {k: row[i] for i, k in enumerate(keys)}
 
 
-_SELECT = "SELECT task_id, cmd, every, next_at, last_at, last_rc, last_out, fails FROM task_wake_checks"
+_SELECT = "SELECT task_id, cmd, every, next_at, last_at, last_rc, last_out, fails, generation FROM task_wake_checks"
 
 
 def get_state(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
@@ -232,9 +244,9 @@ def _shutdown_for_tests() -> None:
 
 
 def _kill(proc: subprocess.Popen) -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    from agent.deadline import kill_process_tree
+
+    if not kill_process_tree(proc.pid):
         try:
             proc.kill()
         except OSError:
@@ -302,14 +314,14 @@ def _run_probe(key: tuple[str, str], cmd: str, cwd: str, env: dict) -> tuple[Any
             _PROCS.pop(key, None)
 
 
-def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int]) -> Any:
+def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int], generation: str) -> Any:
     key = (db_path, task_id)
     try:
         rc, out = _run_probe(key, cmd, cwd, env)
         from hermes_cli import kanban_db_connect as kbc
         conn = kbc.connect(Path(db_path))
         try:
-            apply_result(conn, task_id, cmd, rc, out, now=now)
+            apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation)
         finally:
             conn.close()
         return rc
@@ -319,7 +331,7 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
 
 
 def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out: str,
-                 *, now: Optional[int] = None) -> Optional[str]:
+                 *, generation: str, now: Optional[int] = None) -> Optional[str]:
     """Record one probe result; wake the card on success or a broken probe. Returns the event
     kind appended (``condition_met`` / ``wake_check_broken``) or None. A result for a probe
     that is no longer the card's (re-parked, unblocked) is dropped."""
@@ -330,7 +342,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
     with kb.write_txn(conn):
         state = get_state(conn, task_id)
         status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        if state is None or state["cmd"] != cmd or status is None or status[0] != "scheduled":
+        if (state is None or state["cmd"] != cmd or state["generation"] != generation
+                or status is None or status[0] != "scheduled"):
             return None
         rc_col = rc if isinstance(rc, int) else -1
         if rc == 0:
@@ -396,9 +409,9 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                     conn.execute("DELETE FROM task_wake_checks WHERE task_id = ? AND task_id NOT IN "
                                  "(SELECT id FROM tasks WHERE status = 'scheduled')", (row[0],))
         due = conn.execute(
-            "SELECT w.task_id, w.cmd, w.every FROM task_wake_checks w JOIN tasks t ON t.id = w.task_id "
+            "SELECT w.task_id, w.cmd, w.every, w.generation FROM task_wake_checks w JOIN tasks t ON t.id = w.task_id "
             "WHERE t.status = 'scheduled' AND w.next_at <= ? ORDER BY w.next_at", (ts,)).fetchall()
-        for task_id, cmd, every in due:
+        for task_id, cmd, every, generation in due:
             key = (db_path, task_id)
             with _LOCK:
                 busy = sum(1 for f in _IN_FLIGHT.values() if not f.done())
@@ -411,12 +424,18 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
             if task is None:
                 continue
             # Claim the slot first so a crash mid-probe cannot re-run it every tick.
+            claim = uuid.uuid4().hex
             with kb.write_txn(conn):
-                conn.execute("UPDATE task_wake_checks SET next_at = ? WHERE task_id = ? AND cmd = ?",
-                             (ts + int(every), task_id, cmd))
+                claimed = conn.execute(
+                    "UPDATE task_wake_checks SET next_at = ?, generation = ? "
+                    "WHERE task_id = ? AND cmd = ? AND generation IS ? AND next_at <= ? "
+                    "AND EXISTS (SELECT 1 FROM tasks WHERE id = ? AND status = 'scheduled')",
+                    (ts + int(every), claim, task_id, cmd, generation, ts, task_id))
+                if claimed.rowcount != 1:
+                    continue
             ws = task.workspace_path
             cwd = ws if ws and os.path.isabs(ws) and os.path.isdir(ws) else str(Path.home())
-            fut = _pool().submit(_probe_and_apply, db_path, task_id, cmd, cwd, _probe_env(task, db_path), now)
+            fut = _pool().submit(_probe_and_apply, db_path, task_id, cmd, cwd, _probe_env(task, db_path), now, claim)
             with _LOCK:
                 _IN_FLIGHT[key] = fut
             submitted.append(task_id)
