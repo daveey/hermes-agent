@@ -599,6 +599,11 @@ export function pendingSessionReplay(runtimeId: string): Promise<boolean> | unde
   return pending.length ? Promise.all(pending).then(results => results.every(Boolean)) : undefined
 }
 
+/** Owner of untagged unified-list rows, never the foreground secondary. */
+export function primaryGatewayConnectionId(): string {
+  return g.primaryConnectionId ?? 'local'
+}
+
 /**
  * The registry connection serving the gateway the user is currently looking
  * at. A registry-backed primary takes its identity from the published primary

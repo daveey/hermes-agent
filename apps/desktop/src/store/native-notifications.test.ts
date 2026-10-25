@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
 
-import { $gateway } from './gateway'
+import { $gateway, setPrimaryGatewayConnectionId } from './gateway'
 import {
   clearPluginNotifyHandlers,
   dispatchNativeNotification,
@@ -180,6 +180,52 @@ describe('dispatchNativeNotification focus gating', () => {
     }
   })
 
+  it('never releases from a different owner sharing the stored id', () => {
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    publishSessionState(runtime, createClientSessionState(stored))
+    recordSessionEventScope({ session_id: runtime, connectionId: 'owner-a', profile: 'work' })
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    try {
+      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-b', kanban_observed_at: endedAt } as never])
+      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
+        projectionAfter: endedAt })).toBe(false)
+      expect(notify).not.toHaveBeenCalled()
+      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt,
+        kanban_active: 1 } as never])
+      expect(notify).not.toHaveBeenCalled()
+      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt } as never])
+      expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+    }
+  })
+
+  it.each(['local', 'owner-a'])('normalizes an unstamped primary row to %s for deferred release', primary => {
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    setPrimaryGatewayConnectionId(primary)
+    publishSessionState(runtime, createClientSessionState(stored))
+    recordSessionEventScope({ session_id: runtime, connectionId: primary, profile: 'default' })
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    try {
+      setSessions([])
+      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
+        projectionAfter: endedAt })).toBe(false)
+      setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt } as never])
+      expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+      setPrimaryGatewayConnectionId(null)
+    }
+  })
+
   it('retains a missing projection using the independently recorded runtime owner', () => {
     const runtime = freshSession()
     const stored = `${runtime}-stored`
@@ -194,6 +240,57 @@ describe('dispatchNativeNotification focus gating', () => {
         projectionAfter: endedAt })).toBe(false)
       setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt } as never])
       expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+    }
+  })
+
+  it('retains deferred completion across a proven same-owner lineage rotation', () => {
+    const runtime = freshSession()
+    const stored = `${runtime}-old`
+    const next = `${runtime}-new`
+    publishSessionState(runtime, createClientSessionState(stored))
+    recordSessionEventScope({ session_id: runtime, connectionId: 'owner-a', profile: 'work' })
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    try {
+      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt,
+        kanban_active: 1 } as never])
+      dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
+      setSessions([{ id: next, _lineage_ids: [stored, next], profile: 'work', connection_id: 'owner-a',
+        kanban_observed_at: endedAt, kanban_active: 1 } as never])
+      publishSessionState(runtime, createClientSessionState(next))
+      expect(notify).not.toHaveBeenCalled()
+      setSessions([{ id: next, _lineage_ids: [stored, next], profile: 'work', connection_id: 'owner-a',
+        kanban_observed_at: endedAt } as never])
+      expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+    }
+  })
+
+  it.each(['unrelated', 'foreign'])('cancels a deferred notice on %s stored-id rotation', reason => {
+    const runtime = freshSession()
+    const stored = `${runtime}-old`
+    const next = `${runtime}-new`
+    publishSessionState(runtime, createClientSessionState(stored))
+    recordSessionEventScope({ session_id: runtime, connectionId: 'owner-a', profile: 'work' })
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    try {
+      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-a', kanban_observed_at: endedAt,
+        kanban_active: 1 } as never])
+      dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done', projectionAfter: endedAt })
+      setSessions([{ id: next, _lineage_ids: reason === 'foreign' ? [stored, next] : [next], profile: 'work',
+        connection_id: reason === 'foreign' ? 'owner-b' : 'owner-a', kanban_observed_at: endedAt } as never])
+      publishSessionState(runtime, createClientSessionState(next))
+      setSessions([{ id: next, _lineage_ids: [stored, next], profile: 'work', connection_id: 'owner-a',
+        kanban_observed_at: endedAt } as never])
+      expect(notify).not.toHaveBeenCalled()
     } finally {
       dropSessionState(runtime)
       setSessions([])

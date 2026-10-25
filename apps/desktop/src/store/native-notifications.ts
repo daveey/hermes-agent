@@ -5,7 +5,7 @@ import { type HermesOpenTarget, resolveHermesOpenPath } from '@/lib/hermes-open-
 import { persistString, storedString } from '@/lib/storage'
 
 import { recordFeatureToggle } from './desktop-metrics'
-import { $gateway } from './gateway'
+import { $gateway, primaryGatewayConnectionId } from './gateway'
 import { hasFreshKanbanObservation } from './kanban-observation'
 import { withinNativeNotifyBaseline } from './notify-baseline'
 import {
@@ -20,7 +20,7 @@ import {
   $activeSessionId, $cronSessions, $messagingSessions, $sessions,
   ownerLookupSessionRows, sessionMatchesStoredId
 } from './session'
-import { $sessionStates, knownOwnerForSession, storedSessionIdForRuntimeId } from './session-states'
+import { $sessionStates, knownOwnerForSession, runtimeSessionOwner, storedSessionIdForRuntimeId } from './session-states'
 
 export type { HermesOpenTarget }
 
@@ -232,7 +232,7 @@ const deferredCompletions = new Map<string, DeferredCompletion>()
 let stopCompletionWatch: (() => void) | undefined
 
 function projectionOwner(row: { connection_id?: string; profile?: string }): string {
-  return JSON.stringify([row.connection_id ?? null, row.profile ?? null])
+  return JSON.stringify([row.connection_id ?? primaryGatewayConnectionId(), row.profile ?? 'default'])
 }
 
 function deferCompletion(input: NativeNotificationInput, storedId: string, owner: string): void {
@@ -257,21 +257,43 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
     for (const [id, pending] of [...deferredCompletions]) {
       const state = $sessionStates.get()[id]
 
-      if (!state || state.busy || state.awaitingResponse || state.turnLive ||
-          storedSessionIdForRuntimeId(id) !== pending.storedId) {
+      if (!state || state.busy || state.awaitingResponse || state.turnLive) {
         deferredCompletions.delete(id)
 
         continue
       }
 
-      const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, pending.storedId))
+      const currentId = storedSessionIdForRuntimeId(id)
+      const owner = runtimeSessionOwner(id)
+
+      const runtimePin = owner && typeof owner === 'object'
+        ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
+
+      if (runtimePin !== undefined && runtimePin !== pending.owner) {
+        deferredCompletions.delete(id)
+
+        continue
+      }
+
+      const candidates = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, pending.storedId))
+      const rows = candidates.filter(row => projectionOwner(row) === pending.owner)
+
+      if (currentId !== pending.storedId) {
+        // Compression may rotate the durable id without starting a new turn.
+        // Only one same-owner row proving BOTH aliases can carry the notice.
+        if (!currentId || rows.length !== 1 || !sessionMatchesStoredId(rows[0], currentId)) {
+          deferredCompletions.delete(id)
+
+          continue
+        }
+
+        pending.storedId = currentId
+      }
 
       if (rows.length !== 1) {
-        continue
-      }
-
-      if (projectionOwner(rows[0]) !== pending.owner) {
-        deferredCompletions.delete(id)
+        if (candidates.length === 1 && runtimePin === undefined) {
+          deferredCompletions.delete(id)
+        }
 
         continue
       }
@@ -346,8 +368,14 @@ export function dispatchNativeNotification(input: NativeNotificationInput): bool
   // status from a terminal event or from an absent replica row here.
   if (input.kind === 'turnDone' && input.sessionId) {
     const storedId = storedSessionIdForRuntimeId(input.sessionId) ?? input.sessionId
+    const owner = runtimeSessionOwner(input.sessionId) ?? knownOwnerForSession(input.sessionId)
 
-    const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, storedId))
+    const ownerPin = owner && typeof owner === 'object'
+      ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
+
+    const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, storedId) &&
+      (ownerPin === undefined || projectionOwner(row) === ownerPin))
+
     const row = rows.length === 1 ? rows[0] : undefined
     const known = hasFreshKanbanObservation(row, input.projectionAfter)
 
@@ -357,10 +385,7 @@ export function dispatchNativeNotification(input: NativeNotificationInput): bool
 
     if (unfinished) {
       if (input.projectionAfter !== undefined) {
-        const owner = knownOwnerForSession(input.sessionId)
-
-        const pin = row ? projectionOwner(row) : owner && typeof owner === 'object'
-          ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
+        const pin = ownerPin ?? (row ? projectionOwner(row) : undefined)
 
         if (pin !== undefined) {
           deferCompletion(input, storedId, pin)
