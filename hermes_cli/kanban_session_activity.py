@@ -300,6 +300,7 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
                             "id": cur, "board": board, "gateway": gw, "key": ref, "session": sid,
                             "via": via, "root": f"{prefix}/{tid}", "remote": True,
                             "profile": owner_profile, "owner_profile": owner_profile,
+                            "origin_gateway": me, "origin_profile": origin_profile,
                             "ownership_state": 'unknown' if owner_profile is None else 'qualified',
                             "unfinished": True, "reported_status": card.get('reported_status', card.get('status')),
                             "synced_at": synced, "stale": stale,
@@ -368,15 +369,39 @@ def _remote_links() -> list[dict[str, Any]]:
     rows = project(ledger, replica=replica, gateway=_gateway(replica or missing),
                    profile=get_active_profile_name())
     legacy = _legacy_remote_links()
-    # Only exact qualified ownership can supersede a legacy projection. An
-    # unqualified historical row remains unresolved, never guessed as default.
-    owned = {(r['session'], r['key']) for r in rows}
-    merged = {(r['session'], r['key']): r for r in legacy
-              if (r['session'], r['key']) not in owned}
-    for row in rows:
-        if row['unfinished']:
-            merged[(row['session'], row['key'])] = row
-    return list(merged.values())
+    # A receipt proves its original and accepted tip aliases. Other aliases
+    # require the canonical compression predicate in this origin's state DB.
+    # Never lend current-origin provenance to historical cached associations.
+    from hermes_cli.kanban_origin_adapter import _resolve_session
+
+    tips: dict[str, str | None] = {}
+
+    def tip(sid: str) -> str | None:
+        if sid not in tips:
+            try:
+                tips[sid] = _resolve_session(get_hermes_home() / 'state.db', sid)
+            except (OSError, sqlite3.Error, ValueError):
+                tips[sid] = None
+        return tips[sid]
+
+    def superseded(card: dict[str, Any]) -> bool:
+        for row in rows:
+            if (card.get('key') != row['key']
+                    or card.get('origin_gateway') != row['origin_gateway']
+                    or card.get('origin_profile') != row['origin_profile']):
+                continue
+            aliases = (row['origin_session'], row['session'])
+            if card['session'] in aliases:
+                return True
+            resolved = tip(card['session'])
+            if resolved is not None and any(resolved == tip(sid) for sid in aliases):
+                return True
+        return False
+
+    # Unknown/stale receipt rows replace duplicates, not obligations: they are
+    # still unfinished. Only project() can authorize a verified live release.
+    return [card for card in legacy if not superseded(card)] + [
+        row for row in rows if row['unfinished']]
 
 
 def _legacy_remote_links() -> list[dict[str, Any]]:
