@@ -49,6 +49,24 @@ def test_guard_teardown_with_mocked_popen(tmp_path, monkeypatch, fake_kind, muta
                 next(fixture)
 
 
+@pytest.mark.parametrize("mutate", [False, True])
+def test_guard_teardown_survives_empty_path(tmp_path, monkeypatch, mutate):
+    cfg = _init(tmp_path)
+    snapshots = {cfg: _read_bytes_or_none(cfg)}
+    if mutate:
+        subprocess.run([
+            "git", "config", "--file", str(cfg), "user.email", "fixture@example.invalid",
+        ], check=True)
+    with monkeypatch.context() as mocks:
+        mocks.setenv("PATH", "")
+        if mutate:
+            with pytest.raises(pytest.fail.Exception, match="test wrote user"):
+                _assert_git_configs_unchanged(snapshots)
+            assert _read_bytes_or_none(cfg) == b""
+        else:
+            _assert_git_configs_unchanged(snapshots)
+
+
 def test_guard_watches_the_checkout_under_test():
     assert _live_git_config_paths()
 

@@ -57,7 +57,7 @@ def _task_in(client, src: str) -> str:
         elif src == "blocked":
             assert kb.block_task(conn, tid, reason="x")
         elif src == "scheduled":
-            assert kb.schedule_task(conn, tid, reason="x")
+            assert kb.schedule_task(conn, tid, reason="clock wait", clock_only=True)
         elif src == "review":
             assert kb.request_review(conn, tid, summary="s", force=True)
         elif src == "done":
@@ -77,6 +77,8 @@ def test_manual_moves_match_server(client, src):
         tid = _task_in(client, src)
         # ``done`` needs completion evidence; that is a verb gate, not a transition rule.
         body = {"status": dst, **({"summary": "s"} if dst == "done" else {})}
+        if dst == "scheduled":
+            body["clock_only"] = True  # satisfy the park verb gate, not a transition rule
         r = client.patch(f"/k/tasks/{tid}", json=body)
         with kbc.connect_closing() as conn:
             landed = kb.get_task(conn, tid).status

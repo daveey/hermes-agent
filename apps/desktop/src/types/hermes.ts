@@ -710,6 +710,17 @@ export interface SessionInfo {
    *  rows served by the primary/local backend. Opens must route through the
    *  connection-scoped gateway (`ensureGatewayAgent`) when present. */
   connection_id?: string
+  /** [daveey] Row comes from the hermes-hub replica of a gateway that is not
+   *  reachable right now (never from a live listing). Everything below is the
+   *  owner's last-known state: `is_active` is always false, `last_active` is the
+   *  session's own last activity, not the sync time. */
+  offline_cached?: boolean
+  /** Hub gateway name that owns this cached row. */
+  offline_gateway?: string
+  /** Epoch seconds: when the replica last heard from the owner. */
+  offline_synced_at?: null | number
+  /** Replica record version (optimistic-concurrency base for owner requests). */
+  offline_version?: null | number
 }
 
 /** [daveey] One live background process a session row owns (backend stamp). */

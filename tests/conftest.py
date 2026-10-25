@@ -470,6 +470,8 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
 
 
 _LIVE_GIT_CONFIGS: list | None = None
+# Teardown may run before monkeypatch restores a test's deliberately empty PATH.
+_GUARD_PATH = os.environ.get("PATH", os.defpath)
 
 
 def _live_git_config_paths() -> list:
@@ -503,7 +505,10 @@ def _plain_run(argv: list):
 
     # Capture Popen at conftest import: teardown can precede monkeypatch undo.
     # Capturing subprocess.run instead would still look up the mocked Popen.
-    proc = _GUARD_POPEN(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc = _GUARD_POPEN(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={**os.environ, "PATH": _GUARD_PATH},
+    )
     out, _ = proc.communicate()
     return proc.returncode, out
 

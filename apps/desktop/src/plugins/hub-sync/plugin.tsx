@@ -1,32 +1,66 @@
 /**
  * [daveey] hub-sync — the Desktop half of the hermes-mods `hub-sync` backend
- * plugin (REST over this gateway's hermes-hub replica). Contributes the
- * left-pane "Synced from other gateways" section: sessions of gateways that
- * are not reachable or not registered right now, with archive / pin / rename
- * sent as hub owner requests. Renders nothing when hub-sync or hermes-hub is
- * absent, so it is on by default.
+ * plugin (REST over this gateway's hermes-hub replica). A background service:
+ * it keeps the replica's session rows of unreachable gateways in the sidebar's
+ * fallback store, and the ORDINARY sidebar list shows them (marked offline)
+ * under its normal visibility / automated / profile / gateway / pin / grouping
+ * rules. It contributes no sidebar section of its own. Renders nothing and
+ * does nothing when hub-sync or hermes-hub is absent, so it is on by default.
  */
-import { type HermesPlugin, SIDEBAR_SECTIONS_AREA } from '@hermes/plugin-sdk'
+import { type HermesPlugin, host, publishOfflineSessions } from '@hermes/plugin-sdk'
 
-import { $hubSessionsOpen, HubSessionsSection } from './sessions-section'
+import { loadReplicaSidebarRows } from './api'
+
+const POLL_MS = 60_000
 
 const plugin: HermesPlugin = {
   id: 'hub-sync',
   name: 'Hub Sync',
-  description: "Sessions of gateways that are offline right now, from this gateway's hermes-hub replica.",
+  description: "Keeps sessions of gateways that are offline right now in the sidebar, from this gateway's hermes-hub replica.",
   defaultEnabled: true,
   register(ctx) {
-    $hubSessionsOpen.set(ctx.storage.get('sessionsOpen', true))
-    ctx.onDispose($hubSessionsOpen.listen(value => ctx.storage.set('sessionsOpen', value)))
+    let disposed = false
+    let running = false
+    let again = false
 
-    ctx.registerMany([
-      {
-        id: 'sessions',
-        area: SIDEBAR_SECTIONS_AREA,
-        order: 20,
-        render: () => <HubSessionsSection />
+    const refresh = async () => {
+      if (running) {
+        again = true
+
+        return
       }
-    ])
+
+      running = true
+
+      try {
+        const records = await loadReplicaSidebarRows(host.sessions.rows.get())
+
+        if (!disposed) {
+          publishOfflineSessions(records)
+        }
+      } catch {
+        // Best effort: the live sidebar is untouched when the replica is unreadable.
+      } finally {
+        running = false
+
+        if (again && !disposed) {
+          again = false
+          void refresh()
+        }
+      }
+    }
+
+    void refresh()
+
+    const timer = setInterval(() => void refresh(), POLL_MS)
+    const stopGateways = host.state.gateways.listen(() => void refresh())
+
+    ctx.onDispose(() => {
+      disposed = true
+      clearInterval(timer)
+      stopGateways()
+      publishOfflineSessions([])
+    })
   }
 }
 
