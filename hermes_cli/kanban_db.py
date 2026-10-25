@@ -3260,7 +3260,7 @@ def block_task(
         blocker_id = normalize_blocker_id(blocker_id)
         if blocker_id:
             payload["blocker_id"] = blocker_id
-            if (new_status == "triage" and _row_get(cur_row, "block_kind") == kind
+            if (new_status == "triage" and _row_get(cur_row, "block_kind") == payload.get("kind") == kind
                     and _latest_run_blocker(conn, task_id) == blocker_id):
                 # A probe re-asserting the shared blocker it was parked behind is the
                 # dispatcher's bounded probe cadence, not an unblock loop: keep the

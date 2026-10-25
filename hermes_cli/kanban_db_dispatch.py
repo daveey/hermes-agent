@@ -1546,7 +1546,7 @@ def _record_task_failure(
         # Spawn path (release_claim) is still running and also clears claim
         # state; the timeout/crash path already did.
         conn.execute(
-            "UPDATE tasks SET status = 'blocked', "
+            "UPDATE tasks SET status = 'triage', block_kind = 'transient', "
             + ("claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
                if release_claim else "")
             + "consecutive_failures = ?, last_failure_error = ? "
@@ -1554,6 +1554,8 @@ def _record_task_failure(
             (failures, error, task_id),
         )
         payload = {
+            "kind": "transient",
+            "reason_code": "worker_failures_exhausted",
             "failures": failures,
             "effective_limit": effective_limit,
             "limit_source": limit_source,
@@ -1642,34 +1644,8 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def _block_if_guard_hold_capped(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
-    """Block ``task_id`` when the guard has held it for ``reason`` past the cap. [daveey]"""
-    cap = guard_hold_cap_seconds(reason)
-    if cap is None:
-        return False
-    started = _guard_hold_started_at(conn, task_id)
-    if started is None:
-        return False
-    held = int(time.time()) - started
-    if held < cap:
-        return False
-    row = conn.execute("SELECT last_failure_error FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    raw_err = _kb._lossy_text(row["last_failure_error"]) if row else ""
-    if reason == "rate_limit_cooldown" or _kbq.is_quota_error(raw_err):
-        # A quota wall clears on its own: never a human block. Drop the stamp (the event it
-        # appends restarts the hold clock) and let the next tick retry. [daveey]
-        if raw_err:
-            _kbq.clear_quota_error(conn, task_id, raw_err)
-        return False
-    err = _kb._first_line(raw_err, 300) or "(no error recorded)"
-    minutes = max(1, held // 60)
-    message = (f"Held in ready by the respawn guard ({reason}) for {minutes} min without running. "
-               f"Last error: {err} Fix the cause (credentials, PR binding), then unblock.")
-    kind = "capability" if reason in _GUARD_HOLD_SHORT_CAP_REASONS else "needs_input"
-    try:
-        return bool(_kb.block_task(conn, task_id, reason=message, kind=kind))
-    except Exception:
-        _kb._log.warning("kanban: auto-blocking guard-held %s failed", task_id, exc_info=True)
-        return False
+    from hermes_cli.kanban_block_routing import block_if_guard_hold_capped
+    return block_if_guard_hold_capped(conn, task_id, reason)
 
 
 def check_respawn_guard(
