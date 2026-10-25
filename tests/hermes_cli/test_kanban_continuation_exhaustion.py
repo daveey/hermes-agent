@@ -59,7 +59,7 @@ def test_budget_only_human_block_routes_to_agent_triage(board, kind, reason):
 def test_real_human_questions_and_clock_waits_keep_their_kind(board, kind, reason, human):
     conn, path = board
     tid, _ = exhausted(conn)
-    assert kb.block_task(conn, tid, kind=kind, reason=reason)
+    assert kb.block_task(conn, tid, kind=kind, reason=reason, clock_only=kind == "time")
     task = kb.get_task(conn, tid)
     assert bool(activity._read_counts(path, activity.BLOCKED_STATUSES)) == human
     assert (activity._replica_bucket({"status": task.status, "block_kind": task.block_kind}) == "blocked") == human
