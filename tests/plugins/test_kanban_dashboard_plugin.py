@@ -63,6 +63,33 @@ def client(kanban_home):
 # GET /board on an empty DB
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("options", [{}, {"clock_only": True}, {"wake_check": "exit 1", "check_every": 120}])
+def test_dashboard_scheduled_park_guard(client, bulk, options):
+    from hermes_cli import kanban_wake_check as kwc
+
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="park", assignee="worker")
+    payload = {"status": "scheduled", **options}
+    if bulk:
+        response = client.post("/api/plugins/kanban/tasks/bulk", json={"ids": [tid], **payload})
+        assert response.status_code == 200
+        outcome = response.json()["results"][0]
+        assert outcome["ok"] == bool(options), outcome
+        if not options:
+            assert "wake_check" in outcome["error"]
+    else:
+        response = client.patch(f"/api/plugins/kanban/tasks/{tid}", json=payload)
+        assert response.status_code == (200 if options else 400), response.text
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == ("scheduled" if options else "ready")
+        if "wake_check" in options:
+            state = kwc.get_state(conn, tid)
+            assert state["cmd"] == "exit 1" and state["every"] == 120
+        if options.get("clock_only"):
+            assert kb.list_events(conn, tid)[-1].payload["clock_only"] is True
+
+
 def test_board_empty(client):
     r = client.get("/api/plugins/kanban/board")
     assert r.status_code == 200

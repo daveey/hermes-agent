@@ -23,6 +23,12 @@ def schedule_task(
     with _kb.write_txn(conn):
         if _kb._awaiting_human_answer(conn, task_id):
             return False
+        from hermes_cli.kanban_timed_park import scheduled_payload
+        from hermes_cli import kanban_wake_check as kwc
+        payload = scheduled_payload(reason)
+        wake_check, check_every = kwc.validate_park(
+            wake_at=payload["wake_at"], wake_check=wake_check,
+            check_every=check_every, clock_only=clock_only)
         params: list[Any] = [task_id]
         sql = """
             UPDATE tasks
@@ -41,10 +47,8 @@ def schedule_task(
         run_id = _kb._end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
         )
-        from hermes_cli.kanban_timed_park import scheduled_payload  # SCHEDULED_UNTIL= wakes it [daveey]
-        from hermes_cli import kanban_wake_check as kwc  # condition wake [daveey]
         _kb._append_event(conn, task_id, "scheduled", {
-            **scheduled_payload(reason), **kwc.park_fields(wake_check, check_every, clock_only),
+            **payload, **kwc.park_fields(wake_check, check_every, clock_only),
         }, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check, check_every)
         return True

@@ -1015,7 +1015,8 @@ CREATE TABLE IF NOT EXISTS task_wake_checks (
     last_at   INTEGER,
     last_rc   INTEGER,
     last_out  TEXT,
-    fails     INTEGER NOT NULL DEFAULT 0
+    fails     INTEGER NOT NULL DEFAULT 0,
+    generation TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
