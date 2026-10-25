@@ -71,7 +71,7 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess | None:
     try:
         return subprocess.run(
             ["systemctl", "--user", *args], env=env, capture_output=True,
-            text=True, timeout=2, check=False,
+            text=True, encoding="utf-8", errors="replace", timeout=2, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         # Non-systemd hosts, unavailable bus, or old systemd: preserve exit-code handling.
