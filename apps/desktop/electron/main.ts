@@ -11082,11 +11082,11 @@ async function ensureRegistryBackend(
     throw new Error(`No connection with id "${id}".`)
   }
 
-  if (source.kind === 'ssh') {
-    managedConnectionUpdateGate.assertCanDial(id, managedUpdateCorrelation)
-  }
-
   const profileKey = String(profile ?? '').trim() || 'default'
+
+  if (source.kind === 'ssh') {
+    registryReconnectService.assertCanDispatch(id, profileKey, managedUpdateCorrelation)
+  }
 
   // Never pool a backend under a name no profile can have. A gateway-qualified
   // session ref (`default@mac-mini/<id>`) once leaked its `profile@gateway` head
@@ -16161,14 +16161,8 @@ const registryReconnectService = createRegistryReconnectService({
   terminate: async state => {
     const expected = { ...state, profile: state.remoteProfile || '' }
 
-    if (state.remotePlatform === 'Windows') {
-      await terminateOwnedWindowsDashboardForUpdate(state.ssh,
-        { hermesPath: state.hermesPath, hermesHome: state.hermesHome, python: state.pythonPath }, expected)
-    } else if (state.remotePlatform === 'Linux' || state.remotePlatform === 'Darwin') {
-      await remoteLifecycle.terminateOwnedDashboardForUpdate(state.ssh, expected)
-    } else {
-      throw new Error('Unsupported registry SSH platform')
-    }
+    if (state.remotePlatform !== 'Linux') { throw new Error('Unsupported registry SSH platform') }
+    await remoteLifecycle.terminateOwnedDashboardForUpdate(state.ssh, expected)
   },
   close: async (key, state) => {
     sshIsolatedKeepalives.stop(key)

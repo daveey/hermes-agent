@@ -61,6 +61,10 @@ test('a second profile cannot borrow a pending reconnect claim', async () => {
   await vi.waitFor(() => expect(f.terminate).toHaveBeenCalledOnce())
   expect(await f.service.run(second)).toEqual({ ok: false })
   expect(() => f.gate.assertCanDial('hub')).toThrow()
+  expect(() => f.service.assertCanDispatch('hub', 'other')).not.toThrow()
+  expect(() => f.service.assertCanDispatch('hub', 'default')).toThrow()
+  expect(() => f.service.assertCanStop('conn:hub::other')).not.toThrow()
+  expect(() => f.service.assertCanStop('conn:hub::default')).toThrow()
   finish()
   await running
 })
@@ -85,10 +89,10 @@ test('busy backend releases the connection gate without tearing down its transpo
   expect(f.gate.owner('hub')).toBeNull()
 })
 
-test('unsupported termination platform is refused before retirement', async () => {
+test.each(['Darwin', 'Windows'])('unsupported termination platform %s is refused before retirement', async platform => {
   const f = fixture()
   const target = f.service.target('hub', 'default')!
-  f.state.remotePlatform = 'Darwin'
+  f.state.remotePlatform = platform
   expect(await f.service.run(target)).toEqual({ ok: false })
   expect(f.request).not.toHaveBeenCalled()
   expect(f.terminate).not.toHaveBeenCalled()
