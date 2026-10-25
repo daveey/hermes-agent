@@ -1,9 +1,10 @@
 import type { CSSProperties, ReactNode } from 'react'
 
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
+import { useSessionDotState } from '@/lib/use-session-dot-state'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
-import { $sessionDotStateById, sessionStatusStripe } from '@/store/session-dot-state'
+import { sessionStatusStripe } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 
 interface SessionTabAccentProps {
@@ -16,7 +17,7 @@ interface SessionTabAccentProps {
  *  use neutral grey while non-session tabs keep the theme-primary fallback. */
 export function SessionTabAccent({ children, session, storedSessionId }: SessionTabAccentProps) {
   const id = session?.id ?? storedSessionId
-  const state = useStoreSelector($sessionDotStateById, states => (id ? (states[id] ?? 'idle') : 'draft'))
+  const state = useSessionDotState(id, session)
   const blocked = useStoreSelector($blockedSessionIds, ids => (id ? isSessionBlocked(id, ids) : false))
 
   const stripe = session?.archived

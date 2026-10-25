@@ -557,6 +557,25 @@ describe('SidebarSessionRow own activity stamps', () => {
     })
   }
 
+  it('expires tree-only evidence without a row refresh', async () => {
+    const { $kanbanObservationTick } = await import('@/store/kanban-observation')
+    const { cleanStores } = await import('nanostores')
+    cleanStores($kanbanObservationTick)
+    vi.useFakeTimers()
+
+    try {
+      const { container } = renderRow(makeSession({ id: 'old-proj', message_count: 9, title: 'Old' }))
+      expect(stripe(container)).toBe('done')
+      act(() => vi.advanceTimersByTime(195_000))
+      expect(stripe(container)).toBeNull()
+      expect(container.querySelector('[aria-label="Running in background"]')).not.toBeNull()
+    } finally {
+      cleanup()
+      cleanStores($kanbanObservationTick)
+      vi.useRealTimers()
+    }
+  })
+
   it('still paints done (green) with no activity stamps', () => {
     const { container } = renderRow(makeSession({ id: 'old-proj', message_count: 9, title: 'Old' }))
 

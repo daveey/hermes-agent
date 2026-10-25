@@ -131,17 +131,35 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
 
   // a: green (read, finished turn)  b: no stripe (no turns)  c: working
   // d: red (blocked)  e: green (unread)
-  function setup() {
+  function setup(verified = true) {
     const anchor = document.createElement('span')
     document.body.append(anchor)
     publishSidebarSection(key, {
       anchor,
+      rows: verified ? ['a', 'b', 'c', 'd', 'e'].map(id => ({ id, kanban_observed_at: Date.now() / 1000 }) as never) : [],
       ids: ['a', 'b', 'c', 'd', 'e'],
       turnIds: ['a', 'c', 'd', 'e'],
       virtualized: true
     })
     dots.value = { a: 'idle', b: 'idle', c: 'working', d: 'needs-input', e: 'unread' }
   }
+
+  it('does not treat a missing offscreen row as verified done', () => {
+    setup(false)
+    dots.value = { a: 'idle', b: 'idle', c: 'working', d: 'working', e: 'idle' }
+    expect(nextSidebarSessionId('a', 1, false)).toBeNull()
+  })
+
+  it.each([{ kanban_active: 1 }, { kanban_unknown: true }, { kanban_observed_at: 1 }])('skips unverified offscreen tree rows: %j', evidence => {
+    setup()
+    const anchor = document.createElement('span')
+    document.body.append(anchor)
+    publishSidebarSection(key, {
+      anchor, ids: ['a', 'e'], turnIds: ['a', 'e'], virtualized: true,
+      rows: [{ id: 'e', kanban_observed_at: Date.now() / 1000, ...evidence } as never]
+    })
+    expect(nextSidebarSessionId('a', 1, false)).toBeNull()
+  })
 
   it('lands only on rows with a status stripe, including read-but-finished (green) ones', () => {
     setup()
@@ -230,9 +248,9 @@ describe('automated / test rows (sessions.automated_sources) [daveey]', () => {
     publishSidebarSection(key, { anchor, ids: ['a', 'b', 'c'], turnIds: ['a', 'b', 'c'], virtualized: true })
     dots.value = { a: 'idle', b: 'idle', c: 'idle' }
     $sessions.set([
-      { id: 'a', message_count: 2 },
-      { automated: true, id: 'b', message_count: 2 },
-      { id: 'c', message_count: 2 }
+      { id: 'a', message_count: 2, kanban_observed_at: Date.now() / 1000 },
+      { automated: true, id: 'b', message_count: 2, kanban_observed_at: Date.now() / 1000 },
+      { id: 'c', message_count: 2, kanban_observed_at: Date.now() / 1000 }
     ] as never)
   }
 

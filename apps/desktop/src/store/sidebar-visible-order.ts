@@ -1,7 +1,8 @@
 import { $messagingSessions, $sessions } from '@/store/session'
 import { isSessionBlocked } from '@/store/session-blocked'
-import { $sessionDotStateById, sessionStatusStripe } from '@/store/session-dot-state'
+import { $sessionDotStateById, sessionStatusStripe, withRowActivity } from '@/store/session-dot-state'
 import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
+import type { SessionInfo } from '@/types/hermes'
 
 // The sidebar's session order as the user sees it, for ⌘] / ⌘[ stepping.
 // Each rendered SessionsSection (pinned, recents, …) publishes the ids of its
@@ -15,6 +16,7 @@ import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
 interface SectionEntry {
   anchor: HTMLElement | null
   ids: readonly string[]
+  rows?: readonly SessionInfo[]
   /** Ids of this section's rows that have at least one message (the status
    *  stripe's `hasTurns`), so stepping can match the stripe the row draws. */
   turnIds?: readonly string[]
@@ -131,7 +133,8 @@ export function sessionHasStatusStripe(id: string): boolean {
     }
   }
 
-  const session = $sessions.get().find(s => s.id === id)
+  const session = [...sections.values()].flatMap(entry => entry.rows ?? []).find(s => s.id === id) ??
+    $sessions.get().find(s => s.id === id) ?? $messagingSessions.get().find(s => s.id === id)
 
   if (!hasTurns) {
     hasTurns = (session?.message_count ?? 0) > 0
@@ -140,7 +143,7 @@ export function sessionHasStatusStripe(id: string): boolean {
   return (
     sessionHasStepStripe(
       sessionStatusStripe(
-        $sessionDotStateById.get()[id] ?? 'idle',
+        withRowActivity($sessionDotStateById.get()[id] ?? 'idle', session ?? {}),
         hasTurns,
         false,
         session?.kanban_blocked ?? 0,

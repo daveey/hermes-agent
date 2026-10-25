@@ -505,6 +505,7 @@ export function SidebarSessionsSection({
             row.kind === 'session' && row.entry.session.message_count > 0 ? [row.entry.session.id] : []
           )
         : [],
+      rows: sectionOpen ? visibleRows.flatMap(row => row.kind === 'session' ? [row.entry.session] : []) : [],
       virtualized: flatVirtualized
     })
   }, [flatVirtualized, orderKey, sectionOpen, visibleRows])
