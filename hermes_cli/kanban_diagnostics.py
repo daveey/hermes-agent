@@ -377,7 +377,8 @@ def _failure_threshold(cfg: dict) -> Any:
     return cfg.get("failure_threshold", cfg.get("spawn_failure_threshold", 3))
 
 
-_OUTCOME_LABELS = {"spawn_failed": "spawn", "timed_out": "timeout", "crashed": "crash"}
+_OUTCOME_LABELS = {"spawn_failed": "spawn", "timed_out": "timeout", "crashed": "crash",
+                   "oom_killed": "OOM kill", "signaled": "signal kill"}
 
 
 def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
@@ -406,7 +407,7 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
     # Most recent failure outcome makes the title/action specific.
     most_recent_outcome = next(
         (oc for oc in (_task_field(r, "outcome") for r in _runs_newest_first(runs))
-         if oc in {"spawn_failed", "timed_out", "crashed"}),
+         if oc in _OUTCOME_LABELS),
         None,
     )
 
@@ -416,7 +417,7 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
         doctor, auth = f"hermes -p {assignee} doctor", f"hermes -p {assignee} auth"
         actions.append(_cli_hint(f"Verify profile: {doctor}", doctor, suggested=True))
         actions.append(_cli_hint(f"Fix profile auth: {auth}", auth))
-    elif most_recent_outcome in {"timed_out", "crashed"}:
+    elif most_recent_outcome in {"timed_out", "crashed", "oom_killed", "signaled"}:
         # Worker got off the ground but died: logs diagnose, reclaim/reassign recover.
         task_id = _task_field(task, "id")
         if task_id:
@@ -484,7 +485,7 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
     last_err = None
     for r in _runs_newest_first(runs):
         outcome = _task_field(r, "outcome")
-        if outcome == "crashed":
+        if outcome in {"crashed", "oom_killed", "signaled"}:
             consecutive += 1
             if last_err is None:
                 last_err = _task_field(r, "error")
@@ -503,13 +504,13 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
     if err_snippet:
         title = f"Agent crashed {consecutive}x: {err_snippet.splitlines()[0][:160]}"
         detail = (
-            f"The last {consecutive} runs ended with outcome=crashed. "
+            f"The last {consecutive} runs crashed or were killed. "
             f"Full last error:\n\n{err_snippet}"
         )
     else:
         title = f"Agent crashed {consecutive}x (no error recorded)"
         detail = (
-            f"The last {consecutive} runs ended with outcome=crashed but "
+            f"The last {consecutive} runs crashed or were killed but "
             f"no error text was captured. Check the worker log for more."
         )
     return [Diagnostic(

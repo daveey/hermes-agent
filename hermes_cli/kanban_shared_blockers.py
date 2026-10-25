@@ -40,7 +40,7 @@ DEFAULT_PROBE_SECONDS = 1800
 MAX_BLOCKER_ID_CHARS = 64
 # Outcomes that prove nothing about an external condition.
 NEUTRAL_OUTCOMES = frozenset({
-    "crashed", "timed_out", "reclaimed", "spawn_failed", "rate_limited", "gave_up", "released",
+    "crashed", "oom_killed", "signaled", "timed_out", "reclaimed", "spawn_failed", "rate_limited", "gave_up", "released",
 })
 # Only blockers asserted this recently are considered (bounds the scan on old boards).
 _LOOKBACK_SECONDS = 14 * 86400

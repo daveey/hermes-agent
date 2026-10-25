@@ -28,7 +28,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 # Run outcomes that mean "the previous attempt did not work" (not a checkpoint, a human block or a reclaim).
-FAILED_RUN_OUTCOMES = ("crashed", "timed_out", "gave_up", "failed")
+FAILED_RUN_OUTCOMES = ("crashed", "oom_killed", "signaled", "timed_out", "gave_up", "failed")
 # Events that mean "a reviewer rejected the previous attempt".
 REWORK_EVENT_KINDS = ("changes_requested", "review_reopened")
 REVIEW_SKILL = "sdlc-review"

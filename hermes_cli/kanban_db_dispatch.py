@@ -1728,7 +1728,7 @@ def check_respawn_guard(
     #     ``blocker_auth``. Same cooldown, measured from the latest run's end; once
     #     it has elapsed the stamp is dropped and the card retries. (2026-10-23:
     #     six cards blocked ``capability`` for 13 h on a cleared quota wall.) [daveey]
-    if err and latest_outcome != "crashed" and not _is_completion_gate_error(err) and _kbq.is_quota_error(err):
+    if err and latest_outcome not in {"crashed", "oom_killed", "signaled"} and not _is_completion_gate_error(err) and _kbq.is_quota_error(err):
         ended_at = _kb._to_epoch(latest_run["ended_at"]) if latest_run is not None else None
         if rl_cooldown > 0 and ended_at is not None and (now - ended_at) < rl_cooldown:
             return "rate_limit_cooldown"
@@ -1739,7 +1739,7 @@ def check_respawn_guard(
     # crash is different: its persisted error includes the worker's last
     # captured output, which is context rather than a diagnosis and may contain
     # benign commands such as ``claude auth status`` (#117097).
-    if (err and latest_outcome != "crashed" and not _is_completion_gate_error(err)
+    if (err and latest_outcome not in {"crashed", "oom_killed", "signaled"} and not _is_completion_gate_error(err)
             and _RESPAWN_BLOCKER_RE.search(err)):
         return "blocker_auth"
 

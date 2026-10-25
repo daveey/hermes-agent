@@ -74,7 +74,7 @@ def consecutive_continuations(conn: sqlite3.Connection, task_id: str) -> int:
         outcome = row[0]
         if outcome == CONTINUED_OUTCOME:
             count += 1
-        elif outcome in ("timed_out", "crashed", "reclaimed", "rate_limited"):
+        elif outcome in ("timed_out", "crashed", "oom_killed", "signaled", "reclaimed", "rate_limited"):
             continue
         else:
             break
