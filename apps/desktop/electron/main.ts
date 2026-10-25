@@ -528,6 +528,7 @@ import {
   createQuitTeardownCoordinator,
   type QuitTeardownTask
 } from './quit-teardown'
+import { createRegistryReconnectService } from './registry-reconnect-service'
 import * as remoteLifecycle from './remote-lifecycle'
 import {
   attachPowerResumeRemoteRevalidation,
@@ -9867,6 +9868,7 @@ async function sshProbeReuseProof(baseUrl, token, spawnNonce) {
 
 async function teardownSshConnection(profile) {
   const scope = sshScopeKey(profile)
+  registryReconnectService.assertCanStop(scope)
   sshIsolatedKeepalives.stop(scope)
   const state = sshConnections.get(scope)
 
@@ -11306,6 +11308,10 @@ async function ensureRegistryBackend(
     return ensureRegistryBackend(connectionId, profile, managedUpdateCorrelation, opts)
   }
 
+  if (source.kind === 'ssh') {
+    managedConnectionUpdateGate.assertCanDial(id, managedUpdateCorrelation)
+  }
+
   const entry = {
     process: null,
     port: null,
@@ -12430,6 +12436,7 @@ const poolStopper = createPoolStopper({
 })
 
 function stopPoolBackend(profile: string): Promise<void> {
+  registryReconnectService.assertCanStop(profile)
   const entry = backendPool.get(profile)
 
   const stopping = releaseLocalBackendSlotAfterExit(
@@ -16143,6 +16150,41 @@ ipcMain.handle('hermes:secret-storage:set', async (_event: any, on: any) => appl
 // Storage-level CRUD for named agent sources. Routing/pooling consumption of
 // the registry lands separately; these handlers only manage the persisted
 // list, so they are safe to ship ahead of the switchover.
+const registryReconnectService = createRegistryReconnectService({
+  pool: backendPool,
+  states: sshConnections,
+  gate: managedConnectionUpdateGate,
+  key: backendScopeKey,
+  isSsh: id => readDesktopConnectionsRegistry().connections.some(source => source.id === id && source.kind === 'ssh'),
+  inFlight: key => Boolean(backendDialClaims.inFlight(key) || poolStopper.inFlight(key) || sshBootstrapCoordinator.pending.has(key)),
+  request: (descriptor, requestPath, options) => fetchJsonForBackend(descriptor, requestPath, options),
+  terminate: async state => {
+    const expected = { ...state, profile: state.remoteProfile || '' }
+
+    if (state.remotePlatform === 'Windows') {
+      await terminateOwnedWindowsDashboardForUpdate(state.ssh,
+        { hermesPath: state.hermesPath, hermesHome: state.hermesHome, python: state.pythonPath }, expected)
+    } else if (state.remotePlatform === 'Linux' || state.remotePlatform === 'Darwin') {
+      await remoteLifecycle.terminateOwnedDashboardForUpdate(state.ssh, expected)
+    } else {
+      throw new Error('Unsupported registry SSH platform')
+    }
+  },
+  close: async (key, state) => {
+    sshIsolatedKeepalives.stop(key)
+    terminalIpc.disposeTerminalSessionsForSshScope(key)
+    // The owned serve is already confirmed stopped. Closing its transport
+    // must never fall back to generic remote disconnect/kill.
+    await state.ssh.close().catch(error => sshRememberLog(`[registry-reconnect] transport close: ${String(error)}`))
+  },
+  onCleanupError: error => sshRememberLog(`[registry-reconnect] cleanup: ${String(error)}`),
+  reopen: (id, profile, correlation) => ensureRegistryBackend(id, profile, correlation)
+})
+
+ipcMain.handle('hermes:connections:reconnect-target', (_event, id, profile) =>
+  registryReconnectService.target(id, profile))
+ipcMain.handle('hermes:connections:reconnect', (_event, target) => registryReconnectService.run(target))
+
 ipcMain.handle('hermes:connections:list', async () => sanitizeConnectionsRegistry())
 ipcMain.handle('hermes:connections:save', async (_event, payload) => {
   const saved = await saveRegistryConnection(payload)

@@ -289,6 +289,8 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     setLaunchMode: mode => ipcRenderer.invoke('hermes:connections:set-launch-mode', mode),
     setLastUsed: id => ipcRenderer.invoke('hermes:connections:set-last-used', id),
     test: id => ipcRenderer.invoke('hermes:connections:test', id),
+    reconnectTarget: (id, profile) => ipcRenderer.invoke('hermes:connections:reconnect-target', id, profile),
+    reconnect: target => ipcRenderer.invoke('hermes:connections:reconnect', target),
     updateManaged: id => ipcRenderer.invoke('hermes:connections:update-managed', id),
     // Fan out `hermes update` to every eligible registered connection.
     // Optional excludeIds skips rows the caller updates through another path.
