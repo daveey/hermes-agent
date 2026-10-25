@@ -10,4 +10,19 @@ export {
   hubRequest,
   learnHubGatewayName
 } from '@/store/hub-sync'
+import { connectionForHubGateway } from '@/store/hub-sync'
+import {
+  $offlineSessions,
+  type OfflineReplicaRecord,
+  offlineSessionsFromReplica,
+  withoutLocallyArchived
+} from '@/store/offline-sessions'
 export type { HubPending, HubRecord, HubRequestBody, HubRequestResult, HubTask } from '@/store/hub-sync'
+
+export type { OfflineReplicaRecord } from '@/store/offline-sessions'
+
+/** Hand the ordinary sidebar the cached rows of unreachable gateways (fallback
+ *  inputs: it filters, groups and sorts them like live rows). `[]` clears. */
+export function publishOfflineSessions(records: readonly OfflineReplicaRecord[]): void {
+  $offlineSessions.set(withoutLocallyArchived(offlineSessionsFromReplica(records, connectionForHubGateway)))
+}

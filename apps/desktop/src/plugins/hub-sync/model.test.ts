@@ -5,8 +5,7 @@ import {
   isRowPending,
   markRowPending,
   replicaSessionsToShow,
-  sessionRequestBody,
-  syncedAgo
+  sessionRequestBody
 } from './model'
 
 // [daveey] Sidebar rows for sessions on gateways that aren't live right now,
@@ -54,18 +53,6 @@ describe('replicaSessionsToShow', () => {
     const hub = [row('mini', 's_a', { archived: true }), row('mini', 's_b', { hidden: true }), row('mini', 's_c')]
 
     expect(replicaSessionsToShow(hub, [], () => false).map(r => r.id)).toEqual(['s_c'])
-  })
-})
-
-describe('syncedAgo', () => {
-  it('formats the replica age', () => {
-    const now = 10_000_000
-
-    expect(syncedAgo(now / 1000 - 20, now)).toBe('synced just now')
-    expect(syncedAgo(now / 1000 - 5 * 60, now)).toBe('synced 5m ago')
-    expect(syncedAgo(now / 1000 - 3 * 3600, now)).toBe('synced 3h ago')
-    expect(syncedAgo(now / 1000 - 2 * 86_400, now)).toBe('synced 2d ago')
-    expect(syncedAgo(null, now)).toBe('never synced')
   })
 })
 

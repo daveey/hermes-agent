@@ -5,8 +5,8 @@ import { sameCronSignature } from '@/lib/session-signatures'
 import {
   isMessagingSource,
   LOCAL_SESSION_SOURCE_IDS,
-  MESSAGING_SESSION_SOURCE_IDS,
-  normalizeSessionSource
+  normalizeSessionSource,
+  SIDEBAR_EXCLUDED_SOURCES
 } from '@/lib/session-source'
 import { gatewayActivationEpoch } from '@/store/gateway'
 import {
@@ -52,26 +52,6 @@ import {
 import { $sessionTiles, $workingSessionIds, getRecentlySettledSessionIds } from '@/store/session-states'
 
 import { refreshCronJobs as refreshCronJobsStore } from '../../cron/cron-actions'
-
-// The recents list is local-only: cron rows have their own section, kanban
-// dispatcher workers are read on the board, finite one-shot runs (`hermes -z`,
-// `chat -q`) are not conversations, and each messaging platform
-// (telegram, discord, …) is fetched separately into its own self-managed
-// sidebar section (refreshMessagingSessions). Excluding them here keeps
-// "Load more" paging through interactive local chats instead of
-// interleaving gateway threads that bury them. ACP rows are editor-driven
-// conversations: every editor wake mints an auto-titled row, so they would
-// bury local chats — and they were never ended before #118216, which also
-// kept prune/archive away from them.
-const SIDEBAR_EXCLUDED_SOURCES = [
-  'acp',
-  'cron',
-  'kanban',
-  'oneshot',
-  'subagent',
-  'tool',
-  ...MESSAGING_SESSION_SOURCE_IDS
-]
 
 // The messaging slice is the inverse: drop cron + every local source so only
 // external-platform conversations remain, then split per platform in the UI.

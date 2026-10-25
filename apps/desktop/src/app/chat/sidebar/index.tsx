@@ -193,7 +193,7 @@ import {
   SidebarStorageCorruptNotice
 } from './section-states'
 import { GlobalSessionRenameDialog } from './session-actions-menu'
-import { buildSessionByAnyId, resolvePinnedSessions } from './session-index'
+import { buildSessionByAnyId, resolvePinnedSessions, useOfflineFallback } from './session-index'
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
 import { useEnteredProjectSessions } from './use-entered-project-sessions'
@@ -405,7 +405,7 @@ export function ChatSidebar({
   onLoadMoreSessions,
   onRetrySessions,
   onLoadMoreMessaging,
-  onResumeSession,
+  onResumeSession: resumeSession,
   onDeleteSession,
   onArchiveSession,
   onBranchSession,
@@ -490,7 +490,7 @@ export function ChatSidebar({
   const selectedSessionId = useStore($focusedStoredSessionId)
   const focusedSessionIsTile = useStore($focusedSessionIsTile)
   const currentView = focusedSessionIsTile ? 'chat' : routeView
-  const sessions = useStore($sessions)
+  const { onResumeSession, sessions } = useOfflineFallback(useStore($sessions), resumeSession)
   const cronSessions = useStore($cronSessions)
   const cronJobs = useStore($cronJobs)
   const messagingSessions = useStore($messagingSessions)
