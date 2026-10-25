@@ -19,6 +19,7 @@ import { __resetNativeNotifyBaselineForTests, markNativeNotifyBaseline } from '.
 import { $approvalRequest, APPROVAL_RESPOND_REQUEST_TIMEOUT_MS, clearAllPrompts, setApprovalRequest } from './prompts'
 import { markSessionGone, resetBackgroundPollingGuard } from './runtime-gone'
 import { setActiveSessionId, setSessions } from './session'
+import { stampSecondaryProfileOwner } from './session-event-provenance'
 import { dropSessionState, publishSessionState, recordSessionEventScope } from './session-states'
 
 const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDesktop'] }
@@ -218,6 +219,28 @@ describe('dispatchNativeNotification focus gating', () => {
       expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
         projectionAfter: endedAt })).toBe(false)
       setSessions([{ id: stored, profile: 'default', kanban_observed_at: endedAt } as never])
+      expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+      setPrimaryGatewayConnectionId(null)
+    }
+  })
+
+  it('keeps a proven profile-only event on the primary owner', () => {
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    setPrimaryGatewayConnectionId('owner-a')
+    publishSessionState(runtime, createClientSessionState(stored))
+    recordSessionEventScope(stampSecondaryProfileOwner({ session_id: runtime } as never, 'work'))
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+
+    try {
+      setSessions([{ id: stored, profile: 'work', connection_id: 'owner-b', kanban_observed_at: endedAt } as never])
+      expect(dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
+        projectionAfter: endedAt })).toBe(false)
+      setSessions([{ id: stored, profile: 'work', kanban_observed_at: endedAt } as never])
       expect(notify).toHaveBeenCalledTimes(1)
     } finally {
       dropSessionState(runtime)

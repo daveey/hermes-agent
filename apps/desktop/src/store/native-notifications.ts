@@ -266,8 +266,8 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
       const currentId = storedSessionIdForRuntimeId(id)
       const owner = runtimeSessionOwner(id)
 
-      const runtimePin = owner && typeof owner === 'object'
-        ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
+      const runtimePin = typeof owner === 'string' ? projectionOwner({ profile: owner })
+        : owner ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
 
       if (runtimePin !== undefined && runtimePin !== pending.owner) {
         deferredCompletions.delete(id)
@@ -370,8 +370,8 @@ export function dispatchNativeNotification(input: NativeNotificationInput): bool
     const storedId = storedSessionIdForRuntimeId(input.sessionId) ?? input.sessionId
     const owner = runtimeSessionOwner(input.sessionId) ?? knownOwnerForSession(input.sessionId)
 
-    const ownerPin = owner && typeof owner === 'object'
-      ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
+    const ownerPin = typeof owner === 'string' ? projectionOwner({ profile: owner })
+      : owner ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
 
     const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, storedId) &&
       (ownerPin === undefined || projectionOwner(row) === ownerPin))
