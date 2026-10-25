@@ -183,8 +183,10 @@ cd "$REPO_ROOT"
 # Pre-building the bytecode cache once here (instead of each subprocess
 # compiling on first import) avoids redundant work across ~2000 processes.
 # Uses git to list tracked .py files (skips venv, node_modules, etc).
+# Keep this optional warmup serial: -j 0 spawns a host-sized process pool
+# even for a single-file -j 1 run, bypassing the test runner's CPU budget.
 echo "▶ pre-compiling bytecode cache"
-"$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+"$PYTHON" -m compileall -q -j 1 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
 
 echo "▶ launching test runner"
 exec env -i \
