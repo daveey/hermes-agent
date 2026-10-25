@@ -92,6 +92,31 @@ def all_prs_finished(urls: Iterable[str]) -> bool:
     return all(pr_state(u) in TERMINAL_STATES for u in seen.values())
 
 
+def _immediate_checkpoint_after(conn: sqlite3.Connection, task_id: str, since: int) -> bool:
+    """Only the latest completed run may authorize continuing its existing PR.
+
+    Scheduled checkpoints and crash retries retain the duplicate-work guard.
+    Same-second PR reporting and checkpointing is normal within one worker run.
+    """
+    from hermes_cli import kanban_db as kb
+
+    run = conn.execute(
+        "SELECT outcome, ended_at, metadata FROM task_runs "
+        "WHERE task_id = ? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if run is None or run["outcome"] != "continued":
+        return False
+    ended_at = kb._to_epoch(run["ended_at"])
+    meta = kb._json_dict(run["metadata"])
+    return bool(
+        ended_at is not None and ended_at >= since
+        and meta.get("checkpoint") and meta.get("resume_after_seconds") == 0
+        and meta.get("resume_status") in ("ready", "review")
+        and not meta.get("wake_at") and not meta.get("blocker_id")
+    )
+
+
 def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Optional[str]:
     """Respawn-guard step 4: ``"active_pr"`` when a comment in the last 24 h names a PR, else None.
 
@@ -101,6 +126,9 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     an ``unblocked`` event: a worker that opened its PR and blocked itself waiting for the
     merge is resumed by that unblock to ship/verify THAT PR. A crash/reclaim is not a
     handoff, so the worker that opened the PR is still not re-spawned against it.
+    A latest immediate checkpoint explicitly resumes unfinished work on that PR;
+    scheduled/external waits do not. Dispatcher guard notices are diagnostic, not
+    new PR publication evidence, and cannot invalidate an existing handoff.
     Also lifted once EVERY PR named in those comments is MERGED or CLOSED (gh, cached; any
     gh failure keeps the hold), or has a completed queue rejection requiring repair. [daveey]
     """
@@ -110,14 +138,19 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     pr_times: list[int] = []
     pr_urls: list[str] = []
     for t, c in _kbd._rows_since(conn, "task_comments", task_id, now - _kbd._RESPAWN_GUARD_PR_WINDOW,
-                                 cols=", body", unreadable=now):  # duplicate-PR risk: fail closed
-        urls = _kbd._RESPAWN_GUARD_PR_URL_RE.findall(_kb._lossy_text(c["body"]) or "")
+                                 cols=", body, author", unreadable=now):  # duplicate-PR risk: fail closed
+        body = _kb._lossy_text(c["body"]) or ""
+        if c["author"] == "kanban-dispatcher" and body.startswith("[respawn-guard]"):
+            continue  # a diagnostic must not rearm its own handoff barrier
+        urls = _kbd._RESPAWN_GUARD_PR_URL_RE.findall(body)
         if urls:
             pr_times.append(t)
             pr_urls.extend(urls)
     if not pr_times:
         return None
-    # Strictly after: a same-second tie stays guarded (fail closed).
+    if _immediate_checkpoint_after(conn, task_id, max(pr_times)):
+        return None
+    # Strictly after: a same-second handoff tie stays guarded (fail closed).
     if any(_kbd._is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
             conn, "task_events", task_id, max(pr_times),
             "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')",
