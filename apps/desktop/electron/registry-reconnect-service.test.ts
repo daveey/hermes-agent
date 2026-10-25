@@ -18,6 +18,7 @@ function fixture() {
     : { ok: true, idle: true, token: 'permit', action: options.body?.action })
 
   const terminate = vi.fn(async () => {})
+  const proveStopped = vi.fn(async () => false)
   const close = vi.fn(async () => {})
 
   const reopen = vi.fn(async (id, profile, correlation) => {
@@ -27,14 +28,14 @@ function fixture() {
   })
 
   const service = createRegistryReconnectService({
-    pool, states, gate, request, terminate, close, reopen,
+    pool, states, gate, request, terminate, close, reopen, proveStopped,
     onCleanupError: vi.fn(),
     key: (id, profile) => `conn:${id}::${profile}`,
     isSsh: id => id === 'hub',
     inFlight: () => false
   })
 
-  return { service, pool, states, entry, state, primary, gate, request, terminate, reopen, close }
+  return { service, pool, states, entry, state, primary, gate, request, terminate, reopen, close, proveStopped }
 }
 
 test('composed reconnect repairs a deleted runtime without touching local default', async () => {
@@ -48,6 +49,41 @@ test('composed reconnect repairs a deleted runtime without touching local defaul
   expect(f.pool.get('default')).toBe(f.primary)
   expect(f.request.mock.calls.map(call => call[2].body?.action).filter(Boolean)).toEqual(['prepare', 'commit'])
   expect(f.gate.owner('hub')).toBeNull()
+})
+
+test.each(['stopped', 'replacement', 'live', 'unknown'] as const)('ambiguous commit recovery: %s', async verdict => {
+  const f = fixture()
+  const target = f.service.target('hub', 'default')!
+  const request = f.request.getMockImplementation()!
+  f.request.mockImplementation(async (descriptor, path, options) => {
+    if (options.body?.action === 'commit') { throw new Error('response lost') }
+
+    return request(descriptor, path, options)
+  })
+  await expect(f.service.run(target)).rejects.toThrow('response lost')
+  f.request.mockRejectedValue(new Error('HTTP offline'))
+  f.proveStopped.mockImplementation(async () => {
+    if (verdict === 'unknown') { throw new Error('SSH offline') }
+
+    if (verdict === 'replacement') { f.entry.connectionPromise = Promise.resolve({ baseUrl: 'http://replacement', token: 'new' }) }
+
+    return verdict !== 'live'
+  })
+
+  if (verdict === 'stopped') {
+    expect((await f.service.run(target)).ok).toBe(true)
+    expect(f.close).toHaveBeenCalledOnce()
+    expect(f.gate.owner('hub')).toBeNull()
+  } else {
+    await expect(f.service.run(target)).rejects.toThrow(/offline|changed/)
+    expect(f.close).not.toHaveBeenCalled()
+    expect(f.reopen).not.toHaveBeenCalled()
+    expect(f.gate.owner('hub')).not.toBeNull()
+    expect(f.pool.get('conn:hub::default')).toBe(f.entry)
+  }
+
+  expect(f.terminate).not.toHaveBeenCalled()
+  expect(f.pool.get('default')).toBe(f.primary)
 })
 
 test('a second profile cannot borrow a pending reconnect claim', async () => {

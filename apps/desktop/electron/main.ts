@@ -529,6 +529,7 @@ import {
   type QuitTeardownTask
 } from './quit-teardown'
 import { createRegistryReconnectService } from './registry-reconnect-service'
+import { proveRegistryOwnerStopped } from './registry-stopped-owner'
 import * as remoteLifecycle from './remote-lifecycle'
 import {
   attachPowerResumeRemoteRevalidation,
@@ -16159,6 +16160,7 @@ const registryReconnectService = createRegistryReconnectService({
   isSsh: id => readDesktopConnectionsRegistry().connections.some(source => source.id === id && source.kind === 'ssh'),
   inFlight: key => Boolean(backendDialClaims.inFlight(key) || poolStopper.inFlight(key) || sshBootstrapCoordinator.pending.has(key)),
   request: (descriptor, requestPath, options) => fetchJsonForBackend(descriptor, requestPath, options),
+  proveStopped: state => proveRegistryOwnerStopped(state.ssh, { ...state, profile: state.remoteProfile || '' }),
   terminate: async state => {
     const expected = { ...state, profile: state.remoteProfile || '' }
 

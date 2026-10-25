@@ -11,6 +11,7 @@ export interface RegistryReconnectDeps<E> {
   prepare: (entry: E) => Promise<string | null>
   commit: (entry: E, token: string) => Promise<boolean>
   cancel: (entry: E, token: string) => Promise<void>
+  recoverStopped: (entry: E) => Promise<boolean>
   terminate: (entry: E) => Promise<void>
   reopen: (connectionId: string, profile: string, entry: E) => Promise<string>
 }
@@ -21,8 +22,8 @@ export function createRegistryReconnector<E>(deps: RegistryReconnectDeps<E>) {
   const committed = new Map<string, E>()
   const keyFor = (connectionId: string, profile: string) => JSON.stringify([connectionId, profile])
 
-  async function finish(target: RegistryReconnectTarget, key: string, entry: E) {
-    await deps.terminate(entry)
+  async function finish(target: RegistryReconnectTarget, key: string, entry: E, stopped = false) {
+    if (!stopped) { await deps.terminate(entry) }
     uncertain.delete(key)
     committed.delete(key)
 
@@ -51,6 +52,12 @@ export function createRegistryReconnector<E>(deps: RegistryReconnectDeps<E>) {
     // A confirmed commit survives serve exit. The terminator re-proves the
     // exact SSH process identity or confirms that captured owner has exited.
     if (committed.get(key) === entry) { return finish(target, key, entry) }
+
+    // Ambiguity never grants live termination authority. This path only
+    // removes the captured resident after read-only proof it has stopped.
+    if (uncertain.get(key) === entry && await deps.recoverStopped(entry)) {
+      return finish(target, key, entry, true)
+    }
 
     if (!(await deps.proveOwned(entry))) { return { ok: false } }
 
