@@ -882,8 +882,9 @@ _LATER_TASK_COLUMNS = (
     ("goal_max_turns", "goal_max_turns INTEGER"),
     ("completion_contract", "completion_contract TEXT"),
     ("session_id", "session_id TEXT"),
-    # Typed block reason (VALID_BLOCK_KINDS); NULL = generic human blocker.
+    # Typed operational reason; neither NULL nor capability implies a human ask.
     ("block_kind", "block_kind TEXT"),
+    ("human_request", "human_request TEXT"),
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
     # Spawn-time start fingerprint of worker_pid (PID-reuse guard; NULL = legacy row).
     ("worker_started_at", "worker_started_at INTEGER"),

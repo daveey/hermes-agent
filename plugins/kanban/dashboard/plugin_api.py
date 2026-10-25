@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from fastapi import (
-    APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
+    APIRouter, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -488,6 +488,8 @@ def get_task(
 # --- POST /tasks ------------------------------------------------------------
 
 class CreateTaskBody(BaseModel):
+    initial_status: str = "running"
+    human_request: Optional[dict] = None
     title: str
     body: Optional[str] = None
     assignee: Optional[str] = None
@@ -607,6 +609,9 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 # --- PATCH /tasks/:id  and  POST /tasks/bulk ---------------------------------
 
 class UpdateTaskBody(BaseModel):
+    human_request: Optional[dict] = None
+    block_kind: Optional[str] = None
+    metadata_only: bool = False
     status: Optional[str] = None
     assignee: Optional[str] = None
     priority: Optional[int] = None
@@ -631,6 +636,9 @@ class UpdateTaskBody(BaseModel):
 
 
 class BulkTaskBody(BaseModel):
+    human_request: Optional[dict] = None
+    block_kind: Optional[str] = None
+    metadata_only: bool = False
     ids: list[str]
     status: Optional[str] = None
     assignee: Optional[str] = None  # "" or None = unassign
@@ -656,6 +664,50 @@ class _StatusRejected(Exception):
     """A status the dashboard may not set via this path; the message is user-facing."""
 
 
+def _validate_request_entry(payload) -> None:
+    """Reject ignored or mixed evidence writes before any assignment/status mutation."""
+    from hermes_cli.kanban_human_request import validate_human_request
+
+    with _value_error_400():
+        validate_human_request(payload.human_request, kind=payload.block_kind)
+        if payload.metadata_only:
+            allowed = {"ids", "human_request", "metadata_only", "block_reason"}
+            if payload.model_fields_set - allowed:
+                raise ValueError("metadata-only classification cannot accompany other changes")
+            if "human_request" not in payload.model_fields_set or not (payload.block_reason or "").strip():
+                raise ValueError("metadata-only classification requires human_request and block_reason")
+        elif {"human_request", "block_kind"} & payload.model_fields_set:
+            if payload.status != "blocked" or getattr(payload, "archive", False):
+                raise ValueError("human_request/block_kind require blocked status or metadata_only classification")
+
+
+def _classification_actor(request: Request) -> str:
+    """Use the existing sensitive-endpoint gate, never a payload actor or worker env.
+
+    Dashboard sessions (including the shared loopback token) are trusted operators;
+    there is no worker/operator role distinction within that credential. A worker
+    holding it has the same authority. Service token principals alone do not pass
+    this gate. Annotation records evidence, not approval or OS authentication.
+    """
+    from hermes_cli.web_server import _require_token
+
+    if request is None:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_token(request)
+    session = getattr(request.state, "session", None)
+    if getattr(request.app.state, "auth_required", False):
+        assert session is not None  # enforced by the canonical gate above
+        return f"dashboard:{session.provider}:{session.user_id}"
+    return "dashboard:loopback-token"
+
+
+def _classify_request(conn, task_id, payload, actor: str) -> bool:
+    from hermes_cli.kanban_human_request_migration import classify_parked_request
+
+    return classify_parked_request(conn, task_id, human_request=payload.human_request,
+                                   actor=actor, reason=payload.block_reason)
+
+
 _RUNNING_DIRECT_MSG = "Cannot set status to 'running' directly; use the dispatcher/claim path"
 
 
@@ -678,7 +730,8 @@ _STATUS_HANDLERS: dict[str, Any] = {
     "done": lambda conn, tid, p: kanban_db.complete_task(
         conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True),
     "blocked": lambda conn, tid, p: kanban_db.block_task(
-        conn, tid, reason=p.block_reason, wake_check=p.wake_check,
+        conn, tid, kind=p.block_kind, human_request=p.human_request,
+        reason=p.block_reason, wake_check=p.wake_check,
         check_every=p.check_every, clock_only=p.clock_only),
     "scheduled": lambda conn, tid, p: kanban_db.schedule_task(
         conn, tid, reason=p.block_reason, wake_check=p.wake_check,
@@ -777,9 +830,15 @@ def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Option
 
 
 @router.patch("/tasks/{task_id}")
-def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None)):
+def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None), request: Request = None):
+    _validate_request_entry(payload)
+    actor = _classification_actor(request) if payload.metadata_only else ""
     with _board_conn(board) as (board, conn):
         _require_task(conn, task_id)
+        if payload.metadata_only:
+            with _value_error_400():
+                if not _classify_request(conn, task_id, payload, actor):
+                    raise _conflict("classification requires parked card without a current run")
         # For a combined assignee+review patch, request_review must capture the
         # current implementer before the task is routed to the reviewer.
         review_assignee_deferred = payload.status == "review" and payload.assignee is not None
@@ -849,7 +908,7 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
         was_running = prev["status"] == "running"
         reopening_satisfied_parent = prev["status"] in {"done", "archived"} and effective_status not in {"done", "archived"}
         cur = conn.execute(
-            "UPDATE tasks SET status = ?, "
+            "UPDATE tasks SET status = ?, human_request = NULL, "
             "  claim_lock = CASE WHEN ? = 'running' THEN claim_lock ELSE NULL END, "
             "  claim_expires = CASE WHEN ? = 'running' THEN claim_expires ELSE NULL END, "
             "  worker_pid = CASE WHEN ? = 'running' THEN worker_pid ELSE NULL END "
@@ -914,9 +973,13 @@ def delete_link(parent_id: str = Query(...), child_id: str = Query(...), board: 
         return {"ok": bool(kanban_db.unlink_tasks(conn, parent_id, child_id))}
 
 
-def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str], entry: dict) -> None:
+def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str], entry: dict, actor: str = "") -> None:
     """Apply the bulk patch to one task, recording refusals in ``entry`` without aborting the
     remaining ops — except a rejected status verb (``_StatusRejected`` propagates)."""
+    if payload.metadata_only:
+        if not _classify_request(conn, tid, payload, actor):
+            entry.update(ok=False, error="classification requires parked card without a current run")
+        return
     if payload.archive and not kanban_db.archive_task(conn, tid):
         entry.update(ok=False, error="archive refused")
     if payload.status is not None and not payload.archive:
@@ -943,9 +1006,11 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
 
 
 @router.post("/tasks/bulk")
-def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
+def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None), request: Request = None):
     """Apply the same patch to every id. Independent iteration — per-task
     failures don't abort siblings; returns per-id outcome for partials."""
+    _validate_request_entry(payload)
+    actor = _classification_actor(request) if payload.metadata_only else ""
     ids = [i for i in (payload.ids or []) if i]
     if not ids:
         raise HTTPException(status_code=400, detail="ids is required")
@@ -957,7 +1022,7 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                 if kanban_db.get_task(conn, tid) is None:
                     entry.update(ok=False, error="not found")
                 else:
-                    _bulk_apply_one(conn, tid, payload, board, entry)
+                    _bulk_apply_one(conn, tid, payload, board, entry, actor)
             except Exception as e:  # one bad id shouldn't kill the batch (incl. _StatusRejected)
                 entry.update(ok=False, error=str(e))
             results.append(entry)

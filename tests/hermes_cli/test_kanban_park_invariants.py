@@ -285,7 +285,13 @@ def _escalate(conn, tid):
         if task.status == "blocked":
             kb.unblock_task(conn, tid)
         kb.claim_task(conn, tid)
-        kb.block_task(conn, tid, reason="David: tap Reply timing", kind="needs_input")
+        kb.block_task(conn, tid, reason="David: tap Reply timing", kind="needs_input", human_request={
+            "action": "Tap Reply timing on the test device.",
+            "why_human": "The timing measurement requires a physical tap by the device owner.",
+            "interaction": "physical",
+            "scope": "Test device reply timing measurement",
+            "evidence": "The timing test is paused at the Reply timing prompt awaiting a tap.",
+        })
     assert kb.get_task(conn, tid).status == "triage"
 
 

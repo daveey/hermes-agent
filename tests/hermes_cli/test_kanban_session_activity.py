@@ -9,6 +9,22 @@ import pytest
 from hermes_cli import kanban_session_activity as ksa
 
 
+HUMAN_REQUEST = {
+    "action": "Choose the deployment window.",
+    "why_human": "The release owner must choose the acceptable downtime.",
+    "interaction": "reply",
+    "scope": "Staging deployment window",
+    "evidence": "The release checklist has no owner-selected downtime window.",
+}
+
+
+def _add_human_requests(path: Path, *task_ids: str) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE tasks ADD COLUMN human_request TEXT")
+        conn.executemany("UPDATE tasks SET human_request=? WHERE id=?",
+                         [(json.dumps(HUMAN_REQUEST), task_id) for task_id in task_ids])
+
+
 def _make_board(path: Path, rows: list[tuple[str, str, str | None]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -27,7 +43,7 @@ def kanban_root(tmp_path, monkeypatch):
     ksa._reset_cache_for_tests()
 
 
-def test_counts_only_pending_and_running_tasks_across_boards(kanban_root):
+def test_counts_unfinished_operational_tasks_across_boards(kanban_root):
     _make_board(kanban_root / "kanban.db", [
         ("t1", "running", "s_parent"),
         ("t2", "todo", "s_parent"),
@@ -41,7 +57,8 @@ def test_counts_only_pending_and_running_tasks_across_boards(kanban_root):
         ("t8", "running", "s_other"),
     ])
 
-    assert ksa.active_task_counts() == {"s_parent": 3, "s_other": 1}
+    assert ksa.active_task_counts() == {"s_parent": 3, "s_other": 1, "s_blocked": 1}
+    assert ksa.blocked_task_counts() == {}  # unknown legacy blocks stay operational
 
 
 def test_annotates_rows_by_whole_compression_lineage(kanban_root):
@@ -129,6 +146,7 @@ def test_stamps_blocked_count_separately_from_active(kanban_root):
         ("t5", "done", "s_done"),
     ])
     rows = [{"id": "s1"}, {"id": "s_only_blocked"}, {"id": "s_done", "kanban_blocked": 4}]
+    _add_human_requests(kanban_root / "kanban.db", "t2", "t3", "t4")
 
     ksa.annotate_kanban_activity(rows)
 
@@ -168,6 +186,7 @@ def test_session_tasks_lists_created_and_shepherded_cards_the_sidebar_counts(kan
         ("t_root", "Before compression", "todo", "bob", "s_root", 100, None, None),
     ])
 
+    _add_human_requests(kanban_root / "kanban.db", "t_other")
     got = {t["id"]: t for t in ksa.session_tasks(["s_me", "s_root"])}
 
     assert set(got) == {"t_run", "t_other", "t_root"}
@@ -267,7 +286,8 @@ def test_replica_card_shepherded_by_a_local_session_keeps_it_busy(kanban_root):
         {"_gw": "hub", "id": "t_r1", "status": "running", "children": ["t_r2"], "sessions": [
             {"session": "hub_oneshot", "profile": None, "rel": "created"}, _shep("s_mac")]},
         {"_gw": "hub", "id": "t_r2", "status": "todo", "children": ["t_r3"]},  # child: counts via children
-        {"_gw": "hub", "id": "t_r3", "status": "blocked", "block_kind": "needs_input"},  # grandchild waits on a human
+        {"_gw": "hub", "id": "t_r3", "status": "blocked", "block_kind": "needs_input",
+         "human_request": HUMAN_REQUEST},  # grandchild has an explicit human ask
         {"_gw": "hub", "id": "t_r4", "status": "done", "sessions": [_shep("s_mac")]},
     ])
     rows = [{"id": "s_mac"}, {"id": "hub_oneshot"}]
@@ -348,6 +368,7 @@ def test_rows_carry_the_open_card_ids_the_chat_waits_on(kanban_root):
         ("t4", "done", "s_done"),
     ])
     _make_board(kanban_root / "kanban" / "boards" / "other" / "kanban.db", [("t5", "todo", "s_tip")])
+    _add_human_requests(kanban_root / "kanban.db", "t2")
     rows = [
         {"id": "s_tip", "_lineage_root_id": "s_root", "_lineage_ids": ["s_root", "s_tip"]},
         {"id": "s_done", "kanban_waiting_on": ["stale"]},
@@ -415,6 +436,7 @@ def test_touch_subscription_to_someone_elses_card_never_keeps_the_toucher_busy_o
         ("t_run", "s_shepherd", "shepherd"),
     ])
     rows = [{"id": "s_toucher"}, {"id": "s_owner"}, {"id": "s_shepherd"}]
+    _add_human_requests(kanban_root / "kanban.db", "t_ask")
 
     ksa.annotate_kanban_activity(rows)
 
@@ -432,6 +454,7 @@ def test_legacy_non_owner_subscription_without_a_reason_stops_counting(kanban_ro
         ("t1", "running", "s_owner", None),
         ("t2", "blocked", "s_owner", "needs_input"),
     ], subs=[("t1", "s_old_toucher", None), ("t2", "s_old_toucher", None), ("t1", "s_owner", None)])
+    _add_human_requests(kanban_root / "kanban.db", "t2")
 
     assert ksa.active_task_counts() == {"s_owner": 1}
     assert ksa.blocked_task_counts() == {"s_owner": 1}

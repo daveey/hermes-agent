@@ -9,6 +9,7 @@ records and arguments is the order argparse renders in ``--help``.
 from __future__ import annotations
 
 import argparse
+import json
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
@@ -79,6 +80,8 @@ def _bulk_ids(verb: str):
 
 
 _TASK_ID = _arg("task_id")
+_HUMAN_REQUEST = _arg("--human-request", type=json.loads, metavar="JSON", default=argparse.SUPPRESS,
+                      help="Explicit human request evidence (action, why_human, interaction, scope, evidence); never authorization")
 
 
 def _WAKE_CHECK_ARGS():
@@ -172,6 +175,7 @@ _SPECS = [
          )),
     _cmd("create", [
         _arg("title", help="Task title"),
+        _HUMAN_REQUEST,
         _arg("--body", help="Optional opening post"),
         _arg("--body-file", metavar="PATH",
              help="Read the opening post from a file ('-' = stdin), so bodies with embedded "
@@ -228,8 +232,7 @@ _SPECS = [
              help="Turn budget for --goal workers (default 20). Ignored without --goal."),
         _arg("--initial-status", choices=sorted(kb.VALID_INITIAL_STATUSES), default="running",
              help="Initial card status. Use 'blocked' for cards "
-                  "that require immediate human ops (R3 gate) "
-                  "to skip the brief running-to-blocked transition."),
+                  "that must stay parked. Human asks additionally require explicit --human-request evidence."),
         _json_flag(help="Emit JSON output"),
     ], help="Create a new task"),
     _cmd("swarm", [
@@ -326,13 +329,16 @@ _SPECS = [
         *_STEP_HANDOFF,
     ], help="Edit task fields or recovery fields on an already-completed task"),
     _cmd("block", [
+        _HUMAN_REQUEST,
+        _arg("--metadata-only", action="store_true",
+             help="Audit parked legacy classification only; requires reason and --human-request (null clears); never unblocks"),
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason (also appended as a comment)"),
         _bulk_ids("block"),
         _arg("--kind", choices=sorted(kb.VALID_BLOCK_KINDS),
              help="Typed block reason. 'dependency' waits in todo (auto-promoted when "
                   "parents finish, no human); 'needs_input'/'capability' go to "
-                  "blocked for a human; 'transient' marks a maybe-flaky failure. "
+                  "blocked (human asks require --human-request); 'transient' marks a maybe-flaky failure. "
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
         *_WAKE_CHECK_ARGS(),
