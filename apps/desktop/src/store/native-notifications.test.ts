@@ -249,6 +249,40 @@ describe('dispatchNativeNotification focus gating', () => {
     }
   })
 
+  it('bounds a hung projection refresh and prevents its late publication', async () => {
+    vi.useFakeTimers()
+    const runtime = freshSession()
+    const stored = `${runtime}-stored`
+    publishSessionState(runtime, createClientSessionState(stored))
+    setActiveSessionId(runtime)
+    const endedAt = Date.now() / 1000
+    let oldMayPublish: (() => boolean) | undefined
+
+    const refreshProjection = vi.fn()
+      .mockImplementationOnce((mayPublish?: () => boolean) => {
+        oldMayPublish = mayPublish
+
+        return new Promise<void>(() => {})
+      })
+      .mockImplementation(async () => {
+        setSessions([{ id: stored, profile: 'default', kanban_observed_at: Date.now() / 1000 } as never])
+      })
+
+    try {
+      setSessions([{ id: stored, profile: 'default', kanban_unknown: true } as never])
+      dispatchNativeNotification({ kind: 'turnDone', sessionId: runtime, title: 'done',
+        projectionAfter: endedAt, refreshProjection })
+      await vi.advanceTimersByTimeAsync(45000)
+      expect(refreshProjection).toHaveBeenCalledTimes(2)
+      expect(oldMayPublish?.()).toBe(false)
+      expect(notify).toHaveBeenCalledTimes(1)
+    } finally {
+      dropSessionState(runtime)
+      setSessions([])
+      vi.useRealTimers()
+    }
+  })
+
   it('retains a missing projection using the independently recorded runtime owner', () => {
     const runtime = freshSession()
     const stored = `${runtime}-stored`

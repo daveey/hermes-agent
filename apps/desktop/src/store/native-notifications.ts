@@ -201,7 +201,7 @@ export interface NativeNotificationInput {
   /** Wait for an origin projection observed after this turn ended (epoch seconds). */
   projectionAfter?: number
   /** Existing session-list refresh, retained for background release checks. */
-  refreshProjection?: () => Promise<void>
+  refreshProjection?: (shouldPublish?: () => boolean) => Promise<void>
   /**
    * Not tied to a chat session (e.g. pet generation). Fires whenever the user
    * is away, bypassing the session-match gate that completion kinds normally
@@ -324,7 +324,21 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
     }
 
     const callbacks = new Set([...deferredCompletions.values()].map(p => p.input.refreshProjection))
-    await Promise.allSettled([...callbacks].filter(Boolean).map(callback => Promise.resolve().then(() => callback?.())))
+    // refreshSessions already accepts a publication guard. Time out this read
+    // without allowing a late page to overwrite a newer retry or owner state.
+    let current = true
+    let deadline: ReturnType<typeof setTimeout> | undefined
+
+    try {
+      await Promise.race([
+        Promise.allSettled([...callbacks].filter(Boolean).map(callback =>
+          Promise.resolve().then(() => callback?.(() => current && !stopped)))),
+        new Promise<void>(resolve => { deadline = setTimeout(resolve, 15000) })
+      ])
+    } finally {
+      current = false
+      clearTimeout(deadline)
+    }
 
     if (!stopped) {
       retry()
