@@ -30,7 +30,13 @@ def validate_contract(value: str | None) -> str:
 
 def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
          profile_home: str | None = None):
-    command = ["gh", "api", endpoint, "--hostname", "github.com"]
+    from hermes_platform.resolver.github import resolve_gh
+    env = _gh_env(profile_home)
+    resolved = resolve_gh(env.get("PATH") if env is not None else None)
+    if not resolved.found:
+        raise _GateSetupError("gh executable not found; install GitHub CLI on PATH or in ~/bin")
+    command = [*_gh_command_prefix(profile_home), *resolved.command,
+               "api", endpoint, "--hostname", "github.com"]
     if query is not None:
         command += ["-f", "query=" + query]
     if paginate:
@@ -38,7 +44,7 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
     try:
         result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=30,
-                                check=True, env=_gh_env(profile_home))
+                                check=True, env=env)
     except subprocess.CalledProcessError as exc:
         # 401/403/404 = the login cannot see this repository (wrong profile identity
         # or missing grant), not a transient API failure. Persist only the status
@@ -55,10 +61,48 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
     return value
 
 
+class _GateSetupError(RuntimeError):
+    """The acceptance transport is not installed or configured correctly."""
+
+
 class _GateAuthError(RuntimeError):
     """gh was refused at HTTP 401/403/404 (or GraphQL returned no repository):
     this profile's login cannot see the repo — an identity problem to fix, not
     an infrastructure blip to retry."""
+
+
+def _gh_command_prefix(profile_home: str | None) -> list[str]:
+    """Explicit per-assignee exec wrapper; secrets never return to this process.
+
+    The wrapper receives the resolved gh argv and the already-isolated child env.
+    This supports credential brokers without inheriting a supervisor's tokens.
+    """
+    from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_platform.resolver import locate_command
+    from ruamel.yaml.error import YAMLError
+
+    home = Path(profile_home) if profile_home else get_hermes_home()
+    token = set_hermes_home_override(home)
+    scope_token = None
+    try:
+        scope_token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
+        config = load_user_config_effective(home / "config.yaml", fail_closed=True)
+        prefix = config.get("kanban", {}).get("pr_acceptance", {}).get("gh_command_prefix", [])
+    except (OSError, ValueError, TypeError, AttributeError, YAMLError):
+        # Parser/config errors can contain interpolated credentials. Persist no raw text.
+        raise _GateSetupError("Cannot read kanban.pr_acceptance configuration; check profile config.yaml") from None
+    finally:
+        if scope_token is not None:
+            reset_secret_scope(scope_token)
+        reset_hermes_home_override(token)
+    if not isinstance(prefix, list) or any(not isinstance(s, str) or not s or "\x00" in s for s in prefix):
+        raise _GateSetupError("kanban.pr_acceptance.gh_command_prefix must be an argv list")
+    if prefix:
+        if not Path(prefix[0]).is_absolute() or not locate_command(prefix[0]).found:
+            raise _GateSetupError("gh_command_prefix requires an installed absolute executable path")
+    return prefix
 
 
 def _gh_env(profile_home: str | None) -> dict[str, str] | None:
@@ -193,6 +237,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
             return receipt
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
+        return receipt
+    except _GateSetupError as exc:
+        receipt.update(classification="setup", detail=str(exc))
         return receipt
     except _GateAuthError as exc:
         login = f"assignee profile {assignee!r}'s gh login" if assignee else "the ambient gh login"

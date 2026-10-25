@@ -25,6 +25,7 @@ type AutomatedRow = Pick<
   | 'id'
   | 'kanban_active'
   | 'kanban_attention'
+  | 'kanban_active'
   | 'kanban_blocked'
   | 'message_count'
   | 'pinned'
