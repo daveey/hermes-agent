@@ -60,11 +60,11 @@ import {
   SidebarRowLeadGlyph,
   SidebarRowShell
 } from './chrome'
-import { GatewayDeviceIcon } from './gateway-device-icon'
 import { shellOwnsPress } from './reorderable-list'
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
+import { gatewayMarks } from './session-row-offline'
 import { SessionRowSlot } from './session-row-slots'
 import { useProfilePrewarm } from './use-profile-prewarm'
 
@@ -184,10 +184,7 @@ function SidebarSessionRowImpl({
   const gatewayRegistry = useStore($connectionsRegistry)
   const gatewayId = sessionGatewayId(session, gatewayRegistry)
 
-  const gatewayIcon =
-    (gatewayRegistry?.connections.length ?? 0) > 1 ? (
-      <GatewayDeviceIcon className="ml-1 align-[-2px]" gatewayId={gatewayId} />
-    ) : null
+  const gatewayIcon = gatewayMarks(session, gatewayRegistry, gatewayId)
 
   // [daveey] Kanban work this session is waiting on: open (queued/running)
   // and blocked task counts, after the age and before the gateway glyph.
