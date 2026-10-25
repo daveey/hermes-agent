@@ -3,17 +3,18 @@ import { expect, test, vi } from 'vitest'
 import { ManagedConnectionUpdateGate } from './managed-ssh-update'
 import { createPoolStopper } from './pool-stop'
 import { createRegistryReconnectService } from './registry-reconnect-service'
+import type { createRegistryRetirementClient } from './registry-retirement-http'
 
 function fixture() {
   const descriptor = { baseUrl: 'http://hub', token: 'synthetic' }
-  const primary = { process: null, connectionPromise: Promise.resolve({ baseUrl: 'http://local' }) }
+  const primary = { process: null, connectionPromise: Promise.resolve({ baseUrl: 'http://local', token: 'synthetic-local' }) }
   const entry = { process: null, connectionPromise: Promise.resolve(descriptor) }
   const state = { registryConnectionId: 'hub', primaryRegistryScope: false, spawnNonce: 'owned', remotePlatform: 'Linux' }
   const pool = new Map([['default', primary], ['conn:hub::default', entry]])
   const states = new Map([['conn:hub::default', state]])
   const gate = new ManagedConnectionUpdateGate()
 
-  const request = vi.fn(async (_descriptor, path, options) => path === '/api/ssh/ownership'
+  const request = vi.fn<Parameters<typeof createRegistryRetirementClient<typeof descriptor>>[0]>(async (_descriptor, path, options) => path === '/api/ssh/ownership'
     ? { ok: true, protocolVersion: 1, sshOwnerNonce: 'owned', runtimeIntact: false }
     : { ok: true, idle: true, token: 'permit', action: options.body?.action })
 

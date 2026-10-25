@@ -528,8 +528,7 @@ import {
   createQuitTeardownCoordinator,
   type QuitTeardownTask
 } from './quit-teardown'
-import { createRegistryReconnectService } from './registry-reconnect-service'
-import { proveRegistryOwnerStopped } from './registry-stopped-owner'
+import { createSshReuseProbe, wireRegistryReconnect } from './registry-reconnect-wiring'
 import * as remoteLifecycle from './remote-lifecycle'
 import {
   attachPowerResumeRemoteRevalidation,
@@ -9853,20 +9852,6 @@ function sshRememberLog(chunk) {
   rememberLog(redactSecrets(String(chunk == null ? '' : chunk)))
 }
 
-async function sshProbeReuseProof(baseUrl, token, spawnNonce) {
-  try {
-    const proof: any = await fetchJson(`${baseUrl}/api/ssh/ownership`, token)
-
-    return remoteLifecycle.classifySshReuseProof(proof, spawnNonce)
-  } catch (error: any) {
-    if (/^(401|403|404):/.test(String(error?.message || ''))) {
-      return 'authenticated-stale'
-    }
-
-    throw error
-  }
-}
-
 async function teardownSshConnection(profile) {
   const scope = sshScopeKey(profile)
   registryReconnectService.assertCanStop(scope)
@@ -10246,7 +10231,7 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
       cancelForward: (localPort, remotePort) => ssh.cancelForward(localPort, remotePort),
       pickLocalPort,
       waitForHermes: (baseUrl, token) => waitForHermes(baseUrl, token, lease.signal, 'token'),
-      probeReuseProof: sshProbeReuseProof,
+      probeReuseProof: createSshReuseProbe(fetchJson),
       adoptServedToken: adoptServedDashboardToken,
       rememberLog: sshRememberLog,
       guestOnboarding: GUEST_ONBOARDING,
@@ -11309,9 +11294,7 @@ async function ensureRegistryBackend(
     return ensureRegistryBackend(connectionId, profile, managedUpdateCorrelation, opts)
   }
 
-  if (source.kind === 'ssh') {
-    managedConnectionUpdateGate.assertCanDial(id, managedUpdateCorrelation)
-  }
+  registryReconnectService.assertCanDial(source.kind, id, managedUpdateCorrelation)
 
   const entry = {
     process: null,
@@ -16149,38 +16132,16 @@ ipcMain.handle('hermes:secret-storage:get', async () => ({ on: secretStoragePoli
 ipcMain.handle('hermes:secret-storage:set', async (_event: any, on: any) => applySecretStorageEncryption(on === true))
 
 // ── v2 connection registry IPC (multi-source) ───────────────────────────────
-// Storage-level CRUD for named agent sources. Routing/pooling consumption of
-// the registry lands separately; these handlers only manage the persisted
-// list, so they are safe to ship ahead of the switchover.
-const registryReconnectService = createRegistryReconnectService({
-  pool: backendPool,
-  states: sshConnections,
-  gate: managedConnectionUpdateGate,
-  key: backendScopeKey,
-  isSsh: id => readDesktopConnectionsRegistry().connections.some(source => source.id === id && source.kind === 'ssh'),
-  inFlight: key => Boolean(backendDialClaims.inFlight(key) || poolStopper.inFlight(key) || sshBootstrapCoordinator.pending.has(key)),
+const registryReconnectService = wireRegistryReconnect({
+  ipcMain, pool: backendPool, states: sshConnections,
+  gate: managedConnectionUpdateGate, key: backendScopeKey,
+  readRegistry: readDesktopConnectionsRegistry,
+  dialClaims: backendDialClaims, poolStopper, bootstrap: sshBootstrapCoordinator,
   request: (descriptor, requestPath, options) => fetchJsonForBackend(descriptor, requestPath, options),
-  proveStopped: state => proveRegistryOwnerStopped(state.ssh, { ...state, profile: state.remoteProfile || '' }),
-  terminate: async state => {
-    const expected = { ...state, profile: state.remoteProfile || '' }
-
-    if (state.remotePlatform !== 'Linux') { throw new Error('Unsupported registry SSH platform') }
-    await remoteLifecycle.terminateOwnedDashboardForUpdate(state.ssh, expected)
-  },
-  close: async (key, state) => {
-    sshIsolatedKeepalives.stop(key)
-    terminalIpc.disposeTerminalSessionsForSshScope(key)
-    // The owned serve is already confirmed stopped. Closing its transport
-    // must never fall back to generic remote disconnect/kill.
-    await state.ssh.close().catch(error => sshRememberLog(`[registry-reconnect] transport close: ${String(error)}`))
-  },
-  onCleanupError: error => sshRememberLog(`[registry-reconnect] cleanup: ${String(error)}`),
+  keepalives: sshIsolatedKeepalives, disposeTerminals: key => terminalIpc.disposeTerminalSessionsForSshScope(key),
+  log: sshRememberLog,
   reopen: (id, profile, correlation) => ensureRegistryBackend(id, profile, correlation)
 })
-
-ipcMain.handle('hermes:connections:reconnect-target', (_event, id, profile) =>
-  registryReconnectService.target(id, profile))
-ipcMain.handle('hermes:connections:reconnect', (_event, target) => registryReconnectService.run(target))
 
 ipcMain.handle('hermes:connections:list', async () => sanitizeConnectionsRegistry())
 ipcMain.handle('hermes:connections:save', async (_event, payload) => {
