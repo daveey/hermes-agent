@@ -78,6 +78,34 @@ login. A login that cannot see the repository is rejected with
 `classification=auth`, naming the profile and repository, instead of a
 retryable infra failure.
 
+On short-lived credential-broker hosts, opt in separately in each assignee's
+config with `kanban.pr_acceptance.gh_command_prefix`, an argv list prepended to
+all gate `gh` commands. For example:
+
+```yaml
+kanban:
+  pr_acceptance:
+    gh_command_prefix:
+      - /absolute/path/to/token-broker
+      - exec
+      - --scope
+      - user/github
+      - --reason
+      - Kanban PR acceptance
+      - --
+```
+
+The first element must be an installed absolute executable path. No shell is
+used. The wrapper receives the isolated profile environment and must exec the
+appended command, preserve its exit status, and emit only the command's JSON on
+stdout. It must vend credentials into that child's environment, never print or
+persist tokens. Use noninteractive/already-approved scopes: the whole read has
+a 30-second timeout. Do not put credentials in this setting. The default is an
+empty list (ordinary profile-isolated login); routed profiles do not inherit the
+launch profile's wrapper. `gh` is resolved on the child PATH, then in `~/bin` and
+`~/.local/bin`; a missing CLI or invalid wrapper setting is a `setup` rejection,
+not a transient infrastructure failure.
+
 Rejection retains the active card and workspace. Durable `pr_acceptance` events
 store PR URL, SHA, required contexts, check IDs/URLs, classifications and recovery
 instructions; `last_failure_error` surfaces the next step. Fix failures, rerun

@@ -137,11 +137,11 @@ def _kanban_scratch(project, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("mock_pyright", [False, True], ids=["single-root", "multi-root"], indirect=True)
-@pytest.mark.parametrize("entry", [_kanban_worktree, _cli_worktree, _subagent_worktree, _kanban_scratch],
+@pytest.mark.parametrize("entry", [_kanban_worktree, _cli_worktree, _subagent_worktree],
                          ids=lambda f: f.__name__.strip("_"))
 def test_workspace_removal_releases_only_its_language_servers(entry, mock_pyright, project, tmp_path,
                                                                  monkeypatch):
-    """Every in-process workspace-removal path (kanban worktree/scratch cleanup, ``hermes -w`` exit, the
+    """Every in-process workspace-removal path (kanban worktree cleanup, ``hermes -w`` exit, the
     delegate_task worktree prune) shuts down (single-root) or detaches (multi-root) exactly the removed
     root's servers BEFORE the tree goes: the sibling keeps serving diagnostics, the released state is gone
     everywhere, and a repeat release is a no-op."""
@@ -190,5 +190,30 @@ def test_reaper_shuts_down_client_whose_root_was_deleted(mock_pyright, tmp_path)
         svc._loop.run(svc._reap_idle_once(), timeout=10.0)
         assert key not in svc._clients and key not in svc._last_used
         assert proc.returncode is not None, "reaped server process must have exited"
+    finally:
+        svc.shutdown()
+
+
+@pytest.mark.parametrize("mock_pyright", [False, True], ids=["single-root", "multi-root"], indirect=True)
+def test_git_bearing_kanban_scratch_is_preserved_with_its_language_servers(mock_pyright, project, tmp_path,
+                                                                          monkeypatch):
+    """A scratch workspace only gets language servers when it holds a Git checkout, and completion
+    deliberately preserves Git-bearing scratch (``_scratch_tree_removable``). Completion must therefore
+    neither delete the tree nor tear down the servers still serving it; the sibling is untouched."""
+    gone, kept, complete = _kanban_scratch(project, tmp_path, monkeypatch)
+    ws_s, kept_s = str(gone.resolve()), str(kept.resolve())
+    svc = _service()
+    monkeypatch.setattr(agent.lsp, "_service", svc)
+    try:
+        assert svc.get_diagnostics_sync(str(gone / "x.py"), delta=False)
+        assert svc.get_diagnostics_sync(str(kept / "x.py"), delta=False)
+        before = {key: list(c.workspace_folders) for key, c in svc._clients.items()}
+
+        complete()
+
+        assert (gone / ".git").is_dir() and (gone / "x.py").is_file(), "Git-bearing scratch must be preserved"
+        assert {key: list(c.workspace_folders) for key, c in svc._clients.items()} == before
+        assert any(ws_s in c.workspace_folders for c in svc._clients.values())
+        assert any(kept_s in c.workspace_folders for c in svc._clients.values())
     finally:
         svc.shutdown()

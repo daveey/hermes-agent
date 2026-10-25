@@ -1894,10 +1894,10 @@ DEFAULT_CONFIG = {
         # cron.scheduler.DEFAULT_FAILURE_REPEAT_ALERT_HOURS.
         "failure_repeat_alert_hours": 6,
     },
-    # Kanban multi-agent coordination. The dispatcher ticks every N seconds, reclaims stale claims,
-    # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
-    # claimable task. Run ONE dispatcher per profile; two on the same kanban.db race for claims.
+    # Kanban coordination: one dispatcher per board reclaims, promotes, and spawns workers.
     "kanban": {
+        # Opt-in per-profile broker argv before gh (empty = ordinary login); never include tokens.
+        "pr_acceptance": {"gh_command_prefix": []},
         # Calendar retention for terminal worktrees; archive commits to recovery
         # refs before reaping. 0 disables age-based archival/startup sweeping.
         "worktree_retention_days": 7,

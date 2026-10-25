@@ -1509,7 +1509,7 @@ def test_transient_remote_stop_failure_stays_pending_and_retries(db: Path):
     identity = _identity()
     _admit(db, identity)
     rpc = FakeSessionRPC(auto_complete=False)
-    runtime = _runtime(db, rpc)
+    runtime = _runtime(db, rpc, lease_ttl_seconds=30.0)  # not under test; 0.4 s lapsed on loaded CI (t_94f2c8ba)
     original_interrupt = rpc.interrupt
     attempts = 0
     retry_allowed = threading.Event()
@@ -1519,18 +1519,18 @@ def test_transient_remote_stop_failure_stays_pending_and_retries(db: Path):
         attempts += 1
         if attempts == 1:
             raise RuntimeError("temporary stop transport failure")
-        assert retry_allowed.wait(1.0)
+        assert retry_allowed.wait(30)
         return original_interrupt(**kwargs)
 
     rpc.interrupt = flaky_interrupt
     runtime.start()
-    assert rpc.submitted.wait(1.0)
+    assert rpc.submitted.wait(30)
     stopping = runtime.cancel(identity, cancel_id="cancel-retry")
     assert stopping["status"] == "stopping"
     assert state.get_task(db, identity)["status"] == "stopping"
     retry_allowed.set()
     runtime.wakeup()
-    _wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled")
+    _wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=30)
     assert attempts >= 2
     assert runtime.stop(timeout=5.0)
     assert state.get_task(db, identity)["status"] == "cancelled"
