@@ -170,7 +170,7 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
             }}))
             assert child.pid > 0
     """).strip()
-    probe.write_text(probe_src + "\n")
+    probe.write_text(probe_src + "\n", encoding="utf-8")
 
     # Run the parallel runner against just the probe file. The runner
     # discovers under ``tests/`` by default, so we override via --paths.
@@ -202,7 +202,7 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
     assert handoff.exists(), (
         f"probe never wrote handoff file; runner output:\n{proc.stdout}"
     )
-    handoff_data = json.loads(handoff.read_text())
+    handoff_data = json.loads(handoff.read_text(encoding="utf-8-sig"))
     grandchild_pid = handoff_data["pid"]
     diag = handoff_data.get("diag", "(no diag)")
     test_pid = handoff_data.get("test_pid")
@@ -428,6 +428,132 @@ def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The retry reruns only the failed test ids (t_94f2c8ba). A file whose one
+# flaky test failed used to pay the whole file again (test_run_agent.py: 2 x
+# 320 s under load). A pass-on-retry is still FLAKY and lands in the report
+# that files the deflake card; a test that fails twice keeps the run red.
+
+
+def _run_probe_file(tmp_path: Path, body: str, *extra: str) -> tuple[subprocess.CompletedProcess, dict]:
+    repo_root = _probe_root(tmp_path)
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe = tmp_path / "test_retry_probe.py"
+    probe.write_text(textwrap.dedent(body), encoding="utf-8")
+    report = tmp_path / "flaky.json"
+    proc = subprocess.run(
+        [sys.executable, str(runner), "--files", str(probe), "--file-retries", "1",
+         "-j", "1", "--flaky-report", str(report), *extra],
+        cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, timeout=120, check=False,
+    )
+    return proc, json.loads(report.read_text(encoding="utf-8-sig"))
+
+
+def test_retry_reruns_only_the_failed_test_and_reports_it_flaky(tmp_path: Path) -> None:
+    runs = tmp_path / "runs.log"
+    marker = tmp_path / "failed-once"
+    proc, report = _run_probe_file(tmp_path, f"""
+        from pathlib import Path
+
+        def _note(name):
+            with open({str(runs)!r}, "a") as f:
+                f.write(name + "\\n")
+
+        def test_steady():
+            _note("steady")
+
+        class TestGroup:
+            def test_flaky_once(self):
+                _note("flaky")
+                marker = Path({str(marker)!r})
+                if not marker.exists():
+                    marker.write_text("x")
+                    assert False, "simulated load flake"
+    """)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "FLAKY" in proc.stdout and "retried 1 failed test id" in proc.stdout
+    assert "simulated load flake" in proc.stdout
+    # The passing test ran once: only the failed id was retried.
+    assert runs.read_text(encoding="utf-8-sig").split() == ["steady", "flaky", "flaky"]
+    assert [e["test_id"].rsplit("/", 1)[-1] for e in report["flaky"]] == [
+        "test_retry_probe.py::TestGroup::test_flaky_once"
+    ]
+    assert report["flaky"][0]["retried"] == "tests"
+    assert "simulated load flake" in report["flaky"][0]["first_attempt_excerpt"]
+    # The summary counts the file's tests once each, not the retry twice.
+    assert "2 tests passed, 0 failed" in proc.stdout
+
+
+def test_retry_keeps_a_hard_failure_red_and_out_of_the_flaky_report(tmp_path: Path) -> None:
+    proc, report = _run_probe_file(tmp_path, """
+        def test_fine():
+            assert True
+
+        def test_broken():
+            assert 1 == 2, "real regression"
+    """)
+
+    assert proc.returncode == 1, proc.stdout
+    assert "still failing" in proc.stdout
+    assert "real regression" in proc.stdout
+    assert "FLAKY" not in proc.stdout
+    assert report == {"version": 1, "flaky": []}
+    assert "1 tests passed, 1 failed" in proc.stdout
+
+
+def test_collection_error_falls_back_to_a_whole_file_retry(tmp_path: Path) -> None:
+    marker = tmp_path / "import-failed-once"
+    proc, report = _run_probe_file(tmp_path, f"""
+        from pathlib import Path
+
+        _m = Path({str(marker)!r})
+        if not _m.exists():
+            _m.write_text("x")
+            raise RuntimeError("import-time flake")
+
+        def test_after_import():
+            assert True
+    """)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "retried whole file" in proc.stdout
+    assert len(report["flaky"]) == 1 and report["flaky"][0]["retried"] == "file"
+    assert report["flaky"][0]["test_id"].endswith("test_retry_probe.py")
+
+
+def test_failed_node_ids_ignore_nested_pytest_summaries() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "rtp_ids", Path(__file__).resolve().parents[2] / "scripts" / "run_tests_parallel.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["rtp_ids"] = mod
+    spec.loader.exec_module(mod)
+    out = "\n".join([
+        "captured: ==== short test summary info ====",
+        "FAILED inner.py::test_nested - from a subprocess the test ran",
+        "=========================== short test summary info ============================",
+        "FAILED tests/a.py::TestX::test_one[p - q] - AssertionError: boom",
+        "ERROR tests/a.py::test_two - fixture failed",
+        "=================== 1 failed, 1 error, 3 passed in 1.0s ===================",
+    ])
+    assert mod._failed_node_ids(out, {"failed": 1, "errors": 1, "passed": 3}) == [
+        "tests/a.py::TestX::test_one[p - q]",
+        "tests/a.py::test_two",
+    ]
+    # Count mismatch (e.g. -rN or a truncated summary) -> whole-file retry.
+    assert mod._failed_node_ids(out, {"failed": 3, "passed": 3}) is None
+    # Collection error has no test id.
+    assert mod._failed_node_ids(
+        "==== short test summary info ====\nERROR tests/a.py - ImportError\n==== 1 error ====",
+        {"errors": 1},
+    ) is None
+    assert mod._reroot_node_id("tests/a.py::T::t", Path("/abs/a.py")) == "/abs/a.py::T::t"
+
+
+# ---------------------------------------------------------------------------
 # Zero-collection is not a pass; node ids are translated, not dropped.
 #
 # Both behaviors were real foot-guns: a run where NOTHING was collected printed
@@ -592,7 +718,7 @@ def test_files_from_runs_exactly_the_listed_files(tmp_path: Path) -> None:
     probe_dir = _make_probe_dir(tmp_path)
     extra = tmp_path / "probe_extra"
     extra.mkdir()
-    (extra / "test_extra.py").write_text("def test_extra():\n    assert True\n")
+    (extra / "test_extra.py").write_text("def test_extra():\n    assert True\n", encoding="utf-8")
 
     list_file = tmp_path / "files.txt"
     list_file.write_text(
