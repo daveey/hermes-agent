@@ -456,6 +456,8 @@ _SPECS = [
               "to specify-style single-task promotion when the task "
               "doesn't benefit from fan-out. Uses auxiliary.kanban_decomposer."),
     _cmd("gc", [
+        _arg("--worktree-retention-days", type=_nonnegative_int, default=None,
+             help="Archive committed work and reap terminal task worktrees after N days (config/default: 7; 0 disables)"),
         _arg("--event-retention-days", type=_nonnegative_int, default=30,
              help="Delete task_events older than N days for terminal tasks (default: 30; 0 disables)"),
         _arg("--log-retention-days", type=_nonnegative_int, default=30,

@@ -134,9 +134,11 @@ def continue_task(
                 check_every=check_every, clock_only=clock_only)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        # A successful checkpoint supersedes stale auth/quota diagnostics, not counters.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, "
-            "worker_pid = NULL, worker_started_at = NULL, last_heartbeat_at = NULL "
+            "worker_pid = NULL, worker_started_at = NULL, last_heartbeat_at = NULL, "
+            "last_failure_error = NULL "
             "WHERE id = ? AND status = 'running' AND current_run_id = ?",
             (new_status, task_id, int(row["current_run_id"])),
         )

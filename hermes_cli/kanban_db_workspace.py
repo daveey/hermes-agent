@@ -461,14 +461,16 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def _cleanup_worktree_workspace(
-    task_id: str, path: str, branch_name: Optional[str] = None
+    task_id: str, path: str, branch_name: Optional[str] = None,
+    *, archive_unpushed: bool = False,
 ) -> None:
     """Remove a finished task's linked git worktree when it holds no work.
     Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
     requires a clean tree AND every commit reachable from a remote-tracking
     ref; any doubt (dirty, unpushed, unresolvable repo, failing git) preserves
     it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
-    branches are kept. Best-effort."""
+    branches are kept. Retention GC may opt into archive_unpushed: first save
+    HEAD to a verified recovery ref, then remove without --force. Best-effort."""
     try:
         from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
     except Exception:
@@ -483,12 +485,28 @@ def _cleanup_worktree_workspace(
         repo_root = common.parent
         if _path_key(wp.resolve(strict=False)) == _path_key(repo_root.resolve(strict=False)):
             return  # never remove the main checkout
-        if _worktree_is_dirty(str(wp), str(repo_root)) or _worktree_has_unpushed_commits(str(wp)):
+        archived_head = None
+        if _worktree_is_dirty(str(wp), str(repo_root)) or (
+            not archive_unpushed and _worktree_has_unpushed_commits(str(wp))
+        ):
             _kb._log.info(
                 "Preserving worktree for task %s: dirty or unpushed work at %s",
                 task_id, wp,
             )
             return
+        if archive_unpushed:
+            # Keep the entire history reachable even after ordinary Git GC. The
+            # object id in the ref name makes retries/non-fast-forward runs safe.
+            head = _git(wp, "rev-parse", "--verify", "HEAD^{commit}", timeout=10)
+            if head.returncode != 0:
+                return
+            archived_head = head.stdout.strip()
+            ref = f"refs/hermes/kanban-archive/{task_id}/{archived_head}"
+            saved = _git(repo_root, "update-ref", ref, archived_head, timeout=10)
+            verified = _git(repo_root, "rev-parse", "--verify", ref, timeout=10)
+            if saved.returncode or verified.returncode or verified.stdout.strip() != archived_head:
+                return  # archive failure MUST preserve both tree and branch
+            _kb._log.info("Archived worktree %s at %s", wp, ref)
         # Windows cannot delete a directory while this process has its current
         # directory inside it. Completed workers normally run from their own
         # linked worktree, so move this process back to the main checkout
@@ -528,7 +546,11 @@ def _cleanup_worktree_workspace(
         _kb._log.debug("Removed worktree workspace: %s", wp)
         branch = (branch_name or "").strip() or f"wt/{task_id}"
         if branch.startswith("wt/"):
-            _git(repo_root, "branch", "-D", branch, timeout=30)
+            if archived_head:
+                # Compare-and-delete: never drop a branch advanced since archival.
+                _git(repo_root, "update-ref", "-d", f"refs/heads/{branch}", archived_head, timeout=30)
+            else:
+                _git(repo_root, "branch", "-D", branch, timeout=30)
     except Exception:
         pass  # best-effort — never block completion
 

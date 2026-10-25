@@ -446,7 +446,7 @@ def _task_route_cfg(task: dict[str, Any], routing_cfg: dict[str, Any]) -> tuple[
 
 
 def _resolve_task_routes(
-    task_list: list[dict[str, Any]], creds: dict[str, Any], routing_cfg: dict[str, Any], parent_agent,
+    task_list: list[dict[str, Any]], creds: Optional[dict[str, Any]], routing_cfg: dict[str, Any], parent_agent,
 ) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], Optional[str]]:
     """``[(creds, routing_cfg), ...]`` per task: the call-wide route, or the task's own ``model``/``provider`` pin
     resolved through the same credential path as ``delegation.*``. ``([], error)`` on a bad pin."""
@@ -455,10 +455,14 @@ def _resolve_task_routes(
         task_cfg, err = _task_route_cfg(t, routing_cfg)
         if err:
             return [], f"Task {i}: {err}"
-        if task_cfg is None:
-            routes.append((creds, routing_cfg))
-            continue
         try:
+            if task_cfg is None:
+                # Resolve the default only if a child actually uses it. An unused
+                # default with missing credentials must not veto an explicit route.
+                if creds is None:
+                    creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
+                routes.append((creds, routing_cfg))
+                continue
             task_creds = _resolve_delegation_credentials(task_cfg, parent_agent)
         except ValueError as exc:
             return [], f"Task {i}: {exc}"
@@ -591,12 +595,6 @@ def delegate_task(
     # a per-call routing owner shaped like the delegation config section. Keep
     # the route and its fallback policy together through child construction.
     routing_cfg = credentials_cfg if credentials_cfg is not None else cfg
-    try:
-        creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
-    except ValueError as exc:
-        # Explicit-pin preflight failures (e.g. pinned delegation.command missing from PATH) refuse the
-        # spawn loudly (#80450).
-        return tool_error(str(exc))
     max_children = _get_max_concurrent_children()
     task_list, err = _normalize_task_list(goal, context, tasks, output_schema, top_role, max_children)
     if not err:
@@ -605,9 +603,12 @@ def delegate_task(
         task_images, err = _coerce_task_images(task_list, images)
     if err:
         return tool_error(err)
-    task_routes, err = _resolve_task_routes(task_list, creds, routing_cfg, parent_agent)
+    task_routes, err = _resolve_task_routes(task_list, None, routing_cfg, parent_agent)
     if err:
         return tool_error(err)
+    # Batch metadata uses an actual selected route, never an unused default.
+    # Child construction always receives its own preflighted task_routes entry.
+    creds = task_routes[0][0]
     err = _oneshot_spawn_budget(parent_agent, len(task_list))
     if err:
         return tool_error(err)

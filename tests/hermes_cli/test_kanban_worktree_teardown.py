@@ -175,6 +175,28 @@ def test_unpushed_commits_preserved(repo: Path) -> None:
     assert wt.is_dir()
 
 
+def test_gc_reaps_stale_unpushed_worktree(kanban_home: Path, repo: Path) -> None:
+    import argparse
+    import time
+    from hermes_cli.kanban_ops import _cmd_gc
+
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        (wt / "local.txt").write_text("recover me\n")
+        _git("-C", str(wt), "add", "local.txt")
+        _git("-C", str(wt), "commit", "-m", "unpushed")
+        head = _git("-C", str(wt), "rev-parse", "HEAD").strip()
+        old = int(time.time()) - 9 * 86400
+        conn.execute("UPDATE tasks SET status='archived', completed_at=?, created_at=? WHERE id=?",
+                     (old, old, tid))
+        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?", (old, tid))
+    assert _cmd_gc(argparse.Namespace(event_retention_days=0, log_retention_days=0,
+                                      worktree_retention_days=7)) == 0
+    assert not wt.exists()
+    assert not _branch_exists(repo, f"wt/{tid}")
+    assert _git("-C", str(repo), "show", f"refs/hermes/kanban-archive/{tid}/{head}:local.txt") == "recover me\n"
+
+
 def test_custom_branch_survives_worktree_removal(repo: Path) -> None:
     wt = _make_worktree(repo, "t_dddd4444", branch="feature/custom")
     kbw._cleanup_worktree_workspace("t_dddd4444", str(wt), "feature/custom")
@@ -206,8 +228,6 @@ def test_tree_dirtied_between_check_and_removal_preserved(
     ``--force``, git's own dirty guard re-verifies at removal time and the
     removal fails safe.
     """
-    import cli
-
     wt = _make_worktree(repo, "t_gggg7777")
     (wt / "late-wip.txt").write_text("dirtied after the check\n", encoding="utf-8")
     # Pre-check lies (as if the file appeared just after it ran) — real git
@@ -288,6 +308,125 @@ def test_parent_worktree_deferred_until_children_done(
         assert kb.complete_task(conn, child, summary="child done")
     # last child terminal -> deferred parent worktree reaped
     assert not parent_wt.exists()
+
+
+def _age_task(conn, tid, status="done", days=9):
+    import time
+    old = int(time.time()) - days * 86400
+    conn.execute("UPDATE tasks SET status=?, completed_at=?, created_at=? WHERE id=?", (status, old, old, tid))
+    conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?", (old, tid))
+
+
+def _local_commit(wt):
+    (wt / "local.txt").write_text("precious\n")
+    _git("-C", str(wt), "add", "local.txt")
+    _git("-C", str(wt), "commit", "-m", "local")
+    return _git("-C", str(wt), "rev-parse", "HEAD").strip()
+
+
+@pytest.mark.parametrize("status,days,retention,dirty,keep", [
+    ("done", 9, 7, False, False), ("failed", 9, 7, False, False),
+    ("cancelled", 9, 7, False, False), ("archived", 9, 7, False, False),
+    ("running", 9, 7, False, True), ("review", 9, 7, False, True),
+    ("blocked", 9, 7, False, True), ("done", 1, 7, False, True),
+    ("done", 9, 0, False, True), ("done", 9, 30, False, True),
+    ("done", 9, 7, True, True),
+])
+def test_retention_safety(kanban_home, repo, status, days, retention, dirty, keep):
+    from hermes_cli.kanban_worktree_gc import gc_task_worktrees
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        head = _local_commit(wt)
+        _age_task(conn, tid, status, days)
+        if dirty:
+            (wt / "local.txt").write_text("uncommitted\n")
+        assert gc_task_worktrees(conn, older_than_days=retention) == int(not keep)
+    assert wt.exists() == keep
+    if not keep:
+        _git("-C", str(repo), "gc", "--prune=now")
+        assert _git("-C", str(repo), "show", f"refs/hermes/kanban-archive/{tid}/{head}:local.txt") == "precious\n"
+
+
+@pytest.mark.parametrize("guard", ["child", "shared", "archive-failure", "locked"])
+def test_retention_preserves_guarded_tree(kanban_home, repo, monkeypatch, guard):
+    from hermes_cli.kanban_worktree_gc import gc_task_worktrees
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        _local_commit(wt)
+        _age_task(conn, tid)
+        if guard in {"child", "shared"}:
+            other = kb.create_task(conn, title="still working", assignee="worker")
+            if guard == "child":
+                kb.link_tasks(conn, tid, other)
+            else:
+                conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(wt), other))
+        elif guard == "locked":
+            _git("-C", str(repo), "worktree", "lock", str(wt))
+        else:
+            real_git = kbw._git
+            def fail_archive(root, *args, **kwargs):
+                if args[0] == "update-ref":
+                    return subprocess.CompletedProcess(args, 1, "", "archive failed")
+                return real_git(root, *args, **kwargs)
+            monkeypatch.setattr(kbw, "_git", fail_archive)
+        assert gc_task_worktrees(conn) == 0
+        assert wt.exists()
+        assert _branch_exists(repo, f"wt/{tid}")
+
+
+def test_startup_reaps_archived_and_tombstones_missing_owner(kanban_home, repo, monkeypatch):
+    import json
+    from hermes_cli import kanban_worktree_gc as gc
+    monkeypatch.setattr(gc, "retention_days", lambda: 7)
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        _local_commit(wt)
+        _age_task(conn, tid, "archived")
+        missing, orphan = _worktree_task(conn, repo)
+        _local_commit(orphan)
+        conn.execute("DELETE FROM task_events WHERE task_id=?", (missing,))
+        conn.execute("DELETE FROM tasks WHERE id=?", (missing,))
+    gc.sweep_repo(str(repo))
+    assert not wt.exists()
+    assert orphan.exists()
+    tombstones = list((kanban_home / "archive" / "kanban-orphans").glob("*.json"))
+    assert len(tombstones) == 1
+    assert json.loads(tombstones[0].read_text())["path"] == str(orphan)
+    gc.sweep_repo(str(repo))
+    assert len(list(tombstones[0].parent.glob("*.json"))) == 1
+
+
+def test_retention_config_and_startup_entry(kanban_home, repo, monkeypatch):
+    from hermes_cli import kanban_worktree_gc as gc, worktree_ops
+    config = kanban_home / "config.yaml"
+    config.write_text("kanban:\n  worktree_retention_days: 30\n")
+    assert gc.retention_days() == 30
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        _local_commit(wt)
+        _age_task(conn, tid)
+    monkeypatch.setattr(worktree_ops, "_prune_stale_worktree_trees", lambda *a: None)
+    monkeypatch.setattr(worktree_ops, "_reclaim_orphan_install_states", lambda: None)
+    worktree_ops._prune_stale_worktrees(str(repo))
+    assert wt.exists()
+    config.write_text("kanban:\n  worktree_retention_days: 7\n")
+    worktree_ops._prune_stale_worktrees(str(repo))
+    assert not wt.exists()
+
+
+def test_startup_unreadable_board_preserves_everything(kanban_home, repo, monkeypatch):
+    from hermes_cli import kanban_worktree_gc as gc
+    monkeypatch.setattr(gc, "retention_days", lambda: 7)
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        _local_commit(wt)
+        _age_task(conn, tid)
+    bad = kanban_home / "kanban" / "boards" / "broken" / "kanban.db"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("not sqlite")
+    gc.sweep_repo(str(repo))
+    assert wt.exists()
+    assert not (kanban_home / "archive" / "kanban-orphans").exists()
 
 
 def _running_scratch_parent(conn, title: str = "parent") -> tuple[str, Path]:

@@ -3,7 +3,9 @@
 ``active_pr`` exists to stop a second worker opening a duplicate PR. Once every PR a
 card's comments name is MERGED or CLOSED there is nothing left to duplicate, so the hold
 must lift (2026-10-23: t_d507533c sat held 6 h after Metta-AI/coworld-qwop#1 merged).
-States come from ``gh pr view --json state``; anything else (gh missing, auth, network,
+States and queue markers come from ``gh pr view --json state,comments``. A completed
+rejection releases the worker to repair the existing PR, with a quoted card comment.
+Anything unknown (gh missing, auth, network,
 timeout, unparseable output) is ``None`` and the caller keeps holding (fail closed).
 
 Results are cached per process: terminal states forever (a merged PR never reopens; a
@@ -30,12 +32,13 @@ GH_TIMEOUT_SECONDS = 20
 
 # url -> (state or None, monotonic expiry or None for "forever")
 _cache: dict[str, tuple[Optional[str], Optional[float]]] = {}
+_rejections: dict[str, str] = {}
 
 
 def _gh_pr_state(url: str) -> Optional[str]:
-    """``MERGED`` / ``CLOSED`` / ``OPEN`` for ``url`` via gh, or ``None`` on any failure."""
+    """GitHub state, ``REJECTED`` for a completed queue rejection, or None on failure."""
     try:
-        proc = subprocess.run(["gh", "pr", "view", url, "--json", "state"], stdin=subprocess.DEVNULL,
+        proc = subprocess.run(["gh", "pr", "view", url, "--json", "state,comments"], stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=GH_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -45,10 +48,21 @@ def _gh_pr_state(url: str) -> Optional[str]:
         logger.debug("kanban: gh pr view %s exited %s: %s", url, proc.returncode, (proc.stderr or "")[:200])
         return None
     try:
-        state = json.loads(proc.stdout or "{}").get("state")
+        data = json.loads(proc.stdout or "{}")
+        state = data.get("state")
     except (ValueError, AttributeError):
         return None
-    return state.upper() if isinstance(state, str) and state else None
+    state = state.upper() if isinstance(state, str) and state else None
+    key = url.rstrip("/").lower()
+    _rejections.pop(key, None)
+    if state == "OPEN":
+        from hermes_cli.kanban_db_dispatch_pr_rejection import rejection_reason
+        comments = data.get("comments", [])
+        reason = rejection_reason(comments) if isinstance(comments, list) else None
+        if reason:
+            _rejections[key] = reason
+            return "REJECTED"
+    return state
 
 
 def pr_state(url: str) -> Optional[str]:
@@ -59,7 +73,9 @@ def pr_state(url: str) -> Optional[str]:
     if hit is not None and (hit[1] is None or now < hit[1]):
         return hit[0]
     state = _gh_pr_state(url)
-    if state in TERMINAL_STATES:
+    if state == "REJECTED":
+        _cache.pop(key, None)  # requeue must invalidate rejection immediately
+    elif state in TERMINAL_STATES:
         _cache[key] = (state, None)
     else:
         _cache[key] = (state, now + (OPEN_TTL_SECONDS if state else ERROR_TTL_SECONDS))
@@ -86,7 +102,7 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     merge is resumed by that unblock to ship/verify THAT PR. A crash/reclaim is not a
     handoff, so the worker that opened the PR is still not re-spawned against it.
     Also lifted once EVERY PR named in those comments is MERGED or CLOSED (gh, cached; any
-    gh failure keeps the hold): there is nothing left to duplicate. [daveey]
+    gh failure keeps the hold), or has a completed queue rejection requiring repair. [daveey]
     """
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
@@ -107,10 +123,16 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')",
             cols=", kind, payload", strict=True)):
         return None
-    if all_prs_finished(pr_urls):
+    states = {u: pr_state(u) for u in dict.fromkeys(pr_urls)}
+    if all(s in TERMINAL_STATES or s == "REJECTED" for s in states.values()):
+        from hermes_cli.kanban_db_dispatch_pr_rejection import comment_rejection
+        for url, state in states.items():
+            if state == "REJECTED":
+                comment_rejection(conn, task_id, url, _rejections[url.rstrip("/").lower()])
         return None
     return "active_pr"
 
 
 def clear_cache() -> None:
     _cache.clear()
+    _rejections.clear()

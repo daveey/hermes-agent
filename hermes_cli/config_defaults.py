@@ -1898,6 +1898,9 @@ DEFAULT_CONFIG = {
     # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
     # claimable task. Run ONE dispatcher per profile; two on the same kanban.db race for claims.
     "kanban": {
+        # Calendar retention for terminal worktrees; archive commits to recovery
+        # refs before reaping. 0 disables age-based archival/startup sweeping.
+        "worktree_retention_days": 7,
         # Auto-subscribe the originating gateway/TUI session to completion + block events when
         # kanban_create is called from a session with a persistent delivery channel. Disable for
         # profiles that prefer explicit kanban_notify-subscribe calls per task.
@@ -1930,9 +1933,6 @@ DEFAULT_CONFIG = {
         # Assignee when the orchestrator can't match one to an installed profile; "" = default
         # profile. A task never ends up with assignee=None.
         "default_assignee": "",
-        # Global cap: positive int = the HOST never has more than N tasks 'running' across all
-        # boards and both dispatch lanes. None = ~MemTotal / 512 MiB clamped to [2, 8]; where
-        # MemTotal is unreadable (macOS/Windows) None means no cap.
         # Global concurrency cap (#33488): when set to a positive int, the HOST never has more than N tasks
         # in 'running' at once — counted across every active board and across both the ready and review
         # dispatch lanes (workers are OS processes sharing one machine's memory, so the cap bounds the
