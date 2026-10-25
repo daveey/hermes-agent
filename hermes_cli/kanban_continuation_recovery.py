@@ -19,7 +19,7 @@ _CONTEXT = re.compile(
     r"(?:review the preserved implementation/checkpoint \S+ for this card; "
     r"the dispatcher refused continuation after its \d+-run limit"
     r"|latest unshipped commit\s*[a-z0-9]+ passes\s*\d+ [a-z ]*tests"
-    r"(?: and\s*\d+ [a-z ]*tests)?; [a-z ,/-]+ still remains?"
+    r"(?: and\s*\d+ [a-z ]*tests)?; live acceptance still remains?"
     r"|this is not delivered; keep the originating tracker unfinished)[.!]?", re.IGNORECASE,
 )
 

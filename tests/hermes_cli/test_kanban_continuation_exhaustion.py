@@ -53,6 +53,8 @@ def test_budget_only_human_block_routes_to_agent_triage(board, kind, reason):
 @pytest.mark.parametrize("kind,reason,human", [
     ("needs_input", "Which production region should we deploy to?", True),
     ("needs_input", "Reset the continuation budget. Which production region should we deploy to?", True),
+    ("needs_input", "Reset the continuation budget. Latest unshipped commit abc123 passes 20 tests; "
+     "please approve production deployment, which still remains.", True),
     ("capability", "Restore the deployment credentials, then unblock this card.", True),
     ("time", "Waiting for the release window.", False),
 ])
