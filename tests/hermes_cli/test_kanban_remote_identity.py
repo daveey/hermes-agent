@@ -35,13 +35,12 @@ def test_legacy_terminal_record_is_unknown_not_superseded_by_qualified_collision
     path = replica(tmp_path, [('default/t_same', card('default', status='done')),
                               ('default/default/t_same', card('default', status='done'))])
     rows = activity._read_remote_links(path, now=100)
-    assert len(rows) == 1
-    assert rows[0]['key'] == 'owner/default/t_same'
-    assert rows[0]['profile'] is None
-    assert rows[0]['ownership_state'] == 'unknown'
-    assert rows[0]['status'] == 'unknown'
-    assert rows[0]['reported_status'] == 'done'
-    assert activity._replica_bucket(rows[0]) == 'active'
+    assert len(rows) == 2
+    assert {r['key'] for r in rows} == {'owner/default/t_same', 'owner/default/default/t_same'}
+    assert all(r['status'] == 'unknown' and r['reported_status'] == 'done' for r in rows)
+    assert all(activity._replica_bucket(r) == 'active' for r in rows)
+    legacy = next(r for r in rows if r['profile'] is None)
+    assert legacy['ownership_state'] == 'unknown'
 
 
 def test_origin_profile_and_relation_are_part_of_the_session_join(tmp_path, monkeypatch):

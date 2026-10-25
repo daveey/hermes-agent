@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { cleanStores } from 'nanostores'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
 import type { SessionInfo } from '@/types/hermes'
 
+import { $kanbanObservationTick } from './kanban-observation'
 import {
   $cronSessions,
   $messagingSessions,
@@ -183,7 +185,7 @@ describe('$delegatingSessionIds', () => {
 })
 
 const storedRow = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
-  ({ id, message_count: 1, source: 'cli', started_at: 0, title: id, ...extra }) as SessionInfo
+  ({ id, kanban_observed_at: Date.now() / 1000, message_count: 1, source: 'cli', started_at: 0, title: id, ...extra }) as SessionInfo
 
 describe('persisted unread (backend watermark)', () => {
   beforeEach(() => {
@@ -343,6 +345,33 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
     expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
     // Control: a plain finished session still gets its green stripe.
     expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('done')
+  })
+
+  it.each([undefined, 1, Infinity, Date.now() / 1000 + 60])('keeps absent or stale observations off done: %s', observed => {
+    setSessions([storedRow('s1', { kanban_observed_at: observed })])
+
+    expect($kanbanBusySessionIds.get()).toContain('s1')
+    expect(withRowActivity('idle', { kanban_observed_at: observed } as never)).toBe('background')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+  })
+
+  it('expires a zero-work observation even when no list refresh arrives', () => {
+    // Earlier get() calls mount real timers until nanostores' delayed unmount.
+    // Remount under the fake clock; isolated execution already passes.
+    cleanStores($kanbanBusySessionIds, $kanbanObservationTick)
+    vi.useFakeTimers()
+    const stop = $kanbanBusySessionIds.subscribe(() => {})
+
+    try {
+      setSessions([storedRow('s1')])
+      expect($kanbanBusySessionIds.get()).toEqual([])
+      vi.advanceTimersByTime(200_000)
+      expect($kanbanBusySessionIds.get()).toContain('s1')
+    } finally {
+      stop()
+      vi.advanceTimersByTime(2_000)
+      vi.useRealTimers()
+    }
   })
 
   it('goes back to done once the tasks finish', () => {
@@ -524,7 +553,7 @@ describe('withRowActivity', () => {
       expect(withRowActivity(state, { goal_active: true })).toBe(state)
     }
 
-    expect(withRowActivity('idle', { goal_active: false, kanban_active: 0 })).toBe('idle')
+    expect(withRowActivity('idle', { goal_active: false, kanban_active: 0, kanban_observed_at: Date.now() / 1000 })).toBe('idle')
   })
 })
 
@@ -568,8 +597,8 @@ describe('kanban results waiting for an unloaded session ($kanbanUnseenSessionId
   })
 
   it('withRowActivity turns an idle project-tree row with a waiting result green', () => {
-    expect(withRowActivity('idle', { kanban_active: 0, kanban_unseen: 1 })).toBe('unread')
+    expect(withRowActivity('idle', { kanban_active: 0, kanban_unseen: 1, kanban_observed_at: Date.now() / 1000 })).toBe('unread')
     expect(withRowActivity('idle', { kanban_active: 1, kanban_unseen: 1 })).toBe('background')
-    expect(withRowActivity('idle', { kanban_active: 0 })).toBe('idle')
+    expect(withRowActivity('idle', { kanban_active: 0, kanban_observed_at: Date.now() / 1000 })).toBe('idle')
   })
 })

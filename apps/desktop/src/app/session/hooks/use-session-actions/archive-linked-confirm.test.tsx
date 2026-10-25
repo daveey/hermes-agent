@@ -38,6 +38,7 @@ function row(overrides: Partial<SessionInfo> = {}): SessionInfo {
     id: 's-1',
     input_tokens: 0,
     is_active: false,
+    kanban_observed_at: Date.now() / 1000,
     last_active: 1,
     message_count: 2,
     model: null,
@@ -141,8 +142,12 @@ describe('archiveSession linked-work confirmation', () => {
     expect($sessions.get().map(session => session.id)).toEqual(['s-1'])
   })
 
-  it('asks when remote task status is unknown despite zero known counts', async () => {
-    setSessions([row({ kanban_unknown: true, kanban_active: 0, kanban_blocked: 0 })])
+  it.each([
+    { kanban_unknown: true },
+    { kanban_observed_at: undefined },
+    { kanban_observed_at: 1 }
+  ])('asks when remote task status is unknown despite zero known counts: %j', async evidence => {
+    setSessions([row({ ...evidence, kanban_active: 0, kanban_blocked: 0 })])
     const handle = await mountHarness()
     let done: Promise<void> | undefined
     act(() => { done = handle.archiveSession('s-1') })

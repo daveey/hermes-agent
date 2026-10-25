@@ -158,6 +158,7 @@ function makeSession(overrides: Partial<SessionInfo> & { title: string }): Sessi
     handoff_platform: null,
     handoff_state: null,
     id: 's1',
+    kanban_observed_at: Date.now() / 1000,
     last_active: 0,
     profile: 'default',
     started_at: 0,

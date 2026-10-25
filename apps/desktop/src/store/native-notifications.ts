@@ -6,6 +6,7 @@ import { persistString, storedString } from '@/lib/storage'
 
 import { recordFeatureToggle } from './desktop-metrics'
 import { $gateway } from './gateway'
+import { hasFreshKanbanObservation } from './kanban-observation'
 import { withinNativeNotifyBaseline } from './notify-baseline'
 import {
   answerApproval,
@@ -348,11 +349,7 @@ export function dispatchNativeNotification(input: NativeNotificationInput): bool
 
     const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, storedId))
     const row = rows.length === 1 ? rows[0] : undefined
-    const observed = row?.kanban_observed_at
-    const age = typeof observed === 'number' ? Date.now() / 1000 - observed : NaN
-
-    const known = Number.isFinite(age) && age >= 0 && age <= 180 &&
-      (input.projectionAfter === undefined || (typeof observed === 'number' && observed >= input.projectionAfter))
+    const known = hasFreshKanbanObservation(row, input.projectionAfter)
 
     const unfinished = !row || !known || row.kanban_unknown === true ||
       (row.kanban_active ?? 0) > 0 || (row.kanban_blocked ?? 0) > 0 ||

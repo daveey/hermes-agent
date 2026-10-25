@@ -259,9 +259,10 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
                 raise ValueError('invalid replica task key')
             if not all(parts) or tid != str(t['id']):
                 raise ValueError('replica task identity mismatch')
-            if owner_profile is None:
-                # Historical keys lack provenance; even a terminal report cannot
-                # prove that a colliding qualified task replaced this obligation.
+            if owner_profile is None or t.get('status') not in LISTED_STATUSES:
+                # Legacy links carry no authoritative release receipt. Preserve
+                # terminal/unknown reports even on cold start; only the exact
+                # qualified ledger projection may supersede this obligation.
                 t = {**t, 'reported_status': t.get('status'), 'status': 'unknown', 'unfinished': True}
             tasks[(str(gw), owner_profile, board, tid)] = t
     from hermes_cli.profiles import get_active_profile_name

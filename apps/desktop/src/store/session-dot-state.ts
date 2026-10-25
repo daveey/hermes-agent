@@ -29,6 +29,7 @@ import { stableArray, stableRecord } from '@/lib/stable-array'
 import type { SessionBackgroundProcess, SessionInfo } from '@/types/hermes'
 
 import { $backgroundRunningSessionIds } from './composer-status'
+import { $kanbanObservationTick, hasFreshKanbanObservation } from './kanban-observation'
 import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
 import {
   $attentionSessionIds,
@@ -74,14 +75,15 @@ export const $delegatingSessionIds = computed(
 // the session as done (green stripe) while its workers were still going. The
 // backend stamps `kanban_active` on every list row (summed over the lineage).
 let kanbanBusyIds: readonly string[] = []
-export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions], (sessions, messaging) => {
+export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $kanbanObservationTick], (sessions, messaging) => {
   const ids: string[] = []
 
   for (const rows of [sessions, messaging]) {
     for (const row of rows) {
       // [daveey] `kanban_unknown`: the backend could not read the session's cards (local boards or another
       // gateway's replica). Unknown is not "no work", so the row stays off done until a read succeeds.
-      if ((row.kanban_active ?? 0) > 0 || row.kanban_unknown === true) {
+      if ((row.kanban_active ?? 0) > 0 || row.kanban_unknown === true ||
+          (row.kanban_remote_stale ?? 0) > 0 || !hasFreshKanbanObservation(row)) {
         ids.push(row.id)
       }
     }
@@ -273,12 +275,14 @@ export const sessionStatusStripe = (
 export const withRowActivity = (
   state: SessionDotState,
   row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active'> &
-    Partial<Pick<SessionInfo, 'kanban_unknown' | 'kanban_unseen'>>
+    Partial<Pick<SessionInfo, 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen'>>
 ): SessionDotState =>
   (state === 'idle' || state === 'unread' || state === 'draft') &&
   (row.goal_active === true ||
     (row.kanban_active ?? 0) > 0 ||
     row.kanban_unknown === true ||
+    (row.kanban_remote_stale ?? 0) > 0 ||
+    !hasFreshKanbanObservation(row) ||
     (row.background_active ?? 0) > 0)
     ? 'background'
     : (state === 'idle' || state === 'draft') && (row.kanban_unseen ?? 0) > 0

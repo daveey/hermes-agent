@@ -277,7 +277,7 @@ def test_replica_card_shepherded_by_a_local_session_keeps_it_busy(kanban_root):
     ])
     rows = [{"id": "s_mac"}, {"id": "hub_oneshot"}]
     ksa.annotate_kanban_activity(rows)
-    assert rows[0]["kanban_active"] == 2
+    assert rows[0]["kanban_active"] == 3  # includes unverified terminal shepherd
     assert rows[0]["kanban_blocked"] == 1
     assert "kanban_active" not in rows[1]  # a session on the owning gateway is not ours
 
@@ -386,10 +386,12 @@ def test_remote_dispatch_graph_lists_every_owner_qualified_row_and_counts_the_sa
 def test_done_root_still_lists_unfinished_descendants(kanban_root):
     _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph(root_status="done"))
     rows = ksa.session_tasks(["s_origin"])
-    assert sorted(r["id"] for r in rows) == [f"t_c{i:02d}" for i in range(12)]
+    assert sorted(r["id"] for r in rows) == [f"t_c{i:02d}" for i in range(12)] + ["t_root"]
+    root = next(r for r in rows if r['id'] == 't_root')
+    assert root['status'] == 'unknown' and root['reported_status'] == 'done'
     ann = [{"id": "s_origin"}]
     ksa.annotate_kanban_activity(ann)
-    assert ann[0]["kanban_active"] == 12
+    assert ann[0]["kanban_active"] == 13
 
 
 def test_review_is_unfinished_on_local_and_remote_cards(kanban_root):
@@ -473,17 +475,22 @@ def test_empty_replica_does_not_erase_obligations_after_restart(kanban_root):
     assert all(card["stale"] for card in cards)
 
 
-def test_final_completion_clears_the_origin_and_other_sessions_finish_normally(kanban_root):
-    graph = _dispatch_graph(root_status="done")
+@pytest.mark.parametrize('terminal_status', ['done', 'archived', 'unexpected', None])
+def test_unverified_completion_keeps_origin_and_other_sessions_finish_normally(kanban_root, terminal_status):
+    import time
+    graph = _dispatch_graph(root_status=terminal_status)
     for c in graph:
-        c["status"] = "done"
-    _make_replica(kanban_root / "hub-state", "macbook", graph)
+        c["status"] = terminal_status
+    path = _make_replica(kanban_root / "hub-state", "macbook", graph)
+    _set_meta(path, last_ok=time.time())
     _make_board(kanban_root / "kanban.db", [("t_x", "done", "s_other")])
     ann = [{"id": "s_origin"}, {"id": "s_other"}]
     ksa.annotate_kanban_activity(ann)
     assert [{k: v for k, v in row.items() if k != 'kanban_observed_at'} for row in ann] == [
-        {"id": "s_origin"}, {"id": "s_other"}]
-    assert ksa.session_tasks(["s_origin"]) == []
+        {"id": "s_origin", "kanban_active": 13}, {"id": "s_other"}]
+    cards = ksa.session_tasks(["s_origin"])
+    assert len(cards) == 13
+    assert all(c['status'] == 'unknown' and c['reported_status'] == terminal_status for c in cards)
 
 
 def test_failed_activity_read_stamps_unknown_not_idle(kanban_root, monkeypatch):

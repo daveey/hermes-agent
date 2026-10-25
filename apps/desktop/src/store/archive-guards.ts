@@ -13,6 +13,8 @@
 
 import type { SessionInfo } from '@/types/hermes'
 
+import { hasFreshKanbanObservation } from './kanban-observation'
+
 /** One line in the confirm dialog: `label` = the kind ("Kanban tasks"),
  *  `value` = what's linked ("3 open, 1 blocked"). */
 export interface ArchiveLinkedItem {
@@ -112,7 +114,8 @@ export function kanbanArchiveLinks(
   const blocked = Math.max(0, Number(session?.kanban_blocked) || 0)
 
   if (open + blocked === 0) {
-    return []
+    return hasFreshKanbanObservation(session) && !(session?.kanban_remote_stale ?? 0)
+      ? [] : [{ label: copy.label, value: copy.unknown }]
   }
 
   return [{ label: copy.label, value: copy.value(open, blocked) }]
