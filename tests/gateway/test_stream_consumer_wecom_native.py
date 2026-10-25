@@ -596,11 +596,17 @@ class TestClarifyEagerReseed:
 
         # User answered → request an eager re-seed.  NO on_delta yet.
         consumer.request_reopen_seed()
-        await self._drain(consumer, 0.05)  # let run() process _REOPEN_SEED
 
-        seeds_after = len(
-            [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
-        )
+        def _seed_count():
+            return len(
+                [f for f in adapter.frames if f["text"] == "" and not f["finalize"]]
+            )
+
+        # Wait for run() to process _REOPEN_SEED (a fixed sleep is flaky on a
+        # loaded CI runner), then settle so a duplicate seed would still show.
+        await self._wait_until(lambda: _seed_count() > seeds_before, timeout=5.0)
+        await self._drain(consumer, 0.05)
+        seeds_after = _seed_count()
         assert seeds_after == seeds_before + 1, (
             "eager re-seed must emit exactly one new empty seed frame before "
             f"any delta (before={seeds_before}, after={seeds_after})"
