@@ -1,12 +1,13 @@
 import { expect, test, vi } from 'vitest'
 
 import { ManagedConnectionUpdateGate } from './managed-ssh-update'
+import { createPoolStopper } from './pool-stop'
 import { createRegistryReconnectService } from './registry-reconnect-service'
 
 function fixture() {
   const descriptor = { baseUrl: 'http://hub', token: 'synthetic' }
-  const primary = { connectionPromise: Promise.resolve({ baseUrl: 'http://local' }) }
-  const entry = { connectionPromise: Promise.resolve(descriptor) }
+  const primary = { process: null, connectionPromise: Promise.resolve({ baseUrl: 'http://local' }) }
+  const entry = { process: null, connectionPromise: Promise.resolve(descriptor) }
   const state = { registryConnectionId: 'hub', primaryRegistryScope: false, spawnNonce: 'owned', remotePlatform: 'Linux' }
   const pool = new Map([['default', primary], ['conn:hub::default', entry]])
   const states = new Map([['conn:hub::default', state]])
@@ -21,7 +22,7 @@ function fixture() {
 
   const reopen = vi.fn(async (id, profile, correlation) => {
     gate.assertCanDial(id, correlation)
-    pool.set(`conn:${id}::${profile}`, { connectionPromise: Promise.resolve(descriptor) })
+    pool.set(`conn:${id}::${profile}`, { process: null, connectionPromise: Promise.resolve(descriptor) })
     states.set(`conn:${id}::${profile}`, { ...state, spawnNonce: 'new-owned' })
   })
 
@@ -51,7 +52,7 @@ test('composed reconnect repairs a deleted runtime without touching local defaul
 
 test('a second profile cannot borrow a pending reconnect claim', async () => {
   const f = fixture()
-  f.pool.set('conn:hub::other', { connectionPromise: f.entry.connectionPromise })
+  f.pool.set('conn:hub::other', { process: null, connectionPromise: f.entry.connectionPromise })
   f.states.set('conn:hub::other', { ...f.state })
   const first = f.service.target('hub', 'default')!
   const second = f.service.target('hub', 'other')!
@@ -67,6 +68,37 @@ test('a second profile cannot borrow a pending reconnect claim', async () => {
   expect(() => f.service.assertCanStop('conn:hub::default')).toThrow()
   finish()
   await running
+})
+
+test('direct profile deletion cannot evict a resident during reconnect commit', async () => {
+  const f = fixture()
+  const target = f.service.target('hub', 'default')!
+  let commit!: () => void
+  const request = f.request.getMockImplementation()!
+  f.request.mockImplementation(async (descriptor, path, options) => {
+    if (options.body?.action === 'commit') {
+      await new Promise<void>(resolve => { commit = resolve })
+    }
+
+    return request(descriptor, path, options)
+  })
+  const stopChild = vi.fn()
+
+  const stopper = createPoolStopper({
+    pool: f.pool,
+    assertCanStop: key => f.service.assertCanStop(key),
+    stopChild,
+    waitForExit: async () => {}
+  })
+
+  const running = f.service.run(target)
+  await vi.waitFor(() => expect(commit).toBeTypeOf('function'))
+  expect(() => stopper.stop('conn:hub::default')).toThrow('reconnect in progress')
+  expect(f.pool.get('conn:hub::default')).toBe(f.entry)
+  expect(stopChild).not.toHaveBeenCalled()
+  commit()
+  expect((await running).ok).toBe(true)
+  expect(f.gate.owner('hub')).toBeNull()
 })
 
 test('a primary alias cannot acquire retirement authority', async () => {

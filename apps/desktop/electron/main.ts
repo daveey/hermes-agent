@@ -12413,6 +12413,7 @@ async function runPoolBackendStart(
 // SIGTERM + immediate entry delete dropped the handle and a slow child
 // survived detached under PID 1.
 const poolStopper = createPoolStopper({
+  assertCanStop: key => registryReconnectService.assertCanStop(key),
   pool: backendPool,
   // localBackendLifecycle is the single owner of local child stop semantics:
   // stopChild triggers its stop (stop + bounded exit wait + slot release);
