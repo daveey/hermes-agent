@@ -153,6 +153,9 @@ async def test_cancelled_start_terminates_spawned_server(tmp_path: Path):
     assert client._proc is None
 
 
+# This test deliberately signals a descendant after its launcher exits and it
+# is reparented outside pytest's subtree. Keep the exception local to this test.
+@pytest.mark.live_system_guard_bypass
 @pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_cancelled_start_hard_kills_sigterm_ignoring_descendant(tmp_path: Path):
@@ -177,9 +180,12 @@ async def test_cancelled_start_hard_kills_sigterm_ignoring_descendant(tmp_path: 
             await asyncio.wait_for(start, timeout=0.05)
 
         deadline = asyncio.get_running_loop().time() + 15.0
-        while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-            assert asyncio.get_running_loop().time() < deadline
-            await asyncio.sleep(0.01)
+        # Reaping can race status() even after is_running() returned True.
+        # Either a zombie or a vanished process proves that hard-kill succeeded.
+        with contextlib.suppress(psutil.NoSuchProcess):
+            while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.01)
         assert client.state == "error"
         assert client._proc is None
     finally:
