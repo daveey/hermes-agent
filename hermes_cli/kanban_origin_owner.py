@@ -31,10 +31,11 @@ def receive(request: dict) -> dict:
     if not isinstance(request, dict) or not isinstance(request.get('args'), dict):
         raise ValueError('origin_request_invalid')
     key = request.get('key')
-    if not isinstance(key, str) or len(key.split('/')) != 2:
+    adopting = request.get('action') == 'origin-adopt'
+    if not isinstance(key, str) or len(key.split('/')) != (3 if adopting else 2):
         raise ValueError('origin_route_mismatch')
-    owner_profile, board = key.split('/')
-    if (request.get('coll') != 'tasks' or request.get('action') != 'create'
+    owner_profile, board = key.split('/')[:2]
+    if (request.get('coll') != 'tasks' or request.get('action') not in {'create', 'origin-adopt'}
             or request.get('to_gw') != gateway or owner_profile != profile
             or kb._normalize_board_slug(board) != board
             or not kb.board_exists(board)):
@@ -53,6 +54,18 @@ def receive(request: dict) -> dict:
     intent = {'request_id': request['id'],
               'owner': {'gateway': gateway, 'profile': profile, 'board': board},
               'origin': request['args']['origin']}
+    if adopting:
+        if set(request['args']) != {'origin'}:
+            raise ValueError('origin_request_invalid')
+        task_id = key.split('/')[2]
+        intent['owner']['task_id'] = task_id
+        validate_binding({'binding_id': 'validation', 'version': 1, 'publication_version': 1,
+                          'owner': intent['owner'], 'origin': origin, 'task_record_key': key})
+        if not registry.get_definitions({'kanban_origin_adopt'}, quiet=True):
+            return {'status': 'pending', 'code': 'kanban_tool_unavailable', 'handoff_complete': False}
+        raw_result = registry.dispatch('kanban_origin_adopt', {'task_id': task_id, 'board': board},
+                                       origin_intent=intent)
+        return _dispatch_result(raw_result)
     create = request['args'].get('create')
     if (set(request['args']) != {'origin', 'create'} or not isinstance(create, dict)
             or not isinstance(create.get('session_id'), str)
@@ -63,6 +76,10 @@ def receive(request: dict) -> dict:
     if not registry.get_definitions({'kanban_create'}, quiet=True):
         return {'status': 'pending', 'code': 'kanban_tool_unavailable', 'handoff_complete': False}
     raw_result = registry.dispatch('kanban_create', args, origin_intent=intent)
+    return _dispatch_result(raw_result)
+
+
+def _dispatch_result(raw_result):
     try:
         result = json.loads(raw_result) if isinstance(raw_result, str) else None
     except ValueError:
@@ -77,7 +94,11 @@ def receive(request: dict) -> dict:
 def command(args) -> int:
     try:
         raw = sys.stdin.read() if args.request_file == '-' else Path(args.request_file).read_text(encoding="utf-8-sig")
-        result = receive(json.loads(raw))
+        request = json.loads(raw)
+        expected = {'origin-create': 'create', 'origin-adopt': 'origin-adopt'}.get(args.kanban_action)
+        if not isinstance(request, dict) or expected is None or request.get('action') != expected:
+            raise ValueError('origin_route_mismatch')
+        result = receive(request)
     except (OSError, sqlite3.Error):
         result = {'status': 'pending', 'code': 'origin_storage_unavailable', 'handoff_complete': False}
     except (KeyError, TypeError, ValueError) as exc:

@@ -44,6 +44,16 @@ def _schema(name: str, description: str, properties: dict[str, Any], required: l
     }
 
 
+KANBAN_ORIGIN_ADOPT_SCHEMA = _schema(
+    "kanban_origin_adopt",
+    "Attach an existing exact owner task to an origin through the authenticated courier. "
+    "Requires trusted courier context; never creates or completes a task. A pending "
+    "result is not a successful handoff: wait for the origin-owned receipt.",
+    {"task_id": _prop("string", "Exact existing task ID, never a prefix.")},
+    ["task_id", "board"],
+)
+
+
 KANBAN_SHOW_SCHEMA = _schema(
     "kanban_show",
     (

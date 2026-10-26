@@ -23,7 +23,7 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
-    KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
+    KANBAN_LIST_SCHEMA, KANBAN_ORIGIN_ADOPT_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
 
 logger = logging.getLogger(__name__)
@@ -216,7 +216,7 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                     return _tag_rejection(e.args[0], e.rejection or "invalid_args")
                 return e.args[0]
             except Exception as e:
-                if tool_name == "kanban_create" and kw.get("origin_intent") is not None:
+                if tool_name in {"kanban_create", "kanban_origin_adopt"} and kw.get("origin_intent") is not None:
                     from hermes_cli.kanban_origin import OriginError
                     if isinstance(e, OriginError):
                         return tool_error(str(e), code=e.code, handoff_complete=False)
@@ -1594,6 +1594,30 @@ def _handle_link(args: dict, **kw) -> str:
                    **({"gated_by": parent_id} if gated else {}))
 
 
+@_kanban_handler("kanban_origin_adopt")
+def _handle_origin_adopt(args: dict, **kw) -> str:
+    _reject_delegated_child_mutation("kanban_origin_adopt")
+    intent = kw.get("origin_intent")
+    if intent is None:
+        return tool_error("authenticated origin courier context required", code="origin_context_required",
+                          handoff_complete=False)
+    from hermes_cli.kanban_origin import OriginError
+    from hermes_cli.kanban_origin_creation import adopt_with_origin
+    if (not isinstance(intent, dict) or not isinstance(intent.get("owner"), dict)
+            or intent["owner"].get("task_id") != args.get("task_id")
+            or intent["owner"].get("board") != args.get("board")):
+        raise OriginError("origin_adoption_invalid", "adoption route does not match task arguments")
+    with _board(args["board"]) as (_, conn):
+        tid = adopt_with_origin(conn, intent, board=args["board"])
+        row = conn.execute("SELECT binding_json,child_request_id FROM origin_creation_intents WHERE request_id=?",
+                           (intent["request_id"],)).fetchone()
+        return json.dumps({"ok": False, "created": False, "adopted": True, "task_id": tid,
+                           "code": "origin_bind_pending", "handoff_complete": False,
+                           "origin_creation": {"request_id": intent["request_id"],
+                                               "binding": json.loads(row["binding_json"]),
+                                               "child_request_id": row["child_request_id"]}})
+
+
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
 # kanban_list / kanban_unblock route the board and are hidden from task workers.
@@ -1613,6 +1637,7 @@ _TOOLS = (
     ("kanban_attach_url", KANBAN_ATTACH_URL_SCHEMA, _handle_attach_url, "📎"),
     ("kanban_attachments", KANBAN_ATTACHMENTS_SCHEMA, _handle_attachments, "📎"),
     ("kanban_create", KANBAN_CREATE_SCHEMA, _handle_create, "➕"),
+    ("kanban_origin_adopt", KANBAN_ORIGIN_ADOPT_SCHEMA, _handle_origin_adopt, "🔗"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"))
 

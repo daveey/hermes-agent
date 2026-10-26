@@ -161,7 +161,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_origin_adapter import command
         return command(args)
 
-    if action == "origin-create":
+    if action in {"origin-create", "origin-adopt"}:
         from hermes_cli.kanban_origin_owner import command
         return command(args)
 
@@ -234,7 +234,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
-    "gc", "origin-bind", "origin-create",
+    "gc", "origin-bind", "origin-create", "origin-adopt",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
