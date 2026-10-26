@@ -46,13 +46,13 @@ def test_gateway_checks_identity_after_lock_acquisition(board, monkeypatch):
     replaced = False
 
     @contextmanager
-    def interleave(path):
+    def interleave(path, **kwargs):
         nonlocal replaced
         if not replaced:
             replaced = True
             kb.remove_board("sample")
             kb.create_board("sample")
-        with original(path) as held:
+        with original(path, **kwargs) as held:
             yield held
 
     dispatcher = _KanbanDispatcher.__new__(_KanbanDispatcher)
@@ -74,7 +74,8 @@ def test_contended_open_requires_reconnect_before_dispatch(board):
     with closing(conn):
         callback = Mock(return_value=DispatchResult())
         result = run_owned_tick(conn, callback, "dedicated", "sample", False)
-        assert result.skipped_owned and result.ownership_error
+        assert result.skipped_locked
+        assert not result.skipped_owned and not result.ownership_error
         callback.assert_not_called()
     with closing(kbc.connect(board)) as fresh:
         callback = Mock(return_value=DispatchResult())

@@ -160,7 +160,7 @@ def _cross_process_init_lock(path: Path):
 
 
 @contextlib.contextmanager
-def _dispatch_tick_lock(db_path: Path):
+def _dispatch_tick_lock(db_path: Path, *, create_parent: bool = True):
     """Non-blocking single-writer guard around one dispatcher tick; yields
     ``True`` if this process holds the board's ``.dispatch.lock``, else
     ``False`` (caller skips the tick).
@@ -183,7 +183,8 @@ def _dispatch_tick_lock(db_path: Path):
     handle = None
     acquired = False
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if create_parent:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = lock_path.open("a+b")
         try:
             acquired = _try_lock_nb(handle)

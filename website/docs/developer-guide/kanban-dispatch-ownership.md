@@ -99,7 +99,12 @@ an identity implicitly.
   replacement's owner. Raw SQLite and in-memory handles fail closed. A native
   connection opened while that lock is busy remains usable for ordinary task
   APIs, but must be closed and reopened before dispatch (even after contention
-  clears). This intentional API tightening applies to unowned boards too.
+  clears). This returns `skipped_locked`, not an ownership error. Native opens
+  briefly take the same nonblocking lock as ticks and edits; under heavy connection
+  traffic even an unowned board can report busy. This intentional serialization
+  prevents stale-handle ownership bypasses and applies to unowned boards too.
+  CLI metadata commands report a retryable error rather than a traceback; dashboard
+  create/update returns HTTP 409 on lock contention. Retry with a fresh connection.
 * Direct task APIs are not changed: this coordinates dispatchers, not arbitrary
   same-UID database writers. Replacing a DB manually without removing its sidecar
   retains ownership, including corruption recovery; clear ownership explicitly
@@ -113,6 +118,9 @@ Run `scripts/run_tests.sh tests/hermes_cli/test_kanban_dispatch_owner.py
  tests/hermes_cli/test_kanban_dispatch_owner_operator.py
  tests/hermes_cli/test_kanban_dispatch_owner_regressions.py
  tests/hermes_cli/test_kanban_dispatch_owner_lifecycle.py
+ tests/hermes_cli/test_kanban_dispatch_owner_connection.py
+ tests/hermes_cli/test_kanban_dispatch_owner_busy.py
+ tests/plugins/test_kanban_board_lifecycle_api.py
  tests/gateway/test_kanban_pre_dispatch_isolation.py` (one shell command).
 These exercise native dispatch, CLI and embedded-gateway denial, strict metadata,
 actual-connection identity, alias/symlink handling, operator set/read/clear,

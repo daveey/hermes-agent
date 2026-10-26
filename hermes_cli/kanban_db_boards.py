@@ -161,11 +161,14 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
 def remove_board(slug: str, *, archive: bool = True) -> dict:
     """Refuse busy boards before moving anything, including the current pointer."""
     from hermes_cli.kanban_db_connect import _dispatch_tick_lock
+    _kb._assert_not_delegated_child_mutation()
     normed = _kb._require_slug(slug)
     if normed == _kb.DEFAULT_BOARD:
         raise ValueError("the 'default' board cannot be removed")
+    if not _kb.board_dir(normed).exists():
+        raise ValueError(f"board {normed!r} does not exist")
     path = (_kb.board_dir(normed) / "kanban.db").resolve()
-    with _dispatch_tick_lock(path) as held:
+    with _dispatch_tick_lock(path, create_parent=False) as held:
         if not held:
             raise ValueError("board dispatcher is busy; retry removal")
         return _remove_board_locked(normed, archive=archive)

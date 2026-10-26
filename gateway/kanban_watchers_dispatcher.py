@@ -231,7 +231,10 @@ class _KanbanDispatcher:
                     connection_db_path(conn)
                     if get_dispatch_owner(path) is None:
                         allowed = conn
-            except (OSError, ValueError, UnicodeError, RecursionError, sqlite3.Error) as exc:
+            except (OSError, ValueError, UnicodeError, RecursionError, sqlite3.Error,
+                    _kbc().KanbanDbCorruptError) as exc:
+                # tick_once owns corruption quarantine and its actionable log;
+                # pre-work must not emit a traceback on every probe.
                 logger.debug("kanban dispatcher: pre-dispatch work denied on %s (%s)", slug, exc)
             yield allowed
 

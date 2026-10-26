@@ -21,6 +21,7 @@ def connect_with_identity(path, **kwargs):
         try:
             stat = canonical.stat() if held else None
             conn._dispatch_identity = (stat.st_dev, stat.st_ino) if stat else None
+            conn._dispatch_open_contended = not held
             return conn
         except BaseException:
             conn.close()
@@ -99,6 +100,8 @@ def run_owned_tick(conn, tick, dispatcher_id, board, dry_run):
     """All tick effects are behind the identity read, under the canonical lock."""
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
     from hermes_cli.kanban_db_dispatch import DispatchResult
+    if getattr(conn, "_dispatch_open_contended", False):
+        return DispatchResult(skipped_locked=True)
     try:
         db_path = connection_db_path(conn, validate=False)
     except (OSError, ValueError, sqlite3.Error) as exc:
