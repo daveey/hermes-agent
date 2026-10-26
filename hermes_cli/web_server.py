@@ -417,6 +417,36 @@ def _apply_ssh_session_token(token: str) -> None:
         _SESSION_TOKEN = token
 
 
+def _configure_ssh_bootstrap_identity(
+    host: str, token: Optional[str], ownership_id: Optional[str],
+) -> None:
+    """Bind the validated Desktop SSH ownership slot to this startup only.
+
+    Arguments come from main's token-file validator, never requests or env.
+    Reset on every startup; a replacement token must not inherit the scope.
+    """
+    app.state.ssh_bootstrap_identity = None
+    if (host in _LOOPBACK_HOST_VALUES and token and ownership_id
+            and re.fullmatch(r"[0-9a-f]{32}", ownership_id)):
+        app.state.ssh_bootstrap_identity = (token, ownership_id)
+
+
+def _ssh_bootstrap_session():
+    """Identity for an ALREADY verified legacy credential; never authenticates."""
+    binding = getattr(app.state, "ssh_bootstrap_identity", None)
+    if (not binding or getattr(app.state, "auth_required", False)
+            or getattr(app.state, "bound_host", None) not in _LOOPBACK_HOST_VALUES
+            or not hmac.compare_digest(binding[0].encode(), _SESSION_TOKEN.encode())):
+        return None
+    from hermes_cli.dashboard_auth.base import Session
+
+    # Process-lifetime identity, not OAuth: no token/refresh material is exposed
+    # and this session is never persisted in the auth cookie jar.
+    return Session(user_id=binding[1], provider="desktop-ssh", email="",
+                   display_name="", org_id="", expires_at=0,
+                   access_token="", refresh_token="")
+
+
 def _apply_ssh_owner_nonce(nonce: Optional[str]) -> None:
     global _SSH_OWNER_NONCE, _SSH_RUNTIME_PURELIB, _SSH_RUNTIME_MARKER
     _SSH_OWNER_NONCE = nonce
@@ -738,6 +768,12 @@ async def auth_middleware(request: Request, call_next):
         and not _has_valid_query_token(request, path)
     ):
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    if (not getattr(request.state, "token_authenticated", False)
+            and not getattr(request.app.state, "auth_required", False)
+            and _has_valid_session_token(request)):
+        session = _ssh_bootstrap_session()
+        if session is not None:
+            request.state.session = session
     return await call_next(request)
 
 
@@ -1621,6 +1657,7 @@ def start_server(
     ssh_owner_nonce: Optional[str] = None,
     start_mcp_discovery_after_bind: bool = False,
     ssh_lock_path: Optional[Path] = None,
+    ssh_ownership_id: Optional[str] = None,
 ):
     """Start the web UI server.
 
@@ -1632,11 +1669,15 @@ def start_server(
     ``ssh_session_token``/``ssh_owner_nonce`` are process-local Desktop SSH
     bootstrap state, never persisted or exported to children; ``ssh_lock_path`` is the
     Desktop's ``backend.lock.json`` for that ownership slot (supersession watchdog).
+    ``ssh_ownership_id`` is the stable directory name from the successfully
+    validated SSH token file, not the rotating nonce. Only loopback, ungated
+    requests with the matching credential receive this process-local identity.
     ``start_mcp_discovery_after_bind`` (Desktop ``serve``) defers MCP discovery
     until the ready sentinel is written so its SDK import can't hold the GIL
     against the pre-bind path.
     """
     _apply_ssh_session_token(ssh_session_token or "")
+    _configure_ssh_bootstrap_identity(host, ssh_session_token, ssh_ownership_id)
     _apply_ssh_owner_nonce(ssh_owner_nonce)
 
     # Dashboard-mode starts don't route through main.py's `serve` path, which

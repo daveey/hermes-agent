@@ -8,6 +8,7 @@ import contextlib
 
 from .method_ctx import HandlerRegistry, bind_module
 
+
 _registry = HandlerRegistry()
 method = _registry.method
 _profile_scoped = _registry.profile_scoped
@@ -45,21 +46,8 @@ def _with_db(code: int, *, session_scoped: bool):
     return deco
 
 
-def _str_param(params: dict, key: str, default: str = "") -> str:
-    """``str(params[key]).strip()`` with ``default`` for missing / falsy values."""
-    return str(params.get(key) or "").strip() or default
-
-
 def _flag(params: dict, name: str) -> bool:
     return is_truthy_value(params.get(name, False))
-
-
-def _int_param(params: dict, key: str, default: int) -> int:
-    """``int(params[key])`` with ``default`` for missing / unparsable values."""
-    try:
-        return int(params.get(key, default))
-    except (TypeError, ValueError):
-        return default
 
 
 def _new_runtime_ids(params: dict) -> tuple[str, str]:
@@ -669,6 +657,9 @@ class _Resume:
             self.target, cols=self.cols, cwd=cwd, history=history, lease=None, source=source,
             close_on_disconnect=_flag(self.params, "close_on_disconnect"),
             profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd), **extra)
+        if self.found:
+            # Resuming does not transfer ownership, including legacy NULL owners.
+            record["auth_user_id"] = self.found.get("user_id")
         if follows_profile:
             record.update(follow_profile_config=True, composer_override_profile=(
                 model_config.get("composer_override_profile") if overrides and overrides.get("model_override") else None))
@@ -1035,7 +1026,7 @@ def _resume_eager(ctx: _Resume) -> dict:
                 sid, ctx.target, session_db=ctx.db, platform_override=source,
                 cwd_override=ctx.profile_resume_cwd or None,
                 context_cwd_is_launch_artifact=(source in _LAUNCH_CWD_NOT_A_WORKSPACE and not ctx.profile_resume_cwd),
-                auth_user_id=_transport_auth_user_id(current_transport()), **stored_runtime_overrides)
+                auth_user_id=ctx.found.get("user_id"), **stored_runtime_overrides)
         except Exception as e:
             return _err(ctx.rid, 5000, resume_failed_message(e))
     with _session_resume_lock:
@@ -1047,7 +1038,8 @@ def _resume_eager(ctx: _Resume) -> dict:
         try:
             with _profile_build_scope(ctx.profile_home):
                 _init_session(sid, ctx.target, agent, history, cols=ctx.cols, cwd=ctx.profile_resume_cwd, session_db=ctx.db,
-                              source=source, profile_home=ctx.profile_home, explicit_cwd=bool(ctx.profile_resume_cwd))
+                              source=source, profile_home=ctx.profile_home, explicit_cwd=bool(ctx.profile_resume_cwd),
+                              auth_user_id=ctx.found.get("user_id"))
                 # Ownership TRANSFER: the agent holds the handle for life (AIAgent.close() releases it). The
                 # owns_db drop is UNCONDITIONAL — the session is registered against the handle, so the finally
                 # must not close it even if the transfer was refused (a leak beats "closed database" every
@@ -2407,6 +2399,8 @@ def _(rid, params: dict) -> dict:
 
 def register(server) -> None:
     """Publish this module's helpers onto ``server`` (rebound to its globals) and install handlers."""
+    from .methods_session_params import _int_param, _str_param
+    server._int_param, server._str_param = _int_param, _str_param
     bind_module(globals(), server, skip=("_",))
     from . import methods_session_branch, methods_session_interrupt, methods_session_start_requests
     for module in (methods_session_branch, methods_session_interrupt, methods_session_start_requests):

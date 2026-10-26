@@ -5,7 +5,8 @@ adapters must claim before scheduling and never replay a claimed turn on recover
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
+from types import MappingProxyType
 import hashlib
 import json
 import time
@@ -183,6 +184,7 @@ class StartIntent:
     title: str
     text: str
     source: str = "desktop"
+    metadata: dict[str, str] | None = None
 
     def __post_init__(self):
         if not isinstance(self.title, str) or not 1 <= len(self.title) <= 500:
@@ -191,6 +193,12 @@ class StartIntent:
             raise ValueError("start text must contain 1–100000 characters")
         if self.source not in ("desktop", "tui"):
             raise ValueError("unsupported start source")
+        metadata = {} if self.metadata is None else self.metadata
+        if (not isinstance(metadata, dict) or len(metadata) > 32
+                or any(not isinstance(k, str) or not 1 <= len(k) <= 64
+                       or not isinstance(v, str) or len(v) > 1024 for k, v in metadata.items())):
+            raise ValueError("start metadata must have at most 32 string pairs (keys 1–64, values 0–1024)")
+        object.__setattr__(self, "metadata", MappingProxyType(dict(metadata)))
 
 
 _SCHEMA = """
@@ -231,16 +239,32 @@ class StartStore:
     """
     def __init__(self, db):
         self.db = db
-        db._execute_write(lambda conn: conn.execute(_SCHEMA))
+        def initialize(conn):
+            conn.execute(_SCHEMA)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(session_start_requests)")}
+            if "metadata_json" not in columns:
+                conn.execute("ALTER TABLE session_start_requests ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+        db._execute_write(initialize)
+
+    @staticmethod
+    def _decode(row):
+        result = dict(row)
+        result["metadata"] = json.loads(result.pop("metadata_json"))
+        return result
 
     def lookup(self, owner: StartOwner, namespace: str, request_id: str) -> dict | None:
         row = self.db._read_one("SELECT * FROM session_start_requests WHERE " + _WHERE,
                                 _key(owner, namespace, request_id))
-        return dict(row) if row is not None else None
+        return self._decode(row) if row is not None else None
 
     def accept(self, *, owner: StartOwner, namespace: str, request_id: str, intent: StartIntent) -> dict:
         key = _key(owner, namespace, request_id)
-        digest = hashlib.sha256(json.dumps(asdict(intent), sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+        payload = dict(title=intent.title, text=intent.text, source=intent.source)
+        metadata = dict(intent.metadata)
+        # Preserve the original digest for old callers and pre-migration starts.
+        if metadata:
+            payload["metadata"] = metadata
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
         session_id, turn_id = uuid.uuid4().hex, uuid.uuid4().hex
         now = time.time()
         # Use the canonical transcript serializer and counters, in the SAME
@@ -254,7 +278,7 @@ class StartStore:
             if existing is not None:
                 if existing["intent_digest"] != digest:
                     raise ValueError("start request idempotency conflict")
-                return dict(existing)
+                return self._decode(existing)
             from hermes_state_titles import next_title_in_lineage
             title = next_title_in_lineage(conn, self.db.sanitize_title(intent.title) or "Session")
             conn.execute(
@@ -263,9 +287,12 @@ class StartStore:
             row_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
             self.db._bump_session_counters(conn, session_id, 1, 0, unit=True)
             conn.execute(
-                "INSERT INTO session_start_requests VALUES (?,?,?,?,?,?,?,?,?,'queued',NULL,?,?)",
-                (*key, digest, session_id, turn_id, row_id, now, now))
-            return dict(conn.execute("SELECT * FROM session_start_requests WHERE " + _WHERE, key).fetchone())
+                "INSERT INTO session_start_requests "
+                "(gateway_id,profile,principal,namespace,request_id,intent_digest,stored_session_id,"
+                "first_turn_id,user_row_id,state,runtime_token,created_at,updated_at,metadata_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'queued',NULL,?,?,?)",
+                (*key, digest, session_id, turn_id, row_id, now, now, json.dumps(metadata, sort_keys=True)))
+            return self._decode(conn.execute("SELECT * FROM session_start_requests WHERE " + _WHERE, key).fetchone())
         return self.db._execute_write(write, patience_s=self.db._TRANSCRIPT_WRITE_PATIENCE_S)
 
     def status(self, owner: StartOwner, namespace: str, request_id: str) -> dict | None:
@@ -291,6 +318,7 @@ class StartStore:
             "first_turn_id": start["first_turn_id"], "first_turn_state": state,
             "exists": row is not None, "archived": bool(row and row.get("archived")),
             "active_turn": active,
+            "metadata": start["metadata"],
             "reconciliation": "unknown_outcome" if state == "running" and not active else state,
         }
 
