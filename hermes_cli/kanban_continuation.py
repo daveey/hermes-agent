@@ -160,6 +160,11 @@ def continue_task(
             summary=kb._first_line(checkpoint, 400) or "checkpoint", metadata=meta,
         )
         payload = {"continuation": streak + 1, "status": new_status, "resume_status": source_status}
+        # Server-derived ordering proof for PR comments sharing this checkpoint's second.
+        # Persist inside the same transaction; caller metadata cannot override it.
+        payload["comment_id_at_checkpoint"] = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM task_comments WHERE task_id = ?", (task_id,),
+        ).fetchone()[0]
         if meta.get("blocker_id"):
             payload["blocker_id"] = meta["blocker_id"]
         from hermes_cli import kanban_wake_check as kwc  # condition wake [daveey]
