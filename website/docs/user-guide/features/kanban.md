@@ -78,6 +78,34 @@ login. A login that cannot see the repository is rejected with
 `classification=auth`, naming the profile and repository, instead of a
 retryable infra failure.
 
+On short-lived credential-broker hosts, opt in separately in each assignee's
+config with `kanban.pr_acceptance.gh_command_prefix`, an argv list prepended to
+all gate `gh` commands. For example:
+
+```yaml
+kanban:
+  pr_acceptance:
+    gh_command_prefix:
+      - /absolute/path/to/token-broker
+      - exec
+      - --scope
+      - user/github
+      - --reason
+      - Kanban PR acceptance
+      - --
+```
+
+The first element must be an installed absolute executable path. No shell is
+used. The wrapper receives the isolated profile environment and must exec the
+appended command, preserve its exit status, and emit only the command's JSON on
+stdout. It must vend credentials into that child's environment, never print or
+persist tokens. Use noninteractive/already-approved scopes: the whole read has
+a 30-second timeout. Do not put credentials in this setting. The default is an
+empty list (ordinary profile-isolated login); routed profiles do not inherit the
+launch profile's wrapper. `gh` is resolved on the child PATH, then in `~/bin` and
+`~/.local/bin`; a missing CLI or invalid wrapper setting is a `setup` rejection,
+not a transient infrastructure failure.
+
 Rejection retains the active card and workspace. Durable `pr_acceptance` events
 store PR URL, SHA, required contexts, check IDs/URLs, classifications and recovery
 instructions; `last_failure_error` surfaces the next step. Fix failures, rerun
@@ -1073,9 +1101,34 @@ hermes kanban notify-unsubscribe <id>
 hermes kanban context <id>                             # what a worker sees
 hermes kanban specify [<id> | --all] [--tenant T]      # flesh out a triage-column idea
         [--author NAME] [--json]                       #   into a full spec and promote to todo
-hermes kanban gc [--event-retention-days N]            # workspaces + old events + old logs
+hermes kanban gc [--event-retention-days N] [--worktree-retention-days N] # workspaces + old events + old logs
         [--log-retention-days N]                       #   (negative N is rejected; 0 disables that sweep)
 ```
+
+Worktree GC also covers done, failed, and cancelled tasks. After
+`kanban.worktree_retention_days` (default 7, overridden by the GC flag), clean
+worktrees may be removed even with unpushed commits: their HEAD and history are
+first retained in the repository at `refs/hermes/kanban-archive/<task-id>/<commit>`.
+Zero disables this age-based archival; legacy clean, fully-pushed cleanup remains.
+Dirty trees, locked trees, active tasks, active children and live shared workspaces
+are preserved. Custom branches remain; generated `wt/` branches are pruned only
+when their tip still matches the archived commit.
+
+CLI worktree startup maintenance applies the same policy across the current home's
+boards. Registered `t_<hex>` worktrees with no known owning workspace are not
+silently deleted: they receive JSON tombstones in
+`<hermes-home>/archive/kanban-orphans/` for manual review. Unreadable boards abort
+the startup task sweep rather than treating their workspaces as orphans.
+
+To recover archived committed work, run these commands in the original repository:
+
+```bash
+git for-each-ref refs/hermes/kanban-archive/
+git worktree add -b recovered-task ../recovered-task refs/hermes/kanban-archive/<task-id>/<commit>
+```
+
+Recovery refs do not expire automatically and survive ordinary `git gc`. They
+are local references, not remote backups; retain the original repository.
 
 All commands are also available as a slash command in the interactive CLI and in the messaging gateway (see [`/kanban` slash command](#kanban-slash-command) below).
 

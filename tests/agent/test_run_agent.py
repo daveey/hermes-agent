@@ -4009,8 +4009,8 @@ class TestRunConversation:
             if calls == 1:
                 agent._fire_reasoning_delta("Following the original approach.")
                 entered.set()
-                deadline = time.time() + 2
-                while not agent._interrupt_requested and time.time() < deadline:
+                deadline = time.monotonic() + 30  # wait for the redirect; a loaded CI host took >2 s (t_94f2c8ba)
+                while not agent._interrupt_requested and time.monotonic() < deadline:
                     time.sleep(0.01)
                 raise InterruptedError("request cancelled by redirect")
             return final
@@ -4027,9 +4027,9 @@ class TestRunConversation:
                 )
             )
             worker.start()
-            assert entered.wait(timeout=2)
+            assert entered.wait(timeout=30)
             assert agent.redirect("Use the corrected approach.") is True
-            worker.join(timeout=5)
+            worker.join(timeout=30)
 
         assert worker.is_alive() is False
         assert calls == 2

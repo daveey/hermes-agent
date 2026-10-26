@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import time
 import unicodedata
@@ -359,10 +360,44 @@ def _is_managed_scratch_path(p: Path) -> bool:
     return _managed_scratch_path_info(p)[0]
 
 
+def _scratch_tree_removable(path: Path) -> bool:
+    """Only remove scratch proven free of Git metadata and scan uncertainty.
+
+    Managed storage is not proof that its contents are disposable: workers can
+    clone repositories or create linked worktrees anywhere below it. Preserve
+    the WHOLE scratch tree, even for clean/pushed repositories; repository-aware
+    teardown belongs to their owner, not generic scratch cleanup. Never follow
+    symlinks or execute Git/config/hooks while inspecting untrusted contents.
+    """
+    pending = [path]
+    try:
+        while pending:
+            directory = pending.pop()
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                return False
+            with os.scandir(directory) as entries:
+                names = set()
+                for entry in entries:
+                    names.add(entry.name)
+                    if entry.name == ".git" or entry.is_symlink():
+                        return False
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                    if stat.S_ISDIR(mode):
+                        pending.append(Path(entry.path))
+                # Bare repositories (including reftable storage) have no .git.
+                # Names alone deliberately err towards preserving uncertain data.
+                if {"HEAD", "objects"} <= names and names & {"refs", "reftable"}:
+                    return False
+    except OSError:
+        return False
+    return True
+
+
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
     Called from :func:`complete_task` after the transaction commits; best-effort
-    so cleanup never blocks completion. ``scratch`` is removed; ``worktree``
+    so cleanup never blocks completion. ``scratch`` is removed only when its
+    entire tree is free of Git metadata and scan uncertainty; ``worktree``
     only when provably free of work (clean tree, every commit reachable from a
     remote-tracking ref); ``dir`` is intentionally preserved."""
     try:
@@ -402,7 +437,9 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # See #28818. Containment runs first so an unmanaged dir that is
             # never removed does not pay for (or log) the shared-use scan.
             if _is_managed_scratch_path(wp):
-                if not _defer_shared_workspace_cleanup(conn, task_id, path):
+                if not _scratch_tree_removable(wp):
+                    _kb._log.info("Preserving scratch workspace with Git metadata or scan uncertainty: %s", wp)
+                elif not _defer_shared_workspace_cleanup(conn, task_id, path):
                     release_lsp_clients(str(wp))
                     shutil.rmtree(wp, ignore_errors=True)
                     _kb._log.debug("Removed scratch workspace: %s", wp)
@@ -424,14 +461,16 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def _cleanup_worktree_workspace(
-    task_id: str, path: str, branch_name: Optional[str] = None
+    task_id: str, path: str, branch_name: Optional[str] = None,
+    *, archive_unpushed: bool = False,
 ) -> None:
     """Remove a finished task's linked git worktree when it holds no work.
     Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
     requires a clean tree AND every commit reachable from a remote-tracking
     ref; any doubt (dirty, unpushed, unresolvable repo, failing git) preserves
     it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
-    branches are kept. Best-effort."""
+    branches are kept. Retention GC may opt into archive_unpushed: first save
+    HEAD to a verified recovery ref, then remove without --force. Best-effort."""
     try:
         from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
     except Exception:
@@ -446,12 +485,28 @@ def _cleanup_worktree_workspace(
         repo_root = common.parent
         if _path_key(wp.resolve(strict=False)) == _path_key(repo_root.resolve(strict=False)):
             return  # never remove the main checkout
-        if _worktree_is_dirty(str(wp), str(repo_root)) or _worktree_has_unpushed_commits(str(wp)):
+        archived_head = None
+        if _worktree_is_dirty(str(wp), str(repo_root)) or (
+            not archive_unpushed and _worktree_has_unpushed_commits(str(wp))
+        ):
             _kb._log.info(
                 "Preserving worktree for task %s: dirty or unpushed work at %s",
                 task_id, wp,
             )
             return
+        if archive_unpushed:
+            # Keep the entire history reachable even after ordinary Git GC. The
+            # object id in the ref name makes retries/non-fast-forward runs safe.
+            head = _git(wp, "rev-parse", "--verify", "HEAD^{commit}", timeout=10)
+            if head.returncode != 0:
+                return
+            archived_head = head.stdout.strip()
+            ref = f"refs/hermes/kanban-archive/{task_id}/{archived_head}"
+            saved = _git(repo_root, "update-ref", ref, archived_head, timeout=10)
+            verified = _git(repo_root, "rev-parse", "--verify", ref, timeout=10)
+            if saved.returncode or verified.returncode or verified.stdout.strip() != archived_head:
+                return  # archive failure MUST preserve both tree and branch
+            _kb._log.info("Archived worktree %s at %s", wp, ref)
         # Windows cannot delete a directory while this process has its current
         # directory inside it. Completed workers normally run from their own
         # linked worktree, so move this process back to the main checkout
@@ -491,7 +546,11 @@ def _cleanup_worktree_workspace(
         _kb._log.debug("Removed worktree workspace: %s", wp)
         branch = (branch_name or "").strip() or f"wt/{task_id}"
         if branch.startswith("wt/"):
-            _git(repo_root, "branch", "-D", branch, timeout=30)
+            if archived_head:
+                # Compare-and-delete: never drop a branch advanced since archival.
+                _git(repo_root, "update-ref", "-d", f"refs/heads/{branch}", archived_head, timeout=30)
+            else:
+                _git(repo_root, "branch", "-D", branch, timeout=30)
     except Exception:
         pass  # best-effort — never block completion
 
@@ -528,6 +587,9 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             if not wp.is_dir():
                 continue
             if _is_managed_scratch_path(wp):
+                if not _scratch_tree_removable(wp):
+                    _kb._log.info("Preserving parent scratch workspace with Git metadata or scan uncertainty: %s", wp)
+                    continue
                 if _defer_shared_workspace_cleanup(conn, parent_id, ws_path):
                     continue
                 release_lsp_clients(str(wp))

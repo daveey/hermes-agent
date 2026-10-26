@@ -91,6 +91,8 @@ def park(
 
     now = int(time.time())
     wake_at = scheduled_until(reason, now=now) or now + DEFAULT_WAKE_SECONDS
+    wake_check, check_every = kwc.validate_park(
+        wake_at=wake_at, wake_check=wake_check, check_every=check_every, clock_only=clock_only)
     sql = ("UPDATE tasks SET status = 'scheduled', claim_lock = NULL, claim_expires = NULL, "
            "worker_pid = NULL WHERE id = ? AND status IN ('running', 'ready')")
     params: tuple = (task_id,)
