@@ -776,15 +776,12 @@ def test_tree_rows_carry_session_activity_stamps(monkeypatch, tmp_path):
         _create_session(launch_home, sid, repo)
 
     monkeypatch.setattr(goal_session_activity, "active_goal_sessions", lambda: frozenset({"s_goal"}))
-    # Annotation requests waiting card identities as well as the four count maps.
+    # Match the atomic counts + waiting IDs snapshot used by row annotation.
     def counts(*, include_waiting=False):
-        result = ({"s_cards": 2}, {"s_cards": 1}, {}, {"s_cards": 1})
-        return (*result, {"s_cards": frozenset({"t_waiting"})}) if include_waiting else result
+        snapshot = ({"s_cards": 2}, {"s_cards": 1}, {}, {"s_cards": 1})
+        return (*snapshot, {"s_cards": frozenset({"t_open"})}) if include_waiting else snapshot
 
-    monkeypatch.setattr(
-        kanban_session_activity, "_all_counts",
-        counts,
-    )
+    monkeypatch.setattr(kanban_session_activity, "_all_counts", counts)
     monkeypatch.setattr(cron_session_activity, "cron_owner_sessions", lambda: frozenset())
     monkeypatch.setattr(process_session_activity, "_owned_processes", lambda: {"s_quiet": set()})
 
@@ -798,7 +795,7 @@ def test_tree_rows_carry_session_activity_stamps(monkeypatch, tmp_path):
         assert rows["s_goal"].get("goal_active") is True
         assert rows["s_cards"]["kanban_active"] == 2 and rows["s_cards"]["kanban_blocked"] == 1
         assert rows["s_cards"]["kanban_remote_stale"] == 1
-        assert rows["s_cards"]["kanban_waiting_on"] == ["t_waiting"]
+        assert rows["s_cards"]["kanban_waiting_on"] == ["t_open"]
         assert all("kanban_unknown" not in row for row in rows.values())
         # Control: an idle session carries none of them.
         assert not {"goal_active", "kanban_active", "kanban_remote_stale", "background_active", "cron_active"} & rows["s_quiet"].keys()

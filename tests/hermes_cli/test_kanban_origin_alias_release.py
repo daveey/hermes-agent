@@ -45,7 +45,8 @@ def publish(conn, replica, binding, sessions, version):
                    ('owner', 'tasks', binding['task_record_key'], version, json.dumps(task), 1000000))
         db.execute('INSERT INTO replica VALUES (?,?,?,?,?,?)',
                    ('owner', 'gateway', 'info', version, json.dumps({'gateway': 'owner', 'task_scopes': [
-                       {'profile': 'default', 'board': 'default', 'state': 'ok'}]}), 1000000))
+                       {'profile': 'default', 'board': 'default', 'state': 'ok', 'observed_at': 1000}]}),
+                    1000000))
 
 
 def prepare(scenario, aliases, *, verified=True):

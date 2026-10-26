@@ -155,3 +155,39 @@ def test_canonical_lineage_does_not_bind_to_unrelated_child(world, monkeypatch, 
         db.end_session('s_unrelated', 'reset')
     db.close()
     assert invoke(world, monkeypatch, capsys)['resolved_session'] == 's_new'
+
+
+def test_old_receiver_rejects_without_consuming_id_then_upgrade_accepts(world, monkeypatch, capsys):
+    from tests.hermes_cli.origin_adapter_pre_attestation import receive as old_receive
+    from hermes_cli.kanban_origin_legacy import record_digest
+    home, hub, _, request = world
+    old = {'id': 't_one', 'board': 'build', 'sessions': [
+        {'gw': 'origin', 'profile': 'default', 'session': 's_old', 'rel': 'shepherd'}]}
+    with sqlite3.connect(hub / 'hub.db') as db:
+        db.execute("INSERT INTO replica VALUES ('owner','tasks','build/t_one',2,?)", (json.dumps(old),))
+    request['action'] = 'origin-reconcile-legacy'
+    alias = {'key': 'build/t_one', 'version': 2, 'digest': record_digest(old),
+             'evidence': 'Owner verified the archived source configuration.'}
+    request['args']['legacy_alias'] = alias
+    with pytest.raises(ValueError, match='origin_route_mismatch'):
+        old_receive(request)
+    path = home / 'kanban/origin-ledger.db'
+    assert not path.exists()
+    assert ledger.receipt(path, request['id']) is None
+    result = invoke(world, monkeypatch, capsys)
+    assert result['status'] == 'accepted'
+    assert result['legacy_alias'] == alias
+    assert result['request_id'] == request['id']
+    assert ledger.receipt(path, request['id']) == result
+    assert invoke(world, monkeypatch, capsys) == result
+
+
+@pytest.mark.parametrize('alias', [None, {}, [], 'invalid'])
+def test_reconciliation_requires_alias_before_receipt(world, monkeypatch, capsys, alias):
+    world[3]['action'] = 'origin-reconcile-legacy'
+    if alias is not None:
+        world[3]['args']['legacy_alias'] = alias
+    result = invoke(world, monkeypatch, capsys)
+    assert result['status'] == 'rejected'
+    assert result['code'] == 'origin_legacy_invalid'
+    assert not (world[0] / 'kanban/origin-ledger.db').exists()

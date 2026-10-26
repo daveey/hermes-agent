@@ -62,7 +62,8 @@ def publish_observed(conn, replica, binding, *, version, now=1000):
         db.execute("INSERT OR REPLACE INTO meta VALUES ('last_ok',?)", (str(now),))
         db.execute("INSERT INTO replica VALUES ('owner','gateway','info',6,?)",
                    (json.dumps({'gateway': 'owner', 'task_scopes': [
-                       {'profile': binding['owner']['profile'], 'board': binding['owner']['board'], 'state': 'ok'}]}),))
+                       {'profile': binding['owner']['profile'], 'board': binding['owner']['board'], 'state': 'ok',
+                        'observed_at': now}]}),))
 
 
 @pytest.mark.parametrize('completed', [False, True])
@@ -235,5 +236,7 @@ def test_owner_observation_proves_current_local_completion(board):
             [tuple(r) for r in conn.execute('SELECT id,status,outcome,ended_at FROM task_runs WHERE task_id=?', (tid,))],
             [tuple(r) for r in conn.execute("SELECT id,run_id,created_at FROM task_events WHERE task_id=? AND kind='completed'", (tid,))],
         )
-        assert observed['origin_observation']['observed_at'] == 1000
+        # An unchanged task republishes nothing: a later observation is the identical record (liveness is
+        # the collector's per-scope heartbeat, not a per-task stamp).
+        assert observe(conn, task, now=2000) == observed
         assert task.get('origin_observation') is None

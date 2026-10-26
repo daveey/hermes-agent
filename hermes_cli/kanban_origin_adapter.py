@@ -70,13 +70,19 @@ def receive(request: dict) -> dict:
         raise ValueError('origin_request_invalid')
     binding = request['args'].get('binding')
     validate_binding(binding)
-    if (request.get('coll') != 'sessions' or request.get('action') != 'origin-bind'
+    if (request.get('coll') != 'sessions'
+            or request.get('action') not in ('origin-bind', 'origin-reconcile-legacy')
             or request.get('to_gw') != gateway
             or request.get('key') != f"{profile}/{binding['origin']['session']}"):
         raise ValueError('origin_route_mismatch')
+    # A distinct wire action makes pre-attestation adapters reject before they
+    # consume the immutable receipt ID. Ordinary origin-bind stays compatible.
+    if request['action'] == 'origin-reconcile-legacy' and not isinstance(request['args'].get('legacy_alias'), dict):
+        raise ValueError('origin_legacy_invalid')
     return accept_binding(path=home / 'kanban/origin-ledger.db', replica=replica,
                           binding=binding, request_id=request.get('id'),
                           sender=request.get('from'), gateway=gateway, profile=profile,
+                          legacy_alias=request['args'].get('legacy_alias'),
                           resolve_session=lambda sid: _resolve_session(home / 'state.db', sid))
 
 
