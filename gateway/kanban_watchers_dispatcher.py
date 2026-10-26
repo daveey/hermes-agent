@@ -217,6 +217,27 @@ class _KanbanDispatcher:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""
         return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
 
+    @contextlib.contextmanager
+    def _unowned_board_work(self, slug):
+        """Hold the same canonical lock for pre-dispatch work and owner changes."""
+        from hermes_cli.kanban_dispatch_owner import connection_db_path, get_dispatch_owner
+        with contextlib.ExitStack() as stack:
+            allowed = None
+            try:
+                conn = stack.enter_context(_kbc().connect_closing(board=slug))
+                path = connection_db_path(conn, validate=False)
+                held = stack.enter_context(_kbc()._dispatch_tick_lock(path))
+                if held:
+                    connection_db_path(conn)
+                    if get_dispatch_owner(path) is None:
+                        allowed = conn
+            except (OSError, ValueError, UnicodeError, RecursionError, sqlite3.Error,
+                    _kbc().KanbanDbCorruptError) as exc:
+                # tick_once owns corruption quarantine and its actionable log;
+                # pre-work must not emit a traceback on every probe.
+                logger.debug("kanban dispatcher: pre-dispatch work denied on %s (%s)", slug, exc)
+            yield allowed
+
     def ready_nonempty(self) -> bool:
         """Is there a ready+assigned+unclaimed task on ANY board the dispatcher would spawn for?
 
@@ -231,17 +252,14 @@ class _KanbanDispatcher:
         from hermes_cli import kanban_db as _kb
         with _kb.pin_first_board_resolution():
             for slug in self._board_slugs():
-                conn = None
                 try:
-                    conn = _kbc().connect(board=slug)
-                    if kbd.has_spawnable_ready(conn) or (_review_probe and kbd.has_spawnable_review(conn)):
-                        return True
+                    with self._unowned_board_work(slug) as conn:
+                        if conn is not None and (kbd.has_spawnable_ready(conn) or (
+                                _review_probe and kbd.has_spawnable_review(conn))):
+                            return True
                 except Exception:
-                    continue
-                finally:
-                    if conn is not None:
-                        with contextlib.suppress(Exception):
-                            conn.close()
+                    # A corrupt DB or failed probe must not hide healthy peers.
+                    logger.exception("kanban dispatcher: health probe failed on board %s", slug)
         return False
 
     def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
@@ -267,24 +285,35 @@ class _KanbanDispatcher:
                 prev_env = os.environ.get("HERMES_KANBAN_BOARD")
                 try:
                     os.environ["HERMES_KANBAN_BOARD"] = slug
-                    try:
-                        # Cards a block loop escalated for a human stay put until
-                        # a human adds input; re-specifying them restarts the loop.
-                        triage_ids = _decomp.list_triage_ids(skip_awaiting_human=True)
-                    except Exception as exc:
-                        logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
-                        triage_ids = []
-                    for tid in triage_ids:
-                        if attempted >= auto_decompose_per_tick:
-                            break
-                        attempted += 1
-                        successes += self._decompose_one(_decomp, slug, tid)
+                    with self._unowned_board_work(slug) as conn:
+                        if conn is not None:
+                            used, done = self._decompose_board(_decomp, slug, auto_decompose_per_tick - attempted)
+                            attempted += used
+                            successes += done
+                except Exception:  # health: allow BLE001 -- per-board isolation boundary logs traceback; finally restores env
+                    # Contain connection, callback and cleanup failures per board;
+                    # the caller must still reach tick_once for healthy peers.
+                    logger.exception("kanban auto-decompose: board %s failed", slug)
                 finally:
                     if prev_env is None:
                         os.environ.pop("HERMES_KANBAN_BOARD", None)
                     else:
                         os.environ["HERMES_KANBAN_BOARD"] = prev_env
         return successes
+
+    def _decompose_board(self, decomp, slug, budget):
+        try:
+            triage_ids = decomp.list_triage_ids(skip_awaiting_human=True)
+        except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:
+            logger.exception("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
+            return 0, 0
+        attempted = successes = 0
+        for tid in triage_ids:
+            if attempted >= budget:
+                break
+            attempted += 1
+            successes += self._decompose_one(decomp, slug, tid)
+        return attempted, successes
 
     @staticmethod
     def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:

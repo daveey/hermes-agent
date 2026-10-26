@@ -88,3 +88,23 @@ def test_delete_default_board_is_refused(client):
     r = client.delete("/api/plugins/kanban/boards/default")
     assert r.status_code == 400
     assert "default" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("method", ["post", "patch"])
+def test_busy_board_metadata_returns_conflict(client, method):
+    from hermes_cli import kanban_db_connect as kbc
+    kb.create_board("sample")
+    path = kb.board_dir("sample") / "kanban.db"
+    url = "/api/plugins/kanban/boards" + ("/sample" if method == "patch" else "")
+    with kbc._dispatch_tick_lock(path) as held:
+        assert held
+        response = getattr(client, method)(url, json={"slug": "sample", "name": "New"})
+    assert response.status_code == 409
+    assert "busy" in response.json()["detail"]
+    assert kb.read_board_metadata("sample")["name"] != "New"
+
+
+def test_missing_board_delete_is_refused_without_stub(client):
+    response = client.delete("/api/plugins/kanban/boards/missing")
+    assert response.status_code == 400
+    assert not kb.board_dir("missing").exists()

@@ -27,7 +27,7 @@ def test_failure_breaker_never_resurrects_legacy_request(tmp_path):
         conn.commit()
         assert db._record_task_failure(conn, task, "spawn unavailable",
                                        outcome="spawn_failed", force_trip=True)
-        assert db.get_task(conn, task).status == "blocked"
+        assert db.get_task(conn, task).status == "triage"
         assert db.get_task(conn, task).human_request is None
     finally:
         conn.close()
@@ -72,7 +72,7 @@ def test_completion_retires_request(tmp_path):
         conn.close()
 
 
-@pytest.mark.parametrize("transition", ["archive", "claim", "review", "schedule", "invalidate"])
+@pytest.mark.parametrize("transition", ["archive", "claim", "review", "schedule", "invalidate", "supervisor"])
 def test_legacy_request_retired_by_lifecycle_transition(tmp_path, transition):
     conn = connect(tmp_path / "board.db")
     try:
@@ -87,7 +87,10 @@ def test_legacy_request_retired_by_lifecycle_transition(tmp_path, transition):
             assert plugin_api._set_status_direct(conn, parent, "ready")
             return db.get_task(conn, task).status == "todo"
 
+        from hermes_cli.kanban_block_routing import supervisor_stop
+
         actions = {
+            "supervisor": lambda: supervisor_stop(conn, task, "Guard held execution", "respawn_guard_hold"),
             "archive": lambda: db.archive_task(conn, task),
             "claim": lambda: db.claim_task(conn, task) is not None,
             "review": lambda: db.request_review(conn, task),

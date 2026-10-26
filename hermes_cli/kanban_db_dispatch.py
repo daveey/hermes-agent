@@ -150,6 +150,9 @@ class DispatchResult:
     is
     """
 
+    skipped_owned: bool = False
+    dispatch_owner: Optional[str] = None
+    ownership_error: Optional[str] = None
     reclaimed: int = 0
     promoted: int = 0
     reconciled_orphans: list[str] = field(default_factory=list)
@@ -231,6 +234,8 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
+        if res.skipped_owned:
+            counts["skipped_owned"] = counts.get("skipped_owned", 0) + 1
         if res.memory_pressure:
             pressure = res.memory_pressure
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
@@ -1545,7 +1550,7 @@ def _record_task_failure(
         # Spawn path (release_claim) is still running and also clears claim
         # state; the timeout/crash path already did.
         conn.execute(
-            "UPDATE tasks SET status = 'blocked', human_request = NULL, "
+            "UPDATE tasks SET status = 'triage', block_kind = 'transient', human_request = NULL, "
             + ("claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
                if release_claim else "")
             + "consecutive_failures = ?, last_failure_error = ? "
@@ -1553,6 +1558,8 @@ def _record_task_failure(
             (failures, error, task_id),
         )
         payload = {
+            "kind": "transient",
+            "reason_code": "worker_failures_exhausted",
             "failures": failures,
             "effective_limit": effective_limit,
             "limit_source": limit_source,
@@ -1641,34 +1648,8 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def _block_if_guard_hold_capped(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
-    """Block ``task_id`` when the guard has held it for ``reason`` past the cap. [daveey]"""
-    cap = guard_hold_cap_seconds(reason)
-    if cap is None:
-        return False
-    started = _guard_hold_started_at(conn, task_id)
-    if started is None:
-        return False
-    held = int(time.time()) - started
-    if held < cap:
-        return False
-    row = conn.execute("SELECT last_failure_error FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    raw_err = _kb._lossy_text(row["last_failure_error"]) if row else ""
-    if reason == "rate_limit_cooldown" or _kbq.is_quota_error(raw_err):
-        # A quota wall clears on its own: never a human block. Drop the stamp (the event it
-        # appends restarts the hold clock) and let the next tick retry. [daveey]
-        if raw_err:
-            _kbq.clear_quota_error(conn, task_id, raw_err)
-        return False
-    err = _kb._first_line(raw_err, 300) or "(no error recorded)"
-    minutes = max(1, held // 60)
-    message = (f"Held in ready by the respawn guard ({reason}) for {minutes} min without running. "
-               f"Last error: {err} Fix the cause (credentials, PR binding), then unblock.")
-    kind = "capability" if reason in _GUARD_HOLD_SHORT_CAP_REASONS else "needs_input"
-    try:
-        return bool(_kb.block_task(conn, task_id, reason=message, kind=kind))
-    except Exception:
-        _kb._log.warning("kanban: auto-blocking guard-held %s failed", task_id, exc_info=True)
-        return False
+    from hermes_cli.kanban_block_routing import block_if_guard_hold_capped
+    return block_if_guard_hold_capped(conn, task_id, reason)
 
 
 def check_respawn_guard(
@@ -2126,6 +2107,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    dispatcher_id: Optional[str] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2151,24 +2133,8 @@ def dispatch_once(
             reconcile_orphans=reconcile_orphans,
         )
 
-    try:
-        db_path = _kb.kanban_db_path(board=board)
-    except Exception:
-        # Must not lose the tick — fall through to an unguarded dispatch.
-        result = _locked_tick()
-        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
-        return result
-    with _kbc._dispatch_tick_lock(db_path) as held:
-        if not held:
-            result = DispatchResult(skipped_locked=True)
-        else:
-            result = _locked_tick()
-            # Still under the dispatch lock: periodic PASSIVE WAL checkpoint.
-            _kbc._maybe_checkpoint_wal(conn, db_path)
-    # Lock released. Fire the tick observer strictly OUTSIDE the critical
-    # section: a slow subscriber must never stall a sibling dispatcher's tick.
-    _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
-    return result
+    from hermes_cli.kanban_dispatch_owner import run_owned_tick
+    return run_owned_tick(conn, _locked_tick, dispatcher_id, board, dry_run)
 
 
 def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -> Optional[int]:

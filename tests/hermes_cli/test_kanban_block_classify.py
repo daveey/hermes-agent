@@ -32,6 +32,10 @@ def _time_out_once(conn, tid: str) -> None:
             (started, tid),
         )
     assert tid in kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+    # Model a pre-classification board: new breakers now write triage/transient.
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = 'blocked', block_kind = NULL "
+                     "WHERE id = ? AND status = 'triage'", (tid,))
 
 
 def test_typed_block_classifies_untyped_breaker_block(kanban_home, monkeypatch):

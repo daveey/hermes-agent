@@ -682,26 +682,6 @@ def _validate_request_entry(payload) -> None:
                 raise ValueError("human_request/block_kind require blocked status or metadata_only classification")
 
 
-def _classification_actor(request: Request) -> str:
-    """Use the existing sensitive-endpoint gate, never a payload actor or worker env.
-
-    Dashboard sessions (including the shared loopback token) are trusted operators;
-    there is no worker/operator role distinction within that credential. A worker
-    holding it has the same authority. Service token principals alone do not pass
-    this gate. Annotation records evidence, not approval or OS authentication.
-    """
-    from hermes_cli.web_server import _require_token
-
-    if request is None:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    _require_token(request)
-    session = getattr(request.state, "session", None)
-    if getattr(request.app.state, "auth_required", False):
-        assert session is not None  # enforced by the canonical gate above
-        return f"dashboard:{session.provider}:{session.user_id}"
-    return "dashboard:loopback-token"
-
-
 def _classify_request(conn, task_id, payload, actor: str) -> bool:
     from hermes_cli.kanban_human_request_migration import classify_parked_request
 
@@ -833,7 +813,9 @@ def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Option
 @router.patch("/tasks/{task_id}")
 def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None), request: Request = None):
     _validate_request_entry(payload)
-    actor = _classification_actor(request) if payload.metadata_only else ""
+    from plugins.kanban.dashboard.plugin_api_human_request import classification_actor
+
+    actor = classification_actor(request) if payload.metadata_only else ""
     with _board_conn(board) as (board, conn):
         _require_task(conn, task_id)
         if payload.metadata_only:
@@ -1011,7 +993,9 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None), reque
     """Apply the same patch to every id. Independent iteration — per-task
     failures don't abort siblings; returns per-id outcome for partials."""
     _validate_request_entry(payload)
-    actor = _classification_actor(request) if payload.metadata_only else ""
+    from plugins.kanban.dashboard.plugin_api_human_request import classification_actor
+
+    actor = classification_actor(request) if payload.metadata_only else ""
     ids = [i for i in (payload.ids or []) if i]
     if not ids:
         raise HTTPException(status_code=400, detail="ids is required")
@@ -1598,9 +1582,12 @@ def create_board_endpoint(payload: CreateBoardBody):
     project_id, _pname, primary_path = _resolve_project(payload.project_id)
     if primary_path and not default_workdir:
         default_workdir = primary_path
-    with _value_error_400():
-        meta = kanban_db.create_board(
-            payload.slug, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+    try:
+        with _value_error_400():
+            meta = kanban_db.create_board(
+                payload.slug, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if payload.switch:
         with _value_error_400():
             kanban_db.set_current_board(meta["slug"])
@@ -1625,8 +1612,12 @@ def rename_board(slug: str, payload: RenameBoardBody):
                 default_workdir = primary_path
         else:
             project_id = ""  # clear the scope
-    meta = kanban_db.write_board_metadata(
-        normed, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+    try:
+        with _value_error_400():
+            meta = kanban_db.write_board_metadata(
+                normed, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"board": _annotate_board_meta(meta)}
 
 

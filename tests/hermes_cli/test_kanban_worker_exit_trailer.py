@@ -94,7 +94,7 @@ def test_violation_budget_trip_holds_until_operator_unblock(kanban_home):
             kbd.detect_crashed_workers(conn)
             kb.recompute_ready(conn, failure_limit=10)
         task = kb.get_task(conn, tid)
-        assert task.status == "blocked"
+        assert (task.status, task.block_kind) == ("triage", "transient")
         assert task.consecutive_failures < 10
 
         kb.unblock_task(conn, tid)
@@ -115,7 +115,7 @@ def test_plain_budget_trip_still_auto_recovers(kanban_home):
                     conn, tid, error=f"boom{i}", outcome="crashed", failure_limit=2,
                     release_claim=False, end_run=False,
                 )
-            assert kb.get_task(conn, tid).status == "blocked"
+            assert kb.get_task(conn, tid).status == "triage"
         assert kb.recompute_ready(conn, failure_limit=2) == 0
 
         assert kb.recompute_ready(conn, failure_limit=5) == 2
@@ -126,7 +126,7 @@ def test_plain_budget_trip_still_auto_recovers(kanban_home):
                 conn, tids[1], error=f"again{i}", outcome="crashed", failure_limit=2,
                 release_claim=False, end_run=False,
             )
-        assert kb.get_task(conn, tids[1]).status == "blocked"
+        assert kb.get_task(conn, tids[1]).status == "triage"
         kb.assign_task(conn, tids[1], "other-profile")
         assert kb.recompute_ready(conn, failure_limit=2) == 1
         assert kb.get_task(conn, tids[1]).status == "ready"

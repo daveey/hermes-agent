@@ -2058,34 +2058,6 @@ def _synthesize_ended_run(
 
 # --- Dependency resolution (todo -> ready) ---
 
-def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """True when the newest ``blocked``/``unblocked``/``gave_up`` event says the
-    block must wait for an operator: an explicit ``kanban_block`` (#28712), or a
-    breaker trip ``_record_task_failure`` stamped ``sticky`` — the clean-exit
-    protocol-violation budget or a systemic same-error wave. Those trip on a
-    policy independent of ``consecutive_failures``, so ``recompute_ready``'s
-    counter check cannot see them — without this the trip is promoted back to
-    ``ready`` in the same tick and the card respawns forever. A plain
-    (unified-budget) ``gave_up`` carries no marker and is judged by the counter,
-    so raising ``failure_limit`` or ``assign_task`` to a fresh profile still
-    releases it; a task with no such event at all (direct DB edit) auto-recovers.
-    """
-    row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
-        "ORDER BY id DESC LIMIT 1", (task_id,),
-    ).fetchone()
-    if row and row["kind"] == "blocked":
-        return True
-    trip = conn.execute(
-        "SELECT payload FROM task_events "
-        "WHERE task_id = ? AND kind = 'gave_up' AND id > COALESCE("
-        "  (SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'unblocked'), 0) "
-        "ORDER BY id DESC LIMIT 1", (task_id, task_id),
-    ).fetchone()
-    return bool(trip) and bool(_json_dict(trip["payload"]).get("sticky"))
-
-
 def _latest_event(
     conn: sqlite3.Connection, task_id: str, kind: str, run_id: Optional[int] = None,
 ) -> Optional[sqlite3.Row]:
@@ -2117,8 +2089,11 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
+    """Promote dependency waits and recoverable failure stops;
     returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
+
+    Agent-triage failure-budget stops retain the same recovery as legacy blocked
+    stops. Guard holds and other triage reasons still require explicit resolution.
 
     ``blocked`` is skipped when sticky (explicit ``kanban_block``) or when
     ``consecutive_failures`` reached the limit (else the breaker could never
@@ -2130,16 +2105,21 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
+    from hermes_cli.kanban_block_routing import has_sticky_block
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
-            "FROM tasks WHERE status IN ('todo', 'blocked')"
+            "FROM tasks WHERE status IN ('todo', 'blocked') OR ("
+            "status = 'triage' AND block_kind = 'transient' AND 'gave_up' = ("
+            "SELECT kind FROM task_events WHERE task_id = tasks.id AND kind IN ("
+            "'gave_up', 'blocked', 'block_loop_detected', 'supervisor_escalated', 'status') "
+            "ORDER BY id DESC LIMIT 1))"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
-            if cur_status == "blocked" and _has_sticky_block(conn, task_id):
+            if cur_status in ("blocked", "triage") and has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
             parents = conn.execute(
@@ -2149,7 +2129,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             ).fetchall()
             if all(p["status"] in ("done", "archived") for p in parents):
                 resume_status = _resume_status_from_events(conn, task_id)
-                if cur_status == "blocked":
+                if cur_status in ("blocked", "triage"):
                     # At the breaker limit, no auto-recovery (else block ->
                     # recover -> respawn -> exhaust -> block forever). The
                     # counter is preserved so it accumulates across cycles.
@@ -2163,7 +2143,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                         continue
                     conn.execute(
                         "UPDATE tasks SET status = ? "
-                        "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
+                        "WHERE id = ? AND status = ?", (resume_status, task_id, cur_status),
                     )
                 else:
                     conn.execute(
@@ -3271,8 +3251,8 @@ def block_task(
             return True
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else cur_row["status"]
         requested_kind, rekind_reason = kind, None
-        if kind in {"capability", "assignment"} and not blocker_id:
-            kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason)
+        from hermes_cli.kanban_block_routing import classify_stop
+        kind, rekind_reason, exhausted_budget = classify_stop(conn, task_id, kind, reason, blocker_id)
         no_open_parent = _parents_satisfied(conn, task_id)
         from hermes_cli import kanban_timed_park as ktp
         if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent):
@@ -3296,6 +3276,8 @@ def block_task(
             # human question: its rewording is no progress.
             compare_reason=requested_kind == "needs_input",
         )
+        if exhausted_budget:
+            new_status, event_kind = "triage", "blocked"
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
@@ -3303,7 +3285,7 @@ def block_task(
         blocker_id = normalize_blocker_id(blocker_id)
         if blocker_id:
             payload["blocker_id"] = blocker_id
-            if (new_status == "triage" and _row_get(cur_row, "block_kind") == kind
+            if (new_status == "triage" and _row_get(cur_row, "block_kind") == payload.get("kind") == kind
                     and latest_run_blocker(conn, task_id) == blocker_id):
                 # A probe re-asserting the shared blocker it was parked behind is the
                 # dispatcher's bounded probe cadence, not an unblock loop: keep the
