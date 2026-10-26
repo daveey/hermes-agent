@@ -17,6 +17,41 @@ FILES=(ci.yaml tests.yml lint.yml js-tests.yml rust-tests.yml remote-backends.ym
 sed -i.bak -E 's/^([[:space:]]*runs-on:[[:space:]]*)(ubuntu-latest(-32-core)?|ubuntu-24\.04)[[:space:]]*$/\1[self-hosted, hermes-hub]/' "${FILES[@]}"
 rm -f ./*.bak
 
+# Long-lived pollers go to the poll-only runners (label `hermes-hub-poll` ONLY,
+# 0.5 CPU each; hosts/hermes-hub/gh-runner/ci-slice.sh install-poll), so they
+# never hold one of the test runners.
+sed -i.bak -E 's/^([[:space:]]*runs-on:[[:space:]]*)(\[self-hosted, hermes-hub\]|ubuntu-latest|ubuntu-24\.04)[[:space:]]*$/\1[self-hosted, hermes-hub-poll]/' ci-review-comment.yml
+rm -f ./*.bak
+
+# Aggregator/report jobs (cheap: checkout + a python script) go to the poll
+# runners and skip on cancellation. With `if: always()` on a [hermes-hub] test
+# runner, a CANCELLED run (superseded PR head) still waited for a busy heavy
+# runner to run its aggregator, held the ci-<PR> concurrency group, and left
+# the new head's run `pending` (PR #53, PR #50). `!cancelled()` keeps
+# failure/skip reporting; a cancelled run now completes at once.
+# Detect gets 5 min: a 1-min cap was cancelling whole runs on a loaded hub
+# (checkout 52s + compare-API retry), which skipped every lane.
+python3 - <<'PY'
+import re
+JOBS = {
+    'ci.yaml': ('all-checks-pass', 'ci-timings'),
+    'supply-chain-audit.yml': ('aggregate',),
+}
+for f, names in JOBS.items():
+    t = open(f).read()
+    for name in names:
+        m = re.search(r'(?m)^  ' + re.escape(name) + r':\n(?:(?!  \S).*\n)*', t)
+        assert m, (f, name)
+        block = m.group(0)
+        new = re.sub(r'(?m)^(    if: )always\(\)$', r"\1${{ !cancelled() }}", block)
+        new = re.sub(r'(?m)^(    runs-on: )\[self-hosted, hermes-hub\]$', r'\1[self-hosted, hermes-hub-poll]', new)
+        t = t.replace(block, new)
+    if f == 'ci.yaml':
+        t = re.sub(r"(  detect:\n    name: Detect affected areas\n    runs-on: [^\n]*\n    timeout-minutes: )1\n",
+                   r"\g<1>5  # fork: shared, CPU-capped hub runner\n", t)
+    open(f, 'w').write(t)
+PY
+
 # Docker-dependent jobs go to the rootless-docker runners (label `docker-ci`
 # ONLY, so plain [self-hosted, hermes-hub] jobs never land on them;
 # hosts/hermes-hub/gh-runner/setup-ci-docker.sh). Plain ubuntu jobs above stay

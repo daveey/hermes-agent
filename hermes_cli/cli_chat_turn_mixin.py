@@ -636,6 +636,12 @@ class CLIChatTurnMixin:
         _interrupted_this_turn = bool(turn.result and turn.result.get("interrupted"))
         # Post-turn hooks (e.g. goal continuation) skip themselves on a user-cancelled turn.
         self._last_turn_interrupted = _interrupted_this_turn
+        from agent.turn_facade_lease import session_was_taken_over
+        if self.agent and session_was_taken_over(self.agent, self.agent.session_id):
+            # Ownership notices are not user redirects. Never feed them back to
+            # the model as a new prompt after the durable lease has been released.
+            self._last_turn_interrupted = True
+            return None, False
         if _interrupted_this_turn:
             pending_message = turn.result.get("interrupt_message") or interrupt_msg
             _show_interrupt_marker = bool(response and pending_message)

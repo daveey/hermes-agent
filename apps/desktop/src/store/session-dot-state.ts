@@ -69,7 +69,7 @@ export const $delegatingSessionIds = computed(
   }
 )
 
-// [daveey] Sessions whose kanban tasks are still queued or running. Same story
+// [daveey] Sessions whose kanban tasks are still queued, running or blocked. Same story
 // as async delegation, but the work lives in kanban worker processes for hours:
 // `kanban_create` returns at once, the creating turn ends, and the sidebar read
 // the session as done (green stripe) while its workers were still going. The
@@ -82,8 +82,13 @@ export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $k
     for (const row of rows) {
       // [daveey] `kanban_unknown`: the backend could not read the session's cards (local boards or another
       // gateway's replica). Unknown is not "no work", so the row stays off done until a read succeeds.
-      if ((row.kanban_active ?? 0) > 0 || row.kanban_unknown === true ||
-          (row.kanban_remote_stale ?? 0) > 0 || !hasFreshKanbanObservation(row)) {
+      if (
+        (row.kanban_active ?? 0) > 0 ||
+        (row.kanban_blocked ?? 0) > 0 ||
+        row.kanban_unknown === true ||
+        (row.kanban_remote_stale ?? 0) > 0 ||
+        !hasFreshKanbanObservation(row)
+      ) {
         ids.push(row.id)
       }
     }
@@ -281,7 +286,7 @@ export const sessionStatusStripe = (
  *  Same claim (and priority) as the store: it beats idle/unread/draft only. */
 export const withRowActivity = (
   state: SessionDotState,
-  row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active'> &
+  row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active' | 'kanban_blocked'> &
     Partial<Pick<SessionInfo, 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen'>>
 ): SessionDotState =>
   (state === 'idle' || state === 'unread' || state === 'draft') &&
@@ -290,11 +295,12 @@ export const withRowActivity = (
     row.kanban_unknown === true ||
     (row.kanban_remote_stale ?? 0) > 0 ||
     !hasFreshKanbanObservation(row) ||
+    (row.kanban_blocked ?? 0) > 0 ||
     (row.background_active ?? 0) > 0)
     ? 'background'
     : (state === 'idle' || state === 'draft') && (row.kanban_unseen ?? 0) > 0
-    ? 'unread'
-    : state
+      ? 'unread'
+      : state
 
 /** Whether this turn is the session's own, live: brighter title, and the row's
  *  age yields to the actions menu. Wider than the arc — a turn waiting on an
@@ -408,7 +414,8 @@ export const $sessionDotStateById = computed(
     // claim as background processes — and it yields to `working` below the
     // moment the parent turn itself is live (synchronous orchestrator children).
     claim(delegating, 'background')
-    // Kanban tasks it created are still queued or running: same claim.
+    // Blocked cards are unfinished too, even after a goal completes. The
+    // row's stripe adds the red treatment; its dot must not claim finished.
     claim(kanbanBusy, 'background')
     // A standing goal will start its next turn by itself: same claim.
     claim(goalActive, 'background')

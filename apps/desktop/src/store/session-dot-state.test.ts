@@ -399,6 +399,33 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
     }
   })
 
+  it('does not become done when the goal and running cards finish but a blocked card remains', () => {
+    setSessions([storedRow('s1', { goal_active: true, kanban_active: 1, kanban_blocked: 1, unread: true })])
+    expect($sessionDotStateById.get().s1).toBe('background')
+
+    setSessions([storedRow('s1', { goal_active: false, kanban_active: 0, kanban_blocked: 1, unread: true })])
+    expect($kanbanBusySessionIds.get()).toEqual(['s1'])
+    expect($sessionDotStateById.get().s1).toBe('background')
+    expect(sessionStatusStripe($sessionDotStateById.get().s1, true)).not.toBe('done')
+
+    setSessions([storedRow('s1', { goal_active: false, kanban_active: 0, kanban_blocked: 0, unread: true })])
+    expect($kanbanBusySessionIds.get()).toEqual([])
+    expect(sessionStatusStripe($sessionDotStateById.get().s1, true)).toBe('done')
+  })
+
+  it('folds blocked-only project rows over finished/unseen results after goal completion', () => {
+    const row = { goal_active: false, kanban_active: 0, kanban_blocked: 1, kanban_observed_at: Date.now() / 1000, kanban_unseen: 1 }
+
+    for (const state of ['idle', 'unread', 'draft'] as const) {
+      expect(withRowActivity(state, row)).toBe('background')
+      expect(sessionStatusStripe(withRowActivity(state, row), true)).not.toBe('done')
+    }
+
+    for (const state of ['working', 'stalled', 'needs-input'] as const) {
+      expect(withRowActivity(state, row)).toBe(state)
+    }
+  })
+
   it('goes back to done once the tasks finish', () => {
     setSessions([storedRow('s1', { kanban_active: 1 })])
     setSessions([storedRow('s1', { kanban_active: 0 })])

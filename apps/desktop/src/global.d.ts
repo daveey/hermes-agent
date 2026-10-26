@@ -242,6 +242,8 @@ declare global {
         test: (id: string) => Promise<DesktopConnectionTestResult>
         // Drain/update/restore one Desktop-managed SSH install. External URL
         // and cloud sources are refused without touching their processes.
+        reconnectTarget?: (id: string, profile: string) => Promise<{ connectionId: string; profile: string; generation: string } | null>
+        reconnect?: (target: { connectionId: string; profile: string; generation: string }) => Promise<{ ok: boolean; generation?: string }>
         updateManaged?: (id: string) => Promise<DesktopManagedConnectionUpdateResult>
         // Fan out `hermes update` to every eligible registered connection;
         // cloud entries are skipped (platform-managed), each row independent.

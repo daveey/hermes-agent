@@ -164,9 +164,11 @@ def test_isolated_turn_without_matching_vouch_still_fails_closed(isolated_env):
     try:
         frames, _ = _run_turn(_make_frame(
             "s1", active_session_lease={"lease_id": parent.lease_id, "session_id": "stale-A"}))
-        errors = [f["message"]["params"]["payload"]["message"] for f in frames
-                  if f["type"] == "rpc" and (f["message"].get("params") or {}).get("type") == "error"]
-        assert errors and "open in another Hermes window" in errors[0]
+        completed = [f["message"]["params"]["payload"] for f in frames
+                     if f["type"] == "rpc" and (f["message"].get("params") or {}).get("type") == "message.complete"]
+        assert completed and completed[0]["status"] == "error"
+        assert "open in another Hermes window" in completed[0]["error"]
+        assert completed[0]["error_surface"]["code"] == "SESSION_NOT_OWNED"
         assert [e["lease_id"] for e in _registry()] == [parent.lease_id]
     finally:
         parent.release()

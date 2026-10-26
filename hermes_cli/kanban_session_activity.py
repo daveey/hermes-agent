@@ -47,6 +47,7 @@ _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
 _cache_scope: tuple[str, ...] | None = None
+_cache_fingerprint: tuple = ()
 _waiting_cache: list[dict[str, frozenset[str]]] = [{}]
 _pairs_lock = threading.Lock()
 WAITING_ON_CAP = 50
@@ -354,6 +355,23 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
     return list(found.values())
 
 
+def _activity_fingerprint() -> tuple:
+    """Invalidate on cross-process commits, including WAL writes and board replacement."""
+    paths = _board_db_paths()
+    hub = _hub_db_path()
+    if hub is not None:
+        paths.append(hub)
+    signature = []
+    for db in paths:
+        for path in (db, Path(str(db) + "-wal")):
+            try:
+                st = path.stat()
+                signature.append((str(path), st.st_ino, st.st_size, st.st_mtime_ns))
+            except FileNotFoundError:
+                signature.append((str(path), None))
+    return tuple(signature)
+
+
 def _remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any]] | None:
     """Durable last-known origin obligations, separate from the replaceable hub replica.
 
@@ -485,11 +503,12 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
 
 def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
     """``(active, blocked, unseen, remote_stale)`` per-session task counts across every board, cached."""
-    global _cache, _cache_scope
+    global _cache, _cache_scope, _cache_fingerprint
     scope = _origin_scope()
     now = time.monotonic()
+    fingerprint = _activity_fingerprint()
     with _cache_lock:
-        if _cache is not None and _cache_scope == scope and now < _cache[0]:
+        if _cache is not None and _cache_scope == scope and now < _cache[0] and fingerprint == _cache_fingerprint:
             return _cache[1], _cache[2], _cache[3], _cache[4]
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
@@ -511,6 +530,7 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[
     with _cache_lock:
         _cache_scope = scope
         _cache = (now + _CACHE_TTL_S, active, blocked, unseen, stale)
+        _cache_fingerprint = fingerprint
         _waiting_cache[0] = {sid: frozenset(ids) for sid, ids in waiting.items()}
     return active, blocked, unseen, stale
 

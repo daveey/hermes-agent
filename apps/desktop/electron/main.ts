@@ -528,6 +528,7 @@ import {
   createQuitTeardownCoordinator,
   type QuitTeardownTask
 } from './quit-teardown'
+import { createSshReuseProbe, wireRegistryReconnect } from './registry-reconnect-wiring'
 import * as remoteLifecycle from './remote-lifecycle'
 import {
   attachPowerResumeRemoteRevalidation,
@@ -9851,22 +9852,9 @@ function sshRememberLog(chunk) {
   rememberLog(redactSecrets(String(chunk == null ? '' : chunk)))
 }
 
-async function sshProbeReuseProof(baseUrl, token, spawnNonce) {
-  try {
-    const proof: any = await fetchJson(`${baseUrl}/api/ssh/ownership`, token)
-
-    return remoteLifecycle.classifySshReuseProof(proof, spawnNonce)
-  } catch (error: any) {
-    if (/^(401|403|404):/.test(String(error?.message || ''))) {
-      return 'authenticated-stale'
-    }
-
-    throw error
-  }
-}
-
 async function teardownSshConnection(profile) {
   const scope = sshScopeKey(profile)
+  registryReconnectService.assertCanStop(scope)
   sshIsolatedKeepalives.stop(scope)
   const state = sshConnections.get(scope)
 
@@ -10243,7 +10231,7 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
       cancelForward: (localPort, remotePort) => ssh.cancelForward(localPort, remotePort),
       pickLocalPort,
       waitForHermes: (baseUrl, token) => waitForHermes(baseUrl, token, lease.signal, 'token'),
-      probeReuseProof: sshProbeReuseProof,
+      probeReuseProof: createSshReuseProbe(fetchJson),
       adoptServedToken: adoptServedDashboardToken,
       rememberLog: sshRememberLog,
       guestOnboarding: GUEST_ONBOARDING,
@@ -11080,11 +11068,11 @@ async function ensureRegistryBackend(
     throw new Error(`No connection with id "${id}".`)
   }
 
-  if (source.kind === 'ssh') {
-    managedConnectionUpdateGate.assertCanDial(id, managedUpdateCorrelation)
-  }
-
   const profileKey = String(profile ?? '').trim() || 'default'
+
+  if (source.kind === 'ssh') {
+    registryReconnectService.assertCanDispatch(id, profileKey, managedUpdateCorrelation)
+  }
 
   // Never pool a backend under a name no profile can have. A gateway-qualified
   // session ref (`default@mac-mini/<id>`) once leaked its `profile@gateway` head
@@ -11305,6 +11293,8 @@ async function ensureRegistryBackend(
   if (readDesktopConnectionsRegistry() !== registry || backendPool.get(key)) {
     return ensureRegistryBackend(connectionId, profile, managedUpdateCorrelation, opts)
   }
+
+  registryReconnectService.assertCanDial(source.kind, id, managedUpdateCorrelation)
 
   const entry = {
     process: null,
@@ -12407,6 +12397,7 @@ async function runPoolBackendStart(
 // SIGTERM + immediate entry delete dropped the handle and a slow child
 // survived detached under PID 1.
 const poolStopper = createPoolStopper({
+  assertCanStop: key => registryReconnectService.assertCanStop(key),
   pool: backendPool,
   // localBackendLifecycle is the single owner of local child stop semantics:
   // stopChild triggers its stop (stop + bounded exit wait + slot release);
@@ -12430,6 +12421,7 @@ const poolStopper = createPoolStopper({
 })
 
 function stopPoolBackend(profile: string): Promise<void> {
+  registryReconnectService.assertCanStop(profile)
   const entry = backendPool.get(profile)
 
   const stopping = releaseLocalBackendSlotAfterExit(
@@ -16140,9 +16132,17 @@ ipcMain.handle('hermes:secret-storage:get', async () => ({ on: secretStoragePoli
 ipcMain.handle('hermes:secret-storage:set', async (_event: any, on: any) => applySecretStorageEncryption(on === true))
 
 // ── v2 connection registry IPC (multi-source) ───────────────────────────────
-// Storage-level CRUD for named agent sources. Routing/pooling consumption of
-// the registry lands separately; these handlers only manage the persisted
-// list, so they are safe to ship ahead of the switchover.
+const registryReconnectService = wireRegistryReconnect({
+  ipcMain, pool: backendPool, states: sshConnections,
+  gate: managedConnectionUpdateGate, key: backendScopeKey,
+  readRegistry: readDesktopConnectionsRegistry,
+  dialClaims: backendDialClaims, poolStopper, bootstrap: sshBootstrapCoordinator,
+  request: (descriptor, requestPath, options) => fetchJsonForBackend(descriptor, requestPath, options),
+  keepalives: sshIsolatedKeepalives, disposeTerminals: key => terminalIpc.disposeTerminalSessionsForSshScope(key),
+  log: sshRememberLog,
+  reopen: (id, profile, correlation) => ensureRegistryBackend(id, profile, correlation)
+})
+
 ipcMain.handle('hermes:connections:list', async () => sanitizeConnectionsRegistry())
 ipcMain.handle('hermes:connections:save', async (_event, payload) => {
   const saved = await saveRegistryConnection(payload)

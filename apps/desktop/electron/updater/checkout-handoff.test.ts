@@ -298,6 +298,19 @@ interface Protocol2Run {
  */
 function mockProtocol2Spawn(home: string, script: 'adopts' | 'adopts-then-dies' | 'never'): Protocol2Run[] {
   const runs: Protocol2Run[] = []
+  let claimantSettled: Promise<void> = Promise.resolve()
+
+  if (script === 'adopts-then-dies') {
+    const observe = updaterProcess.observeUpdaterHandoff
+    vi.spyOn(updaterProcess, 'observeUpdaterHandoff').mockImplementation(async (...args) => {
+      // Establish R5's precondition before acknowledgment polling starts.
+      // Publication alone is not enough: the real child must be reaped, or
+      // the poll may correctly acknowledge it while it is still alive.
+      await claimantSettled
+
+      return observe(...args)
+    })
+  }
 
   vi.spyOn(updaterProcess, 'spawnUpdaterProcess').mockImplementation(
     (_command: string, args: string[], options: SpawnOptions): updaterProcess.UpdaterChild => {
@@ -314,7 +327,7 @@ function mockProtocol2Spawn(home: string, script: 'adopts' | 'adopts-then-dies' 
       const startedAt = Number(options.env?.HERMES_UPDATE_STARTED_AT)
 
       if (script !== 'never') {
-        void claimantChild(markerPath(home), { startedAt, run }).then(async ({ child }) => {
+        claimantSettled = claimantChild(markerPath(home), { startedAt, run }).then(async ({ child }) => {
           if (script === 'adopts-then-dies') {
             await killAndReap(child)
           }
