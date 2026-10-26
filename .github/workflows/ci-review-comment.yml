@@ -46,7 +46,9 @@ jobs:
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.head_repository.full_name == github.repository
-    runs-on: [self-hosted, hermes-hub]
+    # [daveey] poll-only runners (label hermes-hub-poll ONLY, 0.5 CPU each): this
+    # poller lives up to 40-60 min and used to hold a test runner slot.
+    runs-on: [self-hosted, hermes-hub-poll]
     timeout-minutes: 60
     steps:
       - name: Checkout trusted default branch
