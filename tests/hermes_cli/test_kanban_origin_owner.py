@@ -156,6 +156,25 @@ def test_owner_cli_operation_mismatch_is_rejected(world, monkeypatch, capsys, co
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='origin_creation_intents'").fetchone()
 
 
+@pytest.mark.parametrize('conflict', ['same_id_changed_origin', 'same_origin_new_id'])
+def test_adoption_immutable_conflict_is_terminal(world, monkeypatch, capsys, conflict):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title='Existing', session_id='creator')
+    request = {**world, 'action': 'origin-adopt', 'key': 'default/default/' + tid,
+               'args': {'origin': world['args']['origin']}}
+    assert invoke(request, monkeypatch, capsys)['adopted'] is True
+    if conflict == 'same_id_changed_origin':
+        request['args'] = {'origin': {**request['args']['origin'], 'session': 'different'}}
+        code = 'origin_creation_conflict'
+    else:
+        request['id'] = 'different-request-001'
+        code = 'origin_already_bound'
+    result = invoke(request, monkeypatch, capsys)
+    assert result['code'] == code
+    assert result.get('status') == 'rejected'
+    assert result['handoff_complete'] is False
+
+
 def test_owner_entry_adopts_existing_task_and_replays(world, monkeypatch, capsys):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title='Existing', session_id='original-creator')

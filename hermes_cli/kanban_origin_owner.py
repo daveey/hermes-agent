@@ -88,6 +88,10 @@ def _dispatch_result(raw_result):
         # Dispatch catches exceptions itself. An untyped error may follow a
         # committed write: keep the exact request retryable, never infer absence.
         return {'status': 'pending', 'code': 'origin_dispatch_pending', 'handoff_complete': False}
+    if result.get('code') in {'origin_creation_conflict', 'origin_already_bound'}:
+        # Replaying an immutable conflicting envelope cannot repair it. Reject
+        # this request only; the original intent and its receipt remain intact.
+        return {**result, 'status': 'rejected'}
     return result
 
 
