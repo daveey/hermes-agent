@@ -17,23 +17,24 @@ export interface HubSessionRow extends HubRecord {
   running?: boolean
 }
 
-/** A live sidebar row reduced to what dedupe needs: its hub gateway + id. */
+/** A live sidebar row reduced to what dedupe needs: its hub gateway + profile + id. */
 export interface LiveSessionKey {
   gateway: string
   id: string
+  profile?: string
 }
 
 /**
  * Replica rows worth a sidebar row: other gateways only, never one that is
- * live right now (its live rows are primary), never a (gateway, id) the live
- * list already has, archived/hidden dropped, first copy per (gateway, id).
+ * live right now (its live rows are primary), never a (gateway, profile, id) the live
+ * list already has, archived/hidden dropped, first copy per (gateway, profile, id).
  */
 export function replicaSessionsToShow(
   hub: readonly HubSessionRow[],
   live: readonly LiveSessionKey[],
   isGatewayLive: (gateway: string) => boolean
 ): HubSessionRow[] {
-  const seen = new Set(live.map(entry => `${entry.gateway}\u0000${entry.id}`))
+  const seen = new Set(live.map(entry => `${entry.gateway}\u0000${entry.profile || 'default'}\u0000${entry.id}`))
   const out: HubSessionRow[] = []
 
   for (const record of hub) {
@@ -41,7 +42,7 @@ export function replicaSessionsToShow(
       continue
     }
 
-    const key = `${record.gateway}\u0000${record.id}`
+    const key = `${record.gateway}\u0000${record.profile || 'default'}\u0000${record.id}`
 
     if (seen.has(key)) {
       continue

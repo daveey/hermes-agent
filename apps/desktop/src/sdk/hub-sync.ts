@@ -26,3 +26,5 @@ export type { OfflineReplicaRecord } from '@/store/offline-sessions'
 export function publishOfflineSessions(records: readonly OfflineReplicaRecord[]): void {
   $offlineSessions.set(withoutLocallyArchived(offlineSessionsFromReplica(records, connectionForHubGateway)))
 }
+
+export { recordSessionGatewayUnavailable, sessionOwnerIsFresh } from '@/store/offline-sessions'
