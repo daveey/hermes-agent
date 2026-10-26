@@ -207,7 +207,7 @@ def test_wait_handoff_wakes_on_dispatcher_tick(home, monkeypatch):
         # default wait: no scheduled card may depend on a cron that can vanish. [daveey]
         tid2 = kb.create_task(conn, title="parked", assignee="default")
         kb.claim_task(conn, tid2)
-        kb.schedule_task(conn, tid2, reason="waiting on the cron that unblocks it")
+        kb.schedule_task(conn, tid2, reason="scheduled re-measure", clock_only=True)
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 3600) == []
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 10 ** 7) == [tid2]
 
@@ -244,7 +244,7 @@ def test_kanban_schedule_after_wait_and_comment_still_stays_put(home, monkeypatc
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="parked", assignee="default")
         kb.claim_task(conn, tid)
-        kb.schedule_task(conn, tid, reason="waiting on the cron that unblocks it")
+        kb.schedule_task(conn, tid, reason="scheduled re-measure", clock_only=True)
         kb.add_comment(conn, tid, "t_other", "FYI")
         assert kc.pending_wake(conn, tid)["wake_at"] >= int(time.time()) + DEFAULT_WAKE_SECONDS - 5
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 3600) == []
@@ -253,7 +253,7 @@ def test_kanban_schedule_after_wait_and_comment_still_stays_put(home, monkeypatc
     with kbc.connect_closing() as conn:
         kb.unblock_task(conn, tid2)
         kb.claim_task(conn, tid2)
-        kb.schedule_task(conn, tid2, reason="until release")
+        kb.schedule_task(conn, tid2, reason="calendar release window", clock_only=True)
         kb.add_comment(conn, tid2, "t_other", "FYI")
         # The old continuation wake no longer applies; only the new park's own (default) wake does.
         assert kc.wake_due_continuations(conn, now=wake_at + 60) == []

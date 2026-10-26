@@ -93,3 +93,5 @@ export function resolvePinnedSessions(
 
   return out
 }
+
+export { useOfflineFallback } from './use-offline-fallback'

@@ -33,6 +33,8 @@ import { PROFILE_SWATCHES } from '@/lib/profile-color'
 import { exportSession } from '@/lib/session-export'
 import { activeGateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+import { queueOfflineSessionAction } from '@/store/offline-session-actions'
+import { findOfflineSession } from '@/store/offline-sessions'
 import {
   $projectTree,
   applyRenamedSessionTitle,
@@ -115,6 +117,15 @@ export async function renameSessionPreferringRpc(
   title: string,
   profile?: string
 ): Promise<{ title?: string }> {
+  // [daveey] Cached row of an offline gateway: queue the rename for its owner.
+  const offlineRow = findOfflineSession(storedSessionId)
+
+  if (offlineRow) {
+    await queueOfflineSessionAction(offlineRow, 'rename', { title })
+
+    return { title }
+  }
+
   const resolvedProfile =
     (profile ?? '').trim() ||
     $sessions.get().find(s => sessionMatchesStoredId(s, storedSessionId))?.profile ||

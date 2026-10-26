@@ -80,15 +80,19 @@ def is_agent_scope_env_key(key: str) -> bool:
     return key.startswith(AGENT_SCOPE_PREFIXES) and not AGENT_SCOPE_TUNABLE_RE.search(key)
 
 
-def strip_agent_scope_env(env: MutableMapping[str, str]) -> list[str]:
+def strip_agent_scope_env(
+    env: MutableMapping[str, str], *, preserve_board_location: bool = False,
+) -> list[str]:
     """Remove the agent-scope family from *env* in place when a worker marker is present.
 
-    Returns the removed key names (empty when nothing leaked). The single list every top-level
-    launch path (CLI entry, Desktop relaunch, Electron main, hermes-sync) uses.
+    Returns the removed key names (empty when nothing leaked). Top-level launch
+    scrubbing removes everything; ordinary lineage checks preserve explicit board
+    locations so checking identity cannot silently redirect a caller's database.
     """
     if not any(env.get(key) for key in AGENT_SCOPE_MARKER_KEYS):
         return []
-    removed = [key for key in list(env) if is_agent_scope_env_key(key)]
+    keep = {"HERMES_KANBAN_DB", "HERMES_KANBAN_HOME", "HERMES_KANBAN_BOARD"} if preserve_board_location else set()
+    removed = [key for key in list(env) if is_agent_scope_env_key(key) and key not in keep]
     for key in removed:
         env.pop(key, None)
     return removed
@@ -206,15 +210,22 @@ def _parent_pid(pid: int) -> int | None:
 
 
 def _descends_from(owner: int) -> bool:
+    """Keep the fence unless a complete ancestry walk proves detachment.
+
+    Missing psutil, access denial and a truncated walk are unknown, not evidence
+    that this process left the owner's lineage.
+    """
     current = os.getpid()
     for _ in range(64):
         if current == owner:
             return True
         parent = _parent_pid(current)
-        if not parent or parent == current:
+        if parent is None or parent == current:
+            return True
+        if parent == 0:
             return False
         current = parent
-    return False
+    return True
 
 
 def _owner_is_live_ancestor(owner: str) -> bool:
@@ -226,7 +237,9 @@ def _owner_is_live_ancestor(owner: str) -> bool:
     if fp_s:
         current = _start_fingerprint(pid)
         if current is None:
-            return False  # owner pid is gone
+            # The fingerprint provider also returns None on lookup/import failure.
+            # A complete parent walk can still prove detachment; absence cannot.
+            return _descends_from(pid)
         try:
             from gateway.status import start_time_fingerprints_match
             if not start_time_fingerprints_match(int(fp_s), current):
@@ -260,7 +273,7 @@ def _heal_leaked_marker() -> None:
     """Drop an orphaned marker (and the worker identity riding with it) from this process, so
     neither it nor anything it spawns is fenced as a delegate child of a lineage it left."""
     owner = os.environ.get(DELEGATED_CHILD_OWNER_ENV, "")
-    removed = strip_agent_scope_env(os.environ)
+    removed = strip_agent_scope_env(os.environ, preserve_board_location=True)
     if removed:
         _log.warning("dropped leaked delegate-child env %s: pid %d does not descend from owner %s",
                      ", ".join(sorted(removed)), os.getpid(), owner)
@@ -358,6 +371,6 @@ def delegated_child_subprocess_env(
             return None
         out = dict(env)
         if out.get(DELEGATED_CHILD_ENV_MARKER):  # leaked into a caller-built env: don't pass it on
-            strip_agent_scope_env(out)
+            strip_agent_scope_env(out, preserve_board_location=True)
         return out
     return scrub_kanban_env(os.environ if env is None else env)

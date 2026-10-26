@@ -236,6 +236,95 @@ def test_cli_wake_check_flags_round_trip(kanban_home, capsys) -> None:
     assert shown["wake_check"]["cmd"] == "test -f /x" and shown["wake_check"]["every"] == 600
 
 
+@pytest.mark.parametrize("rc", [0, 2])
+def test_inflight_same_command_repark_discards_old_result(kanban_home, monkeypatch, rc):
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def probe(*args):
+        started.set()
+        assert release.wait(10)
+        return rc, "old observation"
+
+    monkeypatch.setattr(kwc, "_run_probe", probe)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        assert kb.schedule_task(conn, tid, wake_check="exit 0")
+        kwc.run_due_wake_checks(conn)
+        assert started.wait(10)
+        try:
+            assert kb.unblock_task(conn, tid)
+            assert kb.schedule_task(conn, tid, wake_check="exit 0")
+            before = kwc.get_state(conn, tid)
+        finally:
+            release.set()
+            kwc._shutdown_for_tests()
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert kwc.get_state(conn, tid) == before
+        assert not _events(conn, tid, "condition_met")
+        # The current generation still applies both success and failure normally.
+        kwc.run_due_wake_checks(conn, wait=True)
+        if rc == 0:
+            assert kb.get_task(conn, tid).status == "ready"
+        else:
+            assert kwc.get_state(conn, tid)["fails"] == 1
+
+
+@pytest.mark.parametrize("op", ["schedule", "block", "continue"])
+def test_shared_transition_rejects_long_unprobed_park_atomically(kanban_home, op):
+    from hermes_cli.kanban_continuation import continue_task
+
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        events = kb.list_events(conn, tid)
+        runs = kb.list_runs(conn, tid)
+        if op == "continue":
+            result = continue_task(conn, tid, checkpoint="wait", resume_after_seconds=86400)
+            assert not result["ok"] and "wake_check" in result["error"]
+        else:
+            with pytest.raises(ValueError, match="wake_check"):
+                if op == "schedule":
+                    kb.schedule_task(conn, tid)
+                else:
+                    kb.block_task(conn, tid, kind="time", reason="wait")
+        assert kb.get_task(conn, tid).status == "running"
+        assert kb.list_events(conn, tid) == events
+        assert kb.list_runs(conn, tid) == runs
+
+
+def test_legacy_probe_schema_migrates_without_reparking(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        assert kb.schedule_task(conn, tid, wake_check="exit 0")
+        events = kb.list_events(conn, tid)
+        with kb.write_txn(conn):
+            conn.execute("ALTER TABLE task_wake_checks DROP COLUMN generation")
+    kb.init_db()
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert kb.list_events(conn, tid) == events
+        assert kwc.get_state(conn, tid)["generation"] is None
+        kwc.run_due_wake_checks(conn, wait=True)
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+@pytest.mark.parametrize("op", ["schedule", "block", "continue"])
+@pytest.mark.parametrize("options", [{"clock_only": True}, {"wake_check": "exit 1"}])
+def test_shared_transition_allows_explicit_long_parks(kanban_home, op, options):
+    from hermes_cli.kanban_continuation import continue_task
+
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        if op == "continue":
+            assert continue_task(conn, tid, checkpoint="wait", resume_after_seconds=86400, **options)["ok"]
+        elif op == "block":
+            assert kb.block_task(conn, tid, reason="wait", kind="time", **options)
+        else:
+            assert kb.schedule_task(conn, tid, **options)
+        assert kb.get_task(conn, tid).status == "scheduled"
+
+
 def test_check_every_is_clamped(kanban_home) -> None:
     assert kwc.normalize_every(None) == 900
     assert kwc.normalize_every(5) == 120
@@ -248,7 +337,11 @@ def test_diagnostics_flag_clock_parks_and_failing_probes(kanban_home) -> None:
     with kbc.connect_closing() as conn:
         legacy, failing, ok = _running(conn), _running(conn), _running(conn)
         # Legacy: parked 24 h out with no probe and no clock_only (old code path).
-        assert kb.schedule_task(conn, legacy, reason="waiting on a tag")
+        # Deliberately emulate an old persisted park; new writes must pass the guard.
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (legacy,))
+            kb._append_event(conn, legacy, "scheduled", {
+                "reason": "waiting on a tag", "wake_at": int(time.time()) + 86400})
         assert kb.schedule_task(conn, failing, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
                                 wake_check="exit 2", check_every=120)
         assert kb.schedule_task(conn, ok, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z",

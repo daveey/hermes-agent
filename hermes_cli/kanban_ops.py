@@ -313,7 +313,13 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     if event_days < 0 or log_days < 0:
         return _err("kanban gc: retention days must be >= 0 (0 disables that sweep)", 2)
     scratch_root = kb.workspaces_root()
-    removed_ws = 0
+    from hermes_cli.kanban_worktree_gc import gc_task_worktrees, retention_days
+    wt_days = getattr(args, "worktree_retention_days", None)
+    wt_days = retention_days() if wt_days is None else wt_days
+    if wt_days < 0:
+        return _err("kanban gc: worktree retention days must be >= 0", 2)
+    with kbc.connect_closing() as conn:
+        removed_ws = gc_task_worktrees(conn, older_than_days=wt_days)
     with kbc.connect_closing() as conn:
         rows = conn.execute(
             "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
@@ -321,16 +327,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         ).fetchall()
         for row in rows:
             if row["workspace_kind"] == "worktree":
-                # Backstop for worktrees that escaped the completion/archive hook.
-                # Same safety predicate: only clean, fully-pushed worktrees go.
-                wt_path = row["workspace_path"]
-                if wt_path and Path(wt_path).is_dir():
-                    if kbw._defer_shared_worktree_cleanup(conn, row["id"], wt_path):
-                        continue
-                    kbw._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"])
-                    if not Path(wt_path).is_dir():
-                        removed_ws += 1
-                continue
+                continue  # handled by the retention-aware sweep above
             if row["workspace_kind"] != "scratch":
                 continue
             path = Path(row["workspace_path"] or (scratch_root / row["id"]))

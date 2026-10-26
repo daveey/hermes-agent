@@ -129,7 +129,43 @@ class TestDelegateToolPerTaskModel(unittest.TestCase):
             )
         self.assertEqual(models, ["z-ai/glm-5.3", "claude-sonnet-5-5"])
         self.assertEqual(providers, ["openrouter", "anthropic"])
-        self.assertEqual(seen[1]["provider"], "openrouter")
+        self.assertEqual(seen[0]["provider"], "openrouter")
+        self.assertNotIn("provider", seen[1])
+
+    def test_unavailable_default_does_not_block_explicit_provider(self):
+        def resolve(*, requested, target_model):
+            if requested == "anthropic":
+                raise ValueError("No Anthropic credentials found")
+            return {"provider": "openai-codex", "model": target_model,
+                    "base_url": "https://chatgpt.com/backend-api/codex",
+                    "api_key": "synthetic-token", "api_mode": "codex_responses"}
+
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=resolve) as resolver:
+            out, models, providers = self._run(
+                [{"goal": "review this change using the selected provider", "provider": "openai-codex",
+                  "model": "test-model"}],
+                {"provider": "anthropic", "model": "claude-sonnet-5-5"},
+            )
+        self.assertNotIn("error", json.loads(out), out)
+        self.assertEqual(models, ["test-model"])
+        self.assertEqual(providers, ["openai-codex"])
+        resolver.assert_called_once_with(requested="openai-codex", target_model="test-model")
+
+    def test_unavailable_default_still_refuses_mixed_batch_before_spawn(self):
+        def resolve(cfg, parent):
+            if cfg.get("provider") == "anthropic":
+                raise ValueError("No Anthropic credentials found")
+            return {"model": "test-model", "provider": "openai-codex", "base_url": "https://example.com",
+                    "api_key": "synthetic-token", "api_mode": "codex_responses"}
+
+        with patch("tools.delegate_tool._resolve_delegation_credentials", side_effect=resolve):
+            out, models, _ = self._run(
+                [{"goal": "review this change on the selected route", "provider": "openai-codex"},
+                 {"goal": "review this change on the default route"}],
+                {"provider": "anthropic"},
+            )
+        self.assertIn("No Anthropic credentials found", json.loads(out)["error"])
+        self.assertEqual(models, [])
 
     def test_bad_task_pin_refuses_whole_call_before_spawn(self):
         out, models, _ = self._run([{"goal": "this has a bogus model value", "model": ["x"]}], {})

@@ -20,9 +20,8 @@ def _init(path):
 def test_guard_teardown_with_mocked_popen(tmp_path, monkeypatch, fake_kind, mutate):
     cfg = _init(tmp_path)
     monkeypatch.setattr(guard, "_live_git_config_paths", lambda: [cfg])
-    request = SimpleNamespace(node=SimpleNamespace(get_closest_marker=lambda name: None))
-    fixture = guard._live_git_config_guard.__wrapped__(request)
-    next(fixture)
+    request = SimpleNamespace(node=SimpleNamespace(get_closest_marker=lambda name: None, stash=pytest.Stash()))
+    guard._live_git_config_guard.__wrapped__(request)
     if mutate:
         subprocess.run([
             "git", "config", "--file", str(cfg), "user.email", "fixture@example.invalid",
@@ -42,11 +41,28 @@ def test_guard_teardown_with_mocked_popen(tmp_path, monkeypatch, fake_kind, muta
         mocks.setattr(subprocess, "run", fake_run)
         if mutate:
             with pytest.raises(pytest.fail.Exception, match="test wrote user.* into a live checkout"):
-                next(fixture)
+                guard._check_live_git_configs(request.node)
             assert guard._read_bytes_or_none(cfg) == b""
         else:
-            with pytest.raises(StopIteration):
-                next(fixture)
+            guard._check_live_git_configs(request.node)
+
+
+@pytest.mark.parametrize("mutate", [False, True])
+def test_guard_teardown_survives_empty_path(tmp_path, monkeypatch, mutate):
+    cfg = _init(tmp_path)
+    snapshots = {cfg: _read_bytes_or_none(cfg)}
+    if mutate:
+        subprocess.run([
+            "git", "config", "--file", str(cfg), "user.email", "fixture@example.invalid",
+        ], check=True)
+    with monkeypatch.context() as mocks:
+        mocks.setenv("PATH", "")
+        if mutate:
+            with pytest.raises(pytest.fail.Exception, match="test wrote user"):
+                _assert_git_configs_unchanged(snapshots)
+            assert _read_bytes_or_none(cfg) == b""
+        else:
+            _assert_git_configs_unchanged(snapshots)
 
 
 def test_guard_watches_the_checkout_under_test():
@@ -73,3 +89,18 @@ def test_guard_ignores_branch_and_remote_entries(tmp_path):
     snapshots = {cfg: _read_bytes_or_none(cfg)}
     subprocess.run(["git", "-C", str(tmp_path), "config", "branch.x.remote", "origin"], check=True)
     _assert_git_configs_unchanged(snapshots)
+
+
+def test_guard_teardown_runs_after_monkeypatch_undo(monkeypatch):
+    """Teardown spawns git via Popen, so a test's global ``os`` patches must be undone first.
+
+    If the guard tore down before monkeypatch, this test would error at
+    teardown with the BlockingIOError raised below.
+    """
+    import os
+
+    def would_block(*_args, **_kwargs):
+        raise BlockingIOError(11, "try again")
+
+    monkeypatch.setattr(os, "read", would_block)
+    monkeypatch.setattr(os, "open", would_block)

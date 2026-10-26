@@ -470,6 +470,8 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
 
 
 _LIVE_GIT_CONFIGS: list | None = None
+# Teardown may run before monkeypatch restores a test's deliberately empty PATH.
+_GUARD_PATH = os.environ.get("PATH", os.defpath)
 
 
 def _live_git_config_paths() -> list:
@@ -503,7 +505,10 @@ def _plain_run(argv: list):
 
     # Capture Popen at conftest import: teardown can precede monkeypatch undo.
     # Capturing subprocess.run instead would still look up the mocked Popen.
-    proc = _GUARD_POPEN(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc = _GUARD_POPEN(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={**os.environ, "PATH": _GUARD_PATH},
+    )
     out, _ = proc.communicate()
     return proc.returncode, out
 
@@ -554,11 +559,33 @@ def _live_git_config_guard(request):
     its own repo under ``tmp_path``.
     """
     if request.node.get_closest_marker("allow_live_git_config"):
-        yield
         return
-    snapshots = {path: _read_bytes_or_none(path) for path in _live_git_config_paths()}
-    yield
-    _assert_git_configs_unchanged(snapshots)
+    # The comparison runs in ``pytest_runtest_teardown`` below, not here: it
+    # spawns git, and fixture teardown precedes monkeypatch's undo (the
+    # builtin is set up first and torn down last), so a test's patches of
+    # ``os.open``/``os.read``/``pathlib`` would still be live.
+    request.node.stash[_GIT_CONFIG_SNAPSHOTS] = {
+        path: _read_bytes_or_none(path) for path in _live_git_config_paths()
+    }
+
+
+_GIT_CONFIG_SNAPSHOTS = pytest.StashKey()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    """Run the live git config check once every fixture, monkeypatch included, is torn down."""
+    try:
+        return (yield)
+    finally:
+        _check_live_git_configs(item)
+
+
+def _check_live_git_configs(item) -> None:
+    snapshots = item.stash.get(_GIT_CONFIG_SNAPSHOTS, None)
+    if snapshots is not None:
+        del item.stash[_GIT_CONFIG_SNAPSHOTS]
+        _assert_git_configs_unchanged(snapshots)
 
 
 @pytest.fixture(autouse=True)

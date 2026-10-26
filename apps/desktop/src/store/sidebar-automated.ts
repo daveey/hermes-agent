@@ -23,6 +23,7 @@ type AutomatedRow = Pick<
   | 'automated'
   | 'cron_active'
   | 'id'
+  | 'kanban_active'
   | 'kanban_attention'
   | 'kanban_active'
   | 'kanban_blocked'

@@ -3643,6 +3643,24 @@
       }
     },
     {
+      "name": "session.start_request",
+      "summary": "",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionStartRequestParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionStartRequestResult"
+        }
+      }
+    },
+    {
       "name": "session.status",
       "summary": "Rendered /status text for the session.",
       "params": [
@@ -14455,6 +14473,17 @@
         ],
         "title": "FileAttachResult",
         "type": "object"
+      },
+      "FirstTurnState": {
+        "enum": [
+          "queued",
+          "running",
+          "completed",
+          "failed",
+          "cancelled"
+        ],
+        "title": "FirstTurnState",
+        "type": "string"
       },
       "ForeignSessionRow": {
         "additionalProperties": false,
@@ -32859,6 +32888,93 @@
         "title": "SessionStartChatResult",
         "type": "object"
       },
+      "SessionStartRequestParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Profile",
+            "type": "string"
+          },
+          "namespace": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Namespace",
+            "type": "string"
+          },
+          "start_request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Start Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile",
+          "namespace",
+          "start_request_id"
+        ],
+        "title": "SessionStartRequestParams",
+        "type": "object"
+      },
+      "SessionStartRequestResult": {
+        "additionalProperties": false,
+        "properties": {
+          "gateway_id": {
+            "title": "Gateway Id",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "stored_session_id": {
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "resolved_session_id": {
+            "title": "Resolved Session Id",
+            "type": "string"
+          },
+          "first_turn_id": {
+            "title": "First Turn Id",
+            "type": "string"
+          },
+          "first_turn_state": {
+            "$ref": "#/components/schemas/FirstTurnState"
+          },
+          "exists": {
+            "title": "Exists",
+            "type": "boolean"
+          },
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "active_turn": {
+            "title": "Active Turn",
+            "type": "boolean"
+          },
+          "reconciliation": {
+            "$ref": "#/components/schemas/StartReconciliation"
+          }
+        },
+        "required": [
+          "gateway_id",
+          "profile",
+          "stored_session_id",
+          "resolved_session_id",
+          "first_turn_id",
+          "first_turn_state",
+          "exists",
+          "archived",
+          "active_turn",
+          "reconciliation"
+        ],
+        "title": "SessionStartRequestResult",
+        "type": "object"
+      },
       "SessionStatusParams": {
         "additionalProperties": false,
         "properties": {
@@ -35697,6 +35813,18 @@
           "rejected"
         ],
         "title": "StartChatStatus",
+        "type": "string"
+      },
+      "StartReconciliation": {
+        "enum": [
+          "queued",
+          "running",
+          "completed",
+          "failed",
+          "cancelled",
+          "unknown_outcome"
+        ],
+        "title": "StartReconciliation",
         "type": "string"
       },
       "StatusUpdatePayload": {
