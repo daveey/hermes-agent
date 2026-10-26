@@ -44,9 +44,17 @@ def kanban_root(tmp_path, monkeypatch):
     fresh root, which is as close to "the other machine" as a unit test
     gets.
     """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
     def _use(name: str) -> Path:
         root = tmp_path / name
         root.mkdir(exist_ok=True)
+        profile = root / "profiles" / "coder"
+        profile.mkdir(parents=True, exist_ok=True)
+        (profile / "config.yaml").write_text(
+            "platform_toolsets:\n  cli: [terminal, file]\nterminal:\n  backend: local\n",
+            encoding="utf-8",
+        )
         monkeypatch.setenv("HERMES_HOME", str(root))
         monkeypatch.setenv("HERMES_KANBAN_HOME", str(root))
         for var in ("HERMES_KANBAN_DB", "HERMES_KANBAN_WORKSPACES_ROOT",

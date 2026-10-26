@@ -3,11 +3,20 @@ import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { activeGateway } from '@/store/gateway'
+import { $offlineSessions, _resetOfflineSessionsForTests } from '@/store/offline-sessions'
 import { refreshProjectTree } from '@/store/projects'
+import { makeSessionInfo } from '@/test/session-info'
 
 import { RenameSessionDialog, SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 
-afterEach(cleanup)
+const { hubRequest } = vi.hoisted(() => ({ hubRequest: vi.fn(async () => ({ id: 'queued', state: 'local' })) }))
+vi.mock('@/store/hub-sync', () => ({ hubRequest }))
+
+afterEach(() => {
+  cleanup()
+  _resetOfflineSessionsForTests()
+  hubRequest.mockClear()
+})
 
 // Exercises the real SessionActionsMenu end-to-end (no DropdownMenu mock) so
 // a broken asChild composition on the kebab trigger fails here — the menu
@@ -97,7 +106,7 @@ vi.mock('@/store/session', () => ({
   $sessions: atom<unknown[]>([]),
   $unreadFinishedSessionIds: atom<string[]>([]),
   markSessionRead: vi.fn(),
-  sessionMatchesStoredId: vi.fn(() => false),
+  sessionMatchesStoredId: vi.fn((row: { id: string }, id: string) => row.id === id),
   sessionPinId: vi.fn((s: { id: string }) => s.id),
   setSessions: vi.fn()
 }))
@@ -438,4 +447,29 @@ describe('SessionActionsMenu', () => {
     expect(request).not.toHaveBeenCalled()
     vi.mocked(activeGateway).mockReturnValue(null)
   })
+})
+
+it('carries the selected full owner through the row menu rename dialog', async () => {
+  const selectedRow = makeSessionInfo({
+    id: 'same',
+    connection_id: 'cloud',
+    profile: 'work',
+    offline_cached: true,
+    offline_gateway: 'cloud'
+  })
+
+  $offlineSessions.set([{ ...selectedRow, connection_id: 'mini', offline_gateway: 'mini' }, selectedRow])
+  render(
+    <SessionContextMenu profile="work" selectedRow={selectedRow} sessionId="same" title="Old">
+      <button>Owned row</button>
+    </SessionContextMenu>
+  )
+  fireEvent.contextMenu(screen.getByRole('button', { name: 'Owned row' }))
+  fireEvent.click(await screen.findByRole('menuitem', { name: /rename/i }))
+  const dialog = await screen.findByRole('dialog')
+  fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'New' } })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+  await waitFor(() =>
+    expect(hubRequest).toHaveBeenCalledWith(expect.objectContaining({ gateway: 'cloud', key: 'work/same' }))
+  )
 })

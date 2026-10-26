@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import type * as React from 'react'
 import { useEffect, useRef, useState } from 'react'
 
+import { hermesApi } from '@/api/client'
 import { openSession } from '@/app/open-session'
 import {
   closeAllTreeTabs,
@@ -24,17 +25,17 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { renameSession } from '@/hermes'
+import { renameSession, type SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { ArchiveOff } from '@/lib/icons'
 import { isSubmitEnter } from '@/lib/ime'
 import { PROFILE_SWATCHES } from '@/lib/profile-color'
 import { exportSession } from '@/lib/session-export'
-import { activeGateway } from '@/store/gateway'
+import { activeGateway, requestGatewayForAgent } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
 import { queueOfflineSessionAction } from '@/store/offline-session-actions'
-import { findOfflineSession } from '@/store/offline-sessions'
+import { sessionActionRow } from '@/store/offline-session-owner'
 import {
   $projectTree,
   applyRenamedSessionTitle,
@@ -55,7 +56,8 @@ import {
 } from '@/store/session'
 import { $sessionColorOverrides, setSessionColorOverride } from '@/store/session-color'
 import { $sessionRenameTarget, closeSessionRename } from '@/store/session-rename'
-import { $sessionStates, $sessionTiles, closeAllOpenSessionTiles } from '@/store/session-states'
+import { sessionOwnerRouteFromRow } from '@/store/session-request-router'
+import { $sessionStates, $sessionTiles, closeAllOpenSessionTiles, runtimeSessionOwner } from '@/store/session-states'
 import { ackStoredSessionId } from '@/store/session-unread'
 import { canOpenSessionInTerminal, canOpenSessionWindow, openSessionInTerminal } from '@/store/windows'
 
@@ -112,16 +114,27 @@ function resolveRuntimeIdForStored(storedSessionId: string): null | string {
   return null
 }
 
+function runtimeMatchesSelectedOwner(candidateRuntimeId: null | string, owner: ReturnType<typeof sessionOwnerRouteFromRow>): boolean {
+  const runtimeOwner =
+    owner && candidateRuntimeId
+      ? ($sessionTiles.get().find(tile => tile.runtimeId === candidateRuntimeId)?.ownerRoute ??
+        runtimeSessionOwner(candidateRuntimeId))
+      : undefined
+
+  return !owner || Boolean(runtimeOwner && typeof runtimeOwner === 'object' && runtimeOwner.connectionId === owner.connectionId && runtimeOwner.profile === owner.profile)
+}
+
 export async function renameSessionPreferringRpc(
   storedSessionId: string,
   title: string,
-  profile?: string
+  profile?: string,
+  selectedRow?: SessionInfo
 ): Promise<{ title?: string }> {
   // [daveey] Cached row of an offline gateway: queue the rename for its owner.
-  const offlineRow = findOfflineSession(storedSessionId)
+  const row = sessionActionRow(storedSessionId, selectedRow)
 
-  if (offlineRow) {
-    await queueOfflineSessionAction(offlineRow, 'rename', { title })
+  if (row?.offline_cached) {
+    await queueOfflineSessionAction(row, 'rename', { title })
 
     return { title }
   }
@@ -131,15 +144,19 @@ export async function renameSessionPreferringRpc(
     $sessions.get().find(s => sessionMatchesStoredId(s, storedSessionId))?.profile ||
     undefined
 
-  const runtimeId = resolveRuntimeIdForStored(storedSessionId)
+  const owner = selectedRow ? sessionOwnerRouteFromRow(row) : undefined
+  const candidateRuntimeId = resolveRuntimeIdForStored(storedSessionId)
+
+  const runtimeId = runtimeMatchesSelectedOwner(candidateRuntimeId, owner) ? candidateRuntimeId : null
   const gateway = activeGateway()
 
-  if (title && runtimeId && gateway) {
+  if (title && runtimeId && (owner || gateway)) {
     try {
-      const result = await gateway.request<SessionTitleResponse>('session.title', {
-        session_id: runtimeId,
-        title
-      })
+      const params = { session_id: runtimeId, title }
+
+      const result = owner
+        ? await requestGatewayForAgent<SessionTitleResponse>(owner.connectionId, owner.profile, 'session.title', params)
+        : await gateway!.request<SessionTitleResponse>('session.title', params)
 
       return { title: result?.title ?? title }
     } catch (err) {
@@ -151,10 +168,21 @@ export async function renameSessionPreferringRpc(
     }
   }
 
+  if (owner) {
+    return hermesApi<{ ok: boolean; title: string }>({
+      connectionId: owner.connectionId,
+      profile: owner.profile,
+      path: `/api/sessions/${encodeURIComponent(storedSessionId)}`,
+      method: 'PATCH',
+      body: { title, profile: owner.profile }
+    })
+  }
+
   return renameSession(storedSessionId, title, resolvedProfile)
 }
 
 interface SessionActions {
+  selectedRow?: SessionInfo
   sessionId: string
   title: string
   pinned?: boolean
@@ -258,6 +286,7 @@ function MoveToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; session
 }
 
 function useSessionActions({
+  selectedRow,
   sessionId,
   title,
   pinned = false,
@@ -615,6 +644,7 @@ function useSessionActions({
       onOpenChange={setRenameOpen}
       open={renameOpen}
       profile={profile}
+      selectedRow={selectedRow}
       sessionId={sessionId}
     />
   ) : null
@@ -725,6 +755,7 @@ export function SessionContextMenu({ children, ...actions }: SessionContextMenuP
 }
 
 interface RenameSessionDialogProps {
+  selectedRow?: SessionInfo
   open: boolean
   onOpenChange: (open: boolean) => void
   sessionId: string
@@ -739,6 +770,7 @@ interface SessionTitleSuggestResponse {
 }
 
 export function RenameSessionDialog({
+  selectedRow,
   open,
   onOpenChange,
   sessionId,
@@ -822,14 +854,18 @@ export function RenameSessionDialog({
       const targetProfile =
         (profile ?? '').trim() || $sessions.get().find(s => sessionMatchesStoredId(s, sessionId))?.profile || undefined
 
-      const result = await renameSessionPreferringRpc(sessionId, next, targetProfile)
+      const result = await renameSessionPreferringRpc(sessionId, next, targetProfile, selectedRow)
       const finalTitle = result.title || next || ''
+
       // One write, every list: patch the main store AND the project surfaces.
       // Bare-id patching only the recents slice left project-scoped rows
       // (overview previews, entered-project lanes) on the stale title until a
       // profile switch forced a refetch (#123337).
-      applySessionTitle(sessionId, finalTitle || null)
-      applyRenamedSessionTitle(sessionId, finalTitle || null)
+      if (!selectedRow?.offline_cached) {
+        applySessionTitle(sessionId, finalTitle || null)
+        applyRenamedSessionTitle(sessionId, finalTitle || null)
+      }
+
       notify({ durationMs: 2_000, kind: 'success', message: r.renamed })
       onOpenChange(false)
     } catch (err) {

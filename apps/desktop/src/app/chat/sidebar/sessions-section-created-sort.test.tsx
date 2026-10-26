@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionInfo } from '@/hermes'
@@ -9,8 +9,10 @@ import { $sidebarSessionRankIds } from '@/store/sidebar-sort'
 import { SidebarSessionsSection } from './sessions-section'
 
 vi.mock('./session-row', () => ({
-  SidebarSessionRow: ({ session }: { session: SessionInfo }) => (
-    <div data-testid="session-row">{session.id}</div>
+  SidebarSessionRow: ({ session, onArchive }: { session: SessionInfo; onArchive: () => void }) => (
+    <div data-testid="session-row" onClick={onArchive}>
+      {session.id}
+    </div>
   )
 }))
 
@@ -95,7 +97,11 @@ beforeEach(() => {
 describe('flat recents sorted by creation time', () => {
   // Created two weeks ago, then a week ago, then today — but the oldest one is
   // the chat in use right now, and the middle one was touched this morning.
-  const rows = () => [session('old', 14 * DAY, 60), session('mid', 7 * DAY, 3 * 60 * 60), session('new', 2 * 60 * 60, 2 * 60 * 60)]
+  const rows = () => [
+    session('old', 14 * DAY, 60),
+    session('mid', 7 * DAY, 3 * 60 * 60),
+    session('new', 2 * 60 * 60, 2 * 60 * 60)
+  ]
 
   it('orders rows by started_at, not by last activity', () => {
     setSidebarOrdering('created')
@@ -123,4 +129,19 @@ describe('flat recents sorted by creation time', () => {
 
     expect(renderedIds()).toEqual(['old', 'new', 'mid'])
   })
+})
+
+it('forwards the full owner through a non-virtualized row archive gesture', () => {
+  noop.mockClear()
+
+  const selected = {
+    ...session('same-id', 100, 100),
+    connection_id: 'conn-mini',
+    profile: 'work',
+    offline_cached: true
+  }
+
+  renderFlat([selected])
+  fireEvent.click(screen.getByTestId('session-row'))
+  expect(noop).toHaveBeenCalledWith('same-id', selected)
 })

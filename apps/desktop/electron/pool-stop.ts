@@ -40,6 +40,8 @@ export interface PoolStopperDeps {
    * Held on the same in-flight promise as child exit (SSH teardown, etc.).
    */
   afterStop?: (key: string) => Promise<void>
+  /** Refuse conflicting lifecycle operations before any synchronous eviction. */
+  assertCanStop?: (key: string) => void
 }
 
 export interface PoolStopper {
@@ -63,6 +65,7 @@ export function createPoolStopper(deps: PoolStopperDeps): PoolStopper {
       return inFlight
     }
 
+    deps.assertCanStop?.(key)
     const entry = deps.pool.get(key)
 
     if (!entry) {

@@ -18,7 +18,7 @@ let estimateSize: (index: number) => number = () => 0
 
 const stableVirtualizer = {
   measure: (...args: []) => measureSpy(...args),
-  getVirtualItems: () => [],
+  getVirtualItems: vi.fn((): Array<{ index: number; start: number }> => []),
   getTotalSize: () => 0,
   measureElement: vi.fn()
 }
@@ -32,7 +32,14 @@ vi.mock('@tanstack/react-virtual', () => ({
 }))
 
 vi.mock('./chrome', () => ({ SidebarDateDivider: () => null }))
-vi.mock('./session-row', () => ({ SidebarSessionRow: () => null }))
+const capturedRows = vi.hoisted(() => vi.fn())
+vi.mock('./session-row', () => ({
+  SidebarSessionRow: (props: unknown) => {
+    capturedRows(props)
+
+    return null
+  }
+}))
 
 vi.mock('@/i18n', () => ({
   useI18n: () => ({ t: { sidebar: { dateDivider: {} } } })
@@ -66,6 +73,8 @@ function renderList(props: Partial<Parameters<typeof VirtualSessionList>[0]> = {
 describe('VirtualSessionList row measurement', () => {
   beforeEach(() => {
     measureSpy.mockClear()
+    stableVirtualizer.getVirtualItems.mockReturnValue([])
+    capturedRows.mockClear()
     $sessionListDensity.set('compact')
   })
 
@@ -121,4 +130,14 @@ describe('VirtualSessionList row measurement', () => {
       sessionRowEstimate('detailed') + onePreviewLine + oneTitleLine
     )
   })
+})
+
+it('forwards the full owner through a virtualized row archive gesture', () => {
+  stableVirtualizer.getVirtualItems.mockReturnValue([{ index: 0, start: 0 }])
+  capturedRows.mockClear()
+  const selected = { ...session('same-id'), connection_id: 'conn-mini', profile: 'work', offline_cached: true }
+  const onArchiveSession = vi.fn()
+  renderList({ rows: [{ kind: 'session', entry: { session: selected } }], onArchiveSession })
+  capturedRows.mock.calls[0][0].onArchive()
+  expect(onArchiveSession).toHaveBeenCalledWith('same-id', selected)
 })

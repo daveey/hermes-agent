@@ -842,6 +842,12 @@ def test_create_explicit_scratch_ignores_ambient_board_project(
     repo.mkdir()
     with pdb.connect_closing() as pconn:
         project_id = pdb.create_project(pconn, name="Ambient", primary_path=str(repo))
+    peer = tmp_path / ".hermes" / "profiles" / "peer"
+    peer.mkdir(parents=True)
+    (peer / "config.yaml").write_text(
+        "platform_toolsets:\n  cli: [terminal, file]\nterminal:\n  backend: local\n",
+        encoding="utf-8",
+    )
     kb.write_board_metadata("default", project_id=project_id)
     kb.create_board("target", name="Target", project_id=project_id if target_scoped else "")
 

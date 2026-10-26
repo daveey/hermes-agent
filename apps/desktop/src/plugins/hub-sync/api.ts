@@ -9,46 +9,37 @@ import {
   hubGatewayForConnection,
   hubGet,
   hubReplicaConnectionId,
-  learnHubGatewayName
+  recordSessionGatewayUnavailable,
+  sessionOwnerIsFresh
 } from '@hermes/plugin-sdk'
 
-import { type HubSessionRow, type LiveSessionKey, replicaSessionsToShow } from './model'
+import { type HubSessionRow, replicaSessionsToShow } from './model'
 
 const REPLICA_LIMIT = 300
-
-interface LiveRow {
-  connection_id?: string
-  id: string
-}
-
-/** Hub gateway name of a live row (untagged rows belong to the primary). */
-function liveRowGateway(row: LiveRow, primary: string): string {
-  const connectionId = row.connection_id?.trim() || primary
-
-  return hubGatewayForConnection(connectionId) ?? connectionId
-}
-
-export function liveSessionKeys(live: readonly LiveRow[]): LiveSessionKey[] {
-  const primary = hubReplicaConnectionId()
-
-  return live.filter(row => row?.id).map(row => ({ gateway: liveRowGateway(row, primary), id: row.id }))
-}
 
 /** Registered non-primary connections that answer hub-sync `/status` now. */
 export async function reachableConnections(): Promise<Set<string>> {
   const primary = hubReplicaConnectionId()
-  const ids = host.state.gateways.get().map(c => c.id).filter(id => id && id !== primary)
-  const answers = await Promise.all(ids.map(async id => ((await learnHubGatewayName(id)) ? id : null)))
+
+  const ids = host.state.gateways
+    .get()
+    .map(c => c.id)
+    .filter(id => id && id !== primary)
+
+  // Gateway-name discovery caches success for minutes; it is not a liveness
+  // probe. Read status now so a retained name cannot keep old rows running.
+  const answers = await Promise.all(
+    ids.map(async id => ((await hubGet<{ gateway?: string }>('/status', id))?.gateway ? id : null))
+  )
 
   return new Set(answers.filter((id): id is string => Boolean(id)))
 }
 
 /**
- * Replica rows the sidebar should add: gateways that neither answered a
- * status probe nor contributed rows to the live list (unreachable or not
- * registered on this Desktop), deduped against the live list by (gateway, id).
+ * Status failure invalidates retained lists. Status success cannot repair a
+ * failed owner list: only its next successful sidebar refresh can do that.
  */
-export async function loadReplicaSidebarRows(live: readonly LiveRow[]): Promise<HubSessionRow[]> {
+export async function loadReplicaSidebarRows(shouldPublish: () => boolean = () => true): Promise<HubSessionRow[]> {
   const primary = hubReplicaConnectionId()
 
   const [result, reachable] = await Promise.all([
@@ -56,24 +47,33 @@ export async function loadReplicaSidebarRows(live: readonly LiveRow[]): Promise<
     reachableConnections()
   ])
 
-  const rows = Array.isArray(result?.sessions) ? result.sessions : []
-
-  if (!rows.length) {
+  if (!shouldPublish()) {
     return []
   }
 
-  const liveConnections = new Set(live.map(row => row.connection_id?.trim() || primary))
+  const rows = Array.isArray(result?.sessions) ? result.sessions : []
+
+  for (const connection of host.state.gateways.get()) {
+    if (connection.id !== primary && !reachable.has(connection.id)) {
+      recordSessionGatewayUnavailable(connection.id)
+    }
+  }
+
   const primaryName = hubGatewayForConnection(primary)
 
-  const isGatewayLive = (gateway: string) => {
+  const isGatewayLive = (gateway: string, profile?: string) => {
     if (gateway === primaryName) {
       return true
     }
 
     const connectionId = connectionForHubGateway(gateway)
 
-    return Boolean(connectionId && (reachable.has(connectionId) || liveConnections.has(connectionId)))
+    return Boolean(connectionId && reachable.has(connectionId) && sessionOwnerIsFresh(connectionId, profile))
   }
 
-  return replicaSessionsToShow(rows, liveSessionKeys(live), isGatewayLive)
+  return replicaSessionsToShow(
+    rows.filter(row => !isGatewayLive(row.gateway, row.profile)),
+    [],
+    () => false
+  )
 }

@@ -1,8 +1,11 @@
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { hermesApi } from '@/api/client'
+import { $offlineSessions, _resetOfflineSessionsForTests } from '@/store/offline-sessions'
 import { $activeSessionId, $selectedStoredSessionId, $sessions } from '@/store/session'
-import { $sessionStates, $sessionTiles } from '@/store/session-states'
+import { $sessionStates, $sessionTiles, recordSessionEventScope } from '@/store/session-states'
+import { makeSessionInfo } from '@/test/session-info'
 
 import { renameSessionPreferringRpc } from './session-actions-menu'
 
@@ -41,13 +44,25 @@ vi.mock('@/store/gateway', () => ({
   // atom plus the hoisted activeGateway so the synchronous subscriber doesn't
   // throw on an incomplete mock or hit an uninitialized reference.
   $gateway: atom(null),
+  requestGatewayForAgent: (...args: unknown[]) => request(...(args as [])),
   activeGateway: () => activeGateway()
+}))
+
+const { hubRequest } = vi.hoisted(() => ({ hubRequest: vi.fn(async () => ({ id: 'queued', state: 'local' })) }))
+vi.mock('@/store/hub-sync', () => ({ hubRequest }))
+
+vi.mock('@/api/client', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  hermesApi: vi.fn(async () => ({ ok: true, title: 'rest-title' }))
 }))
 
 const RUNTIME_ID = 'rt-runtime-1'
 const STORED_ID = 'stored-branch-1'
 
 afterEach(() => {
+  _resetOfflineSessionsForTests()
+  hubRequest.mockClear()
+  vi.mocked(hermesApi).mockClear()
   renameSession.mockClear()
   request.mockClear()
   activeGateway.mockReset()
@@ -160,4 +175,60 @@ describe('renameSessionPreferringRpc', () => {
     expect(request).not.toHaveBeenCalled()
     expect(renameSession).toHaveBeenCalledWith(STORED_ID, 'My branch', undefined)
   })
+})
+
+describe('offline rename owner isolation', () => {
+  const cached = (connection_id = 'mini', profile = 'work') =>
+    makeSessionInfo({
+      id: STORED_ID,
+      connection_id,
+      profile,
+      offline_cached: true,
+      offline_gateway: connection_id,
+      offline_version: 7
+    })
+
+  it.each([
+    ['cloud', 'work'],
+    ['mini', 'personal']
+  ])('renames only selected owner %s/%s', async (gateway, profile) => {
+    const selected = cached(gateway, profile)
+    $offlineSessions.set([cached(), selected])
+    await renameSessionPreferringRpc(STORED_ID, 'New', profile, selected)
+    expect(hubRequest).toHaveBeenCalledWith(expect.objectContaining({ gateway, key: profile + '/' + STORED_ID }))
+    expect(renameSession).not.toHaveBeenCalled()
+  })
+  it('uses the live row on reconnect before the replica poll clears cache', async () => {
+    const selected = cached()
+    $offlineSessions.set([selected])
+    $sessions.set([{ ...selected, offline_cached: false }])
+    await renameSessionPreferringRpc(STORED_ID, 'New', 'work', selected)
+    expect(hubRequest).not.toHaveBeenCalled()
+    expect(hermesApi).toHaveBeenCalledWith({
+      connectionId: 'mini',
+      profile: 'work',
+      path: '/api/sessions/' + STORED_ID,
+      method: 'PATCH',
+      body: { title: 'New', profile: 'work' }
+    })
+  })
+  it('does not guess an offline owner from a bare id', async () => {
+    $offlineSessions.set([cached(), cached('cloud')])
+    await expect(renameSessionPreferringRpc(STORED_ID, 'New')).rejects.toThrow(/owner/i)
+    expect(hubRequest).not.toHaveBeenCalled()
+    expect(renameSession).not.toHaveBeenCalled()
+  })
+})
+
+it('keeps RPC rename for a selected connection-tagged branched runtime on its proven owner', async () => {
+  const selectedRow = makeSessionInfo({ id: STORED_ID, connection_id: 'cloud', profile: 'work' })
+  $selectedStoredSessionId.set(STORED_ID)
+  $activeSessionId.set('owned-runtime')
+  recordSessionEventScope({ session_id: 'owned-runtime', connectionId: 'cloud', profile: 'work' })
+  await renameSessionPreferringRpc(STORED_ID, 'Branch', 'work', selectedRow)
+  expect(request).toHaveBeenCalledWith('cloud', 'work', 'session.title', {
+    session_id: 'owned-runtime',
+    title: 'Branch'
+  })
+  expect(renameSession).not.toHaveBeenCalled()
 })

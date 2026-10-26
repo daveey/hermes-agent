@@ -33,7 +33,7 @@ const plugin: HermesPlugin = {
       running = true
 
       try {
-        const records = await loadReplicaSidebarRows(host.sessions.rows.get())
+        const records = await loadReplicaSidebarRows(() => !disposed)
 
         if (!disposed) {
           publishOfflineSessions(records)
