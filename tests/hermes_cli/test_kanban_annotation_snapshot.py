@@ -10,8 +10,8 @@ def test_slow_annotation_uses_one_projection(monkeypatch):
     monkeypatch.setattr(activity.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(activity, "_activity_fingerprint", lambda: ())
     monkeypatch.setattr(activity, "_origin_scope", lambda: ("owner", "default"))
-    monkeypatch.setattr(activity, "_extra_waiting", lambda: {})
-    monkeypatch.setattr(activity, "attention_task_counts", lambda: {})
+    monkeypatch.setattr(activity, "_extra_waiting", dict)
+    monkeypatch.setattr(activity, "attention_task_counts", dict)
 
     def local(active, blocked, unseen):
         active["session"] = 1
