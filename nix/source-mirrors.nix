@@ -2,8 +2,11 @@
 { inputs, ... }:
 {
   perSystem =
-    { system, ... }:
+    { system, pkgs, ... }:
     {
+      # Exercise the real fetcher in flake check, even without a desktop build.
+      checks.libtirpc-source = pkgs.libtirpc.src;
+
       _module.args.pkgs = import inputs.nixpkgs {
         inherit system;
         overlays = [
@@ -14,9 +17,11 @@
             libtirpc = prev.libtirpc.overrideAttrs (
               old:
               final.lib.optionalAttrs (old.version == "1.3.7") {
-                src = old.src.override {
-                  url = "https://tarballs.nixos.org/sha256/5467ed12bdf1cc2a7c3b7a2a0a3219a3396ae7df60c4de48b07051686dfb18fe";
-                };
+                src = old.src.overrideAttrs (_: {
+                  urls = [
+                    "https://tarballs.nixos.org/sha256/5467ed12bdf1cc2a7c3b7a2a0a3219a3396ae7df60c4de48b07051686dfb18fe"
+                  ];
+                });
               }
             );
           })
