@@ -269,7 +269,9 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
         me = _self_gateway(conn)
         if not me:
             return []
-        rows = conn.execute("SELECT gw, key, data, updated_at FROM replica WHERE coll = 'tasks'").fetchall()
+        # Old replicas can still be displayed, but cannot prove an exact revision.
+        version_column = 'version' if any(r[1] == 'version' for r in conn.execute('PRAGMA table_info(replica)')) else 'NULL'
+        rows = conn.execute(f"SELECT gw, key, data, updated_at, {version_column} FROM replica WHERE coll = 'tasks'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
     finally:
         conn.close()
@@ -277,7 +279,8 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
     tasks: dict[tuple[str, str | None, str, str], dict[str, Any]] = {}
     seen_at: dict[str, float] = {}
-    for gw, record_key, data, updated in rows:
+    legacy_records: dict[tuple, dict] = {}
+    for gw, record_key, data, updated, version in rows:
         try:
             t = json.loads(data)
         except (TypeError, ValueError) as exc:
@@ -292,6 +295,9 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
             elif len(parts) == 2:
                 owner_profile = None
                 board, tid = parts
+                from hermes_cli.kanban_origin_legacy import record_digest
+                legacy_records[(str(gw), None, board, tid)] = {
+                    'key': record_key, 'version': version, 'digest': record_digest(t)}
             else:
                 raise ValueError('invalid replica task key')
             if not all(parts) or tid != str(t['id']):
@@ -345,6 +351,7 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
                             "ownership_state": 'unknown' if owner_profile is None else 'qualified',
                             "unfinished": True, "reported_status": card.get('reported_status', card.get('status')),
                             "synced_at": synced, "stale": stale,
+                            "legacy_record": legacy_records.get((gw, owner_profile, board, cur)),
                         }
             kids = card.get("children") if isinstance(card.get("children"), list) else []
             todo.extend(str(k) for k in kids if k)
@@ -478,7 +485,10 @@ def _remote_links() -> list[dict[str, Any]]:
         return tips[sid]
 
     def superseded(card: dict[str, Any]) -> bool:
+        from hermes_cli.kanban_origin_legacy import supersedes
         for row in rows:
+            if supersedes(card, row):
+                return True
             if (card.get('key') != row['key']
                     or card.get('origin_gateway') != row['origin_gateway']
                     or card.get('origin_profile') != row['origin_profile']):

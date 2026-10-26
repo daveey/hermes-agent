@@ -77,6 +77,7 @@ def receive(request: dict) -> dict:
     return accept_binding(path=home / 'kanban/origin-ledger.db', replica=replica,
                           binding=binding, request_id=request.get('id'),
                           sender=request.get('from'), gateway=gateway, profile=profile,
+                          legacy_alias=request['args'].get('legacy_alias'),
                           resolve_session=lambda sid: _resolve_session(home / 'state.db', sid))
 
 

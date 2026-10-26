@@ -284,6 +284,12 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
     result = []
     try:
         with closing(_ro(path)) as conn:
+            from hermes_cli.kanban_origin_legacy import aliases_for_projection
+            alias_receipts = {}
+            for receipt_raw, in conn.execute('SELECT receipt_json FROM origin_receipts'):
+                ack = json.loads(receipt_raw)
+                if 'legacy_alias' in ack:
+                    alias_receipts.setdefault(ack['binding_hash'], []).append(ack)
             for raw, resolved, payload, version, released in conn.execute(
                     "SELECT binding_json,resolved_session,task_json,observation_version,released FROM origin_obligations"):
                 binding = json.loads(raw)
@@ -353,6 +359,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     'unfinished': not (current and released and status in ('done', 'archived')),
                     'stale': not current, 'synced_at': last_ok,
                     'remote': True, 'via': 'origin',
+                    'legacy_aliases': aliases_for_projection(alias_receipts.get(binding_hash(binding), []), binding),
                 })
         return result
     finally:
@@ -362,16 +369,19 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
 
 def accept_binding(*, path: Path, replica: Path, binding: dict, request_id: str,
                    sender: str, gateway: str, profile: str,
-                   resolve_session: Callable[[str], str]) -> dict:
+                   resolve_session: Callable[[str], str], legacy_alias: dict | None = None) -> dict:
     if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", request_id):
         raise ValueError("origin_request_invalid")
     digest = binding_hash(binding)
+    from hermes_cli import kanban_origin_legacy as legacy
+    if legacy_alias is not None:
+        legacy.validate_alias(legacy_alias, binding)
     if (sender != f"gw:{binding['owner']['gateway']}"
             or gateway != binding['origin']['gateway'] or profile != binding['origin']['profile']):
         raise ValueError("origin_route_mismatch")
     prior = receipt(path, request_id)
     if prior:
-        if prior["binding_hash"] != digest:
+        if prior["binding_hash"] != digest or prior.get('legacy_alias') != legacy_alias:
             raise ValueError("origin_binding_conflict")
         return prior
     if not replica.is_file():
@@ -379,8 +389,11 @@ def accept_binding(*, path: Path, replica: Path, binding: dict, request_id: str,
     from hermes_cli.kanban_origin import _ro
     db = _ro(replica)
     try:
+        db.execute('BEGIN')
         row = db.execute("SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
                          (binding["owner"]["gateway"], binding["task_record_key"])).fetchone()
+        if legacy_alias is not None and not legacy.verify_publication(db, legacy_alias, binding):
+            return {"status": "pending", "code": "origin_publication_pending"}
     finally:
         db.close()
     if not row or row[0] < binding["publication_version"]:
@@ -402,13 +415,17 @@ def accept_binding(*, path: Path, replica: Path, binding: dict, request_id: str,
     ack = {"status": "accepted", "request_id": request_id, "binding_id": binding["binding_id"],
            "binding_hash": digest, "origin": binding["origin"], "owner": binding["owner"],
            "resolved_session": resolved, "publication_version": row[0]}
+    if legacy_alias is not None:
+        ack['legacy_alias'] = legacy_alias
     with _db(path) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         existing = _read_receipt(conn, request_id)
         if existing:
-            if existing["binding_hash"] != digest:
+            if existing["binding_hash"] != digest or existing.get('legacy_alias') != legacy_alias:
                 raise ValueError("origin_binding_conflict")
             return existing
+        if legacy_alias is not None:
+            legacy.check_conflicts(conn, legacy_alias, binding)
         existing = conn.execute("SELECT binding_hash,resolved_session,observation_version FROM origin_obligations WHERE binding_id=?", (_binding_key(binding),)).fetchone()
         if existing:
             if existing[0] != digest:
