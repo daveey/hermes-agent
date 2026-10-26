@@ -150,6 +150,9 @@ class DispatchResult:
     is
     """
 
+    skipped_owned: bool = False
+    dispatch_owner: Optional[str] = None
+    ownership_error: Optional[str] = None
     reclaimed: int = 0
     promoted: int = 0
     reconciled_orphans: list[str] = field(default_factory=list)
@@ -231,6 +234,8 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
+        if res.skipped_owned:
+            counts["skipped_owned"] = counts.get("skipped_owned", 0) + 1
         if res.memory_pressure:
             pressure = res.memory_pressure
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
@@ -2102,6 +2107,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    dispatcher_id: Optional[str] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2127,24 +2133,8 @@ def dispatch_once(
             reconcile_orphans=reconcile_orphans,
         )
 
-    try:
-        db_path = _kb.kanban_db_path(board=board)
-    except Exception:
-        # Must not lose the tick — fall through to an unguarded dispatch.
-        result = _locked_tick()
-        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
-        return result
-    with _kbc._dispatch_tick_lock(db_path) as held:
-        if not held:
-            result = DispatchResult(skipped_locked=True)
-        else:
-            result = _locked_tick()
-            # Still under the dispatch lock: periodic PASSIVE WAL checkpoint.
-            _kbc._maybe_checkpoint_wal(conn, db_path)
-    # Lock released. Fire the tick observer strictly OUTSIDE the critical
-    # section: a slow subscriber must never stall a sibling dispatcher's tick.
-    _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
-    return result
+    from hermes_cli.kanban_dispatch_owner import run_owned_tick
+    return run_owned_tick(conn, _locked_tick, dispatcher_id, board, dry_run)
 
 
 def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -> Optional[int]:

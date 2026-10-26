@@ -131,6 +131,12 @@ _BOARD_SPECS = [
     _cmd("show", aliases=["current"], help="Print the currently-active board slug"),
     _cmd("rename", [_SLUG, _arg("name", help="New display name")],
          help="Change a board's human-readable display name (slug is immutable)"),
+    _cmd("dispatch-owner", [
+        _SLUG,
+        _arg("owner", nargs="?", help="Exact dispatcher slug to set; omit to read"),
+        _arg("--clear", action="store_true", help="Explicitly remove dispatch ownership"),
+        _json_flag(),
+    ], help="Read/set native board dispatch ownership (same-UID coordination)"),
     _cmd("set-default-workdir", [
         _SLUG,
         _arg("path", nargs="?", help="Absolute path to use as default workdir. Omit to clear."),
