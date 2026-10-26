@@ -220,6 +220,15 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                     from hermes_cli.kanban_origin import OriginError
                     if isinstance(e, OriginError):
                         return tool_error(str(e), code=e.code, handoff_complete=False)
+
+                from hermes_cli.kanban_capabilities import CapabilityMismatchError
+                from hermes_cli.kanban_assignment_routing import AssignmentRoutingError
+                from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
+                if isinstance(e, (AssignmentRoutingError, ModelProviderMismatchError)):
+                    return tool_error(str(e), code=e.code)
+                if isinstance(e, CapabilityMismatchError):
+                    return tool_error(str(e), code=e.code, assignee=e.assignee, missing=e.missing)
+
                 if not isinstance(e, ValueError):
                     logger.exception(f"{tool_name} failed")
                 if classify_rejections:
@@ -506,7 +515,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
 
 # --- Goal-mode judge gate ---
 
-_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input", "time"})
+_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input", "time", "assignment"})
 
 
 def _goal_judge_available() -> bool:
@@ -1316,9 +1325,7 @@ def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
     _reject_delegated_child_mutation("kanban_create")
     title = _require_text(args, "title")
-    assignee = args.get("assignee")
-    _check(assignee, "assignee is required — name the profile that should execute this "
-                     "task (the dispatcher will only spawn tasks with an assignee)")
+    assignee = args.get("assignee") or _persisted_identity()
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
     # mutate review evidence or race its checkout). Project identity is the one safe thing
@@ -1396,6 +1403,7 @@ def _handle_create(args: dict, **kw) -> str:
             creator_task_id=self_tid,
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
+            requires=args.get("requires"),
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             completion_contract=args.get("completion_contract"),

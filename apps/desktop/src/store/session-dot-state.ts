@@ -287,20 +287,22 @@ export const sessionStatusStripe = (
 export const withRowActivity = (
   state: SessionDotState,
   row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active' | 'kanban_blocked'> &
-    Partial<Pick<SessionInfo, 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen'>>
+    Partial<Pick<SessionInfo, 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen' | 'offline_cached'>>
 ): SessionDotState =>
-  (state === 'idle' || state === 'unread' || state === 'draft') &&
-  (row.goal_active === true ||
-    (row.kanban_active ?? 0) > 0 ||
-    row.kanban_unknown === true ||
-    (row.kanban_remote_stale ?? 0) > 0 ||
-    !hasFreshKanbanObservation(row) ||
-    (row.kanban_blocked ?? 0) > 0 ||
-    (row.background_active ?? 0) > 0)
-    ? 'background'
-    : (state === 'idle' || state === 'draft') && (row.kanban_unseen ?? 0) > 0
-      ? 'unread'
-      : state
+  row.offline_cached
+    ? 'idle'
+    : (state === 'idle' || state === 'unread' || state === 'draft') &&
+        (row.goal_active === true ||
+          (row.kanban_active ?? 0) > 0 ||
+          row.kanban_unknown === true ||
+          (row.kanban_remote_stale ?? 0) > 0 ||
+          !hasFreshKanbanObservation(row) ||
+          (row.kanban_blocked ?? 0) > 0 ||
+          (row.background_active ?? 0) > 0)
+      ? 'background'
+      : (state === 'idle' || state === 'draft') && (row.kanban_unseen ?? 0) > 0
+        ? 'unread'
+        : state
 
 /** Whether this turn is the session's own, live: brighter title, and the row's
  *  age yields to the actions menu. Wider than the arc — a turn waiting on an

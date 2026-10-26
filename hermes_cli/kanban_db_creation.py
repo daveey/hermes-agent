@@ -3,7 +3,7 @@
 
 def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
                    tenant, workspace_kind, workspace_path, branch_name, project_id,
-                   skills, goal_mode, model_override, provider_override, created_by):
+                   skills, goal_mode, model_override, provider_override, created_by, requires):
     from hermes_cli import kanban_db as kb
 
     kb._append_event(conn, task_id, "created", {
@@ -17,6 +17,7 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         "branch_name": branch_name,
         "project_id": project_id,
         "skills": list(skills) if skills else None,
+        "requires": requires,
         "goal_mode": bool(goal_mode) or None,
         "model_override": model_override,
         "provider_override": provider_override,

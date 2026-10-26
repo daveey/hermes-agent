@@ -1,14 +1,20 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
+import { buildGatewaySessionGroups } from '@/app/chat/sidebar/gateway-group-model'
 import { filterSessionsByProfileScope } from '@/app/chat/sidebar/profile-scope'
+import { buildSessionByAnyId, resolvePinnedSessions } from '@/app/chat/sidebar/session-index'
 import type { SessionInfo } from '@/hermes'
+import { sessionOnHiddenGateway } from '@/store/gateway-visibility'
 import { $pinnedSessionIds, $sidebarShowAutomated } from '@/store/layout'
 import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
 
 import {
+  _resetOfflineSessionsForTests,
+  hideOfflineSession,
   mergeOfflineFallback,
   type OfflineReplicaRecord,
   offlineSessionsFromReplica,
+  recordSessionListResult,
   syncedAgoLabel
 } from './offline-sessions'
 
@@ -56,6 +62,7 @@ const live = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
 const ids = (rows: readonly SessionInfo[]) => rows.map(r => r.id)
 
 beforeEach(() => {
+  _resetOfflineSessionsForTests()
   $sidebarShowAutomated.set(false)
   $pinnedSessionIds.set([])
 })
@@ -76,7 +83,7 @@ describe('offlineSessionsFromReplica', () => {
     })
   })
 
-  it('orders by the session\'s own activity, never the sync time', () => {
+  it("orders by the session's own activity, never the sync time", () => {
     const [row] = offlineSessionsFromReplica([rec('a', { activity: 5_000, synced_at: 99_999 })], connFor)
 
     expect(row.last_active).toBe(5_000)
@@ -172,10 +179,10 @@ describe('mergeOfflineFallback', () => {
     expect(ids(mergeOfflineFallback([live('l1')], cached))).toEqual(['l1', 'c1', 'c2'])
   })
 
-  it('live wins: a connection that is live drops all its cached rows (reconnect, no duplicates)', () => {
+  it('live wins only for its owning connection and profile (reconnect, no duplicates)', () => {
     const merged = mergeOfflineFallback([live('l1'), live('c1', { connection_id: 'conn-mini' })], cached)
 
-    expect(ids(merged)).toEqual(['l1', 'c1'])
+    expect(ids(merged)).toEqual(['l1', 'c1', 'c2'])
     expect(merged.find(r => r.id === 'c1')?.offline_cached).toBeUndefined()
   })
 
@@ -207,4 +214,35 @@ describe('syncedAgoLabel', () => {
     expect(syncedAgoLabel(1_000, 1_030_000)).toBe('synced just now')
     expect(syncedAgoLabel(1_000, 1_000_000 + 600_000)).toBe('synced 10m ago')
   })
+})
+
+it('uses ordinary gateway visibility, owner grouping, and pin resolution for cached rows', () => {
+  const cached = offlineSessionsFromReplica(
+    [rec('pin', { pinned: true }), rec('work', { profile: 'work' }), rec('cloud', { gateway: 'cloud' })],
+    connFor
+  )
+
+  const shown = cached.filter(row => !sessionOnHiddenGateway(row, ['conn-cloud'], null))
+  expect(ids(shown)).toEqual(['pin', 'work'])
+  const groups = buildGatewaySessionGroups(shown, null, {})
+  expect(groups.map(group => [group.connectionId, group.profile, ids(group.sessions)])).toEqual([
+    ['conn-mini', 'default', ['pin']],
+    ['conn-mini', 'work', ['work']]
+  ])
+  expect(ids(resolvePinnedSessions([], buildSessionByAnyId(shown, [], []), shown, new Set()))).toEqual(['pin'])
+})
+
+it('freshness and retained-row archive hiding stay scoped to the full owner', () => {
+  const cached = offlineSessionsFromReplica([
+    rec('same'), rec('same', { profile: 'work' }), rec('same', { gateway: 'cloud' })
+  ], connFor)
+
+  const previous = cached.map(row => ({ ...row, offline_cached: false, is_active: true }))
+  const incoming = previous.filter(row => row.connection_id === 'conn-cloud')
+  recordSessionListResult(previous, incoming, 'primary', 'all', [{ connection_id: 'conn-mini', profile: 'work' }])
+  const merged = mergeOfflineFallback(previous, cached)
+  expect(merged.filter(row => row.offline_cached)).toEqual([cached[1]])
+  expect(merged.filter(row => row.is_active)).toHaveLength(2)
+  hideOfflineSession(cached[1])
+  expect(mergeOfflineFallback(previous, cached)).toEqual([previous[0], previous[2]])
 })

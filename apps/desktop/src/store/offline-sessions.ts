@@ -54,6 +54,97 @@ export const $offlineSessions = atom<SessionInfo[]>([])
 const profileOf = (profile: null | string | undefined) => (profile ?? '').trim() || 'default'
 const identity = (connectionId: string, profile: string, id: string) => `${connectionId}\u0000${profile}\u0000${id}`
 
+/** Last authoritative list result per connection/profile. A status probe may
+ * invalidate a list, but only a successful list can make retained rows live. */
+export const $sessionListFreshness = atom<Record<string, boolean>>({})
+
+const ownerKey = (connection: string | undefined, profile: string | undefined) =>
+  `${connection?.trim() || 'local'}\u0000${profileOf(profile)}`
+
+function publishFreshness(next: Record<string, boolean>): void {
+  const previous = $sessionListFreshness.get()
+
+  if (
+    Object.keys(previous).length !== Object.keys(next).length ||
+    Object.keys(next).some(key => previous[key] !== next[key])
+  ) {
+    $sessionListFreshness.set(next)
+  }
+}
+
+export function sessionOwnerIsFresh(
+  connection: string | undefined,
+  profile?: string,
+  state = $sessionListFreshness.get()
+): boolean {
+  return state[ownerKey(connection, profile)] ?? state[ownerKey(connection, '*')] ?? true
+}
+
+export function recordSessionGatewayUnavailable(connection: string): void {
+  const prefix = `${connection}\u0000`
+
+  const next = Object.fromEntries(
+    Object.entries($sessionListFreshness.get()).filter(([key]) => !key.startsWith(prefix))
+  )
+
+  next[ownerKey(connection, '*')] = false
+  publishFreshness(next)
+}
+
+/** Called only by the owning, non-superseded sidebar refresh. */
+export function recordSessionListResult(
+  previous: readonly SessionInfo[],
+  incoming: readonly SessionInfo[],
+  connection: string | undefined,
+  profile: string,
+  errors: readonly { profile?: string; connection_id?: string }[] = [],
+  failed = false
+): void {
+  const next = { ...$sessionListFreshness.get() }
+  const owners = new Map<string, { connection_id?: string; profile?: string }>()
+  owners.set(ownerKey(connection, profile === 'all' ? '*' : profile), {
+    connection_id: connection,
+    profile: profile === 'all' ? '*' : profile
+  })
+
+  for (const row of [...previous, ...incoming]) {
+    if (profile === 'all' || profileOf(row.profile) === profileOf(profile)) {
+      owners.set(ownerKey(row.connection_id, row.profile), row)
+    }
+  }
+
+  for (const error of errors) {
+    if (error.profile && error.profile !== 'all') {
+      owners.set(ownerKey(error.connection_id ?? connection, error.profile), {
+        connection_id: error.connection_id ?? connection,
+        profile: error.profile
+      })
+    }
+  }
+
+  const returnedOwners = new Set(incoming.map(row => ownerKey(row.connection_id, row.profile)))
+
+  for (const [key, owner] of owners) {
+    const ownerFailed =
+      failed ||
+      errors.some(
+        error =>
+          (!error.connection_id || error.connection_id === owner.connection_id) &&
+          (error.profile === 'all' || profileOf(error.profile) === profileOf(owner.profile))
+      )
+
+    if (returnedOwners.has(key) && !failed) {
+      next[key] = true
+    } else if (ownerFailed) {
+      next[key] = false
+    } else if ((owner.connection_id || 'local') === (connection || 'local')) {
+      next[key] = true
+    }
+  }
+
+  publishFreshness(next)
+}
+
 /**
  * Replica records -> sidebar rows. Eligibility is the normal recents rule:
  * sources the recents query excludes (cron, subagent, messaging, …), empty
@@ -166,48 +257,50 @@ function rowFromRecord(record: OfflineReplicaRecord, connectionId: string, linea
   }
 }
 
-/**
- * Live rows win. A connection that has any live row is reachable, so none of
- * its cached rows are added (reconnect swaps cache for live without
- * duplicates); otherwise a cached row is also dropped when a live row has the
- * same (connection, profile, id) or lists that id in its lineage. Returns
- * `live` itself when nothing is added so memos keep their identity.
- */
-export function mergeOfflineFallback(live: SessionInfo[], offline: readonly SessionInfo[]): SessionInfo[] {
-  if (!offline.length) {
-    return live
-  }
-
-  const liveConnections = new Set<string>()
+/** Fresh owner lists win; retained rows from a failed list are cached, not live. */
+export function mergeOfflineFallback(
+  live: SessionInfo[],
+  offline: readonly SessionInfo[],
+  freshness = $sessionListFreshness.get()
+): SessionInfo[] {
+  const cachedById = new Map(offline.map(row => [offlineIdentity(row), row]))
+  const freshOwners = new Set<string>()
   const seen = new Set<string>()
+  let changed = false
 
-  for (const row of live) {
-    const connectionId = row.connection_id?.trim() ?? ''
+  const rows = live.map(row => {
+    const fresh = sessionOwnerIsFresh(row.connection_id, row.profile, freshness)
+    let effective = row
 
-    if (connectionId) {
-      liveConnections.add(connectionId)
+    if (!fresh) {
+      const cached = cachedById.get(offlineIdentity(row))
+      effective = cached ?? { ...row, offline_cached: true, is_active: false }
+      changed = true
+    } else if (!row.offline_cached) {
+      freshOwners.add(ownerKey(row.connection_id, row.profile))
     }
 
-    const profile = profileOf(row.profile)
-
-    for (const id of [row.id, row._lineage_root_id, ...(row._lineage_ids ?? [])]) {
+    for (const id of [effective.id, effective._lineage_root_id, ...(effective._lineage_ids ?? [])]) {
       if (id) {
-        seen.add(identity(connectionId, profile, id))
+        seen.add(identity(effective.connection_id?.trim() ?? '', profileOf(effective.profile), id))
       }
     }
-  }
 
-  const added = offline.filter(row => {
-    const connectionId = row.connection_id?.trim() ?? ''
-
-    if (connectionId && liveConnections.has(connectionId)) {
-      return false
-    }
-
-    return !seen.has(identity(connectionId, profileOf(row.profile), row.id))
+    return effective
   })
 
-  return added.length ? [...live, ...added] : live
+  const added = offline.filter(
+    row =>
+      !freshOwners.has(ownerKey(row.connection_id, row.profile)) &&
+      freshness[ownerKey(row.connection_id, row.profile)] !== true &&
+      !seen.has(offlineIdentity(row))
+  )
+
+  const merged = added.length ? [...rows, ...added] : changed ? rows : live
+
+  return archivedWhileOffline.size
+    ? merged.filter(row => !row.offline_cached || !archivedWhileOffline.has(offlineIdentity(row)))
+    : merged
 }
 
 /** Identity of a cached row for local bookkeeping. */
@@ -232,5 +325,6 @@ export function hideOfflineSession(row: SessionInfo): void {
 
 export function _resetOfflineSessionsForTests(): void {
   archivedWhileOffline.clear()
+  $sessionListFreshness.set({})
   $offlineSessions.set([])
 }

@@ -132,6 +132,16 @@ function formatAge(seconds: number, r: Translations['sidebar']['row']): string {
   return unit === 'second' ? r.ageNow : `${value}${r[AGE_KEY[unit]]}`
 }
 
+function rowHasLiveStatus(session: SessionInfo): boolean {
+  return !session.archived && !session.offline_cached
+}
+
+function liveProcessBadge(session: SessionInfo, onResume: () => void) {
+  return rowHasLiveStatus(session) && rowBackgroundProcesses(session).length > 0 ? (
+      <BackgroundProcessBadge onOpen={onResume} session={session} />
+    ) : null
+}
+
 function SidebarSessionRowImpl({
   session,
   branchStem,
@@ -228,10 +238,7 @@ function SidebarSessionRowImpl({
 
   // [daveey] Live background processes holding this row off green: a process
   // glyph beside the kanban badge; hover lists them with Stop, click opens.
-  const processBadge =
-    !session.archived && rowBackgroundProcesses(session).length > 0 ? (
-      <BackgroundProcessBadge onOpen={onResume} session={session} />
-    ) : null
+  const processBadge = liveProcessBadge(session, onResume)
 
   // Pinned metadata occupies the actions slot and swaps out for the kebab on
   // hover, so the row reserves the same width either way and never reflows.
@@ -353,18 +360,19 @@ function SidebarSessionRowImpl({
   // ⌘B parks a session as blocked: grey stripe, skipped by ⌘] / ⌘[.
   const userBlocked = useStoreSelector($blockedSessionIds, ids => isSessionBlocked(session.id, ids))
 
-  const statusStripe = session.archived
-    ? null
-    : sessionStatusStripe(
-        dotState,
-        session.message_count > 0,
-        userBlocked,
-        kanbanBlocked,
-        session.cron_active === true,
-        session.review_wait,
-        session.kanban_attention,
-        kanbanOpen
-      )
+  const statusStripe =
+    !rowHasLiveStatus(session)
+      ? null
+      : sessionStatusStripe(
+          dotState,
+          session.message_count > 0,
+          userBlocked,
+          kanbanBlocked,
+          session.cron_active === true,
+          session.review_wait,
+          session.kanban_attention,
+          kanbanOpen
+        )
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
@@ -438,6 +446,7 @@ function SidebarSessionRowImpl({
         onToggleUnread={onToggleUnread}
         pinned={isPinned}
         profile={session.profile}
+        selectedRow={session}
         sessionId={session.id}
         title={title}
         unread={unread}
@@ -468,6 +477,7 @@ function SidebarSessionRowImpl({
       onToggleUnread={onToggleUnread}
       pinned={isPinned}
       profile={session.profile}
+      selectedRow={session}
       sessionId={session.id}
       title={title}
       unread={unread}

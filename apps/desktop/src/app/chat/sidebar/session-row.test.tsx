@@ -713,3 +713,41 @@ describe('SidebarSessionRow background process badge', () => {
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('done')
   })
 })
+
+it('passes the exact selected owner to both row action menus', () => {
+  menuProps.mockClear()
+
+  const session = makeSession({
+    title: 'Cached owner',
+    connection_id: 'conn-mini',
+    profile: 'work',
+    offline_cached: true
+  })
+
+  renderRow(session)
+  expect(menuProps.mock.calls).toHaveLength(2)
+
+  for (const [props] of menuProps.mock.calls) {
+    expect(props.selectedRow).toBe(session)
+  }
+})
+
+it('does not paint a retained live turn as running on an offline row', () => {
+  act(() => publishSessionState('offline-rt', { ...createClientSessionState('s1'), busy: true }))
+
+  const { container } = renderRow(
+    makeSession({
+      title: 'Offline retained turn',
+      offline_cached: true,
+      is_active: false,
+      goal_active: true,
+      background_active: 1
+    })
+  )
+
+  expect(container.querySelector('[data-working="true"]')).toBeNull()
+  expect(screen.queryByLabelText('Running')).toBeNull()
+  expect(screen.queryByTestId('session-row-background-processes')).toBeNull()
+  expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
+  act(() => clearAllSessionStates())
+})

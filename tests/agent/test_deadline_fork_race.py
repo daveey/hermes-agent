@@ -10,12 +10,16 @@ import pytest
 
 
 @pytest.mark.platforms("linux")
-def test_cron_timeout_closes_the_descendant_snapshot_fork_window(tmp_path):
+@pytest.mark.parametrize("stop_deadline", [None, "0"], ids=["normal", "stop-budget-exhausted"])
+def test_cron_timeout_closes_the_descendant_snapshot_fork_window(tmp_path, stop_deadline):
+    # "0" exhausts the stop budget immediately, as a loaded host does: the fallback must
+    # still re-read the live tree rather than signal a stale snapshot.
+    extra = {} if stop_deadline is None else {"CRON_FORK_RACE_STOP_DEADLINE_S": stop_deadline}
     probe = Path(__file__).resolve().parents[2] / "evals" / "cron_timeout_fork_race.py"
     result = subprocess.run(
         [sys.executable, str(probe)],
-        env={**os.environ, "HOME": str(tmp_path), "HERMES_HOME": str(tmp_path)},
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=35,
+        env={**os.environ, "HOME": str(tmp_path), "HERMES_HOME": str(tmp_path), **extra},
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180,
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

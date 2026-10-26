@@ -195,7 +195,8 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "goes to todo and auto-resumes when that task finishes, no human "
         "needed), 'needs_input' (you need a human decision/answer), "
         "'capability' (a hard wall: no access, missing credentials, an action "
-        "no agent can do), 'transient' (a flaky failure that may clear), or "
+        "no agent can do), 'assignment' (this worker has the wrong tools/backend; "
+        "route to a capable supervisor, not a human), 'transient' (a flaky failure that may clear), or "
         "'time' (waiting on a clock, a cron, a soak or a release, not a person: "
         "parks the card 'scheduled' with a wake time, never as a human block). "
         "``reason`` is shown to the human on the board and, in Desktop, in a "
@@ -226,7 +227,7 @@ KANBAN_BLOCK_SCHEMA = _schema(
         )),
         "kind": {
             "type": "string",
-            "enum": ["dependency", "needs_input", "capability", "transient", "time"],
+            "enum": ["dependency", "needs_input", "capability", "assignment", "transient", "time"],
             "description": (
                 "Why you're blocked. 'dependency' waits in todo and "
                 "resumes automatically when an incomplete parent finishes; "
@@ -505,9 +506,12 @@ KANBAN_CREATE_SCHEMA = _schema(
         "assignee": _prop("string", (
                 "Profile name that should execute this task "
                 "(e.g. 'researcher-a', 'reviewer', 'writer'). "
-                "Required — tasks without an assignee are never "
-                "dispatched."
+                "Omit to use the creating agent's profile. Requirements are checked before creation."
         )),
+        "requires": {"type": "array", "items": {"type": "string",
+                     "enum": ["terminal", "file", "git", "host_repo", "kanban"]},
+                     "description": "Required configured capabilities, including skill prerequisites. "
+                     "Worktree/dir workspaces infer host repo access; git means terminal access, not an executable probe."},
         "body": _prop("string", (
                 "Opening post: full spec, acceptance criteria, "
                 "links. The assigned worker reads this as part of "
@@ -645,7 +649,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "to a different one. Requires 'model'."
         )),
     },
-    ["title", "assignee"],
+    ["title"],
 )
 
 KANBAN_UNBLOCK_SCHEMA = _schema(

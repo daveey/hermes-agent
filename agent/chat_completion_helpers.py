@@ -2814,22 +2814,10 @@ class _StreamingCall(StreamingWaitMonitor):
         self.result["partial_tool_names"] = []
         return attempt_id
 
-    def _cancel_current_stream_attempt(self, reason: str) -> None:
-        with self.stream_attempt_lock:
-            current = int(self.stream_attempt_state["current"])
-            if current:
-                self.stream_attempt_state["cancelled"].add(current)
-        if current:
-            logger.debug("Marked stream attempt %s cancelled: %s", current, reason)
-
     def _stream_attempt_is_active(self, stream_attempt_id: int) -> bool:
         with self.stream_attempt_lock:
             state = self.stream_attempt_state
             return stream_attempt_id == int(state["current"]) and stream_attempt_id not in state["cancelled"]
-
-    def _stream_attempt_was_cancelled(self, stream_attempt_id: int) -> bool:
-        with self.stream_attempt_lock:
-            return stream_attempt_id in self.stream_attempt_state["cancelled"]
 
     def _discard_stale_stream_chunk(self, stream_attempt_id: int, chunk) -> None:
         try:
@@ -3758,6 +3746,15 @@ class _StreamingCall(StreamingWaitMonitor):
                     return  # success
                 except Exception as e:
                     self._close_managed_stream()
+                    import httpx as _httpx
+                    # Socket shutdown can unwind as EOF or a read/reset error. Report
+                    # the captured attempt's cancellation identically in either case.
+                    if (not self._request_cancelled["value"]
+                            and self._stream_attempt_was_cancelled(stream_attempt_id)
+                            and isinstance(e, _httpx.TransportError)):
+                        cancelled = _httpx.RemoteProtocolError(f"stream attempt {stream_attempt_id} was superseded")
+                        cancelled.__cause__ = e
+                        e = cancelled
                     if not self._handle_stream_error(e, _stream_attempt, _max_stream_retries):
                         return
                     if self._route_switched_under_request():

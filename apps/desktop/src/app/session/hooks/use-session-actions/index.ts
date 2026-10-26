@@ -33,7 +33,6 @@ import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { purgeInFlightTurnJournals, recoverInFlightTurnJournal } from '@/lib/inflight-turn-journal'
 import { latestSessionTodoSnapshot } from '@/lib/todos'
 import { setSessionYolo } from '@/lib/yolo-session'
-import { collectArchiveLinks, sessionKanbanArchiveLinks } from '@/store/archive-guards'
 import { $clarifyRequests, clearClarifyRequest } from '@/store/clarify'
 import {
   announceGoneSessionDraft,
@@ -44,7 +43,6 @@ import {
 } from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
 import { resetSessionBackground } from '@/store/composer-status'
-import { confirm as confirmAction } from '@/store/confirm'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $connectionRequests } from '@/store/connection-request'
 import {
@@ -59,6 +57,7 @@ import { clearSessionGoal } from '@/store/goals'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { archiveIfOfflineCached } from '@/store/offline-session-actions'
+import { sessionActionRow } from '@/store/offline-session-owner'
 import { adoptDraftPreviewTabs, prunePreviewTabsForSession } from '@/store/preview'
 import {
   $activeGatewayProfile,
@@ -152,6 +151,7 @@ import { dropTranscriptTail, dropTranscriptTailEverywhere, saveTranscriptTail } 
 import { isWatchWindow } from '@/store/windows'
 import type {
   SessionCreateResponse,
+  SessionInfo,
   SessionMessage,
   SessionMessagesResponse,
   SessionResumeResult,
@@ -169,6 +169,7 @@ import {
 import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
 import { branchCreateKey } from './branch-create-key'
+import { confirmLinkedArchive } from './confirm-linked-archive'
 import { sessionCreateOverrideParams, type SessionCreateOverrides, type SessionSeedMessage } from './create-overrides'
 import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this-run'
 import { captureDisplayHydration } from './display-hydration'
@@ -3423,15 +3424,23 @@ export function useSessionActions({
     // `onDeselect` replaces the fresh-draft fallback when the archived session
     // was the open one (the ⌘⇧A hotkey steps to the next sidebar session).
     // `skipLinkedConfirm` archives without the linked-work prompt.
-    async (storedSessionId: string, options?: { onDeselect?: () => void; skipLinkedConfirm?: boolean }) => {
+    async (
+      storedSessionId: string,
+      options?: { onDeselect?: () => void; skipLinkedConfirm?: boolean; selectedRow?: SessionInfo }
+    ) => {
       clearNotifications()
 
-      if (await archiveIfOfflineCached(storedSessionId, copy)) {
+      const listed = findListedSession(storedSessionId)
+      let archived: SessionInfo | undefined
+
+      try {
+        archived = sessionActionRow(storedSessionId, options?.selectedRow) ?? listed?.session
+      } catch (err) {
+        notifyError(err, copy.archiveFailed)
+
         return
       }
 
-      const listed = findListedSession(storedSessionId)
-      const archived = listed?.session
       const stampedProfile = archived?.profile?.trim()
       const profile = stampedProfile || (await resolveSessionProfile(storedSessionId))
 
@@ -3446,33 +3455,18 @@ export function useSessionActions({
         return
       }
 
-      // [daveey] Archiving only hides the chat: its Kanban tasks and rented
-      // machines keep running out of sight. Ask first when anything is linked.
-      if (!options?.skipLinkedConfirm) {
-        const linked = [
-          ...sessionKanbanArchiveLinks(archived, copy),
-          ...(await collectArchiveLinks({
-            connectionId: archived?.connection_id,
-            ids: [...new Set([storedSessionId, archived?.id, archived?._lineage_root_id].filter(Boolean) as string[])],
-            profile: profile || undefined,
-            session: archived,
-            sessionId: storedSessionId
-          }))
-        ]
+      if (!(await confirmLinkedArchive(storedSessionId, archived, profile, copy, options?.skipLinkedConfirm))) {
+        return
+      }
 
-        if (linked.length > 0) {
-          const ok = await confirmAction({
-            cancelLabel: copy.archiveLinkedCancel,
-            confirmLabel: copy.archiveLinkedConfirm,
-            description: copy.archiveLinkedBody,
-            details: linked,
-            title: copy.archiveLinkedTitle(archived?.title?.trim() || '')
-          })
-
-          if (!ok) {
-            return
-          }
+      try {
+        if (await archiveIfOfflineCached(storedSessionId, copy, archived)) {
+          return
         }
+      } catch (err) {
+        notifyError(err, copy.archiveFailed)
+
+        return
       }
 
       const wasSelected = selectedStoredSessionIdRef.current === storedSessionId

@@ -78,3 +78,9 @@ describe('owner requests', () => {
     expect(rows[1].pending).toBeUndefined()
   })
 })
+
+it('keeps same-id sessions in different profiles independent', () => {
+  const rows = [row('mini', 'same'), row('mini', 'same', { profile: 'work', key: 'work/same' })]
+  expect(replicaSessionsToShow(rows, [], () => false)).toHaveLength(2)
+  expect(replicaSessionsToShow(rows, [{ gateway: 'mini', profile: 'work', id: 'same' }], () => false)).toEqual([rows[0]])
+})

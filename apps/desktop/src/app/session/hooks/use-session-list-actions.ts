@@ -18,6 +18,7 @@ import {
   SIDEBAR_FILTERED_PAGE_SIZE,
   SIDEBAR_SESSIONS_PAGE_SIZE
 } from '@/store/layout'
+import { recordSessionListResult } from '@/store/offline-sessions'
 import { messagingTotalsKey, normalizeProfileKey, sidebarProfileForScope } from '@/store/profile'
 import {
   $messagingSessions,
@@ -52,6 +53,32 @@ import {
 import { $sessionTiles, $workingSessionIds, getRecentlySettledSessionIds } from '@/store/session-states'
 
 import { refreshCronJobs as refreshCronJobsStore } from '../../cron/cron-actions'
+
+function sidebarRequestConnection(): string | undefined {
+  return getApiRequestConnection() ?? undefined
+}
+
+function recordSidebarFailure(owns: () => boolean, connection: string | undefined, profile: string): void {
+  if (owns()) {recordSessionListResult($sessions.get(), [], connection, profile, [], true)}
+}
+
+function recordSidebarFreshness(result: Awaited<ReturnType<typeof listSidebarSessions>>, connection: string | undefined, profile: string): void {
+  const recents = result.recents
+  const recentsErrors = recents.errors ?? result.errors
+          recordSessionListResult(
+            $sessions.get(),
+            recents.sessions ?? [],
+            connection,
+            profile,
+            [
+              ...(recentsErrors ?? []),
+              ...Object.entries(recents.profiles_failed ?? result.profiles_failed ?? {})
+                .filter(([, failure]) => failure.failed || failure.retry)
+                .map(([profile]) => ({ profile }))
+            ],
+            recents.failed === true || recents.retry === true
+          )
+}
 
 // The messaging slice is the inverse: drop cron + every local source so only
 // external-platform conversations remain, then split per platform in the UI.
@@ -310,6 +337,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
         return
       }
 
+      const requestConnection = sidebarRequestConnection()
       const requestId = refreshSessionsRequestRef.current + 1
       refreshSessionsRequestRef.current = requestId
       // The loading flag exists to drive the initial skeletons (they only render
@@ -378,6 +406,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
         if (owns()) {
           const recents = result.recents
           const recentsErrors = recents.errors ?? result.errors
+          recordSidebarFreshness(result, requestConnection, sessionProfile)
 
           const scopedRetry =
             recents.retry === true ||
@@ -478,6 +507,8 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
           )
         }
       } catch (error) {
+        recordSidebarFailure(owns, requestConnection, sessionProfile)
+
         if (owns() && showLoading) {
           setSessionsLoadError(true)
         }
