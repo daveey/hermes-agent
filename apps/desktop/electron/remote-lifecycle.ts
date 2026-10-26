@@ -1825,6 +1825,7 @@ export {
   locateHermes,
   LOCKFILE_SCHEMA_VERSION,
   lockfilePath,
+  lockMatchesManagedUpdateScope,
   MIN_READY_TIMEOUT_MS,
   mintToken,
   openForward,
