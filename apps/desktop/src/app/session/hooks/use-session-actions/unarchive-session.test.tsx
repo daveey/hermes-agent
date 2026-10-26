@@ -40,6 +40,7 @@ function archivedSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
     id: 'arch-1',
     input_tokens: 0,
     is_active: false,
+    kanban_observed_at: Date.now() / 1000,
     last_active: 1,
     message_count: 2,
     model: null,

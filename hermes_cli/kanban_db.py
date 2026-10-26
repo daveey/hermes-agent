@@ -1216,9 +1216,7 @@ def create_task(
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
-    ``origin_intent`` opts into atomic receipt-workflow creation: immutable
-    request ID/options, task and publication marker commit together. This is
-    owner-side persistence only, never proof of an origin readback or handoff.
+    ``origin_intent`` atomically persists the task and receipt intent, not origin readback.
     ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project
     ``worktree`` workspace that could never resolve at spawn with
     ``WorktreeWorkspaceConfigError`` naming the fix, instead of letting the
@@ -1238,8 +1236,7 @@ def create_task(
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
     if origin_intent is not None:
-        # Capture the full immutable caller intent before defaults/derived state
-        # mutate it. New create options automatically participate in retry checks.
+        # Capture all caller options before defaults mutate them, including future options.
         creation_options = dict(locals())
         creation_options.pop("conn")
         creation_options.pop("origin_intent")
@@ -1353,44 +1350,14 @@ def create_task(
                 )
                 for pid in parents:
                     _link(conn, pid, task_id)
-                _append_event(
-                    conn,
-                    task_id,
-                    "created",
-                    {
-                        "assignee": assignee,
-                        "status": task_status,
-                        "parents": list(parents),
-                        "creator_task_id": creator_task_id,
-                        "tenant": tenant,
-                        "workspace_kind": workspace_kind,
-                        "workspace_path": workspace_path,
-                        "branch_name": branch_name,
-                        "project_id": project_id,
-                        "skills": list(skills_list) if skills_list else None,
-                        "goal_mode": bool(goal_mode) or None,
-                        "model_override": model_override,
-                        "provider_override": provider_override,
-                    },
+                from hermes_cli.kanban_db_creation import record_created
+                record_created(
+                    conn, task_id, assignee=assignee, status=task_status, parents=parents,
+                    creator_task_id=creator_task_id, tenant=tenant, workspace_kind=workspace_kind,
+                    workspace_path=workspace_path, branch_name=branch_name, project_id=project_id,
+                    skills=skills_list, goal_mode=goal_mode, model_override=model_override,
+                    provider_override=provider_override, created_by=created_by,
                 )
-                if task_status == "blocked":
-                    _append_event(
-                        conn,
-                        task_id,
-                        "blocked",
-                        {"reason": "initial_status", "status": "blocked", "actor": created_by or "user"},
-                    )
-                if task_status == "todo":
-                    # Parked behind an open parent: record why, exactly as
-                    # link_tasks does, so the board never shows an unexplained todo.
-                    gating = [p for p in parents if _task_status(conn, p) not in ("done", "archived")]
-                    if gating:
-                        _append_event(
-                            conn,
-                            task_id,
-                            "dependency_wait",
-                            {"reason": "parent_not_done", "parent": gating[0]},
-                        )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)

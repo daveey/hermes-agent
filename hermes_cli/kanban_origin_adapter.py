@@ -19,7 +19,7 @@ from hermes_cli.kanban_origin_ledger import accept_binding, validate_binding
 
 def _gateway(replica: Path) -> str:
     cfg = Path(os.environ.get('HERMES_MAIL_CONFIG') or Path.home() / '.config/hermes-mail/config.json')
-    config = json.loads(cfg.read_text())
+    config = json.loads(cfg.read_text(encoding="utf-8-sig"))
     gateway = config.get('gateway') if isinstance(config, dict) else None
     if not isinstance(gateway, str) or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}', gateway):
         raise ValueError('origin_gateway_invalid')
@@ -82,7 +82,7 @@ def receive(request: dict) -> dict:
 
 def command(args) -> int:
     try:
-        raw = sys.stdin.read() if args.request_file == '-' else Path(args.request_file).read_text()
+        raw = sys.stdin.read() if args.request_file == '-' else Path(args.request_file).read_text(encoding="utf-8-sig")
         result = receive(json.loads(raw))
     except (OSError, sqlite3.Error):
         # Availability is not terminal rejection. Do not print paths or private

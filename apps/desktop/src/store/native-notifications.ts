@@ -358,6 +358,49 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
   }
 }
 
+function completionOwnerPin(sessionId: string): string | undefined {
+  const owner = runtimeSessionOwner(sessionId) ?? knownOwnerForSession(sessionId)
+
+  return typeof owner === 'string' ? projectionOwner({ profile: owner })
+    : owner ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
+}
+
+/** A terminal turn is not completion of its dispatched work: consult the ledger projection. */
+function deferUnfinishedCompletion(input: NativeNotificationInput): boolean {
+  if (input.kind !== 'turnDone' || !input.sessionId) {
+    return false
+  }
+
+  const storedId = storedSessionIdForRuntimeId(input.sessionId) ?? input.sessionId
+  const ownerPin = completionOwnerPin(input.sessionId)
+
+  const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, storedId) &&
+    (ownerPin === undefined || projectionOwner(row) === ownerPin))
+
+  const row = rows.length === 1 ? rows[0] : undefined
+  const known = hasFreshKanbanObservation(row, input.projectionAfter)
+
+  const unfinished = !row || !known || row.kanban_unknown === true ||
+    (row.kanban_active ?? 0) > 0 || (row.kanban_blocked ?? 0) > 0 ||
+    (row.kanban_remote_stale ?? 0) > 0
+
+  if (unfinished) {
+    if (input.projectionAfter !== undefined) {
+      const pin = ownerPin ?? (row ? projectionOwner(row) : undefined)
+
+      if (pin !== undefined) {
+        deferCompletion(input, storedId, pin)
+      }
+    }
+
+    return true
+  }
+
+  deferredCompletions.delete(input.sessionId)
+
+  return false
+}
+
 /** Returns true when the notification passed every guard and was handed to the
  *  OS bridge — callers registering per-notification state (plugin handlers)
  *  must only do so on true, or suppressed/throttled notifications leak it. */
@@ -376,40 +419,8 @@ export function dispatchNativeNotification(input: NativeNotificationInput): bool
     return false
   }
 
-  // A turn ending is not completion of the work it dispatched. These stamps
-  // are the backend's shared origin-ledger projection, also consumed by the
-  // task strip, sidebar finish state and archive guard. Never reconstruct owner
-  // status from a terminal event or from an absent replica row here.
-  if (input.kind === 'turnDone' && input.sessionId) {
-    const storedId = storedSessionIdForRuntimeId(input.sessionId) ?? input.sessionId
-    const owner = runtimeSessionOwner(input.sessionId) ?? knownOwnerForSession(input.sessionId)
-
-    const ownerPin = typeof owner === 'string' ? projectionOwner({ profile: owner })
-      : owner ? projectionOwner({ connection_id: owner.connectionId, profile: owner.profile }) : undefined
-
-    const rows = ownerLookupSessionRows().filter(row => sessionMatchesStoredId(row, storedId) &&
-      (ownerPin === undefined || projectionOwner(row) === ownerPin))
-
-    const row = rows.length === 1 ? rows[0] : undefined
-    const known = hasFreshKanbanObservation(row, input.projectionAfter)
-
-    const unfinished = !row || !known || row.kanban_unknown === true ||
-      (row.kanban_active ?? 0) > 0 || (row.kanban_blocked ?? 0) > 0 ||
-      (row.kanban_remote_stale ?? 0) > 0
-
-    if (unfinished) {
-      if (input.projectionAfter !== undefined) {
-        const pin = ownerPin ?? (row ? projectionOwner(row) : undefined)
-
-        if (pin !== undefined) {
-          deferCompletion(input, storedId, pin)
-        }
-      }
-
-      return false
-    }
-
-    deferredCompletions.delete(input.sessionId)
+  if (deferUnfinishedCompletion(input)) {
+    return false
   }
 
   if (throttled(`${input.kind}:${input.sessionId ?? input.tag ?? (input.global ? 'global' : '')}`, Date.now())) {

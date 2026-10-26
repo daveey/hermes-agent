@@ -76,7 +76,7 @@ def receive(request: dict) -> dict:
 
 def command(args) -> int:
     try:
-        raw = sys.stdin.read() if args.request_file == '-' else Path(args.request_file).read_text()
+        raw = sys.stdin.read() if args.request_file == '-' else Path(args.request_file).read_text(encoding="utf-8-sig")
         result = receive(json.loads(raw))
     except (OSError, sqlite3.Error):
         result = {'status': 'pending', 'code': 'origin_storage_unavailable', 'handoff_complete': False}

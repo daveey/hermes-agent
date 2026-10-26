@@ -33,7 +33,7 @@ import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { purgeInFlightTurnJournals, recoverInFlightTurnJournal } from '@/lib/inflight-turn-journal'
 import { latestSessionTodoSnapshot } from '@/lib/todos'
 import { setSessionYolo } from '@/lib/yolo-session'
-import { collectArchiveLinks, kanbanArchiveLinks } from '@/store/archive-guards'
+import { collectArchiveLinks, sessionKanbanArchiveLinks } from '@/store/archive-guards'
 import { $clarifyRequests, clearClarifyRequest } from '@/store/clarify'
 import {
   announceGoneSessionDraft,
@@ -3450,11 +3450,7 @@ export function useSessionActions({
       // machines keep running out of sight. Ask first when anything is linked.
       if (!options?.skipLinkedConfirm) {
         const linked = [
-          ...kanbanArchiveLinks(archived, {
-            label: copy.archiveLinkedTasksLabel,
-            unknown: copy.archiveLinkedTasksUnknown,
-            value: copy.archiveLinkedTasksValue
-          }),
+          ...sessionKanbanArchiveLinks(archived, copy),
           ...(await collectArchiveLinks({
             connectionId: archived?.connection_id,
             ids: [...new Set([storedSessionId, archived?.id, archived?._lineage_root_id].filter(Boolean) as string[])],

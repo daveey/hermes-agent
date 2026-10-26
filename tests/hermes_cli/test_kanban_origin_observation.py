@@ -1,7 +1,7 @@
 """Versioned owner observations must not erase durable origin obligations."""
 import sqlite3
 
-from tests.hermes_cli.test_kanban_origin_ledger import world, publish, accept
+from tests.hermes_cli.test_kanban_origin_ledger import world as world, publish, accept  # noqa: PLC0414 -- pytest fixture registration
 from hermes_cli import kanban_origin_ledger as ledger
 
 

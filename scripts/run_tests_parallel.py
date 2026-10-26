@@ -1150,6 +1150,29 @@ def _print_failure_report(
             print(f"  {_format_file(file, repo_root)}")
 
 
+def _print_off_host_note(files: list[Path]) -> None:
+    """Report host-gated skips without implying coverage of another OS."""
+    off_host = _off_host_marker_files(files)
+    if off_host:
+        print()
+        for spec, n in sorted(off_host.items()):
+            lanes = ", ".join(_LANES[lane] for lane in sorted(spec_hosts(spec)))
+            print(
+                f"  note: platforms({spec!r}) tests (in {n} file{'s' if n != 1 else ''}) were "
+                f"SKIPPED on this host ({sys.platform}); they run on {lanes}."
+            )
+
+
+def _report_flaky(repo_root: Path) -> None:
+    """Retain both attempts for every self-healed file failure."""
+    if _FLAKY_RESULTS:
+        print()
+        print(f"=== ⚠ {len(_FLAKY_RESULTS)} FLAKY file{'s' if len(_FLAKY_RESULTS) != 1 else ''} (failed once, passed on retry — fix these) ===")
+        for f, output in _FLAKY_RESULTS:
+            print(f"  {_format_file(f, repo_root)}")
+            print(output.rstrip())
+
+
 def main() -> int:
     _make_stdio_glyph_safe()
     parser = argparse.ArgumentParser(
@@ -1572,15 +1595,7 @@ def main() -> int:
     # conftest hook, not run. Say so explicitly — a green local run on Linux
     # proves nothing about the platforms("windows") tests, and the reader
     # should know where they DO run rather than misreading skips as coverage.
-    off_host = _off_host_marker_files(files)
-    if off_host:
-        print()
-        for spec, n in sorted(off_host.items()):
-            lanes = ", ".join(_LANES[lane] for lane in sorted(spec_hosts(spec)))
-            print(
-                f"  note: platforms({spec!r}) tests (in {n} file{'s' if n != 1 else ''}) were "
-                f"SKIPPED on this host ({sys.platform}); they run on {lanes}."
-            )
+    _print_off_host_note(files)
 
     # Zero tests collected across the WHOLE run is NOT a pass. Per-file rc=5
     # is deliberately tolerated above (platform-gated files), but if NOTHING
@@ -1605,12 +1620,7 @@ def main() -> int:
 
     # Flaky files: failed once, passed on the automatic retry. Green, but
     # loudly reported so they get fixed instead of silently re-flaking.
-    if _FLAKY_RESULTS:
-        print()
-        print(f"=== ⚠ {len(_FLAKY_RESULTS)} FLAKY file{'s' if len(_FLAKY_RESULTS) != 1 else ''} (failed once, passed on retry — fix these) ===")
-        for f, output in _FLAKY_RESULTS:
-            print(f"  {_format_file(f, repo_root)}")
-            print(output.rstrip())
+    _report_flaky(repo_root)
 
     # Save durations for future runs (LPT slicing and the per-file timeout
     # scaler, see _effective_file_timeout). _save_durations merges with any

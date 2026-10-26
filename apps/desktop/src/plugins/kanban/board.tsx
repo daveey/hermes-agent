@@ -87,9 +87,9 @@ import {
 } from './api'
 import { isFileDrag, uploadFiles, useFileDrop } from './attach-drop'
 import { BoardSwitcher } from './board-switcher'
-import { TaskDrawer } from './drawer'
+import { BoardTaskDrawer } from './board-task-drawer'
 import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
-import { $openTaskRequest, type OpenTaskRequest } from './open-task'
+import { $openTaskRequest, type OpenTaskRequest, snapshotOpenTask } from './open-task'
 import { OrchestrationPanel } from './orchestration'
 import { columnMeta, type KanbanBoard, type KanbanTask, type TaskEstimate } from './types'
 import {
@@ -1253,7 +1253,7 @@ export function KanbanBoardPage() {
       $boardSlug.set(requestedTask.board)
     }
 
-    setOpenTask({ ...requestedTask, ...(requestedTask.owner ? { owner: Object.freeze({ ...requestedTask.owner }) } : {}) })
+    setOpenTask(snapshotOpenTask(requestedTask))
     $openTaskRequest.set(null)
   }, [requestedTask])
 
@@ -1591,14 +1591,7 @@ export function KanbanBoardPage() {
         parents={parentOptions}
         target={addStatus}
       />
-      <TaskDrawer
-        columns={columnNames}
-        id={openTask?.taskId ?? null}
-        key={JSON.stringify(openTask)}
-        onClose={() => setOpenTask(null)}
-        onOpen={(id, owner) => setOpenTask({ taskId: id, board: owner?.board ?? slug, owner })}
-        owner={openTask?.owner}
-      />
+      <BoardTaskDrawer board={slug} columns={columnNames} onChange={setOpenTask} task={openTask} />
     </div>
   )
 }

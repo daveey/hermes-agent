@@ -112,7 +112,7 @@ def gateway_names() -> tuple[str, set[str]]:
     if not me:
         try:
             cfg = Path(os.environ.get("HERMES_MAIL_CONFIG") or Path.home() / ".config" / "hermes-mail" / "config.json")
-            me = str(json.loads(cfg.read_text()).get("gateway") or "")
+            me = str(json.loads(cfg.read_text(encoding="utf-8-sig")).get("gateway") or "")
         except (OSError, ValueError, AttributeError):
             me = ""
     if me:

@@ -18,6 +18,11 @@ export interface OpenTaskRequest {
 
 export const $openTaskRequest = atom<null | OpenTaskRequest>(null)
 
+/** Snapshot the owner route so later request mutations cannot retarget a drawer. */
+export function snapshotOpenTask(request: OpenTaskRequest): OpenTaskRequest {
+  return { ...request, ...(request.owner ? { owner: Object.freeze({ ...request.owner }) } : {}) }
+}
+
 /** [daveey] Global name of the cross-plugin "open this card" hook. */
 export const OPEN_TASK_HOOK = '__hermesKanbanOpenTask'
 

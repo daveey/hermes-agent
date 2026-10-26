@@ -62,9 +62,6 @@ import {
   type SpawnPriority
 } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
-
-/** Pane, status bar and titlebar slots; see `./areas` for the mount rules. */
-export { PANES_AREA, STATUSBAR_AREAS, TITLEBAR_AREAS } from './areas'
 import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
@@ -118,6 +115,8 @@ import { planPluginOpenSession } from './plugin-open-session-plan'
 import { sessionsHost } from './sessions'
 import { desktopSettings } from './settings'
 
+/** Pane, status bar and titlebar slots; see `./areas` for the mount rules. */
+export { PANES_AREA, STATUSBAR_AREAS, TITLEBAR_AREAS } from './areas'
 export type { PluginGateway } from './gateways'
 
 // -- state: readonly views over the app's live atoms -------------------------
@@ -1660,8 +1659,6 @@ export const host = {
 export * from './hub-sync'
 /** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
 export type * from './plugin-contract'
-/** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
-export type * from './plugin-contract'
 export type { DesktopSettingKey, DesktopSettingValues } from './settings'
 
 // -- ui: the design language --------------------------------------------------
@@ -2027,14 +2024,6 @@ export {
   type TranscriptDirectiveProps
 } from '@/lib/transcript-directives'
 export { cn } from '@/lib/utils'
-// [daveey] Shared hub owner routing for bundled and disk task projections.
-export {
-  hubGatewayForConnection,
-  hubGatewayTasks,
-  hubRequest,
-  type HubTask,
-  learnHubGatewayName
-} from '@/store/hub-sync'
 /** THE unread store behind `SessionStatusDot`'s emerald dot. A plugin that
  *  learns out-of-band that a session produced something the user hasn't seen
  *  (a roster poll's activity watermark, say) writes HERE rather than keeping

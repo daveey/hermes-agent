@@ -1,5 +1,6 @@
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
+import { jaArchiveTasks } from './archive-task-copy'
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { introJa } from './intro-ja'
 import { jaAuxTasks } from './ja_aux_tasks'
@@ -3847,9 +3848,7 @@ export const jaOverrides = {
     archiveLinkedBody: 'このチャットにはまだ作業が紐付いています。アーカイブはチャットを隠すだけで、タスクやマシンは動き続けます。',
     archiveLinkedConfirm: 'アーカイブする',
     archiveLinkedCancel: '残す',
-    archiveLinkedTasksLabel: 'Kanban タスク',
-    archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `未完了 ${open}` : '', blocked ? `ブロック中 ${blocked}` : ''].filter(Boolean).join(' · '),
-    archiveLinkedTasksUnknown: 'タスクの状態を取得できません。作業が未完了の可能性があります。',
+    ...jaArchiveTasks,
     restored: '復元しました',
     unarchiveFailed: 'アーカイブ解除に失敗しました',
     cwdChangeFailed: '作業ディレクトリの変更に失敗しました',

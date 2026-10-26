@@ -43,15 +43,8 @@ import { stampSecondaryProfileOwner } from '@/store/session-event-provenance'
 
 const normKey = (profile: string | null | undefined): string => (profile ?? '').trim() || 'default'
 
-// Spawn-slot priority handed to Electron main with every backend dial. A
-// user-initiated open is 'foreground' and may take the pool's reserved slot;
-// roster hydration, hover prewarm and untagged dials are 'background' — main's
-// default, so background dials keep the pre-priority IPC payload shape.
-export type SpawnPriority = 'foreground' | 'background'
-
-function dialPriority(spawnPriority: SpawnPriority): { priority: 'foreground' } | Record<never, never> {
-  return spawnPriority === 'foreground' ? { priority: 'foreground' } : {}
-}
+import { dialPriority, type SpawnPriority } from './gateway-dial-priority'
+export type { SpawnPriority } from './gateway-dial-priority'
 
 function dialProfile(
   desktop: NonNullable<typeof window.hermesDesktop>,

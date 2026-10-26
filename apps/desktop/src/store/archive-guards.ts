@@ -11,6 +11,7 @@
 // so a slow or broken plugin can delay archiving by at most the timeout and
 // never blocks it.
 
+import type { ArchiveTaskCopy } from '@/i18n/archive-task-copy'
 import type { SessionInfo } from '@/types/hermes'
 
 import { hasFreshKanbanObservation } from './kanban-observation'
@@ -102,6 +103,14 @@ export async function collectArchiveLinks(
 /** Core guard: the row's own Kanban counts (summed over its lineage by the
  *  backend, same numbers as the sidebar badge). `copy.value` renders the value
  *  so the caller owns the copy. */
+export function sessionKanbanArchiveLinks(session: SessionInfo | undefined, copy: ArchiveTaskCopy): ArchiveLinkedItem[] {
+  return kanbanArchiveLinks(session, {
+    label: copy.archiveLinkedTasksLabel,
+    unknown: copy.archiveLinkedTasksUnknown,
+    value: copy.archiveLinkedTasksValue
+  })
+}
+
 export function kanbanArchiveLinks(
   session: SessionInfo | undefined,
   copy: { label: string; unknown: string; value: (open: number, blocked: number) => string }

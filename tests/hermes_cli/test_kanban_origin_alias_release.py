@@ -8,9 +8,9 @@ from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
 from hermes_cli import kanban_origin_adapter as adapter, kanban_origin_ledger as ledger
 from hermes_cli import kanban_session_activity as activity, profiles
 from hermes_state import SessionDB
-from tests.hermes_cli.test_kanban_origin_creation import board
+from tests.hermes_cli.test_kanban_origin_creation import board as board  # noqa: PLC0414 -- pytest fixture registration
 from tests.hermes_cli.test_kanban_origin_evidence import create_bound
-from tests.hermes_cli.test_kanban_origin_ledger import world, accept
+from tests.hermes_cli.test_kanban_origin_ledger import world as world, accept  # noqa: PLC0414 -- pytest fixture registration
 
 
 @pytest.fixture

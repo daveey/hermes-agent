@@ -1,5 +1,6 @@
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
+import { zhArchiveTasks } from './archive-task-copy'
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { introZh } from './intro-zh'
 import { zhAuxTasks } from './zh_aux_tasks'
@@ -4832,9 +4833,7 @@ export const zhOverrides = {
     archiveLinkedBody: '此对话仍有关联的工作。归档只会隐藏对话，任务和机器会继续运行。',
     archiveLinkedConfirm: '仍然归档',
     archiveLinkedCancel: '保留对话',
-    archiveLinkedTasksLabel: '看板任务',
-    archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} 个未完成` : '', blocked ? `${blocked} 个受阻` : ''].filter(Boolean).join(' · '),
-    archiveLinkedTasksUnknown: '无法获取任务状态；工作可能尚未完成。',
+    ...zhArchiveTasks,
     restored: '已恢复',
     unarchiveFailed: '取消归档失败',
     cwdChangeFailed: '工作目录更改失败',

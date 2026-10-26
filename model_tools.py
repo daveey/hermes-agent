@@ -24,6 +24,7 @@ from toolsets import resolve_toolset, validate_toolset
 from tools.arg_coercion import coerce_tool_args
 from tools.todo_tool import TODO_LEGACY_ALIASES, TODO_SCHEMA
 from utils import file_signature
+from hermes_cli.kanban_origin import ambient_origin_ref
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +313,7 @@ def _tool_defs_cache_key(
         registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
         bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
-        bool(os.environ.get("HERMES_ORIGIN_SESSION")),
+        ambient_origin_ref() != "",
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
     )
 
@@ -362,7 +363,7 @@ def _select_tool_names(enabled_toolsets: Optional[list[str]], disabled_toolsets:
             enabled.append("kanban")
         # [daveey] Same for a session started for a chat on another gateway (``--origin-session``): it
         # creates that chat's cards, so it gets the real kanban tools (origin preserved) — see kanban_origin.
-        if (os.environ.get("HERMES_ORIGIN_SESSION") and not _is_delegated_child_context()
+        if (ambient_origin_ref() and not _is_delegated_child_context()
                 and "kanban" not in enabled):
             enabled.append("kanban")
         _apply_toolset_selection(tools, enabled, quiet_mode, disable=False)
@@ -550,7 +551,7 @@ def _compute_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disa
         filtered_tools = _apply_dynamic_schemas(registry.get_definitions(tools_to_include, quiet=quiet_mode))
     global _last_resolved_tool_names
     _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
-    if os.environ.get("HERMES_ORIGIN_SESSION") and not _is_delegated_child_context():
+    if ambient_origin_ref() and not _is_delegated_child_context():
         # [daveey] Typed setup failure, before the first model call, when this origin session could only
         # create cards that its origin chat would never see (no kanban tool, bad ref, unknown gateway).
         from hermes_cli.kanban_origin import preflight
