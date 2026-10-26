@@ -34,7 +34,7 @@ def test_foreign_default_owner_survives_home_switch_and_display_edit(home, tmp_p
         tick.assert_not_called()
         kb.write_board_metadata("default", description="Edited")
         assert get_dispatch_owner(path) == "dedicated"
-        assert kb.read_board_metadata("default")["dispatch_owner"] == "dedicated"
+        assert kb.read_board_metadata("default")["description"] == "Edited"
 
 
 def test_default_symlink_to_named_board_cannot_hide_owner(home, tmp_path, monkeypatch):
@@ -48,7 +48,7 @@ def test_default_symlink_to_named_board_cannot_hide_owner(home, tmp_path, monkey
         tick = Mock(return_value=DispatchResult())
         assert run_owned_tick(conn, tick, None, "default", False).skipped_owned
         tick.assert_not_called()
-    assert kb.read_board_metadata("default")["dispatch_owner"] == "dedicated"
+    assert get_dispatch_owner(home / "kanban.db") == "dedicated"
     kb.write_board_metadata("default", description="Alias edit")
     assert get_dispatch_owner(path) == "dedicated"
 
@@ -66,8 +66,7 @@ def test_distinct_db_filenames_never_share_owner(home):
 
 def test_deep_metadata_denies_without_traceback(home):
     path = home / "kanban.db"
-    metadata = home / "kanban/boards/default/board.json"
-    metadata.parent.mkdir(parents=True)
+    metadata = path.with_name(path.name + ".dispatch-owner.json")
     metadata.write_text('[' * 2000 + ']' * 2000)
     with sqlite3.connect(path) as conn:
         tick = Mock()
@@ -99,7 +98,8 @@ def test_gateway_decompose_and_health_obey_owner(home, monkeypatch, raw):
     from gateway.kanban_watchers_dispatcher import _DispatcherSettings, _KanbanDispatcher
     from hermes_cli import kanban_decompose as decomp, kanban_db_dispatch as kbd
     kb.create_board("sample")
-    metadata = kb.board_metadata_path("sample")
+    path = kb.board_dir("sample") / "kanban.db"
+    metadata = path.with_name(path.name + ".dispatch-owner.json")
     metadata.write_text(json.dumps(raw))
     settings = _DispatcherSettings(60, None, None, 2, 0, True, None, None)
     dispatcher = _KanbanDispatcher(kb, settings)

@@ -26,12 +26,8 @@ def _dir_holds_board(d: Path) -> bool:
 
 
 def board_metadata_path(board: Optional[str] = None) -> Path:
-    """Metadata authority follows the board's canonical DB, not the caller home."""
-    from hermes_cli.kanban_dispatch_owner import metadata_path
-    slug = _kb._slug_or_default(board)
-    path = (_kb.kanban_home() / "kanban.db" if slug == _kb.DEFAULT_BOARD
-            else _kb.board_dir(slug) / "kanban.db")
-    return metadata_path(path)
+    """Display/discovery metadata stays at its original board-local path."""
+    return _kb.board_dir(_kb._slug_or_default(board)) / "board.json"
 
 
 def _default_board_display_name(slug: str) -> str:

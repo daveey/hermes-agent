@@ -24,8 +24,7 @@ def board_db(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     path = home / "kanban.db"
-    metadata = home / "kanban" / "boards" / "default" / "board.json"
-    metadata.parent.mkdir(parents=True)
+    metadata = path.with_name(path.name + ".dispatch-owner.json")
     conn = kbc.connect(path)
     yield conn, path, metadata
     conn.close()
@@ -121,7 +120,7 @@ def test_connection_path_not_board_alias_controls_ownership(board_db, tmp_path, 
     _metadata(metadata, {})
     actual = tmp_path / "actual" / "board.db"
     actual.parent.mkdir()
-    _metadata(actual.with_name(actual.name + ".board.json"), {"dispatch_owner": "owner"})
+    _metadata(actual.with_name(actual.name + ".dispatch-owner.json"), {"dispatch_owner": "owner"})
     if alias in ("pinned", "both"):
         monkeypatch.setenv("HERMES_KANBAN_DB", str(default_path))
     with kbc.connect_closing(actual) as conn:
@@ -153,7 +152,7 @@ def test_set_read_clear_preserves_other_metadata(board_db, tmp_path, layout):
     _, path, metadata = board_db
     if layout == "adjacent":
         path = tmp_path / "custom" / "board.db"
-        metadata = path.with_name(path.name + ".board.json")
+        metadata = path.with_name(path.name + ".dispatch-owner.json")
     _metadata(metadata, {"title": "Generic board", "custom": {"keep": True}})
     with kbc.connect_closing(path):
         pass
@@ -199,7 +198,7 @@ def test_real_pinned_resolution_and_foreign_default(board_db, tmp_path, monkeypa
     foreign = tmp_path / "foreign"
     foreign.mkdir()
     path = foreign / "kanban.db"
-    _metadata(foreign / "kanban" / "boards" / "default" / "board.json",
+    _metadata(path.with_name(path.name + ".dispatch-owner.json"),
               {"dispatch_owner": "foreign-worker"})
     with kbc.connect_closing(path):
         pass

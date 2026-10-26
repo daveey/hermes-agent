@@ -17,26 +17,19 @@ def connection_db_path(conn: sqlite3.Connection) -> Path:
 
 
 def metadata_path(db_path: Path) -> Path:
-    # Pure canonical-path mapping: no caller home or existence-dependent branch.
-    # Nonstandard filenames need distinct sidecars even in the same directory.
+    # Ownership follows the DB, not board display/discovery metadata. Including
+    # the filename keeps distinct DBs in one directory independent. No layout
+    # heuristics: symlinked roots and built-in archive moves retain authority.
     path = Path(db_path).resolve()
-    if path.name != "kanban.db":
-        return path.with_name(path.name + ".board.json")
-    if path.parent.parent.name == "boards" and path.parent.parent.parent.name == "kanban":
-        # default/board.json already belongs to the legacy root DB. A separate
-        # DB placed inside that reserved directory must not share its owner.
-        if path.parent.name == "default":
-            return path.with_name(path.name + ".board.json")
-        return path.parent / "board.json"
-    return path.parent / "kanban" / "boards" / "default" / "board.json"
+    return path.with_name(path.name + ".dispatch-owner.json")
 
 
 def read_metadata(path: Path) -> dict:
     try:
         raw = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
-        # Legacy boards predate board.json. A dangling link is not legacy.
-        if path.is_symlink():
+        # Absence is legacy only when no dangling path component hides data.
+        if any(p.is_symlink() and not p.exists() for p in (path, *path.parents)):
             raise ValueError("dangling board metadata link")
         return {}
     if not isinstance(raw, dict):

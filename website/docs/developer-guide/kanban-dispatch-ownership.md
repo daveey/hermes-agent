@@ -48,7 +48,10 @@ with kb.connect_closing(board="example") as conn:
 
 The ID is an explicit Python keyword, not an environment variable or a worker
 grant. Stock CLI, daemon, and embedded gateway callers omit it and cannot dispatch
-owned boards. No plugin monkeypatch or lock bypass is necessary.
+owned boards. No plugin monkeypatch or lock bypass is necessary. The dedicated
+runtime must supply its own triage decomposition and health telemetry: the stock
+gateway excludes owned boards from both, and no CLI/daemon/gateway config grants
+an identity implicitly.
 
 ## Invariants
 
@@ -59,15 +62,20 @@ owned boards. No plugin monkeypatch or lock bypass is necessary.
 * The actual SQLite main database path selects metadata and the dispatch lock;
   an explicit board label or `HERMES_KANBAN_DB` alias cannot select a different
   owner's metadata. Symlinks resolve to their target, independent of the caller's
-  home or which metadata files happen to exist. For canonical paths:
-  * `.../kanban/boards/<slug>/kanban.db` uses adjacent `board.json`, except
-    a DB placed inside the reserved `default` directory uses `kanban.db.board.json`
-    (that directory's `board.json` already belongs to the legacy root DB).
-  * Other `.../kanban.db` paths use `.../kanban/boards/default/board.json`.
-  * Other filenames use `<database filename>.board.json` alongside the DB, so
-    separate databases in one directory never share ownership.
-  Board display reads/edits follow this same mapping; operator readback reports
-  the canonical DB path. Moving a DB requires moving its metadata as well.
+  home or which metadata files happen to exist. Every DB uses the adjacent
+  `<database filename>.dispatch-owner.json` sidecar (JSON object with optional
+  `dispatch_owner`). There are no directory-name heuristics. Display/discovery
+  `board.json` keeps its original board-local location and is not ownership
+  authority; use the operator command/API above for strict owner readback.
+  Earlier unreleased candidates stored owners in display metadata; those files
+  are not migrated automatically. This feature must not have been activated
+  before the final reviewed storage contract.
+* Move the ownership sidecar with its DB. Native board archive moves both in the
+  same directory rename; an external symlink target and its sidecar stay together
+  outside the archive. Recreating the archived slug starts a new unowned DB.
+  Export/import intentionally does not copy runtime ownership. Hard-link aliases
+  and independently relocated/bind-mounted DB files without their sidecars are
+  unsupported; all runtimes must share a canonical DB and its adjacent sidecar.
 * Under the same lock, invalid/unreadable metadata or a mismatched identity returns
   `skipped_owned=True` before reconciliation, reclaim, promotion, claim, spawn,
   checkpoint, or dispatch observers. A valid owner appears in `dispatch_owner`;
@@ -91,7 +99,9 @@ owned boards. No plugin monkeypatch or lock bypass is necessary.
 
 Run `scripts/run_tests.sh tests/hermes_cli/test_kanban_dispatch_owner.py
  tests/hermes_cli/test_kanban_dispatch_owner_operator.py
- tests/hermes_cli/test_kanban_dispatch_owner_regressions.py` (one shell command).
+ tests/hermes_cli/test_kanban_dispatch_owner_regressions.py
+ tests/hermes_cli/test_kanban_dispatch_owner_lifecycle.py
+ tests/gateway/test_kanban_pre_dispatch_isolation.py` (one shell command).
 These exercise native dispatch, CLI and embedded-gateway denial, strict metadata,
 actual-connection identity, alias/symlink handling, operator set/read/clear,
 allowed scoped spawning, and owner/display edits attempted inside a live tick.
