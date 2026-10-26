@@ -247,10 +247,14 @@ class _KanbanDispatcher:
         from hermes_cli import kanban_db as _kb
         with _kb.pin_first_board_resolution():
             for slug in self._board_slugs():
-                with self._unowned_board_work(slug) as conn:
-                    if conn is not None and (kbd.has_spawnable_ready(conn) or (
-                            _review_probe and kbd.has_spawnable_review(conn))):
-                        return True
+                try:
+                    with self._unowned_board_work(slug) as conn:
+                        if conn is not None and (kbd.has_spawnable_ready(conn) or (
+                                _review_probe and kbd.has_spawnable_review(conn))):
+                            return True
+                except Exception:
+                    # A corrupt DB or failed probe must not hide healthy peers.
+                    logger.exception("kanban dispatcher: health probe failed on board %s", slug)
         return False
 
     def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
@@ -281,6 +285,10 @@ class _KanbanDispatcher:
                             used, done = self._decompose_board(_decomp, slug, auto_decompose_per_tick - attempted)
                             attempted += used
                             successes += done
+                except Exception:  # health: allow BLE001 -- per-board isolation boundary logs traceback; finally restores env
+                    # Contain connection, callback and cleanup failures per board;
+                    # the caller must still reach tick_once for healthy peers.
+                    logger.exception("kanban auto-decompose: board %s failed", slug)
                 finally:
                     if prev_env is None:
                         os.environ.pop("HERMES_KANBAN_BOARD", None)
