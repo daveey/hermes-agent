@@ -18,7 +18,9 @@ def _supersession(api, repo: str, sha: str, job: str, home: str) -> tuple[int, s
             or not isinstance(evidence.get("head_sha"), str)
             or not re.fullmatch(r"[0-9a-f]{40}", evidence["head_sha"])
             or evidence.get("status") not in {"queued", "in_progress", "completed", "waiting", "pending", "requested"}
-            or (evidence["status"] == "completed" and not isinstance(evidence.get("conclusion"), str))):
+            or (evidence["status"] == "completed" and evidence.get("conclusion") not in (
+                "success", "failure", "neutral", "cancelled", "skipped", "timed_out",
+                "action_required", "stale", "startup_failure"))):
         raise ValueError("incomplete job evidence")
     if (evidence["head_sha"] != sha or evidence.get("status") != "completed"
             or evidence.get("conclusion") != "success"):

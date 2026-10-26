@@ -68,6 +68,12 @@ def test_malformed_job_is_error(evidence, value):
     assert inspect_pr(URL, SHA, "123")[0] == 2
 
 
+@pytest.mark.parametrize("conclusion", ["", "unknown", None, [], {}])
+def test_completed_job_invalid_conclusion_is_error(evidence, conclusion):
+    evidence["repos/example/project/actions/jobs/123"]["conclusion"] = conclusion
+    assert inspect_pr(URL, SHA, "123")[0] == 2
+
+
 def test_closed_abandoned_pr_never_claims_verified_supersession(evidence):
     evidence["repos/example/project/pulls/44"]["state"] = "closed"
     evidence["repos/example/project/actions/jobs/123"]["conclusion"] = "failure"
