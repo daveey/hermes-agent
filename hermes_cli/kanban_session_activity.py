@@ -276,8 +276,7 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
         me = _self_gateway(conn)
         if not me:
             return []
-        rows = conn.execute("SELECT gw, key, data, updated_at FROM replica WHERE coll = 'tasks' AND gw != ?",
-                            (me,)).fetchall()
+        rows = conn.execute("SELECT gw, key, data, updated_at FROM replica WHERE coll = 'tasks'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
     finally:
         conn.close()
@@ -315,6 +314,10 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
     origin_profile = get_active_profile_name()
     found: dict[tuple[str, str], dict[str, Any]] = {}
     for (gw, owner_profile, board, tid), t in tasks.items():
+        # Only this exact owner is represented by the local board inventory.
+        # Other profiles on this gateway, and unqualified legacy owners, are not.
+        if gw == me and owner_profile == origin_profile:
+            continue
         links = t.get("sessions") if isinstance(t.get("sessions"), list) else []
         sids = {str(link['session']) for link in links
                 if isinstance(link, dict) and link.get('session') and link.get('gw') == me

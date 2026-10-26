@@ -65,6 +65,22 @@ def test_descendants_stay_in_the_roots_owner_profile(tmp_path):
     assert all(r['status'] == 'running' for r in rows)
 
 
+def test_same_gateway_other_profile_is_not_hidden(tmp_path, monkeypatch):
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: 'default')
+    path = replica(tmp_path, [
+        ('default/default/t_same', card('default', status='blocked', block_kind='needs_input')),
+        ('work/default/t_same', card('work', status='blocked', block_kind='needs_input')),
+        ('default/t_same', card(None, status='blocked', block_kind='needs_input')),
+    ])
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE replica SET gw='origin'")
+    rows = activity._read_remote_links(path, now=100)
+    assert {r['key'] for r in rows} == {'origin/work/default/t_same', 'origin/default/t_same'}
+    assert activity._replica_bucket(next(r for r in rows if r['profile'] == 'work')) == 'blocked'
+    assert activity._replica_bucket(next(r for r in rows if r['profile'] is None)) == 'active'
+
+
 @pytest.mark.parametrize('payload', ['not json', '[]', '{}', 'null'])
 def test_malformed_replica_row_cannot_be_a_successful_empty_projection(tmp_path, payload):
     path = replica(tmp_path, [])
