@@ -450,6 +450,8 @@ def _resolve_task_routes(
 ) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], Optional[str]]:
     """``[(creds, routing_cfg), ...]`` per task: the call-wide route, or the task's own ``model``/``provider`` pin
     resolved through the same credential path as ``delegation.*``. ``([], error)`` on a bad pin."""
+    from tools.delegate_tool_routes import task_route_conflict
+
     routes: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for i, t in enumerate(task_list):
         task_cfg, err = _task_route_cfg(t, routing_cfg)
@@ -461,11 +463,14 @@ def _resolve_task_routes(
                 # default with missing credentials must not veto an explicit route.
                 if creds is None:
                     creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
-                routes.append((creds, routing_cfg))
-                continue
-            task_creds = _resolve_delegation_credentials(task_cfg, parent_agent)
+                task_creds, task_cfg = creds, routing_cfg
+            else:
+                task_creds = _resolve_delegation_credentials(task_cfg, parent_agent)
         except ValueError as exc:
             return [], f"Task {i}: {exc}"
+        err = task_route_conflict(task_creds, parent_agent)
+        if err:
+            return [], f"Task {i}: {err}"
         routes.append((task_creds, task_cfg))
     return routes, None
 
@@ -532,6 +537,13 @@ def _oneshot_spawn_budget(parent_agent: Any, requested: int) -> Optional[str]:
         return None
     spent = getattr(parent_agent, "_oneshot_children_spawned", 0)
     if spent + requested > cap:
+        remaining = max(0, cap - spent)
+        if remaining:
+            return (
+                f"Delegation request exceeds this one-shot run's budget ({spent}/{cap} subagents used; "
+                f"{remaining} remaining; requested {requested}; delegation.oneshot_max_children). "
+                f"Submit at most {remaining} tasks and do the rest inline."
+            )
         return (
             f"Delegation budget for this one-shot run is exhausted ({spent}/{cap} subagents used; "
             f"delegation.oneshot_max_children). Do the remaining work yourself in this session — reviewing "
@@ -738,12 +750,23 @@ def _build_tasks_param_description() -> str:
         max_children = _get_max_concurrent_children()
     except Exception:
         max_children = _DEFAULT_MAX_CONCURRENT_CHILDREN
+    from agent.oneshot_footprint import is_single_query_session
+
+    budget = ""
+    if is_single_query_session():
+        cap = _get_oneshot_max_children()
+        if cap > 0:
+            budget = (
+                f" This one-shot run may spawn at most {cap} subagents total across all calls "
+                "(delegation.oneshot_max_children), not per batch. Plan within that total; "
+                "do remaining work, self-review, and tests inline once it is used."
+            )
     return (
         f"The task(s), up to {max_children} in parallel for this user (set "
         "via delegation.max_concurrent_children). Each entry spawns one "
         "subagent with isolated context and terminal session; a single task "
         "is a one-entry array. Required when spawning."
-    )
+    ) + budget
 
 def _build_dynamic_schema_overrides() -> dict:
     """Per-call schema overrides (ToolEntry.dynamic_schema_overrides): every

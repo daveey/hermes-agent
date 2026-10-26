@@ -35,10 +35,31 @@ _cache: dict[str, tuple[Optional[str], Optional[float]]] = {}
 _rejections: dict[str, str] = {}
 
 
+def _gh_argv() -> Optional[list[str]]:
+    """``gh`` argv for the dispatcher's PR-state read, or None when it cannot be built.
+
+    Reuses the dispatcher home's ``kanban.pr_acceptance.gh_command_prefix`` (a credential
+    broker wrapper such as ``token-broker exec --scope user/github --``) and resolves ``gh``
+    from ~/bin / ~/.local/bin as the PR-acceptance gate does: a service process has a minimal
+    PATH and often no ambient ``gh`` login, and without either every lookup failed closed, so
+    merged PRs held their cards for the full 6 h hold cap. [daveey]"""
+    try:
+        from hermes_cli.kanban_pr_acceptance import _gh_command_prefix
+        from hermes_platform.resolver.github import resolve_gh
+        resolved = resolve_gh()
+        if not resolved.found:
+            return None
+        return [*_gh_command_prefix(None), *resolved.command]
+    except Exception:  # config/setup errors may carry credentials: log no text
+        logger.debug("kanban: gh argv for PR state unavailable")
+        return None
+
+
 def _gh_pr_state(url: str) -> Optional[str]:
     """GitHub state, ``REJECTED`` for a completed queue rejection, or None on failure."""
+    gh = _gh_argv() or ["gh"]
     try:
-        proc = subprocess.run(["gh", "pr", "view", url, "--json", "state,comments"], stdin=subprocess.DEVNULL,
+        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments"], stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=GH_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -92,7 +113,9 @@ def all_prs_finished(urls: Iterable[str]) -> bool:
     return all(pr_state(u) in TERMINAL_STATES for u in seen.values())
 
 
-def _immediate_checkpoint_after(conn: sqlite3.Connection, task_id: str, since: int) -> bool:
+def _immediate_checkpoint_after(
+    conn: sqlite3.Connection, task_id: str, since: int, latest_pr_comment_id: int,
+) -> bool:
     """Only the latest completed run may authorize continuing its existing PR.
 
     Scheduled checkpoints and crash retries retain the duplicate-work guard.
@@ -101,7 +124,7 @@ def _immediate_checkpoint_after(conn: sqlite3.Connection, task_id: str, since: i
     from hermes_cli import kanban_db as kb
 
     run = conn.execute(
-        "SELECT outcome, ended_at, metadata FROM task_runs "
+        "SELECT id, outcome, ended_at, metadata FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
@@ -109,6 +132,14 @@ def _immediate_checkpoint_after(conn: sqlite3.Connection, task_id: str, since: i
         return False
     ended_at = kb._to_epoch(run["ended_at"])
     meta = kb._json_dict(run["metadata"])
+    # A server-derived comment watermark distinguishes ordering within one second.
+    event = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? "
+        "AND kind = 'continued' ORDER BY id DESC LIMIT 1", (task_id, run["id"]),
+    ).fetchone()
+    watermark = kb._json_dict(event["payload"]).get("comment_id_at_checkpoint") if event else None
+    if type(watermark) is not int or watermark < latest_pr_comment_id:
+        return False
     return bool(
         ended_at is not None and ended_at >= since
         and meta.get("checkpoint") and meta.get("resume_after_seconds") == 0
@@ -124,11 +155,14 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     changes_requested, review reopen) names the profile that must now work on THAT PR — a
     closer or the implementer finishing it, not a duplicate implementation (#111910). So does
     an ``unblocked`` event: a worker that opened its PR and blocked itself waiting for the
-    merge is resumed by that unblock to ship/verify THAT PR. A crash/reclaim is not a
-    handoff, so the worker that opened the PR is still not re-spawned against it.
-    A latest immediate checkpoint explicitly resumes unfinished work on that PR;
-    scheduled/external waits do not. Dispatcher guard notices are diagnostic, not
-    new PR publication evidence, and cannot invalidate an existing handoff.
+    merge is resumed by that unblock to ship/verify THAT PR. So does an orderly park AFTER the
+    PR comment (``continued`` checkpoint or ``scheduled`` timed wait): the owner parked knowing
+    its PR, and the wake resumes it from that checkpoint, not a context-free respawn. A
+    crash/reclaim is not a handoff, so the worker that opened the PR is still not re-spawned
+    against it. A latest immediate checkpoint also permits a same-second PR report;
+    scheduled checkpoints do not get that same-second exception. Dispatcher guard
+    notices are diagnostic, not new PR publication evidence, and cannot invalidate
+    an existing handoff.
     Also lifted once EVERY PR named in those comments is MERGED or CLOSED (gh, cached; any
     gh failure keeps the hold), or has a completed queue rejection requiring repair. [daveey]
     """
@@ -137,23 +171,26 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
 
     pr_times: list[int] = []
     pr_urls: list[str] = []
+    latest_pr_comment_id = 0
     for t, c in _kbd._rows_since(conn, "task_comments", task_id, now - _kbd._RESPAWN_GUARD_PR_WINDOW,
-                                 cols=", body, author", unreadable=now):  # duplicate-PR risk: fail closed
+                                 cols=", id, body, author", unreadable=now):  # duplicate-PR risk: fail closed
         body = _kb._lossy_text(c["body"]) or ""
         if c["author"] == "kanban-dispatcher" and body.startswith("[respawn-guard]"):
             continue  # a diagnostic must not rearm its own handoff barrier
         urls = _kbd._RESPAWN_GUARD_PR_URL_RE.findall(body)
         if urls:
+            latest_pr_comment_id = max(latest_pr_comment_id, c["id"])
             pr_times.append(t)
             pr_urls.extend(urls)
     if not pr_times:
         return None
-    if _immediate_checkpoint_after(conn, task_id, max(pr_times)):
+    if _immediate_checkpoint_after(conn, task_id, max(pr_times), latest_pr_comment_id):
         return None
     # Strictly after: a same-second handoff tie stays guarded (fail closed).
     if any(_kbd._is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
             conn, "task_events", task_id, max(pr_times),
-            "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')",
+            "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked', "
+            "'continued', 'scheduled')",
             cols=", kind, payload", strict=True)):
         return None
     states = {u: pr_state(u) for u in dict.fromkeys(pr_urls)}
