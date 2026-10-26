@@ -84,15 +84,18 @@ def test_hub_replica_counts_explicit_requests_and_operational_children(tmp_path,
     path = tmp_path / "hub.db"
     root = dict(id="parent", status="blocked", block_kind="capability",
                 human_request={**REQUEST, "interaction": interaction}, children=["child"],
-                sessions=[{"session": "owner", "gw": "here"}])
+                sessions=[{"session": "owner", "gw": "here", "profile": "default", "rel": "shepherd"}])
     child = dict(id="child", status="blocked", block_kind="capability")
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE meta (k TEXT, v TEXT)")
         conn.execute("INSERT INTO meta VALUES ('gateway', 'here')")
-        conn.execute("CREATE TABLE replica (gw TEXT, coll TEXT, data TEXT)")
-        conn.executemany("INSERT INTO replica VALUES ('there', 'tasks', ?)",
-                         [(json.dumps(card),) for card in [root, child]])
-    assert activity._read_hub_replica(path) == ({"owner": 1}, {"owner": 1})
+        conn.execute("CREATE TABLE replica (gw TEXT, coll TEXT, key TEXT, data TEXT, updated_at INTEGER)")
+        conn.executemany("INSERT INTO replica VALUES ('there', 'tasks', ?, ?, 1000)",
+                         [(f"default/main/{card['id']}", json.dumps(card)) for card in [root, child]])
+    rows = activity._read_remote_links(path, now=1)
+    assert {row["id"]: (row["session"], activity._replica_bucket(row)) for row in rows} == {
+        "parent": ("owner", "blocked"), "child": ("owner", "active"),
+    }
 
 
 @pytest.mark.parametrize("missing", list(REQUEST))
