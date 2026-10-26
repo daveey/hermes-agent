@@ -182,6 +182,8 @@ _SPECS = [
                   "newlines or flag-like lines survive shell quoting. "
                   "Mutually exclusive with --body."),
         _arg("--assignee", help="Profile name to assign"),
+        _arg("--requires", action="append", choices=["terminal", "file", "git", "host_repo"],
+             help="Required configured capability (repeatable); repo work also infers requirements"),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
         _arg("--workspace",
              help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "
@@ -338,7 +340,8 @@ _SPECS = [
         _arg("--kind", choices=sorted(kb.VALID_BLOCK_KINDS),
              help="Typed block reason. 'dependency' waits in todo (auto-promoted when "
                   "parents finish, no human); 'needs_input'/'capability' go to "
-                  "blocked (human asks require --human-request); 'transient' marks a maybe-flaky failure. "
+                  "blocked (human asks require --human-request); 'assignment' routes worker-local tool/backend "
+                  "mismatches to a capable supervisor; 'transient' marks a maybe-flaky failure. "
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
         *_WAKE_CHECK_ARGS(),

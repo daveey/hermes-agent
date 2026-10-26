@@ -28,6 +28,7 @@ import {
   listGroupNodeId,
   toggleWorkspaceNodeCollapsed
 } from '@/store/layout'
+import { offlineIdentity } from '@/store/offline-sessions'
 import { sessionPinId } from '@/store/session'
 import { $sessionDotStateById, hasLiveTurn } from '@/store/session-dot-state'
 import { publishSidebarSection, unpublishSidebarSection } from '@/store/sidebar-visible-order'
@@ -113,7 +114,7 @@ interface SidebarSessionsSectionProps {
   activeSessionId: null | string
   onResumeSession: (sessionId: string, session?: SessionInfo) => void
   onDeleteSession: (sessionId: string) => void
-  onArchiveSession: (sessionId: string) => void
+  onArchiveSession: (sessionId: string, session?: SessionInfo) => void
   onBranchSession?: (sessionId: string, profile?: string) => void
   onTogglePin: (sessionId: string) => void
   onToggleUnread: (sessionId: string) => void
@@ -291,7 +292,7 @@ export function SidebarSessionsSection({
         card,
         isPinned: pinned,
         isSelected: session.id === activeSessionId,
-        onArchive: () => onArchiveSession(session.id),
+        onArchive: () => onArchiveSession(session.id, session),
         onBranch: onBranchSession ? () => onBranchSession(session.id, session.profile) : undefined,
         onDelete: () => onDeleteSession(session.id),
         onPin: () => onTogglePin(sessionPinId(session)),
@@ -307,9 +308,9 @@ export function SidebarSessionsSection({
       // are distinct rows (#92454) — a bare-id key makes React misattribute
       // one twin's rendered state to the other.
       return draggable && !branchStem ? (
-        <SortableSidebarSessionRow key={`${session.profile ?? ''}::${session.id}`} {...rowProps} />
+        <SortableSidebarSessionRow key={offlineIdentity(session)} {...rowProps} />
       ) : (
-        <SidebarSessionRow key={`${session.profile ?? ''}::${session.id}`} {...rowProps} />
+        <SidebarSessionRow key={offlineIdentity(session)} {...rowProps} />
       )
     },
     [
@@ -424,7 +425,9 @@ export function SidebarSessionsSection({
       const entries = flattenSessionsWithBranches(items, { timeOf })
 
       const rows =
-        grouping === 'date' ? groupEntriesByRecency(entries, undefined, undefined, undefined, timeOf) : toSessionRows(entries)
+        grouping === 'date'
+          ? groupEntriesByRecency(entries, undefined, undefined, undefined, timeOf)
+          : toSessionRows(entries)
 
       return hideCollapsedGroupRows(rows, isListGroupOpen).map(row => renderListRow(row, false))
     },
@@ -466,7 +469,6 @@ export function SidebarSessionsSection({
   // section's visible rows (branches included) with an anchor for DOM order.
   const [orderKey] = useState(() => Symbol('sidebar-section'))
   const orderAnchorRef = useRef<HTMLSpanElement>(null)
-
 
   const persistSessionOrder = useCallback(
     (ids: string[]) => onReorderSessions?.(mergeVisibleReorder(allSortableRowIds, ids)),

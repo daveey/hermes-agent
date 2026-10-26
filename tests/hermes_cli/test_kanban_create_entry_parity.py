@@ -135,3 +135,92 @@ def test_suggested_notify_subscribe_links_the_orphan(chat, monkeypatch, capsys):
     assert kc._cmd_notify_subscribe(args) == 0
     ksa._reset_cache_for_tests()
     assert task_id in {t["id"] for t in ksa.session_tasks([SID])}
+
+
+@pytest.fixture
+def restricted_creator(chat, monkeypatch):
+    profile = chat / "profiles" / "restricted"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("platform_toolsets:\n  cli: [web]\nterminal:\n  backend: local\n")
+    from tools import kanban_tools
+    monkeypatch.setattr(kanban_tools, "_persisted_identity", lambda: "restricted")
+    monkeypatch.setattr(kc, "_profile_author", lambda: "restricted")
+    monkeypatch.setattr(kc, "_agent_invoked", lambda: True)
+    monkeypatch.setattr(kc, "_check_dispatcher_presence", lambda **kw: (True, ""))
+
+
+@pytest.mark.parametrize("surface", ["registry", "cli"])
+def test_create_requires_and_default_creator_parity(restricted_creator, surface):
+    if surface == "registry":
+        from tools.registry import registry
+        schema = registry.get_schema("kanban_create")
+        assert "kanban" in schema["parameters"]["properties"]["requires"]["items"]["enum"]
+        good = json.loads(registry.dispatch("kanban_create", {"title": "Allowed", "requires": []}))
+        assert good.get("task_id"), good
+        bad = json.loads(registry.dispatch("kanban_create", {"title": "Denied", "requires": ["terminal"]}))
+        assert bad["code"] == "assignee_capability_mismatch", bad
+    else:
+        root = argparse.ArgumentParser()
+        kc.build_parser(root.add_subparsers())
+        assert kc._cmd_create(root.parse_args(["kanban", "create", "Allowed"])) == 0
+        assert kc._cmd_create(root.parse_args(["kanban", "create", "Denied", "--requires", "terminal"])) == 2
+    with kbc.connect_closing() as conn:
+        tasks = kb.list_tasks(conn)
+        assert len(tasks) == 1
+        assert tasks[0].assignee == "restricted"
+        assert tasks[0].requires == []
+
+
+def test_rest_create_preserves_and_enforces_requires(restricted_creator):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from plugins.kanban.dashboard.plugin_api import router
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        denied = client.post("/tasks", json={"title": "Denied", "assignee": "restricted", "requires": ["terminal"]})
+        assert denied.status_code == 400, denied.text
+        allowed = client.post("/tasks", json={"title": "Draft", "requires": ["terminal"]})
+        assert allowed.status_code == 200, allowed.text
+        assert allowed.json()["task"]["requires"] == ["terminal"]
+        tid = allowed.json()["task"]["id"]
+        rejected = client.patch(f"/tasks/{tid}", json={"assignee": "restricted"})
+        assert rejected.status_code == 400, rejected.text
+        with kbc.connect_closing() as conn:
+            assert kb.get_task(conn, tid).assignee is None
+
+
+def test_decomposition_root_assignment_is_validated_atomically(restricted_creator):
+    from hermes_cli.kanban_capabilities import CapabilityMismatchError
+    from hermes_cli.kanban_db_graph import decompose_triage_task
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Draft", triage=True, requires=["terminal"])
+        with pytest.raises(CapabilityMismatchError):
+            decompose_triage_task(conn, tid, root_assignee="restricted", children=[{"title": "Safe", "assignee": "restricted"}])
+        assert len(kb.list_tasks(conn)) == 1
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_single_task_promotion_checks_assignment(restricted_creator):
+    from hermes_cli.kanban_capabilities import CapabilityMismatchError
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Draft", triage=True, requires=["terminal"])
+        with pytest.raises(CapabilityMismatchError):
+            kb.specify_triage_task(conn, tid, title="Specified", assignee="restricted")
+        task = kb.get_task(conn, tid)
+        assert (task.title, task.status, task.assignee) == ("Draft", "triage", None)
+
+
+def test_single_decomposer_returns_rejected_outcome(restricted_creator, monkeypatch):
+    from hermes_cli import kanban_decompose as decompose
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Draft", triage=True, requires=["terminal"])
+    routing = decompose._Routing("restricted", "restricted", True, [], {"restricted"})
+    monkeypatch.setattr(decompose, "_load_routing", lambda **kw: routing)
+    monkeypatch.setattr(decompose, "_call_aux", lambda *a, **kw: (
+        json.dumps({"fanout": False, "title": "Specified", "assignee": "restricted"}), ""))
+    outcome = decompose.decompose_task(tid)
+    assert not outcome.ok
+    assert "lacks required capabilities" in outcome.reason
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "triage"

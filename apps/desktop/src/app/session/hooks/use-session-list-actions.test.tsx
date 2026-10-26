@@ -1130,3 +1130,130 @@ describe('messaging profile scope', () => {
     expect($messagingSessions.get().map(session => session.id)).toEqual(['tg'])
   })
 })
+
+const replicaTransport = vi.hoisted(() => ({ reachable: true }))
+
+vi.mock('@/store/hub-sync', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  connectionForHubGateway: (gateway: string) => (gateway === 'mini' ? 'conn-mini' : undefined),
+  hubGatewayForConnection: (id: string) => (id === 'conn-mini' ? 'mini' : 'primary'),
+  hubReplicaConnectionId: () => 'primary',
+  hubGet: async (path: string) =>
+    path === '/status'
+      ? replicaTransport.reachable
+        ? { gateway: 'mini' }
+        : null
+      : {
+          sessions: [
+            {
+              gateway: 'mini',
+              id: 'retained',
+              key: 'work/retained',
+              local: false,
+              stale: false,
+              synced_at: 9000,
+              version: 7,
+              profile: 'work',
+              title: 'Replica title',
+              message_count: 3,
+              source: 'desktop',
+              automated: false,
+              running: true
+            }
+          ]
+        }
+}))
+
+vi.mock('@hermes/plugin-sdk', async importOriginal => {
+  const actual = await importOriginal<Record<string, unknown>>()
+  const { $sessions: rows } = await import('@/store/session')
+
+  return {
+    ...actual,
+    host: {
+      sessions: { rows },
+      state: { gateways: { get: () => [{ id: 'primary' }, { id: 'conn-mini' }], listen: () => () => {} } }
+    }
+  }
+})
+
+describe('actual hub poller + list refresh freshness', () => {
+  it.each(['status', 'status-and-list', 'list', 'throw', 'flags'])(
+    'retained rows become offline after %s failure, then recover once',
+    async failure => {
+      const { default: plugin } = await import('@/plugins/hub-sync/plugin')
+
+      const { $offlineSessions, mergeOfflineFallback, _resetOfflineSessionsForTests } =
+        await import('@/store/offline-sessions')
+
+      _resetOfflineSessionsForTests()
+      replicaTransport.reachable = true
+      vi.useFakeTimers()
+      const disposers: Array<() => void> = []
+      const owner = row('retained', { connection_id: 'conn-mini', profile: 'work', is_active: true })
+      listSidebarSessions.mockResolvedValue(sidebar({ sessions: [owner] }))
+      const { result, unmount } = renderHook(() => useSessionListActions({ profileScope: 'all' }))
+      const effective = () => mergeOfflineFallback($sessions.get(), $offlineSessions.get())
+
+      try {
+        await act(async () => {
+          await result.current.refreshSessions()
+        })
+        plugin.register({ onDispose: (fn: () => void) => disposers.push(fn) } as never)
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0)
+        })
+        expect(effective()).toHaveLength(1)
+        expect(effective()[0].offline_cached).not.toBe(true)
+
+        replicaTransport.reachable = !failure.startsWith('status')
+
+        if (failure === 'throw') {
+          listSidebarSessions.mockRejectedValue(new Error('connection lost'))
+        } else if (failure === 'flags') {
+          listSidebarSessions.mockResolvedValue({
+            ...sidebar({ sessions: [] }),
+            profiles_failed: { work: { failed: true, retry: true } },
+            errors: [{ profile: 'work', error: 'failed' }]
+          })
+        } else {
+          listSidebarSessions.mockResolvedValue({
+            ...sidebar({ sessions: [] }),
+            errors: [{ profile: 'work', error: 'unreachable' }]
+          })
+        }
+
+        await act(async () => {
+          if (failure !== 'status') {
+            await result.current.refreshSessions().catch(() => undefined)
+          }
+
+          await vi.advanceTimersByTimeAsync(60_000)
+        })
+        expect($sessions.get().map(s => s.id)).toEqual(['retained'])
+        expect(effective()).toHaveLength(1)
+        expect(effective()[0]).toMatchObject({
+          connection_id: 'conn-mini',
+          profile: 'work',
+          offline_cached: true,
+          is_active: false
+        })
+
+        replicaTransport.reachable = true
+        listSidebarSessions.mockResolvedValue(sidebar({ sessions: [{ ...owner, title: 'Recovered' }] }))
+        await act(async () => {
+          await result.current.refreshSessions()
+        })
+        // Recovery must win even before the next replica poll.
+        expect(effective()).toHaveLength(1)
+        expect(effective()[0]).toMatchObject({ title: 'Recovered', is_active: true })
+        expect(effective()[0].offline_cached).not.toBe(true)
+      } finally {
+        disposers.forEach(dispose => dispose())
+        unmount()
+        vi.useRealTimers()
+        _resetOfflineSessionsForTests()
+      }
+    }
+  )
+})

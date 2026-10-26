@@ -502,6 +502,7 @@ class CreateTaskBody(BaseModel):
     idempotency_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[str]] = None
+    requires: Optional[list[str]] = None
     goal_mode: bool = False
     goal_max_turns: Optional[int] = None
     model_override: Optional[str] = None
@@ -843,7 +844,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         # current implementer before the task is routed to the reviewer.
         review_assignee_deferred = payload.status == "review" and payload.assignee is not None
         if payload.assignee is not None and not review_assignee_deferred:
-            with _map_errors(409, RuntimeError):
+            with _map_errors(409, RuntimeError), _value_error_400():
                 _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
         if payload.status is not None:
             _patch_status(conn, task_id, payload, review_assignee_deferred)

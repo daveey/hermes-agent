@@ -55,6 +55,7 @@ Output a single JSON object with this exact shape:
         "title": "<concrete task title, imperative voice, <= 80 chars>",
         "body":  "<detailed spec for the worker on this child task>",
         "assignee": "<profile name from the roster, or null for default>",
+        "requires": ["<terminal, file, git, or host_repo when needed>"],
         "parents": [<int>, ...]
       },
       ...
@@ -72,6 +73,10 @@ Rules:
   - Pick assignees from the roster by matching the task to the profile's
     DESCRIPTION (not just the name). When nothing matches well, use null
     and the system will route to the default_assignee.
+  - Declare explicit "requires" for every child: terminal for shell work, file for
+    filesystem editing, git for git operations, host_repo for dispatcher-host repo
+    access. Use [] only when none apply. The system validates the profile's actual
+    configured tools/backend; descriptions do not prove capability.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
 
@@ -228,10 +233,13 @@ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -
         )
     if title_val is None and body_val is None:
         return DecomposeOutcome(task.id, False, "decomposer returned fanout=false with no title/body")
-    with kbc.connect_closing() as conn:
-        ok = kb.specify_triage_task(
-            conn, task.id, title=title_val, body=body_val, assignee=assignee_val, author=author,
-        )
+    try:
+        with kbc.connect_closing() as conn:
+            ok = kb.specify_triage_task(
+                conn, task.id, title=title_val, body=body_val, assignee=assignee_val, author=author,
+            )
+    except ValueError as exc:
+        return DecomposeOutcome(task.id, False, f"DB rejected assignment: {exc}")
     if not ok:
         return DecomposeOutcome(task.id, False, "task moved out of triage before promotion")
     return DecomposeOutcome(task.id, True, "single task (no fanout)", fanout=False, new_title=title_val)
@@ -265,6 +273,7 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
             "title": title.strip()[:200],
             "body": body.strip() if isinstance(body, str) else "",
             "assignee": chosen,
+            "requires": entry.get("requires"),
             # Drop non-int, out-of-range and self parent indices.
             "parents": [p for p in parents if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx],
         })

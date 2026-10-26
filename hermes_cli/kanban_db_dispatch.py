@@ -94,7 +94,7 @@ _COMPLETION_GATE_ERROR_PREFIXES = ("PR acceptance ",)
 DEFAULT_GUARD_HOLD_CAP_SECONDS = 30 * 60
 DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS = 6 * 3600
 _GUARD_HOLD_SHORT_CAP_REASONS = frozenset({"blocker_auth"})
-_GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker"})
+_GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch"})
 
 
 def _env_seconds(name: str, default: int) -> int:
@@ -111,7 +111,6 @@ def guard_hold_cap_seconds(reason: str) -> Optional[int]:
     if reason in _GUARD_HOLD_SHORT_CAP_REASONS:
         return _env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS", DEFAULT_GUARD_HOLD_CAP_SECONDS)
     return _env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_LONG_SECONDS", DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS)
-
 
 
 def _is_completion_gate_error(err: str) -> bool:
@@ -2233,7 +2232,8 @@ def _dispatch_lane_task(
         if current >= per_profile_cap:
             result.skipped_per_profile_capped.append((task_id, assignee, current))
             return False
-    guard_reason = check_respawn_guard(conn, task_id, lane=lane)
+    from hermes_cli.kanban_model_assignment import dispatch_guard
+    guard_reason = dispatch_guard(conn, task_id, lane=lane, dry_run=dry_run)
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.

@@ -369,7 +369,8 @@ def _anthropic_token_or_raise(*, model: str | None = None) -> str:
         if model and resolve_anthropic_token():
             raise AuthError(f"Anthropic credentials are rate-limited for {model}; "
                             "other Claude models remain available (see `hermes auth list`).")
-        raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)
+        from hermes_cli.runtime_provider_anthropic_diagnostics import unavailable_pool_message
+        raise AuthError(unavailable_pool_message(_NO_ANTHROPIC_CREDENTIALS_MSG))
     return token
 
 

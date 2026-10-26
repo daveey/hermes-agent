@@ -9,14 +9,19 @@ import { useCallback, useMemo } from 'react'
 import type { SessionInfo } from '@/hermes'
 import { notify } from '@/store/notifications'
 import { offlineOpenNotice } from '@/store/offline-session-actions'
-import { $offlineSessions, mergeOfflineFallback } from '@/store/offline-sessions'
+import { $offlineSessions, $sessionListFreshness, mergeOfflineFallback } from '@/store/offline-sessions'
 
 export function useOfflineFallback(
   liveSessions: SessionInfo[],
   resumeSession: (sessionId: string, session?: SessionInfo) => void
 ) {
   const offlineSessions = useStore($offlineSessions)
-  const sessions = useMemo(() => mergeOfflineFallback(liveSessions, offlineSessions), [liveSessions, offlineSessions])
+  const freshness = useStore($sessionListFreshness)
+
+  const sessions = useMemo(
+    () => mergeOfflineFallback(liveSessions, offlineSessions, freshness),
+    [liveSessions, offlineSessions, freshness]
+  )
 
   const onResumeSession = useCallback(
     (sessionId: string, session?: SessionInfo) => {

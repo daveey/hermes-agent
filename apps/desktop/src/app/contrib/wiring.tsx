@@ -1109,13 +1109,14 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     // The sidebar row menu reuses this verb in the Archived view too, where the
     // row is already archived — dispatch by state so the verb restores there
     // instead of re-archiving (#98813).
-    onArchiveSession: sessionId => {
-      const listed = $sessions.get().find(session => sessionMatchesStoredId(session, sessionId))
+    onArchiveSession: (sessionId, selectedRow) => {
+      const listed = selectedRow ?? $sessions.get().find(session => sessionMatchesStoredId(session, sessionId))
 
       const isArchived =
-        listed?.archived === true || $archivedSessions.get().some(session => sessionMatchesStoredId(session, sessionId))
+        listed?.archived === true ||
+        (!selectedRow && $archivedSessions.get().some(session => sessionMatchesStoredId(session, sessionId)))
 
-      void (isArchived ? unarchiveSession(sessionId) : archiveSession(sessionId))
+      void (isArchived ? unarchiveSession(sessionId) : archiveSession(sessionId, { selectedRow }))
     },
     onAttachDroppedItems: composer.attachDroppedItems,
     onAttachImageBlob: composer.attachImageBlob,

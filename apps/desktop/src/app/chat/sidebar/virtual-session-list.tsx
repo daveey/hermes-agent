@@ -10,6 +10,7 @@ import { useI18n } from '@/i18n'
 import { type SidebarListRow } from '@/lib/session-date-groups'
 import { sessionBucketLabel } from '@/lib/time'
 import { cn } from '@/lib/utils'
+import { offlineIdentity } from '@/store/offline-sessions'
 import { sessionPinId } from '@/store/session'
 import { $sessionListDensity } from '@/store/session-list-density'
 
@@ -47,7 +48,7 @@ export interface VirtualSessionListProps {
     open: (key: string) => boolean
   }
   rows: SidebarListRow[]
-  onArchiveSession: (sessionId: string) => void
+  onArchiveSession: (sessionId: string, session?: SessionInfo) => void
   onBranchSession?: (sessionId: string, profile?: string) => void
   onDeleteSession: (sessionId: string) => void
   onResumeSession: (sessionId: string, session?: SessionInfo) => void
@@ -101,7 +102,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
     getItemKey: index => {
       const row = listRows[index]
 
-      return row ? (row.kind === 'divider' ? row.key : row.entry.session.id) : index
+      return row ? (row.kind === 'divider' ? row.key : offlineIdentity(row.entry.session)) : index
     },
     getScrollElement: () => scrollerRef.current,
     // jsdom-friendly default; the real rect takes over on first observe.
@@ -164,7 +165,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
       card,
       isPinned: pinned,
       isSelected: session.id === activeSessionId,
-      onArchive: () => onArchiveSession(session.id),
+      onArchive: () => onArchiveSession(session.id, session),
       onBranch: onBranchSession ? () => onBranchSession(session.id, session.profile) : undefined,
       onDelete: () => onDeleteSession(session.id),
       onPin: () => onTogglePin(sessionPinId(session)),
@@ -175,9 +176,9 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
       unread: session.unread === true
     }
 
-    // Key by (profile, id): twins with the same stored id in two profiles are
-    // distinct rows (#92454) — a bare-id key misattributes rendered state.
-    const rowKey = `${session.profile ?? ''}::${session.id}`
+    // Same stored ids on different gateways/profiles are distinct owners;
+    // keep virtualizer and React identity aligned with the selected row.
+    const rowKey = offlineIdentity(session)
 
     return reorderable ? (
       <div data-index={virtualItem.index} key={rowKey} ref={virtualizer.measureElement} style={itemStyle}>

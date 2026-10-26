@@ -115,7 +115,7 @@ def decompose_triage_task(
     now = int(time.time())
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, assignee, requires "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
@@ -127,6 +127,13 @@ def decompose_triage_task(
             (task_id,),
         ).fetchone():
             return None
+        import json
+        from hermes_cli.kanban_capabilities import validate_assignment
+        validate_assignment(
+            root_assignee if root_assignee is not None else root_row["assignee"],
+            requires=json.loads(root_row["requires"] or "[]"),
+            workspace_kind=root_row["workspace_kind"], workspace_path=root_row["workspace_path"],
+        )
         child_ids = [
             _insert_decomposed_child(conn, task_id, root_row, child, author, now)
             for child in children
@@ -195,20 +202,27 @@ def _insert_decomposed_child(
     else:
         child_ws_path = None
     new_id = _new_task_id()
+    import json
+    from hermes_cli.kanban_capabilities import validate_assignment
+    assignee = _canonical_assignee(child.get("assignee"))
+    required = validate_assignment(assignee, requires=child.get("requires"),
+                                   workspace_kind=child_ws_kind, workspace_path=child_ws_path)
     body = child.get("body")
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "
-        " workspace_path, tenant, created_at, created_by) "
-        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+        " workspace_path, tenant, created_at, created_by, requires) "
+        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
         (
             new_id, child["title"].strip(), body if isinstance(body, str) else None,
-            _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path,
+            assignee, child_ws_kind, child_ws_path,
             root_row["tenant"], now, (author or "decomposer"),
+            json.dumps(required),
         ),
     )
     _append_event(
-        conn, new_id, "created", {"by": author or "decomposer", "from_decompose_of": root_id},
+        conn, new_id, "created", {"by": author or "decomposer", "from_decompose_of": root_id,
+                                  "requires": required},
     )
     inherit_creator_origin(conn, new_id, root_id, created_at=now)
     return new_id
