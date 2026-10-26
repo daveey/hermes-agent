@@ -66,7 +66,20 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
     return meta
 
 
-def write_board_metadata(
+def write_board_metadata(board: Optional[str], **changes) -> dict:
+    """Serialize display edits with dispatch/ownership changes; preserve owner."""
+    from hermes_cli.kanban_db_connect import _dispatch_tick_lock
+    slug = _kb._slug_or_default(board)
+    # Metadata operations name a board, independent of worker DB env pins.
+    db_path = (_kb.kanban_home() / "kanban.db" if slug == _kb.DEFAULT_BOARD
+               else _kb.board_dir(slug) / "kanban.db").resolve()
+    with _dispatch_tick_lock(db_path) as held:
+        if not held:
+            raise RuntimeError("board dispatcher is busy; retry metadata change")
+        return _write_board_metadata_locked(board, **changes)
+
+
+def _write_board_metadata_locked(
     board: Optional[str], *, name: Optional[str] = None, description: Optional[str] = None,
     icon: Optional[str] = None, color: Optional[str] = None, archived: Optional[bool] = None,
     default_workdir: Optional[str] = None, project_id: Optional[str] = None,
@@ -75,8 +88,12 @@ def write_board_metadata(
     set on first write. ``project_id``/``default_workdir``: ``None`` = unchanged,
     "" = clear (``project_id`` is not validated here)."""
     _kb._assert_not_delegated_child_mutation()
+    from hermes_cli.kanban_dispatch_owner import read_metadata, atomic_metadata_write
     slug = _kb._slug_or_default(board)
+    raw = read_metadata(board_metadata_path(slug))
     meta = read_board_metadata(slug)
+    meta.update(raw)
+    meta["slug"] = slug
     # db_path is derived on every read; never persist it into board.json.
     meta.pop("db_path", None)
     if name is not None:
@@ -93,9 +110,7 @@ def write_board_metadata(
         meta["created_at"] = int(time.time())
     path = board_metadata_path(slug)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
-    )
+    atomic_metadata_write(path, meta)
     meta["db_path"] = str(_kb.kanban_db_path(slug))
     return meta
 

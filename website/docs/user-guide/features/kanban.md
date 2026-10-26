@@ -168,6 +168,11 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
 
 ## Boards (multi-project)
 
+Dedicated supervised runtimes can reserve a board with the optional native
+`dispatch_owner` field. See [per-board dispatch ownership](../../developer-guide/kanban-dispatch-ownership.md)
+for operator set/read/clear commands, the Python dispatcher ID contract, and
+safe rollout. This is same-UID coordination, not an authentication boundary.
+
 Boards let you separate unrelated streams of work — one per project, repo,
 or domain — into isolated queues. A new install has exactly one board
 called `default` (DB at `~/.hermes/kanban.db` for back-compat). Users who

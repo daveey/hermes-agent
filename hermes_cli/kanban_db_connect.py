@@ -168,7 +168,7 @@ def _dispatch_tick_lock(db_path: Path):
     multi-writer corruption; this is defense-in-depth behind
     ``_guard_supervised_gateway_conflict``. Non-blocking on purpose: the
     gateway's async watcher must never stall; the loser retries next interval.
-    Without ``fcntl``/``msvcrt`` it degrades to a no-op (yields ``True``).
+    An unavailable lock refuses the tick (yields ``False``).
 
     Motivation (issue #35240): a ``hermes gateway run --replace`` / ``gateway restart`` invoked from a shell
     on a systemd/launchd host can leave an orphan gateway whose dispatcher escapes the service cgroup,
@@ -188,9 +188,8 @@ def _dispatch_tick_lock(db_path: Path):
         except (OSError, AttributeError):
             acquired = False
     except OSError:
-        # Can't even open the lock file (permissions, read-only FS): degrade to
-        # a no-op so a probe failure never blocks dispatch.
-        acquired = True
+        # A failed lock is not permission to dispatch or change ownership.
+        acquired = False
         handle = None
     try:
         yield acquired

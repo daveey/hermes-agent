@@ -160,6 +160,27 @@ def _cmd_boards_set_default_workdir(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_boards_dispatch_owner(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_dispatch_owner import get_dispatch_owner, set_dispatch_owner
+    slug, rc = _board_slug_arg(args, "dispatch-owner", must_exist=True)
+    if rc:
+        return rc
+    if args.clear and args.owner is not None:
+        return _err("Specify owner or --clear, not both", 2)
+    path = (kb.kanban_home() / "kanban.db" if slug == kb.DEFAULT_BOARD
+            else kb.board_dir(slug) / "kanban.db")
+    try:
+        if args.clear or args.owner is not None:
+            set_dispatch_owner(path, None if args.clear else args.owner)
+        owner = get_dispatch_owner(path)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return _err(f"kanban boards dispatch-owner: {exc}")
+    result = {"slug": slug, "db_path": str(path.resolve()), "dispatch_owner": owner}
+    if not _json_out(args, result):
+        print(f"Board {slug!r} dispatch owner: {owner or '(unowned)'}")
+    return 0
+
+
 def _cmd_boards_export(args: argparse.Namespace) -> int:
     from hermes_cli import kanban_transfer
     from hermes_cli.sizefmt import format_bytes
@@ -214,6 +235,7 @@ _BOARD_HANDLERS = {
     "show": _cmd_boards_show, "current": _cmd_boards_show,
     "rename": _cmd_boards_rename,
     "set-default-workdir": _cmd_boards_set_default_workdir,
+    "dispatch-owner": _cmd_boards_dispatch_owner,
     "export": _cmd_boards_export,
     "import": _cmd_boards_import,
 }
