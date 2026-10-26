@@ -28,7 +28,9 @@ def check(root: Path) -> list[str]:
         if path.is_symlink() or not path.is_file():
             continue
         data = path.read_bytes()
-        if b"\0" in data:
+        # Most tracked text contains no shebang. Avoid splitting and testing
+        # every source/lockfile line in Python while preserving the full scan.
+        if b"\0" in data or b"#!" not in data:
             continue
         for number, line in enumerate(data.splitlines(), 1):
             if FIXED_BASH.search(line):
