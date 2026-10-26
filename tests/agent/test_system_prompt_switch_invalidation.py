@@ -85,6 +85,9 @@ def test_compression_tip_adoption_applies_the_identity_check(db):
         agent.session_id = "parent"
         agent.model, agent.provider = model, provider
         agent.pass_session_id = False
+        # Ordinary exact-model agents have no class allocation. An unspecced
+        # MagicMock otherwise fabricates truthy provenance and a nonexistent DB.
+        agent.model_routing = None
         agent.context_compressor = None
         agent._memory_manager = None
         assert _adopt_live_compression_child(agent, db, "parent") is not None

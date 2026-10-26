@@ -278,9 +278,17 @@ async def test_batched_completions_follow_the_owning_profile(
 
     rig = _build_rig(monkeypatch, tmp_path, request, surface_a, "all")
     runner = rig.runner
+    flush = runner._flush_process_completion_batch
+    release = asyncio.Event()
+
+    async def flush_when_enqueued(key):
+        await release.wait()
+        await flush(key)
+
+    monkeypatch.setattr(runner, "_flush_process_completion_batch", flush_when_enqueued)
 
     async def consume(leg):
-        runner._completion_notification_batch_window = 0.01
+        release.clear()
         if owner == "live_handoff":
             _transfer_to_parent(rig, leg)
         leg.proc.output_buffer = "PROCESS_RESULT"
@@ -297,10 +305,20 @@ async def test_batched_completions_follow_the_owning_profile(
         pair = [("PROCESS_RESULT", evt), ("COMPANION_RESULT", companion)]
         if path in {"batch_foreground_first", "batch_boundary_first"}:
             pair.reverse()
-        outcomes = await asyncio.gather(*(
-            runner._enqueue_process_completion_notification(text, event)
-            for text, event in pair
-        ))
+        from tests.waiting import async_wait_until
+
+        tasks = [asyncio.create_task(runner._enqueue_process_completion_notification(text, event))
+                 for text, event in pair]
+        try:
+            # Profile admission can exceed 10ms on a loaded runner. Both events
+            # must be admitted (or suppressed) before this test closes its batch;
+            # keep the real filtering, route keys, delivery and settlement intact.
+            await async_wait_until(lambda: sum(t.done() for t in tasks) + sum(
+                len(entries) for entries in runner._completion_notification_batches.values()) == len(pair),
+                what="both completion admissions")
+        finally:
+            release.set()
+            outcomes = await asyncio.gather(*tasks)
         assert outcomes[pair.index(("PROCESS_RESULT", evt))] is (True if leg.surfaced else None)
         assert outcomes[pair.index(("COMPANION_RESULT", companion))] is (None if boundary else True)
         texts = "\n".join(event.text for event, _sid, _home in rig.admitted)
