@@ -2092,8 +2092,11 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
+    """Promote dependency waits and recoverable failure stops;
     returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
+
+    Agent-triage failure-budget stops retain the same recovery as legacy blocked
+    stops. Guard holds and other triage reasons still require explicit resolution.
 
     ``blocked`` is skipped when sticky (explicit ``kanban_block``) or when
     ``consecutive_failures`` reached the limit (else the breaker could never
@@ -2109,12 +2112,16 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     with write_txn(conn):
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
-            "FROM tasks WHERE status IN ('todo', 'blocked')"
+            "FROM tasks WHERE status IN ('todo', 'blocked') OR ("
+            "status = 'triage' AND block_kind = 'transient' AND 'gave_up' = ("
+            "SELECT kind FROM task_events WHERE task_id = tasks.id AND kind IN ("
+            "'gave_up', 'blocked', 'block_loop_detected', 'supervisor_escalated', 'status') "
+            "ORDER BY id DESC LIMIT 1))"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
-            if cur_status == "blocked" and _has_sticky_block(conn, task_id):
+            if cur_status in ("blocked", "triage") and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
             parents = conn.execute(
@@ -2124,7 +2131,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             ).fetchall()
             if all(p["status"] in ("done", "archived") for p in parents):
                 resume_status = _resume_status_from_events(conn, task_id)
-                if cur_status == "blocked":
+                if cur_status in ("blocked", "triage"):
                     # At the breaker limit, no auto-recovery (else block ->
                     # recover -> respawn -> exhaust -> block forever). The
                     # counter is preserved so it accumulates across cycles.
@@ -2138,7 +2145,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                         continue
                     conn.execute(
                         "UPDATE tasks SET status = ? "
-                        "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
+                        "WHERE id = ? AND status = ?", (resume_status, task_id, cur_status),
                     )
                 else:
                     conn.execute(

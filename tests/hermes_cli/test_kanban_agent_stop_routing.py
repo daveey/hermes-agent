@@ -38,6 +38,7 @@ def test_guard_hold_is_agent_triage(board, monkeypatch, reason):
     tid = kb.create_task(conn, title="Guard hold", assignee="default", session_id="owner")
     monkeypatch.setattr(dispatch, "_guard_hold_started_at", lambda *args: 1)
     assert dispatch._block_if_guard_hold_capped(conn, tid, reason)
+    assert kb.recompute_ready(conn, failure_limit=100) == 0
     assert_agent(conn, path, tid)
 
 
@@ -51,6 +52,7 @@ def test_repeated_agent_block_stays_agent_but_approval_stays_human(board):
             if kb.get_task(conn, tid).status != "triage":
                 assert kb.unblock_task(conn, tid)
         if kind == "transient":
+            assert kb.recompute_ready(conn, failure_limit=100) == 0
             assert_agent(conn, path, tid)
         else:
             assert kb.get_task(conn, tid).block_kind == "needs_input"
