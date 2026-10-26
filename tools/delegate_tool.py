@@ -450,6 +450,8 @@ def _resolve_task_routes(
 ) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], Optional[str]]:
     """``[(creds, routing_cfg), ...]`` per task: the call-wide route, or the task's own ``model``/``provider`` pin
     resolved through the same credential path as ``delegation.*``. ``([], error)`` on a bad pin."""
+    from tools.delegate_tool_routes import task_route_conflict
+
     routes: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for i, t in enumerate(task_list):
         task_cfg, err = _task_route_cfg(t, routing_cfg)
@@ -461,11 +463,14 @@ def _resolve_task_routes(
                 # default with missing credentials must not veto an explicit route.
                 if creds is None:
                     creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
-                routes.append((creds, routing_cfg))
-                continue
-            task_creds = _resolve_delegation_credentials(task_cfg, parent_agent)
+                task_creds, task_cfg = creds, routing_cfg
+            else:
+                task_creds = _resolve_delegation_credentials(task_cfg, parent_agent)
         except ValueError as exc:
             return [], f"Task {i}: {exc}"
+        err = task_route_conflict(task_creds, parent_agent)
+        if err:
+            return [], f"Task {i}: {err}"
         routes.append((task_creds, task_cfg))
     return routes, None
 

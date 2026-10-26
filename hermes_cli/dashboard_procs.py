@@ -949,6 +949,46 @@ def _process_age_seconds(pid: int) -> float:
     return max(0.0, _time.time() - _psutil.Process(pid).create_time())
 
 
+def _reap_candidate_in_current_home(pid: int) -> bool:
+    """Require positive install and UID ownership; argv/ppid alone are host-wide.
+
+    Missing exec-time HERMES_HOME is not permission to infer our own home. Old
+    launchers without an explicit home are deliberately left for their owner.
+    """
+    import psutil
+
+    if not hasattr(os, "getuid") or not hasattr(os, "geteuid"):
+        return False
+    try:
+        proc = psutil.Process(pid)
+        uids = proc.uids()
+        if uids.real != os.getuid() or uids.effective != os.geteuid():  # windows-footgun: ok -- hasattr guard above
+            return False
+        argv = proc.cmdline()
+        # SSH backends have their own nonce/owner watchdog. Reparenting is normal
+        # for them, and their lock may live outside even their process home.
+        if any(tok.split("=", 1)[0] in ("--ssh-session-token-file", "--ssh-owner-nonce") for tok in argv):
+            return False
+        home = (_pid_environ(pid) or {}).get("HERMES_HOME", "")
+        if not home or not Path(home).is_absolute():
+            return False
+        # /proc exposes exec-time env, before CLI --profile rewrites HERMES_HOME.
+        if _profile_flag_value(argv) is not None:
+            home = _hermes_home_for_pid(pid)
+        return bool(home and Path(home).resolve() == _hermes_home_dir().resolve())
+    except (psutil.Error, OSError, ValueError, RuntimeError):
+        return False
+
+
+def _reap_identity_still_matches(pid: int, start: int | None) -> bool:
+    from gateway.status import get_process_start_time, start_time_fingerprints_match
+
+    current = get_process_start_time(pid)
+    return (start is not None and current is not None
+            and start_time_fingerprints_match(start, current)
+            and _reap_candidate_in_current_home(pid))
+
+
 def _reap_orphaned_desktop_local_serves(
     *, reason: str = "orphaned desktop-local hermes serve", signal_term=None, signal_kill=None,
     sleep_fn=None, lock_owned_pids_fn=None, process_age_seconds_fn=None) -> dict[str, list]:
@@ -956,7 +996,8 @@ def _reap_orphaned_desktop_local_serves(
 
     When Electron dies uncleanly its ``serve --host 127.0.0.1 --port 0`` children are
     reparented to pid 1 with their MCP trees alive; each Desktop boot then stacks a fresh
-    backend on the corpses until EMFILE. Reaped only if ALL hold: Desktop-local shape; ppid
+    backend on the corpses until EMFILE. Reaped only if ALL hold: positively same UID and
+    explicit HERMES_HOME; no SSH token/owner marker; Desktop-local shape; ppid
     0/1; not self / parent / HERMES_DESKTOP_CHILD_PID; not claimed by a valid
     ``backend.lock.json`` (SSH backends other clients started legitimately sit at ppid 1);
     older than ``_REAP_MIN_AGE_SECONDS`` with a determinable age (Desktop writes the lock only
@@ -991,9 +1032,12 @@ def _reap_orphaned_desktop_local_serves(
         scanned = _scan_dashboard_processes(exclude_pids=exclude)
     except Exception:
         return _empty_result()
+    from gateway.status import get_process_start_time
+    starts = {pid: get_process_start_time(pid) for pid, _ in scanned}
     owned_now = _owned_pids()  # re-read: a lock may have been written since the scan
     matched = [pid for pid, cmd in scanned
                if _is_desktop_local_serve_cmdline(cmd) and pid not in owned_now
+               and _reap_candidate_in_current_home(pid)
                and _process_ppid(pid) in (0, 1) and _is_stale_orphan(pid)]
     if not matched:
         return _empty_result()
@@ -1001,6 +1045,9 @@ def _reap_orphaned_desktop_local_serves(
     killed: list[int] = []
     failed: list[int] = []
     for pid in matched:
+        if not _reap_identity_still_matches(pid, starts[pid]):
+            failed.append(pid)
+            continue
         try:
             os.kill(pid, signal_term)
         except ProcessLookupError:
@@ -1015,6 +1062,9 @@ def _reap_orphaned_desktop_local_serves(
             continue
         try:
             if psutil.pid_exists(pid):
+                if not _reap_identity_still_matches(pid, starts[pid]):
+                    failed.append(pid)
+                    continue
                 os.kill(pid, signal_kill)
             killed.append(pid)
         except ProcessLookupError:
@@ -1025,9 +1075,8 @@ def _reap_orphaned_desktop_local_serves(
     # keep the deleted state.db-wal inode open (#112631). The boot-path budget leaves no second
     # grace, and these trees already lost their Electron and their backend.
     # A root whose own kill raised (EPERM: not ours) keeps its subtree — do not orphan it half-way.
-    from gateway.status import get_process_start_time
     for pid, (root, start) in descendants.items():
-        if root not in failed and start is not None and get_process_start_time(pid) == start:
+        if root in killed and _reap_identity_still_matches(pid, start):
             with contextlib.suppress(OSError):
                 os.kill(pid, signal_kill)
     with contextlib.suppress(Exception):
