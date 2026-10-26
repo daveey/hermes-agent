@@ -36,6 +36,26 @@ def checkpoint(conn, task_id, expected_run_id):
     return {"run_id": expected_run_id, "parents": sorted(parents), "prs": sorted(urls)}
 
 
+def apply_block_update(conn, task_id, expected_run_id, kind, new_status, set_sql, params, payload):
+    """Capture review scope and release the claim in the caller's transaction."""
+    if kind == "dependency":
+        evidence = checkpoint(conn, task_id, expected_run_id)
+        if evidence:
+            payload["review_checkpoint"] = evidence
+    sql = f"""
+        UPDATE tasks
+           SET status = '{new_status}', claim_lock = NULL, claim_expires = NULL,
+               worker_pid = NULL, {set_sql}
+         WHERE id = ?
+           AND (status IN ('running', 'ready') OR (status = 'review' AND ? = 'assignment'))
+    """
+    params = (*params, task_id, kind)
+    if expected_run_id is not None:
+        sql += " AND current_run_id = ?"
+        params = (*params, int(expected_run_id))
+    return conn.execute(sql, params).rowcount == 1
+
+
 def _reviewed_pr(conn, parent_id, parked_at, owner_run_id):
     """Structured evidence from the latest completed run, never a board comment."""
     from hermes_cli import kanban_db as kb

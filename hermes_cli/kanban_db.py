@@ -3279,26 +3279,10 @@ def block_task(
                 payload["recurrences"] = prev
                 payload.pop("limit", None)
                 payload["shared_blocker_probe"] = True
-        if kind == "dependency":
-            from hermes_cli.kanban_dependency_review import checkpoint
-            review_checkpoint = checkpoint(conn, task_id, expected_run_id)
-            if review_checkpoint:
-                payload["review_checkpoint"] = review_checkpoint
-        sql = f"""
-                UPDATE tasks
-                   SET status        = '{new_status}',
-                       claim_lock    = NULL,
-                       claim_expires = NULL,
-                       worker_pid    = NULL,
-                       {set_sql}
-                 WHERE id = ?
-                   AND (status IN ('running', 'ready') OR (status = 'review' AND ? = 'assignment'))
-                """
-        params = (*params, task_id, kind)
-        if expected_run_id is not None:
-            sql += " AND current_run_id = ?"
-            params = (*params, int(expected_run_id))
-        if conn.execute(sql, params).rowcount != 1:
+        from hermes_cli.kanban_dependency_review import apply_block_update
+        if not apply_block_update(
+            conn, task_id, expected_run_id, kind, new_status, set_sql, params, payload,
+        ):
             return False
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="blocked", status="blocked", summary=reason,
