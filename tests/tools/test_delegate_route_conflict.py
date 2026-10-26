@@ -1,0 +1,137 @@
+"""Reject certain route mismatches atomically through the registered delegate handler."""
+import copy
+import json
+from unittest.mock import patch
+
+import pytest
+
+from tests.tools.test_delegate_per_task_model import _child, _parent
+from tools.registry import registry
+
+
+@pytest.fixture
+def route_call():
+    parent = _parent(depth=1)
+    parent.provider = "openai-codex"
+    parent.model = "gpt-5.6-sol"
+    parent.base_url = "https://chatgpt.com/backend-api/codex"
+    parent.api_mode = "codex_responses"
+    cfg = {"max_spawn_depth": 3, "allow_task_model": True}
+    children = []
+
+    def construct(**kwargs):
+        child = _child()
+        children.append(child)
+        return child
+
+    def runtime(*, requested, target_model):
+        endpoints = {"openai-codex": "https://chatgpt.com/backend-api/codex",
+                     "anthropic": "https://api.anthropic.com",
+                     "gemini": "https://generativelanguage.googleapis.com"}
+        return {"provider": requested, "model": target_model,
+                "base_url": endpoints.get(requested, "https://relay.example.com/v1"),
+                "api_key": "synthetic-token",
+                "api_mode": "anthropic_messages"}
+
+    with patch("tools.delegate_tool._load_config", return_value=cfg), \
+            patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=runtime), \
+            patch("run_agent.AIAgent", side_effect=construct) as constructor:
+        def call(tasks):
+            before = (parent.provider, parent.model, parent.base_url, parent.api_key,
+                      parent.api_mode, list(parent._active_children))
+            cfg_before, tasks_before = copy.deepcopy(cfg), copy.deepcopy(tasks)
+            result = json.loads(registry.get_entry("delegate_task").handler(
+                {"tasks": tasks}, parent_agent=parent))
+            assert before == (parent.provider, parent.model, parent.base_url, parent.api_key,
+                              parent.api_mode, list(parent._active_children))
+            assert cfg == cfg_before
+            assert tasks == tasks_before
+            return result
+        yield call, parent, cfg, constructor, children
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_mismatch_rejects_whole_batch_before_construction_or_send(route_call, mixed):
+    call, _parent, _cfg, constructor, children = route_call
+    tasks = [{"goal": "review the proposed change", "model": "claude-opus-5-5"}]
+    if mixed:
+        tasks.insert(0, {"goal": "review on the inherited compatible route"})
+    from tools import delegate_tool as dt
+
+    with patch("tools.delegate_tool._run_single_child", wraps=dt._run_single_child) as run:
+        result = call(tasks)
+    constructor.assert_not_called()
+    run.assert_not_called()
+    assert children == []
+    error = result["error"]
+    assert f"Task {int(mixed)}" in error
+    assert "claude-opus-5-5" in error
+    assert "openai-codex" in error
+    assert "provider" in error and "together with" in error and "compatible model" in error
+
+
+def test_explicit_compatible_provider_and_model(route_call):
+    call, _parent, _cfg, constructor, children = route_call
+    result = call([{"goal": "review on the explicitly selected provider",
+                    "model": "claude-opus-5-5", "provider": "anthropic"}])
+    assert "error" not in result
+    assert constructor.call_args.kwargs["provider"] == "anthropic"
+    assert constructor.call_args.kwargs["model"] == "claude-opus-5-5"
+    children[0].run_conversation.assert_called_once()
+
+
+@pytest.mark.parametrize("model", ["gpt-future-preview", "openai/gpt-future-preview",
+                                  "openai-codex:gpt-future-preview", "test-model", "org/private-preview"])
+def test_same_provider_and_unknown_model_only_pins_are_unchanged(route_call, model):
+    call, _parent, _cfg, constructor, children = route_call
+    result = call([{"goal": "review using the requested model", "model": model}])
+    assert "error" not in result
+    assert constructor.call_args.kwargs["provider"] == "openai-codex"
+    assert constructor.call_args.kwargs["model"] == model
+    children[0].run_conversation.assert_called_once()
+
+
+@pytest.mark.parametrize("provider,url", [
+    ("openrouter", "https://openrouter.ai/api/v1"),
+    ("nous", "https://inference-api.nousresearch.com/v1"),
+    ("copilot", "https://api.githubcopilot.com"),
+    ("custom", "https://relay.example.com/v1"),
+    ("custom:team", "https://relay.example.com/v1"),
+    ("team-relay", "https://relay.example.com/v1"),
+    ("openai-codex", "https://relay.example.com/v1"),
+    ("anthropic", "https://relay.example.com/v1"),
+])
+def test_custom_and_aggregator_routes_remain_permissive(route_call, provider, url):
+    call, parent, _cfg, constructor, _children = route_call
+    parent.provider, parent.base_url = provider, url
+    result = call([{"goal": "review using this endpoint's model", "model": "gemini-future-preview"}])
+    assert "error" not in result
+    assert constructor.call_args.kwargs["provider"] == provider
+    assert constructor.call_args.kwargs["base_url"] == url
+    assert constructor.call_args.kwargs["model"] == "gemini-future-preview"
+
+
+@pytest.mark.parametrize("provider,model", [
+    ("openai-codex", "claude-opus-5-5"),
+    ("anthropic", "gpt-future-preview"),
+    ("gemini", "claude-future-preview"),
+])
+@pytest.mark.parametrize("configured", [False, True])
+def test_explicit_and_configured_mismatches_are_rejected_offline(route_call, provider, model, configured):
+    call, _parent, cfg, constructor, _children = route_call
+    task = {"goal": "review on the selected route"}
+    (cfg if configured else task).update(provider=provider, model=model)
+    with patch("hermes_cli.models.fetch_api_models", side_effect=AssertionError("network catalog probe")):
+        result = call([task])
+    constructor.assert_not_called()
+    assert "Task 0" in result["error"]
+    assert model in result["error"] and provider in result["error"]
+
+
+def test_configured_custom_endpoint_with_misleading_provider(route_call):
+    call, _parent, cfg, constructor, _children = route_call
+    cfg.update(provider="openai-codex", base_url="https://relay.example.com/v1")
+    result = call([{"goal": "review through the configured relay", "model": "claude-opus-5-5"}])
+    assert "error" not in result
+    assert constructor.call_args.kwargs["base_url"] == "https://relay.example.com/v1"
+    assert constructor.call_args.kwargs["model"] == "claude-opus-5-5"

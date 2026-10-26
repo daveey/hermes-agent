@@ -735,6 +735,74 @@ def test_comment_rejects_caller_supplied_author(worker_env):
         conn.close()
 
 
+@pytest.mark.parametrize("human_action_now", [None, False])
+def test_create_blocked_open_parent_requires_present_human_need(worker_env, human_action_now):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db_connect as kbc
+
+    args = dict(title="Approve deployment after soak", assignee="peer",
+                parents=[worker_env], initial_status="blocked")
+    if human_action_now is not None:
+        args["human_action_now"] = human_action_now
+    with kbc.connect() as conn:
+        before = conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
+    result = json.loads(kt._handle_create(args))
+    assert "error" in result, result
+    for guidance in ("parents", "todo", "kanban_schedule", "wake_check", "human_action_now"):
+        assert guidance in result["error"]
+    with kbc.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == before
+        assert conn.execute("SELECT count(*) FROM tasks WHERE title = ?", (args["title"],)).fetchone()[0] == 0
+    # Following the guidance uses the existing dependency gate, not an automatic
+    # conversion of the rejected human hold into runnable work.
+    args.pop("initial_status")
+    retried = json.loads(kt._handle_create(args))
+    assert retried.get("ok"), retried
+    assert retried["status"] == "todo"
+    assert retried["gated_by"] == worker_env
+
+
+def test_create_blocked_open_parent_explicit_present_human_need(worker_env):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+
+    result = json.loads(kt._handle_create(dict(
+        title="Grant test account now while implementation continues", assignee="peer",
+        parents=[worker_env], initial_status="blocked", human_action_now=True)))
+    assert result.get("ok"), result
+    assert result["status"] == "blocked"
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, result["task_id"])
+        assert task is not None and task.status == "blocked"
+        assert any(e.kind == "blocked" for e in kb.list_events(conn, result["task_id"]))
+
+
+@pytest.mark.parametrize("parent_done", [False, True])
+def test_create_immediate_block_without_open_parents_unchanged(worker_env, parent_done):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db_connect as kbc
+
+    parents = []
+    if parent_done:
+        with kbc.connect() as conn:
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (worker_env,))
+        parents = [worker_env]
+    result = json.loads(kt._handle_create(dict(
+        title="Approve release now", assignee="peer", parents=parents, initial_status="blocked")))
+    assert result.get("ok"), result
+    assert result["status"] == "blocked"
+
+
+def test_create_conditional_guidance_is_in_schema():
+    from tools.kanban_tools_schemas import KANBAN_CREATE_SCHEMA
+
+    props = KANBAN_CREATE_SCHEMA["parameters"]["properties"]
+    description = props["initial_status"]["description"]
+    for guidance in ("parents", "kanban_schedule", "wake_check", "human_action_now"):
+        assert guidance in description
+    assert props["human_action_now"]["type"] == "boolean"
+
+
 def test_create_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_create({

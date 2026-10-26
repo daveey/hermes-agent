@@ -17,6 +17,9 @@ def test_checker_reports_and_clears_fixed_bash_paths(tmp_path):
         "other.sh": "#!/bin/sh\n",
         "portable.sh": "#!/usr/bin/env bash\n",
         "usr.sh": "#! /usr/bin/" + "bash\n",
+        "large.txt": "ordinary text without a shell marker\n" * 10000,
+        "late.txt": "ordinary text\r\n" * 10000 + fixed + "\n",
+        "binary.dat": "\0" + fixed,
     }
     for name, text in files.items():
         (tmp_path / name).write_text(text, encoding="utf-8")
@@ -29,8 +32,9 @@ def test_checker_reports_and_clears_fixed_bash_paths(tmp_path):
         "activate:1: use #!/usr/bin/env bash",
         "example.md:2: use #!/usr/bin/env bash",
         "generator.py:1: use #!/usr/bin/env bash",
+        "late.txt:10001: use #!/usr/bin/env bash",
         "usr.sh:1: use #!/usr/bin/env bash",
-        "Bash shebang check: 4 violation(s)",
+        "Bash shebang check: 5 violation(s)",
     ]
     for name, text in files.items():
         (tmp_path / name).write_text(

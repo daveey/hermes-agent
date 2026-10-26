@@ -1321,7 +1321,23 @@ def _handle_create(args: dict, **kw) -> str:
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
+    human_action_now = _parse_bool_arg(args, "human_action_now")
     with _board(args.get("board")) as (kb, conn):
+        # Never infer approval from prose or silently turn a human gate into
+        # dispatchable work. Ask the creator to distinguish a future dependency
+        # from a human action that can actually be taken while parents are open.
+        if args.get("initial_status") == "blocked" and not human_action_now:
+            open_parents = [pid for pid in (parents or [])
+                            if (parent := kb.get_task(conn, pid)) and parent.status != "done"]
+            _check(not open_parents,
+                   "initial_status='blocked' with unfinished parents requires an immediate "
+                   "human action. For 'after X, then Y', keep parents and omit initial_status "
+                   "so the task waits in todo; the worker must request any required approval "
+                   "when it becomes due, never assume approval. For an external/time condition, "
+                   "use kanban_schedule with wake_check (clock_only for a pure time wait). "
+                   "If a human really can act now despite the unfinished parents, set "
+                   "human_action_now=true and explain that present action in body. Nothing changed.",
+                   rejection="invalid_args")
         from gateway.session_context import get_session_env
         from tools.async_delegation import _current_origin_session_id
         self_tid = (os.environ.get("HERMES_KANBAN_TASK")

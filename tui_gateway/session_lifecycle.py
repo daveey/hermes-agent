@@ -118,11 +118,43 @@ def _install_borrowed_lease(sid: str, session: dict, frame: dict) -> None:
         surface=str(frame.get("source") or "desktop"), enabled=False)
 
 
+def _foreign_turn_owner(session: dict):
+    key = str(session.get("session_key") or "")
+    if not key:
+        return None
+    with _session_db(session) as db:
+        owner = db.session_turn_lease_owner(key)
+    own_holder = getattr(session.get("agent"), "_active_session_turn_lease_holder", None)
+    return owner if owner and owner["holder"] != own_holder else None
+
+
+def _durable_owner_refusal(session: dict):
+    from hermes_cli.active_sessions import ActiveSessionRefusal, SESSION_NOT_OWNED
+    try:
+        owner = _foreign_turn_owner(session)
+    except Exception:
+        logger.warning("Could not inspect durable turn owner", exc_info=True)
+        return _SESSION_OWNERSHIP_UNAVAILABLE
+    if owner is None:
+        return None
+    holder = owner["holder"]
+    surface = holder.rsplit(":platform=", 1)[-1] if ":platform=" in holder else "unknown"
+    return ActiveSessionRefusal(
+        "This chat is active in another Hermes window/terminal. Use Take over here "
+        "(session.take_over), or wait for that turn to finish.\n"
+        f"Details: session {owner['conversation_id']} opened by {surface}. "
+        f"Writer: {holder}", SESSION_NOT_OWNED)
+
+
 def _ensure_active_session_slot(sid: str, session: dict) -> str | None:
     """Claim this session's cap slot on its first real turn; None when ok. session.create/resume deliberately
     do NOT claim: tile paints, reconnect-resumes and abandoned drafts would hold invisible slots (no DB row)
     that starve the messaging gateway sharing the cap. Anything holding a slot must be user-visible. An
     inert borrowed token (see _install_borrowed_lease) also lands here: present = slot held upstream."""
+    # A registry slot is not the SQLite writer lease. Check even on a warm Desktop session.
+    # Its own running agent is excluded by exact holder, preserving ordinary steer/stop.
+    if (refusal := _durable_owner_refusal(session)) is not None:
+        return refusal
     if session.get("active_session_lease") is not None:
         return None
     key = str(session.get("session_key") or "")

@@ -91,14 +91,10 @@ import { ChatView } from '.'
 
 const NO_MESSAGES: ChatMessage[] = []
 
-export const WRONG_BACKEND_TILE_ERROR =
-  'Wrong backend — this session lives on another connection. Reconnect to that backend to open it.'
-
 export function sessionTileResumeFailure(
   message: string,
   durableSessionFound: boolean | undefined,
-  tileStillUnbound: boolean,
-  backendIdentityChanged = false
+  tileStillUnbound: boolean
 ): string | undefined {
   if (!tileStillUnbound) {
     return undefined
@@ -108,10 +104,6 @@ export function sessionTileResumeFailure(
     return message
   }
 
-  if (backendIdentityChanged) {
-    return WRONG_BACKEND_TILE_ERROR
-  }
-
   if (durableSessionFound) {
     return 'Session is still available — retry resuming it.'
   }
@@ -119,9 +111,9 @@ export function sessionTileResumeFailure(
   return 'Session unavailable — you can retry resuming it.'
 }
 
-/** True when a persisted tile's owner is a different backend than the one that
- *  just became active. An unqualified local boot (no connectionId, mode local)
- *  counts as the local identity — that is the post-update empty backend. */
+/** Conservative deletion check for restored, missing tiles only. A different
+ *  ambient backend is NOT a resume failure: live tiles use their owner route.
+ *  An unqualified local boot still counts as the local identity here. */
 export function tileBackendIdentityChanged(
   ownerConnectionId: string | null | undefined,
   activeConnection: { connectionId?: string | null; mode?: string | null } | null | undefined
@@ -136,33 +128,6 @@ export function tileBackendIdentityChanged(
     String(activeConnection.connectionId || '').trim() || (activeConnection.mode === 'local' ? 'local' : '')
 
   return Boolean(active) && owner !== active
-}
-
-export function unbindTilesForBackendIdentityChange<
-  T extends { error?: string; ownerRoute?: { connectionId?: string }; runtimeId?: string }
->(
-  tiles: readonly T[],
-  activeConnection: { connectionId?: string | null; mode?: string | null } | null | undefined
-): T[] {
-  let changed = false
-
-  const next = tiles.map(tile => {
-    if (!tileBackendIdentityChanged(tile.ownerRoute?.connectionId, activeConnection)) {
-      return tile
-    }
-
-    if (!tile.runtimeId && tile.error === WRONG_BACKEND_TILE_ERROR) {
-      return tile
-    }
-
-    changed = true
-    const unbound = { ...tile, error: WRONG_BACKEND_TILE_ERROR }
-    delete unbound.runtimeId
-
-    return unbound
-  })
-
-  return changed ? next : (tiles as T[])
 }
 
 /** Should this tile dispatch a `session.resume`?
@@ -540,13 +505,11 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
         // reconnect-time lookup.
         const durableSession = await resolveStoredSession(storedSessionId, ownerRoute).catch(() => undefined)
         const current = $sessionTiles.get().find(candidate => candidate.storedSessionId === storedSessionId)
-        const identityChanged = tileBackendIdentityChanged(ownerRoute?.connectionId, $connection.get())
 
         const error = sessionTileResumeFailure(
           message,
           Boolean(durableSession),
-          Boolean(current && !current.runtimeId),
-          identityChanged
+          Boolean(current && !current.runtimeId)
         )
 
         if (error) {
@@ -563,7 +526,7 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
   // retriggers the resume effect: one bounded auto-retry per (re)connect,
   // mirroring the primary path's became-open resync.
   useEffect(() => {
-    if (gatewayOpen && tile?.error && tile.error !== WRONG_BACKEND_TILE_ERROR) {
+    if (gatewayOpen && tile?.error) {
       patchSessionTile(storedSessionId, { error: undefined })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -694,26 +657,6 @@ export function startUnrestoredTileTitleBackfill(lookup = probeStoredSession): (
     stopped = true
     off()
   }
-}
-
-/** Drop persisted tile bindings that belong to a different backend than the
- *  one that just became active, and latch the wrong-backend error so a later
- *  resume cannot turn a cross-backend 404 into the durable-session retry copy. */
-export function startTileBackendIdentityGuard(activeConnection = () => $connection.get()): () => void {
-  const run = () => {
-    const connection = activeConnection()
-    const tiles = $sessionTiles.get()
-    const next = unbindTilesForBackendIdentityChange(tiles, connection)
-
-    if (next !== tiles) {
-      $sessionTiles.set(next)
-    }
-  }
-
-  const off = $connection.listen(run)
-  run()
-
-  return off
 }
 
 /** The tab's REGISTERED name. Deliberately the bare placeholder for a draft

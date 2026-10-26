@@ -178,6 +178,54 @@ def _takeover_previous_owner(entry: dict | None) -> dict | None:
             "started_at": float(started) if isinstance(started, (int, float)) else None}
 
 
+def _take_over_durable_writer(rid, sid: str, session: dict, owner: dict):
+    from pathlib import Path
+    from hermes_cli.active_sessions import (
+        request_turn_handoff, take_over_active_session, turn_handoff_is_current, _state_path)
+    # Bind to the store we inspected, not the RPC thread's ambient profile.
+    with _session_db(session) as db:
+        registry_home = Path(db.db_path).parent
+    lease = session.get("active_session_lease")
+    if lease is not None and Path(lease.state_path).resolve() != _state_path(registry_home).resolve():
+        return _err(rid, 4090, _SESSION_OWNERSHIP_UNAVAILABLE,
+                    {"reason": "SESSION_COORDINATION_UNAVAILABLE"})
+    if lease is None:
+        lease, _removed, refusal = take_over_active_session(
+            session_id=str(session.get("session_key") or ""), surface=_session_source(session),
+            metadata=_lease_metadata(sid), registry_home=registry_home,
+            config=_load_cfg(), track_liveness=True)
+        if refusal is not None:
+            return _err(rid, 4090, str(refusal), {"reason": getattr(refusal, "reason", None)})
+        _attach_lease(session, lease)
+    if not request_turn_handoff(lease, owner["holder"]):
+        return _err(rid, 4090, _SESSION_OWNERSHIP_UNAVAILABLE,
+                    {"reason": "SESSION_COORDINATION_UNAVAILABLE"})
+    deadline = time.monotonic() + max(0.0, env_float("HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S", 8.0))
+    while True:
+        current = _foreign_turn_owner(session)
+        if (session.get("active_session_lease") is not lease
+                or not turn_handoff_is_current(lease, owner["holder"])
+                or (current is not None and current["holder"] != owner["holder"])):
+            return _err(rid, 4090, "Ownership changed during handoff. Retry Take over here.",
+                        {"reason": "SESSION_NOT_OWNED"})
+        if current is None:
+            break
+        if time.monotonic() >= deadline:
+            return _err(rid, 4090,
+                        "The other writer has not released this chat. It may be an older Hermes CLI. "
+                        "Stop its turn in that terminal, then retry Take over here. No writer was forced out.",
+                        {"reason": "SESSION_NOT_OWNED"})
+        time.sleep(_TAKEOVER_ACK_POLL_S)
+    _reload_history_after_takeover(session)
+    holder = owner["holder"]
+    surface = holder.rsplit(":platform=", 1)[-1] if ":platform=" in holder else "unknown"
+    return _ok(rid, {"status": "taken_over", "acknowledged": True,
+                     "previous_owner": {"surface": surface,
+                                        "pid": int(holder.split(":", 1)[0][4:])
+                                        if holder.startswith("pid=") and holder.split(":", 1)[0][4:].isdigit() else None,
+                                        "started_at": owner["acquired_at"]}})
+
+
 @method("session.take_over")
 @_registry.profile_scoped
 def _(rid, params: dict) -> dict:
@@ -185,6 +233,14 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     sid = str(params.get("session_id") or "")
+    try:
+        owner = _foreign_turn_owner(session)
+        if owner is not None:
+            return _take_over_durable_writer(rid, sid, session, owner)
+    except Exception:
+        logger.warning("Durable writer handoff failed", exc_info=True)
+        return _err(rid, 4090, _SESSION_OWNERSHIP_UNAVAILABLE,
+                    {"reason": "SESSION_COORDINATION_UNAVAILABLE"})
     if session.get("active_session_lease") is not None:
         return _ok(rid, {"status": "already_owner", "previous_owner": None, "acknowledged": True})
     key = str(session.get("session_key") or "")

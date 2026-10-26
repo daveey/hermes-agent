@@ -573,12 +573,21 @@ KANBAN_CREATE_SCHEMA = _schema(
             "type": "string",
             "enum": ["running", "blocked"],
             "description": (
-                "Initial card status. Use 'blocked' for tasks that "
-                "require immediate human ops (R3 gate) to skip the "
-                "brief running-to-blocked transition. Defaults to "
-                "'running', which preserves the usual dispatch path."
+                "Initial card status. 'blocked' is only for human action needed now, "
+                "not a future approval or 'after X, then Y' hold. For task dependencies, "
+                "set parents and omit initial_status: the card waits in todo until parents "
+                "finish. The worker must still obtain any required approval when due. "
+                "For external conditions use kanban_schedule with wake_check (clock_only "
+                "for pure time waits). With unfinished parents, 'blocked' requires explicit "
+                "human_action_now=true. Defaults to 'running' (usual dispatch path)."
             ),
         },
+        "human_action_now": _prop("boolean", (
+            "Only for initial_status='blocked': explicitly confirm a human can act now "
+            "even while parents remain unfinished. Describe that present action in body. "
+            "Do not set for future/conditional approval. This keeps the card blocked; "
+            "it does not grant approval or authorize execution."
+        )),
         "skills": {
             "type": "array",
             "items": {"type": "string"},
