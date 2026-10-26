@@ -316,6 +316,16 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     observed_at = evidence.get('observed_at')
                     live = (type(observed_at) in (int, float) and 0 <= now - observed_at <= 180)
                     current = current and readable and live
+                if (owner['gateway'], owner['profile']) == (gateway, profile):
+                    from hermes_cli.kanban_origin_local import observe_local_binding
+                    local = observe_local_binding(binding, profile=profile, now=now)
+                    # An unreadable local authority must not fall back to a stale
+                    # own replica, even one which previously proved completion.
+                    current = local is not None
+                    released = False
+                    if local is not None:
+                        task = local
+                        released = _owner_evidence(task).get('verified') is True
                 status = task.get('status')
                 # Acceptance alone is not a release, including an initially
                 # terminal publication. Unknown status also remains unfinished.

@@ -1,0 +1,41 @@
+"""Read-only, binding-qualified evidence from the current profile's owner board."""
+from contextlib import closing
+import json
+import sqlite3
+
+
+def observe_local_binding(binding: dict, *, profile: str, now: float) -> dict | None:
+    """Never infer an owner from an ID or release a receipt without its marker.
+
+    Caller has already matched the trusted local gateway and profile. Shared or
+    overridden board locations are ambiguous and cannot authorize this overlay.
+    """
+    from hermes_constants import get_hermes_home
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_origin import _ro
+    from hermes_cli.kanban_origin_ledger import observe_owner_task
+    from hermes_cli.profiles import get_active_profile_name
+
+    owner = binding['owner']
+    home = get_hermes_home().resolve()
+    board = owner['board']
+    expected = home / 'kanban.db' if board == 'default' else home / 'kanban/boards' / board / 'kanban.db'
+    if (profile != get_active_profile_name() or owner['profile'] != profile
+            or kb.kanban_home().resolve() != home or kb.kanban_db_path(board).resolve() != expected):
+        return None
+    try:
+        with closing(_ro(expected)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute('BEGIN')
+            row = conn.execute('SELECT * FROM tasks WHERE id=?', (owner['task_id'],)).fetchone()
+            if row is None:
+                return None
+            markers = [json.loads(r[0]) for r in conn.execute(
+                'SELECT binding_json FROM origin_creation_intents WHERE task_id=?', (owner['task_id'],))]
+            marker = {k: v for k, v in binding.items() if k != 'publication_version'}
+            if marker not in markers:
+                return None
+            task = {**dict(row), **owner, 'id': owner['task_id'], 'origin_bindings': markers}
+            return observe_owner_task(conn, task, now=now)
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        return None
