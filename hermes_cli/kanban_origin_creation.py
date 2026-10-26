@@ -97,8 +97,6 @@ def adopt_with_origin(conn, intent: dict, *, board: str) -> str:
     immutable = _json({"operation": "adopt", "intent": intent})
     task_id = owner["task_id"]
     with kb.write_txn(conn, allow_nested=True):
-        if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
-            raise OriginError("origin_task_missing", "exact owner task does not exist")
         conn.execute("""CREATE TABLE IF NOT EXISTS origin_creation_intents (
             request_id TEXT PRIMARY KEY NOT NULL,
             intent_json TEXT NOT NULL,
@@ -113,6 +111,8 @@ def adopt_with_origin(conn, intent: dict, *, board: str) -> str:
             if existing["intent_json"] != immutable:
                 raise OriginError("origin_creation_conflict", "request ID reused with a different origin intent")
             return existing["task_id"]
+        if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
+            raise OriginError("origin_task_missing", "exact owner task does not exist")
         for row in conn.execute("SELECT request_id,binding_json FROM origin_creation_intents WHERE task_id=?", (task_id,)):
             try:
                 previous = json.loads(row["binding_json"])

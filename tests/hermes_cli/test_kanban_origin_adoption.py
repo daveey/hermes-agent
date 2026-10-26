@@ -91,6 +91,16 @@ def test_retry_archive_and_conflicting_request(board):
     assert conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0] == "archived"
 
 
+def test_changed_retry_to_missing_task_is_an_immutable_conflict(board):
+    conn, tid = board
+    creation.adopt_with_origin(conn, intent(tid), board="default")
+    changed = {**intent(tid), "owner": {**intent(tid)["owner"], "task_id": "t_missing"}}
+    with pytest.raises(OriginError) as exc:
+        creation.adopt_with_origin(conn, changed, board="default")
+    assert exc.value.code == "origin_creation_conflict"
+    assert conn.execute("SELECT COUNT(*) FROM origin_creation_intents").fetchone()[0] == 1
+
+
 def test_failed_adoption_insert_rolls_back_without_changing_task(board):
     import sqlite3
     conn, tid = board
@@ -121,6 +131,30 @@ def test_concurrent_adoption_replay_keeps_one_marker(board):
         futures = [pool.submit(adopt) for _ in range(2)]
         assert [f.result(timeout=20) for f in futures] == [tid, tid]
     assert conn.execute("SELECT COUNT(*) FROM origin_creation_intents").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("first", ["create", "adopt"])
+def test_create_adopt_request_id_collision_preserves_original_operation(board, first):
+    conn, tid = board
+    adoption = intent(tid)
+    creation_intent = {**adoption, "owner": {
+        key: value for key, value in adoption["owner"].items() if key != "task_id"
+    }}
+    operations = {
+        "create": lambda: kb.create_task(conn, title="Build", origin_intent=creation_intent),
+        "adopt": lambda: creation.adopt_with_origin(conn, adoption, board="default"),
+    }
+    operations[first]()
+    original = [dict(row) for row in conn.execute("SELECT * FROM origin_creation_intents")]
+    tasks = [dict(row) for row in conn.execute("SELECT * FROM tasks ORDER BY id")]
+    events = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+    second = "adopt" if first == "create" else "create"
+    with pytest.raises(OriginError) as exc:
+        operations[second]()
+    assert exc.value.code == "origin_creation_conflict"
+    assert [dict(row) for row in conn.execute("SELECT * FROM origin_creation_intents")] == original
+    assert [dict(row) for row in conn.execute("SELECT * FROM tasks ORDER BY id")] == tasks
+    assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == events
 
 
 def test_registered_adoption_tool_requires_trusted_context(board):

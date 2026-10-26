@@ -198,22 +198,20 @@ def test_adoption_entry_rejects_wrong_route_or_missing_capability(world, monkeyp
         tid = kb.create_task(conn, title='Existing', session_id='original-creator')
     request = {**world, 'action': 'origin-adopt', 'key': 'default/default/' + tid,
                'args': {'origin': world['args']['origin']}}
-    if damage == 'sender':
-        request['from'] = 'gw:impostor'
-    elif damage == 'gateway':
-        request['to_gw'] = 'other'
-    elif damage == 'profile':
-        request['key'] = 'other/default/' + tid
-    elif damage == 'task':
-        request['key'] = 'default/default/' + tid[:-1]
-    elif damage == 'args':
-        request['args']['create'] = {'title': 'Duplicate'}
-    elif damage == 'pinned_db':
+    request_changes = {
+        'sender': {'from': 'gw:impostor'},
+        'gateway': {'to_gw': 'other'},
+        'profile': {'key': 'other/default/' + tid},
+        'task': {'key': 'default/default/' + tid[:-1]},
+        'args': {'args': {**request['args'], 'create': {'title': 'Duplicate'}}},
+    }
+    request.update(request_changes.get(damage, {}))
+    if damage == 'pinned_db':
         monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'wrong.db'))
         monkeypatch.setattr(kb, '_explicit_board_intent_pinned', lambda: True)
-    elif damage == 'tool_absent':
+    if damage == 'tool_absent':
         monkeypatch.setattr(registry, '_snapshot_entries', list)
-    else:
+    if damage == 'delegated':
         monkeypatch.setattr('agent.delegation_context.kanban_path_is_fenced', lambda path: True)
         args = argparse.Namespace(kanban_action='origin-adopt', request_file='-')
         assert kanban.kanban_command(args) != 0
