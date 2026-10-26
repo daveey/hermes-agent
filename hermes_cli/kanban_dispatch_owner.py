@@ -8,11 +8,41 @@ import sqlite3
 import tempfile
 
 
-def connection_db_path(conn: sqlite3.Connection) -> Path:
-    """Use the opened database, never an enumerated board alias or env pin."""
+def connect_with_identity(path, **kwargs):
+    """Capture the opened inode while native archive/delete cannot relocate it.
+
+    Ordinary clients may still connect during a tick. Such handles cannot later
+    dispatch: reopen after contention clears instead of trusting a pathname.
+    """
+    from hermes_cli.kanban_db_connect import _dispatch_tick_lock
+    canonical = Path(path).resolve()
+    with _dispatch_tick_lock(canonical) as held:
+        conn = sqlite3.connect(str(canonical), **kwargs)
+        try:
+            stat = canonical.stat() if held else None
+            conn._dispatch_identity = (stat.st_dev, stat.st_ino) if stat else None
+            return conn
+        except BaseException:
+            conn.close()
+            raise
+
+
+def connection_db_path(conn: sqlite3.Connection, *, validate: bool = True) -> Path:
+    """Validate the opened inode, not just PRAGMA's original filename.
+
+    Call again under the dispatch lock before reading ownership or doing work.
+    Raw SQLite handles cannot establish lifecycle provenance and fail closed.
+    """
+    expected = getattr(conn, "_dispatch_identity", None)
+    if validate and expected is None:
+        raise ValueError("dispatch requires a native connection opened without lock contention; reconnect")
     for row in conn.execute("PRAGMA database_list"):
         if row[1] == "main" and row[2]:
-            return Path(row[2]).resolve(strict=True)
+            path = Path(row[2]).resolve(strict=True)
+            stat = path.stat()
+            if validate and (stat.st_dev, stat.st_ino) != expected:
+                raise ValueError("database was relocated or replaced after connection open; reconnect")
+            return path
     raise ValueError("dispatcher requires an identifiable on-disk database")
 
 
@@ -70,13 +100,14 @@ def run_owned_tick(conn, tick, dispatcher_id, board, dry_run):
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
     from hermes_cli.kanban_db_dispatch import DispatchResult
     try:
-        db_path = connection_db_path(conn)
+        db_path = connection_db_path(conn, validate=False)
     except (OSError, ValueError, sqlite3.Error) as exc:
         return DispatchResult(skipped_owned=True, ownership_error=str(exc))
     with kbc._dispatch_tick_lock(db_path) as held:
         if not held:
             return DispatchResult(skipped_locked=True)
         try:
+            connection_db_path(conn)
             owner = get_dispatch_owner(db_path)
         except (OSError, ValueError, UnicodeError, RecursionError) as exc:
             return DispatchResult(skipped_owned=True, ownership_error=str(exc))

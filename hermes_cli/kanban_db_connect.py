@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import random
 import re
 import secrets
@@ -59,11 +60,12 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
     byte-level probes of the file are refused because an ``open()``/``close()``
     would cancel this process's POSIX advisory locks (see ``sqlite_safe_read``)."""
     from hermes_cli.sqlite_safe_read import connect_tracked
+    from hermes_cli.kanban_dispatch_owner import connect_with_identity
 
     busy_timeout_ms = _resolve_busy_timeout_ms()
     conn = connect_tracked(
         path,
-        connect_fn=sqlite3.connect,
+        connect_fn=connect_with_identity,
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
     )
@@ -192,7 +194,15 @@ def _dispatch_tick_lock(db_path: Path):
         acquired = False
         handle = None
     try:
-        yield acquired
+        # Archive/delete may have moved this lock after open but before flock.
+        # An acquired obsolete inode does not serialize work on its replacement.
+        current = False
+        if acquired:
+            try:
+                current = os.path.samestat(os.fstat(handle.fileno()), lock_path.stat())
+            except OSError:
+                current = False
+        yield acquired and current
     finally:
         if handle is not None:
             try:

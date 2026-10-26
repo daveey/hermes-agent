@@ -38,10 +38,10 @@ repaired explicitly rather than silently replaced by display defaults.
 Call the native boundary with a constant ID and your scoped spawn function:
 
 ```python
-from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_db_connect import connect_closing
 from hermes_cli.kanban_db_dispatch import dispatch_once
 
-with kb.connect_closing(board="example") as conn:
+with connect_closing(board="example") as conn:
     result = dispatch_once(conn, board="example", dispatcher_id="dedicated-worker",
                            spawn_fn=scoped_spawn)
 ```
@@ -92,8 +92,20 @@ an identity implicitly.
 * Gateway auto-decomposition also holds this lock through listing and decomposing
   triage work. Owned/invalid boards neither spend auxiliary LLM calls nor count
   toward the stock gateway's stuck-dispatch health check.
-* In-memory/unidentifiable connections fail closed. Direct task APIs are not
-  changed: this coordinates dispatchers, not arbitrary same-UID database writers.
+* Dispatch requires a native `kanban_db_connect.connect`/`connect_closing`
+  connection. Native open captures device/inode under the lifecycle lock, and
+  both tick and gateway pre-work revalidate it under that lock. Archive/delete
+  followed by recreating a slug cannot redirect an already-open handle to the
+  replacement's owner. Raw SQLite and in-memory handles fail closed. A native
+  connection opened while that lock is busy remains usable for ordinary task
+  APIs, but must be closed and reopened before dispatch (even after contention
+  clears). This intentional API tightening applies to unowned boards too.
+* Direct task APIs are not changed: this coordinates dispatchers, not arbitrary
+  same-UID database writers. Replacing a DB manually without removing its sidecar
+  retains ownership, including corruption recovery; clear ownership explicitly
+  if the replacement should become unowned.
+* Auto-decomposition holds the lock across auxiliary calls; operator edits may
+  report busy for their entire duration and must be retried.
 
 ## Tests
 

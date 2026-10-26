@@ -225,10 +225,12 @@ class _KanbanDispatcher:
             allowed = None
             try:
                 conn = stack.enter_context(_kbc().connect_closing(board=slug))
-                path = connection_db_path(conn)
+                path = connection_db_path(conn, validate=False)
                 held = stack.enter_context(_kbc()._dispatch_tick_lock(path))
-                if held and get_dispatch_owner(path) is None:
-                    allowed = conn
+                if held:
+                    connection_db_path(conn)
+                    if get_dispatch_owner(path) is None:
+                        allowed = conn
             except (OSError, ValueError, UnicodeError, RecursionError, sqlite3.Error) as exc:
                 logger.debug("kanban dispatcher: pre-dispatch work denied on %s (%s)", slug, exc)
             yield allowed

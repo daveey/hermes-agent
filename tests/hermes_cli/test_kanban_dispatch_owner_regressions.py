@@ -1,4 +1,5 @@
 """Ownership authority must be invariant across homes and DB aliases."""
+from contextlib import closing
 import json
 import sqlite3
 from pathlib import Path
@@ -26,7 +27,7 @@ def test_foreign_default_owner_survives_home_switch_and_display_edit(home, tmp_p
     foreign = tmp_path / "foreign"
     foreign.mkdir()
     path = foreign / "kanban.db"
-    with sqlite3.connect(path) as conn:
+    with closing(kbc.connect(path)) as conn:
         set_dispatch_owner(path, "dedicated")
         monkeypatch.setenv("HERMES_KANBAN_HOME", str(foreign))
         tick = Mock(return_value=DispatchResult())
@@ -44,7 +45,7 @@ def test_default_symlink_to_named_board_cannot_hide_owner(home, tmp_path, monkey
         pass
     set_dispatch_owner(path, "dedicated")
     (home / "kanban.db").symlink_to(path)
-    with sqlite3.connect(home / "kanban.db") as conn:
+    with closing(kbc.connect(home / "kanban.db")) as conn:
         tick = Mock(return_value=DispatchResult())
         assert run_owned_tick(conn, tick, None, "default", False).skipped_owned
         tick.assert_not_called()
@@ -68,7 +69,7 @@ def test_deep_metadata_denies_without_traceback(home):
     path = home / "kanban.db"
     metadata = path.with_name(path.name + ".dispatch-owner.json")
     metadata.write_text('[' * 2000 + ']' * 2000)
-    with sqlite3.connect(path) as conn:
+    with closing(kbc.connect(path)) as conn:
         tick = Mock()
         result = run_owned_tick(conn, tick, None, "default", False)
         assert result.skipped_owned and result.ownership_error
@@ -78,7 +79,7 @@ def test_deep_metadata_denies_without_traceback(home):
 @pytest.mark.parametrize("owned", [True, False])
 def test_lock_failure_is_closed_even_for_unowned_board(home, monkeypatch, owned):
     path = home / "kanban.db"
-    with sqlite3.connect(path) as conn:
+    with closing(kbc.connect(path)) as conn:
         if owned:
             set_dispatch_owner(path, "dedicated")
         original = Path.open

@@ -1,4 +1,6 @@
 """Ownership must not alter display identity, and must survive native moves."""
+from contextlib import closing
+from hermes_cli import kanban_db_connect as kbc
 import json
 import sqlite3
 import tarfile
@@ -61,7 +63,7 @@ def test_archive_preserves_owner_for_direct_dispatch(home, tmp_path, external):
     result = kb.remove_board("sample")
     archived = Path(result["new_path"]) / "kanban.db"
     assert get_dispatch_owner(archived) == "dedicated"
-    with sqlite3.connect(archived) as conn:
+    with closing(kbc.connect(archived)) as conn:
         tick = Mock(return_value=DispatchResult())
         assert run_owned_tick(conn, tick, None, "sample", False).skipped_owned
         tick.assert_not_called()
@@ -71,7 +73,7 @@ def test_archive_preserves_owner_for_direct_dispatch(home, tmp_path, external):
 
 def test_dangling_owner_link_through_missing_ancestor_denies(home, tmp_path):
     path = home / "kanban.db"
-    with sqlite3.connect(path) as conn:
+    with closing(kbc.connect(path)) as conn:
         target_dir = tmp_path / "owner-data"
         target_dir.mkdir()
         target = target_dir / "owner.json"
@@ -127,7 +129,7 @@ def test_broken_display_ancestor_cannot_hide_owner(home, tmp_path):
     backing = tmp_path / "display"
     backing.mkdir()
     display.symlink_to(backing, target_is_directory=True)
-    with sqlite3.connect(path) as conn:
+    with closing(kbc.connect(path)) as conn:
         set_dispatch_owner(path, "dedicated")
         backing.rename(tmp_path / "moved-display")
         tick = Mock(return_value=DispatchResult())
