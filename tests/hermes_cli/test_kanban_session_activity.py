@@ -85,6 +85,8 @@ def test_archive_invalidates_cached_counts_and_waiting_ids(kanban_root, journal_
     """An archive from another process must be visible before the poll TTL expires."""
     path = kanban_root / "kanban.db"
     _make_board(path, [("t1", status, "s1")])
+    if status == "blocked":
+        _add_human_requests(path, "t1")
     conn = sqlite3.connect(path)
     try:
         conn.execute(f"PRAGMA journal_mode={journal_mode}")
