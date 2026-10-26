@@ -112,14 +112,20 @@ def turn_env(monkeypatch, tmp_path, marker_home):
 # ── Marker module ──────────────────────────────────────────────────────
 
 
-def test_marker_roundtrip(tmp_path):
+def test_marker_roundtrip(tmp_path, monkeypatch):
+    started_at = 1_700_000_000.125
+    # Patch only the marker's clock, not the shared time module: scheduling
+    # delays must not affect this persistence round-trip assertion.
+    clock = types.SimpleNamespace(time=lambda: started_at)
+    monkeypatch.setattr("tui_gateway.turn_marker.time", clock)
     record_turn_start(tmp_path, "abc", "fix the bug", attempts=1)
+    clock.time = lambda: started_at + 60
 
     marker = read_turn_marker(tmp_path, "abc")
     assert marker is not None
     assert marker["prompt"] == "fix the bug"
     assert marker["attempts"] == 1
-    assert marker["started_at"] == pytest.approx(time.time(), abs=5)
+    assert marker["started_at"] == started_at
 
     clear_turn_marker(tmp_path, "abc")
     assert read_turn_marker(tmp_path, "abc") is None
