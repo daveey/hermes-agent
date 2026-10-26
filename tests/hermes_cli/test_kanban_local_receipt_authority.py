@@ -36,10 +36,12 @@ def test_local_open_association_dominates_stale_receipt(tmp_path, monkeypatch, s
     for changed in ({'profile': 'other'}, {'board': 'other'}, {'profile': None},
                     {'session': 's_other', 'origin_session': 's_other'}):
         row.update(changed)
+        activity._reset_cache_for_tests()  # the stubbed projection changed without any store changing
         assert activity._remote_links() == [row]
         row.update(profile='default', board='default', session='s_one', origin_session='s_one')
     other = {**row, 'session': 's_other', 'origin_session': 's_other'}
     monkeypatch.setattr(ledger, 'project', lambda *args, **kwargs: [row, other])
+    activity._reset_cache_for_tests()
     assert activity._remote_links() == [other]
     # An arbitrary terminal status is not a verified durable release.
     import sqlite3

@@ -252,6 +252,7 @@ HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync
 _REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority")
 _remote_last: list[dict[str, Any]] | None = None  # last good read (process lifetime)
 _remote_scope: tuple[str, ...] | None = None
+_snapshot_saved: tuple[tuple[str, ...], list[dict[str, Any]]] | None = None  # last (scope, cards) written to disk
 
 
 def _meta_float(conn: sqlite3.Connection, key: str) -> float | None:
@@ -451,8 +452,43 @@ def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
             if (row['key'], row['session'], row['origin_session']) not in represented]
 
 
+_links_lock = threading.Lock()
+_links_cache: tuple[float, tuple, tuple, list[dict[str, Any]]] | None = None  # (expires, scope, fingerprint, cards)
+
+
+def _links_fingerprint() -> tuple:
+    """Every store the remote inventory reads except state.db (alias tips), which the TTL bounds instead."""
+    from hermes_constants import get_hermes_home
+
+    ledger = get_hermes_home() / 'kanban' / 'origin-ledger.db'
+    signature = list(_activity_fingerprint())
+    for path in (ledger, Path(str(ledger) + '-wal')):
+        try:
+            st = path.stat()
+            signature.append((str(path), st.st_ino, st.st_size, st.st_mtime_ns))
+        except FileNotFoundError:
+            signature.append((str(path), None))
+    return tuple(signature)
+
+
 def _remote_links() -> list[dict[str, Any]]:
-    """Shared origin-ledger projection, with preserved legacy associations."""
+    """Shared origin-ledger projection, with preserved legacy associations.
+
+    One projection per scope serves every reader (counts, session task lists, plugins) for ``_CACHE_TTL_S``
+    while no store it reads has changed. Single-flight: concurrent readers wait for the running projection
+    and share it instead of each rebuilding the whole replica inventory. Failures are never cached."""
+    global _links_cache
+    scope, fingerprint = _origin_scope(), _links_fingerprint()
+    with _links_lock:
+        hit = _links_cache
+        if hit is not None and hit[1] == scope and hit[2] == fingerprint and time.monotonic() < hit[0]:
+            return list(hit[3])
+        cards = _project_remote_links()
+        _links_cache = (time.monotonic() + _CACHE_TTL_S, scope, fingerprint, cards)
+        return list(cards)
+
+
+def _project_remote_links() -> list[dict[str, Any]]:
     from hermes_constants import get_hermes_home
     from hermes_cli.kanban_origin_adapter import _gateway
     from hermes_cli.kanban_origin_ledger import project
@@ -511,7 +547,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     """``_read_remote_links`` of this gateway's replica. A failed read (corrupt/locked/vanished hub.db) is not
     "no remote work": it returns the last good answer with every row marked stale, so a session never paints
     done because the replica could not be read. No replica ever seen = not installed = []."""
-    global _remote_last, _remote_scope
+    global _remote_last, _remote_scope, _snapshot_saved
     scope = _origin_scope()
     with _cache_lock:
         previous = _remote_last if _remote_scope == scope else None
@@ -535,7 +571,14 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     present = {(c["session"], c["key"]) for c in cards}
     cards.extend({**c, "stale": True} for c in (previous or [])
                  if (c["session"], c["key"]) not in present)
-    _remote_snapshot(cards)
+    if _snapshot_saved != (scope, cards):
+        # The durable snapshot only speeds a cold start. Losing a write race (database is locked) must not
+        # fail this read: the sidebar would mark every row kanban_unknown. The next changed read retries.
+        try:
+            _remote_snapshot(cards)
+            _snapshot_saved = (scope, [dict(c) for c in cards])
+        except sqlite3.Error as exc:
+            _log.warning("origin-work snapshot not saved; retrying on the next change: %s", exc)
     with _cache_lock:
         _remote_scope = scope
         _remote_last = cards
@@ -885,10 +928,13 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:
-    global _cache, _attention_cache, _remote_last
+    global _cache, _attention_cache, _remote_last, _links_cache, _snapshot_saved
+    with _links_lock:
+        _links_cache = None
     with _cache_lock:
         _cache = None
         _attention_cache = None
         if not keep_remote:
             _remote_last = None
+            _snapshot_saved = None
         _waiting_cache[0] = {}
