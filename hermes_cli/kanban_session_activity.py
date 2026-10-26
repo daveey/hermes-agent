@@ -429,14 +429,23 @@ def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
         return rows
     boards = {_board_slug(p): p for p in _board_db_paths()}
     represented = set()
+    # Receipt fan-out often repeats the same board/session. Read each alias once
+    # per projection, without extending freshness or sharing across profiles.
+    task_ids: dict[tuple[Path, str], set[str]] = {}
+
+    def contains(path: Path, sid: str, task_id: str) -> bool:
+        key = (path, sid)
+        if key not in task_ids:
+            task_ids[key] = {t['id'] for t in _read_session_tasks(path, [sid], LISTED_STATUSES)}
+        return task_id in task_ids[key]
+
     for row in local:
         path = boards.get(row['board'])
         if path is None:
             continue
         aliases = {row['session'], row['origin_session']}
         # Require coverage of every receipt alias, not just a matching task id.
-        if all(any(t['id'] == row['id'] for t in _read_session_tasks(path, [sid], LISTED_STATUSES))
-               for sid in aliases):
+        if all(contains(path, sid, row['id']) for sid in aliases):
             represented.add((row['key'], row['session'], row['origin_session']))
     return [row for row in rows
             if (row['key'], row['session'], row['origin_session']) not in represented]
