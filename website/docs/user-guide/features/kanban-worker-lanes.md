@@ -28,6 +28,44 @@ To be a kanban worker lane, an integration must provide three things:
 
 The dispatcher matches `task.assignee` against either a Hermes profile name (the default lane shape) or a registered non-spawnable identifier (the plugin lane shape — see [Adding an external CLI worker lane](#adding-an-external-cli-worker-lane) below). Tasks whose assignee doesn't resolve are left on `ready` with a `skipped_nonspawnable` event so a board operator can fix them; they are not silently dropped or executed by an arbitrary fallback.
 
+### Capability preflight and assignment repair
+
+Cards can declare `requires: [terminal, file, git, host_repo, kanban]` (any subset).
+The CLI accepts repeated `--requires` flags; the create tool and dashboard API accept
+an array. The stored requirements travel through decomposition and later assignment,
+including review handoffs. Agent create calls that omit the assignee use their own
+profile; a human CLI or dashboard may still create an unassigned draft.
+
+Preflight reads the assignee's actual CLI toolsets and profile-scoped terminal backend.
+A `dir` workspace implies `terminal`, `file`, and `host_repo`; a `worktree` additionally
+implies `git`. Explicit requirements augment these checks, never disable them.
+`git` means configured terminal access, not a successful binary or credential probe.
+`host_repo` means a local backend; remote/container mounts are not inferred from paths.
+Unknown or unreadable profiles fail closed for constrained tasks. Unconstrained scratch
+cards keep legacy behavior. Skills have no standard capability metadata contract:
+put their prerequisites in `requires`, rather than relying on skill-name heuristics.
+
+A mismatched create or reassignment fails before mutation; the create tool returns
+`code: assignee_capability_mismatch` with the missing capabilities. Fix the target
+profile or choose a compatible one; do not ask a human to supply credentials for
+what is actually a worker-tool mismatch.
+
+Use `kanban_block(kind="assignment", reason="Wrong worker")` when another agent can
+perform the work but this worker's tools/backend cannot. The kernel selects a compatible
+`kanban.orchestrator_profile`, then the creating profile as fallback; it must have both
+the original requirements and Kanban tools. It atomically reassigns the original,
+creates one ready assignment-verification card for that supervisor, and dependency-gates
+the original until verification completes. Completion rechecks policy drift. There is
+no recursive repair chain: unavailable/exhausted routing fails without ending the run
+or parking an invisible blocked card. The caller must resolve the existing assignment
+or identify the concrete external blocker, rather than claim the handoff succeeded.
+
+Legacy `kind="capability"` calls are reclassified only when a narrow worker-mismatch
+reason and the actual profile policy both prove the mismatch. Audit events preserve
+`requested_kind` and `rekind_reason`. Credentials, sign-in, payment, and human policy
+requests stay human-visible, even when mistakenly labeled assignment. Assignment waits
+are agent work, not human-blocked counts; time waits retain their scheduled behavior.
+
 ### 2. A spawn mechanism
 
 For Hermes profile lanes, the dispatcher's `_default_spawn` runs `hermes -p <assignee> chat -q <prompt>` (or the equivalent module form when the `hermes` shim isn't on `$PATH`) inside the task's pinned workspace, with these env vars set:

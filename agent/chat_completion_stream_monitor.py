@@ -8,6 +8,20 @@ from agent.model_metadata import is_local_endpoint
 
 
 class StreamingWaitMonitor:
+    def _cancel_current_stream_attempt(self, reason: str) -> None:
+        from agent.chat_completion_helpers import logger
+
+        with self.stream_attempt_lock:
+            current = int(self.stream_attempt_state["current"])
+            if current:
+                self.stream_attempt_state["cancelled"].add(current)
+        if current:
+            logger.debug("Marked stream attempt %s cancelled: %s", current, reason)
+
+    def _stream_attempt_was_cancelled(self, stream_attempt_id: int) -> bool:
+        with self.stream_attempt_lock:
+            return stream_attempt_id in self.stream_attempt_state["cancelled"]
+
     def _poll_local_load_notice(self, now: float) -> bool:
         """Managed local server: surface a cold model's weight-load progress
         instead of the 60s neutral "waiting on <model>" notice. Polled ~1s only while no

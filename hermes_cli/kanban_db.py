@@ -107,8 +107,8 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
-# Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
-VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient", "time"}
+# Typed block reasons (routing in kanban_block_routing); None = legacy untyped.
+VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "assignment", "transient", "time"}
 
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
@@ -657,6 +657,7 @@ class Task:
     workflow_template_id: Optional[str] = None
     current_step_key: Optional[str] = None
     skills: Optional[list] = None            # None = defaults only; [] = explicitly none
+    requires: Optional[list] = None          # Configured assignment capabilities
     model_override: Optional[str] = None
     provider_override: Optional[str] = None  # provider ``model_override`` belongs to
     reasoning_effort: Optional[str] = None   # VALID_REASONING_EFFORTS | "none"; NULL = profile's
@@ -687,6 +688,7 @@ class Task:
             consecutive_failures=g("consecutive_failures", g("spawn_failures", 0)),
             last_failure_error=g("last_failure_error", g("last_spawn_error")),
             skills=skills_value,
+            requires=_json_or(g("requires")) or [],
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
         )
@@ -858,6 +860,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Force-loaded skills for the worker on this task, stored as JSON.
     -- Passed to the worker via `--skills`. NULL or empty array = no extras.
     skills               TEXT,
+    requires             TEXT,
     -- Per-task model override. When set, the dispatcher passes -m <model>
     -- to the worker, overriding the profile's default model. NULL = use
     -- the profile default.
@@ -1212,6 +1215,7 @@ def create_task(
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
     validate_workspace: bool = False,
+    requires: Optional[list[str]] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1299,6 +1303,12 @@ def create_task(
         if board_default:
             workspace_path = str(board_default)
 
+    from hermes_cli.kanban_capabilities import validate_assignment
+    required = validate_assignment(assignee, requires=requires, workspace_kind=workspace_kind,
+                                   workspace_path=workspace_path)
+    from hermes_cli.kanban_model_assignment import validate_model_assignment
+    validate_model_assignment(assignee, model_override, provider_override)
+
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
         task_id = _new_task_id()
@@ -1324,8 +1334,8 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract, requires
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
@@ -1335,6 +1345,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
                         1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        json.dumps(required),
                     ),
                 )
                 for pid in parents:
@@ -1354,6 +1365,7 @@ def create_task(
                         "branch_name": branch_name,
                         "project_id": project_id,
                         "skills": list(skills_list) if skills_list else None,
+                        "requires": required,
                         "goal_mode": bool(goal_mode) or None,
                         "model_override": model_override,
                         "provider_override": provider_override,
@@ -1523,6 +1535,10 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
                 f"cannot reassign {task_id}: currently running (claimed). "
                 "Wait for completion or reclaim the stale lock first."
             )
+        from hermes_cli.kanban_capabilities import validate_assignment
+        task = get_task(conn, task_id)
+        validate_assignment(profile, requires=task.requires, workspace_kind=task.workspace_kind,
+                            workspace_path=task.workspace_path)
         if row["assignee"] != profile:
             # The failure streak is per task/profile; a new profile starts fresh.
             conn.execute(
@@ -2033,34 +2049,6 @@ def _synthesize_ended_run(
 
 # --- Dependency resolution (todo -> ready) ---
 
-def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """True when the newest ``blocked``/``unblocked``/``gave_up`` event says the
-    block must wait for an operator: an explicit ``kanban_block`` (#28712), or a
-    breaker trip ``_record_task_failure`` stamped ``sticky`` — the clean-exit
-    protocol-violation budget or a systemic same-error wave. Those trip on a
-    policy independent of ``consecutive_failures``, so ``recompute_ready``'s
-    counter check cannot see them — without this the trip is promoted back to
-    ``ready`` in the same tick and the card respawns forever. A plain
-    (unified-budget) ``gave_up`` carries no marker and is judged by the counter,
-    so raising ``failure_limit`` or ``assign_task`` to a fresh profile still
-    releases it; a task with no such event at all (direct DB edit) auto-recovers.
-    """
-    row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
-        "ORDER BY id DESC LIMIT 1", (task_id,),
-    ).fetchone()
-    if row and row["kind"] == "blocked":
-        return True
-    trip = conn.execute(
-        "SELECT payload FROM task_events "
-        "WHERE task_id = ? AND kind = 'gave_up' AND id > COALESCE("
-        "  (SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'unblocked'), 0) "
-        "ORDER BY id DESC LIMIT 1", (task_id, task_id),
-    ).fetchone()
-    return bool(trip) and bool(_json_dict(trip["payload"]).get("sticky"))
-
-
 def _latest_event(
     conn: sqlite3.Connection, task_id: str, kind: str, run_id: Optional[int] = None,
 ) -> Optional[sqlite3.Row]:
@@ -2108,6 +2096,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
+    from hermes_cli.kanban_block_routing import has_sticky_block
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
@@ -2121,7 +2110,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
-            if cur_status in ("blocked", "triage") and _has_sticky_block(conn, task_id):
+            if cur_status in ("blocked", "triage") and has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
             parents = conn.execute(
@@ -2739,6 +2728,8 @@ def complete_task(
         # reopened while this task waited.
         if not _parents_satisfied(conn, task_id):
             return False
+        from hermes_cli.kanban_assignment_routing import validate_repair_completion
+        validate_repair_completion(conn, task_id)
         if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
             return False
         trow = conn.execute(
@@ -3189,7 +3180,7 @@ def block_task(
     check_every: Optional[int] = None, clock_only: bool = False,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
-    :func:`_route_block`). A wait on time -- ``kind='time'``, a ``dependency``
+    :func:`kanban_block_routing.route_block`). A wait on time -- ``kind='time'``, a ``dependency``
     with no open parent, or a ``SCHEDULED_UNTIL=`` reason -- parks ``scheduled``
     with a wake time instead (``kanban_timed_park``). ``transient`` still counts
     toward the loop breaker. True on any transition. ``blocker_id`` names a
@@ -3202,6 +3193,9 @@ def block_task(
     audit event is appended, while status, failure evidence and the terminal
     runs stay exactly as the breaker left them. A typed block, a card with a
     live run, or a kind-less call on a blocked card are still refused.
+    ``assignment`` is agent-owned: a capable configured supervisor receives a
+    durable repair card and the original waits in ``todo`` on that dependency
+    (including explicit classification of a breaker-parked card).
     """
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
@@ -3211,6 +3205,7 @@ def block_task(
         ).fetchone()
         if cur_row is None:
             return False
+        from hermes_cli import kanban_assignment_routing as assignment_routing
         # The breaker (``_record_task_failure``) parks cards ``blocked`` with no
         # ``block_kind`` and no ``blocked`` event -- the policy is the
         # supervisor's, not the kernel's -- but the transition guard below only
@@ -3221,6 +3216,9 @@ def block_task(
         if cur_row["status"] == "blocked":
             if kind is None or expected_run_id is not None or _row_get(cur_row, "block_kind") is not None:
                 return False
+            requested_kind, rekind_reason = kind, None
+            if kind == "assignment":
+                kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason)
             classified = conn.execute(
                 "UPDATE tasks SET block_kind = ?, block_recurrences = 1 "
                 "WHERE id = ? AND status = 'blocked' AND block_kind IS NULL "
@@ -3229,16 +3227,17 @@ def block_task(
             ).rowcount
             if classified != 1:
                 return False
-            _append_event(conn, task_id, "blocked", {
-                "kind": kind, "reason": reason, "classified_in_place": True,
-            })
+            payload = {"kind": kind, "reason": reason, "classified_in_place": True}
+            if requested_kind == "assignment":
+                payload.update(requested_kind=requested_kind, rekind_reason=rekind_reason)
+            if kind == "assignment":
+                assignment_routing.route(conn, get_task(conn, task_id), payload)
+            _append_event(conn, task_id, "blocked", payload)
             return True
-        source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
+        source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else cur_row["status"]
         requested_kind, rekind_reason = kind, None
-        from hermes_cli.kanban_continuation_recovery import is_exhausted_budget_block
-        exhausted_budget = is_exhausted_budget_block(conn, task_id, kind, reason)
-        if exhausted_budget:
-            kind, rekind_reason = "transient", "continuation_exhausted"
+        from hermes_cli.kanban_block_routing import classify_stop
+        kind, rekind_reason, exhausted_budget = classify_stop(conn, task_id, kind, reason, blocker_id)
         no_open_parent = _parents_satisfied(conn, task_id)
         from hermes_cli import kanban_timed_park as ktp
         if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent):
@@ -3249,11 +3248,13 @@ def block_task(
         if kind == "dependency" and no_open_parent:
             kind = "needs_input"
             rekind_reason = "no_open_parent"
-        from hermes_cli.kanban_block_routing import route_block
+        from hermes_cli.kanban_block_routing import (
+            latest_block_reason, latest_run_blocker, route_block,
+        )
         new_status, event_kind, set_sql, params, payload = route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
-            prev_reason=_latest_block_reason(conn, task_id),
+            prev_reason=latest_block_reason(conn, task_id),
             # A dependency re-kinded to needs_input is an impossible wait, not a
             # human question: its rewording is no progress.
             compare_reason=requested_kind == "needs_input",
@@ -3268,7 +3269,7 @@ def block_task(
         if blocker_id:
             payload["blocker_id"] = blocker_id
             if (new_status == "triage" and _row_get(cur_row, "block_kind") == payload.get("kind") == kind
-                    and _latest_run_blocker(conn, task_id) == blocker_id):
+                    and latest_run_blocker(conn, task_id) == blocker_id):
                 # A probe re-asserting the shared blocker it was parked behind is the
                 # dispatcher's bounded probe cadence, not an unblock loop: keep the
                 # recurrence count where it was and stay ``blocked``. [daveey]
@@ -3286,9 +3287,9 @@ def block_task(
                        worker_pid    = NULL,
                        {set_sql}
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND (status IN ('running', 'ready') OR (status = 'review' AND ? = 'assignment'))
                 """
-        params = (*params, task_id)
+        params = (*params, task_id, kind)
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params = (*params, int(expected_run_id))
@@ -3299,6 +3300,10 @@ def block_task(
             metadata={"blocker_id": blocker_id} if blocker_id else None,
             synthesize=bool(reason or blocker_id),
         )
+        if kind == "assignment":
+            payload["requested_kind"] = requested_kind
+            payload["rekind_reason"] = rekind_reason
+            assignment_routing.route(conn, get_task(conn, task_id), payload)
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
         if kind == "dependency":
@@ -3307,34 +3312,6 @@ def block_task(
             return True
     _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
     return True
-
-
-def _latest_run_blocker(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
-    """``blocker_id`` of the task's latest non-neutral closed run, if any. [daveey]"""
-    from hermes_cli.kanban_shared_blockers import NEUTRAL_OUTCOMES, normalize_blocker_id
-    for row in conn.execute(
-        "SELECT outcome, metadata FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY id DESC LIMIT 20", (task_id,),
-    ):
-        bid = normalize_blocker_id(_json_dict(row["metadata"]).get("blocker_id"))
-        if bid is not None:
-            return bid
-        if (row["outcome"] or "") not in NEUTRAL_OUTCOMES:
-            return None
-    return None
-
-
-def _latest_block_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
-    """``reason`` of the newest ``blocked``/``block_loop_detected`` event, if any. [daveey]"""
-    row = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? "
-        "AND kind IN ('blocked', 'block_loop_detected') ORDER BY id DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    value = _json_dict(_row_get(row, "payload")).get("reason")
-    return value if isinstance(value, str) else None
 
 
 def redact_review_value(value: Any) -> Any:
@@ -3416,6 +3393,18 @@ def request_review(
                         "malformed); pass reviewer= explicitly",
                     )
             reviewer = _canonical_assignee(reviewer)
+            if trow["status"] not in ("running", "ready") or (
+                expected_run_id is not None and trow["current_run_id"] != int(expected_run_id)
+            ):
+                return _ret(
+                    False, "task is not in running/ready (or expected_run_id did not match the current run)",
+                )
+            if reviewer is not None:
+                from hermes_cli.kanban_capabilities import validate_assignment
+
+                task = get_task(conn, task_id)
+                validate_assignment(reviewer, requires=task.requires,
+                                    workspace_kind=task.workspace_kind, workspace_path=task.workspace_path)
             # The actor is the run that did the work. ``assignee`` is the actor
             # only while a worker holds the card; on a never-claimed card it is
             # whoever the operator assigned -- possibly the reviewer itself,
@@ -3535,6 +3524,11 @@ def request_changes(
         if implementer is None:
             return False, "review handoff has no valid implementer provenance"
         reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
+        from hermes_cli.kanban_capabilities import validate_assignment
+
+        task = get_task(conn, task_id)
+        validate_assignment(implementer, requires=task.requires,
+                            workspace_kind=task.workspace_kind, workspace_path=task.workspace_path)
 
         new_status = _landing_status_after_parents(conn, task_id)
         # consecutive_failures deliberately PRESERVED: a review transition is
@@ -3712,14 +3706,22 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
     not a block; only :func:`complete_task` clears them)."""
     now = int(time.time())
     with write_txn(conn):
+        task = get_task(conn, task_id)
+        if task is None or task.status != "review":
+            return False
+        review_event = _latest_event(conn, task_id, "review_requested")
+        handoff = _json_dict(_row_get(review_event, "payload"))
+        implementer = _nonblank_str(handoff.get("implementer"))
+        if implementer:
+            from hermes_cli.kanban_capabilities import validate_assignment
+
+            validate_assignment(implementer, requires=task.requires,
+                                workspace_kind=task.workspace_kind, workspace_path=task.workspace_path)
         _reclaim_dangling_run(
             conn, task_id, statuses=("review",), now=now,
             note="invariant recovery on review reopen",
         )
         new_status = _landing_status_after_parents(conn, task_id)
-        review_event = _latest_event(conn, task_id, "review_requested")
-        handoff = _json_dict(_row_get(review_event, "payload"))
-        implementer = _nonblank_str(handoff.get("implementer"))
         params: tuple[Any, ...] = (new_status, *((implementer,) if implementer else ()), task_id)
         cur = conn.execute(
             # consecutive_failures deliberately PRESERVED: review reopen is not
@@ -3909,6 +3911,11 @@ def specify_triage_task(
         ).fetchone()
         if existing is None:
             return False
+        from hermes_cli.kanban_capabilities import validate_assignment
+        task = get_task(conn, task_id)
+        validate_assignment(assignee or task.assignee, requires=task.requires,
+                            workspace_kind=task.workspace_kind,
+                            workspace_path=task.workspace_path)
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
         changed_fields: list[str] = []

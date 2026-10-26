@@ -628,6 +628,7 @@ async def test_closed_membership_phrases_prune_without_reconnect(detail):
     sub_id = "hermes-buzz-0"
     messages = [json.dumps(["CLOSED", sub_id, detail])]
     idx = 0
+    processed = asyncio.Event()
 
     class _FakeWs:
         async def send(self, raw):
@@ -642,7 +643,8 @@ async def test_closed_membership_phrases_prune_without_reconnect(detail):
                 val = messages[idx]
                 idx += 1
                 return val
-            await asyncio.sleep(10)
+            processed.set()
+            await asyncio.Event().wait()
             raise StopAsyncIteration
 
     @asynccontextmanager
@@ -666,17 +668,19 @@ async def test_closed_membership_phrases_prune_without_reconnect(detail):
         adapter._ws_ready = asyncio.Event()
         adapter._ws_ready.set()
         task = asyncio.create_task(adapter._websocket_loop())
-        await asyncio.sleep(0.1)
-
-    assert CHANNEL in adapter._restricted_channels
-    assert CHANNEL not in adapter._channel_state
-    assert not task.done(), "membership rejection must not reconnect the socket"
-
-    task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, Exception):
-        pass
+        try:
+            # The next receive starts only after CLOSED has been handled. A fixed
+            # delay can expire before that on a loaded runner.
+            await asyncio.wait_for(processed.wait(), timeout=5.0)
+            assert CHANNEL in adapter._restricted_channels
+            assert CHANNEL not in adapter._channel_state
+            assert not task.done(), "membership rejection must not reconnect the socket"
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 @pytest.mark.asyncio

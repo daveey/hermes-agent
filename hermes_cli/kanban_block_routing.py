@@ -4,6 +4,69 @@ from __future__ import annotations
 import sqlite3
 
 
+def latest_run_blocker(conn: sqlite3.Connection, task_id: str) -> str | None:
+    """Shared blocker of the latest non-neutral closed run."""
+    from hermes_cli.kanban_db import _json_dict
+    from hermes_cli.kanban_shared_blockers import NEUTRAL_OUTCOMES, normalize_blocker_id
+    for row in conn.execute(
+        "SELECT outcome, metadata FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT 20", (task_id,),
+    ):
+        bid = normalize_blocker_id(_json_dict(row["metadata"]).get("blocker_id"))
+        if bid is not None:
+            return bid
+        if (row["outcome"] or "") not in NEUTRAL_OUTCOMES:
+            return None
+    return None
+
+
+def latest_block_reason(conn: sqlite3.Connection, task_id: str) -> str | None:
+    """Reason of the newest blocked or block-loop event."""
+    from hermes_cli.kanban_db import _json_dict
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind IN ('blocked', 'block_loop_detected') ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    value = _json_dict(row["payload"]).get("reason")
+    return value if isinstance(value, str) else None
+
+
+def has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Explicit blocks and policy breakers need resolution, not a higher retry limit."""
+    from hermes_cli.kanban_db import _json_dict
+    row = conn.execute(
+        "SELECT kind FROM task_events "
+        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    if row and row["kind"] == "blocked":
+        return True
+    trip = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'gave_up' AND id > COALESCE("
+        "  (SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'unblocked'), 0) "
+        "ORDER BY id DESC LIMIT 1", (task_id, task_id),
+    ).fetchone()
+    return bool(trip) and bool(_json_dict(trip["payload"]).get("sticky"))
+
+
+def classify_stop(conn, task_id, kind, reason, blocker_id):
+    """Compose continuation recovery with assignment routing without changing human asks."""
+    from hermes_cli import kanban_assignment_routing
+    from hermes_cli.kanban_continuation_recovery import is_exhausted_budget_block
+    from hermes_cli.kanban_db import get_task
+
+    if is_exhausted_budget_block(conn, task_id, kind, reason):
+        return "transient", "continuation_exhausted", True
+    if kind in {"capability", "assignment"} and not blocker_id:
+        kind, rekind_reason = kanban_assignment_routing.classify(get_task(conn, task_id), kind, reason)
+        return kind, rekind_reason, False
+    return kind, None, False
+
+
 def supervisor_stop(conn, task_id: str, reason: str, reason_code: str) -> bool:
     """Atomically park an automatic stop for agent investigation, never a human ask."""
     from hermes_cli import kanban_db as kb

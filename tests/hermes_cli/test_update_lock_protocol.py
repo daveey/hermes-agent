@@ -353,7 +353,8 @@ def test_the_source_build_keeps_checkout_custody_after_its_updater_is_killed(tmp
     bin_dir.mkdir()
     node = bin_dir / "node"
     node.write_text(f"#!{sys.executable}\nimport os, time\nfrom pathlib import Path\nr = Path({str(tmp_path)!r})\n"
-                    "(r / 'node').write_text(str(os.getpid()))\n"
+                    "(r / 'node.pending').write_text(str(os.getpid()))\n"
+                    "(r / 'node.pending').replace(r / 'node')\n"
                     "while not (r / 'go').exists(): time.sleep(0.02)\n")
     node.chmod(0o700)
     owner = _python(tmp_path, _BUILD_OWNER, root, bin_dir)
