@@ -44,7 +44,7 @@ def _make_phase_runner(monkeypatch, events):
     )
     monkeypatch.setattr(
         "tools.browser_tool_lifecycle.cleanup_all_browsers",
-        lambda: events.append(("cleanup_browsers", threading.current_thread())),
+        lambda *, process_shutdown: events.append(("cleanup_browsers" if process_shutdown else "reset_browsers", threading.current_thread())),
     )
     return runner, loop_thread
 
