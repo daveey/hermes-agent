@@ -392,9 +392,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
             "SELECT 1 FROM tasks WHERE idempotency_key = ? AND status != 'archived' LIMIT 1",
             (idem_key,)).fetchone() is not None
         from hermes_cli.kanban_db_workspace import WorktreeWorkspaceConfigError
+        from hermes_cli.kanban_capabilities import CapabilityMismatchError
         try:
             task_id = kb.create_task(
-                conn, title=args.title, body=body, assignee=args.assignee, session_id=session_id,
+                conn, title=args.title, body=body,
+                assignee=args.assignee or (_profile_author() if in_worker or _agent_invoked() else None),
+                session_id=session_id, requires=getattr(args, "requires", None),
                 created_by=args.created_by or _profile_author(),
                 workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
                 project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
@@ -413,6 +416,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             )
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)
+        except CapabilityMismatchError as exc:
+            return _err(f"kanban: {exc.code}: {exc}", 2)
         if session_key and not idem_hit:
             # Same completion subscription the kanban_create tool adds, so the chat
             # that shelled out hears when the card lands (and its row stays busy).

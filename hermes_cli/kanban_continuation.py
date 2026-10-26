@@ -277,7 +277,9 @@ def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int,
     if info is None:
         return False
     if block_kind in HUMAN_BLOCK_KINDS:
-        reason = kb._latest_block_reason(conn, tid) or info["reason"] or (
+        from hermes_cli.kanban_block_routing import latest_block_reason
+
+        reason = latest_block_reason(conn, tid) or info["reason"] or (
             "Parked in scheduled with no wake while waiting on a human answer.")
         with kb.write_txn(conn):
             cur = conn.execute(
