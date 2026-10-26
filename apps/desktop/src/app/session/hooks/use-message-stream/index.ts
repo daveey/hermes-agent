@@ -1119,11 +1119,13 @@ export function useMessageStream({
       dispatchNativeNotification({
         body: turnDoneNotificationBody(text, translateNow('notifications.native.turnDoneBody')),
         kind: 'turnDone',
+        projectionAfter: Date.now() / 1000,
+        refreshProjection: refreshSessions,
         sessionId,
         title: translateNow('notifications.native.turnDoneTitle')
       })
     },
-    [hydrateFromStoredSession, scheduleSessionsRefresh, updateSessionState]
+    [hydrateFromStoredSession, refreshSessions, scheduleSessionsRefresh, updateSessionState]
   )
 
   const failAssistantMessage = useCallback(

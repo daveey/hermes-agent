@@ -1,5 +1,6 @@
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
+import { frArchiveTasks } from './archive-task-copy'
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { frAuxTasks } from './fr_aux_tasks'
 import { frBoot } from './fr_boot'
@@ -5668,8 +5669,7 @@ export const frOverrides = {
     archiveLinkedBody: "Du travail est encore lié à ce chat. L'archivage masque seulement le chat : les tâches et les machines continuent de tourner.",
     archiveLinkedConfirm: 'Archiver quand même',
     archiveLinkedCancel: 'Garder le chat',
-    archiveLinkedTasksLabel: 'Tâches Kanban',
-    archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} ouvertes` : '', blocked ? `${blocked} bloquées` : ''].filter(Boolean).join(' · '),
+    ...frArchiveTasks,
     restored: 'Restauré',
     unarchiveFailed: 'Échec de la restauration',
     cwdChangeFailed: 'Échec du changement de répertoire de travail',

@@ -1799,10 +1799,10 @@ def cmd_chat(args):
     # --source: tag session source for filtering (e.g. 'tool' for integrations)
     if getattr(args, "source", None):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
-        # Explicit flag, not a label inherited from a parent TUI/Desktop session — one-shot
-        # runs must keep it (see agent.session_source.session_source_for).
+        # Explicit, not inherited: one-shot runs keep it (agent.session_source.session_source_for).
         os.environ["HERMES_SESSION_SOURCE_EXPLICIT"] = "1"
-
+    from hermes_cli.main_chat_origin import configure_chat_origin
+    configure_chat_origin(args)
     _pin_kanban_board_env()
     from hermes_cli.observability.shared_metrics_consent import offer_consent_before_chat
 

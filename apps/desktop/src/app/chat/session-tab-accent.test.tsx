@@ -18,7 +18,7 @@ vi.mock('@/store/session-dot-state', async importOriginal => ({
 }))
 
 const states = $sessionDotStateById as WritableAtom<Record<string, SessionDotState>>
-const row = { id: 'session', message_count: 2 } as SessionInfo
+const row = { id: 'session', message_count: 2, kanban_observed_at: Date.now() / 1000 } as SessionInfo
 
 function tab(session: SessionInfo | null = row) {
   return (
@@ -103,6 +103,18 @@ describe('session tab underline', () => {
     rerender(tab(null))
     expect(stripe()).toBe('neutral')
     expect(container.firstElementChild!.className).toContain('dark:[--session-status-color:var(--color-zinc-500)]')
+  })
+
+  it.each([{ kanban_observed_at: undefined }, { kanban_unknown: true }, { kanban_active: 1 }, { kanban_observed_at: 1 }])('does not mark unverified tree-only rows done: %j', evidence => {
+    const { container } = render(tab({ ...row, ...evidence }))
+
+    expect(container.querySelector('[data-session-tab-accent="done"]')).toBeNull()
+  })
+
+  it('does not finish an unread stored tab whose row is missing', () => {
+    states.set({ session: 'unread' })
+    const { container } = render(<SessionTabAccent storedSessionId="session"><span>Missing</span></SessionTabAccent>)
+    expect(container.querySelector('[data-session-tab-accent="done"]')).toBeNull()
   })
 
   it('leaves non-session tabs on their existing theme accent', () => {

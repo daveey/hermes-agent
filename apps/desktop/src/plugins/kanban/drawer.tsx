@@ -44,6 +44,7 @@ import {
   deleteTask,
   estimateTask,
   fetchLog,
+  fetchOwnerProfiles,
   fetchProfiles,
   fetchTask,
   logKey,
@@ -53,6 +54,7 @@ import {
   reclaimTask,
   routedToScope,
   taskKey,
+  type TaskOwner,
   useKanbanScope
 } from './api'
 import { uploadFiles, useFileDrop } from './attach-drop'
@@ -299,14 +301,22 @@ function Diagnostics({
  *  streak — the explicit human recovery action). */
 function AssigneeMenu({
   current,
+  owner,
   onReassign
 }: {
   current: null | string | undefined
+  owner?: TaskOwner
   onReassign: (p: string) => void
 }) {
   const k = useKanban()
   const scope = useKanbanScope()
-  const { data: roster } = useQuery({ queryKey: profilesKey(scope), queryFn: fetchProfiles, staleTime: 60_000 })
+
+  const { data: roster } = useQuery({
+    enabled: query => !!owner || routedToScope(query),
+    queryKey: profilesKey(scope, owner),
+    queryFn: () => owner ? fetchOwnerProfiles(owner) : fetchProfiles(),
+    staleTime: 60_000
+  })
 
   return (
     <DropdownMenu>
@@ -582,12 +592,12 @@ function AttachmentsSection({
 // behind an explicit click + disclaimer since it makes a model call. The
 // control keeps a stable footprint (spinner swaps in place) so there's no
 // layout jump when it runs.
-function EstimateSection({ id }: { id: string }) {
+function EstimateSection({ id, owner }: { id: string; owner?: TaskOwner }) {
   const k = useKanban()
   const [result, setResult] = useState<null | TaskEstimate>(null)
 
   const est = useMutation({
-    mutationFn: () => estimateTask(id),
+    mutationFn: () => estimateTask(id, owner),
     onError: err => host.notify({ kind: 'error', message: errText(err) }),
     onSuccess: r => {
       if (r.ok) {
@@ -833,13 +843,15 @@ function FeedTabs({
 export function TaskDrawer({
   columns,
   id,
+  owner,
   onClose,
   onOpen
 }: {
   columns: string[]
   id: null | string
+  owner?: TaskOwner
   onClose: () => void
-  onOpen: (id: string) => void
+  onOpen: (id: string, owner?: TaskOwner) => void
 }) {
   const k = useKanban()
   const qc = useQueryClient()
@@ -848,9 +860,9 @@ export function TaskDrawer({
 
   // Socket-invalidated (bindApi); the interval is only the socketless heartbeat.
   const { data: detail, error } = useQuery({
-    enabled: query => !!id && routedToScope(query),
-    queryFn: () => fetchTask(id!),
-    queryKey: taskKey(scope, slug, id ?? ''),
+    enabled: query => !!id && (!!owner || routedToScope(query)),
+    queryFn: () => fetchTask(id!, owner),
+    queryKey: taskKey(scope, slug, id ?? '', owner),
     refetchInterval: 30_000
   })
 
@@ -859,34 +871,34 @@ export function TaskDrawer({
   const defaultAssignee = useDefaultAssignee()
 
   const { data: log } = useQuery({
-    enabled: query => !!id && routedToScope(query),
-    queryFn: () => fetchLog(id!),
-    queryKey: logKey(scope, slug, id ?? ''),
+    enabled: query => !!id && (!!owner || routedToScope(query)),
+    queryFn: () => fetchLog(id!, owner),
+    queryKey: logKey(scope, slug, id ?? '', owner),
     refetchInterval: running ? 3_000 : 15_000
   })
 
   const invalidate = () => {
-    void qc.invalidateQueries({ queryKey: taskKey(scope, slug, id!) })
+    void qc.invalidateQueries({ queryKey: taskKey(scope, slug, id!, owner) })
     void qc.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
   }
 
   // Optimistic status change against the task cache; rolls back + toasts on a
   // rejected transition (the backend enforces the workflow).
   const moveMut = useMutation({
-    mutationFn: (status: string) => patchTask(id!, { status }),
+    mutationFn: (status: string) => patchTask(id!, { status }, owner),
     onMutate: async status => {
-      await qc.cancelQueries({ queryKey: taskKey(scope, slug, id!) })
-      const previous = qc.getQueryData<KanbanTaskDetail>(taskKey(scope, slug, id!))
+      await qc.cancelQueries({ queryKey: taskKey(scope, slug, id!, owner) })
+      const previous = qc.getQueryData<KanbanTaskDetail>(taskKey(scope, slug, id!, owner))
 
       if (previous) {
-        qc.setQueryData(taskKey(scope, slug, id!), { ...previous, task: { ...previous.task, status } })
+        qc.setQueryData(taskKey(scope, slug, id!, owner), { ...previous, task: { ...previous.task, status } })
       }
 
       return { previous }
     },
     onError: (err, _status, context) => {
       if (context?.previous) {
-        qc.setQueryData(taskKey(scope, slug, id!), context.previous)
+        qc.setQueryData(taskKey(scope, slug, id!, owner), context.previous)
       }
 
       host.notify({ kind: 'error', message: errText(err) })
@@ -904,7 +916,7 @@ export function TaskDrawer({
     )
 
   const commentMut = useMutation({
-    mutationFn: (body: string) => addComment(id!, body),
+    mutationFn: (body: string) => addComment(id!, body, owner),
     onError: err => host.notify({ kind: 'error', message: errText(err) }),
     onSuccess: invalidate
   })
@@ -914,8 +926,8 @@ export function TaskDrawer({
   // replacement for the block → comment → unblock dance.
   const requeueMut = useMutation({
     mutationFn: async (body: string) => {
-      await addComment(id!, body)
-      await reclaimTask(id!)
+      await addComment(id!, body, owner)
+      await reclaimTask(id!, owner)
     },
     onError: err => host.notify({ kind: 'error', message: errText(err) }),
     onSuccess: () => {
@@ -925,7 +937,7 @@ export function TaskDrawer({
   })
 
   const uploadMut = useMutation({
-    mutationFn: (files: File[]) => uploadFiles(id!, files),
+    mutationFn: (files: File[]) => uploadFiles(id!, files, owner),
     onError: err => host.notify({ kind: 'error', message: errText(err) }),
     onSettled: invalidate
   })
@@ -1025,13 +1037,13 @@ export function TaskDrawer({
                       {k.copyTitle}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem onSelect={mutate(() => patchTask(task.id, { status: 'archived' }), onClose)}>
+                    <DropdownMenuItem onSelect={mutate(() => patchTask(task.id, { status: 'archived' }, owner), onClose)}>
                       <Codicon name="archive" size="0.85rem" />
                       {k.archive}
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       className="text-destructive"
-                      onSelect={mutate(() => deleteTask(task.id), onClose)}
+                      onSelect={mutate(() => deleteTask(task.id, owner), onClose)}
                     >
                       <Codicon name="trash" size="0.85rem" />
                       {k.delete}
@@ -1072,10 +1084,10 @@ export function TaskDrawer({
                     <Section label={k.diagnosticsN(task.diagnostics.length)}>
                       <Diagnostics
                         items={task.diagnostics}
-                        onReclaim={() => void mutate(() => reclaimTask(task.id))()}
+                        onReclaim={() => void mutate(() => reclaimTask(task.id, owner))()}
                         onUnblock={() =>
                           void mutate(
-                            () => patchTask(task.id, { status: 'ready' }),
+                            () => patchTask(task.id, { status: 'ready' }, owner),
                             () => host.notify({ kind: 'success', message: k.unblockedMessage(shortId(task.id)) })
                           )()
                         }
@@ -1085,7 +1097,7 @@ export function TaskDrawer({
 
                   <DescriptionSection
                     body={task.body}
-                    onSave={body => void mutate(() => patchTask(task.id, { body }))()}
+                    onSave={body => void mutate(() => patchTask(task.id, { body }, owner))()}
                   />
 
                   {task.result && (
@@ -1114,7 +1126,8 @@ export function TaskDrawer({
                 <MetaRow label={k.assignee}>
                   <AssigneeMenu
                     current={task.assignee}
-                    onReassign={profile => void mutate(() => reassignTask(task.id, profile))()}
+                    onReassign={profile => void mutate(() => reassignTask(task.id, profile, owner))()}
+                    owner={owner}
                   />
                 </MetaRow>
                 {typeof task.priority === 'number' && (
@@ -1157,7 +1170,7 @@ export function TaskDrawer({
                 )}
                 <MetaRow label={k.model}>
                   <ModelOverrideField
-                    onChange={next => void mutate(() => patchTask(task.id, overridePatch(next)))()}
+                    onChange={next => void mutate(() => patchTask(task.id, overridePatch(next), owner))()}
                     value={{
                       effort: task.reasoning_effort ?? '',
                       model: task.model_override ?? '',
@@ -1169,14 +1182,14 @@ export function TaskDrawer({
                   (['parents', 'children'] as const).map(side =>
                     detail.links[side].length > 0 ? (
                       <MetaRow key={side} label={side === 'parents' ? k.blockedBy : k.blocks}>
-                        <LinkChips ids={detail.links[side]} linkTitles={linkTitles} onOpen={onOpen} />
+                        <LinkChips ids={detail.links[side]} linkTitles={linkTitles} onOpen={linked => owner ? onOpen(linked, owner) : onOpen(linked)} />
                       </MetaRow>
                     ) : null
                   )}
                 {task.created_by && <MetaRow label={k.metaCreatedBy}>{task.created_by}</MetaRow>}
                 {ago(task.created_at) && <MetaRow label={k.metaCreated}>{ago(task.created_at)}</MetaRow>}
                 {running && task.worker_pid ? <MetaRow label={k.metaWorkerPid}>{task.worker_pid}</MetaRow> : null}
-                <EstimateSection id={task.id} />
+                <EstimateSection id={task.id} owner={owner} />
 
                 {Array.isArray(detail.attachments) && (
                   <AttachmentsSection

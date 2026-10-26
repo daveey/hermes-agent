@@ -87,6 +87,11 @@ def _visible(*, to_env_worker: bool) -> bool:
         return False
     if os.environ.get("HERMES_KANBAN_TASK") and _is_dispatcher_owned_worker():
         return to_env_worker
+    # [daveey] A session started for a chat on another gateway (``hermes chat --origin-session``) exists to
+    # create that chat's cards: it always gets the real tools, never a private-handler fallback.
+    from hermes_cli.kanban_origin import ambient_origin_ref
+    if ambient_origin_ref():
+        return True
     return _profile_has_kanban_toolset()
 
 
@@ -211,6 +216,11 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                     return _tag_rejection(e.args[0], e.rejection or "invalid_args")
                 return e.args[0]
             except Exception as e:
+                if tool_name == "kanban_create" and kw.get("origin_intent") is not None:
+                    from hermes_cli.kanban_origin import OriginError
+                    if isinstance(e, OriginError):
+                        return tool_error(str(e), code=e.code, handoff_complete=False)
+
                 from hermes_cli.kanban_capabilities import CapabilityMismatchError
                 from hermes_cli.kanban_assignment_routing import AssignmentRoutingError
                 from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
@@ -218,6 +228,7 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                     return tool_error(str(e), code=e.code)
                 if isinstance(e, CapabilityMismatchError):
                     return tool_error(str(e), code=e.code, assignee=e.assignee, missing=e.missing)
+
                 if not isinstance(e, ValueError):
                     logger.exception(f"{tool_name} failed")
                 if classify_rejections:
@@ -539,7 +550,7 @@ _GOAL_GATE_MESSAGES = {
             "matching the card before requesting review.")}}
 
 
-def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
+def _goal_gate(tool_name: str, task, tid: str, evidence: str):
     """Goal-mode pre-handoff judge gate: a worker must not complete / request
     review before acceptance criteria are met. ``blocked`` gets its own
     guidance; any other non-``done`` verdict gets the ``continue`` guidance.
@@ -552,7 +563,7 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
         from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{tid}")
         try:
-            verdict, reason, _, _, transport_failed = judge_goal(
+            verdict, reason, parse_failed, _, transport_failed = judge_goal(
                 goal=handoff_judge_goal(task.title, task.body, tool_name),
                 last_response=evidence.strip())
         finally:
@@ -568,7 +579,10 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
         logger.warning("goal judge unreachable (%s), allowing lifecycle handoff", reason)
         return
     if verdict == "done":
-        return
+        if parse_failed or tool_name != 'kanban_complete':
+            return
+        from hermes_cli.kanban_goal_receipt import GoalVerification
+        return GoalVerification.for_handoff(task, evidence)
     key = "blocked" if verdict == "blocked" else "continue"
     raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid), "goal_judge")
 
@@ -859,11 +873,11 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
-        _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
+        goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
-                created_cards=created_cards, expected_run_id=_worker_run_id(tid))
+                created_cards=created_cards, expected_run_id=_worker_run_id(tid), goal_verification=goal_verification)
         except kb.ArtifactPreservationError as artifact_err:
             # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
             # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
@@ -1326,6 +1340,17 @@ def _handle_create(args: dict, **kw) -> str:
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
+    # [daveey] Validate the origin binding BEFORE the card exists: a binding the origin gateway can never
+    # read back is the silent "cards exist but the chat shows none" failure.
+    from hermes_cli import kanban_origin
+    # Trusted courier context is not an LLM argument. The owner adapter validates
+    # its route; the DB validates/persists its immutable creation intent.
+    origin_intent = kw.get("origin_intent")
+    try:
+        origin = (None if origin_intent is not None
+                  else kanban_origin.resolve(args.get("origin_session")))
+    except kanban_origin.OriginError as exc:
+        return tool_error(f"{exc.code}: {exc}")
     human_action_now = _parse_bool_arg(args, "human_action_now")
     with _board(args.get("board")) as (kb, conn):
         # Never infer approval from prose or silently turn a human gate into
@@ -1346,22 +1371,29 @@ def _handle_create(args: dict, **kw) -> str:
         from gateway.session_context import get_session_env
         from tools.async_delegation import _current_origin_session_id
         self_tid = (os.environ.get("HERMES_KANBAN_TASK")
-                    if _is_dispatcher_owned_worker() else None)
+                    if origin_intent is None and _is_dispatcher_owned_worker() else None)
         self_task = kb.get_task(conn, self_tid) if self_tid else None
         # The worker/API runtime may be transient; the owning task's origin is durable.
         # The ambient id is the request-scoped ContextVar binding, not the process-global
         # os.environ: in a multi-session gateway the env holds the LAST agent built, and an
         # id that never reached its ``sessions`` row is provenance pointing at nothing.
-        session_id = (_persisted_session_id(args.get("session_id"))
-                      or (self_task.session_id if self_task else None)
-                      or _persisted_session_id(_current_origin_session_id())
-                      or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))
+        if origin_intent is not None:
+            # Courier retries use only their durable envelope, never the receiving
+            # process's current session/tenant/project. Creator provenance remains
+            # unchanged even if its session is compressed or subsequently removed.
+            session_id = args.get("session_id")
+        else:
+            session_id = (_persisted_session_id(args.get("session_id"))
+                          or (self_task.session_id if self_task else None)
+                          or _persisted_session_id(_current_origin_session_id())
+                          or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))
         if project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
         new_tid = kb.create_task(
             conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
-            parents=tuple(parents), tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
+            parents=tuple(parents), tenant=(args.get("tenant") if origin_intent is not None
+                                           else args.get("tenant") or os.environ.get("HERMES_TENANT")),
             priority=_opt_int(args.get("priority"), 0),
             workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
             # Board-project inheritance must read the board this call opened, not the
@@ -1377,14 +1409,32 @@ def _handle_create(args: dict, **kw) -> str:
             completion_contract=args.get("completion_contract"),
             initial_status=str(args.get("initial_status") or "running"),
             created_by=_persisted_identity(), session_id=session_id,
+            origin_intent=origin_intent,
             # Reject a worktree path the dispatcher could never resolve now, to the
             # creator, instead of burning spawn retries on it later. [daveey]
             validate_workspace=True)
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
         wait = [e for e in kb.list_events(conn, new_tid) if e.kind == "dependency_wait"]
         gate = {"gated": True, "gated_by": wait[-1].payload["parent"]} if wait else {"gated": False}
+        extra = {}
+        if origin_intent is not None:
+            row = conn.execute(
+                "SELECT binding_json,child_request_id FROM origin_creation_intents WHERE request_id=? AND task_id=?",
+                (origin_intent["request_id"], new_tid),
+            ).fetchone()
+            extra = {"handoff_complete": False, "origin_creation": {
+                "request_id": origin_intent["request_id"],
+                "binding": json.loads(row["binding_json"]),
+                "child_request_id": row["child_request_id"],
+            }}
+        if origin is not None:
+            extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
+        if origin_intent is not None:
+            return json.dumps({"ok": False, "created": True, "code": "origin_bind_pending",
+                               "task_id": new_tid, **landed, **gate,
+                               "subscribed": _maybe_auto_subscribe(conn, new_tid), **extra})
         return _ok(task_id=new_tid, **landed, **gate,
-                   subscribed=_maybe_auto_subscribe(conn, new_tid))
+                   subscribed=_maybe_auto_subscribe(conn, new_tid), **extra)
 
 
 def _live_tui_session_key(session_key: str, profile: Optional[str]) -> str:

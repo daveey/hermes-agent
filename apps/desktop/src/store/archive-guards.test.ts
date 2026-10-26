@@ -62,11 +62,28 @@ describe('archive guards', () => {
     expect(await collectArchiveLinks(ctx)).toEqual([])
   })
 
-  it('kanbanArchiveLinks reads the row counts', () => {
-    const copy = { label: 'Kanban tasks', value: (open: number, blocked: number) => `${open}/${blocked}` }
+  it('keeps unknown task status visible even with zero known counts', () => {
+    const copy = { label: 'Kanban tasks', unknown: 'Status unavailable; work may be unfinished', value: () => 'counts' }
 
-    expect(kanbanArchiveLinks(undefined, copy)).toEqual([])
-    expect(kanbanArchiveLinks({ kanban_active: 0 } as never, copy)).toEqual([])
+    expect(kanbanArchiveLinks({ kanban_unknown: true, kanban_active: 0 } as never, copy)).toEqual([
+      { label: copy.label, value: copy.unknown }
+    ])
+    expect(kanbanArchiveLinks({ kanban_unknown: true, kanban_active: 2 } as never, copy)).toEqual([
+      { label: copy.label, value: copy.unknown }
+    ])
+  })
+
+  it.each([undefined, {}, { kanban_observed_at: 1 }, { kanban_observed_at: Infinity },
+    { kanban_observed_at: Date.now() / 1000 + 60 }])('warns when zero-work evidence is absent or stale: %j', session => {
+    const copy = { label: 'Kanban tasks', unknown: 'Status unavailable', value: () => 'counts' }
+
+    expect(kanbanArchiveLinks(session as never, copy)).toEqual([{ label: copy.label, value: copy.unknown }])
+  })
+
+  it('kanbanArchiveLinks reads the row counts', () => {
+    const copy = { label: 'Kanban tasks', unknown: 'Status unavailable', value: (open: number, blocked: number) => `${open}/${blocked}` }
+
+    expect(kanbanArchiveLinks({ kanban_active: 0, kanban_observed_at: Date.now() / 1000 } as never, copy)).toEqual([])
     expect(kanbanArchiveLinks({ kanban_active: 2, kanban_blocked: 1 } as never, copy)).toEqual([
       { label: 'Kanban tasks', value: '2/1' }
     ])

@@ -1869,7 +1869,12 @@ register(ctx) {
 
 `ctx.rest` is profile-aware and rejects path traversal (`..`) so you can never
 address another plugin's API or a core route through it. `PluginRestOptions` is
-`{ method?, body?, upload?: { filename, contentType?, bytes }, timeoutMs? }`.
+`{ method?, body?, upload?: { filename, contentType?, bytes }, timeoutMs?, connectionId?, profile? }`.
+An explicit `connectionId` pins the registry gateway and does not inherit the
+ambient profile. Pair it with `profile: 'worker'` to target that gateway's named
+profile; `profile: null` deliberately selects its default. With neither option,
+existing ambient connection/profile routing is unchanged. These options apply to
+reads, JSON writes and multipart uploads alike; they do not widen the namespace.
 
 `ctx.socket` auto-reconnects with backoff until disposed. **It resolves to a no-op
 on OAuth remotes** (single-use WS tickets are core-managed) — treat the socket as

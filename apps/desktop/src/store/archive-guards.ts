@@ -11,7 +11,10 @@
 // so a slow or broken plugin can delay archiving by at most the timeout and
 // never blocks it.
 
+import type { ArchiveTaskCopy } from '@/i18n/archive-task-copy'
 import type { SessionInfo } from '@/types/hermes'
+
+import { hasFreshKanbanObservation } from './kanban-observation'
 
 /** One line in the confirm dialog: `label` = the kind ("Kanban tasks"),
  *  `value` = what's linked ("3 open, 1 blocked"). */
@@ -100,15 +103,28 @@ export async function collectArchiveLinks(
 /** Core guard: the row's own Kanban counts (summed over its lineage by the
  *  backend, same numbers as the sidebar badge). `copy.value` renders the value
  *  so the caller owns the copy. */
+export function sessionKanbanArchiveLinks(session: SessionInfo | undefined, copy: ArchiveTaskCopy): ArchiveLinkedItem[] {
+  return kanbanArchiveLinks(session, {
+    label: copy.archiveLinkedTasksLabel,
+    unknown: copy.archiveLinkedTasksUnknown,
+    value: copy.archiveLinkedTasksValue
+  })
+}
+
 export function kanbanArchiveLinks(
   session: SessionInfo | undefined,
-  copy: { label: string; value: (open: number, blocked: number) => string }
+  copy: { label: string; unknown: string; value: (open: number, blocked: number) => string }
 ): ArchiveLinkedItem[] {
+  if (session?.kanban_unknown) {
+    return [{ label: copy.label, value: copy.unknown }]
+  }
+
   const open = Math.max(0, Number(session?.kanban_active) || 0)
   const blocked = Math.max(0, Number(session?.kanban_blocked) || 0)
 
   if (open + blocked === 0) {
-    return []
+    return hasFreshKanbanObservation(session) && !(session?.kanban_remote_stale ?? 0)
+      ? [] : [{ label: copy.label, value: copy.unknown }]
   }
 
   return [{ label: copy.label, value: copy.value(open, blocked) }]

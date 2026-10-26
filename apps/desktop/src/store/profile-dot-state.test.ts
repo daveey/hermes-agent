@@ -19,7 +19,9 @@ import {
 import { clearAllSessionStates, publishSessionState, recordSessionEventScope } from './session-states'
 import { $sessionSeenCounts, $unreadFinishedMarkers } from './session-unread'
 
-const session = (over: Partial<SessionInfo>): SessionInfo => makeSessionInfo({ id: 'live', ...over })
+// These routing tests model a successful, current empty task observation.
+const session = (over: Partial<SessionInfo>): SessionInfo =>
+  makeSessionInfo({ id: 'live', kanban_observed_at: Date.now() / 1000, ...over })
 
 const profileInfo = (name: string, is_default = false) => ({
   has_env: false,

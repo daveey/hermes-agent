@@ -8,6 +8,7 @@
 import type { ErrorCodeKey } from '@/lib/error-surface'
 import type { TipId } from '@/lib/tips/catalog'
 
+import type { ArchiveTaskCopy } from './archive-task-copy'
 import type { AppTourTranslations, HandoffTourTranslations } from './types_app_tour'
 import type { AuxTaskCopyMap } from './types_aux_tasks'
 import type { BillingTranslations } from './types_billing'
@@ -4280,7 +4281,7 @@ export interface Translations extends NoticeTranslations {
     vaultUnlockConfirm: string
   }
 
-  desktop: {
+  desktop: ArchiveTaskCopy & {
     audioReadFailed: string
     sessionUnavailable: string
     createSessionFailed: string
@@ -4330,8 +4331,7 @@ export interface Translations extends NoticeTranslations {
     archiveLinkedBody: string
     archiveLinkedConfirm: string
     archiveLinkedCancel: string
-    archiveLinkedTasksLabel: string
-    archiveLinkedTasksValue: (open: number, blocked: number) => string
+
     restored: string
     unarchiveFailed: string
     cwdChangeFailed: string

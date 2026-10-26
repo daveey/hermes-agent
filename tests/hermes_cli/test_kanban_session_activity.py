@@ -27,6 +27,22 @@ def kanban_root(tmp_path, monkeypatch):
     ksa._reset_cache_for_tests()
 
 
+def test_successful_empty_projection_has_explicit_observation_time(kanban_root, monkeypatch):
+    monkeypatch.setattr(ksa.time, 'time', lambda: 1234.5)
+    rows = [{'id': 's_empty'}]
+    ksa.annotate_kanban_activity(rows)
+    assert 1234.5 - ksa._CACHE_TTL_S <= rows[0]['kanban_observed_at'] <= 1234.5
+    assert 'kanban_unknown' not in rows[0]
+
+
+def test_failed_projection_clears_previous_observation_time(kanban_root):
+    (kanban_root / 'kanban.db').write_bytes(b'not sqlite')
+    rows = [{'id': 's_empty', 'kanban_observed_at': 1234.5}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0]['kanban_unknown'] is True
+    assert 'kanban_observed_at' not in rows[0]
+
+
 def test_counts_only_pending_and_running_tasks_across_boards(kanban_root):
     _make_board(kanban_root / "kanban.db", [
         ("t1", "running", "s_parent"),
@@ -62,6 +78,15 @@ def test_annotates_rows_by_whole_compression_lineage(kanban_root):
     assert "kanban_active" not in rows[2]
 
 
+def test_corrupt_local_board_is_unknown_not_successful_empty(kanban_root):
+    (kanban_root / "kanban.db").write_bytes(b"not a database" * 100)
+    rows = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0].get("kanban_unknown") is True
+    with pytest.raises(sqlite3.DatabaseError):
+        ksa.session_tasks(["s1"])
+
+
 @pytest.mark.parametrize("journal_mode", ["DELETE", "WAL"])
 @pytest.mark.parametrize("status,key", [("blocked", "kanban_blocked"), ("running", "kanban_active")])
 def test_archive_invalidates_cached_counts_and_waiting_ids(kanban_root, journal_mode, status, key):
@@ -78,7 +103,9 @@ def test_archive_invalidates_cached_counts_and_waiting_ids(kanban_root, journal_
         assert ksa.annotate_kanban_activity([{"id": "s2"}])[0][key] == 1
         conn.execute("UPDATE tasks SET status = 'archived' WHERE id = 't1'")
         conn.commit()
-        assert ksa.annotate_kanban_activity([{"id": "s1"}, {"id": "s2"}]) == [{"id": "s1"}, {"id": "s2"}]
+        rows = ksa.annotate_kanban_activity([{"id": "s1"}, {"id": "s2"}])
+        assert all(row.pop("kanban_observed_at") > 0 for row in rows)
+        assert rows == [{"id": "s1"}, {"id": "s2"}]
     finally:
         conn.close()
 
@@ -91,7 +118,10 @@ def test_missing_or_old_board_never_breaks_the_list(kanban_root):
     conn.close()
     rows = [{"id": "s1"}]
 
-    assert ksa.annotate_kanban_activity(rows) == [{"id": "s1"}]
+    assert ksa.annotate_kanban_activity(rows) is rows
+    assert rows[0]['id'] == 's1'
+    assert 'kanban_observed_at' in rows[0]
+    assert 'kanban_unknown' not in rows[0]
 
 
 def test_counts_tasks_a_session_subscribed_to_but_did_not_create(kanban_root):
@@ -250,9 +280,9 @@ def _make_replica(state_dir: Path, me: str, tasks: list[dict]) -> Path:
     conn.execute("INSERT INTO meta VALUES ('gateway', ?)", (me,))
     for t in tasks:
         gw = t.pop("_gw")
-        data = {"board": "default", "children": [], "parents": [], "sessions": [], "block_kind": None, **t}
+        data = {"profile": "default", "board": "default", "children": [], "parents": [], "sessions": [], "block_kind": None, **t}
         conn.execute("INSERT INTO replica VALUES (?, 'tasks', ?, 1, 1, ?, 0)",
-                     (gw, f"{data['board']}/{data['id']}", _json.dumps(data, sort_keys=True)))
+                     (gw, f"{data['profile']}/{data['board']}/{data['id']}", _json.dumps(data, sort_keys=True)))
     conn.commit()
     conn.close()
     return path
@@ -272,7 +302,7 @@ def test_replica_card_shepherded_by_a_local_session_keeps_it_busy(kanban_root):
     ])
     rows = [{"id": "s_mac"}, {"id": "hub_oneshot"}]
     ksa.annotate_kanban_activity(rows)
-    assert rows[0]["kanban_active"] == 2
+    assert rows[0]["kanban_active"] == 3  # includes unverified terminal shepherd
     assert rows[0]["kanban_blocked"] == 1
     assert "kanban_active" not in rows[1]  # a session on the owning gateway is not ours
 
@@ -301,7 +331,7 @@ def test_replica_counts_add_to_local_boards_and_follow_lineage(kanban_root):
     assert "kanban_blocked" not in rows[0]
 
 
-def test_missing_or_corrupt_replica_is_harmless(kanban_root):
+def test_absent_replica_is_optional_but_corrupt_replica_is_unknown(kanban_root):
     _make_board(kanban_root / "kanban.db", [("t1", "running", "s1")])
     rows = [{"id": "s1"}]
     ksa.annotate_kanban_activity(rows)  # no hub-state dir at all
@@ -312,8 +342,11 @@ def test_missing_or_corrupt_replica_is_harmless(kanban_root):
     ksa._reset_cache_for_tests()
     rows = [{"id": "s1"}]
     ksa.annotate_kanban_activity(rows)
-    assert rows[0]["kanban_active"] == 1
-    # a replica row with junk data is skipped, not fatal
+    assert rows[0].get("kanban_unknown") is True
+    assert "kanban_active" not in rows[0]
+    with pytest.raises(sqlite3.DatabaseError):
+        ksa.session_tasks(["s1"])
+    # Junk data is an unknown projection, never a successful partial list.
     (kanban_root / "hub-state" / "hub.db").unlink()
     path = _make_replica(kanban_root / "hub-state", "macbook", [
         {"_gw": "hub", "id": "t_ok", "status": "running", "sessions": [_shep("s1")]}])
@@ -324,7 +357,7 @@ def test_missing_or_corrupt_replica_is_harmless(kanban_root):
     ksa._reset_cache_for_tests()
     rows = [{"id": "s1"}]
     ksa.annotate_kanban_activity(rows)
-    assert rows[0]["kanban_active"] == 2
+    assert rows[0].get("kanban_unknown") is True
 
 
 def test_hub_platform_subscription_on_a_local_board_is_not_a_tui_shepherd(kanban_root):
@@ -336,6 +369,15 @@ def test_hub_platform_subscription_on_a_local_board_is_not_a_tui_shepherd(kanban
     conn.commit()
     conn.close()
     assert ksa.active_task_counts() == {}
+
+
+# --- one origin-work association for counts AND the task list (cross-gateway ownership) [daveey] ---
+
+def _set_meta(path: Path, **kv) -> None:
+    conn = sqlite3.connect(path)
+    conn.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", [(k, str(v)) for k, v in kv.items()])
+    conn.commit()
+    conn.close()
 
 
 def test_rows_carry_the_open_card_ids_the_chat_waits_on(kanban_root):
@@ -363,8 +405,8 @@ def test_rows_carry_the_open_card_ids_the_chat_waits_on(kanban_root):
 
 def test_plugin_waiting_source_keeps_a_settled_batch_waiting_until_its_close_out(kanban_root):
     """A registered source (chat-closeout's pending close-outs) adds its ids to ``kanban_waiting_on`` and to
-    ``kanban_active`` without double-counting ids the boards already report open; a failing source is harmless
-    and unregistering removes it. [daveey]"""
+    ``kanban_active`` without double-counting ids the boards already report open; a failing source marks
+    unknown without crashing, and unregistering removes it. [daveey]"""
     _make_board(kanban_root / "kanban.db", [("t1", "running", "s_a"), ("t2", "done", "s_b")])
 
     def boom():
@@ -375,6 +417,10 @@ def test_plugin_waiting_source_keeps_a_settled_batch_waiting_until_its_close_out
     try:
         rows = [{"id": "s_a"}, {"id": "s_b"}, {"id": "s_c"}]
         ksa.annotate_kanban_activity(rows)
+        assert all(row.get("kanban_unknown") for row in rows)
+        ksa.register_waiting_source("broken", None)
+        ksa.annotate_kanban_activity(rows)
+        assert all("kanban_unknown" not in row for row in rows)
         assert rows[0]["kanban_active"] == 1 and rows[0]["kanban_waiting_on"] == ["t1"]  # not double-counted
         assert rows[1]["kanban_active"] == 1 and rows[1]["kanban_waiting_on"] == ["t2"]  # grey until close-out
         assert "kanban_active" not in rows[2]
@@ -398,6 +444,161 @@ def _make_subs_board(path: Path, tasks: list[tuple], subs: list[tuple[str, str, 
         (tid, chat, json.dumps({"reason": reason}) if reason else None) for tid, chat, reason in subs])
     conn.commit()
     conn.close()
+
+
+def _dispatch_graph(root_status="running"):
+    """A local chat on 'macbook' dispatched a 13-card graph that runs on 'hub': only the root carries the
+    shepherd link (later cards are its descendants). Root running, 12 waiting on it."""
+    kids = [f"t_c{i:02d}" for i in range(12)]
+    cards = [{"_gw": "hub", "id": "t_root", "title": "P0", "status": root_status, "children": kids,
+              "sessions": [{"session": "hub_orch", "profile": None, "rel": "created"}, _shep("s_origin")]}]
+    cards += [{"_gw": "hub", "id": k, "title": k, "status": "todo", "parents": ["t_root"],
+               "sessions": [{"session": "hub_orch", "profile": None, "rel": "created"}]} for k in kids]
+    return cards
+
+
+def test_remote_dispatch_graph_lists_every_owner_qualified_row_and_counts_the_same(kanban_root):
+    """Dispatcher exited, origin chat keeps all 13 remote rows in its task list, and the sidebar count is the
+    same set (one predicate), so the row cannot paint done."""
+    _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    rows = ksa.session_tasks(["s_origin"])
+    assert len(rows) == 13
+    assert {(r["gateway"], r["board"], r["id"]) for r in rows} == (
+        {("hub", "default", "t_root")} | {("hub", "default", f"t_c{i:02d}") for i in range(12)})
+    root = next(r for r in rows if r["id"] == "t_root")
+    assert root["remote"] is True and root["via"] == "shepherd" and root["status"] == "running"
+    assert next(r for r in rows if r["id"] == "t_c00")["via"] == "descendant"
+    assert all(r["key"] == f"hub/default/default/{r['id']}" for r in rows)
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 13
+
+
+def test_done_root_still_lists_unfinished_descendants(kanban_root):
+    _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph(root_status="done"))
+    rows = ksa.session_tasks(["s_origin"])
+    assert sorted(r["id"] for r in rows) == [f"t_c{i:02d}" for i in range(12)] + ["t_root"]
+    root = next(r for r in rows if r['id'] == 't_root')
+    assert root['status'] == 'unknown' and root['reported_status'] == 'done'
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 13
+
+
+def test_review_is_unfinished_on_local_and_remote_cards(kanban_root):
+    """A card waiting for code review (or a goal completion awaiting verification) is not done."""
+    _make_board(kanban_root / "kanban.db", [("t_l", "review", "s1")])
+    _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_r", "status": "review", "sessions": [_shep("s1")]}])
+    ann = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 2
+    assert {r["id"] for r in ksa.session_tasks(["s1"])} == {"t_l", "t_r"}
+
+
+def test_same_task_id_on_two_gateways_is_two_rows(kanban_root):
+    _make_board(kanban_root / "kanban.db", [("t_same", "running", "s1")])
+    _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_same", "status": "running", "sessions": [_shep("s1")]},
+        {"_gw": "mini", "id": "t_same", "status": "todo", "sessions": [_shep("s1")]}])
+    ann = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 3
+    rows = ksa.session_tasks(["s1"])
+    assert sorted((r.get("gateway"), r["id"]) for r in rows if r.get("remote")) == [("hub", "t_same"), ("mini", "t_same")]
+    assert len({r["key"] for r in rows}) == 3
+
+
+def test_stale_replica_keeps_last_known_unfinished_rows_marked_stale(kanban_root):
+    path = _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    _set_meta(path, last_ok=1.0, offline_since=2.0)  # hub unreachable for ages
+    rows = ksa.session_tasks(["s_origin"])
+    assert len(rows) == 13 and all(r["stale"] for r in rows)
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 13
+    assert ann[0]["kanban_remote_stale"] == 13
+
+
+def test_failed_replica_read_keeps_the_last_good_answer_never_zero(kanban_root):
+    path = _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    import time as _time
+    _set_meta(path, last_ok=_time.time())
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 13 and "kanban_remote_stale" not in ann[0]
+    path.write_bytes(b"not a database" * 100)  # replica now unreadable
+    ksa._reset_cache_for_tests(keep_remote=True)
+    ann = [{"id": "s_origin"}]
+    ksa.annotate_kanban_activity(ann)
+    assert ann[0]["kanban_active"] == 13
+    assert ann[0]["kanban_remote_stale"] == 13
+    assert all(r["stale"] for r in ksa.session_tasks(["s_origin"]))
+
+
+def test_missing_replica_after_restart_retains_origin_work(kanban_root):
+    path = _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    import time as _time
+    _set_meta(path, last_ok=_time.time())
+    assert len(ksa.session_tasks(["s_origin"])) == 13
+    path.unlink()
+    ksa._reset_cache_for_tests()  # all process memory gone, as after restart
+    rows = [{"id": "s_origin"}, {"id": "s_unrelated"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0].get("kanban_active") == 13
+    assert rows[0].get("kanban_remote_stale") == 13
+    assert {k: v for k, v in rows[1].items() if k != 'kanban_observed_at'} == {"id": "s_unrelated"}
+    cards = ksa.session_tasks(["s_origin"])
+    assert len(cards) == 13
+    assert all(card["stale"] for card in cards)
+
+
+def test_empty_replica_does_not_erase_obligations_after_restart(kanban_root):
+    path = _make_replica(kanban_root / "hub-state", "macbook", _dispatch_graph())
+    import time as _time
+    _set_meta(path, last_ok=_time.time())
+    assert len(ksa.session_tasks(["s_origin"])) == 13
+    with sqlite3.connect(path) as conn:
+        conn.execute("DELETE FROM replica")
+    ksa._reset_cache_for_tests()
+    cards = ksa.session_tasks(["s_origin"])
+    assert len(cards) == 13
+    assert all(card["stale"] for card in cards)
+
+
+@pytest.mark.parametrize('terminal_status', ['done', 'archived', 'unexpected', None])
+def test_unverified_completion_keeps_origin_and_other_sessions_finish_normally(kanban_root, terminal_status):
+    import time
+    graph = _dispatch_graph(root_status=terminal_status)
+    for c in graph:
+        c["status"] = terminal_status
+    path = _make_replica(kanban_root / "hub-state", "macbook", graph)
+    _set_meta(path, last_ok=time.time())
+    _make_board(kanban_root / "kanban.db", [("t_x", "done", "s_other")])
+    ann = [{"id": "s_origin"}, {"id": "s_other"}]
+    ksa.annotate_kanban_activity(ann)
+    assert [{k: v for k, v in row.items() if k != 'kanban_observed_at'} for row in ann] == [
+        {"id": "s_origin", "kanban_active": 13}, {"id": "s_other"}]
+    cards = ksa.session_tasks(["s_origin"])
+    assert len(cards) == 13
+    assert all(c['status'] == 'unknown' and c['reported_status'] == terminal_status for c in cards)
+
+
+def test_failed_activity_read_stamps_unknown_not_idle(kanban_root, monkeypatch):
+    """A failed kanban read is not "no work": the row says ``kanban_unknown`` so the sidebar can't paint it
+    done, and the stamp clears once a read succeeds. [daveey]"""
+    def boom():
+        raise RuntimeError("replica and boards unreadable")
+
+    monkeypatch.setattr(ksa, "_all_counts", boom)
+    rows = [{"id": "s1", "kanban_active": 3}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0].get("kanban_unknown") is True
+    assert "kanban_active" not in rows[0]  # no stale count presented as fresh
+    monkeypatch.undo()
+    ksa._reset_cache_for_tests()
+    ksa.annotate_kanban_activity(rows)
+    assert "kanban_unknown" not in rows[0]
 
 
 def test_touch_subscription_to_someone_elses_card_never_keeps_the_toucher_busy_or_red(kanban_root):
@@ -426,12 +627,35 @@ def test_touch_subscription_to_someone_elses_card_never_keeps_the_toucher_busy_o
     assert [t["id"] for t in ksa.session_tasks(["s_shepherd"])] == ["t_run"]
 
 
-def test_legacy_non_owner_subscription_without_a_reason_stops_counting(kanban_root):
-    """[daveey] Backfill: subs written before reasons were stamped are touches unless the chat owns the card."""
+def test_legacy_non_owner_subscription_preserves_ambiguous_obligation(kanban_root):
+    """Old explicit shepherd subscriptions lack reasons too: unknown provenance cannot release work."""
     _make_subs_board(kanban_root / "kanban.db", [
         ("t1", "running", "s_owner", None),
         ("t2", "blocked", "s_owner", "needs_input"),
     ], subs=[("t1", "s_old_toucher", None), ("t2", "s_old_toucher", None), ("t1", "s_owner", None)])
 
-    assert ksa.active_task_counts() == {"s_owner": 1}
-    assert ksa.blocked_task_counts() == {"s_owner": 1}
+    assert ksa.active_task_counts() == {"s_owner": 1, "s_old_toucher": 1}
+    assert ksa.blocked_task_counts() == {"s_owner": 1, "s_old_toucher": 1}
+    assert {t['id'] for t in ksa.session_tasks(['s_old_toucher'])} == {'t1', 't2'}
+
+
+@pytest.mark.parametrize('warm', [False, True])
+def test_waiting_source_failure_is_unknown_until_success(kanban_root, monkeypatch, warm):
+    """A failed closeout read, even after restart, is not verified completion."""
+    _make_board(kanban_root / 'kanban.db', [('t1', 'done', 's1')])
+    def unavailable():
+        raise RuntimeError('closeout store unavailable')
+
+    monkeypatch.setattr(ksa, '_waiting_sources', {'closeout': lambda: {'s1': ['t1']}})
+    rows = [{'id': 's1'}]
+    if warm:
+        ksa.annotate_kanban_activity(rows)
+        assert rows[0]['kanban_active'] == 1
+    ksa._waiting_sources['closeout'] = unavailable
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0].get('kanban_unknown') is True
+    assert 'kanban_observed_at' not in rows[0]
+    ksa._waiting_sources['closeout'] = dict
+    ksa.annotate_kanban_activity(rows)
+    assert 'kanban_unknown' not in rows[0]
+    assert 'kanban_active' not in rows[0]

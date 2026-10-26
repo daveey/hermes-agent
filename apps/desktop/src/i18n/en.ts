@@ -1,5 +1,6 @@
 import { FIELD_DESCRIPTIONS, FIELD_LABELS } from '@/app/settings/constants'
 
+import { enArchiveTasks } from './archive-task-copy'
 import { enAppTour, enHandoffTour } from './en_app_tour'
 import { enAuxTasks } from './en_aux_tasks'
 import { enBilling } from './en_billing'
@@ -5116,8 +5117,7 @@ export const en: Translations = {
     archiveLinkedBody: 'This chat still has work linked to it. Archiving only hides the chat — the tasks and machines keep running.',
     archiveLinkedConfirm: 'Archive anyway',
     archiveLinkedCancel: 'Keep chat',
-    archiveLinkedTasksLabel: 'Kanban tasks',
-    archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} open` : '', blocked ? `${blocked} blocked` : ''].filter(Boolean).join(' · '),
+    ...enArchiveTasks,
     restored: 'Restored',
     unarchiveFailed: 'Unarchive failed',
     cwdChangeFailed: 'Working directory change failed',

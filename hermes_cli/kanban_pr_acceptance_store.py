@@ -62,4 +62,5 @@ def record_acceptance(conn, task_id, acceptance):
     if not receipt["ok"]:
         detail = f"PR acceptance {receipt['classification']}: {receipt.get('detail', '')} {receipt['recovery']}"
         conn.execute("UPDATE tasks SET last_failure_error=? WHERE id=?", (detail, task_id))
-    return receipt["ok"]
+    # Capture the exact core event, not a worker-provided receipt identifier.
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0] if receipt["ok"] else False

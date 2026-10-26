@@ -177,24 +177,7 @@ type HarnessHandle = Pick<
 > &
   Pick<ReturnType<typeof useSessionActions>, 'submitTextToNewSession'>
 
-function storedSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
-  return {
-    ended_at: null,
-    id: 'stored-1',
-    input_tokens: 0,
-    is_active: false,
-    last_active: 1,
-    message_count: 0,
-    model: null,
-    output_tokens: 0,
-    preview: null,
-    source: 'desktop',
-    started_at: 1,
-    title: 'stored',
-    tool_call_count: 0,
-    ...overrides
-  }
-}
+import { storedSession } from './use-session-actions/stored-session-fixture'
 
 function Harness({
   activeSessionId = null,
