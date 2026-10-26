@@ -182,11 +182,17 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
                     and event and run and event[1] == run[0] and run[1] in ('done', 'completed') and run[2] == 'completed'
                     and row[1] is not None and event[2] >= row[1] and run[3] is not None and run[3] >= row[1])
     payload = {k: v for k, v in task.items() if k != 'origin_observation'}
+    # No per-task timestamp: an unchanged task must publish an identical record, or every sync republishes
+    # every task. Owner liveness is the collector's per-scope heartbeat (``task_scopes[].observed_at``).
     return {**payload, 'origin_observation': {
-        'schema': 1, 'observed_at': now,
+        'schema': 1,
         'task_hash': hashlib.sha256(_json(payload).encode()).hexdigest(),
         'verified': verified,
     }}
+
+
+def _recent(observed_at: object, now: float, window: float = 180) -> bool:
+    return type(observed_at) in (int, float) and 0 <= now - observed_at <= window
 
 
 def _owner_evidence(task: dict) -> dict:
@@ -310,11 +316,14 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                                     and (s.get('profile'), s.get('board')) == (owner['profile'], owner['board'])]
                         readable = (info.get('gateway') == owner['gateway'] and len(matching) == 1
                                     and matching[0].get('state') == 'ok')
+                        heartbeat = matching[0].get('observed_at') if readable else None
                     except (ValueError, TypeError, AttributeError):
-                        readable = False
-                    evidence = _owner_evidence(task)
-                    observed_at = evidence.get('observed_at')
-                    live = (type(observed_at) in (int, float) and 0 <= now - observed_at <= 180)
+                        readable, heartbeat = False, None
+                    # Owner liveness: the collector's per-scope heartbeat (one record per sync) proves it read
+                    # this whole board recently, so an unchanged, current task record is still observed. The
+                    # per-task stamp is accepted too, for records published before scope heartbeats existed.
+                    live = (_recent(heartbeat, now)
+                            or _recent(_owner_evidence(task).get('observed_at'), now))
                     current = current and readable and live
                 if (owner['gateway'], owner['profile']) == (gateway, profile):
                     from hermes_cli.kanban_origin_local import observe_local_binding
