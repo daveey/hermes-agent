@@ -35,10 +35,16 @@ class AssignmentRoutingError(ValueError):
     code = 'no_capable_supervisor'
 
 
-def classify(task, kind, reason):
-    """Require both a narrow worker-local reason and independent policy evidence."""
-    if kind == 'assignment' and _HUMAN_ACCESS.search(reason or ''):
-        return 'capability', 'human_access_request'
+def classify(task, kind, reason, *, human_request=None):
+    """Use explicit request evidence, never auth vocabulary, to stop assignment repair."""
+    # Routing grants no execution authorization. Prose may describe denied or
+    # hypothetical authentication routes; only validated actionability evidence
+    # makes this a human request rather than supervised operational recovery.
+    from hermes_cli.kanban_human_request import validate_human_request
+    if validate_human_request(human_request, kind=kind) is not None:
+        return ('capability', 'human_access_request') if kind == 'assignment' else (kind, None)
+    if kind == 'assignment':
+        return kind, None
     if (kind != 'capability' or _HUMAN_ACCESS.search(reason or '')
             or not _WORKER_MISMATCH.fullmatch((reason or '').strip())):
         return kind, None
