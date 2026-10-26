@@ -5114,7 +5114,7 @@ export const en: Translations = {
     archived: 'Archived',
     archiveFailed: 'Archive failed',
     archiveLinkedTitle: (title: string) => (title ? `Archive “${title}”?` : 'Archive this chat?'),
-    archiveLinkedBody: 'This chat still has work linked to it. Archiving only hides the chat — the tasks and machines keep running.',
+    archiveLinkedBody: 'Review the linked-work status below. Archiving only hides the chat; it does not stop any tasks or machines.',
     archiveLinkedConfirm: 'Archive anyway',
     archiveLinkedCancel: 'Keep chat',
     ...enArchiveTasks,

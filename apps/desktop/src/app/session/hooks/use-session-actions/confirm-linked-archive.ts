@@ -3,11 +3,13 @@ import type { Translations } from '@/i18n/types'
 import { collectArchiveLinks, sessionKanbanArchiveLinks } from '@/store/archive-guards'
 import { confirm as confirmAction } from '@/store/confirm'
 
+import { refreshArchiveTasks } from './refresh-archive-tasks'
+
 export async function confirmLinkedArchive(storedSessionId: string, archived: SessionInfo | undefined, profile: string | undefined, copy: Translations['desktop'], skip = false): Promise<boolean> {
   if (skip) {return true}
 
         const linked = [
-          ...sessionKanbanArchiveLinks(archived, copy),
+          ...sessionKanbanArchiveLinks(await refreshArchiveTasks(storedSessionId, archived, profile), copy),
           ...(await collectArchiveLinks({
             connectionId: archived?.connection_id,
             ids: [...new Set([storedSessionId, archived?.id, archived?._lineage_root_id].filter(Boolean) as string[])],

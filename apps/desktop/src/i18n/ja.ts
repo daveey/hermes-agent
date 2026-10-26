@@ -3845,7 +3845,7 @@ export const jaOverrides = {
     archived: 'アーカイブしました',
     archiveFailed: 'アーカイブに失敗しました',
     archiveLinkedTitle: (title: string) => (title ? `「${title}」をアーカイブしますか？` : 'このチャットをアーカイブしますか？'),
-    archiveLinkedBody: 'このチャットにはまだ作業が紐付いています。アーカイブはチャットを隠すだけで、タスクやマシンは動き続けます。',
+    archiveLinkedBody: '以下の関連作業の状態を確認してください。アーカイブはチャットを隠すだけで、タスクやマシンを停止しません。',
     archiveLinkedConfirm: 'アーカイブする',
     archiveLinkedCancel: '残す',
     ...jaArchiveTasks,

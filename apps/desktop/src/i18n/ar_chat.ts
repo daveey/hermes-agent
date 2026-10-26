@@ -436,7 +436,7 @@ export const arChat = {
     archived: 'تمت الأرشفة',
     archiveFailed: 'فشلت الأرشفة',
     archiveLinkedTitle: (title: string) => (title ? `أرشفة «${title}»؟` : 'أرشفة هذه المحادثة؟'),
-    archiveLinkedBody: 'لا يزال هناك عمل مرتبط بهذه المحادثة. الأرشفة تخفي المحادثة فقط، وتستمر المهام والأجهزة في العمل.',
+    archiveLinkedBody: 'راجع حالة العمل المرتبط أدناه. الأرشفة تخفي المحادثة فقط ولا توقف أي مهام أو أجهزة.',
     archiveLinkedConfirm: 'أرشفة على أي حال',
     archiveLinkedCancel: 'إبقاء المحادثة',
     archiveLinkedTasksLabel: 'مهام كانبان',

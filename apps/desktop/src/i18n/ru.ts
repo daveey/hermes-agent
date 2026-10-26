@@ -4028,7 +4028,7 @@ export const ruOverrides = {
     archived: 'В архиве',
     archiveFailed: 'Архивирование не удалось',
     archiveLinkedTitle: (title: string) => (title ? `Архивировать «${title}»?` : 'Архивировать этот чат?'),
-    archiveLinkedBody: 'С этим чатом ещё связана работа. Архивирование лишь скрывает чат — задачи и машины продолжают работать.',
+    archiveLinkedBody: 'Проверьте статус связанной работы ниже. Архивирование лишь скрывает чат и не останавливает задачи или машины.',
     archiveLinkedConfirm: 'Всё равно архивировать',
     archiveLinkedCancel: 'Оставить чат',
     ...ruArchiveTasks,

@@ -458,7 +458,7 @@ export const zhHantChat = {
     archived: '已封存',
     archiveFailed: '封存失敗',
     archiveLinkedTitle: (title: string) => (title ? `封存「${title}」？` : '封存此對話？'),
-    archiveLinkedBody: '此對話仍有連結的工作。封存只會隱藏對話，任務和機器會繼續執行。',
+    archiveLinkedBody: '請查看下方關聯工作的狀態。封存只會隱藏對話，不會停止任何任務或機器。',
     archiveLinkedConfirm: '仍要封存',
     archiveLinkedCancel: '保留對話',
     archiveLinkedTasksLabel: '看板任務',

@@ -5666,7 +5666,7 @@ export const frOverrides = {
     archived: 'Archivé',
     archiveFailed: "Échec de l'archivage",
     archiveLinkedTitle: (title: string) => (title ? `Archiver « ${title} » ?` : 'Archiver ce chat ?'),
-    archiveLinkedBody: "Du travail est encore lié à ce chat. L'archivage masque seulement le chat : les tâches et les machines continuent de tourner.",
+    archiveLinkedBody: 'Consultez ci-dessous le statut du travail lié. L’archivage masque seulement le chat ; il n’arrête aucune tâche ni machine.',
     archiveLinkedConfirm: 'Archiver quand même',
     archiveLinkedCancel: 'Garder le chat',
     ...frArchiveTasks,

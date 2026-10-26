@@ -5657,7 +5657,7 @@ export const deOverrides = {
     archived: 'Archiviert',
     archiveFailed: 'Archivieren fehlgeschlagen',
     archiveLinkedTitle: (title: string) => (title ? `„${title}“ archivieren?` : 'Diesen Chat archivieren?'),
-    archiveLinkedBody: 'Mit diesem Chat ist noch Arbeit verknüpft. Archivieren blendet nur den Chat aus – Aufgaben und Maschinen laufen weiter.',
+    archiveLinkedBody: 'Prüfe unten den Status verknüpfter Arbeit. Archivieren blendet nur den Chat aus; Aufgaben oder Maschinen werden nicht angehalten.',
     archiveLinkedConfirm: 'Trotzdem archivieren',
     archiveLinkedCancel: 'Chat behalten',
     ...deArchiveTasks,

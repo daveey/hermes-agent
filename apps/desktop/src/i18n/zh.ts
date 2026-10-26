@@ -4830,7 +4830,7 @@ export const zhOverrides = {
     archived: '已归档',
     archiveFailed: '归档失败',
     archiveLinkedTitle: (title: string) => (title ? `归档“${title}”？` : '归档此对话？'),
-    archiveLinkedBody: '此对话仍有关联的工作。归档只会隐藏对话，任务和机器会继续运行。',
+    archiveLinkedBody: '请查看下方关联工作的状态。归档只会隐藏对话，不会停止任何任务或机器。',
     archiveLinkedConfirm: '仍然归档',
     archiveLinkedCancel: '保留对话',
     ...zhArchiveTasks,

@@ -5650,7 +5650,7 @@ export const esOverrides = {
     archived: 'Archivado',
     archiveFailed: 'No se pudo archivar',
     archiveLinkedTitle: (title: string) => (title ? `¿Archivar «${title}»?` : '¿Archivar este chat?'),
-    archiveLinkedBody: 'Este chat todavía tiene trabajo vinculado. Archivar solo oculta el chat: las tareas y las máquinas siguen en marcha.',
+    archiveLinkedBody: 'Revisa el estado del trabajo vinculado a continuación. Archivar solo oculta el chat; no detiene tareas ni máquinas.',
     archiveLinkedConfirm: 'Archivar de todos modos',
     archiveLinkedCancel: 'Conservar chat',
     ...esArchiveTasks,
