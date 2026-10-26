@@ -30,7 +30,7 @@ concurrency:
 jobs:
   actionlint:
     name: actionlint
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: [self-hosted, ci-fast]
     timeout-minutes: 5
     env:
       ACTIONLINT_VERSION: 1.7.12

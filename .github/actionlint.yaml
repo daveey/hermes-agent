@@ -13,6 +13,7 @@ self-hosted-runner:
     - hermes-hub
     - docker-ci
     - hermes-hub-poll
+    - ci-fast
 
 # fork (daveey/hermes): known findings that are not bugs. The lint runs in
 # .github/workflows/actionlint.yml. Keep each pattern narrow.
