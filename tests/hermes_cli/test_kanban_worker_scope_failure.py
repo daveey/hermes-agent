@@ -51,7 +51,9 @@ def test_scope_failure_overrides_clean_exit_and_reaches_retry_context(kanban_hom
             assert kbd._protocol_violation_streak(conn, tid) == 0
             task = kb.get_task(conn, tid)
             assert task.consecutive_failures == attempt + 1
-            assert task.status == ("ready" if attempt == 0 else "blocked")
+            assert task.status == ("ready" if attempt == 0 else "triage")
+            if attempt:
+                assert task.block_kind == "transient"
             assert "protocol violation" not in task.last_failure_error
             if result == "oom-kill":
                 assert "OOM-killed at 64 MiB" in task.last_failure_error

@@ -102,8 +102,8 @@ def test_real_auth_error_still_blocker_auth_and_escalates(kanban_home, monkeypat
         monkeypatch.setattr(kb.time, "time", lambda: now + 700)
         kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: spawned.append(a) or 1)
         task = kb.get_task(conn, tid)
-        assert task.status == "blocked"
-        assert task.block_kind == "capability"
+        assert task.status == "triage"
+        assert task.block_kind == "transient"
         assert not spawned
 
 

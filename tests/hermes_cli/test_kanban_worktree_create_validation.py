@@ -157,7 +157,7 @@ def test_dispatcher_blocks_config_error_on_first_failure(kanban_home, code_dir, 
         kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: spawned.append(a) or 1234, failure_limit=3)
         task = kb.get_task(conn, tid)
         assert spawned == []
-        assert task.status == "blocked"
+        assert (task.status, task.block_kind) == ("triage", "transient")
         assert task.consecutive_failures == 1
         assert "not inside a git repo" in task.last_failure_error
         assert "Fix: use workspace_path=" in task.last_failure_error
@@ -166,7 +166,7 @@ def test_dispatcher_blocks_config_error_on_first_failure(kanban_home, code_dir, 
         assert gave_up[-1].payload.get("workspace_config_error") is True
         # Sticky: recompute_ready must not auto-resume it.
         kb.recompute_ready(conn)
-        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.get_task(conn, tid).status == "triage"
 
 
 def test_dispatcher_transient_workspace_error_still_retries(

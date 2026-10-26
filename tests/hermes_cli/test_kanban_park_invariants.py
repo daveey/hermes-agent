@@ -72,8 +72,7 @@ def test_provider_auth_failure_still_guards(kanban_home):
 
 
 def test_guard_hold_is_capped_and_auto_blocks_with_reason(kanban_home, monkeypatch, all_assignees_spawnable):
-    """A card held by the guard past the cap leaves ``ready`` for ``blocked`` with the reason,
-    so it shows as waiting on someone instead of silently parking forever."""
+    """A capped guard hold reaches agent triage with its reason, not a human ask."""
     monkeypatch.setenv("HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS", "600")
     spawned = []
     with kbc.connect() as conn:
@@ -92,9 +91,9 @@ def test_guard_hold_is_capped_and_auto_blocks_with_reason(kanban_home, monkeypat
         monkeypatch.setattr(kb.time, "time", lambda: now + 700)
         res = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: spawned.append(a) or 1)
         task = kb.get_task(conn, tid)
-        assert task.status == "blocked"
+        assert (task.status, task.block_kind) == ("triage", "transient")
         assert tid in res.auto_blocked
-        ev = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' "
+        ev = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='supervisor_escalated' "
                           "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
         reason = json.loads(ev["payload"])["reason"]
         assert "blocker_auth" in reason and "provider authentication failed" in reason
@@ -420,7 +419,7 @@ def test_guard_hold_posts_one_comment_and_no_inbox_card_naming_pr_and_checks(
         # The notice must not restart the hold clock: the 6 h cap still blocks.
         monkeypatch.setattr(kb.time, "time", lambda: now + 6 * 3600 + 100)
         res = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 1)
-        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.get_task(conn, tid).status == "triage"
 
 
 def test_guard_event_relogged_after_hold_is_broken(kanban_home, monkeypatch, all_assignees_spawnable):
