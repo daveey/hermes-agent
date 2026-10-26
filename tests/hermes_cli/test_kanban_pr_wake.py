@@ -26,7 +26,7 @@ def probe(tmp_path, monkeypatch):
     gh = tmp_path / "gh"
     response = tmp_path / "response.json"
     response.write_text(json.dumps({"state": "open", "merged": False, "html_url": URL}))
-    gh.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nprint(Path({str(response)!r}).read_text())\n")
+    gh.write_text(f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\ndata=json.loads(Path({str(response)!r}).read_text())\nprint(json.dumps(data.get(sys.argv[2], data)) if isinstance(data, dict) else json.dumps(data))\n")
     gh.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + ":" + os.environ["PATH"])
     home = tmp_path / "home"
@@ -91,10 +91,21 @@ def test_timeout_remains_error_without_detail(probe, monkeypatch):
     assert rc == 2 and "SENSITIVE_TOKEN" not in message
 
 
-def test_closed_pr_wakes_real_board_but_does_not_complete(probe, tmp_path, monkeypatch):
+@pytest.mark.parametrize("superseded", [False, True])
+def test_closed_pr_wakes_real_board_but_does_not_complete(probe, tmp_path, monkeypatch, superseded):
     from hermes_cli.kanban_pr_wake import inspect_pr
     probe[0].write_text(json.dumps({"state": "closed", "merged": False, "html_url": URL}))
     assert inspect_pr(URL)[0] == 0
+    extra = ""
+    if superseded:
+        sha = "a" * 40
+        probe[0].write_text(json.dumps({
+            "repos/example/project/pulls/44": {"state": "open", "merged": False, "html_url": URL},
+            "repos/example/project/actions/jobs/123": {"head_sha": sha, "status": "completed", "conclusion": "success"},
+            "repos/example/project": {"default_branch": "main"},
+            f"repos/example/project/compare/{sha}...main": {"status": "ahead"},
+        }))
+        extra = f" --superseding-commit {sha} --verification-job 123"
     kb.init_db()
     with kbc.connect_closing() as conn:
         assert Path(conn.execute("PRAGMA database_list").fetchone()[2]).parent == tmp_path / "home"
@@ -104,7 +115,7 @@ def test_closed_pr_wakes_real_board_but_does_not_complete(probe, tmp_path, monke
         assert kb.claim_task(conn, tid, claimer="fixture-no-dispatch")
         command = (f"PYTHONPATH={shlex.quote(str(Path(kb.__file__).resolve().parents[1]))} "
                    f"PATH={shlex.quote(str(tmp_path) + ':' + os.environ['PATH'])} "
-                   f"{shlex.quote(sys.executable)} -m hermes_cli.kanban_pr_wake {URL}")
+                   f"{shlex.quote(sys.executable)} -m hermes_cli.kanban_pr_wake {URL}{extra}")
         monkeypatch.setattr(wakes, "_profile_home", lambda task: str(tmp_path / "home"))
         assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", wake_check=command, check_every=120)
         wakes.run_due_wake_checks(conn, now=int(time.time()), wait=True)
