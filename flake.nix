@@ -46,6 +46,7 @@
       ];
 
       imports = [
+        ./nix/source-mirrors.nix
         ./nix/packages.nix
         ./nix/overlays.nix
         ./nix/nixosModules.nix
