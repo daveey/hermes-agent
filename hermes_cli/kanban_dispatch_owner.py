@@ -17,21 +17,18 @@ def connection_db_path(conn: sqlite3.Connection) -> Path:
 
 
 def metadata_path(db_path: Path) -> Path:
-    from hermes_cli import kanban_db as kb
-    path = Path(db_path).resolve(strict=True)
-    default_meta = path.parent / "kanban" / "boards" / "default" / "board.json"
-    if path == (kb.kanban_home() / "kanban.db").resolve():
-        return default_meta
-    # Detect a foreign root's legacy default layout without treating an
-    # unreadable configured metadata path as absent (Path.exists hides errors).
-    if path.name == "kanban.db":
-        try:
-            default_meta.lstat()
-        except FileNotFoundError:
-            pass
-        else:
-            return default_meta
-    return path.parent / "board.json"
+    # Pure canonical-path mapping: no caller home or existence-dependent branch.
+    # Nonstandard filenames need distinct sidecars even in the same directory.
+    path = Path(db_path).resolve()
+    if path.name != "kanban.db":
+        return path.with_name(path.name + ".board.json")
+    if path.parent.parent.name == "boards" and path.parent.parent.parent.name == "kanban":
+        # default/board.json already belongs to the legacy root DB. A separate
+        # DB placed inside that reserved directory must not share its owner.
+        if path.parent.name == "default":
+            return path.with_name(path.name + ".board.json")
+        return path.parent / "board.json"
+    return path.parent / "kanban" / "boards" / "default" / "board.json"
 
 
 def read_metadata(path: Path) -> dict:
@@ -88,7 +85,7 @@ def run_owned_tick(conn, tick, dispatcher_id, board, dry_run):
             return DispatchResult(skipped_locked=True)
         try:
             owner = get_dispatch_owner(db_path)
-        except (OSError, ValueError, UnicodeError) as exc:
+        except (OSError, ValueError, UnicodeError, RecursionError) as exc:
             return DispatchResult(skipped_owned=True, ownership_error=str(exc))
         if owner is not None and dispatcher_id != owner:
             return DispatchResult(skipped_owned=True, dispatch_owner=owner)

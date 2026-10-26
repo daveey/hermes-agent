@@ -121,7 +121,7 @@ def test_connection_path_not_board_alias_controls_ownership(board_db, tmp_path, 
     _metadata(metadata, {})
     actual = tmp_path / "actual" / "board.db"
     actual.parent.mkdir()
-    _metadata(actual.parent / "board.json", {"dispatch_owner": "owner"})
+    _metadata(actual.with_name(actual.name + ".board.json"), {"dispatch_owner": "owner"})
     if alias in ("pinned", "both"):
         monkeypatch.setenv("HERMES_KANBAN_DB", str(default_path))
     with kbc.connect_closing(actual) as conn:
@@ -153,7 +153,7 @@ def test_set_read_clear_preserves_other_metadata(board_db, tmp_path, layout):
     _, path, metadata = board_db
     if layout == "adjacent":
         path = tmp_path / "custom" / "board.db"
-        metadata = path.parent / "board.json"
+        metadata = path.with_name(path.name + ".board.json")
     _metadata(metadata, {"title": "Generic board", "custom": {"keep": True}})
     with kbc.connect_closing(path):
         pass

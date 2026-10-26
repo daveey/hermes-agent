@@ -26,8 +26,12 @@ def _dir_holds_board(d: Path) -> bool:
 
 
 def board_metadata_path(board: Optional[str] = None) -> Path:
-    """``board.json`` path — display metadata only; the directory slug is the identity."""
-    return _kb.board_dir(_kb._slug_or_default(board)) / "board.json"
+    """Metadata authority follows the board's canonical DB, not the caller home."""
+    from hermes_cli.kanban_dispatch_owner import metadata_path
+    slug = _kb._slug_or_default(board)
+    path = (_kb.kanban_home() / "kanban.db" if slug == _kb.DEFAULT_BOARD
+            else _kb.board_dir(slug) / "kanban.db")
+    return metadata_path(path)
 
 
 def _default_board_display_name(slug: str) -> str:
@@ -159,6 +163,19 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
 
 
 def remove_board(slug: str, *, archive: bool = True) -> dict:
+    """Refuse busy boards before moving anything, including the current pointer."""
+    from hermes_cli.kanban_db_connect import _dispatch_tick_lock
+    normed = _kb._require_slug(slug)
+    if normed == _kb.DEFAULT_BOARD:
+        raise ValueError("the 'default' board cannot be removed")
+    path = (_kb.board_dir(normed) / "kanban.db").resolve()
+    with _dispatch_tick_lock(path) as held:
+        if not held:
+            raise ValueError("board dispatcher is busy; retry removal")
+        return _remove_board_locked(normed, archive=archive)
+
+
+def _remove_board_locked(slug: str, *, archive: bool = True) -> dict:
     """Archive (to ``boards/_archived/<slug>-<ts>/``) or delete a board;
     ``default`` cannot be removed. Returns ``{"slug", "action", "new_path"}``."""
     _kb._assert_not_delegated_child_mutation()
@@ -194,7 +211,7 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
         # tabs / gateway pollers can keep calling connect(board=slug) after the
         # archive; without a marker the resurrect-guard cannot tell an archived
         # slug from a brand-new one and an empty board would reappear (#43243).
-        write_board_metadata(
+        _write_board_metadata_locked(
             normed,
             name=prior_meta.get("name"),
             description=prior_meta.get("description"),
