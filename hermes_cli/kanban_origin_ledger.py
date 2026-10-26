@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -53,9 +53,9 @@ def binding_hash(binding: dict) -> str:
 
 
 @contextmanager
-def _db(path: Path):
+def _db(path: Path, *, timeout: float = 5):
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=5)
+    conn = sqlite3.connect(path, timeout=timeout)
     try:
         conn.execute("""CREATE TABLE IF NOT EXISTS origin_obligations (
             binding_id TEXT PRIMARY KEY, binding_hash TEXT NOT NULL,
@@ -199,7 +199,7 @@ def _owner_evidence(task: dict) -> dict:
     return evidence
 
 
-def refresh_observations(path: Path, replica: Path) -> None:
+def refresh_observations(path: Path, replica: Path, *, timeout: float = 5) -> None:
     """Advance durable observations only from newer, exactly bound owner records.
 
     Disappearance is not completion. Corrupt/unreadable stores raise to let callers
@@ -212,7 +212,7 @@ def refresh_observations(path: Path, replica: Path) -> None:
 
     source = _ro(replica)
     try:
-        with _db(path) as conn, conn:
+        with _db(path, timeout=timeout) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             for key, raw, observed in conn.execute(
                     "SELECT binding_id,binding_json,observation_version FROM origin_obligations").fetchall():
@@ -263,7 +263,10 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
     last_ok = None
     try:
         if replica is not None and replica.is_file():
-            refresh_observations(path, replica)
+            # Inventory readers must not queue behind a receipt/sync writer.
+            # Contention is an unavailable observation, handled conservatively
+            # below; the next poll retries without dropping the durable receipt.
+            refresh_observations(path, replica, timeout=0)
             source = _ro(replica)
             meta = dict(source.execute("SELECT k,v FROM meta"))
             last_ok = float(meta.get('last_ok') or 0)
@@ -274,7 +277,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
         fresh = False
     result = []
     try:
-        with _db(path) as conn:
+        with closing(_ro(path)) as conn:
             for raw, resolved, payload, version, released in conn.execute(
                     "SELECT binding_json,resolved_session,task_json,observation_version,released FROM origin_obligations"):
                 binding = json.loads(raw)
