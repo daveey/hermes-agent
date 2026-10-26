@@ -39,3 +39,9 @@ def validate_initial_request(value, initial_status, triage):
     if request is not None and (initial_status != "blocked" or triage):
         raise ValueError("human_request requires initial_status='blocked' without triage")
     return request
+
+
+def reject_timed_request(value):
+    """Automatic wake-up and a pending human action cannot share a block."""
+    if value is not None:
+        raise ValueError("human_request cannot be combined with automatic timed resumption")

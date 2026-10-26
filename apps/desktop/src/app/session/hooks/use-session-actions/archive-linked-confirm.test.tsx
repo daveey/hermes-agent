@@ -42,6 +42,7 @@ function row(overrides: Partial<SessionInfo> = {}): SessionInfo {
     id: 's-1',
     input_tokens: 0,
     is_active: false,
+    kanban_observed_at: Date.now() / 1000,
     last_active: 1,
     message_count: 2,
     model: null,
@@ -147,6 +148,23 @@ describe('archiveSession linked-work confirmation', () => {
     expect($sessions.get().map(session => session.id)).toEqual(['s-1'])
   })
 
+  it.each([
+    { kanban_unknown: true },
+    { kanban_observed_at: undefined },
+    { kanban_observed_at: 1 }
+  ])('asks when remote task status is unknown despite zero known counts: %j', async evidence => {
+    setSessions([row({ ...evidence, kanban_active: 0, kanban_blocked: 0 })])
+    const handle = await mountHarness()
+    let done: Promise<void> | undefined
+    act(() => { done = handle.archiveSession('s-1') })
+    await waitFor(() => expect($confirmRequest.get()).not.toBeNull())
+    expect($confirmRequest.get()!.details).toEqual([
+      { label: 'Kanban tasks', value: 'Task status unavailable; work may still be unfinished.' }
+    ])
+    await act(async () => { settleConfirm(false); await done })
+    expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled()
+  })
+
   it('archives after the user confirms', async () => {
     setSessions([row({ kanban_blocked: 1 })])
     const handle = await mountHarness()
@@ -234,11 +252,12 @@ describe('offline archive owner isolation', () => {
     ['mini', 'personal']
   ])('archives selected owner %s/%s', async (gateway, profile) => {
     const selectedRow = cached(gateway, profile)
-    $offlineSessions.set([cached(), selectedRow])
+    const otherOwnerRow = cached()
+    $offlineSessions.set([otherOwnerRow, selectedRow])
     const handle = await mountHarness()
     await act(() => handle.archiveSession('s-1', { selectedRow }))
     expect(hubRequest).toHaveBeenCalledWith(expect.objectContaining({ gateway, key: profile + '/s-1' }))
-    expect($offlineSessions.get()).toEqual([cached()])
+    expect($offlineSessions.get()).toEqual([otherOwnerRow])
     expect(setSessionArchived).not.toHaveBeenCalled()
   })
   it('uses live owner after reconnect with the cache still populated', async () => {

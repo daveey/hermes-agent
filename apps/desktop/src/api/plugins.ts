@@ -52,6 +52,9 @@ export interface PluginRestOptions {
    *  Kanban board). The ambient profile is NOT carried: a profile name belongs
    *  to its own gateway, so the target's default profile answers. */
   connectionId?: string
+  /** Explicit owner profile on the selected connection. null chooses its
+   * default; omitted preserves existing ambient/connection-only semantics. */
+  profile?: null | string
 }
 
 // Normalize `path` to a leading-slash suffix relative to `/api/plugins/<id>`.
@@ -87,7 +90,8 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
     body: opts.body,
     upload: opts.upload,
     timeoutMs: opts.timeoutMs,
-    ...(opts.connectionId ? { connectionId: opts.connectionId } : profileScoped())
+    ...(opts.connectionId ? { connectionId: opts.connectionId } : {}),
+    ...(opts.profile !== undefined ? profileScoped(opts.profile) : opts.connectionId ? {} : profileScoped())
   })
 }
 

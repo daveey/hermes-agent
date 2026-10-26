@@ -155,6 +155,16 @@ def kanban_command(args: argparse.Namespace) -> int:
         return _err(delegated_child_refusal(
             "kanban: delegate_task child contexts cannot mutate Kanban tasks via the CLI"))
 
+    # Origin obligations are profile-local, not current-board state; do not
+    # auto-initialize a board or route by a worker's inherited board override.
+    if action == "origin-bind":
+        from hermes_cli.kanban_origin_adapter import command
+        return command(args)
+
+    if action == "origin-create":
+        from hermes_cli.kanban_origin_owner import command
+        return command(args)
+
     # `boards …` manages board metadata and the current-board pointer itself, so it must ignore
     # the `--board` routing override (else `--board beta boards show` reports beta).
     if action == "boards":
@@ -224,7 +234,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
-    "gc",
+    "gc", "origin-bind", "origin-create",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
@@ -242,6 +252,9 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
         return False
     from agent.delegation_context import kanban_path_is_fenced
 
+    if action == "origin-bind":
+        from hermes_constants import get_hermes_home
+        return kanban_path_is_fenced(get_hermes_home() / "kanban/origin-ledger.db")
     return kanban_path_is_fenced(kb.kanban_home()) or kanban_path_is_fenced(kb.kanban_db_path())
 
 
@@ -386,6 +399,14 @@ def _cmd_create(args: argparse.Namespace) -> int:
         session_id = (_persisted_session_id(session_key)
                       or _persisted_session_id(os.environ.get("HERMES_SESSION_ID")))
     idem_key = getattr(args, "idempotency_key", None)
+    # [daveey] Bind cards made for a chat on another gateway ($HERMES_ORIGIN_SESSION / --origin-session),
+    # validated before the card exists. See hermes_cli/kanban_origin.py.
+    from hermes_cli import kanban_origin
+    try:
+        origin = kanban_origin.resolve(getattr(args, "origin_session", None))
+    except kanban_origin.OriginError as exc:
+        return _err(f"kanban: {exc.code}: {exc}", 2)
+    origin_binding = None
     with kbc.connect_closing() as conn:
         # An --idempotency-key hit returns an existing card: never re-stamp/re-subscribe it.
         idem_hit = bool(idem_key) and conn.execute(
@@ -424,6 +445,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             # that shelled out hears when the card lands (and its row stays busy).
             from tools.kanban_tools import _maybe_auto_subscribe
             _maybe_auto_subscribe(conn, task_id)
+        if origin is not None:  # idempotent, so a retried create still (re)binds
+            origin_binding = kanban_origin.bind(conn, task_id, origin, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
     if not in_worker and not session_id and not idem_hit and _agent_invoked():
         # An agent shelled out but no chat could be stamped (unknown/missing session env:
@@ -435,9 +458,15 @@ def _cmd_create(args: argparse.Namespace) -> int:
               f"hermes kanban notify-subscribe {task_id} --platform tui --chat-id <session_id>",
               file=sys.stderr)
     if getattr(args, "json", False):
-        _print_json(_task_to_dict(task))
+        out = _task_to_dict(task)
+        if origin_binding:
+            out["origin_binding"] = origin_binding
+        _print_json(out)
     else:
         print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
+        if origin_binding:
+            print(f"Bound to {origin_binding['origin']} (readback pending: on the origin gateway run "
+                  f"`{origin_binding['verify_on_origin']}`)")
         # Warn only for ready+assigned tasks that would sit without a dispatcher (triage/todo idle
         # by design, unassigned can't dispatch); skipped under --json so stdout stays parseable.
         if task.status == "ready" and task.assignee:
@@ -895,7 +924,7 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
 
 
 def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
-                                 handoff_tool: str = "kanban_complete"):
+                                 handoff_tool: str = "kanban_complete", *, verified=None):
     """Goal judge for every terminal worker handoff (including review).
 
     Returns ``(verdict, reason_or_None)``: ``"done"`` allows; ``"blocked"`` = judge ruled the goal
@@ -927,7 +956,7 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
         from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{task.id}")
         try:
-            verdict, reason, _, _, transport_failed = judge_goal(
+            verdict, reason, parse_failed, _, transport_failed = judge_goal(
                 goal=handoff_judge_goal(task.title, task.body, handoff_tool),
                 last_response=evidence.strip())
         finally:
@@ -938,6 +967,7 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
 
         _logging.getLogger(__name__).warning("goal judge check failed, allowing lifecycle handoff: %s",
                                              judge_exc, exc_info=True)
+        return ("done", None)
     if transport_failed:
         # ``judge_goal`` fails open to ``continue`` on transport errors (relay 400, auth, timeout);
         # an unreachable judge is not a human "not done" and must not reject the handoff (#83610).
@@ -945,16 +975,19 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
 
         _logging.getLogger(__name__).warning("goal judge unreachable (%s), allowing lifecycle handoff", reason)
         return ("done", None)
+    if verdict == 'done' and not parse_failed and verified is not None and handoff_tool == 'kanban_complete':
+        from hermes_cli.kanban_goal_receipt import GoalVerification
+        verified.append(GoalVerification.for_handoff(task, evidence))
     return (verdict, None if verdict == "done" else reason)
 
 
 def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: str,
-                     continue_hint: str) -> Optional[str]:
+                     continue_hint: str, *, verified=None) -> Optional[str]:
     """Goal-mode judge gate shared by ``complete`` / ``request-review`` (mirrors tools/kanban_tools.py);
     applied to every terminal handoff so request-review can't bypass it. Returns the error line, or
     None to allow."""
     tool = "kanban_request_review" if handoff.startswith("review") else "kanban_complete"
-    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence, tool)
+    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence, tool, verified=verified)
     if verdict == "blocked":
         return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
                 f"the goal unachievable — {rejection}. {blocked_hint}")
@@ -981,16 +1014,18 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
+            verified = []
             gate_err = _goal_gate_error(
                 conn, tid, (summary or args.result or "").strip(), "completion",
                 "Re-scope with kanban edit, or record the block with kanban block instead of completing.",
-                "Provide evidence matching the task's acceptance criteria.")
+                "Provide evidence matching the task's acceptance criteria.", verified=verified)
             if gate_err:
                 fail_msg[tid] = gate_err
                 return False
             fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
+                                        goal_verification=verified[0] if verified else None,
                                         expected_run_id=_worker_run_id_for(tid),
                                         force=bool(getattr(args, "force", False)))
             except kb.LiveClaimError:

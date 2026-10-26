@@ -6,13 +6,13 @@
 
 import { type DragEvent as ReactDragEvent, useRef, useState } from 'react'
 
-import { uploadAttachment } from './api'
+import { type TaskOwner, uploadAttachment } from './api'
 
 export const isFileDrag = (dt: DataTransfer | null | undefined) => !!dt && Array.from(dt.types ?? []).includes('Files')
 
 /** Sequential uploads; resolves with the count stored. The first failure
  *  rejects (earlier files stay attached — the caller's refresh shows them). */
-export async function uploadFiles(taskId: string, files: readonly File[]): Promise<number> {
+export async function uploadFiles(taskId: string, files: readonly File[], owner?: TaskOwner): Promise<number> {
   let stored = 0
 
   for (const file of files) {
@@ -20,7 +20,7 @@ export async function uploadFiles(taskId: string, files: readonly File[]): Promi
       bytes: await file.arrayBuffer(),
       contentType: file.type || undefined,
       filename: file.name
-    })
+    }, owner)
     stored += 1
   }
 

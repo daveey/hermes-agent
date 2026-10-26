@@ -2775,7 +2775,7 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
 def _init_session(
     sid: str, key: str, agent, history: list, cols: int = 80, cwd: str | None = None,
     session_db=None, source: str | None = None, profile_home: str | None = None,
-    explicit_cwd: bool = False):
+    explicit_cwd: bool = False, auth_user_id=...):
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
@@ -2791,7 +2791,9 @@ def _init_session(
             "model_override": None,
             # Async events go to the transport that created the session (stdio for Ink, WS for the dashboard).
             "transport": current_transport() or _stdio_transport,
-            "auth_user_id": _transport_auth_user_id(current_transport()),
+            # Omitted for new starts; explicit None preserves a resumed NULL owner.
+            "auth_user_id": (_transport_auth_user_id(current_transport())
+                             if auth_user_id is ... else auth_user_id),
         }
         _session_todo_state(_sessions[sid])
     _hydrate_session_cwd(sid, key, session_db, profile_home)

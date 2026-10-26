@@ -87,9 +87,9 @@ import {
 } from './api'
 import { isFileDrag, uploadFiles, useFileDrop } from './attach-drop'
 import { BoardSwitcher } from './board-switcher'
-import { TaskDrawer } from './drawer'
+import { BoardTaskDrawer } from './board-task-drawer'
 import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
-import { $openTaskRequest } from './open-task'
+import { $openTaskRequest, type OpenTaskRequest, snapshotOpenTask } from './open-task'
 import { OrchestrationPanel } from './orchestration'
 import { columnMeta, type KanbanBoard, type KanbanTask, type TaskEstimate } from './types'
 import {
@@ -1217,7 +1217,7 @@ export function KanbanBoardPage() {
   const gatewayFilter = gateways.some(gateway => gateway.id === pickedGateway) ? pickedGateway : ''
   const createGateway = gatewayFilter || scope
 
-  const [openId, setOpenId] = useState<null | string>(null)
+  const [openTask, setOpenTask] = useState<null | OpenTaskRequest>(null)
   const [addStatus, setAddStatus] = useState<null | string>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -1253,7 +1253,7 @@ export function KanbanBoardPage() {
       $boardSlug.set(requestedTask.board)
     }
 
-    setOpenId(requestedTask.taskId)
+    setOpenTask(snapshotOpenTask(requestedTask))
     $openTaskRequest.set(null)
   }, [requestedTask])
 
@@ -1566,7 +1566,7 @@ export function KanbanBoardPage() {
                 onDelete={id => deleteMut.mutate(id)}
                 onDropTask={onMove}
                 onMove={onMove}
-                onOpen={setOpenId}
+                onOpen={id => setOpenTask({ taskId: id, board: slug })}
                 onToggle={() => toggleLane(col.name, auto)}
                 onToggleSelect={toggleSelect}
                 selected={selected}
@@ -1591,7 +1591,7 @@ export function KanbanBoardPage() {
         parents={parentOptions}
         target={addStatus}
       />
-      <TaskDrawer columns={columnNames} id={openId} onClose={() => setOpenId(null)} onOpen={setOpenId} />
+      <BoardTaskDrawer board={slug} columns={columnNames} onChange={setOpenTask} task={openTask} />
     </div>
   )
 }

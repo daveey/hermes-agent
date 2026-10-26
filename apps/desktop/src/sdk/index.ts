@@ -117,6 +117,7 @@ import { desktopSettings } from './settings'
 
 /** Pane, status bar and titlebar slots; see `./areas` for the mount rules. */
 export { PANES_AREA, STATUSBAR_AREAS, TITLEBAR_AREAS } from './areas'
+export type { PluginGateway } from './gateways'
 
 // -- state: readonly views over the app's live atoms -------------------------
 
@@ -1655,7 +1656,6 @@ export const host = {
 
 // -- react bridge -------------------------------------------------------------
 
-export type { PluginGateway } from './gateways'
 export * from './hub-sync'
 /** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
 export type * from './plugin-contract'

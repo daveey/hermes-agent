@@ -1,5 +1,6 @@
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
+import { esArchiveTasks } from './archive-task-copy'
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { esAuxTasks } from './es_aux_tasks'
 import { esBoot } from './es_boot'
@@ -5652,8 +5653,7 @@ export const esOverrides = {
     archiveLinkedBody: 'Este chat todavía tiene trabajo vinculado. Archivar solo oculta el chat: las tareas y las máquinas siguen en marcha.',
     archiveLinkedConfirm: 'Archivar de todos modos',
     archiveLinkedCancel: 'Conservar chat',
-    archiveLinkedTasksLabel: 'Tareas de Kanban',
-    archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} abiertas` : '', blocked ? `${blocked} bloqueadas` : ''].filter(Boolean).join(' · '),
+    ...esArchiveTasks,
     restored: 'Restaurado',
     unarchiveFailed: 'No se pudo desarchivar',
     cwdChangeFailed: 'No se pudo cambiar el directorio de trabajo',

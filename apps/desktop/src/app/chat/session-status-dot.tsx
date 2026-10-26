@@ -1,10 +1,10 @@
 import { useStore } from '@nanostores/react'
 
 import { type Translations, useI18n } from '@/i18n'
-import { useStoreSelector } from '@/lib/use-session-slice'
+import { useSessionDotState } from '@/lib/use-session-dot-state'
 import { cn } from '@/lib/utils'
 import { $sessionColorById, sessionColorFor } from '@/store/session-color'
-import { $sessionDotStateById, type SessionDotState, withRowActivity } from '@/store/session-dot-state'
+import type { SessionDotState } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 
 // A pure lookup table: each state maps to its className, aria-label, and title.
@@ -133,13 +133,7 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
 
   // Selector, not a plain useStore: the map is rebuilt whenever any session's
   // status changes, but a given dot only repaints when ITS OWN state flips.
-  const storeState = useStoreSelector($sessionDotStateById, states =>
-    storedSessionId ? (states[storedSessionId] ?? 'idle') : 'draft'
-  )
-
-  // [daveey] Same row-stamp fold as the sidebar row's stripe, so the dot and
-  // the stripe agree on a project-tree row the store can't see.
-  const dotState = session && storedSessionId ? withRowActivity(storeState, session) : storeState
+  const dotState = useSessionDotState(storedSessionId, session)
 
   const variant = DOT_VARIANTS[dotState]
 

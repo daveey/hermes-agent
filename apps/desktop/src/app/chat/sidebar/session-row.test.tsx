@@ -158,6 +158,7 @@ function makeSession(overrides: Partial<SessionInfo> & { title: string }): Sessi
     handoff_platform: null,
     handoff_state: null,
     id: 's1',
+    kanban_observed_at: Date.now() / 1000,
     last_active: 0,
     profile: 'default',
     started_at: 0,
@@ -557,6 +558,26 @@ describe('SidebarSessionRow own activity stamps', () => {
     })
   }
 
+
+  it('expires tree-only evidence without a row refresh', async () => {
+    const { $kanbanObservationTick } = await import('@/store/kanban-observation')
+    const { cleanStores } = await import('nanostores')
+    cleanStores($kanbanObservationTick)
+    vi.useFakeTimers()
+
+    try {
+      const { container } = renderRow(makeSession({ id: 'old-proj', message_count: 9, title: 'Old' }))
+      expect(stripe(container)).toBe('done')
+      act(() => vi.advanceTimersByTime(195_000))
+      expect(stripe(container)).toBeNull()
+      expect(container.querySelector('[aria-label="Running in background"]')).not.toBeNull()
+    } finally {
+      cleanup()
+      cleanStores($kanbanObservationTick)
+      vi.useRealTimers()
+    }
+  })
+
   // [daveey] Open kanban cards: never green and never blank — the grey
   // `waiting` card glyph (parked: ⌘] / ⌘[ skip it).
   it('shows the grey waiting glyph while kanban_active is set', () => {
@@ -620,6 +641,7 @@ describe('SidebarSessionRow own activity stamps', () => {
     )
 
     expect(stripe(container)).toBe('stuck')
+
   })
 
   it('still paints done (green) with no activity stamps', () => {

@@ -764,6 +764,23 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     print("    Sign in at the dashboard with these credentials.\n")
 
 
+def _ssh_bootstrap_server_kwargs(token_file, token, owner_nonce):
+    """Server launch binding, called only after the private token file validates.
+
+    The ownership directory survives token rotation. Neither it nor the nonce
+    alone grants an identity: the server also requires the verified credential.
+    """
+    from hermes_cli.dashboard_procs import BACKEND_LOCK_NAME
+
+    directory = Path(token_file).parent if token_file else None
+    return {
+        "ssh_session_token": token,
+        "ssh_owner_nonce": owner_nonce,
+        "ssh_ownership_id": directory.name if directory else None,
+        "ssh_lock_path": directory / BACKEND_LOCK_NAME if directory else None,
+    }
+
+
 def _read_ssh_session_token_file(path: str) -> str:
     """Read and unlink a Desktop SSH token from its private runtime directory."""
     if sys.platform == "win32":

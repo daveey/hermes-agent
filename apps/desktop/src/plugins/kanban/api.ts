@@ -394,10 +394,15 @@ function withBoard(path: string, params: Record<string, string> = {}): string {
 export const boardKeyPrefix = (scope: string) => ['kanban', 'board', scope] as const
 export const boardKey = (scope: string, slug: string, archived: boolean) =>
   [...boardKeyPrefix(scope), slug, archived] as const
-export const taskKey = (scope: string, slug: string, id: string) => ['kanban', 'task', scope, slug, id] as const
-export const logKey = (scope: string, slug: string, id: string) => ['kanban', 'log', scope, slug, id] as const
+export const taskKey = (scope: string, slug: string, id: string, owner?: TaskOwner) =>
+  owner ? ['kanban', 'task', owner.gateway, owner.board, id, owner.profile] as const
+    : ['kanban', 'task', scope, slug, id] as const
+export const logKey = (scope: string, slug: string, id: string, owner?: TaskOwner) =>
+  owner ? ['kanban', 'log', owner.gateway, owner.board, id, owner.profile] as const
+    : ['kanban', 'log', scope, slug, id] as const
 export const boardsKey = (scope: string) => ['kanban', 'boards', scope] as const
-export const profilesKey = (scope: string) => ['kanban', 'profiles', scope] as const
+export const profilesKey = (scope: string, owner?: TaskOwner) =>
+  owner ? ['kanban', 'profiles', owner.gateway, owner.profile] as const : ['kanban', 'profiles', scope] as const
 export const projectsKey = (scope: string) => ['kanban', 'projects', scope] as const
 export const orchestrationKey = (scope: string) => ['kanban', 'orchestration', scope] as const
 /** [daveey] Blocked cards across every board and gateway (sidebar section). */
@@ -469,14 +474,30 @@ function remoteRead<T>(gateway: string, path: string): Promise<T> {
   })
 }
 
-interface TaskOwner {
-  gateway: string
-  board: string
+export interface TaskOwner {
+  readonly gateway: string
+  readonly board: string
+  readonly profile?: string
 }
 
-const taskOwners = new Map<string, TaskOwner>()
+const taskOwners = new Map<string, { id: string; owner: TaskOwner }>()
 
-/** [daveey] Cards read from the hermes-hub replica, by id: their hub gateway
+function ownerKey(id: string, owner: TaskOwner): string {
+  return JSON.stringify([owner.gateway, owner.profile ?? null, owner.board, id])
+}
+
+/** Legacy callers are safe only when the id has exactly one known owner. */
+function rememberedOwner(id: string): TaskOwner | undefined {
+  const matches = [...taskOwners.values()].filter(entry => entry.id === id)
+
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous task id ${id}: supply gateway, profile and board`)
+  }
+
+  return matches[0]?.owner
+}
+
+/** [daveey] Cards read from the hermes-hub replica, by qualified owner key: their hub gateway
  *  name and board, so a comment on one becomes a hub request instead of a
  *  call to a gateway that just failed to answer. */
 const hubTaskRefs = new Map<string, { board: string; hubGateway: string }>()
@@ -484,8 +505,9 @@ const hubTaskRefs = new Map<string, { board: string; hubGateway: string }>()
 /** [daveey] Record where a task lives before the board has read it (the
  *  open-task hook: a card opened from a chat on another gateway), so the
  *  drawer's first fetch goes to the owning gateway + board. */
-export function rememberTaskOwner(id: string, board: string, gateway: string): void {
-  taskOwners.set(id, { board, gateway })
+export function rememberTaskOwner(id: string, board: string, gateway: string, profile?: string): void {
+  const owner = Object.freeze({ board, gateway, ...(profile === undefined ? {} : { profile }) })
+  taskOwners.set(ownerKey(id, owner), { id, owner })
 }
 
 /** Registry ids of every gateway, the routed (active) one first. A single
@@ -513,7 +535,7 @@ function via(gateway: string | undefined): PluginRestOptions {
 /** Owning gateway of a task (the routed one when unknown — e.g. a task id
  *  typed before the board loaded, or a single-gateway setup). */
 export function taskGateway(id: string): string {
-  return taskOwners.get(id)?.gateway ?? routedScope()
+  return rememberedOwner(id)?.gateway ?? routedScope()
 }
 
 function withSlug(path: string, slug: string, params: Record<string, string> = {}): string {
@@ -529,11 +551,14 @@ function withSlug(path: string, slug: string, params: Record<string, string> = {
 }
 
 /** `withBoard` for a task: its own board slug on its own gateway. */
-function forTask(id: string, path: string, params: Record<string, string> = {}): [string, PluginRestOptions] {
-  const owner = taskOwners.get(id)
+function forTask(id: string, path: string, params: Record<string, string> = {}, explicitOwner?: TaskOwner): [string, PluginRestOptions] {
+  const owner = explicitOwner ?? rememberedOwner(id)
 
-  return owner && owner.gateway !== routedScope()
-    ? [withSlug(path, owner.board, params), via(owner.gateway)]
+  return owner
+    ? [
+        withSlug(path, owner.board, params),
+        owner.profile === undefined ? via(owner.gateway) : { connectionId: owner.gateway, profile: owner.profile }
+      ]
     : [withBoard(path, params), {}]
 }
 
@@ -652,17 +677,17 @@ function rememberOwners(board: KanbanBoard, slug: string): KanbanBoard {
   for (const col of board.columns) {
     for (const task of col.tasks) {
       if (task.gateway) {
-        taskOwners.set(task.id, { board: slug, gateway: task.gateway })
+        rememberTaskOwner(task.id, slug, task.gateway)
       }
 
       if (task.from_hub && task.gateway) {
         const hubGateway = hubGatewayForConnection(task.gateway)
 
         if (hubGateway) {
-          hubTaskRefs.set(task.id, { board: slug || 'default', hubGateway })
+          hubTaskRefs.set(ownerKey(task.id, { board: slug, gateway: task.gateway }), { board: slug || 'default', hubGateway })
         }
       } else {
-        hubTaskRefs.delete(task.id)
+        hubTaskRefs.delete(ownerKey(task.id, { board: slug, gateway: task.gateway ?? routedScope() }))
       }
     }
   }
@@ -797,15 +822,15 @@ export async function fetchBoard(archived: boolean): Promise<KanbanBoard> {
   return rememberOwners(board, slug)
 }
 
-export const fetchTask = async (id: string) => {
-  const downloadAttachment = captureGatewayFileDownload()
-  const detail = await call<KanbanTaskDetail>(...forTask(id, `/tasks/${id}`))
+export const fetchTask = async (id: string, owner?: TaskOwner) => {
+  const downloadAttachment = captureGatewayFileDownload(owner ? { connectionId: owner.gateway, profile: owner.profile } : undefined)
+  const detail = await call<KanbanTaskDetail>(...forTask(id, `/tasks/${id}`, {}, owner))
 
   return { ...detail, downloadAttachment }
 }
 
 /** Worker stdout/stderr tail (last 16 KiB — plenty for the drawer). */
-export const fetchLog = (id: string) => call<WorkerLog>(...forTask(id, `/tasks/${id}/log`, { tail: '16384' }))
+export const fetchLog = (id: string, owner?: TaskOwner) => call<WorkerLog>(...forTask(id, `/tasks/${id}/log`, { tail: '16384' }, owner))
 
 /** Every gateway's boards as one list: union by slug, card totals summed,
  *  `current` = the routed gateway's. A remote-only board is listed too, so
@@ -947,7 +972,7 @@ export async function fetchBlockedTasks(): Promise<BlockedTask[]> {
   const tasks = perGateway.flatMap(result => (result.status === 'fulfilled' ? result.value : []))
 
   for (const task of tasks) {
-    taskOwners.set(task.id, { board: task.board, gateway: task.gateway ?? gateways[0] })
+    rememberTaskOwner(task.id, task.board, task.gateway ?? gateways[0])
   }
 
   return tasks.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || (b.created_at ?? 0) - (a.created_at ?? 0))
@@ -956,6 +981,9 @@ export async function fetchBlockedTasks(): Promise<BlockedTask[]> {
 /** The assignee roster of `gateway` (default: the routed one) — profiles are
  *  per gateway, so a create aimed at another gateway lists ITS profiles. */
 export const fetchProfiles = () => call<{ profiles: KanbanProfile[] }>('/profiles')
+
+export const fetchOwnerProfiles = (owner: TaskOwner) =>
+  call<{ profiles: KanbanProfile[] }>('/profiles', { connectionId: owner.gateway, profile: owner.profile })
 
 export const fetchGatewayProfiles = (gateway: string) => remoteRead<{ profiles: KanbanProfile[] }>(gateway, '/profiles')
 
@@ -974,35 +1002,43 @@ export const fetchOrchestration = () => call<OrchestrationSettings>('/orchestrat
 // The nudge goes to the gateway the write landed on — one timer per gateway.
 const nudgeTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function autoNudge(gateway: string = routedScope()): void {
-  const pending = nudgeTimers.get(gateway)
+function autoNudge(gateway: string | TaskOwner = routedScope()): void {
+  const key = typeof gateway === 'string' ? gateway : ownerKey('', gateway)
+  const pending = nudgeTimers.get(key)
 
   if (pending != null) {
     clearTimeout(pending)
   }
 
   nudgeTimers.set(
-    gateway,
+    key,
     setTimeout(() => {
-      nudgeTimers.delete(gateway)
-      nudgeDispatcher(gateway).catch(() => undefined)
+      nudgeTimers.delete(key)
+
+      const request = typeof gateway === 'string'
+        ? nudgeDispatcher(gateway)
+        : call(withSlug('/dispatch', gateway.board), { connectionId: gateway.gateway, profile: gateway.profile, method: 'POST', body: {} })
+
+      request.catch(() => undefined)
     }, 400)
   )
 }
 
 /** Resolve the write, then kick the owning gateway's dispatcher. Rejections pass through. */
-function nudged<T>(write: Promise<T>, gateway?: string): Promise<T> {
+function nudged<T>(write: Promise<T>, gateway?: string | TaskOwner): Promise<T> {
+  const captured = typeof gateway === 'object' ? { ...gateway } : gateway
+
   return write.then(value => {
-    autoNudge(gateway)
+    autoNudge(captured)
 
     return value
   })
 }
 
-export const patchTask = (id: string, patch: Record<string, unknown>) => {
-  const [path, opts] = forTask(id, `/tasks/${id}`)
+export const patchTask = (id: string, patch: Record<string, unknown>, owner?: TaskOwner) => {
+  const [path, opts] = forTask(id, `/tasks/${id}`, {}, owner)
 
-  return nudged(call(path, { ...opts, method: 'PATCH', body: patch }), taskGateway(id))
+  return nudged(call(path, { ...opts, method: 'PATCH', body: patch }), owner ?? taskGateway(id))
 }
 
 /** Create on `gateway` (default: the routed one). The board slug is the
@@ -1027,7 +1063,7 @@ export const createTask = async (body: Record<string, unknown>, gateway?: string
   // Route the follow-up writes (the dialog's lane move) before any board read
   // has seen the new card.
   if (created.task?.id) {
-    taskOwners.set(created.task.id, { board: slug, gateway })
+    rememberTaskOwner(created.task.id, slug, gateway)
   }
 
   return created
@@ -1035,10 +1071,10 @@ export const createTask = async (body: Record<string, unknown>, gateway?: string
 
 // Deleting can unblock dependants (a gone parent no longer gates), so it
 // nudges too.
-export const deleteTask = (id: string) => {
-  const [path, opts] = forTask(id, `/tasks/${id}`)
+export const deleteTask = (id: string, owner?: TaskOwner) => {
+  const [path, opts] = forTask(id, `/tasks/${id}`, {}, owner)
 
-  return nudged(call(path, { ...opts, method: 'DELETE' }), taskGateway(id))
+  return nudged(call(path, { ...opts, method: 'DELETE' }), owner ?? taskGateway(id))
 }
 
 type BulkResult = { results: Array<{ id: string; ok: boolean; error?: string }> }
@@ -1047,22 +1083,23 @@ type BulkResult = { results: Array<{ id: string; ok: boolean; error?: string }> 
  *  outcomes so the UI can toast partial failures. [daveey] Split per owning
  *  gateway (and board); a whole gateway failing reports each of its ids. */
 export async function bulkTasks(ids: string[], patch: Record<string, unknown>): Promise<BulkResult> {
-  const groups = new Map<string, string[]>()
+  const groups = new Map<string, { ids: string[]; path: string; opts: PluginRestOptions; gateway: string }>()
 
   for (const id of ids) {
-    const owner = taskOwners.get(id)
-    const key = owner && owner.gateway !== routedScope() ? `${owner.gateway}\0${owner.board}` : ''
-    groups.set(key, [...(groups.get(key) ?? []), id])
+    // Capture the complete route before starting any asynchronous writes.
+    const [path, opts] = forTask(id, '/tasks/bulk')
+    const gateway = taskGateway(id)
+    const key = JSON.stringify([gateway, opts.profile, path])
+    const group = groups.get(key) ?? { ids: [], path, opts, gateway }
+    group.ids.push(id)
+    groups.set(key, group)
   }
 
   const outcomes = await Promise.all(
-    [...groups.entries()].map(async ([key, group]) => {
-      const [gateway, board] = key ? key.split('\0') : [routedScope(), '']
-      const path = key ? withSlug('/tasks/bulk', board) : withBoard('/tasks/bulk')
-
+    [...groups.values()].map(async ({ ids: group, path, opts, gateway }) => {
       try {
         return await nudged(
-          call<BulkResult>(path, { ...(key ? via(gateway) : {}), method: 'POST', body: { ids: group, ...patch } }),
+          call<BulkResult>(path, { ...opts, method: 'POST', body: { ids: group, ...patch } }),
           gateway
         )
       } catch (err) {
@@ -1080,8 +1117,11 @@ export async function bulkTasks(ids: string[], patch: Record<string, unknown>): 
   return { results: outcomes.flatMap(outcome => outcome.results) }
 }
 
-export const addComment = (id: string, body: string) => {
-  const hubRef = hubTaskRefs.get(id)
+export const addComment = (id: string, body: string, owner?: TaskOwner) => {
+  const captured = owner ?? rememberedOwner(id)
+  // The legacy replica request protocol has no profile field. Never queue a
+  // qualified-profile write through that lossy route.
+  const hubRef = captured && captured.profile === undefined ? hubTaskRefs.get(ownerKey(id, captured)) : undefined
 
   // [daveey] A replica card's owner is unreachable: queue the comment as a
   // hermes-hub owner request (applied when that gateway syncs again).
@@ -1095,28 +1135,29 @@ export const addComment = (id: string, body: string) => {
     })
   }
 
-  const [path, opts] = forTask(id, `/tasks/${id}/comments`)
+  const [path, opts] = forTask(id, `/tasks/${id}/comments`, {}, captured)
 
   return call(path, { ...opts, method: 'POST', body: { author: 'desktop', body } })
 }
 
-export const reassignTask = (id: string, profile: string) => {
-  const [path, opts] = forTask(id, `/tasks/${id}/reassign`)
+export const reassignTask = (id: string, profile: string, owner?: TaskOwner) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/reassign`, {}, owner)
 
-  return nudged(call(path, { ...opts, method: 'POST', body: { profile, reclaim_first: true } }), taskGateway(id))
+  return nudged(call(path, { ...opts, method: 'POST', body: { profile, reclaim_first: true } }), owner ?? taskGateway(id))
 }
 
-export const reclaimTask = (id: string) => {
-  const [path, opts] = forTask(id, `/tasks/${id}/reclaim`)
+export const reclaimTask = (id: string, owner?: TaskOwner) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/reclaim`, {}, owner)
 
-  return nudged(call(path, { ...opts, method: 'POST', body: {} }), taskGateway(id))
+  return nudged(call(path, { ...opts, method: 'POST', body: {} }), owner ?? taskGateway(id))
 }
 
 export const uploadAttachment = (
   id: string,
-  upload: { filename: string; contentType?: string; bytes: ArrayBuffer }
+  upload: { filename: string; contentType?: string; bytes: ArrayBuffer },
+  owner?: TaskOwner
 ) => {
-  const [path, opts] = forTask(id, `/tasks/${id}/attachments`)
+  const [path, opts] = forTask(id, `/tasks/${id}/attachments`, {}, owner)
 
   return call(path, { ...opts, method: 'POST', upload })
 }
@@ -1129,8 +1170,8 @@ export const createBoard = (slug: string, name: string, projectId?: string) =>
 
 /** Rough auxiliary-model estimate for a task (tokens + complexity). Makes a
  *  model call — gate behind an explicit user action + disclaimer. */
-export const estimateTask = (id: string) => {
-  const [path, opts] = forTask(id, `/tasks/${id}/estimate`)
+export const estimateTask = (id: string, owner?: TaskOwner) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/estimate`, {}, owner)
 
   return call<TaskEstimate>(path, { ...opts, method: 'POST', body: {} })
 }

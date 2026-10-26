@@ -32958,6 +32958,13 @@
           },
           "reconciliation": {
             "$ref": "#/components/schemas/StartReconciliation"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Metadata",
+            "type": "object"
           }
         },
         "required": [

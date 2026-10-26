@@ -370,6 +370,12 @@ def _ws_auth_reason(ws: WebSocket) -> tuple[Optional[str], str]:
     if not token:
         return "no_credential", "none"
     if hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        from hermes_cli.web_server import _ssh_bootstrap_session
+
+        session = _ssh_bootstrap_session()
+        if session is not None:
+            ws._hermes_auth_identity = {
+                "user_id": session.user_id, "provider": session.provider}
         return None, "token"
     return "token_mismatch", "token"
 

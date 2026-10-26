@@ -639,6 +639,18 @@ export interface SessionInfo {
    *  workers, so the sidebar paints it like a background job, not "done".
    *  Absent when zero or against a backend predating the field. */
   kanban_active?: number
+
+  /** [daveey] The backend could not read this conversation's kanban cards (a
+   *  local board or another gateway's hermes-hub replica failed). Unknown is
+   *  not "no work": the row stays off done until a read succeeds. Absent when
+   *  the read worked. */
+  kanban_unknown?: boolean
+  /** Origin projection observation lower bound (epoch seconds), including known zero work. */
+  kanban_observed_at?: number
+  /** [daveey] How many of `kanban_active`/`kanban_blocked` are cards on another
+   *  gateway known only from a stale hermes-hub replica (last-known status).
+   *  Absent when zero. */
+  kanban_remote_stale?: number
   /** [daveey] Open card ids (queued/running + waiting on a human) the chat waits on, over the lineage. */
   kanban_waiting_on?: string[]
   /** [daveey] Kanban tasks of this conversation (created or subscribed) that

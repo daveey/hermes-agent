@@ -1,5 +1,6 @@
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
+import { deArchiveTasks } from './archive-task-copy'
 import { deAuxTasks } from './de_aux_tasks'
 import { deBoot } from './de_boot'
 import { deConnectorAccounts } from './de_connector_accounts'
@@ -5659,8 +5660,7 @@ export const deOverrides = {
     archiveLinkedBody: 'Mit diesem Chat ist noch Arbeit verknüpft. Archivieren blendet nur den Chat aus – Aufgaben und Maschinen laufen weiter.',
     archiveLinkedConfirm: 'Trotzdem archivieren',
     archiveLinkedCancel: 'Chat behalten',
-    archiveLinkedTasksLabel: 'Kanban-Aufgaben',
-    archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `${open} offen` : '', blocked ? `${blocked} blockiert` : ''].filter(Boolean).join(' · '),
+    ...deArchiveTasks,
     restored: 'Wiederhergestellt',
     unarchiveFailed: 'Archivierung aufheben fehlgeschlagen',
     cwdChangeFailed: 'Arbeitsverzeichnis-Änderung fehlgeschlagen',

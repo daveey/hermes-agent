@@ -171,6 +171,14 @@ _BOARD_SPECS = [
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
+    _cmd("origin-create", [
+        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
+        _arg("--json", action="store_true", help="Return structured pending creation (always JSON)"),
+    ], help="Create owner work through registered tools, pending origin receipt"),
+    _cmd("origin-bind", [
+        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
+        _arg("--json", action="store_true", help="Return structured receipt (always JSON)"),
+    ], help="Accept a courier origin obligation and read back its durable receipt"),
     _cmd("boards", children=("boards_action", _BOARD_SPECS),
          help="Manage kanban boards (one board per project / workstream)",
          description=(
@@ -206,6 +214,9 @@ _SPECS = [
         _arg("--idempotency-key",
              help="Dedup key. If a non-archived task with this key exists, "
                   "its id is returned instead of creating a duplicate."),
+        _arg("--origin-session", default=None,
+             help="Chat on ANOTHER gateway this card is work for (@session:<profile>@<gateway>/<id>; "
+                  "default $HERMES_ORIGIN_SESSION). It then shows in that chat's task list."),
         _arg("--max-runtime",
              help="Per-task runtime cap. Accepts seconds (300) or durations (90s, "
                   "30m, 2h, 1d). When exceeded, the dispatcher SIGTERMs (then "

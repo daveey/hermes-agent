@@ -1219,10 +1219,12 @@ def create_task(
     completion_contract: Optional[str] = None,
     validate_workspace: bool = False,
     human_request: Optional[dict] = None,
+    origin_intent: Optional[dict] = None,
     requires: Optional[list[str]] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
+    ``origin_intent`` atomically persists the task and receipt intent, not origin readback.
     ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project
     ``worktree`` workspace that could never resolve at spawn with
     ``WorktreeWorkspaceConfigError`` naming the fix, instead of letting the
@@ -1241,6 +1243,15 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
+    if origin_intent is not None:
+        # Capture all caller options before defaults mutate them, including future options.
+        creation_options = dict(locals())
+        creation_options.pop("conn")
+        creation_options.pop("origin_intent")
+        from hermes_cli.kanban_origin_creation import create_with_origin
+
+        return create_with_origin(conn, origin_intent, creation_options)
+
     from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
     from hermes_cli.kanban_pr_acceptance import validate_contract
     from hermes_cli.kanban_human_request import validate_initial_request
@@ -1356,48 +1367,15 @@ def create_task(
                 )
                 for pid in parents:
                     _link(conn, pid, task_id)
-                _append_event(
-                    conn,
-                    task_id,
-                    "created",
-                    {
-                        "assignee": assignee,
-                        "status": task_status,
-                        "parents": list(parents),
-                        "creator_task_id": creator_task_id,
-                        "tenant": tenant,
-                        "workspace_kind": workspace_kind,
-                        "workspace_path": workspace_path,
-                        "branch_name": branch_name,
-                        "project_id": project_id,
-                        "skills": list(skills_list) if skills_list else None,
-                        "requires": required,
-                        "goal_mode": bool(goal_mode) or None,
-                        "model_override": model_override,
-                        "provider_override": provider_override,
-                    },
+                from hermes_cli.kanban_db_creation import record_created
+                record_created(
+                    conn, task_id, assignee=assignee, status=task_status, parents=parents,
+                    creator_task_id=creator_task_id, tenant=tenant, workspace_kind=workspace_kind,
+                    workspace_path=workspace_path, branch_name=branch_name, project_id=project_id,
+                    skills=skills_list, goal_mode=goal_mode, model_override=model_override,
+                    provider_override=provider_override, created_by=created_by, requires=required,
+                    human_request=human_request,
                 )
-                if task_status == "blocked":
-                    conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
-                                 (json.dumps(human_request) if human_request else None, task_id))
-                    _append_event(
-                        conn,
-                        task_id,
-                        "blocked",
-                        {"reason": "initial_status", "status": "blocked", "actor": created_by or "user",
-                         "human_request": human_request},
-                    )
-                if task_status == "todo":
-                    # Parked behind an open parent: record why, exactly as
-                    # link_tasks does, so the board never shows an unexplained todo.
-                    gating = [p for p in parents if _task_status(conn, p) not in ("done", "archived")]
-                    if gating:
-                        _append_event(
-                            conn,
-                            task_id,
-                            "dependency_wait",
-                            {"reason": "parent_not_done", "parent": gating[0]},
-                        )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
@@ -2700,7 +2678,7 @@ def complete_task(
     conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
     summary: Optional[str] = None, metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
-    fire_lifecycle_hook: bool = True, force: bool = False,
+    fire_lifecycle_hook: bool = True, force: bool = False, goal_verification=None,
 ) -> bool:
     """``running|ready|blocked|review -> done``; records ``result``.
 
@@ -2740,7 +2718,10 @@ def complete_task(
             return False
         from hermes_cli.kanban_assignment_routing import validate_repair_completion
         validate_repair_completion(conn, task_id)
-        if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
+        from hermes_cli.kanban_goal_receipt import record as record_goal
+        goal_event_id = record_goal(conn, task_id, goal_verification, (summary or result or '').strip())
+        acceptance_event_id = record_acceptance(conn, task_id, acceptance) if acceptance is not None else None
+        if acceptance is not None and not acceptance_event_id:
             return False
         trow = conn.execute(
             "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
@@ -2790,9 +2771,17 @@ def complete_task(
         event_summary = handoff_summary
         if prior_status == "review" and not event_summary:
             event_summary = _REVIEW_APPROVED_NOTE
+        completion_payload = _completed_event_payload(result, event_summary, verified_cards, metadata)
+        if goal_event_id is not None:
+            conn.execute('UPDATE task_events SET run_id=? WHERE id=? AND task_id=?',
+                         (run_id, goal_event_id, task_id))
+            completion_payload['goal_verified_event_id'] = goal_event_id
+        if acceptance_event_id is not None:
+            conn.execute("UPDATE task_events SET run_id=? WHERE id=? AND task_id=?",
+                         (run_id, acceptance_event_id, task_id))
+            completion_payload["pr_acceptance_event_id"] = acceptance_event_id
         _append_event(
-            conn, task_id, "completed",
-            _completed_event_payload(result, event_summary, verified_cards, metadata),
+            conn, task_id, "completed", completion_payload,
             run_id=run_id,
         )
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
@@ -3209,7 +3198,7 @@ def block_task(
     durable repair card and the original waits in ``todo`` on that dependency
     (including explicit classification of a breaker-parked card).
     """
-    from hermes_cli.kanban_human_request import validate_human_request
+    from hermes_cli.kanban_human_request import reject_timed_request, validate_human_request
     human_request = validate_human_request(human_request, kind=kind)
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
@@ -3230,9 +3219,19 @@ def block_task(
         if cur_row["status"] == "blocked":
             if kind is None or expected_run_id is not None or _row_get(cur_row, "block_kind") is not None:
                 return False
+
+            # [daveey] Park untyped clock waits as scheduled too, not blocked + kind=time;
+            # otherwise Desktop lists them under "For you" with an unblock button.
+            from hermes_cli import kanban_timed_park as ktp
+            if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=_parents_satisfied(conn, task_id)):
+                reject_timed_request(human_request)
+                return ktp.park(conn, task_id, reason=reason, requested_kind=kind, source_status="ready",
+                                from_untyped_block=True, wake_check=wake_check,
+                                check_every=check_every, clock_only=clock_only)
             requested_kind, rekind_reason = kind, None
             if kind == "assignment":
                 kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason)
+
             classified = conn.execute(
                 "UPDATE tasks SET block_kind = ?, block_recurrences = 1, human_request = ? "
                 "WHERE id = ? AND status = 'blocked' AND block_kind IS NULL "
@@ -3256,8 +3255,7 @@ def block_task(
         no_open_parent = _parents_satisfied(conn, task_id)
         from hermes_cli import kanban_timed_park as ktp
         if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent):
-            if human_request is not None:
-                raise ValueError("human_request cannot be combined with automatic timed resumption")
+            reject_timed_request(human_request)
             return ktp.park(conn, task_id, reason=reason, requested_kind=kind,
                             source_status=source_status, expected_run_id=expected_run_id,
                             wake_check=wake_check, check_every=check_every, clock_only=clock_only)
@@ -4011,7 +4009,7 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> b
             conn, task_id, outcome="reclaimed", status="reclaimed",
             summary="task archived with run still active",
         )
-        _append_event(conn, task_id, "archived", None, run_id=run_id)
+        _append_event(conn, task_id, "archived", {"source_status": row["status"]}, run_id=run_id)
     if was_running:
         termination = _terminate_reclaimed_worker(prev_pid, prev_lock, signal_fn=signal_fn, started_at=prev_started)
         with write_txn(conn):

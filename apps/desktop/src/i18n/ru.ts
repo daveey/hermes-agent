@@ -1,5 +1,6 @@
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
+import { ruArchiveTasks } from './archive-task-copy'
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { ruAuxTasks } from './ru_aux_tasks'
 import { ruConnectors } from './ru_connectors'
@@ -4030,8 +4031,7 @@ export const ruOverrides = {
     archiveLinkedBody: 'С этим чатом ещё связана работа. Архивирование лишь скрывает чат — задачи и машины продолжают работать.',
     archiveLinkedConfirm: 'Всё равно архивировать',
     archiveLinkedCancel: 'Оставить чат',
-    archiveLinkedTasksLabel: 'Задачи Kanban',
-    archiveLinkedTasksValue: (open: number, blocked: number) => [open ? `открыто: ${open}` : '', blocked ? `заблокировано: ${blocked}` : ''].filter(Boolean).join(' · '),
+    ...ruArchiveTasks,
     restored: 'Восстановлено',
     unarchiveFailed: 'Не удалось восстановить',
     cwdChangeFailed: 'Изменение рабочего каталога не удалось',

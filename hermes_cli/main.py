@@ -817,6 +817,7 @@ from hermes_cli.main_dashboard import (
     _is_electron_packaged_web_dist,
     _maybe_setup_dashboard_auth_interactively,
     _read_ssh_session_token_file,
+    _ssh_bootstrap_server_kwargs,
     _report_dashboard_status,
     _resolve_dashboard_web_dist,
     _route_named_profile_dashboard,
@@ -1799,10 +1800,10 @@ def cmd_chat(args):
     # --source: tag session source for filtering (e.g. 'tool' for integrations)
     if getattr(args, "source", None):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
-        # Explicit flag, not a label inherited from a parent TUI/Desktop session — one-shot
-        # runs must keep it (see agent.session_source.session_source_for).
+        # Explicit, not inherited: one-shot runs keep it (agent.session_source.session_source_for).
         os.environ["HERMES_SESSION_SOURCE_EXPLICIT"] = "1"
-
+    from hermes_cli.main_chat_origin import configure_chat_origin
+    configure_chat_origin(args)
     _pin_kanban_board_env()
     from hermes_cli.observability.shared_metrics_consent import offer_consent_before_chat
 
@@ -2773,7 +2774,6 @@ def cmd_dashboard(args):
     _ssh_session_token = _read_ssh_session_token_file(_token_file) if _token_file else None
     _mcp_discovery_after_bind = _dashboard_prepare_runtime(args, _headless_backend)
 
-    from hermes_cli.dashboard_procs import BACKEND_LOCK_NAME
     from hermes_cli.web_server import start_server
 
     # Interactive auth setup: if this bind will engage the auth gate but no
@@ -2796,11 +2796,8 @@ def cmd_dashboard(args):
         initial_profile=getattr(args, "open_profile", "") or "",
         headless=_headless_backend,
         isolated=getattr(args, "isolated", False),
-        ssh_session_token=_ssh_session_token,
-        ssh_owner_nonce=_ssh_owner_nonce,
+        **_ssh_bootstrap_server_kwargs(_token_file, _ssh_session_token, _ssh_owner_nonce),
         start_mcp_discovery_after_bind=_mcp_discovery_after_bind,
-        # The validated token file lives in desktop-ssh/<ownershipId>/, next to the Desktop's lock.
-        ssh_lock_path=Path(_token_file).parent / BACKEND_LOCK_NAME if _token_file else None,
     )
 
 

@@ -10,6 +10,7 @@ import {
   readInFlightTurnJournal,
   recoverInFlightTurnJournal
 } from '@/lib/inflight-turn-journal'
+import * as nativeNotifications from '@/store/native-notifications'
 import { $messages, setActiveSessionId, setMessages } from '@/store/session'
 import { $sessionStates } from '@/store/session-states'
 
@@ -106,6 +107,19 @@ function mount(rpc = requestGateway) {
     }
   }
 }
+
+it('requires a post-completion origin observation for the native completion notice', async () => {
+  const notify = vi.spyOn(nativeNotifications, 'dispatchNativeNotification').mockReturnValue(false)
+  const h = mount()
+  await h.submit()
+  await h.send('message.start')
+  const endedAt = Date.now() / 1000
+  await h.send('message.complete', { text: ANSWER })
+  expect(notify).toHaveBeenCalledWith(expect.objectContaining({
+    kind: 'turnDone', sessionId: SID, projectionAfter: endedAt, refreshProjection: noop
+  }))
+  h.dispose()
+})
 
 it('binds a late submit acknowledgement to its exact optimistic prompt without reviving the turn', async () => {
   const laterUser: ChatMessage = { id: 'later-user', role: 'user', parts: [{ type: 'text', text: 'Give the answer.' }] }
