@@ -134,7 +134,7 @@ def test_receiver_and_session_projection_replace_only_attested_alias(world, tmp_
     monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: 'default')
     monkeypatch.setattr(adapter, '_resolve_session', lambda path, sid: 's_tip')
     request = {'id': 'request-one', 'from': 'gw:owner', 'to_gw': 'origin',
-               'coll': 'sessions', 'key': 'default/s_old', 'action': 'origin-bind',
+               'coll': 'sessions', 'key': 'default/s_old', 'action': 'origin-reconcile-legacy',
                'args': {'binding': world['binding'], 'legacy_alias': world['legacy_alias']}}
     assert adapter.receive(request)['legacy_alias'] == world['legacy_alias']
     monkeypatch.setattr(activity, '_hub_db_path', lambda: world['replica'])
