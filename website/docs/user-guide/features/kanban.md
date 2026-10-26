@@ -425,6 +425,46 @@ Probe state is in the `task_wake_checks` table and shown by `kanban show`,
 the worker context and the board API; `kanban diagnostics` flags failing or
 overdue probes, and parks more than 2 h out that have neither.
 
+For an external GitHub PR wait, use the installed runtime's read-only probe:
+
+```text
+hermes --run-module hermes_cli.kanban_pr_wake https://github.com/OWNER/REPO/pull/NUMBER
+```
+
+Set this as `wake_check` only when the task is waiting for that PR to reach a
+terminal state. The probe uses the current task profile's GitHub transport and
+`kanban.pr_acceptance.gh_command_prefix` configuration. OPEN returns 1;
+MERGED returns 0 to resume integration/verification; CLOSED without merge also
+returns 0, but explicitly requests **reconciliation, not acceptance**. A closed
+PR may be abandoned or superseded: verify the replacement's containing-main
+commit and exact successful CI evidence before changing dependencies or claiming
+delivery. All existing completion/CI/consent gates remain in force. API, auth or
+malformed-response failures return 2 (or the outer probe timeout), never pending.
+
+For a known replacement that may land while the original PR remains OPEN, the
+owning worker can explicitly supply a pair of evidence anchors:
+
+```text
+hermes --run-module hermes_cli.kanban_pr_wake https://github.com/OWNER/REPO/pull/NUMBER --superseding-commit FULL_SHA --verification-job ACTIONS_JOB_ID
+```
+
+The helper requires the named job in that repository to be completed/successful
+for exactly FULL_SHA and a GitHub comparison proving that SHA is contained in the
+repository's default branch. Only then does an OPEN PR wake for reconciliation.
+A failed/skipped/unfinished job, wrong SHA or noncontaining default branch stays
+pending; incomplete/unreadable evidence is an error. The caller owns identifying
+the replacement: the helper does not infer semantic equivalence from commits or
+comments, and one successful job does not satisfy all required CI. Reconciliation
+must verify actual replacement behavior, owner dependencies and release gates.
+
+Do not use `test "$(gh ... --jq .state)" = MERGED`: it treats API failures as
+pending and waits forever when a PR is intentionally superseded. Existing stored
+shell probes are not rewritten automatically; the owning worker/supervisor must
+adopt the terminal-state probe on the next explicit park. This is not a CI-ready
+probe: an OPEN PR still waits even if checks finish. Use a separate exact-head
+CI probe when the next action is review/landing rather than an external merge.
+
+
 Continuations leave `consecutive_failures` and the unblock-loop counter
 untouched, so they never trip the give-up or block-loop limits. Their own
 bound is `kanban.max_continuations` (default 12) consecutive `continued` runs.
