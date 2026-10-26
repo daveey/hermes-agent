@@ -232,8 +232,8 @@ jobs:
   aggregate:
     name: Aggregate review statuses
     needs: [scan, dep-bounds]
-    if: always()
-    runs-on: [self-hosted, hermes-hub]
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, hermes-hub-poll]
     timeout-minutes: 15
     outputs:
       review_status: ${{ steps.merge.outputs.review_status }}

@@ -452,7 +452,7 @@ def _gh_states(monkeypatch, states):
 
     def _run(cmd, *a, **k):
         calls.append(cmd)
-        st = states[cmd[3]]
+        st = states[cmd[cmd.index("view") + 1]]
         if isinstance(st, BaseException):
             raise st
         if isinstance(st, int):
@@ -483,7 +483,7 @@ def test_active_pr_guard_checks_pr_state(kanban_home, monkeypatch, states, expec
         tid = kb.create_task(conn, title="pr card", assignee="a")
         kb.add_comment(conn, tid, "a", "opened " + " and ".join(states))
         assert kbd.check_respawn_guard(conn, tid) == expected
-        assert {c[3] for c in calls} <= set(states)
+        assert {c[c.index("view") + 1] for c in calls} <= set(states)
 
 
 def test_pr_state_is_cached(kanban_home, monkeypatch):
@@ -507,3 +507,35 @@ def test_merged_pr_card_gets_a_worker(kanban_home, monkeypatch, all_assignees_sp
         res = kbd.dispatch_once(conn, spawn_fn=lambda task, *a, **k: spawned.append(task.id) or 1)
         assert tid not in dict(res.respawn_guarded)
         assert spawned == [tid]
+
+
+def test_pr_state_lookup_uses_broker_prefix_and_resolved_gh(kanban_home, monkeypatch):
+    """A service dispatcher has a minimal PATH and no ambient gh login; the PR-state read must
+    use the configured ``kanban.pr_acceptance.gh_command_prefix`` and ~/bin gh, or every lookup
+    fails closed and a merged PR holds its card for the whole hold cap. [daveey]"""
+    import types
+    from hermes_cli import kanban_db_dispatch_pr_state as prs
+    from hermes_cli import kanban_pr_acceptance as kpa
+    from hermes_platform.resolver import github as ghres
+
+    monkeypatch.setattr(prs, "_gh_pr_state", _REAL_GH_PR_STATE)
+    prs.clear_cache()
+    prefix = ["/opt/broker", "exec", "--scope", "user/github", "--"]
+    monkeypatch.setattr(kpa, "_gh_command_prefix", lambda home: list(prefix))
+    monkeypatch.setattr(ghres, "resolve_gh",
+                        lambda path=None: types.SimpleNamespace(found=True, command=["/home/x/bin/gh"]))
+    calls = []
+    monkeypatch.setattr(prs.subprocess, "run",
+                        lambda cmd, *a, **k: calls.append(cmd) or _Proc(0, json.dumps({"state": "MERGED"})))
+    assert prs.pr_state(PR_A) == "MERGED"
+    assert calls == [[*prefix, "/home/x/bin/gh", "pr", "view", PR_A, "--json", "state,comments"]]
+
+    # Broken broker config: fall back to bare gh (still fail-closed on error), never raise.
+    prs.clear_cache()
+    calls.clear()
+    def _boom(home):
+        raise kpa._GateSetupError("bad config")
+    monkeypatch.setattr(kpa, "_gh_command_prefix", _boom)
+    monkeypatch.setattr(prs.subprocess, "run", lambda cmd, *a, **k: calls.append(cmd) or _Proc(1))
+    assert prs.pr_state(PR_A) is None
+    assert calls[0][:4] == ["gh", "pr", "view", PR_A]

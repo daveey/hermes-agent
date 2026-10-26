@@ -113,6 +113,20 @@ def _plan_goal_compression_recovery(
         "Run /compress, then /goal resume to continue.")
 
 
+def _retain_unadmitted_submit_row(history: list, staged: Any) -> bool:
+    """Keep the accepted row address for takeover's existing reload/rewind path.
+
+    No new send or queue: the row already exists in SQLite. Losing it from warm history
+    makes a retry append a second user turn instead of rewinding this exact send.
+    """
+    if not isinstance(staged, dict) or _message_row_id(staged) is None:
+        return False
+    if any(_message_row_id(message) == _message_row_id(staged) for message in history):
+        return False
+    history.append(staged)
+    return True
+
+
 def _admit_prompt_turn(
     sid: str, session: dict, text: Any, image_paths: list[str] | None,
     queued_prompt_generation: int | None, display_kind: str | None,
@@ -129,8 +143,13 @@ def _admit_prompt_turn(
             getattr(ownership_refusal, "reason", None) or "refused")
         with session["history_lock"]:
             session["running"] = False
-            session.pop("_submit_user_row", None)  # no turn runs: the submit-time row stays as the send
-        _emit("error", sid, {"message": str(ownership_refusal)})
+            staged = session.pop("_submit_user_row", None)
+            if _retain_unadmitted_submit_row(session["history"], staged):
+                session["history_version"] = int(session.get("history_version", 0)) + 1
+        reason = getattr(ownership_refusal, "reason", None) or "SESSION_COORDINATION_UNAVAILABLE"
+        _emit_terminal_turn_error(
+            sid, session, str(ownership_refusal),
+            error_surface={"layer": "gateway", "code": reason, "retryable": False})
         return None
     with session["history_lock"]:
         if session.get("_closing") or (
@@ -824,7 +843,11 @@ def _invoke_agent(
             text, _resolve_agent_platform(_session_source(session)), agent.valid_tool_names, st.history)
         if prelude is not None:
             run_kwargs["prelude"] = prelude
+    submitted_row = session.get("_submit_user_row")
     _adopt_submit_user_row(session, agent, run_kwargs["persist_user_message"], text)
+    # Only this invocation's adopted row is eligible; a prior turn's pending slot is not.
+    if getattr(agent, "_pending_cli_user_message", None) is not submitted_row:
+        submitted_row = None
     # Live-rename hook: auto-titling fires inside the turn prologue.
     _title_key = session.get("session_key") or sid
     agent._on_session_title = lambda t, _src, _k=_title_key: _emit(
@@ -834,6 +857,12 @@ def _invoke_agent(
         from agent.notification_presentation import notification_turn, event_presentation_muted
         with notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid):
             st.result = agent.run_conversation(run_message, **st.run_kwargs)
+        if isinstance(st.result, dict) and st.result.get("failure_reason") == "session_busy":
+            # Durable admission can lose a race after the gateway's ownership preflight.
+            # The facade has not staged this user row or run the model in that case.
+            _retain_unadmitted_submit_row(st.result["messages"], submitted_row)
+            if submitted_row is not None and getattr(agent, "_pending_cli_user_message", None) is submitted_row:
+                agent._pending_cli_user_message = None
     finally:
         # Stop AND join before anything emits: a tick surviving past message.complete would
         # roll the client's usage back to a stale snapshot (unbounded join: same worst case).
@@ -967,6 +996,8 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
                 model=str(getattr(agent, "model", "") or ""))
         except Exception:
             _error_surface = None
+    if result.get("failure_reason") == "session_busy":
+        _error_surface = {"layer": "gateway", "code": "SESSION_NOT_OWNED", "retryable": False}
     raw, status, last_reasoning = _turn_outcome(result, _error_surface)
     if _is_bot_mode_session(session):
         raw = _bot_mode_delivery_text(raw, successful=status == "complete")

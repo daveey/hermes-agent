@@ -850,7 +850,7 @@ def _command_requires_pipe_stdin(command: str) -> bool:
 
 from tools.terminal_tool_guards import (
     _foreground_background_guidance, _safe_command_preview, _validate_workdir,
-    gateway_lifecycle_block, self_repo_block,
+    background_user_chat_block, gateway_lifecycle_block, self_repo_block,
 )
 from tools.terminal_tool_background import _YIELDED_NOTE, spawn_background_process, yield_to_background_handler
 from tools.terminal_tool_result import finalize_foreground_result
@@ -1084,6 +1084,12 @@ def _plan_execution(
         raise _Rejected(_error_json(
             f"Invalid command: expected string, got {type(command).__name__}", status="error",
         ))
+
+    blocked = background_user_chat_block(
+        command, background=background or (timeout is not None and timeout > FOREGROUND_MAX_TIMEOUT),
+    )
+    if blocked:
+        raise _Rejected(blocked)
 
     config = _get_env_config()
     env_type = "local" if _host_local else config["env_type"]

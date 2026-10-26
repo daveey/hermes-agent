@@ -263,6 +263,102 @@ def gateway_lifecycle_block(
     return None
 
 
+# This is an origin-footgun guard, not a shell sandbox. Reuse the existing
+# command-position scanner: quoted documentation/queries are not invocations.
+# Scripts, substitutions, remote SSH payloads and generated argv are deliberately
+# not interpreted here. Do not turn this into a blanket worker-CLI prohibition.
+_HERMES_VALUE_OPTIONS = frozenset({
+    "--profile", "-p", "--model", "-m", "--provider", "--reasoning",
+    "--skills", "-s", "--toolsets", "-t", "--query", "-q", "--query-file",
+    "--image", "--format", "--resume", "-r", "--in", "--max-turns",
+    "--run-budget", "--source",
+})
+
+
+def _is_titled_chat_upsert(argv: list[str]) -> bool:
+    """Recognize literal CLI options without mistaking option values for flags."""
+    chat = named_continue = create = False
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--":
+            break
+        option, equals, value = token.partition("=")
+        if option in {"--help", "-h", "--version"}:
+            return False
+        if option in {"--continue", "-c"}:
+            if not equals and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                i += 1
+                value = argv[i]
+            named_continue = bool(value)
+        elif token == "--create-if-missing":
+            create = True
+        elif option in _HERMES_VALUE_OPTIONS:
+            if not equals:
+                i += 1
+        elif not token.startswith("-"):
+            # First positional must be the chat subcommand; other Hermes
+            # subcommands (including help text/search) must never match.
+            if not chat:
+                if token != "chat":
+                    return False
+                chat = True
+        i += 1
+    return chat and named_continue and create
+
+
+def background_user_chat_block(command: str, *, background: bool) -> Optional[str]:
+    """Reject agent background titled-chat upserts before acquiring any backend.
+
+    PTY/persistence/approval do not make a child CLI a Desktop-owned runtime.
+    Ordinary workers (-q, --query-file, --resume) remain supported. Foreground
+    CLI invocations remain unchanged. This also covers timeout promotion.
+    """
+    if not background:
+        return None
+    from cron.lifecycle_guard import (
+        _executed_command_index, _iter_command_segments, _iter_shell_command_payloads,
+    )
+
+    pending = [(strip_inert_heredoc_bodies(command), 0)]
+    while pending:
+        text, depth = pending.pop()
+        for segment in _iter_command_segments(text):
+            index = _executed_command_index(segment)
+            if index is None:
+                continue
+            name = Path(segment[index]).name
+            argv = segment[index + 1:]
+            # The lifecycle helper recognizes -c/--command, but not the
+            # common combined spelling -lc used by terminal launchers.
+            if depth < 4 and name in {"sh", "bash", "zsh", "dash", "ksh"}:
+                for j, flag in enumerate(argv[:-1]):
+                    if re.fullmatch(r"-[a-zA-Z]+", flag) and "c" in flag and flag != "-c":
+                        pending.append((argv[j + 1], depth + 1))
+                        break
+            if re.fullmatch(r"python(?:3(?:\.\d+)?)?", name) and argv[:2] == ["-m", "hermes_cli.main"]:
+                argv = argv[2:]
+            elif name not in {"hermes", "hermes.exe"}:
+                continue
+            if _is_titled_chat_upsert(argv):
+                return _blocked_json(
+                    "Blocked: a background `hermes chat --continue TITLE --create-if-missing` "
+                    "creates or takes over a named chat in an unattended CLI, not an interactive "
+                    "Desktop conversation. For an existing Desktop chat, use cross_session "
+                    "action=list then action=send with its exact target. For a new chat, create "
+                    "it in Desktop (the routed gateway API is session.create followed by "
+                    "prompt.submit on the returned session_id, on the same gateway/profile). "
+                    "If no Desktop creation route is available, ask the user to create the chat; "
+                    "do not substitute a detached CLI. For an independent worker, use "
+                    "`hermes chat -q ... --source tool` without the titled-chat upsert flags "
+                    "and report it as a worker, not a Desktop conversation.",
+                    "blocked",
+                )
+        if depth < 4:
+            pending.extend((payload, depth + 1) for payload in _iter_shell_command_payloads(text))
+    return None
+
+
 def self_repo_block(
     *,
     command: str,

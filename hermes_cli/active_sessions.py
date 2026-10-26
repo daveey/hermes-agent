@@ -676,6 +676,35 @@ def take_over_active_session(
     return lease, owned, None
 
 
+def turn_handoff_is_current(lease: ActiveSessionLease, holder: str) -> bool:
+    """Read back the exact requester, not a successor that replaced its registry slot."""
+    if lease.released or not lease.enabled:
+        return False
+    state_path, lock_path = _lease_paths(lease)
+    with _FileLock(lock_path):
+        entries = _read_entries(state_path, strict=True)
+        return any(e.get("lease_id") == lease.lease_id
+                   and holder in (e.get("metadata") or {}).get("took_over_from", [])
+                   for e in entries)
+
+
+def request_turn_handoff(lease: ActiveSessionLease, holder: str) -> bool:
+    """Ask one exact durable turn to stand down through the existing takeover metadata."""
+    state_path, lock_path = _lease_paths(lease)
+    with _FileLock(lock_path):
+        entries = _read_entries(state_path, strict=True)
+        own = next((e for e in entries if e.get("lease_id") == lease.lease_id), None)
+        if own is None:
+            return False
+        md = own.setdefault("metadata", {})
+        targets = md.setdefault("took_over_from", [])
+        if holder not in targets:
+            targets.append(holder)
+        md["took_over_at"] = time.time()
+        _write_entries(state_path, entries)
+        return True
+
+
 def _registry_state_path(registry_home: str | Path | None, state_path: str | Path | None) -> Path:
     return Path(state_path) if state_path is not None else _state_path(registry_home)
 

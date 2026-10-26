@@ -966,3 +966,45 @@ def test_active_pr_guard_lifts_when_the_card_is_unblocked_after_the_pr(
 
         kb.add_comment(conn, tid, author="dev", body="Opened https://github.com/example/repo/pull/301")
         assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+
+def test_active_pr_guard_lifts_after_owner_parks_with_its_pr(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker names its open PR in a checkpoint, then parks itself (``continued`` or a
+    timed ``scheduled`` wait) to keep working on independent slices. The wake resumes the
+    same owner from that checkpoint, not a context-free respawn, so ``active_pr`` must not
+    hold it (t_5408b241 sat ``ready`` after every continuation). A crash after the PR still
+    guards, and a newer PR comment after the park guards again. [daveey]
+    """
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+    from hermes_cli import kanban_continuation as kc
+    from hermes_cli.kanban_db_schedule import schedule_task
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(cfgmod, "load_config", lambda *a, **k: {})
+    pr_comment = "Checkpoint: PR #300 (https://github.com/example/repo/pull/300) queued; next slice is mine."
+    with kbc.connect() as conn:
+        cont = kb.create_task(conn, title="continued with own pr", assignee="dev")
+        assert kb.claim_task(conn, cont) is not None
+        kb.add_comment(conn, cont, author="dev", body=pr_comment)
+        _backdate_comments(conn, cont)
+        assert kbd.check_respawn_guard(conn, cont) == "active_pr"  # RED before the park
+        assert kc.continue_task(conn, cont, checkpoint="next slice")["ok"]
+        assert kbd.check_respawn_guard(conn, cont) is None
+
+        sched = kb.create_task(conn, title="scheduled with own pr", assignee="dev")
+        assert kb.claim_task(conn, sched) is not None
+        kb.add_comment(conn, sched, author="dev", body=pr_comment)
+        _backdate_comments(conn, sched)
+        assert schedule_task(conn, sched, reason="waiting on CI", clock_only=True)
+        assert kbd.check_respawn_guard(conn, sched) is None
+
+        control = kb.create_task(conn, title="crashed after pr", assignee="dev")
+        kb.add_comment(conn, control, author="dev", body=pr_comment)
+        _backdate_comments(conn, control)
+        assert kbd.check_respawn_guard(conn, control) == "active_pr"
+
+        kb.add_comment(conn, cont, author="dev", body="Opened https://github.com/example/repo/pull/301")
+        assert kbd.check_respawn_guard(conn, cont) == "active_pr"

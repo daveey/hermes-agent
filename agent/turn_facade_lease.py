@@ -91,8 +91,24 @@ class DurableTurnLease:
         from agent.periodic_scheduler import schedule
 
         self.timer_handles.append(schedule(self.refresh_tick, self.refresh_interval))
+        self.timer_handles.append(schedule(self.takeover_tick, 0.5))
         if self.watchdog is not None:
             self.timer_handles.append(self.watchdog.schedule())
+
+    def takeover_tick(self):
+        """Observe the existing registry handoff, qualified by this exact durable holder.
+
+        Keep renewing until the turn unwinds and releases: an interrupt is NOT a release.
+        Explicit DB home binding also works for multiplexed CLI/background turns.
+        """
+        from pathlib import Path
+        from hermes_cli.active_sessions import find_takeover_of
+        if self.stop.is_set():
+            return False
+        if find_takeover_of(self.holder, registry_home=Path(self.db.db_path).parent):
+            self._interrupt_turn("This chat was taken over by another Hermes window.", taken_over=True)
+            return False
+        return None
 
     def stop_refresher(self) -> None:
         """Stop renewal and deactivate the turn. Also the watchdog's deactivate callback: a wedge the
@@ -125,12 +141,17 @@ class DurableTurnLease:
         with self._lock:
             return self.turn_active
 
-    def _interrupt_turn(self, message: str) -> None:
+    def _interrupt_turn(self, message: str, *, taken_over: bool = False) -> None:
         """Lease-loss interrupts fire UNCONDITIONALLY (no generation claim): a lost lease means
         this process no longer owns the session. Only the watchdog's stalls can be spuriously stale."""
         with self._lock:
             if self.stop.is_set() or not self.turn_active:
                 return
+            if taken_over:
+                # Survive finalizer interrupt clearing: a queued completion/goal must
+                # not reacquire the row in the gap before the new window starts.
+                self.agent._taken_over_session_id = self._current_session_id()
+                self.agent._taken_over_db_path = self.db.db_path
             self.interrupt_message = message
             try:
                 self.agent.interrupt(message, hard_cancel=True, tool_reason=_REASON_LEASE_LOST)
@@ -351,6 +372,23 @@ def _durable_session_exists(db, session_id: str) -> Optional[bool]:
         return None
 
 
+def session_was_taken_over(agent, session_id: str) -> bool:
+    """The stand-down latch follows compression, but never a different profile or fork."""
+    taken = getattr(agent, "_taken_over_session_id", None)
+    if not taken or not session_id:
+        return False
+    db = getattr(agent, "_session_db", None)
+    bound_db = getattr(agent, "_taken_over_db_path", None)
+    if bound_db is not None and bound_db != getattr(db, "db_path", None):
+        return False
+    if taken == session_id:
+        return True
+    if not callable(getattr(type(db), "_session_turn_lease_key", None)):
+        return False
+    # Read errors propagate: a failed lineage lookup must not authorize a writer.
+    return db._session_turn_lease_key(taken) == db._session_turn_lease_key(session_id)
+
+
 def admit_durable_turn_lease(
     agent, *, session_id: str, relay_turn_id: str, task_context: dict[str, Any],
     conversation_history: Optional[list[dict[str, Any]]],
@@ -362,6 +400,18 @@ def admit_durable_turn_lease(
     fails; the caller returns it verbatim."""
     db = getattr(agent, "_session_db", None)
     admission = TurnLeaseAdmission(conversation_history=conversation_history)
+    if session_was_taken_over(agent, session_id):
+        admission.early_result = {
+            "messages": list(conversation_history or []), "api_calls": 0,
+            "completed": False, "failed": True, "interrupted": True,
+            "_hard_interrupted": True,
+            "failure_reason": "session_busy", "failure_retryable": False,
+            "final_response": (
+                "This chat was taken over by another Hermes window. "
+                "Resume it explicitly to continue here. Your message was not processed."
+            ),
+        }
+        return admission
     if db is None or not session_id:
         return admission
     # Check the concrete type: MagicMock-style shims accept any attribute without the protocol.
@@ -400,7 +450,8 @@ def admit_durable_turn_lease(
 
     authority_floor = time.time()  # every acquisition attempt stamps its expiry after this instant
     if not db.acquire_session_turn_lease(
-        session_id, holder, ttl_seconds=LEASE_TTL_SECONDS, wait_seconds=LEASE_WAIT_SECONDS,
+        session_id, holder, ttl_seconds=LEASE_TTL_SECONDS,
+        wait_seconds=0.0 if task_context['platform'] in {"desktop", "tui"} else LEASE_WAIT_SECONDS,
         on_wait=_on_wait, on_contended=_on_contended,
         should_abort=lambda: getattr(agent, "_interrupt_requested", False),
     ):
@@ -527,6 +578,11 @@ def _lease_not_acquired_result(agent, session_id: str, conversation_history) -> 
         "⏳ Another Hermes process kept this session busy too long. Your message was not "
         "processed - wait for the other process to finish, then send it again."
     )
+    if getattr(agent, "platform", None) in {"desktop", "tui"}:
+        timeout_msg = (
+            "This chat has another active writer. Use session.take_over (Take over here), "
+            "then retry your message. Your message was not processed."
+        )
     logger.error("session turn lease wait timed out for %s", session_id)
     try:
         agent._emit_warning(timeout_msg)

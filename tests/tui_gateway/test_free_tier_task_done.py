@@ -125,7 +125,9 @@ def test_prompt_submit_records_only_untouched_turns(monkeypatch, touch, recorded
                     "messages": [{"role": "assistant", "content": "Here is your plan."}]}
 
     from unittest.mock import MagicMock
-    monkeypatch.setattr(server, "_get_db", lambda: MagicMock())
+    mock_db = MagicMock()
+    mock_db.session_turn_lease_owner.return_value = None
+    monkeypatch.setattr(server, "_get_db", lambda: mock_db)
     recorded_at_complete: list[int] = []
 
     def _emit(event, *a, **kw):

@@ -72,7 +72,7 @@ jobs:
   detect:
     name: Detect affected areas
     runs-on: [self-hosted, hermes-hub]
-    timeout-minutes: 3
+    timeout-minutes: 5  # fork: shared, CPU-capped hub runner
     outputs:
       python: ${{ steps.gate-lanes.outputs.python }}
       python_prod: ${{ steps.gate-lanes.outputs.python_prod }}
@@ -399,8 +399,8 @@ jobs:
       # its own check. It was never required here, because it is too slow
       # to block a merge. A separate run also stops it from holding this
       # run open. That is what blocked ``gh run rerun``.
-    if: always()
-    runs-on: [self-hosted, hermes-hub]
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, hermes-hub-poll]
     timeout-minutes: 10
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
@@ -434,8 +434,8 @@ jobs:
   ci-timings:
     name: CI timing report
     needs: [all-checks-pass]
-    if: always()
-    runs-on: [self-hosted, hermes-hub]
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, hermes-hub-poll]
     timeout-minutes: 10
     steps:
       - name: Checkout code

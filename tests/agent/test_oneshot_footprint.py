@@ -63,3 +63,38 @@ def test_oneshot_delegation_budget_charges_total_children_then_refuses(oneshot, 
     # Interactive sessions are never charged, whatever the count.
     monkeypatch.delenv("HERMES_SINGLE_QUERY_SESSION")
     assert delegate_tool._oneshot_spawn_budget(parent, 50) is None
+
+
+@pytest.mark.parametrize("cap", [1, 2, 7])
+def test_oneshot_schema_advertises_total_budget(oneshot, monkeypatch, cap):
+    from tools import delegate_tool
+
+    monkeypatch.setattr(delegate_tool, "_get_oneshot_max_children", lambda: cap)
+    schema = delegate_tool._build_dynamic_schema_overrides()
+    description = schema["parameters"]["properties"]["tasks"]["description"]
+    assert f"at most {cap} subagents total" in description
+    assert "across all calls" in description
+    assert "inline" in description
+
+
+@pytest.mark.parametrize("single_query,cap", [(False, 2), (True, 0)])
+def test_schema_does_not_advertise_inapplicable_budget(monkeypatch, single_query, cap):
+    from tools import delegate_tool
+
+    monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "1" if single_query else "0")
+    monkeypatch.setattr(delegate_tool, "_get_oneshot_max_children", lambda: cap)
+    description = delegate_tool._build_tasks_param_description()
+    assert "subagents total" not in description
+
+
+def test_oversized_batch_reports_remaining_budget(oneshot, monkeypatch):
+    from tools import delegate_tool
+
+    monkeypatch.setattr(delegate_tool, "_get_oneshot_max_children", lambda: 2)
+    parent = type("P", (), {})()
+    error = delegate_tool._oneshot_spawn_budget(parent, 3)
+    assert error is not None
+    assert "2 remaining" in error
+    assert "requested 3" in error
+    assert "exhausted" not in error
+    assert getattr(parent, "_oneshot_children_spawned", 0) == 0

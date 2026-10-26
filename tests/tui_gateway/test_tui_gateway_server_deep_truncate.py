@@ -5,7 +5,16 @@ anchor can still name the wrong, stale row)."""
 import threading
 import types
 
+import pytest
+
 from tui_gateway import server
+
+
+@pytest.fixture(autouse=True)
+def _isolate_durable_writer_preflight(monkeypatch):
+    # These truncation-unit fixtures deliberately implement only transcript APIs.
+    # Real durable ownership and unavailable-store behavior have separate coverage.
+    monkeypatch.setattr(server, "_foreign_turn_owner", lambda _session: None)
 
 
 def _session(agent=None, **extra):
