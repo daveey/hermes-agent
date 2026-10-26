@@ -71,7 +71,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   detect:
     name: Detect affected areas
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: [self-hosted, ci-fast]
     timeout-minutes: 5  # fork: shared, CPU-capped hub runner
     outputs:
       python: ${{ steps.gate-lanes.outputs.python }}
