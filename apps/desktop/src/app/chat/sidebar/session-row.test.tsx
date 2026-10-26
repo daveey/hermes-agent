@@ -542,7 +542,8 @@ describe('SidebarSessionRow kanban counts', () => {
 // [daveey] A project-mode row older than the recents page is not in $sessions,
 // so the dot-state store can't see its activity stamps; the row reads its own.
 describe('SidebarSessionRow own activity stamps', () => {
-  const stripe = (c: HTMLElement) => c.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe') ?? null
+  const stripe = (c: HTMLElement) =>
+    c.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe') ?? null
 
   for (const stamp of [{ goal_active: true }, { background_active: 1 }]) {
     it(`keeps the row off green while ${Object.keys(stamp)[0]} is set`, () => {
@@ -569,6 +570,46 @@ describe('SidebarSessionRow own activity stamps', () => {
     const glyph = container.querySelector('[data-slot="session-status-stripe"]')
     expect(glyph?.getAttribute('data-status-stripe')).toBe('waiting')
     expect(glyph?.querySelector('.codicon-project')).not.toBeNull()
+  })
+
+  it('refreshes goal completion without painting a finished dot while a blocked card remains', () => {
+    const row = makeSession({
+      id: 'goal-kanban-project',
+      title: 'Goal complete',
+      message_count: 9,
+      goal_active: true,
+      kanban_active: 1,
+      kanban_blocked: 1,
+      kanban_unseen: 1
+    })
+
+    const props = {
+      isPinned: false,
+      isSelected: false,
+      onArchive: noop,
+      onDelete: noop,
+      onPin: noop,
+      onResume: noop,
+      onToggleUnread: noop,
+      unread: false
+    }
+
+    const { container, rerender } = render(<SidebarSessionRow {...props} session={row} />)
+    expect(stripe(container)).toBe('stuck')
+
+    rerender(<SidebarSessionRow {...props} session={{ ...row, goal_active: false, kanban_active: 0 }} />)
+    expect(stripe(container)).toBe('stuck')
+    expect(screen.queryByLabelText('Finished')).toBeNull()
+
+    rerender(<SidebarSessionRow {...props} session={{ ...row, goal_active: false, kanban_blocked: 0 }} />)
+    expect(stripe(container)).toBe('waiting')
+    expect(screen.queryByLabelText('Finished')).toBeNull()
+
+    rerender(
+      <SidebarSessionRow {...props} session={{ ...row, goal_active: false, kanban_active: 0, kanban_blocked: 0 }} />
+    )
+    expect(stripe(container)).toBe('done')
+    expect(screen.getByLabelText('Finished')).toBeTruthy()
   })
 
   it('a blocked card beats waiting (red)', () => {

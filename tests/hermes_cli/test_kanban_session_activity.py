@@ -62,6 +62,27 @@ def test_annotates_rows_by_whole_compression_lineage(kanban_root):
     assert "kanban_active" not in rows[2]
 
 
+@pytest.mark.parametrize("journal_mode", ["DELETE", "WAL"])
+@pytest.mark.parametrize("status,key", [("blocked", "kanban_blocked"), ("running", "kanban_active")])
+def test_archive_invalidates_cached_counts_and_waiting_ids(kanban_root, journal_mode, status, key):
+    """An archive from another process must be visible before the poll TTL expires."""
+    path = kanban_root / "kanban.db"
+    _make_board(path, [("t1", status, "s1")])
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(f"PRAGMA journal_mode={journal_mode}")
+        conn.execute("CREATE TABLE kanban_notify_subs (task_id TEXT, platform TEXT, chat_id TEXT, delivery_metadata TEXT)")
+        conn.execute("INSERT INTO kanban_notify_subs VALUES ('t1', 'tui', 's2', '{\"reason\":\"shepherd\"}')")
+        conn.commit()
+        assert ksa.annotate_kanban_activity([{"id": "s1"}])[0][key] == 1
+        assert ksa.annotate_kanban_activity([{"id": "s2"}])[0][key] == 1
+        conn.execute("UPDATE tasks SET status = 'archived' WHERE id = 't1'")
+        conn.commit()
+        assert ksa.annotate_kanban_activity([{"id": "s1"}, {"id": "s2"}]) == [{"id": "s1"}, {"id": "s2"}]
+    finally:
+        conn.close()
+
+
 def test_missing_or_old_board_never_breaks_the_list(kanban_root):
     old = kanban_root / "kanban.db"
     conn = sqlite3.connect(old)
