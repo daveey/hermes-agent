@@ -530,15 +530,16 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     return cards
 
 
-def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
-    """``(active, blocked, unseen, remote_stale)`` per-session task counts across every board, cached."""
+def _all_counts(*, include_waiting: bool = False) -> tuple:
+    """Cached counts, optionally with waiting IDs from the same scoped snapshot."""
     global _cache, _cache_scope, _cache_fingerprint
     scope = _origin_scope()
     now = time.monotonic()
     fingerprint = _activity_fingerprint()
     with _cache_lock:
         if _cache is not None and _cache_scope == scope and now < _cache[0] and fingerprint == _cache_fingerprint:
-            return _cache[1], _cache[2], _cache[3], _cache[4]
+            counts = _cache[1:5]
+            return (*counts, dict(_waiting_cache[0])) if include_waiting else counts
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
     unseen: dict[str, int] = {}
@@ -561,7 +562,8 @@ def _all_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[
         _cache = (now + _CACHE_TTL_S, active, blocked, unseen, stale)
         _cache_fingerprint = fingerprint
         _waiting_cache[0] = {sid: frozenset(ids) for sid, ids in waiting.items()}
-    return active, blocked, unseen, stale
+    counts = (active, blocked, unseen, stale)
+    return (*counts, {sid: frozenset(ids) for sid, ids in waiting.items()}) if include_waiting else counts
 
 
 def _read_local_pairs_into(active: dict[str, int], blocked: dict[str, int],
@@ -618,9 +620,7 @@ def _extra_waiting() -> dict[str, set[str]]:
 def waiting_on_task_ids() -> dict[str, frozenset[str]]:
     """``{session_id: open task ids}`` on this gateway's boards: queued/running cards plus those waiting on a human,
     created or shepherded by the session — what the chat is waiting on. Same cache as the counts. [daveey]"""
-    _all_counts()
-    with _cache_lock:
-        return dict(_waiting_cache[0])
+    return _all_counts(include_waiting=True)[4]
 
 
 def active_task_counts() -> dict[str, int]:
@@ -829,8 +829,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     # Never re-date a cached zero as a new owner observation.
     observed_at = time.time() - _CACHE_TTL_S
     try:
-        active, blocked, unseen, remote_stale = _all_counts()
-        waiting = waiting_on_task_ids()
+        active, blocked, unseen, remote_stale, waiting = _all_counts(include_waiting=True)
         extra = _extra_waiting()
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
