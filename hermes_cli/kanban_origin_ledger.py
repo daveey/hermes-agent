@@ -269,13 +269,14 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
     last_ok = None
     try:
         if replica is not None and replica.is_file():
-            # Inventory readers must not queue behind a receipt/sync writer.
-            # Contention is an unavailable observation, handled conservatively
-            # below; the next poll retries without dropping the durable receipt.
-            refresh_observations(path, replica, timeout=0)
+            # Sync metadata is independent of the ledger write: retain its last
+            # successful pull timestamp even when observation refresh is busy.
             source = _ro(replica)
             meta = dict(source.execute("SELECT k,v FROM meta"))
             last_ok = float(meta.get('last_ok') or 0)
+            # Inventory readers must not queue behind a receipt/sync writer.
+            # Only a successful refresh can make these observations current.
+            refresh_observations(path, replica, timeout=0)
             fresh = (0 <= now - last_ok <= 180 and not meta.get('offline_since'))
     except (OSError, sqlite3.Error, ValueError, TypeError):
         # A failed refresh never erases a receipt. Reading the ledger below
