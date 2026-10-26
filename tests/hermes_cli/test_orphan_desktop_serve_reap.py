@@ -11,6 +11,16 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def same_home_candidates(monkeypatch):
+    # This suite exercises topology/locks; ownership boundary coverage lives in
+    # test_orphan_reap_home_scope.py and uses real identity checks.
+    monkeypatch.setattr("hermes_cli.dashboard_procs._reap_candidate_in_current_home", lambda pid: True)
+    monkeypatch.setattr("gateway.status.get_process_start_time", lambda pid: 1000)
+
 from hermes_cli.dashboard_procs import (
     _is_desktop_local_serve_cmdline,
     _reap_orphaned_desktop_local_serves,
@@ -426,7 +436,7 @@ def test_reap_kills_descendants_of_killed_roots_but_spares_a_failed_roots_subtre
         patch("hermes_cli.dashboard_procs._scan_dashboard_processes", return_value=scanned),
         patch("hermes_cli.dashboard_procs._process_ppid", return_value=1),
         patch("hermes_cli.dashboard_procs._posix_descendants", return_value=descendants) as snap,
-        patch("gateway.status.get_process_start_time", side_effect=start_times.get),
+        patch("gateway.status.get_process_start_time", side_effect=lambda pid: start_times.get(pid, 1000)),
         patch("psutil.pid_exists", return_value=True),
         patch("os.kill", side_effect=fake_kill),
     ):
