@@ -414,6 +414,31 @@ def _remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str
         conn.close()
 
 
+def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
+                                   profile: str) -> list[dict[str, Any]]:
+    """Prefer exact local open associations, without inferring receipt release.
+
+    Terminal/missing tasks and receipt-only aliases remain obligations. This is
+    display deduplication only: it never updates or deletes the durable ledger.
+    """
+    local = [r for r in rows if (r.get('gateway'), r.get('profile')) == (gateway, profile)]
+    if not local:
+        return rows
+    boards = {_board_slug(p): p for p in _board_db_paths()}
+    represented = set()
+    for row in local:
+        path = boards.get(row['board'])
+        if path is None:
+            continue
+        aliases = {row['session'], row['origin_session']}
+        # Require coverage of every receipt alias, not just a matching task id.
+        if all(any(t['id'] == row['id'] for t in _read_session_tasks(path, [sid], LISTED_STATUSES))
+               for sid in aliases):
+            represented.add((row['key'], row['session'], row['origin_session']))
+    return [row for row in rows
+            if (row['key'], row['session'], row['origin_session']) not in represented]
+
+
 def _remote_links() -> list[dict[str, Any]]:
     """Shared origin-ledger projection, with preserved legacy associations."""
     from hermes_constants import get_hermes_home
@@ -428,8 +453,9 @@ def _remote_links() -> list[dict[str, Any]]:
     # Configured identity remains available with no replica; corrupt identity
     # must raise, not project another gateway's receipts.
     missing = get_hermes_home() / 'kanban' / 'absent-replica.db'
-    rows = project(ledger, replica=replica, gateway=_gateway(replica or missing),
-                   profile=get_active_profile_name())
+    gateway, profile = _gateway(replica or missing), get_active_profile_name()
+    rows = project(ledger, replica=replica, gateway=gateway, profile=profile)
+    rows = _without_local_open_duplicates(rows, gateway=gateway, profile=profile)
     legacy = _legacy_remote_links()
     # A receipt proves its original and accepted tip aliases. Other aliases
     # require the canonical compression predicate in this origin's state DB.
