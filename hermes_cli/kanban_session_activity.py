@@ -25,23 +25,10 @@ from typing import Any, Callable, Iterable
 
 _log = logging.getLogger(__name__)
 
-# Statuses that mean "work is still queued or running". ``done``/``archived``
-# are finished. ``review`` is unfinished too: the card waits for a reviewer
-# (usually a dispatched agent) or for its completion to be verified, so a
-# session whose only open card sits in review must not paint done. [daveey]
+# Operational parked/review work remains unfinished, not runnable in the scheduler.
 ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled", "review")
-
-# Waiting on a human. These don't keep the session busy, but the sidebar row
-# shows how many there are next to the open count (``kanban_blocked``) and the
-# row paints red. [daveey]
-# ``triage`` joins it only for a card block-loop detection escalated there: it
-# keeps its human ``block_kind`` and still waits on the user. A card created
-# in triage for a specifier (``block_kind`` NULL) is not red. [daveey]
+# Only validated explicit requests paint the sidebar red, in either parked status.
 BLOCKED_STATUSES = ("blocked", "triage")
-# A ``blocked`` card only waits on a human for these kinds (NULL = generic human
-# blocker). A ``transient``/``time`` block waits on a retry or a clock, so it
-# counts as in-progress work instead, like ``scheduled``. [daveey]
-HUMAN_BLOCK_KINDS = ("needs_input", "capability")
 
 _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
@@ -83,25 +70,33 @@ def _board_db_paths() -> list[Path]:
 
 
 def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple[str, tuple]:
-    """Split open work by human responsibility, including escalated triage.
+    """Split display counts by explicit evidence, without changing execution gates.
 
-    Legacy boards have no explicit human triage kinds, so triage stays active.
+    A connection-local function keeps SQL and replica validation identical,
+    including malformed JSON and Python's non-ASCII whitespace handling.
     """
     ph = ",".join("?" for _ in statuses)
-    if not {r[1] for r in conn.execute("PRAGMA table_info(tasks)")} >= {"block_kind"}:
-        if statuses == BLOCKED_STATUSES:
-            return "t.status = 'blocked'", ()
-        return f"(t.status IN ({ph}) OR t.status = 'triage')", statuses
-    kinds = ",".join("?" for _ in HUMAN_BLOCK_KINDS)
-    human = f"(t.block_kind IS NULL OR t.block_kind IN ({kinds}))"
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    conn.create_function("kanban_needs_human", 2, _stored_needs_human, deterministic=True)
+    evidence = "t.human_request" if "human_request" in cols else "NULL"
+    kind = "t.block_kind" if "block_kind" in cols else "NULL"
+    human = f"kanban_needs_human({evidence}, {kind})"
+    parked = "t.status IN ('blocked', 'triage')"
     if statuses == BLOCKED_STATUSES:
-        escalated = f"(t.status = 'triage' AND t.block_kind IN ({kinds}))"
-        return f"((t.status = 'blocked' AND {human}) OR {escalated})", (*HUMAN_BLOCK_KINDS, *HUMAN_BLOCK_KINDS)
-    # Triage is unfinished even without a worker. Only explicit human kinds
-    # belong to the blocked bucket; NULL triage awaits an agent specifier.
-    triage = f"(t.status = 'triage' AND (t.block_kind IS NULL OR t.block_kind NOT IN ({kinds})))"
-    return (f"(t.status IN ({ph}) OR (t.status = 'blocked' AND NOT {human}) OR {triage})",
-            (*statuses, *HUMAN_BLOCK_KINDS, *HUMAN_BLOCK_KINDS))
+        return f"({parked} AND {human})", ()
+    return f"(t.status IN ({ph}) OR ({parked} AND NOT {human}))", statuses
+
+
+def _stored_needs_human(value, kind) -> bool:
+    """Decode the DB's JSON text before applying the shared evidence contract."""
+    from hermes_cli.kanban_human_request import needs_human
+
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return False
+    return needs_human(value, kind=kind)
 
 
 # Set while ``_all_counts`` reads local boards: collects the (session, task) pairs behind the counts, so the
@@ -234,16 +229,14 @@ def _self_gateway(conn: sqlite3.Connection) -> str:
 
 def _replica_bucket(task: dict[str, Any]) -> str | None:
     """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards."""
-    status, kind = task.get("status"), task.get("block_kind")
-    human = kind is None or kind in HUMAN_BLOCK_KINDS
-    if status == 'unknown' and task.get('unfinished'):
-        return 'active'
-    if (status in ACTIVE_STATUSES or (status == "blocked" and not human)
-            or (status == "triage" and kind not in HUMAN_BLOCK_KINDS)):
+    from hermes_cli.kanban_human_request import needs_human
+
+    status = task.get("status")
+    if status == "unknown" and task.get("unfinished"):
         return "active"
-    if (status == "blocked" and human) or (status == "triage" and kind in HUMAN_BLOCK_KINDS):
-        return "blocked"
-    return None
+    if status in BLOCKED_STATUSES:
+        return "blocked" if needs_human(task.get("human_request"), kind=task.get("block_kind")) else "active"
+    return "active" if status in ACTIVE_STATUSES else None
 
 
 # [daveey] The ONE origin-work association for cards on other gateways. The sidebar counts
@@ -256,7 +249,7 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
 # by gateway/profile/board/id: equal task IDs in different owner profiles are separate cards.
 # Historical board/id records retain unknown ownership rather than default-profile inference.
 HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync for this long = stale
-_REMOTE_FIELDS = ("title", "status", "block_kind", "assignee", "created_at", "started_at", "priority")
+_REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority")
 _remote_last: list[dict[str, Any]] | None = None  # last good read (process lifetime)
 _remote_scope: tuple[str, ...] | None = None
 

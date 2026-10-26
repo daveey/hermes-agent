@@ -47,8 +47,15 @@ def test_repeated_agent_block_stays_agent_but_approval_stays_human(board):
     for kind in ("transient", "needs_input"):
         tid = kb.create_task(conn, title="Repeated stop", assignee="default", session_id="owner")
         reason = "Retry network" if kind == "transient" else "Approve production deployment?"
+        request = {
+            "action": reason,
+            "why_human": "Release policy requires the owner's approval.",
+            "interaction": "approval",
+            "scope": "This production deployment only",
+            "evidence": "Production deployment is subject to the release approval policy.",
+        } if kind == "needs_input" else None
         for _ in range(kb.BLOCK_RECURRENCE_LIMIT):
-            assert kb.block_task(conn, tid, kind=kind, reason=reason)
+            assert kb.block_task(conn, tid, kind=kind, reason=reason, human_request=request)
             if kb.get_task(conn, tid).status != "triage":
                 assert kb.unblock_task(conn, tid)
         if kind == "transient":

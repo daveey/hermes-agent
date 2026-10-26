@@ -1,9 +1,11 @@
 """Creation lifecycle events, shared by ordinary and origin-bound tasks."""
+import json
 
 
 def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
                    tenant, workspace_kind, workspace_path, branch_name, project_id,
-                   skills, goal_mode, model_override, provider_override, created_by, requires):
+                   skills, goal_mode, model_override, provider_override, created_by, requires,
+                   human_request=None):
     from hermes_cli import kanban_db as kb
 
     kb._append_event(conn, task_id, "created", {
@@ -23,8 +25,11 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         "provider_override": provider_override,
     })
     if status == "blocked":
+        conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
+                     (json.dumps(human_request) if human_request else None, task_id))
         kb._append_event(conn, task_id, "blocked", {
             "reason": "initial_status", "status": "blocked", "actor": created_by or "user",
+            "human_request": human_request,
         })
     if status == "todo":
         # Match link_tasks: a card parked behind a parent needs a reason.

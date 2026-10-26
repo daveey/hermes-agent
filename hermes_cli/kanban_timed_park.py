@@ -96,7 +96,7 @@ def park(
              else "status IN ('running', 'ready')")
     wake_check, check_every = kwc.validate_park(
         wake_at=wake_at, wake_check=wake_check, check_every=check_every, clock_only=clock_only)
-    sql = ("UPDATE tasks SET status = 'scheduled', claim_lock = NULL, claim_expires = NULL, "
+    sql = ("UPDATE tasks SET status = 'scheduled', human_request = NULL, claim_lock = NULL, claim_expires = NULL, "
            f"worker_pid = NULL WHERE id = ? AND {guard}")
     params: tuple = (task_id,)
     if expected_run_id is not None:

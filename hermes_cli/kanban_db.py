@@ -670,6 +670,7 @@ class Task:
     session_id: Optional[str] = None         # originating HERMES_SESSION_ID; NULL from CLI/dashboard
     # VALID_BLOCK_KINDS or None (legacy); kept across unblock so a same-kind re-block reads as a loop.
     block_kind: Optional[str] = None
+    human_request: Optional[dict] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
 
@@ -688,6 +689,7 @@ class Task:
             consecutive_failures=g("consecutive_failures", g("spawn_failures", 0)),
             last_failure_error=g("last_failure_error", g("last_spawn_error")),
             skills=skills_value,
+            human_request=_json_or(g("human_request")),
             requires=_json_or(g("requires")) or [],
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
@@ -904,6 +906,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- to ``blocked`` for a human. Preserved across unblock so a re-block for
     -- the SAME kind can be recognised as a loop.
     block_kind           TEXT,
+    human_request        TEXT,
     -- Unblock-loop counter. Incremented each time a task is re-blocked for the
     -- same truly-blocked reason after having been unblocked. When it reaches
     -- BLOCK_RECURRENCE_LIMIT the task is routed to ``triage`` instead of
@@ -1215,6 +1218,7 @@ def create_task(
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
     validate_workspace: bool = False,
+    human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None,
     requires: Optional[list[str]] = None,
 ) -> str:
@@ -1250,7 +1254,9 @@ def create_task(
 
     from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
     from hermes_cli.kanban_pr_acceptance import validate_contract
+    from hermes_cli.kanban_human_request import validate_initial_request
 
+    human_request = validate_initial_request(human_request, initial_status, triage)
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
@@ -1368,6 +1374,7 @@ def create_task(
                     workspace_path=workspace_path, branch_name=branch_name, project_id=project_id,
                     skills=skills_list, goal_mode=goal_mode, model_override=model_override,
                     provider_override=provider_override, created_by=created_by, requires=required,
+                    human_request=human_request,
                 )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
@@ -1704,13 +1711,13 @@ def task_graph_contexts(conn: sqlite3.Connection, task_ids: Iterable[str]) -> di
     placeholders = ",".join("?" for _ in ordered_ids)
     for bucket, own, other in (("parents", "child_id", "parent_id"), ("children", "parent_id", "child_id")):
         for row in conn.execute(
-            f"SELECT l.{own} AS owner_id, t.id, t.title, t.status, t.block_kind "
+            f"SELECT l.{own} AS owner_id, t.id, t.title, t.status, t.block_kind, t.human_request "
             f"FROM task_links l JOIN tasks t ON t.id = l.{other} "
             f"WHERE l.{own} IN ({placeholders}) ORDER BY l.{own}, t.id", tuple(ordered_ids),
         ).fetchall():
             contexts[row["owner_id"]][bucket].append(
                 {"id": row["id"], "title": row["title"], "status": row["status"],
-                 "block_kind": row["block_kind"]}
+                 "block_kind": row["block_kind"], "human_request": _json_or(row["human_request"])}
             )
     return contexts
 
@@ -2165,6 +2172,7 @@ def _claim_and_open_run(
         f"""
         UPDATE tasks
            SET status        = 'running',
+               human_request = NULL,
                claim_lock    = ?,
                claim_expires = ?,
                started_at    = COALESCE(started_at, ?)
@@ -2734,6 +2742,7 @@ def complete_task(
                        claim_expires= NULL,
                        worker_pid   = NULL,
                        block_kind   = NULL,
+                       human_request = NULL,
                        block_recurrences = 0
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked', 'review')
@@ -3169,6 +3178,7 @@ def block_task(
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
     blocker_id: Optional[str] = None, wake_check: Optional[str] = None,
     check_every: Optional[int] = None, clock_only: bool = False,
+    human_request: Optional[dict] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`kanban_block_routing.route_block`). A wait on time -- ``kind='time'``, a ``dependency``
@@ -3188,6 +3198,8 @@ def block_task(
     durable repair card and the original waits in ``todo`` on that dependency
     (including explicit classification of a breaker-parked card).
     """
+    from hermes_cli.kanban_human_request import reject_timed_request, validate_human_request
+    human_request = validate_human_request(human_request, kind=kind)
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
     with write_txn(conn):
@@ -3212,6 +3224,7 @@ def block_task(
             # otherwise Desktop lists them under "For you" with an unblock button.
             from hermes_cli import kanban_timed_park as ktp
             if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=_parents_satisfied(conn, task_id)):
+                reject_timed_request(human_request)
                 return ktp.park(conn, task_id, reason=reason, requested_kind=kind, source_status="ready",
                                 from_untyped_block=True, wake_check=wake_check,
                                 check_every=check_every, clock_only=clock_only)
@@ -3220,14 +3233,15 @@ def block_task(
                 kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason)
 
             classified = conn.execute(
-                "UPDATE tasks SET block_kind = ?, block_recurrences = 1 "
+                "UPDATE tasks SET block_kind = ?, block_recurrences = 1, human_request = ? "
                 "WHERE id = ? AND status = 'blocked' AND block_kind IS NULL "
                 "AND current_run_id IS NULL",
-                (kind, task_id),
+                (kind, json.dumps(human_request) if human_request else None, task_id),
             ).rowcount
             if classified != 1:
                 return False
-            payload = {"kind": kind, "reason": reason, "classified_in_place": True}
+            payload = {"kind": kind, "reason": reason, "classified_in_place": True,
+                       "human_request": human_request}
             if requested_kind == "assignment":
                 payload.update(requested_kind=requested_kind, rekind_reason=rekind_reason)
             if kind == "assignment":
@@ -3241,6 +3255,7 @@ def block_task(
         no_open_parent = _parents_satisfied(conn, task_id)
         from hermes_cli import kanban_timed_park as ktp
         if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent):
+            reject_timed_request(human_request)
             return ktp.park(conn, task_id, reason=reason, requested_kind=kind,
                             source_status=source_status, expected_run_id=expected_run_id,
                             wake_check=wake_check, check_every=check_every, clock_only=clock_only)
@@ -3284,6 +3299,9 @@ def block_task(
             conn, task_id, expected_run_id, kind, new_status, set_sql, params, payload,
         ):
             return False
+        conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
+                     (json.dumps(human_request) if human_request else None, task_id))
+        payload["human_request"] = human_request
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="blocked", status="blocked", summary=reason,
             metadata={"blocker_id": blocker_id} if blocker_id else None,
@@ -3421,6 +3439,7 @@ def request_review(
                 """
                 UPDATE tasks
                    SET status        = 'review',
+                       human_request = NULL,
                        claim_lock    = NULL,
                        claim_expires = NULL,
                        worker_pid    = NULL
@@ -3672,7 +3691,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # is a fresh start for the retry budget.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "consecutive_failures = 0, last_failure_error = NULL "
+            "consecutive_failures = 0, last_failure_error = NULL, human_request = NULL "
             "WHERE id = ? AND status IN ('blocked', 'scheduled', 'triage')", (new_status, task_id),
         )
         if cur.rowcount != 1:
@@ -3792,7 +3811,7 @@ def invalidate_descendants_for_parent_reopen(
             conn.execute(
                 "UPDATE tasks SET status = 'todo', completed_at = NULL, "
                 "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-                "current_run_id = NULL, consecutive_failures = 0 WHERE id = ?", (row["id"],),
+                "current_run_id = NULL, consecutive_failures = 0, human_request = NULL WHERE id = ?", (row["id"],),
             )
             entry = {
                 "id": row["id"], "prior_status": previous_status,
@@ -3968,7 +3987,7 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> b
         was_running = row["status"] == "running"
         prev_pid, prev_lock, prev_started = row["worker_pid"], row["claim_lock"], row["worker_started_at"]
         cur = conn.execute(
-            "UPDATE tasks SET status = 'archived', "
+            "UPDATE tasks SET status = 'archived', human_request = NULL, "
             "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
             "WHERE id = ? AND status != 'archived'", (task_id,),
         )
@@ -4272,40 +4291,10 @@ def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
 # --- Stats + SLA helpers ---
 
 def board_stats(conn: sqlite3.Connection) -> dict:
-    """Per-status + per-assignee counts and the oldest ``ready`` age (staleness signal)."""
-    by_status: dict[str, int] = {}
-    for row in conn.execute(
-        "SELECT status, COUNT(*) AS n FROM tasks "
-        "WHERE status != 'archived' GROUP BY status"
-    ):
-        by_status[row["status"]] = int(row["n"])
+    """Public board summary entry point."""
+    from hermes_cli.kanban_db_stats import board_stats as summarize
+    return summarize(conn)
 
-    by_assignee = _counts_by_assignee(conn)
-
-    oldest_row = conn.execute(
-        "SELECT MIN(created_at) AS ts FROM tasks WHERE status = 'ready'"
-    ).fetchone()
-    now = int(time.time())
-    oldest_ready_age = (
-        (now - int(oldest_row["ts"]))
-        if oldest_row and oldest_row["ts"] is not None else None
-    )
-
-    # Waiting on the user: human-kind ``blocked`` plus block-loop escalations in ``triage``
-    # (they keep their human ``block_kind``). A plain triage card awaiting a specifier is not. [daveey]
-    waiting_ids = [r["id"] for r in conn.execute(
-        "SELECT id FROM tasks WHERE (status = 'blocked' AND (block_kind IS NULL OR block_kind IN "
-        "('needs_input', 'capability'))) OR (status = 'triage' AND block_kind IN ('needs_input', 'capability')) "
-        "ORDER BY id")]
-
-    return {
-        "by_status": by_status,
-        "by_assignee": by_assignee,
-        "oldest_ready_age_seconds": oldest_ready_age,
-        "waiting_on_user": len(waiting_ids),
-        "waiting_on_user_ids": waiting_ids,
-        "now": now,
-    }
 
 
 def _counts_by_assignee(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:

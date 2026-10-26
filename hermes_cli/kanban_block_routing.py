@@ -73,7 +73,7 @@ def supervisor_stop(conn, task_id: str, reason: str, reason_code: str) -> bool:
 
     with kb.write_txn(conn):
         changed = conn.execute(
-            "UPDATE tasks SET status = 'triage', block_kind = 'transient' "
+            "UPDATE tasks SET status = 'triage', block_kind = 'transient', human_request = NULL "
             "WHERE id = ? AND status IN ('ready', 'review')", (task_id,),
         ).rowcount
         if not changed:

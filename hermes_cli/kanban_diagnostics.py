@@ -80,6 +80,19 @@ def _task_field(task, name, default=None):
     return getattr(task, name, default)
 
 
+def _human_request(task) -> dict | None:
+    """Read canonical current evidence, never resurrect an ask from older events."""
+    from hermes_cli.kanban_human_request import validate_human_request
+
+    value = _task_field(task, "human_request")
+    try:
+        if isinstance(value, str):
+            value = json.loads(value)
+        return validate_human_request(value, kind=_task_field(task, "block_kind"))
+    except (ValueError, TypeError):
+        return None
+
+
 def _parse_payload(ev) -> dict:
     """Tolerate event.payload being either a dict or a JSON string."""
     p = _task_field(ev, "payload", None)
@@ -611,9 +624,10 @@ def _rule_stuck_in_blocked(task, events, runs, now, cfg) -> list[Diagnostic]:
         kind="stuck_in_blocked", severity="warning",
         title=f"Task has been blocked for {int(age_hours)}h",
         detail=f"This task transitioned to blocked {int(age_hours)}h ago and has had no comments or "
-               f"unblock attempts since. Blocked tasks are waiting for human input — check the block "
-               f"reason and either unblock with feedback or answer with a comment.",
-        actions=[DiagnosticAction(kind="comment", label="Add a comment / unblock the task",
+               f"unblock attempts since. Owner: {_task_field(task, 'assignee') or 'unassigned'}. "
+               + ("Review the explicit human request and answer it."
+                  if _human_request(task) else "Operational blocker: inspect the cause and record a recovery plan."),
+        actions=[DiagnosticAction(kind="comment", label="Record a response or recovery plan",
                                   suggested=True)],
         first_seen_at=last_blocked_ts, last_seen_at=last_blocked_ts, count=1,
         data={"blocked_at": last_blocked_ts, "age_hours": round(age_hours, 1)},
@@ -804,15 +818,15 @@ def _rule_scheduled_without_wake(task, events, runs, now, cfg) -> list[Diagnosti
         return []
     parked_at = _event_ts(ev) if ev is not None else int(_task_field(task, "created_at", default=now) or now)
     wake_at = implied_wake(payload, parked_at)
-    human = _task_field(task, "block_kind") in kc.HUMAN_BLOCK_KINDS
+    human = _human_request(task) is not None
     return [Diagnostic(
         kind="scheduled_without_wake", severity="error" if human or wake_at <= now else "warning",
         title="Scheduled with no wake time",
-        detail=("This card is parked in scheduled but its park recorded no wake time, so only a cron "
-                "or a human would ever resume it. "
-                + ("It waits on a human answer; the dispatcher moves it to blocked."
-                   if human else "The dispatcher wakes it at the implied time.")),
-        actions=[DiagnosticAction(kind="unblock", label="Resume the task now", suggested=True)],
+        detail=("This card is parked in scheduled but its park recorded no wake time. "
+                + ("It has an explicit human request; resolve that request before resuming."
+                   if human else "This is an operational scheduling issue; existing execution guards still apply.")),
+        actions=[_cli_hint("Inspect the parked task", f"hermes kanban show {_task_field(task, 'id')}",
+                           suggested=True)],
         first_seen_at=parked_at, last_seen_at=parked_at, count=1,
         data={"parked_at": parked_at, "implied_wake_at": wake_at},
     )]
@@ -905,15 +919,13 @@ def _block_loop_ask(events) -> Optional[str]:
 
 
 def _rule_escalated_waiting_on_user(task, events, runs, now, cfg) -> list[Diagnostic]:
-    """Block-loop detection moved a repeatedly re-blocked card to ``triage``. It keeps its human
-    ``block_kind`` and waits on the user exactly like ``blocked`` -- surface it as such. [daveey]"""
-    from hermes_cli import kanban_continuation as kc
-
-    if _task_field(task, "status") != "triage" or _task_field(task, "block_kind") not in kc.HUMAN_BLOCK_KINDS:
+    """An escalated triage card needs the user only with explicit current evidence."""
+    request = _human_request(task)
+    if _task_field(task, "status") != "triage" or request is None:
         return []
-    ask = _block_loop_ask(events)
-    if ask is None:
+    if _block_loop_ask(events) is None:
         return []
+    ask = request["action"]
     ts = _latest_event_ts(events, {"block_loop_detected"}) or now
     task_id = str(_task_field(task, "id") or "")
     return [Diagnostic(
@@ -926,18 +938,14 @@ def _rule_escalated_waiting_on_user(task, events, runs, now, cfg) -> list[Diagno
 
 
 def _rule_waiting_behind_user(task, events, runs, now, cfg) -> list[Diagnostic]:
-    """A ``todo`` card gated on a parent that waits on the user (human-kind ``blocked``, or a
-    block-loop escalation in ``triage``): it looks queued but cannot move until the user acts. [daveey]"""
-    from hermes_cli import kanban_continuation as kc
-
+    """A todo card gated by a parent's explicit human request."""
     if _task_field(task, "status") != "todo":
         return []
     graph = cfg.get("_graph")
     if not isinstance(graph, dict):
         return []
-    waiting = [p for p in (graph.get("parents") or []) if isinstance(p, dict) and (
-        (p.get("status") == "blocked" and p.get("block_kind") in (None, *kc.HUMAN_BLOCK_KINDS))
-        or (p.get("status") == "triage" and p.get("block_kind") in kc.HUMAN_BLOCK_KINDS))]
+    waiting = [p for p in (graph.get("parents") or []) if isinstance(p, dict)
+               and p.get("status") in ("blocked", "triage") and _human_request(p)]
     if not waiting:
         return []
     ids = [str(p.get("id")) for p in waiting]
