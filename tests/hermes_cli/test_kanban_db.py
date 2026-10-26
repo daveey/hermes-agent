@@ -270,7 +270,7 @@ def test_stale_claim_reclaim_without_spawn_counts_toward_breaker(kanban_home):
                 "SELECT status, consecutive_failures FROM tasks WHERE id = ?", (t,),
             ).fetchone()
             assert row["consecutive_failures"] == expected
-        assert row["status"] == "blocked"
+        assert row["status"] == "triage"
         kinds = [e.kind for e in kb.list_events(conn, t)]
         assert kinds[-2:] == ["reclaimed", "gave_up"]
 
@@ -389,7 +389,7 @@ def test_rate_limit_exit_requeues_without_counting_failure(
 @pytest.mark.parametrize("lane", ["ready", "review"])
 def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_home, monkeypatch, lane):
     """A worker that exits ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` (credential revoked, model
-    gone) parks the card ``blocked`` on the FIRST death — well below ``failure_limit`` and the
+    gone) parks the card ``triage`` on the FIRST death — well below ``failure_limit`` and the
     per-task ``max_retries`` — with the provider error as the reason, sticky against
     ``recompute_ready``. Same booking for the implementation and the review lane (#114587)."""
     import hermes_cli.kanban_db as _kb
@@ -416,7 +416,7 @@ def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_h
         assert tid in getattr(_kbd.detect_crashed_workers, "_last_auto_blocked", [])
 
         task = kb.get_task(conn, tid)
-        assert task.status == "blocked"
+        assert task.status == "triage"
         assert task.consecutive_failures == 1  # one spawn, not failure_limit / max_retries of them
         assert "terminal provider error" in (task.last_failure_error or "")
         gave_up = conn.execute(
@@ -427,7 +427,7 @@ def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_h
         # Sticky: the breaker did not reach its counter limit, yet the card must stay parked
         # until an operator fixes the provider and unblocks it.
         kb.recompute_ready(conn)
-        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.get_task(conn, tid).status == "triage"
 
 
 

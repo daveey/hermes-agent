@@ -113,6 +113,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "rate_limited": res.rate_limited,
             "shared_blocker_released": res.shared_blocker_released,
             "skipped_locked": res.skipped_locked,
+            "skipped_owned": res.skipped_owned,
+            "dispatch_owner": res.dispatch_owner,
+            "ownership_error": res.ownership_error,
             "memory_pressure": res.memory_pressure,
         }, ascii=True)
         return 0
@@ -155,6 +158,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Released (shared blocker cleared): {', '.join(res.shared_blocker_released)}")
     if res.skipped_locked:
         print("Skipped: another dispatcher holds this board's lock (no writes this tick)")
+    if res.skipped_owned:
+        print(f"Skipped: dispatch owner {res.dispatch_owner or '(unknown)'}; "
+              f"{res.ownership_error or 'dispatcher identity does not match'}")
     if res.memory_pressure:
         print(f"Memory pressure {res.memory_pressure}: new workers restricted this tick")
     return 0

@@ -168,6 +168,11 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
 
 ## Boards (multi-project)
 
+Dedicated supervised runtimes can reserve a board with the optional native
+`dispatch_owner` field. See [per-board dispatch ownership](../../developer-guide/kanban-dispatch-ownership.md)
+for operator set/read/clear commands, the Python dispatcher ID contract, and
+safe rollout. This is same-UID coordination, not an authentication boundary.
+
 Boards let you separate unrelated streams of work — one per project, repo,
 or domain — into isolated queues. A new install has exactly one board
 called `default` (DB at `~/.hermes/kanban.db` for back-compat). Users who
@@ -463,7 +468,18 @@ CI probe when the next action is review/landing rather than an external merge.
 Continuations leave `consecutive_failures` and the unblock-loop counter
 untouched, so they never trip the give-up or block-loop limits. Their own
 bound is `kanban.max_continuations` (default 12) consecutive `continued` runs.
-Past that, the worker has to complete or block.
+Past that, the worker has to complete or block. The refusal records a run-scoped
+`continuation_exhausted` event with the checkpoint and recommends
+`kanban_block(kind='transient', reason='continuation_exhausted: split the work or reset the continuation budget')`.
+That budget-management block enters agent `triage`, not the human-input list.
+A budget-only `needs_input` following the same run's refusal is corrected to
+`transient`, with `requested_kind` and `rekind_reason=continuation_exhausted`
+in the block event. Actual user questions, capability requests, and time waits
+retain their own routing; unknown prose is not suppressed. This is a supervisor
+handoff, not an automatic budget reset: previously run triage cards are excluded
+from automatic decomposition, so the supervising agent must split or resume the
+preserved work. Local session counts and remote replica counts treat this as
+unfinished agent work, never as waiting on a human.
 
 #### Workers and systemd cgroups
 

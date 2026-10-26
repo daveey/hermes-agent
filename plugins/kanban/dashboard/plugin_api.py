@@ -1533,9 +1533,12 @@ def create_board_endpoint(payload: CreateBoardBody):
     project_id, _pname, primary_path = _resolve_project(payload.project_id)
     if primary_path and not default_workdir:
         default_workdir = primary_path
-    with _value_error_400():
-        meta = kanban_db.create_board(
-            payload.slug, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+    try:
+        with _value_error_400():
+            meta = kanban_db.create_board(
+                payload.slug, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if payload.switch:
         with _value_error_400():
             kanban_db.set_current_board(meta["slug"])
@@ -1560,8 +1563,12 @@ def rename_board(slug: str, payload: RenameBoardBody):
                 default_workdir = primary_path
         else:
             project_id = ""  # clear the scope
-    meta = kanban_db.write_board_metadata(
-        normed, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+    try:
+        with _value_error_400():
+            meta = kanban_db.write_board_metadata(
+                normed, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"board": _annotate_board_meta(meta)}
 
 

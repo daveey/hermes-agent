@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import random
 import re
 import secrets
@@ -59,11 +60,12 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
     byte-level probes of the file are refused because an ``open()``/``close()``
     would cancel this process's POSIX advisory locks (see ``sqlite_safe_read``)."""
     from hermes_cli.sqlite_safe_read import connect_tracked
+    from hermes_cli.kanban_dispatch_owner import connect_with_identity
 
     busy_timeout_ms = _resolve_busy_timeout_ms()
     conn = connect_tracked(
         path,
-        connect_fn=sqlite3.connect,
+        connect_fn=connect_with_identity,
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
     )
@@ -158,7 +160,7 @@ def _cross_process_init_lock(path: Path):
 
 
 @contextlib.contextmanager
-def _dispatch_tick_lock(db_path: Path):
+def _dispatch_tick_lock(db_path: Path, *, create_parent: bool = True):
     """Non-blocking single-writer guard around one dispatcher tick; yields
     ``True`` if this process holds the board's ``.dispatch.lock``, else
     ``False`` (caller skips the tick).
@@ -168,7 +170,7 @@ def _dispatch_tick_lock(db_path: Path):
     multi-writer corruption; this is defense-in-depth behind
     ``_guard_supervised_gateway_conflict``. Non-blocking on purpose: the
     gateway's async watcher must never stall; the loser retries next interval.
-    Without ``fcntl``/``msvcrt`` it degrades to a no-op (yields ``True``).
+    An unavailable lock refuses the tick (yields ``False``).
 
     Motivation (issue #35240): a ``hermes gateway run --replace`` / ``gateway restart`` invoked from a shell
     on a systemd/launchd host can leave an orphan gateway whose dispatcher escapes the service cgroup,
@@ -181,19 +183,27 @@ def _dispatch_tick_lock(db_path: Path):
     handle = None
     acquired = False
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if create_parent:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = lock_path.open("a+b")
         try:
             acquired = _try_lock_nb(handle)
         except (OSError, AttributeError):
             acquired = False
     except OSError:
-        # Can't even open the lock file (permissions, read-only FS): degrade to
-        # a no-op so a probe failure never blocks dispatch.
-        acquired = True
+        # A failed lock is not permission to dispatch or change ownership.
+        acquired = False
         handle = None
     try:
-        yield acquired
+        # Archive/delete may have moved this lock after open but before flock.
+        # An acquired obsolete inode does not serialize work on its replacement.
+        current = False
+        if acquired:
+            try:
+                current = os.path.samestat(os.fstat(handle.fileno()), lock_path.stat())
+            except OSError:
+                current = False
+        yield acquired and current
     finally:
         if handle is not None:
             try:

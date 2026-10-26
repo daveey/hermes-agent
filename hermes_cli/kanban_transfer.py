@@ -148,6 +148,7 @@ def export_board(
         # Both name a location on the exporting machine; the importer
         # resolves its own.
         meta.pop("db_path", None)
+        meta.pop("dispatch_owner", None)  # Runtime-local, never portable authority.
         meta["default_workdir"] = None
         meta["project_id"] = None
         _write_json(staged / "board.json", meta)
