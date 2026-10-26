@@ -303,6 +303,8 @@ def _custom_provider_extra_body_for_agent(
 
 
 def _merge_custom_provider_extra_body(agent, custom_providers: list[dict[str, Any]]) -> None:
+    from agent.runtime_request_overrides import capture_caller_body
+    capture_caller_body(agent)
     extra_body = _custom_provider_extra_body_for_agent(
         provider=agent.provider, model=agent.model, base_url=agent.base_url,
         custom_providers=custom_providers,

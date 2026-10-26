@@ -171,7 +171,9 @@ def clear_class_route(agent):
 def current_main_runtime(agent):
     runtime = {key: getattr(agent, key, "") or "" for key in (
         "model", "provider", "base_url", "api_key", "api_mode", "auth_mode", "session_id")}
-    runtime["requested_class"] = (getattr(agent, "model_routing", None) or {}).get("requested_class", "")
+    requested_class = (getattr(agent, "model_routing", None) or {}).get("requested_class")
+    if requested_class:
+        runtime["requested_class"] = requested_class
     return runtime
 
 

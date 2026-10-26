@@ -2133,10 +2133,12 @@ def _apply_switched_provider_request_overrides(agent, new_provider):
         provider=new_provider, model=getattr(agent, "model", "") or "",
         base_url=getattr(agent, "base_url", "") or "", custom_providers=custom_providers or [],
     )
+    from agent.runtime_request_overrides import switched_extra_body
+    new_extra_body = switched_extra_body(agent, new_extra_body)
     overrides = dict(getattr(agent, "request_overrides", {}) or {})
-    overrides.pop("extra_body", None)  # always drop the previous provider's extra_body
+    overrides.pop("extra_body", None)  # drop old defaults, not caller-owned settings
     if new_extra_body:
-        overrides["extra_body"] = dict(new_extra_body)
+        overrides["extra_body"] = new_extra_body
     agent.request_overrides = overrides
 
 
