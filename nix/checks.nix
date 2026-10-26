@@ -1036,7 +1036,7 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
           echo "PASS: All binaries present"
 
           echo "=== Checking version ==="
-          ${hermes-agent}/bin/hermes --version 2>&1 | grep -qi "hermes" || (echo "FAIL: version check"; exit 1)
+          ${hermes-agent}/bin/hermes --version 2>&1 | grep -i "hermes" > /dev/null || (echo "FAIL: version check"; exit 1)
           echo "PASS: Version check"
 
           echo "=== All checks passed ==="
@@ -1067,8 +1067,8 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
           export HOME=$(mktemp -d)
 
           echo "=== Checking hermes --help ==="
-          ${hermes-agent}/bin/hermes --help 2>&1 | grep -q "gateway" || (echo "FAIL: gateway subcommand missing"; exit 1)
-          ${hermes-agent}/bin/hermes --help 2>&1 | grep -q "config" || (echo "FAIL: config subcommand missing"; exit 1)
+          ${hermes-agent}/bin/hermes --help 2>&1 | grep "gateway" > /dev/null || (echo "FAIL: gateway subcommand missing"; exit 1)
+          ${hermes-agent}/bin/hermes --help 2>&1 | grep "config" > /dev/null || (echo "FAIL: config subcommand missing"; exit 1)
           echo "PASS: All subcommands accessible"
 
           echo "=== All CLI checks passed ==="
@@ -1247,9 +1247,34 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
             # Case-insensitive: the message names the managing system as the
             # identifier it is keyed by, and the display form is not the
             # property under test here.
-            echo "$OUTPUT" | grep -qi "managed by nixos" || (echo "FAIL: $label not guarded"; echo "$OUTPUT"; exit 1)
+            # Drain the pipe: grep -q can close it early and make echo fail
+            # with SIGPIPE under the build shell's pipefail setting.
+            printf '%s\n' "$OUTPUT" | grep -i "managed by nixos" > /dev/null || {
+              echo "FAIL: $label not guarded"; printf '%s\n' "$OUTPUT"; return 1;
+            }
             echo "PASS: $label blocked in managed mode"
           }
+
+          # Exercise the assertion with output larger than a pipe buffer. A
+          # match at the start must not turn into a false failure under pipefail;
+          # a failing command without the guard message must still be rejected.
+          set -o pipefail
+          printf -v padding '%1048576s' ' '
+          guard_fixture() {
+            test "$HERMES_MANAGED" = true || return 2
+            case "$1" in
+              early) printf 'Managed by NixOS\n%s\n' "$padding" ;;
+              late) printf '%s\nMANAGED BY NIXOS\n' "$padding" ;;
+              absent) printf '%s\nnot a guard message\n' "$padding" ;;
+            esac >&2
+            return 1
+          }
+          check_blocked "early message regression" guard_fixture early
+          check_blocked "late message regression" guard_fixture late
+          if check_blocked "missing message regression" guard_fixture absent > missing-message.log; then
+            echo "FAIL: missing guard message was accepted"; exit 1
+          fi
+          unset padding
 
           echo "=== Checking HERMES_MANAGED guards ==="
           check_blocked "config set" ${hermes-agent}/bin/hermes config set model foo
