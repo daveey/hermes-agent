@@ -193,6 +193,9 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             "'continued', 'scheduled')",
             cols=", kind, payload", strict=True)):
         return None
+    from hermes_cli.kanban_dependency_review import resumes_review
+    if resumes_review(conn, task_id, pr_urls):
+        return None
     states = {u: pr_state(u) for u in dict.fromkeys(pr_urls)}
     if all(s in TERMINAL_STATES or s == "REJECTED" for s in states.values()):
         from hermes_cli.kanban_db_dispatch_pr_rejection import comment_rejection

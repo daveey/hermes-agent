@@ -3279,6 +3279,11 @@ def block_task(
                 payload["recurrences"] = prev
                 payload.pop("limit", None)
                 payload["shared_blocker_probe"] = True
+        if kind == "dependency":
+            from hermes_cli.kanban_dependency_review import checkpoint
+            review_checkpoint = checkpoint(conn, task_id, expected_run_id)
+            if review_checkpoint:
+                payload["review_checkpoint"] = review_checkpoint
         sql = f"""
                 UPDATE tasks
                    SET status        = '{new_status}',
