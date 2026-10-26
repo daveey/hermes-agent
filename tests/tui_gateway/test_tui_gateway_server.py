@@ -21,21 +21,17 @@ from tui_gateway import server
 from tui_gateway.transport import bind_transport, reset_transport
 
 
-def _dispatch_sync(req: dict, transport=None) -> dict | None:
-    """Run one RPC to completion synchronously, regardless of pool routing.
+from tests.tui_gateway.gateway_dispatch_helpers import dispatch_sync as _dispatch_sync
 
-    Voice RPCs (voice.toggle/record/tts) are in ``_LONG_HANDLERS`` so they run
-    on the RPC pool and ``server.dispatch`` returns None — the pool worker
-    writes the response via the bound transport. These tests exercise the
-    handler's business logic, not the routing, so they drive the handler
-    inline while preserving the transport-binding semantics ``dispatch``
-    applies around a real request.
+
+@pytest.fixture(autouse=True)
+def _isolate_durable_writer_preflight(monkeypatch):
+    """These handler-unit tests supply partial/absent DBs for unrelated paths.
+
+    Cross-process durable ownership, unavailable-store fail-closed behavior and
+    takeover are exercised with real stores in test_cli_durable_takeover.py.
     """
-    token = bind_transport(transport)
-    try:
-        return server.handle_request(req)
-    finally:
-        reset_transport(token)
+    monkeypatch.setattr(server, "_foreign_turn_owner", lambda _session: None)
 
 
 @pytest.fixture(autouse=True)

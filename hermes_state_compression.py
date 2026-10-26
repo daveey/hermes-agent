@@ -657,6 +657,20 @@ class SessionCompressionMixin:
                 last_notice_at = now
             time.sleep(min(max(0.01, float(poll_interval_seconds)), remaining))
 
+    def session_turn_lease_owner(self, session_id: str) -> Optional[dict[str, Any]]:
+        """Inspect the actual writer at the compression root, without reclaiming its row."""
+        from hermes_state import _compression_lock_holder_process_is_dead
+        with self._read_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_turn_leases WHERE conversation_id = ?",
+                (self._session_turn_lease_key_on_conn(conn, session_id),),
+            ).fetchone()
+        if row is None or _compression_lock_holder_process_is_dead(row["holder"]):
+            return None
+        # An expired but live holder can still renew: takeover must wait for release,
+        # not mistake expiry for acknowledgement.
+        return dict(row)
+
     def session_turn_lease_expires_at(self, session_id: str, holder: str) -> Optional[float]:
         """Committed ``expires_at`` of ``holder``'s turn lease, or None when it does not hold it."""
         if not session_id or not holder:
