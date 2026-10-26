@@ -776,11 +776,12 @@ def test_tree_rows_carry_session_activity_stamps(monkeypatch, tmp_path):
         _create_session(launch_home, sid, repo)
 
     monkeypatch.setattr(goal_session_activity, "active_goal_sessions", lambda: frozenset({"s_goal"}))
-    # Counts include durable remote-stale evidence as the fourth mapping.
-    monkeypatch.setattr(
-        kanban_session_activity, "_all_counts",
-        lambda: ({"s_cards": 2}, {"s_cards": 1}, {}, {"s_cards": 1}),
-    )
+    # Match the atomic counts + waiting IDs snapshot used by row annotation.
+    def counts(*, include_waiting=False):
+        snapshot = ({"s_cards": 2}, {"s_cards": 1}, {}, {"s_cards": 1})
+        return (*snapshot, {"s_cards": frozenset({"t_open"})}) if include_waiting else snapshot
+
+    monkeypatch.setattr(kanban_session_activity, "_all_counts", counts)
     monkeypatch.setattr(cron_session_activity, "cron_owner_sessions", lambda: frozenset())
     monkeypatch.setattr(process_session_activity, "_owned_processes", lambda: {"s_quiet": set()})
 
