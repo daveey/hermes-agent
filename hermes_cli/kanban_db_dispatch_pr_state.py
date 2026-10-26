@@ -35,10 +35,31 @@ _cache: dict[str, tuple[Optional[str], Optional[float]]] = {}
 _rejections: dict[str, str] = {}
 
 
+def _gh_argv() -> Optional[list[str]]:
+    """``gh`` argv for the dispatcher's PR-state read, or None when it cannot be built.
+
+    Reuses the dispatcher home's ``kanban.pr_acceptance.gh_command_prefix`` (a credential
+    broker wrapper such as ``token-broker exec --scope user/github --``) and resolves ``gh``
+    from ~/bin / ~/.local/bin as the PR-acceptance gate does: a service process has a minimal
+    PATH and often no ambient ``gh`` login, and without either every lookup failed closed, so
+    merged PRs held their cards for the full 6 h hold cap. [daveey]"""
+    try:
+        from hermes_cli.kanban_pr_acceptance import _gh_command_prefix
+        from hermes_platform.resolver.github import resolve_gh
+        resolved = resolve_gh()
+        if not resolved.found:
+            return None
+        return [*_gh_command_prefix(None), *resolved.command]
+    except Exception:  # config/setup errors may carry credentials: log no text
+        logger.debug("kanban: gh argv for PR state unavailable")
+        return None
+
+
 def _gh_pr_state(url: str) -> Optional[str]:
     """GitHub state, ``REJECTED`` for a completed queue rejection, or None on failure."""
+    gh = _gh_argv() or ["gh"]
     try:
-        proc = subprocess.run(["gh", "pr", "view", url, "--json", "state,comments"], stdin=subprocess.DEVNULL,
+        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments"], stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=GH_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -99,8 +120,11 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     changes_requested, review reopen) names the profile that must now work on THAT PR — a
     closer or the implementer finishing it, not a duplicate implementation (#111910). So does
     an ``unblocked`` event: a worker that opened its PR and blocked itself waiting for the
-    merge is resumed by that unblock to ship/verify THAT PR. A crash/reclaim is not a
-    handoff, so the worker that opened the PR is still not re-spawned against it.
+    merge is resumed by that unblock to ship/verify THAT PR. So does an orderly park AFTER the
+    PR comment (``continued`` checkpoint or ``scheduled`` timed wait): the owner parked knowing
+    its PR, and the wake resumes it from that checkpoint, not a context-free respawn. A
+    crash/reclaim is not a handoff, so the worker that opened the PR is still not re-spawned
+    against it.
     Also lifted once EVERY PR named in those comments is MERGED or CLOSED (gh, cached; any
     gh failure keeps the hold), or has a completed queue rejection requiring repair. [daveey]
     """
@@ -120,7 +144,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     # Strictly after: a same-second tie stays guarded (fail closed).
     if any(_kbd._is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
             conn, "task_events", task_id, max(pr_times),
-            "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')",
+            "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked', "
+            "'continued', 'scheduled')",
             cols=", kind, payload", strict=True)):
         return None
     states = {u: pr_state(u) for u in dict.fromkeys(pr_urls)}
