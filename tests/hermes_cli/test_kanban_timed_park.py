@@ -135,12 +135,17 @@ def _sidebar_counts(home: Path):
 
 
 def test_sidebar_counts_only_human_blocks_as_blocked(kanban_home: Path, monkeypatch) -> None:
-    """The row paints red (``kanban_blocked``) for needs_input/capability/untyped blocks
-    only; a timed park or a transient block counts as in-progress work."""
+    """Only evidenced human requests paint red; operational blocks remain active."""
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(kanban_home))
     with kbc.connect_closing() as conn:
         human = _running(conn, "s_human")
-        kb.block_task(conn, human, reason="1) tap Approve", kind="needs_input")
+        kb.block_task(conn, human, reason="1) tap Approve", kind="needs_input", human_request={
+            "action": "Tap Approve on the iPhone sign-in prompt",
+            "why_human": "Only the owner can confirm the prompt on their phone",
+            "interaction": "physical",
+            "scope": "Pending account sign-in on the owner's iPhone",
+            "evidence": "Sign-in reports a pending device confirmation",
+        })
         timed = _running(conn, "s_timed")
         kb.block_task(conn, timed, reason="nightly run; cron wakes", kind="dependency", clock_only=True)
         flaky = _running(conn, "s_flaky")
@@ -148,5 +153,6 @@ def test_sidebar_counts_only_human_blocks_as_blocked(kanban_home: Path, monkeypa
         untyped = _running(conn, "s_untyped")
         kb.block_task(conn, untyped, reason="??")
     active, blocked = _sidebar_counts(kanban_home)
-    assert blocked == {"s_human": 1, "s_untyped": 1}
+    assert blocked == {"s_human": 1}
+    assert active.get("s_untyped") == 1
     assert active.get("s_timed") == 1 and active.get("s_flaky") == 1
