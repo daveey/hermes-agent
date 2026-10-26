@@ -172,6 +172,10 @@ _SPECS = [
         _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
         _arg("--json", action="store_true", help="Return structured pending creation (always JSON)"),
     ], help="Create owner work through registered tools, pending origin receipt"),
+    _cmd("origin-adopt", [
+        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
+        _arg("--json", action="store_true", help="Return pending adoption (always JSON)"),
+    ], help="Attach existing owner work through registered tools, pending origin receipt"),
     _cmd("origin-bind", [
         _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
         _arg("--json", action="store_true", help="Return structured receipt (always JSON)"),
