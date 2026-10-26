@@ -31,6 +31,7 @@ from hermes_cli import kanban_db_dispatch_guard_notice as _guard_notice
 from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as _guard_hold_started_at
 from hermes_cli import kanban_db_dispatch_quota as _kbq
 from hermes_cli import kanban_worker_scope as _worker_scope
+from hermes_cli.kanban_db_dispatch_queries import lane_rows
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -150,6 +151,8 @@ class DispatchResult:
     is
     """
 
+    scheduling_admitted: bool = False
+    """Real tick reached scheduling after global capacity gates; not task delivery proof."""
     skipped_owned: bool = False
     dispatch_owner: Optional[str] = None
     ownership_error: Optional[str] = None
@@ -2419,14 +2422,6 @@ def _tick_spawn_budget(
     return True, spawn_budget
 
 
-def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
-    """Unclaimed rows of one lane in dispatch order."""
-    return conn.execute(
-        "SELECT id, assignee FROM tasks "
-        f"WHERE status = '{status}' AND claim_lock IS NULL "
-        "ORDER BY priority DESC, created_at ASC"
-    ).fetchall()
-
 
 def _any_spawnable_review(
     conn: sqlite3.Connection,
@@ -2509,10 +2504,11 @@ def _dispatch_once_locked(
     if not may_spawn:
         return result
 
-    ready_rows = _lane_rows(conn, "ready")
+    result.scheduling_admitted = not dry_run
+    ready_rows = lane_rows(conn, "ready")
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
-    review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
+    review_rows = lane_rows(conn, "review") if review_dispatch_enabled() else []
     # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
     # skipped_unassigned — "busy, retry later" differs from "needs routing".
     # Resolved BEFORE the review reservation so the reservation can see which

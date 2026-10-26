@@ -22,7 +22,7 @@ CALLS = {
                      "limit": 4, "offset": 2, "output_mode": "count", "context": 3, "order": "modified"},
     "patch": {"path": "output", "old_string": "old", "new_string": "new", "replace_all": True,
               "mode": "replace", "patch": None, "cross_profile": False},
-    "terminal": {"command": "echo fixture", "timeout": 3, "workdir": "/tmp"},
+    "terminal": {"command": "echo fixture", "timeout": 3, "workdir": "/tmp", "http_readback": True},
 }
 
 
@@ -90,6 +90,7 @@ def test_generated_file_rpc_kwargs_correlation_and_authority(tmp_path, monkeypat
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda i: namespace["terminal"](f"tag-{i}", 3, "/tmp"), range(8)))
         assert [r["args"]["command"] for r in results] == [f"tag-{i}" for i in range(8)]
+        assert all(r["args"]["http_readback"] is False for r in results)
         assert "not available" in namespace["_call"]("unauthorized-tool", {})["error"]
         assert "limit reached" in namespace["terminal"]("over-budget")["error"]
         assert counter == [budget] and len(seen) == len(log) == budget

@@ -118,8 +118,6 @@ COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE = (
     "🗜️ Context reduced to {new_ctx:,} tokens (was {old_ctx:,}), retrying..."
 )
 
-# FAILURE-class notice: compression blocked, so the session grows until the provider limit kills it. Must stay visible
-# on gateways: never add it to ROUTINE_COMPRESSION_STATUS_SAMPLES or _TELEGRAM_NOISY_STATUS_RE.
 # FAILURE-CLASS notice — a deliberate carve-out from routine-compression silence (#16775 class): the context
 # is over the compression threshold but compression is blocked (summary-LLM cooldown / anti-thrash breaker),
 # so the session will keep growing until the hard provider token limit kills it. Do NOT add it to
@@ -3330,17 +3328,16 @@ def _publish_rotated_compaction(
     # healed by publish (don't abort); the lease is re-acquirable (don't check it).
     if _parent_deliberately_ended(agent._session_db, old_session_id):
         raise RuntimeError(f"Compression parent already ended: {old_session_id}")
-    # Foreign-tail ceiling: the flush below writes OUR rows (already in handoff);
-    # rows above the lease watermark (lease start, or the newest adopted-snapshot row) up to this MAX(id)
+    # Flush OUR rows only after the foreign-tail ceiling; rows above the lease watermark up to this MAX(id)
     # are foreign appends.
-    # No trustworthy ceiling means the clone could duplicate the handoff: skip tail preservation this rotation.
     _foreign_tail_ceiling = None
     with contextlib.suppress(Exception):
         _foreign_tail_ceiling = agent._session_db.get_active_message_watermark(agent.session_id)
-    with contextlib.suppress(Exception):  # best-effort — don't block compression on a flush error
+    from agent.steering_provenance import flush_steering_before_compaction
+    flush_steering_before_compaction(agent, messages)
+    with contextlib.suppress(Exception):  # best-effort for rows other than pending steering
         agent._flush_messages_to_session_db(messages, conversation_history=persisted_history)
-    # Publish closure + child + handoff in one transaction so no reader sees an empty child. Child stays on the
-    # parent's profile ("default" persists as NULL) and keeps a live /yolo; publish COALESCEs from the parent row.
+    # Publish closure + handoff atomically, retaining the parent profile and /yolo.
     _profile_for_child = None
     with contextlib.suppress(Exception):
         from hermes_cli.profiles import get_active_profile_name
@@ -3926,6 +3923,9 @@ def _run_summary_phase(
                 # Adopted list is fully durable: re-anchor persist idx at the end so the post-
                 # compression flush skips it; run_agent marker sync realigns _session_messages.
                 agent._persist_user_message_idx = len(messages)
+        from agent.steering_provenance import flush_steering_before_compaction
+        if in_place:
+            flush_steering_before_compaction(agent, messages)
         memory_context = _pre_compress_memory_context(agent, messages, checkpoint_required)
         compress_fn, compress_kwargs = _resolve_compress_call(
             agent, approx_tokens=approx_tokens, focus_topic=focus_topic, force=force, memory_context=memory_context,

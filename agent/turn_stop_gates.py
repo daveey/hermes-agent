@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent.message_metadata import append_message
+from agent.pre_final_gate import UnresolvedFallback
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -32,6 +33,12 @@ class StopGateVerdict:
     final_response: Any
     pending_verification_response: Any
     pending_verification_response_previewed: Any
+    boundary: str = ""
+
+    def exit_reason(self, finish_reason: Any) -> str:
+        if self.boundary:
+            return f"pre_final_gate_unresolved({self.boundary})"
+        return f"text_response(finish_reason={finish_reason})"
 
 
 def _verify_on_stop_nudge(agent) -> Optional[str]:
@@ -110,13 +117,14 @@ def apply_stop_gates(
     conversation_history: Any, pending_verification_response: Any,
     pending_verification_response_previewed: Any,
 ) -> StopGateVerdict:
-    """Run verify-on-stop → pre_verify hook → kanban stop guard, in that order. Nudges
+    """Check buffered candidates before verify-on-stop → pre_verify → kanban. Nudges
     are user-role rows appended only after the assistant answer row, so role alternation
     holds. Hook lookups are imported lazily from their origin modules (tests patch them
     there)."""
 
     def _continue(nudge: str, flag: str) -> StopGateVerdict:
         """Append the synthetic nudge row and hand the turn back to the loop."""
+        unresolved = isinstance(pending_verification_response, UnresolvedFallback)
         append_message(messages, {"role": "user", "content": nudge, flag: True})
         agent._session_messages = messages
         # Keep the answer only as a budget-exhaustion fallback; clear ``final_response`` so
@@ -124,14 +132,74 @@ def apply_stop_gates(
         # candidate is reused (#61631).
         return StopGateVerdict(
             continue_turn=True, final_response=None,
-            pending_verification_response=final_response,
+            pending_verification_response=pending_verification_response if unresolved else final_response,
             # Prefix semantics on purpose: the streamed prefix IS on screen here. The gateway
             # interim verdict uses _interim_content_fully_streamed instead (#88954).
-            pending_verification_response_previewed=agent._interim_content_was_streamed(
+            pending_verification_response_previewed=not unresolved and agent._interim_content_was_streamed(
                 final_response or ""
             ),
         )
 
+    # Classify private candidates before verification can emit them as interims.
+    # Unbuffered legacy plugins retain their existing gate order.
+    from agent.pre_final_gate import needs_buffer
+
+    early_gate = isinstance(pending_verification_response, UnresolvedFallback) or needs_buffer(agent)
+    if not early_gate:
+        verdict = _apply_verification_gates(agent, final_msg, final_response, messages,
+                                          conversation_history, _continue)
+        if verdict is not None:
+            return verdict
+
+    _decision = _pre_final_gate_decision(agent, final_response, messages, pending_verification_response)
+    if _decision.recheck_accepted:
+        pending_verification_response = None
+    if _decision.hold or (
+        _decision.unresolved_fallback is not None and getattr(agent, "_interrupt_requested", False)
+    ):
+        # Silent hold [daveey]: no interim emit, no flush, buffered deltas dropped. The candidate
+        # survives only as the budget-exhaustion fallback; both rows are ephemeral scaffolding.
+        agent._pre_final_gate_attempts = getattr(agent, "_pre_final_gate_attempts", 0) + 1
+        agent._discard_final_gate_buffer()
+        final_msg["finish_reason"] = "pre_final_gate_hold"
+        final_msg[_PFG_FLAG] = True
+        append_message(messages, final_msg)
+        verdict = _continue(_decision.nudge or "Turn interrupted.", _PFG_FLAG)
+        if _decision.unresolved_fallback is not None:
+            verdict.pending_verification_response = _decision.unresolved_fallback
+            verdict.pending_verification_response_previewed = False
+        logger.info("pre_final_gate hold issued (attempt %d)", agent._pre_final_gate_attempts)
+        return verdict
+    if _decision.unresolved_fallback is not None:
+        agent._discard_final_gate_buffer()
+        final_response = _decision.unresolved_fallback.render(_decision.boundary)
+        final_msg["content"] = final_response
+        final_msg.pop("api_content", None)
+        return StopGateVerdict(False, final_response, None, False, _decision.boundary)
+    if early_gate:
+        # Acceptance clears the old rejection before another gate can nudge.
+        if isinstance(pending_verification_response, UnresolvedFallback):
+            pending_verification_response = None
+        verdict = _apply_verification_gates(agent, final_msg, final_response, messages,
+                                          conversation_history, _continue)
+        if verdict is not None:
+            return verdict
+    if _decision.append:
+        final_response = _append_to_final(agent, final_msg, final_response, _decision.append)
+    else:
+        agent._flush_final_gate_buffer()
+    return StopGateVerdict(
+        continue_turn=False, final_response=final_response,
+        pending_verification_response=(
+            None if isinstance(pending_verification_response, UnresolvedFallback)
+            else pending_verification_response
+        ),
+        pending_verification_response_previewed=pending_verification_response_previewed,
+    )
+
+
+def _apply_verification_gates(agent, final_msg, final_response, messages, conversation_history, _continue):
+    # Legacy verification precedence, after buffered candidate acceptance.
     _verify_nudge = _verify_on_stop_nudge(agent)
     if _verify_nudge:
         agent._verification_stop_nudges = getattr(agent, "_verification_stop_nudges", 0) + 1
@@ -174,42 +242,22 @@ def apply_stop_gates(
         )
         return verdict
 
-    _decision = _pre_final_gate_decision(agent, final_response, messages)
-    if _decision.hold:
-        # Silent hold [daveey]: no interim emit, no flush, buffered deltas dropped. The candidate
-        # survives only as the budget-exhaustion fallback; both rows are ephemeral scaffolding.
-        agent._pre_final_gate_attempts = getattr(agent, "_pre_final_gate_attempts", 0) + 1
-        agent._discard_final_gate_buffer()
-        final_msg["finish_reason"] = "pre_final_gate_hold"
-        final_msg[_PFG_FLAG] = True
-        append_message(messages, final_msg)
-        verdict = _continue(_decision.nudge, _PFG_FLAG)
-        logger.info("pre_final_gate hold issued (attempt %d)", agent._pre_final_gate_attempts)
-        return verdict
-    if _decision.append:
-        final_response = _append_to_final(agent, final_msg, final_response, _decision.append)
-    else:
-        agent._flush_final_gate_buffer()
-    return StopGateVerdict(
-        continue_turn=False, final_response=final_response,
-        pending_verification_response=pending_verification_response,
-        pending_verification_response_previewed=pending_verification_response_previewed,
-    )
+    return None
 
 
 _PFG_FLAG = "_pre_final_gate_synthetic"
 
 
-def _pre_final_gate_decision(agent, final_response, messages):
-    from agent.pre_final_gate import GateDecision, evaluate
+def _pre_final_gate_decision(agent, final_response, messages, pending=None):
+    from agent.pre_final_gate import GateDecision, _unavailable, evaluate
 
     if getattr(agent, "_interrupt_requested", False):
         return GateDecision()
     try:
-        return evaluate(agent, final_response, messages, getattr(agent, "_pre_final_gate_attempts", 0))
+        return evaluate(agent, final_response, messages, getattr(agent, "_pre_final_gate_attempts", 0), pending)
     except Exception:
-        logger.warning("pre_final_gate evaluation failed; delivering", exc_info=True)
-        return GateDecision()
+        logger.warning("pre_final_gate evaluation failed", exc_info=True)
+        return _unavailable(pending)
 
 
 def _append_to_final(agent, final_msg, final_response: str, extra: str) -> str:

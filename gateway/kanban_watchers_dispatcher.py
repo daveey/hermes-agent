@@ -132,6 +132,7 @@ class _KanbanDispatcher:
     def __init__(self, kb: Any, settings: _DispatcherSettings) -> None:
         self.kb = kb
         self.settings = settings
+        self.successful_scopes: list = []
         self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
 
     def _board_slugs(self) -> list:
@@ -193,7 +194,16 @@ class _KanbanDispatcher:
             from hermes_cli import kanban_db as _kb
             with _kb.pin_first_board_resolution():
                 conn = _kbc().connect(board=slug)
-                return _kbd().dispatch_once(conn, board=slug, **kwargs)
+                profiles, lanes = self._receipt_scope()
+                result = _kbd().dispatch_once(conn, board=slug, **kwargs)
+                if not result.skipped_locked and result.scheduling_admitted:
+                    after_profiles, after_lanes = self._receipt_scope()
+                    path = conn.execute("PRAGMA database_list").fetchone()[2]
+                    if path:
+                        self.successful_scopes.append((
+                            str(Path(path).resolve()), sorted(profiles & after_profiles),
+                            sorted(lanes & after_lanes), time.monotonic()))
+                return result
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
                 self.disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
@@ -215,7 +225,21 @@ class _KanbanDispatcher:
 
     def tick_once(self) -> list[tuple[str, Optional[object]]]:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""
+        self.successful_scopes = []
         return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
+
+    @staticmethod
+    def _receipt_scope() -> tuple[set, set]:
+        """Only existing profiles admitted by native dispatch policy."""
+        from hermes_cli.profiles import list_profiles
+        predicate = _kbd()._profile_exists_fn()
+        if predicate is None:
+            return set(), set()
+        profiles = {p.name for p in list_profiles(lazy_skill_count=True) if predicate(p.name)}
+        lanes = {"ready"}
+        if _kbd().review_dispatch_enabled():
+            lanes.add("review")
+        return profiles, lanes
 
     @contextlib.contextmanager
     def _unowned_board_work(self, slug):

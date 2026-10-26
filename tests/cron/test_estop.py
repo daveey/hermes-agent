@@ -145,7 +145,10 @@ def test_kanban_dispatch_blocked_when_engaged(hermes_home):
 
 
 class _FakeSource:
-    platform = None
+    from gateway.config import Platform
+
+    platform = Platform.TELEGRAM
+    thread_id = None
     chat_id = "c1"
     user_id = "u1"
     user_name = "user"

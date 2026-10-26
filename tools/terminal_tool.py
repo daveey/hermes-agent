@@ -1378,6 +1378,7 @@ def terminal_tool(
     _completion_output_chars: int = 0,
     heartbeat: int = 0,
     persist_on_release: bool = False,
+    http_readback: bool = False,
 ) -> str:
     """Execute *command* in the configured terminal environment; returns a JSON string.
 
@@ -1406,7 +1407,15 @@ def terminal_tool(
         plan = _plan_execution(
             command, task_id=task_id, timeout=timeout, background=background, _host_local=_host_local,
         )
-        env = _acquire_env(plan, task_id)
+        readback = None
+        if http_readback:
+            from tools.terminal_http_readback import readback_argv
+            readback = readback_argv(
+                command, env_type=plan.env_type, background=background, pty=pty,
+                promoted=plan.promoted_from_foreground_timeout,
+            )
+        # The readback must never bootstrap a shell (even a configured init file).
+        env = None if readback else _acquire_env(plan, task_id)
         env_type, cwd, effective_task_id = plan.env_type, plan.cwd, plan.effective_task_id
 
         # Session key for cwd records: the contextvar doesn't cross tool-worker
@@ -1450,6 +1459,18 @@ def terminal_tool(
         # Pre-exec security checks (floors + dangerous command detection);
         # force=True means the user already confirmed.
         verdict = _run_approval_guards(command, env_type, plan.config, force=force)
+
+        if readback:
+            from tools.terminal_http_readback import run_http_readback
+            if verdict.approved_run:
+                from tools.interrupt import clear_current_thread_interrupt
+                clear_current_thread_interrupt()
+            command_cwd = _resolve_command_cwd(
+                workdir=workdir, default_cwd=cwd, session_key=session_key, env_type=env_type,
+            )
+            return _metered(plan, run_http_readback(
+                readback, timeout=plan.effective_timeout, cwd=command_cwd,
+            ))
 
         pty_disabled = pty and _command_requires_pipe_stdin(command)
         if plan.promoted_from_foreground_timeout is not None:
@@ -1509,6 +1530,11 @@ TERMINAL_SCHEMA = {
             "command": {
                 "type": "string",
                 "description": "The shell command to execute"
+            },
+            "http_readback": {
+                "type": "boolean",
+                "default": False,
+                "description": "Opt-in Linux local foreground HTTP status readback, direct exec with clean environment (no shell). Requires exactly: /usr/bin/curl -q --noproxy '*' --path-as-is --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' -- <URL>, canonical shlex.join quoting. One HTTP(S) URL, no credentials, fragments or globbing. Ordinary approvals apply. Other backends are unsupported."
             },
             "background": {
                 "type": "boolean",
@@ -1630,6 +1656,7 @@ def _handle_terminal(args, **kw):
         watch_patterns=watch_patterns,
         heartbeat=heartbeat,
         persist_on_release=persist_on_release,
+        http_readback=args.get("http_readback", False),
     )
 
 

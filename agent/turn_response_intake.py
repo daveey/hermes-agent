@@ -149,12 +149,15 @@ def normalize_model_response(
     record_reply_content(agent, response, assistant_message)
 
     content = assistant_message.content
-    if content and not agent.quiet_mode:
+    # Both console and progress previews expose assistant content before the gate.
+    private_candidate = (getattr(agent, "_final_gate_buffer", None) is not None
+                         and not assistant_message.tool_calls)
+    if content and not agent.quiet_mode and not private_candidate:
         if agent.verbose_logging:
             agent._vprint(f"{agent.log_prefix}🤖 Assistant: {content}")
         else:
             agent._vprint(f"{agent.log_prefix}🤖 Assistant: {content[:100]}{'...' if len(content) > 100 else ''}")
-    if content and agent.tool_progress_callback:
+    if content and agent.tool_progress_callback and not private_candidate:
         _relay_thinking(agent, content)
 
     # Incomplete <REASONING_SCRATCHPAD> (opened, never closed): the model ran out of

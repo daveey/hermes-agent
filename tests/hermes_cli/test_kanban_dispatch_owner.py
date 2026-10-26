@@ -223,9 +223,12 @@ def test_gateway_dispatch_cannot_bypass_ownership(board_db, monkeypatch):
         stale_timeout_seconds=0, reconcile_orphans=True,
         default_assignee=None, max_in_progress_per_profile=None,
     )
-    result = _KanbanDispatcher(kb, settings).tick_once_for_board("default")
+    dispatcher = _KanbanDispatcher(kb, settings)
+    result = dispatcher.tick_once_for_board("default")
     assert result is not None
     assert result.skipped_owned is True
+    assert result.scheduling_admitted is False
+    assert dispatcher.successful_scopes == []
     assert result.dispatch_owner == "owner"
     assert list(conn.iterdump()) == before
     spawn.assert_not_called()

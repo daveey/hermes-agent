@@ -125,8 +125,12 @@ def test_rewind_matches_cold_sanitized_carrier_to_unchanged_warm_ask(
         "REAL ASK",
         "  REAL ASK\n\n<memory-context>\nprivate\n</memory-context>  ",
     )
+    from agent.memory_manager import sanitize_context
+
+    # Native writes keep canonical human content separate from injected API wire.
+    canonical = dict(carrier, content=sanitize_context(carrier["content"]).strip())
     sid, session_key, session = install(
-        [carrier, {"role": "assistant", "content": "failed"}]
+        [canonical, {"role": "assistant", "content": "failed"}]
     )
     db._conn.execute(
         "UPDATE messages SET api_content = ? "
@@ -134,9 +138,8 @@ def test_rewind_matches_cold_sanitized_carrier_to_unchanged_warm_ask(
         (carrier["content"], session_key),
     )
     db._conn.commit()
-    # A live agent still has the raw wire form while a cold DB projection has
-    # already applied the role-aware sanitize_context(...).strip() rule and
-    # retained the raw provider wire in api_content.
+    # Legacy warm history can still have the injected wire form; the native
+    # durable content is the separately persisted canonical human text.
     session["history"][0] = carrier.copy()
     session["agent"]._session_messages = list(session["history"])
 
@@ -516,3 +519,31 @@ def test_prompt_row_id_rewind_preserves_scaffold_before_regeneration(
     ]
     assert "REAL ASK" not in active[0]["content"]
     assert active[1]["_row_id"] > target_row_id
+
+
+@pytest.mark.parametrize("command", ["retry", "undo"])
+@pytest.mark.parametrize("composite", [False, True])
+def test_rewind_preserves_native_literal_memory_tags(carrier_session, command, composite):
+    db, install = carrier_session
+    text = "REAL ASK\n<memory-context>do not deploy</memory-context>"
+    carrier = _composite_carrier() if composite else {"role": "user", "content": "REAL ASK"}
+    carrier["content"] = carrier["content"].replace("REAL ASK", text)
+    sid, session_key, session = install(
+        [carrier, {"role": "assistant", "content": "failed"}]
+    )
+    db._conn.execute(
+        "UPDATE messages SET api_content = ? WHERE session_id = ? AND role = 'user'",
+        (carrier["content"], session_key),
+    )
+    db._conn.commit()
+    session["history"] = db.get_messages_as_conversation(session_key)
+    session["agent"]._session_messages = list(session["history"])
+
+    response = _dispatch(sid, command)
+
+    assert "result" in response, response
+    assert response["result"]["message"] == text
+    if composite:
+        _assert_scaffold_preserved(db, session_key, session)
+    else:
+        assert db.get_messages_as_conversation(session_key) == []

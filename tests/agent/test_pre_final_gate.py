@@ -105,6 +105,160 @@ def test_hold_once_never_shows_or_persists_first_answer(agent):
     assert result["messages"][-1]["content"] == "Done: I minted it myself."
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_unresolved_hold_at_budget_never_releases_diagnosis(agent, streaming):
+    agent.max_iterations = 1
+    agent.iteration_budget.max_total = 1
+    run = Run(agent, ["The example service is broken; the repair is deferred."])
+    if not streaming:
+        agent.stream_delta_callback = None
+    hook = _buffered(lambda **kw: {
+        "hold": True, "nudge": "Continue the authorized repair.",
+        "unresolved_fallback": {"goal": "Repair the example service", "evidence_refs": ["tool:probe-1"]},
+    })
+    result = _run(agent, hook, "Repair the example service")
+    assert "Unresolved goal: Repair the example service" in result["final_response"]
+    assert "turn budget exhausted" in result["final_response"]
+    assert "tool:probe-1" in result["final_response"]
+    assert "repair is deferred" not in str(result["messages"]) + run.shown
+    assert [m["role"] for m in result["messages"]] == ["user", "assistant"]
+    assert result["messages"][-1]["content"] == result["final_response"]
+    assert not result["completed"]
+    assert not result["response_previewed"] and not result["response_reused"]
+    assert len(run.requests) == 1
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_unresolved_hold_cap_replaces_rejected_answer(agent, streaming):
+    run = Run(agent, ["Rejected diagnosis."] * 3)
+    if not streaming:
+        agent.stream_delta_callback = None
+    hook = _buffered(lambda **kw: {
+        "hold": True, "nudge": "Repair it.",
+        "unresolved_fallback": {"goal": "Repair example", "evidence_refs": ["tool:probe"]},
+    })
+    result = _run(agent, hook)
+    assert "Unresolved goal: Repair example" in result["final_response"]
+    assert "pre-final hold limit reached" in result["final_response"]
+    assert "Rejected diagnosis" not in run.shown + str(result["messages"])
+    assert [m["role"] for m in result["messages"]] == ["user", "assistant"]
+    assert result["messages"][-1]["content"] == result["final_response"]
+    assert not result["completed"]
+    assert len(run.requests) == 3
+    assert run.shown in ("", result["final_response"])
+
+
+@pytest.mark.parametrize("failure", ["exception", "timeout", "missing"])
+def test_unresolved_recheck_failure_does_not_release_diagnosis(agent, failure):
+    import concurrent.futures
+
+    run = Run(agent, ["Rejected diagnosis.", "Still only a diagnosis."])
+
+    @_buffered
+    def hook(attempt, **kw):
+        if attempt:
+            if failure == "timeout":
+                raise concurrent.futures.TimeoutError()
+            raise RuntimeError("judge unavailable")
+        if failure == "missing":
+            # Discovery can change between iterations (e.g. a plugin reload).
+            agent._pre_final_test_missing = True
+        return {"hold": True, "nudge": "Repair it.", "unresolved_fallback": {
+            "goal": "Repair example", "evidence_refs": ["tool:probe"],
+        }}
+
+    if failure == "missing":
+        from agent.pre_final_gate import eligible_callbacks
+
+        with patch("agent.pre_final_gate.eligible_callbacks", side_effect=lambda a: (
+            [] if getattr(a, "_pre_final_test_missing", False) else eligible_callbacks(a)
+        )):
+            result = _run(agent, hook)
+    else:
+        result = _run(agent, hook)
+    assert "Unresolved goal: Repair example" in result["final_response"]
+    assert "continuation unavailable" in result["final_response"]
+    assert "diagnosis." not in run.shown + str(result["messages"])
+    assert not result["completed"]
+    assert len(run.requests) == 2
+
+
+def test_later_plain_hold_cannot_erase_confirmed_unresolved_goal(agent):
+    run = Run(agent, ["Rejected diagnosis."] * 3)
+
+    @_buffered
+    def hook(attempt, **kw):
+        result = {"hold": True, "nudge": "Keep checking."}
+        if attempt == 0:
+            result["unresolved_fallback"] = {"goal": "Repair example", "evidence_refs": ["tool:probe"]}
+        return result
+
+    result = _run(agent, hook)
+    assert "Unresolved goal: Repair example" in result["final_response"]
+    assert "Rejected diagnosis" not in run.shown + str(result["messages"])
+    assert not result["completed"]
+
+
+@pytest.mark.parametrize("fallback", [
+    None, "not structured", {}, {"goal": "Repair example", "evidence_refs": "tool:probe"},
+    {"goal": " ", "evidence_refs": ["tool:probe"]},
+    {"goal": "Repair example", "evidence_refs": []},
+    {"goal": "Repair example", "evidence_refs": [None]},
+    {"goal": "Repair example", "evidence_refs": [" "]},
+    {"goal": "x" * 2001, "evidence_refs": ["tool:probe"]},
+    {"goal": "Repair example", "evidence_refs": ["x" * 501]},
+    {"goal": "Repair example", "evidence_refs": ["probe"] * 33},
+    {"goal": "Repair example", "evidence_refs": ["tool:probe"], "owner": "invented"},
+])
+def test_invalid_unresolved_fallback_preserves_legacy_contract(agent, fallback):
+    from agent.pre_final_gate import evaluate
+
+    hook = lambda **kw: {"hold": True, "nudge": "Check it.", "unresolved_fallback": fallback}
+    with patch("agent.pre_final_gate.eligible_callbacks", return_value=[hook]):
+        decision = evaluate(agent, "candidate", [], 0)
+    assert decision.hold
+    assert decision.unresolved_fallback is None
+
+
+def test_accepted_response_clears_unresolved_and_next_turn_is_unaffected(agent):
+    run = Run(agent, ["Rejected diagnosis.", "Repair verified."])
+
+    @_buffered
+    def hook(attempt, **kw):
+        if not attempt:
+            return {"hold": True, "nudge": "Repair it.", "unresolved_fallback": {
+                "goal": "Repair example", "evidence_refs": ["tool:probe"],
+            }}
+        return None
+
+    result = _run(agent, hook)
+    assert result["completed"]
+    assert result["final_response"] == "Repair verified."
+    assert run.shown == "Repair verified."
+    Run(agent, ["A new answer."])
+    result = _run(agent, _buffered(lambda **kw: None))
+    assert result["completed"] and result["final_response"] == "A new answer."
+
+
+@pytest.mark.parametrize("cap", [0, 2])
+def test_stop_after_unresolved_hold_does_not_resume_work(agent, cap):
+    run = Run(agent, ["Rejected diagnosis."])
+
+    @_buffered
+    def hook(**kw):
+        agent.interrupt("user pressed stop")
+        return {"hold": True, "nudge": "Repair it.", "unresolved_fallback": {
+            "goal": "Repair example", "evidence_refs": ["tool:probe"],
+        }}
+
+    with patch("agent.pre_final_gate.max_attempts", return_value=cap):
+        result = _run(agent, hook)
+    assert result["interrupted"] and not result["completed"]
+    assert "Unresolved goal" not in (result["final_response"] or "")
+    assert len(run.requests) == 1
+    assert "Rejected diagnosis" not in run.shown + str(result["messages"])
+
+
 def test_append_delivers_with_note(agent):
     run = Run(agent, ["Here is the answer."])
     result = _run(agent, _buffered(lambda **kw: {"append": "(gate note)"}))

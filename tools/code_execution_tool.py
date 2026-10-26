@@ -138,9 +138,9 @@ _TOOL_STUBS = {
     "patch": ('path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False',
         '"""Targeted find-and-replace (mode="replace") or V4A multi-file patches (mode="patch"). Returns dict with status."""',
         '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile}'),
-    "terminal": ("command: str, timeout: int = None, workdir: str = None",
-        '"""Run a shell command (foreground only). Returns dict with "output" and "exit_code"."""',
-        '{"command": command, "timeout": timeout, "workdir": workdir}'),
+    "terminal": ("command: str, timeout: int = None, workdir: str = None, http_readback: bool = False",
+        '"""Run a command (foreground only); http_readback opts into native HTTP status readback. Returns dict with "output" and "exit_code"."""',
+        '{"command": command, "timeout": timeout, "workdir": workdir, "http_readback": http_readback}'),
 }
 
 

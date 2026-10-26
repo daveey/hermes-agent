@@ -801,6 +801,7 @@ def _ensure_session_row(agent: Any, pending_cli_message: Any) -> None:
 def _collect_pre_llm_call_context(
     agent: Any, *, effective_task_id: str, turn_id: str, original_user_message: Any,
     messages: list[Any], conversation_history: Optional[list[Any]],
+    current_turn_user_idx: Optional[int] = None,
 ) -> str:
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
@@ -808,13 +809,30 @@ def _collect_pre_llm_call_context(
     if getattr(agent, "_persist_disabled", False):
         return ""
     try:
+        import copy
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
+        from agent.message_metadata import stamp_message_uid
+        # Native inbound/persist override, before memory/plugin injection. The
+        # index authenticates only this turn, never unversioned legacy history.
+        canonical_user_content = None
+        if (type(current_turn_user_idx) is int
+                and 0 <= current_turn_user_idx < len(messages)
+                and messages[current_turn_user_idx].get("role") == "user"
+                and not messages[current_turn_user_idx].get("display_kind")):
+            canonical_user_content = {
+                "message_index": current_turn_user_idx,
+                "message_uid": stamp_message_uid(messages[current_turn_user_idx]),
+                "content": copy.deepcopy(original_user_message),
+            }
+        from tools.process_registry_ownership import capture_canonical_scope
+        capture_canonical_scope(agent, canonical_user_content)
         _pre_results = _invoke_hook(
             "pre_llm_call",
             session_id=agent.session_id,
             task_id=effective_task_id,
             turn_id=turn_id,
             user_message=original_user_message,
+            canonical_user_content=canonical_user_content,
             conversation_history=list(messages),
             is_first_turn=(not bool(conversation_history)),
             model=agent.model,
@@ -1180,7 +1198,7 @@ def build_turn_context(
     plugin_user_context = _collect_pre_llm_call_context(
         agent, effective_task_id=effective_task_id, turn_id=turn_id,
         original_user_message=original_user_message, messages=messages,
-        conversation_history=conversation_history,
+        conversation_history=conversation_history, current_turn_user_idx=current_turn_user_idx,
     )
     # Every turn, not only on a prompt restore: a long-lived agent (CLI, TUI, Desktop) keeps its
     # prompt in memory for the whole conversation and would never re-check its skills index.

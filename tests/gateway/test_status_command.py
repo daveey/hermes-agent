@@ -380,6 +380,9 @@ async def test_agents_command_reports_active_agents_and_processes(monkeypatch):
     runner._background_tasks = set()
 
     class _FakeRegistry:
+        def revoke_route_ownership(self, key):
+            pass
+
         def list_sessions(self):
             return [
                 {
@@ -415,6 +418,9 @@ async def test_tasks_alias_routes_to_agents_command(monkeypatch):
     runner._background_tasks = set()
 
     class _FakeRegistry:
+        def revoke_route_ownership(self, key):
+            pass
+
         def list_sessions(self):
             return []
 

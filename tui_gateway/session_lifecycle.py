@@ -725,6 +725,8 @@ def _interrupt_session_turn(
     ``orphan=True`` (reaper path) labels dropped approvals ``ws_orphan_reap``; the label comes from the
     caller, never from request_id prefix sniffing — a future orphan caller may use another id (#106678).
     """
+    from tui_gateway.process_consumer_health import invalidate
+    invalidate(session)
     use_compute_host = _session_uses_compute_host(session)
     # A manual compaction holds `running` with no run thread and its own finally releases it: Stop must not
     # abort it nor clear `running` under it, or the next submit is admitted idle and loses its reply (#133504).

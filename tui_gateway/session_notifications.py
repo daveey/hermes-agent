@@ -435,6 +435,9 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None)
             if task and getattr(task, "status", "") == "archived":
                 with contextlib.suppress(Exception):
                     _kbn.remove_notify_sub(conn, **sub_ident)
+    from hermes_constants import get_hermes_home
+    from tui_gateway.kanban_consumer_health import polled
+    polled(get_hermes_home(), session_key, _kb.kanban_db_path(board=slug))
     return texts
 
 
@@ -690,9 +693,20 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
     return True
 
 
+def _notif_retry_completions(claimed, registry, deferred):
+    """A delegation claim release cannot restore a dequeued native completion."""
+    from tools.async_delegation import release_event_delivery
+    for event, _text, claim in claimed:
+        release_event_delivery(event, claim)
+        if event.get("type", "completion") == "completion":
+            (deferred.append if deferred is not None else registry.completion_queue.put)(event)
+    if deferred is None and claimed:
+        time.sleep(0.25)
+
+
 def _notif_dispatch_completions(sid, session, notifications, registry, deferred):
     from tools.process_registry_notifications import PROCESS_COMPLETE_DISPLAY_KIND, ProcessNotificationBatch
-    from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
+    from tools.async_delegation import claim_event_delivery, complete_event_delivery
 
     if not notifications:
         return
@@ -702,6 +716,8 @@ def _notif_dispatch_completions(sid, session, notifications, registry, deferred)
         if deferred is None:
             time.sleep(0.25)
         return
+    from tui_gateway.process_consumer_health import begin_delivery
+    delivery_token = begin_delivery(session)
     claimed: list = []
     try:
         for event, event_text in notifications:
@@ -712,19 +728,22 @@ def _notif_dispatch_completions(sid, session, notifications, registry, deferred)
     except Exception as exc:
         _notif_log_failure("completion batch preparation failed", exc)
         _notif_release_turn(session)
-        for event, _text, claim in claimed:
-            release_event_delivery(event, claim)
+        _notif_retry_completions(claimed, registry, deferred)
         return
     if text is None:
         _notif_release_turn(session)
     try:
         if text is not None:
-            _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
-                          "completion batch dispatch failed", display_kind=PROCESS_COMPLETE_DISPLAY_KIND,
-                          display_metadata={"display_text": batch.display_text(registry)})
+            accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
+                                     "completion batch dispatch failed", display_kind=PROCESS_COMPLETE_DISPLAY_KIND,
+                                     display_metadata={"display_text": batch.display_text(registry)})
+            from tui_gateway.process_consumer_health import delivered
+            delivered(sid, session, registry, [event for event, _, _ in claimed], accepted, delivery_token)
+            if accepted is not True:
+                _notif_retry_completions(claimed, registry, deferred)
+                return
     except Exception:
-        for event, _text, claim in claimed:
-            release_event_delivery(event, claim)
+        _notif_retry_completions(claimed, registry, deferred)
         return
     for event, _text, claim in claimed:
         complete_event_delivery(event, claim)
@@ -977,8 +996,14 @@ def _install_readopted_exit_waker(registry=None) -> None:
 
 
 def _notification_poller_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
+    from tools.process_registry import process_registry
+    from tui_gateway import process_consumer_health
     with _session_profile_runtime_scope(session):
-        _notification_poller_scoped_loop(stop_event, sid, session)
+        process_consumer_health.register(sid, session, stop_event, process_registry)
+        try:
+            _notification_poller_scoped_loop(stop_event, sid, session)
+        finally:
+            process_consumer_health.unregister()
 
 
 def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
@@ -1106,6 +1131,8 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     stop = threading.Event()
     t = threading.Thread(target=_notification_poller_loop, args=(stop, sid, session), daemon=True, name=f"tui-notif-poller-{sid}")
     _notification_pollers[:] = [(s, th) for (s, th) in _notification_pollers if th.is_alive()] + [(stop, t)]
+    from tui_gateway.kanban_consumer_health import register
+    register(session, stop, t)
     t.start()
     return stop
 

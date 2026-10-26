@@ -60,6 +60,28 @@ def _assert_pending_response_survives(agent, result):
     ]
 
 
+def test_other_verification_gate_preserves_unresolved_budget_fallback(agent, monkeypatch):
+    from tests.agent.test_pre_final_gate import _buffered, _run
+
+    monkeypatch.setenv("HERMES_VERIFY_ON_STOP", "0")
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    agent.max_iterations = 2
+    agent.iteration_budget.max_total = 2
+    answers = iter([_response("Rejected diagnosis."), _response("Another probe was attempted.")])
+    agent._interruptible_api_call = lambda _kwargs: next(answers)
+    hook = _buffered(lambda **kw: {"hold": True, "nudge": "Repair it.", "unresolved_fallback": {
+        "goal": "Repair example", "evidence_refs": ["tool:probe"],
+    }})
+    with patch("agent.turn_stop_gates._pre_verify_nudge", side_effect=lambda *args: (
+        "Verify again." if getattr(agent, "_pre_final_gate_attempts", 0) else None
+    )):
+        result = _run(agent, hook)
+    assert "Unresolved goal: Repair example" in result["final_response"]
+    assert "turn budget exhausted" in result["final_response"]
+    assert "Rejected diagnosis" not in str(result["messages"])
+    assert result["messages"][-1]["content"] == result["final_response"]
+
+
 def test_verify_on_stop_preserves_composed_report_at_budget_limit(agent, monkeypatch):
     def model_call(_api_kwargs):
         agent._turn_file_mutation_paths = {"changed.py"}

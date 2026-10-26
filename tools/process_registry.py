@@ -35,6 +35,7 @@ from hermes_cli.config import get_hermes_home
 from tools.process_registry_notifications import format_process_notification, is_child_process_notification, should_surface_notification
 from tools.process_registry_checkpoint import ProcessCheckpointMixin
 from tools.process_registry_readopt import ProcessReadoptMixin
+from tools.process_registry_ownership import ProcessOwnershipMixin
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
 from tools.process_registry_env_log import log_delta_command
@@ -701,7 +702,7 @@ def _is_wsl_launcher_command(command: str) -> bool:
     return False
 
 
-class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessReadoptMixin):
+class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessReadoptMixin, ProcessOwnershipMixin):
     """In-memory registry of running and finished background processes.
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
@@ -714,6 +715,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
     _completions_restored = False
 
     def __init__(self):
+        self.ownership_generation = uuid.uuid4().hex
+        self._ownership_bindings: dict = {}
         self._running: dict[str, ProcessSession] = {}
         self._finished: dict[str, ProcessSession] = {}
         self._lock = threading.Lock()
@@ -1169,7 +1172,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         env["PYTHONUNBUFFERED"] = "1"
         return env
 
-    def _track_started(self, session: ProcessSession, reader_target, reader_name: str, extra_args=()) -> None:
+    def _track_started(self, session: ProcessSession, reader_target, reader_name: str, extra_args=(), *, ownership_scope=None) -> None:
         """Register before the reader can publish completion, even for an exited child."""
         from contextvars import copy_context
 
@@ -1183,6 +1186,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
             # ghost entry if the interpreter cannot start another thread.
             reader.start()
             self._running[session.id] = session
+            if ownership_scope is not None:
+                self._ownership_bindings[session.id] = (ownership_scope, session.process, session.owner_task_id, session.session_key)
         self._write_checkpoint()
 
     def _spawn_local_pty(self, session: ProcessSession, safe_command: str, env_vars: dict) -> ProcessSession:
@@ -1261,7 +1266,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         session.pid = proc.pid
         session.host_start_time = self._safe_host_start_time(session.pid)
         try:
-            self._track_started(session, self._reader_loop, f"proc-reader-{session.id}")
+            from tools.process_registry_ownership import current_spawn_scope
+            self._track_started(session, self._reader_loop, f"proc-reader-{session.id}",
+                                ownership_scope=current_spawn_scope())
         except Exception:
             self._reap_untracked(session, proc)
             raise
@@ -1610,6 +1617,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
                 # parent must not observe completion and exit during this write.
                 save_completed_result(session)
                 self._running.pop(session.id)
+                self._ownership_bindings.pop(session.id, None)
             self._finished[session.id] = session
         # Release the retained Popen/PTY handles now: otherwise every
         # finished-but-unpruned session keeps its stdout pipe (or PTY master)
@@ -2503,22 +2511,6 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
                     if s.owner_task_id == owner_task_id and s.notify_on_complete
                     and s.exit_code is not None
                     and s.id not in self._completion_consumed and s.id not in self._poll_observed]
-
-    def transfer_ownership(self, session_id: str, *, from_owner: str, to_owner: str, to_task_id: str,
-                           to_session_key: str, note: str = "") -> Optional[ProcessSession]:
-        """Move a RUNNING process from one owner to another under the registry lock. Ownership is the ``owner_task_id``
-        field: completion notices are stamped from it at exit time and teardown kills by it, so flipping it here is the
-        whole transfer. Returns the session, or None when it is unknown, already exited, or not owned by ``from_owner``
-        (the caller must not report a transfer that did not happen)."""
-        session = self.get(session_id)
-        with self._lock:
-            if session is None or session.exited or session.owner_task_id != from_owner:
-                return None
-            session.owner_task_id = to_owner
-            session.task_id = to_task_id
-            session.session_key = to_session_key
-            session.handoff_note = note
-            return session
 
     def has_active_for_session(self, session_key: str, max_active_age: Optional[float] = None) -> bool:
         """Active processes for a gateway session key. Processes older than

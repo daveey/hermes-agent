@@ -841,9 +841,8 @@ class TestFlushSanitizeDivergenceCapture:
         return agent
 
     def test_user_content_sanitize_would_rewrite_is_captured(self, tmp_path):
-        """get_messages_as_conversation strips <memory-context> fences on
-        load; the sent bytes must survive in the sidecar so a reloaded
-        session replays what was actually on the wire."""
+        """Native canonical user tags and the exact wire bytes both survive reload.
+        Assistant sanitization is unchanged."""
         from agent.memory_manager import sanitize_context
 
         db = SessionDB(db_path=tmp_path / "state.db")
@@ -860,7 +859,7 @@ class TestFlushSanitizeDivergenceCapture:
             agent._flush_messages_to_session_db(messages, None)
 
             msgs = db.get_messages_as_conversation(sid)
-            assert msgs[0]["content"] == sanitize_context(raw).strip()
+            assert msgs[0]["content"] == raw
             assert msgs[0]["api_content"] == raw
             assert msgs[1]["api_content"] == (
                 "it fences recalled memory <memory-context>"

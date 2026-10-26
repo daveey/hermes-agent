@@ -1758,6 +1758,7 @@ def run_conversation(
                 prelude=prelude,
             )
         finally:
+            agent._process_spawn_scope = None
             end_voice_turn_route(agent)
     result = export_current_turn_boundary(agent, result, user_message)
     if isinstance(result, dict):

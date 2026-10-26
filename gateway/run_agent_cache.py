@@ -457,6 +457,8 @@ class GatewayAgentCacheMixin:
 
         Settles a pending one-shot model override first: the displaced turn's finalizer is
         generation-guarded and would otherwise leave ``/moa`` / ``/model --once`` in force."""
+        from gateway.process_consumer_health import invalidate
+        invalidate(self, session_key)
         self._restore_pending_one_turn_model_override(session_key)
         generation = self._begin_session_run_generation(session_key)
         if reason:

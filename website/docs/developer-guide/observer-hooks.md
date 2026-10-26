@@ -120,6 +120,18 @@ Common `pre_llm_call` fields include `session_id`, `turn_id`,
 `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`,
 and `sender_id`.
 
+`canonical_user_content`, when available, is an isolated snapshot with `content`,
+`message_index` (into `conversation_history`), and `message_uid`. Core constructs it
+from the inbound/persist-override payload before memory and plugin injection, not
+by parsing delimiters. The UID lets a consumer recognize that same turn after its
+wire payload gains context. It asserts nothing about unversioned historical rows.
+Consumers must handle `None` (no surviving eligible current row) and older cores
+that do not supply the field. Native persisted string rows keep canonical `content`
+separate from `api_content`; legacy user rows whose replay lens removed content
+carry local-only `_user_content_sanitized` uncertainty, never a provider field.
+Native persistence carries that uncertainty in `display_metadata.user_content_sanitized`
+through compaction/rotation; it must not become fresh authorization on reload.
+
 Common `post_llm_call` fields include `session_id`, `turn_id`,
 `user_message`, `assistant_response`, `conversation_history`, `model`, and
 `platform`.

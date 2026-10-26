@@ -19,6 +19,7 @@ from agent.message_metadata import (
     index_tool_call_uids, message_uid_or_none, resolve_tool_call_uid, mint_uid, stamp_message_uid)
 from agent.message_sanitization import _sanitize_surrogates, coalesce_tool_call_id
 from hermes_cli.timefmt import coerce_epoch
+from hermes_state_replay_content import replay_content_fields, replay_persistence_metadata
 from hermes_state_common import (
     _COMPRESSION_LOCK_ROW_SQL, _ENDED_ROW_SQL, _RESET_END_REASONS, _RESET_END_REASONS_SQL, _ended_by_compression,
     _json_or, _legacy_reset_child_sql, _placeholders, _sql_json_extract)
@@ -274,7 +275,7 @@ class SessionMessagesMixin:
         encoded_content = self._encode_content(msg.get("content"))
         encoded_tool_calls = json.dumps(tool_calls) if tool_calls else None
         encoded_tool_name = _scrub_surrogates(msg.get("tool_name"))
-        display_metadata = self._encode_display_metadata(msg.get("display_metadata"))
+        display_metadata = self._encode_display_metadata(replay_persistence_metadata(msg))
         identity_row = {
             "role": role, "content": encoded_content, "timestamp": message_timestamp,
             "tool_call_id": msg.get("tool_call_id"), "tool_calls": encoded_tool_calls,
@@ -1611,10 +1612,9 @@ class SessionMessagesMixin:
         # build's) needs the index, so rows this build wrote never pay for it. Indexed in order: same shadowing.
         unindexed_tool_owners: list[dict[str, Any]] = []
         for row in rows:
-            content = self._loaded_view_content(row["role"], self._decode_content(row["content"]))
-            # Underscore-prefixed like ``_row_id``: transports strip it before the wire; compression's
-            # assembly copies strip it so rotated child handoffs still flush (_fresh_compaction_message_copy).
-            msg = {"role": row["role"], "content": content, _DB_PERSISTED_MARKER_KEY: True}
+            msg = replay_content_fields(row, self._decode_content, self._loaded_view_content,
+                                        self._decode_display_metadata)
+            msg[_DB_PERSISTED_MARKER_KEY] = True
             if stamp_snapshot:
                 msg[DB_ROW_SNAPSHOT] = transcript_row_snapshot(row)
             # Born durable (#92231): this dict is materialized FROM a durable row, so stamp the persistence
@@ -1853,7 +1853,7 @@ class SessionMessagesMixin:
         if live_view is None:
             raise ValueError("rewind target is not a user-originated turn")
         live_content = live_view.get("content")
-        if isinstance(live_content, str):
+        if isinstance(live_content, str) and not target_row.get("api_content"):
             live_content = sanitize_context(live_content).strip()
         if expected_target_content is not None and live_content != expected_target_content:
             raise RuntimeError("rewind target changed before it could be persisted")

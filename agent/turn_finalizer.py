@@ -144,7 +144,13 @@ def _resolve_budget_fallback(
             # preserve it rather than make another fallible call. The explicit pending
             # value is the provenance guard; unrelated error exits never enter here.
             # Previewed only if the reused candidate was actually streamed as interim.
-            final_response = _pending_verification_response
+            from agent.pre_final_gate import UnresolvedFallback
+
+            final_response = (
+                _pending_verification_response.render("turn budget exhausted")
+                if isinstance(_pending_verification_response, UnresolvedFallback)
+                else _pending_verification_response
+            )
             if _pending_verification_response_previewed:
                 agent._response_was_previewed = True
                 # Reuses the candidate the user already saw sealed as an interim (#130396).
@@ -525,6 +531,45 @@ def apply_llm_output_transform(
     return final_response, transformed, pre_transform
 
 
+def _prepare_final_gate_fallback(
+    agent, final_response, pending, *, interrupted, failed, exit_reason, api_call_count, messages, logger,
+):
+    """Resolve unavailable continuations before any buffered text can escape."""
+    from agent.pre_final_gate import UnresolvedFallback
+
+    unresolved = isinstance(pending, UnresolvedFallback) and not interrupted
+    budget_fallback = (
+        final_response is None and not failed
+        and str(exit_reason) in {"unknown", "budget_exhausted"}
+        and (api_call_count >= agent.max_iterations or agent.iteration_budget.remaining <= 0)
+    )
+    if isinstance(pending, UnresolvedFallback) and unresolved and not budget_fallback:
+        boundary_response = pending.render("continuation unavailable")
+        # Keep actual failure diagnostics, not a held candidate recovered by an error path.
+        held_text = {m.get("content") for m in messages if m.get("_pre_final_gate_synthetic")
+                     and m.get("role") == "assistant" and isinstance(m.get("content"), str)}
+        if isinstance(final_response, str) and final_response and final_response not in held_text:
+            boundary_response += "\n\n" + final_response
+        final_response = boundary_response
+    try:
+        if unresolved:
+            agent._discard_final_gate_buffer()
+        else:
+            agent._flush_final_gate_buffer()
+    except Exception:
+        logger.debug("pre_final_gate buffer flush failed", exc_info=True)
+    agent._final_gate_buffer = None
+    return final_response, unresolved
+
+
+def _stamp_unresolved_failure(result, goal_unresolved):
+    if goal_unresolved and not result.get("error"):
+        # Delivery adapters understand error; completed=False alone is not a
+        # terminal failure on Desktop. Never automatically retry past the cap.
+        result["error"] = result.get("final_response") or "The requested goal remains unresolved."
+        stamp_failure(result, "pre_final_gate_unresolved", False)
+
+
 def finalize_turn(
     agent, *, final_response, api_call_count, interrupted, failed, messages, conversation_history,
     effective_task_id, turn_id, user_message, original_user_message, _should_review_memory,
@@ -533,14 +578,10 @@ def finalize_turn(
 ):
     """Run the post-loop finalization and return the turn ``result`` dict."""
     from agent.conversation_loop import logger
-
-    # pre_final_gate stream buffer [daveey]: release text no gate held (interrupts, error exits),
-    # then stop buffering so the budget summary and post-turn output stream normally.
-    try:
-        agent._flush_final_gate_buffer()
-    except Exception:
-        logger.debug("pre_final_gate buffer flush failed", exc_info=True)
-    agent._final_gate_buffer = None
+    final_response, unresolved = _prepare_final_gate_fallback(
+        agent, final_response, _pending_verification_response, interrupted=interrupted, failed=failed,
+        exit_reason=_turn_exit_reason, api_call_count=api_call_count, messages=messages, logger=logger,
+    )
 
     final_response, _turn_exit_reason, preserved_verification_fallback, interrupted = _resolve_budget_fallback(
         agent, final_response=final_response, api_call_count=api_call_count,
@@ -590,6 +631,9 @@ def finalize_turn(
     # ``turn_exit_reason`` collapsed to code="unknown", retryable=True on every surface.
     # Advisory verdicts (``fails_turn=False``) only add the code: ``failed``/``completed`` keep
     # the loop's values so cron, kanban and transcript persistence behave as before.
+    goal_unresolved = not interrupted and (
+        unresolved or str(_turn_exit_reason).startswith("pre_final_gate_unresolved("))
+    failed = failed or goal_unresolved
     _exit_failure = None if interrupted else exit_reason_failure(_turn_exit_reason)
     if _exit_failure is not None and _exit_failure.fails_turn:
         failed = True
@@ -600,6 +644,8 @@ def finalize_turn(
         final_response is not None
         and not failed
         and not interrupted
+        and not unresolved
+        and not str(_turn_exit_reason).startswith("pre_final_gate_unresolved(")
         and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
     )
 
@@ -640,6 +686,11 @@ def finalize_turn(
         # user will see, never the raw model text (#44239).
         if final_response and not interrupted:
             final_response, _, _ = apply_llm_output_transform(agent, final_response, turn_id=turn_id, logger=logger)
+        if (unresolved and messages and messages[-1].get("role") == "assistant"
+                and messages[-1].get("content") != final_response):
+            # A different gate may have published an interim after the silent hold. Do not
+            # overwrite that durable row; the runtime boundary is a distinct final answer.
+            append_message(messages, {"role": "assistant", "content": final_response})
         _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream)
         if not interrupted and not failed:
             _micro_compact_after_turn(agent, messages, final_response, logger, effective_task_id)
@@ -750,6 +801,7 @@ def finalize_turn(
         if failed:
             result["error"] = final_response or str(_turn_exit_reason)
         stamp_failure(result, _exit_failure.reason, _exit_failure.retryable)
+    _stamp_unresolved_failure(result, goal_unresolved)
     # Cleanup failures are surfaced, but the response is returned either way (#8049).
     if _cleanup_errors:
         result["cleanup_errors"] = _cleanup_errors
