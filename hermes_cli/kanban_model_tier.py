@@ -154,6 +154,21 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
     except Exception as exc:
         logger.warning("kanban model tier: resolve failed for %s (%s)", getattr(task, "id", "?"), exc)
         return "error"
+    if reason not in ("off", "profile_out_of_scope"):
+        try:
+            from hermes_cli import kanban_provider_walls as _walls
+            cfg_ = load_tier_config() if cfg is None else cfg
+            if model:
+                probe = type("T", (), {"model_override": model, "provider_override": provider,
+                                       "title": task.title, "body": task.body})()
+            else:
+                probe = task
+            moved = _walls.retier_for_walls(probe, cfg_)
+            if moved:
+                model, provider, walled = moved
+                reason = f"{reason}+wall:{walled}"
+        except Exception as exc:  # never break dispatch over wall bookkeeping
+            logger.debug("kanban model tier: wall re-tier failed for %s (%s)", getattr(task, "id", "?"), exc)
     if model:
         task.model_override = model
         task.provider_override = provider

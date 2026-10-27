@@ -217,6 +217,16 @@ _AGENT_ENV_MARKERS = ("HERMES_SESSION_KEY", "HERMES_SESSION_ID", "HERMES_SESSION
                       "HERMES_RPC_SOCKET", "HERMES_KERNEL_SENTINEL")
 
 
+def _cli_default_assignee(args) -> Optional[str]:
+    """Dispatchable cards need an assignee: an unassigned ``ready``/``todo`` card is
+    never spawned. Default it (``kanban.default_assignee`` or ``default``); triage and
+    blocked drafts stay unassigned. Trackers for remote work should use
+    ``kanban_schedule`` with a ``wake_check`` instead."""
+    if getattr(args, "triage", False) or getattr(args, "initial_status", "running") == "blocked":
+        return None
+    return kb._default_ready_assignee()
+
+
 def _agent_invoked() -> bool:
     """Whether this CLI call came from an agent tool (terminal / execute_code)."""
     return any(os.environ.get(name) for name in _AGENT_ENV_MARKERS)
@@ -417,7 +427,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
         try:
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
-                assignee=args.assignee or (_profile_author() if in_worker or _agent_invoked() else None),
+                assignee=args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
+                or _cli_default_assignee(args),
                 session_id=session_id, requires=getattr(args, "requires", None),
                 created_by=args.created_by or _profile_author(),
                 workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
@@ -565,6 +576,11 @@ def _print_max_retries(task) -> None:
         print(f"  max-retries: {int(cfg_val)} (config kanban.failure_limit)")
     else:
         print(f"  max-retries: {kb.DEFAULT_FAILURE_LIMIT} (default)")
+
+
+def _cmd_wait_check(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_wait_check
+    return kanban_wait_check.run(args)
 
 
 def _cmd_show(args: argparse.Namespace) -> int:
@@ -1091,6 +1107,9 @@ def _cli_wake_check(args: argparse.Namespace):
 
     cmd = kwc.normalize_cmd(getattr(args, "wake_check", None))
     every = kwc.normalize_every(getattr(args, "check_every", None)) if cmd else None
+    err = kwc.dry_run_error(cmd)
+    if err:
+        raise ValueError(err)
     return cmd, every, bool(getattr(args, "clock_only", False))
 
 
@@ -1138,6 +1157,11 @@ def _cmd_block(args: argparse.Namespace) -> int:
             wake = _cli_wake_check(args)
         except ValueError as exc:
             return _err(f"kanban block: {exc}", 2)
+        from hermes_cli.kanban_block_policy import block_policy_error
+        policy = block_policy_error(kind, human_request=request, wake_check=wake[0],
+                                    clock_only=wake[2], reason=reason)
+        if policy:
+            return _err(f"kanban block: {policy}", 2)
         refused: dict = {}
         op = _guarded_park(conn, "block", wake, refused, _commented(
             conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
@@ -1481,7 +1505,7 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
 
 _HANDLERS = {
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
-    "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
+    "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show, "wait-check": _cmd_wait_check,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
     "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,

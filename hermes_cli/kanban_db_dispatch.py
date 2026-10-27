@@ -186,6 +186,8 @@ class DispatchResult:
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
+    agent_block_escalated: list[str] = field(default_factory=list)
+    """Agent-owned blocks older than 2h re-spawned through triage."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
     woken_continuations: list[str] = field(default_factory=list)
@@ -1188,6 +1190,8 @@ def _classify_dead_worker(
     failure = _worker_scope.read_failure(task_id, run_id, log or "") if task_id else None
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
+        if kind == "oom_killed":
+            _worker_scope.note_oom_kill(task_id, board)
         dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
                            {"pid": pid, "claimer": claimer, **failure})
     else:
@@ -1346,6 +1350,12 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
+                try:
+                    from hermes_cli import kanban_provider_walls as _walls
+                    _walls.record_wall_for_run(conn, row["id"], row["current_run_id"],
+                                               _kb.worker_log_path(row["id"], board=board))
+                except Exception:
+                    _kb._log.warning("kanban: recording provider wall failed", exc_info=True)
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
@@ -2356,6 +2366,11 @@ def _run_reclaim_phase(
     except Exception:
         _kb._log.warning("kanban: releasing cleared shared blockers failed", exc_info=True)
     try:
+        from hermes_cli import kanban_provider_walls as _walls
+        _walls.alert_on_storm(conn, board=board)
+    except Exception:
+        _kb._log.warning("kanban: rate-limit storm alert failed", exc_info=True)
+    try:
         result.quota_block_released = _kbq.release_recovered_quota_blocks(conn)
     except Exception:
         _kb._log.warning("kanban: releasing recovered quota-wall blocks failed", exc_info=True)
@@ -2473,6 +2488,48 @@ def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
 # The dispatch lock has been released here. Fire the tick observer strictly OUTSIDE the single-writer
 # critical section (#56066 sweeper finding / #64231 disposition): a slow subscriber must never extend the
 # lock hold and stall a sibling dispatcher's tick.
+TRIAGE_STALE_SECONDS = 3600
+_TRIAGE_BRIEF = (
+    "\n\n---\n[triage sweep] This card sat in triage with no specifier. Specify it "
+    "(clarify title/body, then do the work), or park it with kanban_schedule + a wake_check "
+    "probe if it waits on something external. Do not return it to triage."
+)
+
+
+def sweep_stale_triage(
+    conn: sqlite3.Connection, *, default_assignee: Optional[str] = None,
+    older_than: int = TRIAGE_STALE_SECONDS, now: Optional[int] = None,
+) -> list[str]:
+    """Nothing consumes ``triage`` on boards without a specifier, so it becomes a
+    parking lot. Move triage cards idle for ``older_than`` seconds to ``ready`` on the
+    default profile with a "specify or park with a probe" brief. Once per card
+    (``triage_swept`` event) so a worker that re-triages cannot loop; cards with an
+    open human request are left alone. Returns swept task ids."""
+    import time as _time
+    now = int(now if now is not None else _time.time())
+    cutoff = now - older_than
+    swept: list[str] = []
+    rows = conn.execute(
+        "SELECT t.id, t.body, t.assignee, t.human_request FROM tasks t WHERE t.status = 'triage' "
+        "AND COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id), t.created_at) <= ? "
+        "AND NOT EXISTS (SELECT 1 FROM task_events s WHERE s.task_id = t.id AND s.kind = 'triage_swept')",
+        (cutoff,),
+    ).fetchall()
+    for row in rows:
+        if row["human_request"]:
+            continue
+        assignee = (row["assignee"] or "").strip() or default_assignee or "default"
+        with _kb.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'ready', assignee = ?, body = ? WHERE id = ? AND status = 'triage'",
+                (assignee, (row["body"] or "") + _TRIAGE_BRIEF, row["id"]),
+            )
+            if cur.rowcount:
+                _kb._append_event(conn, row["id"], "triage_swept", {"assignee": assignee, "older_than": older_than})
+                swept.append(row["id"])
+    return swept
+
+
 def _dispatch_once_locked(
     conn: sqlite3.Connection,
     *,
@@ -2498,6 +2555,13 @@ def _dispatch_once_locked(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
     )
+    if not dry_run:
+        # Agent-owned blocks (no human ask / wake probe) get one triage respawn after 2h.
+        try:
+            from hermes_cli.kanban_block_policy import sweep_agent_owned_blocks
+            result.agent_block_escalated.extend(sweep_agent_owned_blocks(conn))
+        except sqlite3.Error:
+            _kb._log.exception("kanban: agent-owned block sweep failed")
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
@@ -2505,6 +2569,11 @@ def _dispatch_once_locked(
         return result
 
     result.scheduling_admitted = not dry_run
+    if not dry_run:
+        try:
+            sweep_stale_triage(conn, default_assignee=_resolve_default_assignee(default_assignee))
+        except Exception:
+            _kb._log.debug("kanban dispatch: triage sweep failed", exc_info=True)
     ready_rows = lane_rows(conn, "ready")
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
@@ -2936,7 +3005,7 @@ def _open_worker_log(task: Task, board: Optional[str]):
     return open(log_path, "ab")
 
 
-def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
+def _restart_safe_worker_argv(task: Task, command: list[str], board: Optional[str] = None) -> list[str]:
     """Wrap a systemd-hosted dispatcher's worker in the shared restart-safe scope.
 
     Kanban workers are long-lived agentic runs that outlive the dispatcher
@@ -2966,12 +3035,14 @@ def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
             )
         return command
 
-    return _worker_scope.retain_failed_scope(restart_safe_gateway_child_argv(
+    argv = _worker_scope.retain_failed_scope(restart_safe_gateway_child_argv(
         command,
         unit_suffix=f"kanban-{task.id}-run-{task.current_run_id}",
         require_restart_safe_scope=True,
         outlives_parent=True,
     ).argv)
+    # Typed OOM recovery: a task whose last run(s) were OOM-killed gets a raised cap.
+    return _worker_scope.apply_oom_recovery(argv, task.id, board)
 
 
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:
@@ -3090,7 +3161,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
-    cmd = _restart_safe_worker_argv(task, cmd)
+    cmd = _restart_safe_worker_argv(task, cmd, board)
+    _worker_scope.apply_toolchain_env(env)
     from tools.process_registry import systemd_user_bus_env
     env = systemd_user_bus_env(env)
     log_f = _open_worker_log(task, board)

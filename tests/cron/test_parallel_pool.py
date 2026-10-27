@@ -6,7 +6,6 @@ prevented the ticker thread from firing, causing all other jobs to be fast-forwa
 
 import concurrent.futures
 import threading
-import time
 
 class TestRunningJobGuard:
     """_running_job_ids prevents double-dispatch of active jobs."""
@@ -209,10 +208,14 @@ class TestSyncMode:
             "deliver": "local",
         }
 
-        barrier = threading.Barrier(2, timeout=5)
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
 
         def slow_run(j, *, defer_agent_teardown=None, **_kw):
-            barrier.wait()  # blocks until test thread also waits
+            started.set()
+            release.wait()
+            finished.set()
             return True, "out", "resp", None
 
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
@@ -222,14 +225,20 @@ class TestSyncMode:
         monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
         monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
 
-        start = time.monotonic()
-        n = sched.tick(verbose=False, sync=False)  # opt-in: non-blocking
-        elapsed = time.monotonic() - start
+        # Prove ordering, not wall-clock speed: the job cannot finish until
+        # after tick returns, even if the entire process is descheduled.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as jobs_pool, \
+                concurrent.futures.ThreadPoolExecutor(max_workers=1) as ticker:
+            monkeypatch.setattr(sched, "_get_parallel_pool", lambda _workers: jobs_pool)
+            tick_result = ticker.submit(sched.tick, verbose=False, sync=False)
+            try:
+                assert tick_result.result(timeout=30) == 1  # optimistic count
+                assert started.wait(timeout=30), "parallel job never started"
+                assert not finished.is_set()
+            finally:
+                # Release even on failure, then join BOTH executors before
+                # monkeypatch teardown restores real delivery/store functions.
+                release.set()
 
-        assert n == 1  # optimistic count
-        assert elapsed < 1.0  # returned immediately, didn't wait for slow_run
-
-        # Let the job finish so cleanup works.
-        barrier.wait()
-        time.sleep(0.1)
-        sched._shutdown_parallel_pool()
+        assert finished.is_set()
+        assert sched._inflight_key("slow-job") not in sched._running_job_ids

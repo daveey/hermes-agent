@@ -26,6 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.hermes_cli.kanban_guard_helpers import worker_ran
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -1008,3 +1009,8 @@ def test_active_pr_guard_lifts_after_owner_parks_with_its_pr(
 
         kb.add_comment(conn, cont, author="dev", body="Opened https://github.com/example/repo/pull/301")
         assert kbd.check_respawn_guard(conn, cont) == "active_pr"
+
+
+@pytest.fixture(autouse=True)
+def _worker_ran(worker_ran):
+    """These guard tests model cards whose worker already ran."""

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hermes_cli import kanban_db_sync as _sync
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
@@ -328,34 +329,6 @@ def _resolve_crash_grace_seconds() -> int:
 def _resolve_rate_limit_cooldown_seconds() -> int:
     """``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` (0 = next tick, for tests) else default."""
     return _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
-
-
-# build_worker_context() caps, sized for a ~100k-char prompt with headroom.
-_CTX_MAX_PRIOR_ATTEMPTS = 10      # most recent N prior runs shown in full
-_CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
-_CTX_MAX_FIELD_BYTES    = 4 * 1024   # per summary/error/metadata/result
-_CTX_MAX_BODY_BYTES     = 8 * 1024   # per task.body (opening post)
-_CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
-
-
-def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
-    """``just now`` / ``18h ago`` / ``3d ago``; "" for a missing/invalid ts. An LLM
-    reads a bare absolute timestamp as current fact — the relative age is what
-    prompts a worker to re-verify stale sibling work."""
-    try:
-        ts = int(ts)
-    except (TypeError, ValueError):
-        return ""
-    if now is None:
-        now = int(time.time())
-    delta = now - ts
-    if delta < 60:  # includes negative = clock skew across machines; never claim "in the future"
-        return "just now"
-    if delta < 3600:
-        return f"{delta // 60}m ago"
-    if delta < 86400:
-        return f"{delta // 3600}h ago"
-    return f"{delta // 86400}d ago"
 
 
 # --- Paths ---
@@ -1203,6 +1176,17 @@ def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str
     return cleaned
 
 
+def _default_ready_assignee() -> str:
+    """``kanban.default_assignee`` (config) or the ``default`` profile."""
+    try:
+        from hermes_cli.config import load_config
+
+        name = str(((load_config().get("kanban") or {}).get("default_assignee")) or "").strip()
+    except Exception:
+        name = ""
+    return name or "default"
+
+
 def create_task(
     conn: sqlite3.Connection, *, title: str, body: Optional[str] = None,
     assignee: Optional[str] = None, created_by: Optional[str] = None,
@@ -1221,9 +1205,12 @@ def create_task(
     human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None,
     requires: Optional[list[str]] = None,
+    lint_blocked: bool = True,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
+    ``lint_blocked=False`` is for internal trackers parked blocked without a human ask
+    (swarm root); everything else must pass ``human_request`` with ``initial_status='blocked'``.
     ``origin_intent`` atomically persists the task and receipt intent, not origin readback.
     ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project
     ``worktree`` workspace that could never resolve at spawn with
@@ -1257,6 +1244,10 @@ def create_task(
     from hermes_cli.kanban_human_request import validate_initial_request
 
     human_request = validate_initial_request(human_request, initial_status, triage)
+    from hermes_cli.kanban_block_policy import creation_lint_error
+    _lint = creation_lint_error(title, initial_status, human_request, triage=triage) if lint_blocked else None
+    if _lint:
+        raise ValueError(_lint)
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
@@ -1328,7 +1319,7 @@ def create_task(
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
-        task_id = _new_task_id()
+        task_id = _sync.new_task_id(conn)
         try:
             # allow_nested: graph builders compose create_task under one outer
             # commit so the dispatcher never sees a half-built graph.
@@ -2164,7 +2155,7 @@ def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[st
 
 def _claim_and_open_run(
     conn: sqlite3.Connection, task_id: str, source_status: str, lock: str, expires: int, now: int,
-    *, event_extra: Optional[dict] = None,
+    *, event_extra: Optional[dict] = None, gate: Optional[_sync.ClaimGate] = None,
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
@@ -2184,6 +2175,7 @@ def _claim_and_open_run(
     )
     if cur.rowcount != 1:
         return None
+    _sync.stage_claim(conn, task_id, gate)
     trow = conn.execute(
         "SELECT assignee, max_runtime_seconds, current_step_key "
         "FROM tasks WHERE id = ?", (task_id,),
@@ -2222,7 +2214,10 @@ def claim_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
+    gate = _sync.claim_gate(conn, task_id, expires)
+    if gate.deferred:
+        return None
+    with gate, write_txn(conn):
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
         # recompute_ready re-promotes when the parents finish.
@@ -2237,7 +2232,7 @@ def claim_task(
         _reclaim_dangling_run(
             conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
         )
-        run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
+        run_id = _claim_and_open_run(conn, task_id, "ready", lock, gate.expires, now, gate=gate)
         if run_id is None:
             return None
         claimed = get_task(conn, task_id)
@@ -2255,7 +2250,10 @@ def claim_review_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
+    gate = _sync.claim_gate(conn, task_id, expires)
+    if gate.deferred:
+        return None
+    with gate, write_txn(conn):
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -2268,7 +2266,7 @@ def claim_review_task(
                 )
             return None
         run_id = _claim_and_open_run(
-            conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
+            conn, task_id, "review", lock, gate.expires, now, event_extra={"source_status": "review"}, gate=gate,
         )
         if run_id is None:
             return None
@@ -2339,6 +2337,7 @@ def heartbeat_claim(
     """Extend a running claim; True if we still own it."""
     expires = int(time.time()) + _resolve_claim_ttl_seconds(ttl_seconds)
     lock = claimer or _claimer_id()
+    expires = _sync.heartbeat_expiry(conn, task_id, expires)  # bounded by the lease on synced boards
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET claim_expires = ? "
@@ -2403,9 +2402,10 @@ def release_stale_claims(
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
         heartbeat_stale = hb is not None and (now - hb) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+        lease_lost = _sync.lease_lost(conn, row["id"], now)  # a live worker never outlives its lease
         started_at = _row_get(row, "worker_started_at")
         if (host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at)
-                and not heartbeat_stale):
+                and not heartbeat_stale and not lease_lost):
             _extend_live_stale_claim(conn, row, now)
             continue
 
@@ -2433,7 +2433,7 @@ def release_stale_claims(
             if cur.rowcount != 1:
                 continue
             run_id = _record_reclaim(
-                conn, row["id"], termination,
+                conn, row["id"], termination, outcome="lease_lost" if lease_lost else "reclaimed",
                 error=f"stale_lock={row['claim_lock']}",
                 payload={
                     "stale_lock": row["claim_lock"],
@@ -2468,11 +2468,12 @@ def release_stale_claims(
 
 def _record_reclaim(
     conn: sqlite3.Connection, task_id: str, termination: dict, *, error: str, payload: dict,
+    outcome: str = "reclaimed",
 ) -> Optional[int]:
     """Close the active run as ``reclaimed`` and emit the ``reclaimed`` event
     (payload merged with the termination report). Caller holds the txn."""
     run_id = _end_run(
-        conn, task_id, outcome="reclaimed", status="reclaimed", error=error, metadata=termination,
+        conn, task_id, outcome=outcome, status=outcome, error=error, metadata=termination,
     )
     payload.update(termination)
     _append_event(conn, task_id, "reclaimed", payload, run_id=run_id)
@@ -2535,11 +2536,12 @@ def reclaim_task(
         )
         if cur.rowcount != 1:
             return False
-        _record_reclaim(
+        run_id = _record_reclaim(
             conn, task_id, termination,
             error=f"manual_reclaim: {reason}" if reason else f"manual_reclaim lock={prev_lock}",
             payload={"manual": True, "reason": reason, "prev_lock": prev_lock, "retry_status": retry_status},
         )
+    _sync.release_lease(conn, task_id, _sync.run_uid(conn, run_id))
     # Operator intervention = fresh retry budget (own txn, runs after commit).
     _clear_failure_counter(conn, task_id)
     return True
@@ -4096,43 +4098,6 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     return "\n".join(lines).rstrip() + "\n" + build_recovery_context(conn, task_id)
 
 
-def _ctx_cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
-    """Truncate to ``limit`` chars with a visible ellipsis."""
-    if not s:
-        return ""
-    s = s.strip()
-    if len(s) <= limit:
-        return s
-    return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
-
-
-def _ctx_stamp(ts: int, now: int) -> str:
-    """``YYYY-MM-DD HH:MM`` plus a relative age when one is available."""
-    disp = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-    age = _relative_age(ts, now)
-    return f"{disp}, {age}" if age else disp
-
-
-def _ctx_metadata_line(metadata: Any) -> Optional[str]:
-    if not metadata:
-        return None
-    try:
-        return f"_metadata_: `{_ctx_cap(json.dumps(metadata, ensure_ascii=False, sort_keys=True))}`"
-    except Exception:
-        return None
-
-
-def _ctx_tail(items: list, cap: int, noun: str) -> tuple[list, Optional[str]]:
-    """Keep the newest ``cap`` items; describe the omitted head, if any."""
-    omitted = max(0, len(items) - cap)
-    if not omitted:
-        return items, None
-    return items[-cap:], (
-        f"_({omitted} earlier {noun}{'s' if omitted != 1 else ''} "
-        f"omitted; showing most recent {cap})_"
-    )
-
-
 def _ctx_header(lines: list[str], task: Task) -> None:
     lines.append(f"# Kanban task {task.id}: {task.title}")
     lines.append("")
@@ -4562,6 +4527,18 @@ from hermes_cli.kanban_db_boards import (
     read_board_metadata,
     remove_board,
     write_board_metadata,
+)
+from hermes_cli.kanban_db_context import (
+    _CTX_MAX_BODY_BYTES,
+    _CTX_MAX_COMMENT_BYTES,
+    _CTX_MAX_COMMENTS,
+    _CTX_MAX_FIELD_BYTES,
+    _CTX_MAX_PRIOR_ATTEMPTS,
+    _ctx_cap,
+    _ctx_metadata_line,
+    _ctx_stamp,
+    _ctx_tail,
+    _relative_age,
 )
 from hermes_cli.kanban_db_connect import (
     _INITIALIZED_PATHS,

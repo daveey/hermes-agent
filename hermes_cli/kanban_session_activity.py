@@ -263,8 +263,96 @@ def _meta_float(conn: sqlite3.Connection, key: str) -> float | None:
         return None
 
 
+TERMINAL_STATUSES = ("done", "archived")
+
+
+def _scope_heartbeats(info_rows: list[tuple[str, str]]) -> dict[tuple[str, str, str], float]:
+    """``(gateway, profile, board) -> observed_at`` for every scope its owner collector read cleanly.
+
+    Ambiguous scopes (listed twice) and scopes not in state ``ok`` are absent: they prove nothing."""
+    seen: dict[tuple[str, str, str], list] = {}
+    for gw, raw in info_rows:
+        try:
+            info = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(info, dict) or info.get('gateway') != gw or not isinstance(info.get('task_scopes'), list):
+            continue
+        for scope in info['task_scopes']:
+            if isinstance(scope, dict) and isinstance(scope.get('profile'), str) and isinstance(scope.get('board'), str):
+                seen.setdefault((str(gw), scope['profile'], scope['board']), []).append(scope)
+    return {key: scopes[0].get('observed_at') for key, scopes in seen.items()
+            if len(scopes) == 1 and scopes[0].get('state') == 'ok'
+            and type(scopes[0].get('observed_at')) in (int, float)}
+
+
+def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | None, board: str,
+                            heartbeats: dict[tuple[str, str, str], float], now: float, stale: bool) -> bool:
+    """The owner itself, recently, published this card as closed.
+
+    Release needs all of: a fresh hub sync; a profile-qualified record whose own identity fields match its
+    key; a terminal status inside the owner collector's hash-bound observation (``origin_observation``, so a
+    replica row edited or truncated in transit proves nothing); and that collector's per-scope heartbeat for
+    this exact (profile, board) within ``HUB_STALE_AFTER_S``, so an offline owner's last word is not taken
+    as current. Absence of a row is never release. This is the same rule a local board applies to its own
+    cards (``done``/``archived`` are not counted), applied only to evidence the owner signed. Pre-ledger
+    cards had no other release path, so every one of them stayed open forever. [daveey]
+    """
+    from hermes_cli.kanban_origin_ledger import _owner_evidence
+
+    if stale or owner_profile is None or task.get('status') not in TERMINAL_STATUSES:
+        return False
+    if task.get('profile') != owner_profile or task.get('board') != board or task.get('gateway') != gw:
+        return False
+    evidence = _owner_evidence(task)
+    if not evidence:
+        return False
+    # A card bound through the origin ledger keeps the ledger's stricter release: its owner must
+    # have verified the completion (lifecycle event, run, contract and goal receipts), not just closed it.
+    if task.get('origin_bindings') and evidence.get('verified') is not True:
+        return False
+    beat = heartbeats.get((gw, owner_profile, board))
+    return beat is not None and 0 <= now - beat <= HUB_STALE_AFTER_S
+
+
+def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, dict[str, Any]]) -> None:
+    """Merge each unqualified ``board/id`` record into its proven profile-qualified twin, in place.
+
+    Hub-sync used to key records ``board/id``; it now publishes ``profile/board/id`` and the old rows linger,
+    so every pre-qualification card was both counted twice and stuck ``unknown`` forever. A legacy record is
+    folded only when exactly one profile on the same owner gateway publishes that board/id AND both records
+    carry the same non-null ``created_at`` and ``created_by`` (identity, not an ID match). Its shepherd links
+    move onto the twin, so no session loses the association; anything ambiguous stays a separate ``unknown``
+    obligation. [daveey]
+    """
+    qualified: dict[tuple[str, str, str], list[tuple]] = {}
+    for key in tasks:
+        gw, owner_profile, board, tid = key
+        if owner_profile is not None:
+            qualified.setdefault((gw, board, tid), []).append(key)
+    for key in [k for k in tasks if k[1] is None]:
+        gw, _, board, tid = key
+        twins = qualified.get((gw, board, tid), [])
+        if len(twins) != 1:
+            continue
+        old, new = raw[key], raw[twins[0]]
+        if (old.get('created_at') is None or old.get('created_at') != new.get('created_at')
+                or old.get('created_by') != new.get('created_by')):
+            continue
+        twin = tasks[twins[0]]
+        links = [*(twin.get('sessions') if isinstance(twin.get('sessions'), list) else []),
+                 *(link for link in (old.get('sessions') if isinstance(old.get('sessions'), list) else [])
+                   if isinstance(link, dict) and link.get('rel') == 'shepherd')]
+        tasks[twins[0]] = {**twin, 'sessions': links, '_legacy_key': f'{gw}/{board}/{tid}'}
+        del tasks[key]
+
+
 def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, Any]]:
-    """Unfinished replica cards linked to a session on this gateway, one row per (session, card)."""
+    """Replica cards linked to a session on this gateway, one row per (session, card).
+
+    Open and unproven cards come back ``unfinished``; cards their owner attests closed
+    (``_owner_attests_terminal``) come back as explicit ``released`` rows, so a durable snapshot sees them
+    as present-and-closed rather than missing."""
     conn = _open_ro(path)
     try:
         me = _self_gateway(conn)
@@ -273,12 +361,16 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
         # Old replicas can still be displayed, but cannot prove an exact revision.
         version_column = 'version' if any(r[1] == 'version' for r in conn.execute('PRAGMA table_info(replica)')) else 'NULL'
         rows = conn.execute(f"SELECT gw, key, data, updated_at, {version_column} FROM replica WHERE coll = 'tasks'").fetchall()
+        info_rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'gateway' AND key = 'info'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
     finally:
         conn.close()
     now = time.time() if now is None else now
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
+    heartbeats = _scope_heartbeats(info_rows)
     tasks: dict[tuple[str, str | None, str, str], dict[str, Any]] = {}
+    raw: dict[tuple[str, str | None, str, str], dict[str, Any]] = {}
+    released: set[tuple[str, str | None, str, str]] = set()
     seen_at: dict[str, float] = {}
     legacy_records: dict[tuple, dict] = {}
     for gw, record_key, data, updated, version in rows:
@@ -303,12 +395,17 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
                 raise ValueError('invalid replica task key')
             if not all(parts) or tid != str(t['id']):
                 raise ValueError('replica task identity mismatch')
-            if owner_profile is None or t.get('status') not in LISTED_STATUSES:
+            key = (str(gw), owner_profile, board, tid)
+            raw[key] = t
+            if _owner_attests_terminal(t, str(gw), owner_profile, board, heartbeats, now, stale):
+                released.add(key)
+            elif owner_profile is None or t.get('status') not in LISTED_STATUSES:
                 # Legacy links carry no authoritative release receipt. Preserve
-                # terminal/unknown reports even on cold start; only the exact
-                # qualified ledger projection may supersede this obligation.
+                # terminal/unknown reports even on cold start; only owner-attested
+                # terminal evidence or the qualified ledger projection supersedes it.
                 t = {**t, 'reported_status': t.get('status'), 'status': 'unknown', 'unfinished': True}
-            tasks[(str(gw), owner_profile, board, tid)] = t
+            tasks[key] = t
+    _fold_legacy_aliases(tasks, raw)
     from hermes_cli.profiles import get_active_profile_name
 
     origin_profile = get_active_profile_name()
@@ -336,7 +433,8 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
             card = tasks.get((gw, owner_profile, board, cur))
             if card is None:
                 continue
-            if card.get("status") in LISTED_STATUSES or card.get('unfinished'):
+            closed = (gw, owner_profile, board, cur) in released
+            if closed or card.get("status") in LISTED_STATUSES or card.get('unfinished'):
                 prefix = f'{gw}/{owner_profile}/{board}' if owner_profile is not None else f'{gw}/{board}'
                 ref = f'{prefix}/{cur}'
                 via = "shepherd" if cur == tid else "descendant"
@@ -350,9 +448,11 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
                             "profile": owner_profile, "owner_profile": owner_profile,
                             "origin_gateway": me, "origin_profile": origin_profile,
                             "ownership_state": 'unknown' if owner_profile is None else 'qualified',
-                            "unfinished": True, "reported_status": card.get('reported_status', card.get('status')),
+                            "unfinished": not closed, "released": closed,
+                            "reported_status": card.get('reported_status', card.get('status')),
                             "synced_at": synced, "stale": stale,
                             "legacy_record": legacy_records.get((gw, owner_profile, board, cur)),
+                            "legacy_key": card.get('_legacy_key'),
                         }
             kids = card.get("children") if isinstance(card.get("children"), list) else []
             todo.extend(str(k) for k in kids if k)
@@ -568,7 +668,9 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
             return []
         _log.warning("hermes-hub replica read failed, keeping last known remote cards (stale): %s", exc)
         return [{**c, "stale": True} for c in previous]
-    present = {(c["session"], c["key"]) for c in cards}
+    # A folded legacy alias (``legacy_key``) is present under its qualified key: its last-known
+    # unqualified row must not be resurrected as a stale obligation.
+    present = {(c["session"], k) for c in cards for k in (c["key"], c.get("legacy_key")) if k}
     cards.extend({**c, "stale": True} for c in (previous or [])
                  if (c["session"], c["key"]) not in present)
     if _snapshot_saved != (scope, cards):

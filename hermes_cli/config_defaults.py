@@ -1890,6 +1890,8 @@ DEFAULT_CONFIG = {
     },
     # Kanban coordination: one dispatcher per board reclaims, promotes, and spawns workers.
     "kanban": {
+        # Central sync (core patch 0193): true = boards opened afterwards get sync tables + outbox triggers. [daveey]
+        "sync": {"enabled": False},
         # Opt-in per-profile broker argv before gh (empty = ordinary login); never include tokens.
         "pr_acceptance": {"gh_command_prefix": []},
         # Calendar retention for terminal worktrees; archive commits to recovery
@@ -1937,10 +1939,7 @@ DEFAULT_CONFIG = {
         "max_in_progress": None,
         # Per-profile cap: positive int = no single profile runs more than N workers even if the
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
-        # when fan-out would saturate one profile's model/API quota/browser pool.
-        # Unset (None) means "no per-profile cap" — backward-compatible with existing installs. Useful for
-        # fan-out workflows that would otherwise saturate one profile's local model / API quota / browser
-        # pool while leaving other profiles idle. See #21582.
+        # when fan-out would saturate one profile's model/API quota/browser pool. See #21582.
         "max_in_progress_per_profile": None,
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing

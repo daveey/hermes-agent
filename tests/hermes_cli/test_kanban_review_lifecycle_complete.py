@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import pytest
+from tests.hermes_cli.kanban_guard_helpers import worker_ran
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -791,3 +792,8 @@ def test_review_transitions_preserve_consecutive_failures(conn) -> None:
         )
     assert kb.complete_task(conn, ok_id, summary="done")
     assert _failures(conn, ok_id) == 0
+
+
+@pytest.fixture(autouse=True)
+def _worker_ran(worker_ran):
+    """These guard tests model cards whose worker already ran."""

@@ -34,7 +34,7 @@ def cli(*args):
 def parked(*, triage=False):
     with connect_closing() as conn:
         return db.create_task(conn, title="Legacy", assignee="owner", triage=triage,
-                              initial_status="blocked")
+                              initial_status="blocked", lint_blocked=False)
 
 
 def snapshot(tid):

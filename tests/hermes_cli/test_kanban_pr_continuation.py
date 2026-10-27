@@ -8,6 +8,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_dispatch_pr_state as prs
+from tests.hermes_cli.kanban_guard_helpers import worker_ran
 from tests.hermes_cli.test_kanban_park_invariants import kanban_home
 
 __all__ = ["kanban_home"]  # register the shared isolated-board fixture
@@ -39,6 +40,7 @@ def test_immediate_checkpoint_with_open_pr_dispatches(monkeypatch, all_assignees
         assert "Continue implementation of existing PR" in kb.build_worker_context(conn, tid)
 
 
+@pytest.mark.usefixtures("worker_ran")
 def test_guard_notice_cannot_supersede_real_handoff(monkeypatch):
     now = int(time.time())
     monkeypatch.setattr(time, "time", lambda: now)
@@ -117,4 +119,23 @@ def test_non_immediate_or_superseded_continuation_still_guards(monkeypatch, mode
             kb.add_comment(conn, tid, "a", f"External PR remains: {URL}")
         else:
             conn.execute("UPDATE task_runs SET metadata='{}' WHERE id=?", (result["run_id"],))
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+
+def test_never_run_card_with_pr_in_handoff_is_not_held():
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="review PR", assignee="a")
+        kb.add_comment(conn, tid, "impl", f"Please review {URL}")
+        assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == 0
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def test_worker_that_opened_pr_then_crashed_is_still_held(monkeypatch):
+    now = int(time.time())
+    monkeypatch.setattr(time, "time", lambda: now)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="impl", assignee="a")
+        kb.claim_task(conn, tid)
+        monkeypatch.setattr(time, "time", lambda: now + 5)
+        kb.add_comment(conn, tid, "a", f"Opened {URL}")
         assert kbd.check_respawn_guard(conn, tid) == "active_pr"

@@ -963,6 +963,9 @@ def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
     try:
         cmd = kwc.normalize_cmd(args.get("wake_check"))
         every = kwc.normalize_every(raw_every) if cmd else None
+        err = kwc.dry_run_error(cmd)
+        if err:
+            raise ValueError(err)
     except ValueError as exc:
         _check(False, str(exc))
     return (_redact(cmd) if cmd else None), every, clock_only
@@ -1010,6 +1013,10 @@ def _handle_block(args: dict, **kw) -> str:
                f"the completion judge will evaluate it.")
         blocker_id = _blocker_id_arg(args)
         wake = _wake_check_args(args)
+        from hermes_cli.kanban_block_policy import ERROR_CODE, block_policy_error
+        _policy = block_policy_error(kind, human_request=args.get("human_request"), wake_check=wake[0],
+                                     clock_only=wake[2], blocker_id=blocker_id, reason=reason)
+        _check(_policy is None, _policy or "", ERROR_CODE)
         _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id)
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1],

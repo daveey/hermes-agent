@@ -107,7 +107,14 @@ def _kanban_dispatch_allowed() -> bool:
         from agent.estop import check_paused
     except ImportError:
         return True
-    return not check_paused("kanban", logger)
+    if check_paused("kanban", logger):
+        return False
+    # hermes-sync core-update drain: no new claims while running work drains (never touches it).
+    try:
+        from agent.core_update_drain import check_drain_hold
+    except ImportError:
+        return True
+    return not check_drain_hold("kanban", logger)
 
 
 def _acquire_singleton_lock(lock_path) -> tuple[Optional[object], str]:

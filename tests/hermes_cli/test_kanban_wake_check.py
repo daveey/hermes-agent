@@ -362,3 +362,88 @@ def test_diagnostics_flag_clock_parks_and_failing_probes(kanban_home) -> None:
             conn.execute("UPDATE task_wake_checks SET last_rc = 1, fails = 0 WHERE task_id = ?", (failing,))
         states = kwc.load_states(conn)
         assert "wake_check_overdue" in kinds(failing, now=states[failing]["next_at"] + 3600)
+
+
+# --- silent forever-waits (t_1132a78a) -----------------------------------------------------
+
+def test_dry_run_rejects_probes_that_can_never_succeed():
+    assert kwc.dry_run_error("exit 0") is None
+    assert kwc.dry_run_error("exit 1") is None
+    assert "exited 2" in kwc.dry_run_error("exit 2")
+    assert "exited 127" in kwc.dry_run_error("no_such_command_xyz")
+    # exit 1 with a traceback / shell syntax error / sqlite error is still broken
+    assert kwc.dry_run_error("echo 'OperationalError: incomplete input' >&2; exit 1")
+    assert kwc.dry_run_error("echo \"bash: -c: line 1: syntax error near unexpected token '('\"; exit 1")
+    assert kwc.dry_run_error("echo 'error: database is locked'; exit 1")
+    assert kwc.dry_run_error("echo 'task t_x running'; exit 1") is None
+
+
+def test_dry_run_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_WAKE_DRYRUN", "0")
+    assert kwc.dry_run_error("exit 2") is None
+
+
+def test_exit1_with_error_output_counts_as_failing_then_wakes_broken(kanban_home):
+    cmd = "echo 'Traceback (most recent call last):' ; exit 1"
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
+                                wake_check=cmd, check_every=120)
+        for i in range(kwc.BROKEN_AFTER):
+            state = kwc.get_state(conn, tid)
+            gen = state["generation"]
+            kwc.apply_result(conn, tid, cmd, 1, "Traceback (most recent call last):", generation=gen, now=1000 + i)
+            if i < kwc.BROKEN_AFTER - 1:
+                assert kwc.get_state(conn, tid)["fails"] == i + 1
+        assert _events(conn, tid, kwc.BROKEN_EVENT)
+
+
+def test_plain_exit1_is_still_not_yet(kanban_home):
+    cmd = "echo 'running'; exit 1"
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
+                                wake_check=cmd, check_every=120)
+        gen = kwc.get_state(conn, tid)["generation"]
+        kwc.apply_result(conn, tid, cmd, 1, "t_x running", generation=gen, now=1000)
+        assert kwc.get_state(conn, tid)["fails"] == 0
+
+
+def test_cli_park_rejects_broken_probe():
+    from hermes_cli.kanban import _cli_wake_check
+
+    ns = argparse.Namespace(wake_check="exit 2", check_every=None, clock_only=False)
+    with pytest.raises(ValueError, match="never succeed|could never"):
+        _cli_wake_check(ns)
+
+
+def test_wait_check_local(kanban_home):
+    from hermes_cli import kanban_wait_check as w
+
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+    assert w.check_local("task", tid, until=("done",))[0] == 1
+    assert w.check_local("task", tid, until=("running",))[0] == 0
+    rc, msg = w.check_local("task", "t_missing")
+    assert rc == 2 and msg.startswith("error:")
+    assert w.check_local("board-empty", "default")[0] == 1
+
+
+def test_wait_check_remote_is_argv_safe(monkeypatch):
+    from hermes_cli import kanban_wait_check as w
+
+    seen = {}
+
+    class P:
+        returncode, stdout, stderr = 1, "t_x running", ""
+
+    def fake(argv, **kw):
+        seen["argv"] = argv
+        return P()
+
+    monkeypatch.setattr(w.subprocess, "run", fake)
+    assert w.check_remote("hub", "task", "t_x; rm -rf /", until=("done",))[0] == 1
+    assert seen["argv"][-2] == "ubuntu@100.104.201.88"
+    assert "'t_x; rm -rf /'" in seen["argv"][-1]
+    P.returncode, P.stdout = 255, ""
+    assert w.check_remote("hub", "task", "t_x")[0] == 2

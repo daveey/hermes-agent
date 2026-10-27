@@ -111,10 +111,13 @@ def test_alias_merge_never_releases_unavailable_or_unverified_evidence(scenario,
 
 
 @pytest.mark.parametrize('fault', ['missing', 'unreadable', 'unrelated', 'cycle'])
-def test_unproven_intermediate_alias_is_not_released(scenario, fault):
+@pytest.mark.parametrize('verified', [False, True])
+def test_unproven_intermediate_alias_needs_verified_owner_release(scenario, fault, verified):
+    """An alias the receipt cannot prove is not released by the receipt; only the owner's own verified
+    completion of the bound card releases it (the card is closed whoever links it). [daveey]"""
     path, _, _ = scenario
     aliases = ['s_old', 's_middle', 's_new']
-    prepare(scenario, aliases)
+    prepare(scenario, aliases, verified=verified)
     state = path.parent / 'state.db'
     if fault == 'missing':
         state.unlink()
@@ -128,10 +131,13 @@ def test_unproven_intermediate_alias_is_not_released(scenario, fault):
             else:
                 db.execute("UPDATE sessions SET end_reason='compression' WHERE id='s_new'")
                 db.execute("UPDATE sessions SET parent_session_id='s_new' WHERE id='s_old'")
-    remaining = activity._remote_links()
+    remaining = [r for r in activity._remote_links() if r['session'] == 's_middle']
     assert len(remaining) == 1
-    assert remaining[0]['session'] == 's_middle'
-    assert remaining[0]['status'] == 'unknown' and remaining[0]['unfinished']
+    if verified:
+        assert remaining[0]['status'] == 'done' and remaining[0]['released'] and not remaining[0]['unfinished']
+        assert activity._replica_bucket(remaining[0]) is None
+    else:
+        assert remaining[0]['status'] == 'unknown' and remaining[0]['unfinished']
 
 
 @pytest.mark.parametrize('session', ['s_old', 's_new'])
