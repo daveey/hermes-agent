@@ -1294,6 +1294,29 @@ export function useBackgroundSync({
     // not create a new request (and invalidate the old result) on every tick.
   }, [activeConnectionId, activeGatewayProfile, changeEventsAvailable, gatewayState, requestGateway])
 
+  // Kanban replica/release changes need not emit sessions.changed. Older chats can
+  // exist only in project previews (outside the capped sessions list), so refreshing
+  // live statuses alone leaves their badges frozen. Catch up on focus and bound
+  // staleness while viewed, without polling hidden windows. [daveey]
+  useEffect(() => {
+    if (gatewayState !== 'open') {
+      return
+    }
+
+    let inFlight = false
+
+    return visiblePoll(60_000, () => {
+      if (inFlight) {
+        return
+      }
+
+      inFlight = true
+      void refreshProjectTree().finally(() => {
+        inFlight = false
+      })
+    })
+  }, [activeConnectionId, activeGatewayProfile, gatewayState])
+
   // sessions.changed also means the *stored* list may have new rows (a cron
   // run's session, an inbound messaging turn creating a thread). The full list
   // refresh is heavier than the active_list snapshot, so trail it on a gap

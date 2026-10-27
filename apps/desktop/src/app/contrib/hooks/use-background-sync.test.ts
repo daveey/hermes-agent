@@ -916,6 +916,36 @@ describe('active transcript refresh', () => {
     await waitFor(() => expect(refreshProjectTree).toHaveBeenCalled())
   })
 
+  it.each([true, false])('refreshes preview-only kanban rows without session events (events=%s)', async events => {
+    vi.useFakeTimers()
+    $changeEventsAvailable.set(events)
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    renderSync(vi.fn(async () => undefined))
+    vi.mocked(refreshProjectTree).mockClear()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(refreshProjectTree).toHaveBeenCalled()
+  })
+
+  it('keeps the preview backstop quiet while unfocused and catches up on focus', async () => {
+    vi.useFakeTimers()
+    $changeEventsAvailable.set(true)
+    const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+    const { unmount } = renderSync(vi.fn(async () => undefined))
+    vi.mocked(refreshProjectTree).mockClear()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(refreshProjectTree).not.toHaveBeenCalled()
+    focus.mockReturnValue(true)
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    expect(refreshProjectTree).toHaveBeenCalledTimes(1)
+    unmount()
+    vi.mocked(refreshProjectTree).mockClear()
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(refreshProjectTree).not.toHaveBeenCalled()
+  })
+
   it('does not refresh projects on a bare sessions.changed tick', async () => {
     // The two stores are independent: a sessions.changed refresh pulls the tree
     // (grouping of the same rows) but must not also fire a projects.list read.
