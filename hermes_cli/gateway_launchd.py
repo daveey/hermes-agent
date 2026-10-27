@@ -227,6 +227,33 @@ _SIGNED_WRAPPER_SOURCE = (
 )
 
 
+# [daveey] Stable core-update launcher that hermes-sync installs outside the mutable checkout (state repo
+# ``hermes-gateway-launcher``, docs/core-update-safety.md). Same name gateway.status skips.
+GATEWAY_LAUNCHER_NAME = "hermes-gateway-launcher"
+
+
+def gateway_launcher_path(hermes_home: str) -> Path:
+    """``<installation root>/bin/hermes-gateway-launcher``: a profile home maps to its root."""
+    home = Path(hermes_home)
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    return root / "bin" / GATEWAY_LAUNCHER_NAME
+
+
+def gateway_launcher_prefix(hermes_home: str) -> list[str]:
+    """[daveey] ``[launcher, --home, <home>, --]`` when the core-update launcher is installed, else ``[]``.
+
+    It goes around ``stderr_timestamp``, inside the job's ``/bin/sh -c exec …`` string, never around the
+    signed-bundle or osascript wrapper: those forward no SIGUSR1 (the launcher's drain request) and spawn
+    ``sh`` without the launcher's ``exec.lock`` fd, so wrapping them would let the updater take LOCK_EX while
+    the gateway still runs. ``stderr_timestamp`` forwards SIGUSR1 to the gateway and exits with its status.
+    Emitting it here keeps ``refresh_launchd_plist_if_needed`` from reverting the bootstrap.
+    """
+    launcher = gateway_launcher_path(hermes_home)
+    if not (launcher.is_file() and os.access(launcher, os.X_OK)):
+        return []
+    return [str(launcher), "--home", hermes_home, "--"]
+
+
 def launchd_responsible_python() -> Path | None:
     """[daveey] The Developer-ID-signed Hermes Python.app executable to own the launchd job, if installed."""
     from hermes_cli._launchers import signed_python_app
@@ -399,6 +426,7 @@ def generate_launchd_plist() -> str:
     # [daveey] With Hermes Python.app installed, the signed bundle owns the job instead (TCC attribution).
     stdout_log, stderr_log = log_dir / "gateway.log", log_dir / "gateway.error.log"
     command = _timestamped_stderr_gateway_command(stderr_log, external_supervisor=True)
+    command = [*gateway_launcher_prefix(hermes_home), *command]
     prog_args = launchd_program_arguments(command, stdout_log, stderr_log, responsible=launchd_responsible_python())
     prog_args_xml = "\n        ".join(f"<string>{escape(part)}</string>" for part in prog_args)
 

@@ -591,8 +591,8 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
         tokens = [t.lower() for t in cased_tokens]
         basenames = [t.rsplit("/", 1)[-1] for t in tokens]
     # The launchd job's osascript wrapper (gateway_launchd.launchd_program_arguments) carries the gateway argv
-    # inside one JXA script string; the gateway itself is its child and is matched on its own command line.
-    if basenames[0] == "osascript":
+    # inside one JXA script string ([daveey] the core-update launcher after ``--``); the gateway is matched on its own line.
+    if basenames[0] == "osascript" or "hermes-gateway-launcher" in basenames[:2]:
         return None
     # Gateway-dedicated entrypoints carry no subcommand to inspect.
     if any(t == "gateway/run.py" or t.endswith("/gateway/run.py") for t in tokens):
