@@ -92,6 +92,10 @@ def dry_run_error(cmd: Optional[str], *, cwd: Optional[str] = None, env: Optiona
 
 
 GUARD_HELP = (
+    "A wait needs a producer (awaiting={kind: card|ci|deploy|external|clock, ref, why}); a probe "
+    "only says when to look. A condition only an agent action changes (a grant, a permission, an "
+    "install, a fix) is work, not a wait: create its owner card where the capability lives and "
+    "point awaiting at it. "
     "A wait on any readable fact needs wake_check=<shell command>: exit 0 = the condition "
     "holds (the card wakes at once), exit 1 = not yet (re-probed every check_every seconds, "
     "default 900, min 120). Examples: "

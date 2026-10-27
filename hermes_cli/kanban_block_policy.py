@@ -31,9 +31,12 @@ def block_policy_error(kind, *, human_request=None, wake_check=None, clock_only=
     return (
         f"{ERROR_CODE}: kind={kind!r} with no human_request, wake_check or clock_only leaves the "
         "card with no owner and nothing to wake it. Pick one: (1) a decision/action only David can "
-        "take -> pass human_request (kind needs_input or capability); (2) a wait on time or a "
-        "readable fact -> pass wake_check (or clock_only=true) so it parks scheduled and wakes; "
-        "(3) the wrong worker/tools -> kind='assignment' so a capable supervisor is routed. "
+        "take -> pass human_request (kind needs_input or capability); (2) a condition an agent action "
+        "changes (a grant, a permission, an install, a fix) is work, not a wait -> create the owner "
+        "card on the gateway that holds the capability and park on it (kind='time', "
+        "awaiting={kind:'card', ref, gateway}), or kind='assignment' so a capable supervisor is "
+        "routed; (3) a wait needs a producer -> kind='time' with awaiting naming it (a live card, a "
+        "CI run, a vendor ticket, a real clock window) plus wake_check (or clock_only=true). "
         "If the work is actually done, call kanban_complete; if it needs another card, "
         "kanban_create it and link it as a parent."
     )

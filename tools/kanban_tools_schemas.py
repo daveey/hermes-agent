@@ -194,6 +194,30 @@ _WAKE_CHECK_PROPS = {
         "Set true only for a pure time wait with no fact to probe (a soak window, a calendar "
         "date, a timed re-measure). A park more than 2 h out needs wake_check or clock_only."
     )},
+    "awaiting": {
+        "type": "object",
+        "description": (
+            "Who produces the condition this park waits on. A wait needs a producer; a probe is "
+            "not one. kind: 'card' (ref=<task id>, gateway=<name> when it lives on another "
+            "gateway; it must be live, and a wake probe is added for you), 'ci' / 'deploy' "
+            "(ref=<run, job or release id/URL>), 'external' (ref=<vendor or ticket>, why=<evidence>), "
+            "'clock' (a real window: soak, cooldown, release slot). 'human' is always refused: a "
+            "wait on David is kanban_block kind='needs_input' with human_request. A condition only "
+            "an agent action changes (a grant, a permission, an install, a fix) is work, not a "
+            "wait: it is refused (agent_action_wait) unless ref names the owner card doing it. "
+            "Omitted: classified from the reason. The third park in a row on the same premise "
+            "goes to the supervisor as an owner card instead of parking again."
+        ),
+        "properties": {
+            "kind": {"type": "string", "enum": ["card", "ci", "deploy", "external", "clock", "human"]},
+            "ref": {"type": "string"},
+            "why": {"type": "string"},
+            "gateway": {"type": "string"},
+            "board": {"type": "string"},
+        },
+        "required": ["kind"],
+        "additionalProperties": False,
+    },
 }
 
 
@@ -240,10 +264,15 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "external event (a cap, a soak, a release window) is not a block: use "
         "kind='time' (put SCHEDULED_UNTIL=<ISO8601> in the reason to set the wake; "
         "default 24h), since a blocked card marks its chat as needing a human. "
-        "A timed wait on any readable fact needs ``wake_check`` (a shell probe; "
-        "the card wakes the moment it exits 0); a park more than 2 h out without "
-        "one is refused unless ``clock_only`` is true. A wait on another card on "
-        "this board is a parent link (kanban_link), not a park."
+        "A timed wait needs a producer, named in ``awaiting`` (a live card, a CI "
+        "run, a vendor ticket, a real clock window); ``wake_check`` only says when "
+        "to look, and a park more than 2 h out without one is refused unless "
+        "``clock_only`` is true. Agent-action conditions (a grant, a permission, "
+        "an install, a fix) are work, not waits: create the owner card on the "
+        "gateway that holds the capability and point ``awaiting`` at it, or use "
+        "kind='assignment'. A wait on David is kind='needs_input' with "
+        "``human_request``, never a park. A wait on another card on this board is "
+        "a parent link (kanban_link), not a park."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
@@ -289,10 +318,15 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
         "time or an external event. This ends the current run and makes the "
         "task non-dispatchable until an orchestrator unblocks it, or until the "
         "time named by a ``SCHEDULED_UNTIL=<ISO8601>`` marker in ``reason`` "
-        "(default 24h), or until ``wake_check`` exits 0. A wait on any readable "
-        "fact needs ``wake_check``; a park more than 2 h out without one is "
-        "refused unless ``clock_only`` is true. A wait on another card on this "
-        "board is a parent link (kanban_link), not a park."
+        "(default 24h), or until ``wake_check`` exits 0. A wait needs a producer, "
+        "named in ``awaiting``: a probe is not one. A park more than 2 h out "
+        "without ``wake_check`` is refused unless ``clock_only`` is true. "
+        "Agent-action conditions (a grant, a permission, an install, a fix) are "
+        "work, not waits: they are refused (agent_action_wait) unless ``awaiting`` "
+        "names the owner card doing it (create it on the gateway that holds the "
+        "capability), and a wait on David is a kanban_block needs_input ask, never "
+        "a park. A wait on another card on this board is a parent link "
+        "(kanban_link), not a park."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
@@ -335,7 +369,9 @@ KANBAN_CONTINUE_SCHEMA = _schema(
             "Optional. 0 (default) re-queues immediately. N > 0 parks the card in "
             "'scheduled' and the dispatcher re-queues it after N seconds (max "
             "86400): use this to hand off a wait instead of polling. Over 7200 "
-            "needs wake_check (or clock_only for a pure time wait)."
+            "needs wake_check (or clock_only for a pure time wait). The wait needs a "
+            "producer (``awaiting``): agent-action conditions (a grant, a permission, "
+            "an install, a fix) are work, not waits."
         )},
         **_WAKE_CHECK_PROPS,
         "metadata": {"type": "object", "description": (

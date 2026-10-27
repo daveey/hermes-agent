@@ -224,7 +224,8 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                 from hermes_cli.kanban_capabilities import CapabilityMismatchError
                 from hermes_cli.kanban_assignment_routing import AssignmentRoutingError
                 from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
-                if isinstance(e, (AssignmentRoutingError, ModelProviderMismatchError)):
+                from hermes_cli.kanban_awaiting import AwaitingError
+                if isinstance(e, (AssignmentRoutingError, ModelProviderMismatchError, AwaitingError)):
                     return tool_error(str(e), code=e.code)
                 if isinstance(e, CapabilityMismatchError):
                     return tool_error(str(e), code=e.code, assignee=e.assignee, missing=e.missing)
@@ -410,6 +411,17 @@ def _ok_landed(kb, conn, tid: str, default_status: str, **extra: Any) -> str:
     landed = kb.get_task(conn, tid)
     return _ok(task_id=tid, run_id=run.id if run else None,
                status=landed.status if landed else default_status, **extra)
+
+
+def _escalated(kb, conn, tid: str) -> Optional[str]:
+    """The result for a park that escalated to an owner card instead (``kanban_awaiting``). [daveey]"""
+    from hermes_cli import kanban_awaiting as kaw
+
+    owner = kaw.escalated_owner(conn, tid)
+    if owner is None:
+        return None
+    return _ok_landed(kb, conn, tid, "todo", code="repark_escalated", owner_task_id=owner,
+                      next=kaw.escalation_message(tid, owner))
 
 
 def _redact(value: Any) -> str:
@@ -976,6 +988,31 @@ def _wake_check_echo(wake: tuple) -> dict:
     return {"wake_check": wake[0], "check_every": wake[1]} if wake[0] else {}
 
 
+def _awaiting_arg(args: dict, wake: tuple) -> tuple[Optional[dict], tuple]:
+    """``(awaiting, wake)``: the declared producer (``kanban_awaiting``), and the park's probe
+    with ``hermes kanban wait-check`` filled in for a card wait that brought none. [daveey]"""
+    from hermes_cli import kanban_awaiting as kaw
+
+    try:
+        awaiting = kaw.normalize(args.get("awaiting"))
+    except kaw.AwaitingError as exc:
+        raise _Reject(str(exc), exc.code) from exc
+    if awaiting and awaiting["kind"] == "human":
+        exc = kaw.human_error(os.environ.get("HERMES_KANBAN_TASK") or "",
+                              " ".join(str(args.get(k) or "") for k in ("reason", "checkpoint")) + " "
+                              + str(awaiting.get("why") or ""))
+        raise _Reject(str(exc), exc.code)
+    probe = None if wake[0] else kaw.card_probe(awaiting)
+    if probe:
+        from hermes_cli import kanban_wake_check as kwc
+        wake = (probe, kwc.normalize_every(None), wake[2])
+    try:
+        kaw.confirm_remote(awaiting)  # ssh, so before the park's write txn
+    except kaw.AwaitingError as exc:
+        raise _Reject(str(exc), exc.code) from exc
+    return awaiting, wake
+
+
 def _park_guard(conn, tid: str, op: str, wake: tuple, **plan: Any) -> None:
     """Refuse a park that wakes > 2 h away with no wake_check and no clock_only. [daveey]"""
     from hermes_cli import kanban_wake_check as kwc
@@ -1013,15 +1050,19 @@ def _handle_block(args: dict, **kw) -> str:
                f"the completion judge will evaluate it.")
         blocker_id = _blocker_id_arg(args)
         wake = _wake_check_args(args)
+        awaiting, wake = _awaiting_arg(args, wake)
         from hermes_cli.kanban_block_policy import ERROR_CODE, block_policy_error
         _policy = block_policy_error(kind, human_request=args.get("human_request"), wake_check=wake[0],
                                      clock_only=wake[2], blocker_id=blocker_id, reason=reason)
         _check(_policy is None, _policy or "", ERROR_CODE)
         _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id)
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
-                           blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1],
+                           blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
                            clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")))
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
+        escalated = _escalated(kb, conn, tid)
+        if escalated:
+            return escalated
         landed_kind = kb.get_task(conn, tid).block_kind
         extra: dict = {"block_kind": landed_kind}
         if blocker_id:
@@ -1062,12 +1103,16 @@ def _handle_schedule(args: dict, **kw) -> str:
                "kanban_block with kind='time' (SCHEDULED_UNTIL=<ISO8601> in the reason sets "
                "the wake), or kanban_complete so the completion judge can evaluate it.")
         wake = _wake_check_args(args)
+        awaiting, wake = _awaiting_arg(args, wake)
         _park_guard(conn, tid, "schedule", wake, reason=reason)
         ok = kb.schedule_task(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid),
-            wake_check=wake[0], check_every=wake[1], clock_only=wake[2])
+            wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting)
         _check(ok, f"could not schedule {tid} (unknown id, not in todo/ready/running/blocked, or it "
                    "waits on a human answer: needs_input/capability asks stay blocked, never scheduled)")
+        escalated = _escalated(kb, conn, tid)
+        if escalated:
+            return escalated
         return _ok_landed(kb, conn, tid, "scheduled", reason=reason, **_wake_check_echo(wake))
 
 
@@ -1093,11 +1138,17 @@ def _handle_continue(args: dict, **kw) -> str:
     from hermes_cli.kanban_continuation import continue_task
     with _board(args.get("board")) as (kb, conn):
         wake = _wake_check_args(args)
+        awaiting, wake = _awaiting_arg(args, wake)
         _park_guard(conn, tid, "continue", wake, resume_after=int(raw_after or 0))
         res = continue_task(conn, tid, checkpoint=checkpoint, resume_after_seconds=int(raw_after or 0),
-                            expected_run_id=_worker_run_id(tid), metadata=metadata,
+                            expected_run_id=_worker_run_id(tid), metadata=metadata, awaiting=awaiting,
                             wake_check=wake[0], check_every=wake[1], clock_only=wake[2])
-        _check(res.get("ok"), f"could not continue {tid}: {res.get('error')}")
+        from hermes_cli.kanban_awaiting import CODES
+        _check(res.get("ok"), f"could not continue {tid}: {res.get('error')}",
+               res.get("reason_code") if res.get("reason_code") in CODES else None)
+        escalated = _escalated(kb, conn, tid)
+        if escalated:
+            return escalated
         note = ("Checkpoint saved; a fresh run will resume this card"
                 + (f" after {int(raw_after)}s" if raw_after else " now")
                 + ". End your turn with a one-line reply; do not call more tools.")

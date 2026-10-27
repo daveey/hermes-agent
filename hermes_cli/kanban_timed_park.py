@@ -84,9 +84,12 @@ def park(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str], requested_kind: Optional[str],
     source_status: str = "ready", expected_run_id: Optional[int] = None, from_untyped_block: bool = False,
     wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
+    awaiting=None,
 ) -> bool:
     """``running``/``ready`` -> ``scheduled`` with a wake time. Caller holds the write txn.
-    ``from_untyped_block``: an untyped ``blocked`` card with no live run (classify-in-place) instead. [daveey]"""
+    ``from_untyped_block``: an untyped ``blocked`` card with no live run (classify-in-place) instead.
+    ``awaiting`` names the producer (``kanban_awaiting.gate``: refused or escalated otherwise). [daveey]"""
+    from hermes_cli import kanban_awaiting as kaw
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
 
@@ -94,6 +97,13 @@ def park(
     wake_at = scheduled_until(reason, now=now) or now + DEFAULT_WAKE_SECONDS
     guard = ("status = 'blocked' AND block_kind IS NULL AND current_run_id IS NULL" if from_untyped_block
              else "status IN ('running', 'ready')")
+    try:
+        record = kaw.gate(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
+                          clock_only=clock_only, op="block")
+    except kaw.RepeatedPark as rp:
+        return kaw.escalate(conn, task_id, record=rp.record, reason=reason,
+                            expected_run_id=expected_run_id) is not None
+    wake_check = wake_check or kaw.card_probe(record)
     wake_check, check_every = kwc.validate_park(
         wake_at=wake_at, wake_check=wake_check, check_every=check_every, clock_only=clock_only)
     sql = ("UPDATE tasks SET status = 'scheduled', human_request = NULL, claim_lock = NULL, claim_expires = NULL, "
@@ -110,7 +120,7 @@ def park(
     kb._append_event(conn, task_id, "scheduled", {
         "reason": reason, "timed_park": True, "requested_kind": requested_kind,
         "wake_at": wake_at, "resume_status": source_status,
-        **kwc.park_fields(wake_check, check_every, clock_only),
+        **kwc.park_fields(wake_check, check_every, clock_only), "awaiting": record,
     }, run_id=run_id)
     kwc.set_check(conn, task_id, wake_check, check_every, now=now)
     return True

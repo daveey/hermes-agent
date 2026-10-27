@@ -86,6 +86,7 @@ def continue_task(
     resume_after_seconds: int = 0, expected_run_id: Optional[int] = None,
     max_continuations: Optional[int] = None, metadata: Optional[dict] = None,
     wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
+    awaiting: Any = None,
 ) -> dict[str, Any]:
     """End the running run as ``continued`` and re-queue the card.
 
@@ -135,6 +136,22 @@ def continue_task(
         new_status = "scheduled" if resume_after > 0 else source_status
         wake_at = now + resume_after if resume_after > 0 else None
         from hermes_cli import kanban_wake_check as kwc
+        record = None
+        if wake_at is not None:
+            from hermes_cli import kanban_awaiting as kaw
+            try:
+                record = kaw.gate(conn, task_id, awaiting=awaiting, reason=checkpoint, wake_check=wake_check,
+                                  clock_only=clock_only, op="continue", wake_in=resume_after)
+            except kaw.AwaitingError as exc:
+                return {"ok": False, "error": str(exc), "reason_code": exc.code}
+            except kaw.RepeatedPark as rp:
+                owner = kaw.escalate(conn, task_id, record=rp.record, reason=checkpoint,
+                                     expected_run_id=int(row["current_run_id"]))
+                if owner is None:
+                    return {"ok": False, "error": "task changed state concurrently"}
+                return {"ok": True, "status": "todo", "run_id": None, "continuation": streak,
+                        "wake_at": None, "escalated_to": owner}
+            wake_check = wake_check or kaw.card_probe(record)
         try:
             wake_check, check_every = kwc.validate_park(
                 wake_at=wake_at, wake_check=wake_check,
@@ -178,6 +195,7 @@ def continue_task(
         if wake_at is not None:
             payload["wake_at"] = wake_at
             payload.update(kwc.park_fields(wake_check, check_every, clock_only))
+            payload["awaiting"] = record
         kb._append_event(conn, task_id, CONTINUED_OUTCOME, payload, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check if wake_at is not None else None, check_every, now=now)
     return {"ok": True, "status": new_status, "run_id": run_id,

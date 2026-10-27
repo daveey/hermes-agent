@@ -14,17 +14,28 @@ from hermes_cli import kanban_db as _kb
 def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     expected_run_id: Optional[int] = None, wake_check: Optional[str] = None,
-    check_every: Optional[int] = None, clock_only: bool = False,
+    check_every: Optional[int] = None, clock_only: bool = False, awaiting: Any = None,
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable) until its wake
     (``SCHEDULED_UNTIL=`` in the reason, else ``kanban_timed_park.DEFAULT_WAKE_SECONDS``) or an
     ``unblock_task``. Refused (False) while the card waits on a human answer: ``scheduled`` is
-    not on any needs-me surface, so such a park hid the ask (t_6feb6afd). [daveey]"""
+    not on any needs-me surface, so such a park hid the ask (t_6feb6afd). [daveey]
+
+    ``awaiting`` names the producer (``kanban_awaiting``); a park nothing would satisfy raises
+    ``AwaitingError``, and a third park on one premise escalates to an owner card instead."""
     with _kb.write_txn(conn):
         if _kb._awaiting_human_answer(conn, task_id):
             return False
         from hermes_cli.kanban_timed_park import scheduled_payload
+        from hermes_cli import kanban_awaiting as kaw
         from hermes_cli import kanban_wake_check as kwc
+        try:
+            record = kaw.gate(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
+                              clock_only=clock_only, op="schedule")
+        except kaw.RepeatedPark as rp:
+            return kaw.escalate(conn, task_id, record=rp.record, reason=reason,
+                                expected_run_id=expected_run_id) is not None
+        wake_check = wake_check or kaw.card_probe(record)
         payload = scheduled_payload(reason)
         wake_check, check_every = kwc.validate_park(
             wake_at=payload["wake_at"], wake_check=wake_check,
@@ -49,7 +60,7 @@ def schedule_task(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
         )
         _kb._append_event(conn, task_id, "scheduled", {
-            **payload, **kwc.park_fields(wake_check, check_every, clock_only),
+            **payload, **kwc.park_fields(wake_check, check_every, clock_only), "awaiting": record,
         }, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check, check_every)
         return True

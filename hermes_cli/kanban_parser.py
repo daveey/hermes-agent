@@ -94,6 +94,11 @@ def _WAKE_CHECK_ARGS():
              help="Seconds between --wake-check probes (default 900, min 120, max 21600)"),
         _arg("--clock-only", dest="clock_only", action="store_true",
              help="A pure time wait with nothing to probe (soak window, calendar date)"),
+        _arg("--awaiting", dest="awaiting", default=None, metavar="KIND:REF|JSON",
+             help="Who produces the condition: card:<task id> (JSON adds gateway/board), ci:<run id>, "
+                  "deploy:<id>, external:<vendor/ticket>, clock:<window>. A wait needs a producer; "
+                  "agent-action conditions (grant, permission, install, fix) are work, not waits."),
+        _arg("--awaiting-why", dest="awaiting_why", default=None, help="Evidence for --awaiting"),
     )
 _TASK_IDS = _arg("task_ids", nargs="+")
 _SLUG = _arg("slug")

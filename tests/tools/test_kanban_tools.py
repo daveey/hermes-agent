@@ -467,7 +467,9 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
         run = kb.latest_run(conn, worker_env)
         assert (run.outcome, run.summary) == ("scheduled", reason)
         assert any(
-            event.kind == "scheduled" and event.payload == {"reason": reason, "wake_at": event.payload.get("wake_at")}
+            event.kind == "scheduled" and event.payload == {
+                "reason": reason, "wake_at": event.payload.get("wake_at"),
+                "awaiting": {"kind": "clock", "inferred": True}}  # no producer named: an inferred clock wait
             and event.payload["wake_at"]  # SCHEDULED_UNTIL= sets a real wake time
             for event in kb.list_events(conn, worker_env)
         )

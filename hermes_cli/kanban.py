@@ -1114,18 +1114,57 @@ def _cli_wake_check(args: argparse.Namespace):
     return cmd, every, bool(getattr(args, "clock_only", False))
 
 
-def _guarded_park(conn, op: str, wake, refused: dict, park, **plan):
-    """Per-task op: refuse a park > 2 h out with no probe (``kanban_wake_check.guard_error``). [daveey]"""
+def _cli_awaiting(args: argparse.Namespace, wake):
+    """``(awaiting, wake)`` from ``--awaiting KIND:REF|JSON`` (+ ``--awaiting-why``); a card wait
+    with no ``--wake-check`` gets ``hermes kanban wait-check task`` as its probe. [daveey]"""
+    from hermes_cli import kanban_awaiting as kaw
+
+    raw = getattr(args, "awaiting", None)
+    if not raw:
+        return None, wake
+    awaiting = kaw.normalize(raw)
+    why = getattr(args, "awaiting_why", None)
+    if why and awaiting is not None:
+        awaiting["why"] = why.strip()[:600]
+    probe = None if wake[0] else kaw.card_probe(awaiting)
+    if probe:
+        from hermes_cli import kanban_wake_check as kwc
+        wake = (probe, kwc.normalize_every(None), wake[2])
+    kaw.confirm_remote(awaiting)  # ssh, so before the park's write txn
+    return awaiting, wake
+
+
+def _guarded_park(conn, op: str, wake, refused: dict, park, awaiting=None, **plan):
+    """Per-task op: refuse a park > 2 h out with no probe (``kanban_wake_check.guard_error``)
+    or one nothing would produce (``kanban_awaiting``), before its comment is written. [daveey]"""
+    from hermes_cli import kanban_awaiting as kaw
     from hermes_cli import kanban_wake_check as kwc
 
     def run(tid):
-        err = kwc.guard_error(wake_at=kwc.planned_wake(conn, tid, op=op, **plan),
-                              wake_check=wake[0], clock_only=wake[2])
+        wake_at = kwc.planned_wake(conn, tid, op=op, **plan)
+        err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
         if err:
             refused[tid] = f"cannot {op} {tid}: {err}"
             return False
-        return park(tid)
+        try:
+            if wake_at is not None:
+                kaw.resolve(conn, tid, awaiting=awaiting, reason=plan.get("reason"), wake_check=wake[0],
+                            clock_only=wake[2], op=op)
+            return park(tid)
+        except kaw.AwaitingError as exc:
+            refused[tid] = f"cannot {op} {tid}: {exc}"
+            return False
     return run
+
+
+def _parked_msg(conn, verb: str, suffix: str):
+    """``ok_msg`` for a park that may have escalated to an owner card instead."""
+    from hermes_cli import kanban_awaiting as kaw
+
+    def msg(tid):
+        owner = kaw.escalated_owner(conn, tid)
+        return kaw.escalation_message(tid, owner) if owner else f"{verb} {tid}{suffix}"
+    return msg
 
 
 def _cmd_block(args: argparse.Namespace) -> int:
@@ -1144,6 +1183,9 @@ def _cmd_block(args: argparse.Namespace) -> int:
             # Report where it landed: dependency blocks -> todo, tripped unblock-loop breaker -> triage.
             landed = kb.get_task(conn, tid)
             where = landed.status if landed else "blocked"
+            from hermes_cli import kanban_awaiting as kaw
+            if kaw.escalated_owner(conn, tid):
+                return _parked_msg(conn, "Blocked", suffix)(tid)
             if where == "todo":
                 return f"{tid} → todo (dependency wait){suffix}"
             if kind == "dependency" and where == "blocked":
@@ -1156,6 +1198,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
 
         try:
             wake = _cli_wake_check(args)
+            awaiting, wake = _cli_awaiting(args, wake)
         except ValueError as exc:
             return _err(f"kanban block: {exc}", 2)
         from hermes_cli.kanban_block_policy import block_policy_error
@@ -1167,9 +1210,9 @@ def _cmd_block(args: argparse.Namespace) -> int:
         op = _guarded_park(conn, "block", wake, refused, _commented(
             conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
                 conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid),
-                human_request=request,
+                human_request=request, awaiting=awaiting,
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
-            reason=reason, kind=kind)
+            awaiting=awaiting, reason=reason, kind=kind)
         return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}")
 
 
@@ -1181,15 +1224,16 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         try:
             wake = _cli_wake_check(args)
+            awaiting, wake = _cli_awaiting(args, wake)
         except ValueError as exc:
             return _err(f"kanban schedule: {exc}", 2)
         refused: dict = {}
         op = _guarded_park(conn, "schedule", wake, refused, _commented(
             conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
-                conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid),
+                conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid), awaiting=awaiting,
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
-            reason=reason)
-        return _bulk_apply(ids, op, lambda tid: f"Scheduled {tid}{suffix}",
+            awaiting=awaiting, reason=reason)
+        return _bulk_apply(ids, op, _parked_msg(conn, "Scheduled", suffix),
                            lambda tid: refused.get(tid) or f"cannot schedule {tid}")
 
 

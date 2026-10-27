@@ -3136,7 +3136,7 @@ def block_task(
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
     blocker_id: Optional[str] = None, wake_check: Optional[str] = None,
     check_every: Optional[int] = None, clock_only: bool = False,
-    human_request: Optional[dict] = None,
+    human_request: Optional[dict] = None, awaiting: Any = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`kanban_block_routing.route_block`). A wait on time -- ``kind='time'``, a ``dependency``
@@ -3185,7 +3185,7 @@ def block_task(
                 reject_timed_request(human_request)
                 return ktp.park(conn, task_id, reason=reason, requested_kind=kind, source_status="ready",
                                 from_untyped_block=True, wake_check=wake_check,
-                                check_every=check_every, clock_only=clock_only)
+                                check_every=check_every, clock_only=clock_only, awaiting=awaiting)
             requested_kind, rekind_reason = kind, None
             if kind == "assignment":
                 kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason, human_request=human_request)
@@ -3216,7 +3216,7 @@ def block_task(
             reject_timed_request(human_request)
             return ktp.park(conn, task_id, reason=reason, requested_kind=kind,
                             source_status=source_status, expected_run_id=expected_run_id,
-                            wake_check=wake_check, check_every=check_every, clock_only=clock_only)
+                            wake_check=wake_check, check_every=check_every, clock_only=clock_only, awaiting=awaiting)
         # Parent-less ``dependency`` behind a shared blocker: sticky ``needs_input`` (todo would respawn it).
         if kind == "dependency" and no_open_parent:
             kind = "needs_input"
