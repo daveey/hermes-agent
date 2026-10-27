@@ -203,9 +203,13 @@ function SidebarSessionRowImpl({
   const kanbanBlocked = session.kanban_blocked ?? 0
   // [daveey] Done cards whose handoff admits dropped work with no follow-up.
   const kanbanAttention = session.kanban_attention ?? 0
+  // [daveey] Parked cards nothing is producing for over 2 h (agent-owned waits): amber, not grey or red. The count
+  // shows even while other cards run (they don't make the stalled one move); only the stripe defers to live work.
+  const kanbanStalled = session.kanban_stalled ?? 0
 
   const kanbanLabel = [
     kanbanOpen > 0 || kanbanBlocked > 0 ? r.kanbanTasks(kanbanOpen, kanbanBlocked) : '',
+    kanbanStalled > 0 ? r.kanbanStalled(kanbanStalled) : '',
     kanbanAttention > 0 ? r.kanbanAttention(kanbanAttention) : ''
   ]
     .filter(Boolean)
@@ -230,6 +234,12 @@ function SidebarSessionRowImpl({
             <span className="inline-flex items-center gap-px text-amber-500" data-kanban-count="blocked">
               <Codicon name="question" size="0.625rem" />
               {kanbanBlocked}
+            </span>
+          )}
+          {kanbanStalled > 0 && (
+            <span className="inline-flex items-center gap-px text-amber-500" data-kanban-count="stalled">
+              <Codicon name="watch" size="0.625rem" />
+              {kanbanStalled}
             </span>
           )}
           {kanbanAttention > 0 && (
@@ -377,7 +387,8 @@ function SidebarSessionRowImpl({
           session.cron_active === true,
           session.review_wait,
           session.kanban_attention,
-          kanbanStripeCounts(session).waiting
+          kanbanStripeCounts(session).waiting,
+          kanbanStripeCounts(session).stalled
         )
 
   // [daveey] desktop.log trace of every stripe change with the row inputs that fed it (`stripe-transition <sid>`),
@@ -568,7 +579,7 @@ function SidebarSessionRowImpl({
         {isSelected && <span aria-hidden="true" className="arc-border arc-row" />}
         {/* [daveey] A session that owns a live cron job: a tiny grey loop
             glyph in the stripe's place — it recurs, so it is never "done". */}
-        {(statusStripe === 'periodic' || statusStripe === 'waiting') && (
+        {(statusStripe === 'periodic' || statusStripe === 'waiting' || statusStripe === 'stalled') && (
           <span
             aria-hidden="true"
             className={cn(
@@ -578,11 +589,11 @@ function SidebarSessionRowImpl({
             data-slot="session-status-stripe"
             data-status-stripe={statusStripe}
           >
-            {/* [daveey] `waiting`: open kanban cards hold it — the card glyph. */}
-            <Codicon name={statusStripe === 'waiting' ? 'project' : 'sync'} size="0.5625rem" />
+            {/* [daveey] `waiting`: open kanban cards hold it — the card glyph (amber when `stalled`). */}
+            <Codicon name={statusStripe === 'periodic' ? 'sync' : 'project'} size="0.5625rem" />
           </span>
         )}
-        {statusStripe && statusStripe !== 'periodic' && statusStripe !== 'waiting' && (
+        {statusStripe && statusStripe !== 'periodic' && statusStripe !== 'waiting' && statusStripe !== 'stalled' && (
           <span
             aria-hidden="true"
             className={cn(

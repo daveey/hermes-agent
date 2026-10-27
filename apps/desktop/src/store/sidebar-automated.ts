@@ -57,10 +57,11 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
     row.cron_active === true,
     row.review_wait,
     row.kanban_attention ?? 0,
-    kanbanStripeCounts(row).waiting
+    kanbanStripeCounts(row).waiting,
+    kanbanStripeCounts(row).stalled
   )
 
-  return stripe === 'stuck' || stripe === 'blocked' || stripe === 'attention'
+  return stripe === 'stuck' || stripe === 'blocked' || stripe === 'attention' || stripe === 'stalled'
 }
 
 export function sessionHiddenAsAutomated(

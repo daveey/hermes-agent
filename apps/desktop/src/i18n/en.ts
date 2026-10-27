@@ -3377,6 +3377,8 @@ export const en: Translations = {
           .join(', '),
       kanbanAttention: count =>
         `${count} done ${count === 1 ? 'card says' : 'cards say'} part of the work was dropped, with no follow-up card`,
+      kanbanStalled: count =>
+        `${count} ${count === 1 ? 'card has' : 'cards have'} stalled: waiting over 2 h on something only an agent can do, with nothing producing it`,
       backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
       backgroundProcessUnnamed: 'background process',
       stopProcess: 'Stop',

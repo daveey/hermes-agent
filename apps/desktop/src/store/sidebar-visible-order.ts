@@ -150,7 +150,8 @@ export function sessionHasStatusStripe(id: string): boolean {
         session?.cron_active === true,
         session?.review_wait,
         session?.kanban_attention ?? 0,
-        kanbanStripeCounts(session ?? {}).waiting
+        kanbanStripeCounts(session ?? {}).waiting,
+        kanbanStripeCounts(session ?? {}).stalled
       )
     )
   )

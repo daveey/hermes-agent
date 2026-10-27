@@ -37,6 +37,7 @@ vi.mock('@/i18n', () => ({
           ageNow: 'now',
           kanbanTasks: (open: number, blocked: number) => `${open} open, ${blocked} blocked`,
           kanbanAttention: (count: number) => `${count} dropped`,
+          kanbanStalled: (count: number) => `${count} stalled`,
           backgroundProcesses: (count: number) => `${count} background processes`,
           backgroundProcessUnnamed: 'background process',
           stopProcess: 'Stop',
@@ -562,6 +563,69 @@ describe('SidebarSessionRow kanban counts', () => {
     const counts = screen.getByTestId('session-row-kanban-counts')
     expect(counts.querySelector('[data-kanban-count="attention"]')?.textContent).toBe('1')
     expect(counts.getAttribute('aria-label')).toBe('1 dropped')
+  })
+
+  // [daveey] A parked card nothing has produced for over 2 h: an amber stalled count in BOTH trailing branches
+  // (the card's figures/age tail and the one-line row's default branch), and the amber stalled glyph.
+  it('shows the amber stalled count after the age on a card row', () => {
+    const { container } = renderRow(
+      makeSession({ kanban_active: 2, kanban_parked: 2, kanban_stalled: 1, title: 'Stalled' } as Partial<SessionInfo> & {
+        title: string
+      }),
+      { card: true }
+    )
+
+    const counts = screen.getByTestId('session-row-kanban-counts')
+    expect(counts.querySelector('[data-kanban-count="stalled"]')?.textContent).toBe('1')
+    expect(counts.querySelector('[data-kanban-count="stalled"]')?.className).toContain('text-amber-500')
+    expect(counts.getAttribute('aria-label')).toContain('stalled')
+    const time = container.querySelector('time')!
+    expect(time.compareDocumentPosition(counts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('shows the stalled count and the amber stalled glyph on a one-line row (no age)', async () => {
+    const { $sidebarRowMeta } = await import('@/store/layout')
+    const before = $sidebarRowMeta.get()
+    act(() => $sidebarRowMeta.set([]))
+
+    try {
+    const { container } = renderRow(
+      makeSession({
+        kanban_active: 1,
+        kanban_observed_at: Date.now() / 1000,
+        kanban_parked: 1,
+        kanban_stalled: 1,
+        message_count: 4,
+        title: 'Stalled one-line'
+      } as Partial<SessionInfo> & { title: string })
+    )
+
+    expect(container.querySelector('time')).toBeNull()
+    const counts = screen.getByTestId('session-row-kanban-counts')
+    expect(counts.querySelector('[data-kanban-count="stalled"]')?.textContent).toBe('1')
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stalled')
+    const glyph = container.querySelector('[data-slot="session-status-stripe"]')
+    expect(glyph?.getAttribute('data-status-stripe')).toBe('stalled')
+    expect(glyph?.className).toContain('amber')
+    expect(glyph?.querySelector('.codicon-project')).not.toBeNull()
+    } finally {
+      act(() => $sidebarRowMeta.set(before))
+    }
+  })
+
+  it('a parked row without stalled cards stays grey waiting', () => {
+    const { container } = renderRow(
+      makeSession({
+        kanban_active: 1,
+        kanban_observed_at: Date.now() / 1000,
+        kanban_parked: 1,
+        message_count: 4,
+        title: 'Waiting'
+      } as Partial<SessionInfo> & { title: string })
+    )
+
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('waiting')
+    expect(screen.getByTestId('session-row-kanban-counts').querySelector('[data-kanban-count="stalled"]')).toBeNull()
   })
 
   it('stays green (done) without kanban_attention', () => {

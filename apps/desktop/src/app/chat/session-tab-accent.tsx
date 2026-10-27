@@ -30,7 +30,8 @@ export function SessionTabAccent({ children, session, storedSessionId }: Session
         session?.cron_active,
         session?.review_wait,
         session?.kanban_attention,
-        kanbanStripeCounts(session ?? {}).waiting
+        kanbanStripeCounts(session ?? {}).waiting,
+        kanbanStripeCounts(session ?? {}).stalled
       )
 
   return (

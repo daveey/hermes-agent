@@ -240,7 +240,10 @@ export const showsRunningArc = (state: SessionDotState): boolean => state === 's
 //  kanban cards that are still open (`kanban_active`): it is not done and not
 //  stuck, it waits on them — never green, never blank. Parked like `periodic`
 //  (⌘] / ⌘[ skip it); a blocked card (red) and a live turn beat it.
-export type SessionStatusStripe = 'attention' | 'blocked' | 'done' | 'periodic' | 'stuck' | 'waiting'
+//  [daveey] `stalled` (amber, card glyph) replaces `waiting` when one of those parked cards waits on something only an
+//  agent can end and has for over 2 h (backend `kanban_stalled`): nothing is producing what it waits for. Still not
+//  the user's move (red stays for that), and parked like `waiting` for ⌘] / ⌘[.
+export type SessionStatusStripe = 'attention' | 'blocked' | 'done' | 'periodic' | 'stalled' | 'stuck' | 'waiting'
 
 /** [daveey] Backend `review_wait` stamp: the session's latest reply links an
  *  open PR still needing a code review. `stuck` = the review is on the user
@@ -257,7 +260,8 @@ export const sessionStatusStripe = (
   periodic = false,
   reviewWait: null | ReviewWait | undefined = null,
   kanbanAttention = 0,
-  kanbanWaiting = 0
+  kanbanWaiting = 0,
+  kanbanStalled = 0
 ): null | SessionStatusStripe =>
   userBlocked
     ? 'blocked'
@@ -271,14 +275,17 @@ export const sessionStatusStripe = (
     : reviewWait === 'parked' && state !== 'working'
     ? 'blocked'
     : (kanbanWaiting ?? 0) > 0 && state !== 'working'
-    ? 'waiting'
+    ? (kanbanStalled ?? 0) > 0
+      ? 'stalled'
+      : 'waiting'
     : state === 'unread' || (state === 'idle' && hasTurns)
       ? (kanbanAttention ?? 0) > 0
         ? 'attention'
         : 'done'
       : null
 
-type KanbanCounts = Pick<SessionInfo, 'kanban_active' | 'kanban_blocked' | 'kanban_held' | 'kanban_parked'>
+type KanbanCounts = Pick<SessionInfo, 'kanban_active' | 'kanban_blocked' | 'kanban_held' | 'kanban_parked'> &
+  Partial<Pick<SessionInfo, 'kanban_stalled'>>
 
 /** [daveey] Open kanban cards someone is actually working (running/ready/review, or a todo about to be promoted).
  *  `kanban_parked` (scheduled, non-human blocks, todo behind an open parent) and `kanban_held` (todo behind a human
@@ -293,14 +300,17 @@ export const liveKanbanCount = (row: KanbanCounts): number =>
  *  behind one (red); `waiting` = parked cards when nothing is live (grey). Live cards give neither, so a chat whose
  *  cards are running reads as working (no stripe) instead of grey like one parked until Thursday. Against a
  *  backend without `kanban_parked` every open card waits, as before. */
-export const kanbanStripeCounts = (row: KanbanCounts): { blocked: number; waiting: number } => {
+export const kanbanStripeCounts = (row: KanbanCounts): { blocked: number; stalled: number; waiting: number } => {
   const blocked = (row.kanban_blocked ?? 0) + (row.kanban_held ?? 0)
 
   if (row.kanban_parked === undefined) {
-    return { blocked, waiting: row.kanban_active ?? 0 }
+    return { blocked, stalled: 0, waiting: row.kanban_active ?? 0 }
   }
 
-  return { blocked, waiting: liveKanbanCount(row) > 0 ? 0 : row.kanban_parked }
+  const waiting = liveKanbanCount(row) > 0 ? 0 : row.kanban_parked
+
+  // [daveey] Stalled is a subset of parked: only meaningful while the row is waiting at all.
+  return { blocked, stalled: waiting > 0 ? Math.min(row.kanban_stalled ?? 0, waiting) : 0, waiting }
 }
 
 /** [daveey] Fold the row's OWN backend activity stamps into its resolved state.
@@ -556,6 +566,7 @@ export type StripeTraceRow = Pick<SessionInfo, 'id'> &
       | 'kanban_held'
       | 'kanban_observed_at'
       | 'kanban_parked'
+      | 'kanban_stalled'
       | 'kanban_waiting_on'
       | 'offline_cached'
       | 'profile'
@@ -592,6 +603,7 @@ export function formatStripeTransition(
     ['kanban_active', row.kanban_active],
     ['kanban_parked', row.kanban_parked],
     ['kanban_held', row.kanban_held],
+    ['kanban_stalled', row.kanban_stalled],
     ['kanban_blocked', row.kanban_blocked],
     ['kanban_waiting_on', row.kanban_waiting_on],
     ['kanban_observed_at', row.kanban_observed_at],

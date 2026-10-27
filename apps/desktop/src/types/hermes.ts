@@ -669,6 +669,10 @@ export interface SessionInfo {
   /** [daveey] How many of `kanban_active` are queued behind a card blocked on a human ask (painted red). Absent
    *  when zero. */
   kanban_held?: number
+  /** [daveey] How many of `kanban_parked` wait on something only an agent can end (transient/capability block,
+   *  triage, continuation exhausted, a park with no named producer) and have waited over 2 h. Painted amber
+   *  "stalled", distinct from grey waiting and red needs-you. Absent when zero. */
+  kanban_stalled?: number
   /** [daveey] Finished kanban cards (created or subscribed) whose result this
    *  conversation has not been handed — it was not loaded in any backend when
    *  they completed. Paints the row green (unread) until the gateway's

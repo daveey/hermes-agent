@@ -13,6 +13,10 @@ export const sessionStatusStripeColor = (stripe: null | SessionStatusStripe): st
     case 'attention':
       return '[--session-status-color:var(--color-amber-500)]'
 
+    // [daveey] Parked kanban work that nothing is producing for over 2 h (agent-owned wait).
+    case 'stalled':
+      return '[--session-status-color:var(--color-amber-500)]'
+
     default:
       return '[--session-status-color:var(--color-zinc-400)] dark:[--session-status-color:var(--color-zinc-500)]'
   }

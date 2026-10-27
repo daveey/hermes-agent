@@ -2943,6 +2943,7 @@ export interface Translations extends NoticeTranslations {
       ageMin: string
       kanbanTasks: (open: number, blocked: number) => string
       kanbanAttention: (count: number) => string
+      kanbanStalled: (count: number) => string
       backgroundProcesses: (count: number) => string
       backgroundProcessUnnamed: string
       stopProcess: string

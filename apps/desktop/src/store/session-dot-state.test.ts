@@ -668,7 +668,7 @@ describe('kanban results waiting for an unloaded session ($kanbanUnseenSessionId
 describe('kanbanStripeCounts', () => {
   it('live cards are working: no waiting count, background dot, no stripe', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 3, kanban_parked: 1 }
-    expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, waiting: 0 })
+    expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, stalled: 0, waiting: 0 })
     const state = withRowActivity('idle', row)
     expect(state).toBe('background')
     expect(sessionStatusStripe(state, true, false, 0, false, null, 0, kanbanStripeCounts(row).waiting)).toBeNull()
@@ -677,7 +677,7 @@ describe('kanbanStripeCounts', () => {
   it('parked-only work waits (grey) and does not paint the dot as running', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 2 }
     const counts = kanbanStripeCounts(row)
-    expect(counts).toEqual({ blocked: 0, waiting: 2 })
+    expect(counts).toEqual({ blocked: 0, stalled: 0, waiting: 2 })
     const state = withRowActivity('idle', row)
     expect(state).toBe('idle')
     expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('waiting')
@@ -686,7 +686,7 @@ describe('kanbanStripeCounts', () => {
   it('a queue held behind a human ask is stuck (red)', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 1, kanban_parked: 0, kanban_held: 1 }
     const counts = kanbanStripeCounts(row)
-    expect(counts).toEqual({ blocked: 1, waiting: 0 })
+    expect(counts).toEqual({ blocked: 1, stalled: 0, waiting: 0 })
     expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
   })
 
@@ -699,12 +699,34 @@ describe('kanbanStripeCounts', () => {
 
   it('a backend without kanban_parked keeps the old behaviour (all open cards wait)', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_blocked: 1 }
-    expect(kanbanStripeCounts(row)).toEqual({ blocked: 1, waiting: 2 })
+    expect(kanbanStripeCounts(row)).toEqual({ blocked: 1, stalled: 0, waiting: 2 })
     expect(withRowActivity('idle', row)).toBe('background')
   })
 
   it('no kanban work: zero counts', () => {
-    expect(kanbanStripeCounts({})).toEqual({ blocked: 0, waiting: 0 })
+    expect(kanbanStripeCounts({})).toEqual({ blocked: 0, stalled: 0, waiting: 0 })
+  })
+
+  // [daveey] Agent-owned parks that nothing has produced for over 2 h: amber `stalled`, distinct from grey waiting
+  // and red needs-you; a human ask still wins, and live work still reads as working.
+  it('parked work with a stalled card paints amber stalled, not grey waiting', () => {
+    const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 3, kanban_parked: 3, kanban_stalled: 1 }
+    const counts = kanbanStripeCounts(row)
+    expect(counts).toEqual({ blocked: 0, stalled: 1, waiting: 3 })
+    const state = withRowActivity('idle', row)
+    expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting, counts.stalled)).toBe(
+      'stalled'
+    )
+  })
+
+  it('a human ask (red) beats stalled, and live work hides it', () => {
+    const held = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 1, kanban_held: 1, kanban_stalled: 1 }
+    const h = kanbanStripeCounts(held)
+    expect(sessionStatusStripe(withRowActivity('idle', held), true, false, h.blocked, false, null, 0, h.waiting, h.stalled)).toBe(
+      'stuck'
+    )
+    const live = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 1, kanban_stalled: 1 }
+    expect(kanbanStripeCounts(live)).toEqual({ blocked: 0, stalled: 0, waiting: 0 })
   })
 })
 
