@@ -189,11 +189,10 @@ def _read_unseen(path: Path) -> dict[str, int]:
     return {str(sid): int(n) for sid, n in rows}
 
 
-# [daveey] Cards on ANOTHER gateway. A session here can own work that runs elsewhere (``hermes-hub create-task``,
-# a ``shepherd`` request, ``cross_task`` read/comment): the owner publishes it as a ``sessions`` link
-# ``{session, gw: <this gateway>, rel: "shepherd"}`` on the card, and hermes-hub keeps a local replica of every
-# gateway's cards in ``hub.db``. Those cards (and their children, transitively) count for the session too, so it
-# doesn't paint green while its remote work runs. Read-only; no replica = no-op.
+# Remote ownership comes from create/adopt receipts in the origin ledger. Replica
+# session links observe the linked card only, never its dependency graph. Created
+# children inherit their own origin subscription/receipt; dependency children may
+# be unrelated downstream work and MUST NOT be walked. Ledger release stays strict.
 def _hub_db_path() -> Path | None:
     base = os.environ.get("HERMES_HUB_STATE") or str(Path.home() / ".local" / "state" / "hermes-hub")
     path = Path(base) / "hub.db"
@@ -242,12 +241,10 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
 # [daveey] The ONE origin-work association for cards on other gateways. The sidebar counts
 # (``kanban_active``/``kanban_blocked``, which also drive the archive guard) and the session task list
 # (``session_tasks``) both come from ``_remote_links``, so they can never disagree about which remote
-# cards a session owns. A link is a ``rel: shepherd`` entry naming THIS gateway on a replica card (the
-# owner stores it as a ``platform='hub'`` notify subscription: ``hermes-hub create-task`` origin, a
-# ``shepherd`` request, or ``kanban_create`` run with an origin session); every descendant of that card
-# (``children``, transitively, on the owner's same board) is the session's work too. Rows are qualified
-# by gateway/profile/board/id: equal task IDs in different owner profiles are separate cards.
-# Historical board/id records retain unknown ownership rather than default-profile inference.
+# cards a session observes or owns. Each link selects only its exact card. Created
+# children count via their own inherited links. Gateway/profile/board/id identifies
+# a card; distinct qualified profiles stay separate. Historical unqualified aliases
+# do not add another count when a qualified record for the same card is available.
 HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync for this long = stale
 # The owner collector publishes each scope heartbeat about every 180s (sawtooth 0..~200s as replicated), so a
 # 180s window flapped: a closed card was released half the time. Allow ~2.5 collector periods. [daveey]
@@ -350,7 +347,8 @@ def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, di
         del tasks[key]
 
 
-def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, Any]]:
+def _read_remote_links(path: Path, now: float | None = None, *,
+                       qualified_out: set | None = None) -> list[dict[str, Any]]:
     """Replica cards linked to a session on this gateway, one row per (session, card).
 
     Open and unproven cards come back ``unfinished``; cards their owner attests closed
@@ -408,7 +406,12 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
                 # terminal evidence or the qualified ledger projection supersedes it.
                 t = {**t, 'reported_status': t.get('status'), 'status': 'unknown', 'unfinished': True}
             tasks[key] = t
+    blank_before = {key for key in tasks if key[1] is None}
     _fold_legacy_aliases(tasks, raw)
+    # Only a proven-identity alias is the same card as its qualified twin (folded above, links carried
+    # over). An unproven or ambiguous alias stays a separate ``unknown`` obligation: absence is never release.
+    if qualified_out is not None:
+        qualified_out.update((gw, board, tid) for gw, _, board, tid in blank_before - set(tasks))
     from hermes_cli.profiles import get_active_profile_name
 
     origin_profile = get_active_profile_name()
@@ -421,44 +424,31 @@ def _read_remote_links(path: Path, now: float | None = None) -> list[dict[str, A
         links = t.get("sessions") if isinstance(t.get("sessions"), list) else []
         sids = {str(link['session']) for link in links
                 if isinstance(link, dict) and link.get('session') and link.get('gw') == me
-                and link.get('profile') == origin_profile and link.get('rel') == 'shepherd'}
+                and link.get('profile') == origin_profile
+                and link.get('rel') in ('shepherd', 'cross_task', 'create-task', 'adopt-task')}
         if not sids:
             continue
         owner_seen = seen_at.get(gw) or None
         synced = min(owner_seen, last_ok) if (owner_seen and last_ok) else (owner_seen or last_ok)
-        done: set[str] = set()
-        todo = [tid]
-        while todo:
-            cur = todo.pop()
-            if cur in done:
-                continue
-            done.add(cur)
-            card = tasks.get((gw, owner_profile, board, cur))
-            if card is None:
-                continue
-            closed = (gw, owner_profile, board, cur) in released
-            if closed or card.get("status") in LISTED_STATUSES or card.get('unfinished'):
-                prefix = f'{gw}/{owner_profile}/{board}' if owner_profile is not None else f'{gw}/{board}'
-                ref = f'{prefix}/{cur}'
-                via = "shepherd" if cur == tid else "descendant"
-                for sid in sids:
-                    prev = found.get((sid, ref))
-                    if prev is None or (via == "shepherd" and prev["via"] != "shepherd"):
-                        found[(sid, ref)] = {
-                            **{f: card.get(f) for f in _REMOTE_FIELDS},
-                            "id": cur, "board": board, "gateway": gw, "key": ref, "session": sid,
-                            "via": via, "root": f"{prefix}/{tid}", "remote": True,
-                            "profile": owner_profile, "owner_profile": owner_profile,
-                            "origin_gateway": me, "origin_profile": origin_profile,
-                            "ownership_state": 'unknown' if owner_profile is None else 'qualified',
-                            "unfinished": not closed, "released": closed,
-                            "reported_status": card.get('reported_status', card.get('status')),
-                            "synced_at": synced, "stale": stale,
-                            "legacy_record": legacy_records.get((gw, owner_profile, board, cur)),
-                            "legacy_key": card.get('_legacy_key'),
-                        }
-            kids = card.get("children") if isinstance(card.get("children"), list) else []
-            todo.extend(str(k) for k in kids if k)
+        # Observation scope: the linked card only, never its dependency descendants.
+        closed = (gw, owner_profile, board, tid) in released
+        prefix = f'{gw}/{owner_profile}/{board}' if owner_profile is not None else f'{gw}/{board}'
+        ref = f'{prefix}/{tid}'
+        for sid in sids:
+            found[(sid, ref)] = {
+                **{f: t.get(f) for f in _REMOTE_FIELDS},
+                "id": tid, "board": board, "gateway": gw, "key": ref, "session": sid,
+                "via": "shepherd", "root": ref, "remote": True,
+                "profile": owner_profile, "owner_profile": owner_profile,
+                "origin_gateway": me, "origin_profile": origin_profile,
+                "ownership_state": 'unknown' if owner_profile is None else 'qualified',
+                "unfinished": not closed and (t.get("status") in LISTED_STATUSES or bool(t.get("unfinished"))),
+                "released": closed,
+                "reported_status": t.get('reported_status', t.get('status')),
+                "synced_at": synced, "stale": stale,
+                "legacy_record": legacy_records.get((gw, owner_profile, board, tid)),
+                "legacy_key": t.get('_legacy_key'),
+            }
     return list(found.values())
 
 
@@ -660,7 +650,8 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     try:
         if path is None:
             raise FileNotFoundError("no hub.db")
-        cards = _read_remote_links(path)
+        qualified: set[tuple[str, str, str]] = set()
+        cards = _read_remote_links(path, qualified_out=qualified)
     except Exception as exc:  # a broken replica must never break the sidebar
         if previous is None:
             if path is not None:
@@ -681,6 +672,9 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                      for c in cards if c.get("ownership_state") == "qualified"}
     cards.extend({**c, "stale": True} for c in (previous or [])
                  if (c["session"], c["key"]) not in present
+                 # Successful reads migrate graph-inferred cache entries only.
+                 # Receipt-backed obligations remain in the separate ledger.
+                 and c.get("via") != "descendant"
                  and not (c.get("ownership_state") == "unknown"
                           and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now))
     if _snapshot_saved != (scope, cards):

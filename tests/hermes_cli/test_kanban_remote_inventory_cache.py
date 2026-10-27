@@ -111,7 +111,7 @@ def replica(tmp_path, monkeypatch):
     hub.touch()
     card = dict(id='t_one', key='owner/work/build/t_one', session='s_one', status='running', unfinished=True)
     monkeypatch.setattr(activity, '_hub_db_path', lambda: hub)
-    monkeypatch.setattr(activity, '_read_remote_links', lambda path: [dict(card)])
+    monkeypatch.setattr(activity, '_read_remote_links', lambda path, **kw: [dict(card)])
     writes = []
 
     def snapshot(cards=None):

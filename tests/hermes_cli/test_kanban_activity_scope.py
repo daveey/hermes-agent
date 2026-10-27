@@ -32,10 +32,10 @@ def test_count_cache_does_not_leak_between_profiles(scoped, monkeypatch):
 
 def test_remote_memory_fallback_does_not_leak_between_profiles(scoped, monkeypatch, tmp_path):
     monkeypatch.setattr(activity, '_hub_db_path', lambda: tmp_path / 'replica')
-    monkeypatch.setattr(activity, '_read_remote_links', lambda _: [card()])
+    monkeypatch.setattr(activity, '_read_remote_links', lambda _, **kw: [card()])
     assert activity._legacy_remote_links() == [card()]
     scoped[0] = 'work'
-    def unavailable(_):
+    def unavailable(_, **kw):
         raise OSError('offline')
     monkeypatch.setattr(activity, '_read_remote_links', unavailable)
     with pytest.raises(OSError, match='offline'):

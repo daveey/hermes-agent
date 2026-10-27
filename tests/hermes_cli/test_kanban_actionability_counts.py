@@ -80,7 +80,7 @@ def test_stale_operational_block_remains_visible_and_owned():
 
 
 @pytest.mark.parametrize("interaction", ["approval", "reply", "user_terminal", "physical", "external"])
-def test_hub_replica_counts_explicit_requests_and_operational_children(tmp_path, interaction):
+def test_hub_replica_counts_explicit_requests_not_observed_descendants(tmp_path, interaction):
     path = tmp_path / "hub.db"
     root = dict(id="parent", status="blocked", block_kind="capability",
                 human_request={**REQUEST, "interaction": interaction}, children=["child"],
@@ -94,8 +94,8 @@ def test_hub_replica_counts_explicit_requests_and_operational_children(tmp_path,
                          [(f"default/main/{card['id']}", json.dumps(card)) for card in [root, child]])
     rows = activity._read_remote_links(path, now=1)
     assert {row["id"]: (row["session"], activity._replica_bucket(row)) for row in rows} == {
-        "parent": ("owner", "blocked"), "child": ("owner", "active"),
-    }
+        "parent": ("owner", "blocked"),
+    }  # shepherd links observe only the linked card, never its descendants
 
 
 @pytest.mark.parametrize("missing", list(REQUEST))

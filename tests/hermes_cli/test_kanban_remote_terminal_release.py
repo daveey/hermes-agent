@@ -131,8 +131,9 @@ def test_descendants_of_a_folded_root_follow_the_qualified_graph(tmp_path):
         ('default/default/t_2', observed(card('running', tid='t_2', sessions=[]))),
     ])
     rows = activity._read_remote_links(path, now=NOW)
+    # Observation scope: the linked card only, never its dependency descendants.
     assert {(r['key'], r['via'], r['unfinished']) for r in rows} == {
-        ('owner/default/default/t_1', 'shepherd', False), ('owner/default/default/t_2', 'descendant', True)}
+        ('owner/default/default/t_1', 'shepherd', False)}
 
 
 def test_snapshot_does_not_resurrect_a_folded_or_released_alias(tmp_path, monkeypatch):
@@ -144,7 +145,7 @@ def test_snapshot_does_not_resurrect_a_folded_or_released_alias(tmp_path, monkey
     monkeypatch.setattr(activity, '_remote_last', None)
     monkeypatch.setattr(activity, '_snapshot_saved', None)
     real = activity._read_remote_links
-    monkeypatch.setattr(activity, '_read_remote_links', lambda p: real(p, now=NOW))
+    monkeypatch.setattr(activity, '_read_remote_links', lambda p, **kw: real(p, now=NOW, **kw))
     rows = activity._legacy_remote_links()
     assert counted(rows) == []
     assert {r['key'] for r in rows} == {'owner/default/default/t_1'}

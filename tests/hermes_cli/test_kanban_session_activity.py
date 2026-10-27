@@ -324,8 +324,8 @@ def test_replica_card_shepherded_by_a_local_session_keeps_it_busy(kanban_root):
     ])
     rows = [{"id": "s_mac"}, {"id": "hub_oneshot"}]
     ksa.annotate_kanban_activity(rows)
-    assert rows[0]["kanban_active"] == 3  # includes unverified terminal shepherd
-    assert rows[0]["kanban_blocked"] == 1
+    assert rows[0]["kanban_active"] == 2  # running card + unverified terminal shepherd; no descendants
+    assert "kanban_blocked" not in rows[0]  # dependencies are not owned
     assert "kanban_active" not in rows[1]  # a session on the owning gateway is not ours
 
 
@@ -470,13 +470,12 @@ def _make_subs_board(path: Path, tasks: list[tuple], subs: list[tuple[str, str, 
 
 
 def _dispatch_graph(root_status="running"):
-    """A local chat on 'macbook' dispatched a 13-card graph that runs on 'hub': only the root carries the
-    shepherd link (later cards are its descendants). Root running, 12 waiting on it."""
+    """Created children inherit their own origin subscription, not graph ownership."""
     kids = [f"t_c{i:02d}" for i in range(12)]
     cards = [{"_gw": "hub", "id": "t_root", "title": "P0", "status": root_status, "children": kids,
               "sessions": [{"session": "hub_orch", "profile": None, "rel": "created"}, _shep("s_origin")]}]
     cards += [{"_gw": "hub", "id": k, "title": k, "status": "todo", "parents": ["t_root"],
-               "sessions": [{"session": "hub_orch", "profile": None, "rel": "created"}]} for k in kids]
+               "sessions": [{"session": "hub_orch", "profile": None, "rel": "created"}, _shep("s_origin")]} for k in kids]
     return cards
 
 
@@ -490,7 +489,7 @@ def test_remote_dispatch_graph_lists_every_owner_qualified_row_and_counts_the_sa
         {("hub", "default", "t_root")} | {("hub", "default", f"t_c{i:02d}") for i in range(12)})
     root = next(r for r in rows if r["id"] == "t_root")
     assert root["remote"] is True and root["via"] == "shepherd" and root["status"] == "running"
-    assert next(r for r in rows if r["id"] == "t_c00")["via"] == "descendant"
+    assert next(r for r in rows if r["id"] == "t_c00")["via"] == "shepherd"
     assert all(r["key"] == f"hub/default/default/{r['id']}" for r in rows)
     ann = [{"id": "s_origin"}]
     ksa.annotate_kanban_activity(ann)
