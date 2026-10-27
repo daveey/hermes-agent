@@ -60,3 +60,61 @@ def test_foreign_thread_cannot_forge_success(tmp_path):
     finally:
         stop.set()
         thread.join(3)
+
+
+def test_snapshot_epoch_advances_on_replacement_and_invalidation(tmp_path):
+    home, board = tmp_path, tmp_path / "kanban.db"
+    stops, threads = [], []
+
+    def consumer():
+        stop, ready = threading.Event(), threading.Event()
+        def run():
+            health.polled(home, "origin", board)
+            ready.set()
+            stop.wait(3)
+        thread = threading.Thread(target=run, daemon=True)
+        health.register({"session_key": "origin", "profile_home": str(home)}, stop, thread)
+        thread.start()
+        assert ready.wait(3)
+        stops.append(stop)
+        threads.append(thread)
+    try:
+        consumer()
+        first = health.snapshot(home, "origin", board)
+        assert first["available"]
+        assert health.snapshot(home, "origin", board)["epoch"] == first["epoch"]  # reads do not advance it
+        consumer()
+        second = health.snapshot(home, "origin", board)
+        assert second["epoch"] > first["epoch"] and second["incarnation"] != first["incarnation"]
+        stops[-1].set()
+        stopped = health.snapshot(home, "origin", board)
+        assert stopped["epoch"] > second["epoch"]
+    finally:
+        for stop in stops:
+            stop.set()
+        for thread in threads:
+            thread.join(3)
+
+
+def test_scope_loss_invalidates_receipt_even_if_nobody_read_during_the_outage(tmp_path):
+    home, board = tmp_path, tmp_path / "kanban.db"
+    stop, ready = threading.Event(), threading.Event()
+    session = {"session_key": "origin", "profile_home": str(home)}
+
+    def run():
+        health.polled(home, "origin", board)
+        ready.set()
+        stop.wait(3)
+    thread = threading.Thread(target=run, daemon=True)
+    health.register(session, stop, thread)
+    thread.start()
+    try:
+        assert ready.wait(3)
+        before = health.snapshot(home, "origin", board)
+        assert before["available"]
+        health.invalidate(session)  # refusal backoff / finalize, then recovery before any read
+        after = health.snapshot(home, "origin", board)
+        assert after["epoch"] > before["epoch"] and not after["available"]
+    finally:
+        stop.set()
+        thread.join(3)

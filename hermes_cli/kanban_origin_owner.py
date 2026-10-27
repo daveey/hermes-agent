@@ -95,7 +95,35 @@ def _dispatch_result(raw_result):
     return result
 
 
+def snapshot_command(args) -> int:
+    """Owner-side read for the origin guard: answer only for this exact gateway/profile route."""
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        from hermes_cli.kanban_origin_snapshot import owner_evidence
+        raw = sys.stdin.read() if args.request_file == '-' else Path(args.request_file).read_text(encoding="utf-8-sig")
+        request = json.loads(raw)
+        replica = Path(os.environ.get('HERMES_HUB_STATE') or Path.home() / '.local/state/hermes-hub') / 'hub.db'
+        gateway = _gateway(replica)
+        body = request.get('args')
+        owner = body.get('owner')
+        if (request.get('action') != 'ownership-snapshot' or not isinstance(owner, dict)
+                or set(body) != {'owner', 'binding_id'} or owner.get('gateway') != gateway
+                or owner.get('profile') != get_active_profile_name() or request.get('to_gw') != gateway):
+            raise ValueError('origin_route_mismatch')
+        result = owner_evidence(owner, body['binding_id'])
+    except (OSError, sqlite3.Error):
+        result = {'schema': 1, 'state': 'unknown', 'reasons': ['origin_storage_unavailable']}
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        code = str(exc)
+        result = {'schema': 1, 'state': 'unknown',
+                  'reasons': [code if re.fullmatch(r'origin_[a-z_]+', code) else 'origin_request_invalid']}
+    print(json.dumps(result))
+    return 0
+
+
 def command(args) -> int:
+    if args.kanban_action == 'ownership-snapshot':
+        return snapshot_command(args)
     try:
         raw = sys.stdin.read() if args.request_file == '-' else Path(args.request_file).read_text(encoding="utf-8-sig")
         request = json.loads(raw)

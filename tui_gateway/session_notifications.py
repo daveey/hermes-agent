@@ -533,6 +533,8 @@ def _kb_rewind_refused(session: dict, batch: list) -> None:
         delay = session.get("_kanban_refusal_delay") or _KANBAN_REFUSAL_BACKOFF_S
         session["_kanban_refusal_delay"] = min(delay * 2, _KANBAN_REFUSAL_BACKOFF_MAX_S)
         session["_kanban_refused_until"] = time.monotonic() + delay
+        from tui_gateway import kanban_consumer_health
+        kanban_consumer_health.invalidate(session)
     logger.info("kanban notification turn refused for session %s: rewound %d of %d notice(s); retry in %.0fs",
                 session.get("session_key") or "", len(rewound), len(refused), delay)
 
