@@ -1069,7 +1069,9 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         # replicated todo waits on a parent (parked). Held needs those links, so remote cards are never held.
         if bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo"):
             parked[sid] = parked.get(sid, 0) + 1
-        if (_remote_wait(card) or {}).get("wait_state") == "stalled":
+        # Same status test as parked/blocked above: a legacy row whose live status is unknown (reported_status is
+        # only its last report) is never counted stalled, so stalled can't exceed what the row shows parked.
+        if card.get("status") != "unknown" and (_remote_wait(card) or {}).get("wait_state") == "stalled":
             stalled[sid] = stalled.get(sid, 0) + 1
         if card.get("stale"):
             stale[sid] = stale.get(sid, 0) + 1
@@ -1192,7 +1194,8 @@ def parked_waits(now: float | None = None) -> list[dict[str, Any]]:
     """[daveey] Every parked card a session created or shepherds, local and on other gateways, with its wait info
     (``kanban_wait_info``): ``{session, id, board, key, title, remote, gateway, wait}``. For the owner wake (the
     chat-closeout plugin), which starts a supervise turn in the owning chat when a card parks for an agent-owned
-    reason. Local read failures skip that board; a failed remote read propagates (unknown is not "none")."""
+    reason. Local read failures skip that board; a failed remote read skips the remote cards for this
+    call (logged), so the local cards still wake."""
     out: list[dict[str, Any]] = []
     for path in _board_db_paths():
         try:
@@ -1218,7 +1221,12 @@ def parked_waits(now: float | None = None) -> list[dict[str, Any]]:
             if tid in info:
                 out.append({"session": sid, "id": tid, "board": board, "key": f"{board}/{tid}",
                             "title": titles.get(tid, ""), "remote": False, "gateway": None, "wait": info[tid]})
-    for card in _remote_links():
+    try:
+        remote = _remote_links()
+    except Exception as exc:
+        _log.warning("kanban parked waits: remote links unreadable, local cards only this pass: %s", exc)
+        remote = []
+    for card in remote:
         if card.get("stale"):
             continue
         wait = _remote_wait(card)

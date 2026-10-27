@@ -76,13 +76,24 @@ def _json(value: Any) -> Any:
     return value
 
 
-def parse_awaiting(value: Any) -> Optional[dict[str, str]]:
-    """A valid ``awaiting`` object (kind + ref + why strings) or None."""
+def parse_awaiting(value: Any) -> Optional[dict[str, Any]]:
+    """A valid ``awaiting`` object (kind, ref, why, gateway strings; ``inferred`` when core guessed it from the park's
+    text rather than the parker declaring it) or None."""
     data = _json(value)
     if not isinstance(data, dict) or not isinstance(data.get("kind"), str):
         return None
     return {"kind": data["kind"].strip().lower(), "ref": str(data.get("ref") or "").strip(),
-            "why": str(data.get("why") or "").strip()}
+            "why": str(data.get("why") or "").strip(), "gateway": str(data.get("gateway") or "").strip(),
+            "inferred": bool(data.get("inferred"))}
+
+
+def _awaiting_label(awaited: dict[str, Any]) -> str:
+    where = f" on {awaited['gateway']}" if awaited.get("gateway") else ""
+    return f"{awaited['kind']} {awaited['ref']}{where}"
+
+
+def _clock_label(wake_at: float) -> str:
+    return "the clock until " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(wake_at))
 
 
 def producer_from_wake_check(cmd: Any) -> Optional[tuple[str, str]]:
@@ -127,7 +138,8 @@ def premise_key(kind: str, status: str, reason: Any = "", awaiting: Optional[dic
     """Stable id of WHY a card waits: structured fields first (kind, status, reason code, awaiting kind/ref); the
     free-text reason only when nothing structured names it."""
     structured = [kind, status, str(reason_code or ""),
-                  [awaiting.get("kind"), _norm(awaiting.get("ref"))] if awaiting else None]
+                  [awaiting.get("kind"), _norm(awaiting.get("ref")), awaiting.get("gateway") or ""]
+                  if awaiting else None]
     text = "" if (reason_code or awaiting) else _norm(reason)
     basis = json.dumps([structured, text], sort_keys=True)
     return f"{kind}:{hashlib.sha1(basis.encode()).hexdigest()[:12]}"
@@ -184,12 +196,21 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
             # needs_input (or another human kind) without a validated ask: the user's move, just not visible.
             return out(f"blocked:{kind}", f"an unvalidated ask ({kind})", False)
     # scheduled, or blocked kind=time: a park. Who produces what it waits for?
+    wake_at = epoch_s(payload.get("wake_at"))
+    if awaited and awaited["inferred"] and not (awaited["kind"] == "card" and awaited["ref"]):
+        # Core's guess from the park text (every park on the "no producer, no park" core records one): an inferred
+        # clock/external wait is just the legacy wake mechanism, judged below like a park with no ``awaiting``.
+        awaited = None
     if awaited:
         if awaited["kind"] == "human":
             # A human ask hidden in a park: nobody sees it, so no one will produce the answer.
             return out("scheduled:hidden_ask", "a hidden ask (not visible to you)", True)
         if awaited["kind"] in LIVE_PRODUCER_KINDS and awaited["ref"]:
-            return out("scheduled", f"{awaited['kind']} {awaited['ref']}", False)
+            return out("scheduled", _awaiting_label(awaited), False)
+        if awaited["kind"] == "clock":
+            # A declared window (a soak, a cooldown, a release slot): the clock produces it.
+            label = _clock_label(wake_at) if wake_at else "a declared window"
+            return out("scheduled", label + (f" ({awaited['why'][:80]})" if awaited["why"] else ""), False)
         return out("scheduled:no_producer", f"{awaited['kind'] or 'something'} with no named producer", True)
     found = producer_from_wake_check(payload.get("wake_check"))
     if found and found[0] in ("card", "ci"):
@@ -197,10 +218,8 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
     if found:
         # An opaque probe proves only that something polls, not that anything will make it true.
         return out("scheduled:probe", f"probe {found[1]}", True, certain=False)
-    wake_at = epoch_s(payload.get("wake_at"))
     if wake_at:
-        return out("scheduled", "the clock until " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(wake_at)),
-                   False)
+        return out("scheduled", _clock_label(wake_at), False)
     if payload.get("unknown_producer"):
         return out("scheduled:unknown", "a producer the owner did not publish", False)
     return out("scheduled:no_producer", "nothing named", True, certain=False)

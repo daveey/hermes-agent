@@ -11,6 +11,7 @@ never gets re-split by a remote shell.
 """
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import sqlite3
@@ -113,9 +114,41 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
     return 2, f"error: remote wait-check on {host} exited {p.returncode}: {out[-300:]}"
 
 
+def handled_status(waiter: Optional[str], db_path: Optional[str], target: str) -> Optional[str]:
+    """The target status this probe's waiter already woke for: the newest ``condition_met`` on the waiter whose probe
+    names ``target`` and whose output read ``<target> <status>``. A tracker that handled that wake and re-parked
+    with the same probe must not be met again while the target still sits in that status (review or triage can
+    last hours; each probe run would wake it again). Read from the probe env the dispatcher sets
+    (``HERMES_KANBAN_TASK`` = the waiter, ``HERMES_KANBAN_DB`` = its board); None outside a probe or on any error."""
+    if not (waiter and db_path and target):
+        return None
+    try:
+        rows = _query(Path(db_path), "select payload from task_events where task_id=? and kind='condition_met' "
+                                     "order by id desc limit 5", (waiter,))
+    except Exception:
+        return None
+    for (raw,) in rows:
+        try:
+            payload = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        if target not in str(payload.get("wake_check") or ""):
+            continue
+        for line in str(payload.get("output") or "").splitlines():
+            words = line.split()
+            if len(words) >= 2 and words[0] == target:
+                return words[1]
+        return None
+    return None
+
+
 def run(args) -> int:
     until = tuple(u for u in (args.until or "").split(",") if u) or DEFAULT_UNTIL
     since = tuple(u for u in (getattr(args, "since", None) or "").split(",") if u)
+    if not since and args.check == "task":
+        # Implicit --from: the status the waiter already handled (see handled_status).
+        seen = handled_status(os.environ.get("HERMES_KANBAN_TASK"), os.environ.get("HERMES_KANBAN_DB"), args.target)
+        since = (seen,) if seen else ()
     gw = getattr(args, "gateway", None)
     if args.check == "capability-owner":
         # Owner cards live on another gateway; the hermes-hub replica on THIS gateway is the

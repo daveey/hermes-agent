@@ -20,6 +20,12 @@ NOW = 1_793_140_000.0
 H = 3600
 
 
+@pytest.fixture(autouse=True)
+def _not_a_probe_run(monkeypatch):
+    # wait-check reads the waiter from HERMES_KANBAN_TASK (set for dispatcher probes and kanban workers).
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+
+
 def d(status, **kw) -> dict:
     info = kwi.describe(status, now=NOW, **kw)
     assert info is not None
@@ -347,3 +353,66 @@ def test_stale_remote_rows_have_no_wait(kanban_root, monkeypatch):
     monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: rows)
     assert ksa._remote_wait(rows[0]) is None
     assert [r for r in ksa.parked_waits() if r["remote"]] == []
+
+
+# ---- review fixes: main's park payloads carry an inferred ``awaiting`` on every park ----------------------------
+def test_inferred_clock_awaiting_is_judged_by_the_wake_mechanism():
+    # kanban_awaiting._infer on a plain schedule / continuation: {"kind": "clock", "inferred": True}, no ref.
+    park = {"status": "scheduled", "wake_at": NOW + 600, "continuation": 2,
+            "awaiting": {"kind": "clock", "inferred": True, "premise": "abc"}}
+    info = d("scheduled", park=park, park_kind="continued", since=NOW - 9 * H)
+    assert info["agent_owned"] is False and info["wait_state"] == "waiting"
+    assert info["waiting_on"].startswith("the clock until ")
+
+
+def test_inferred_external_awaiting_falls_back_to_the_probe():
+    cmd = "python3 aws_hub_ec2_probe.py"
+    park = {"wake_check": cmd, "awaiting": {"kind": "external", "ref": cmd, "inferred": True}}
+    info = d("scheduled", park=park, since=NOW - 3 * H)
+    assert info["agent_owned"] is True and info["agent_owned_certain"] is False and info["wait_state"] == "stalled"
+    ci = {"wake_check": "gh run watch 9", "awaiting": {"kind": "external", "ref": "gh run watch 9", "inferred": True}}
+    assert d("scheduled", park=ci, since=NOW - 9 * H)["agent_owned"] is False
+
+
+def test_inferred_card_awaiting_and_declared_clock_are_live_producers():
+    card = d("scheduled", park={"awaiting": {"kind": "card", "ref": "t_abc12345", "inferred": True}},
+             since=NOW - 9 * H)
+    assert card["agent_owned"] is False and card["waiting_on"] == "card t_abc12345"
+    soak = d("scheduled", park={"wake_at": NOW + 600, "awaiting": {"kind": "clock", "why": "24h soak"}},
+             since=NOW - 9 * H)
+    assert soak["agent_owned"] is False and "24h soak" in soak["waiting_on"]
+    remote = d("scheduled", park={"awaiting": {"kind": "card", "ref": "t_abc12345", "gateway": "hub"}})
+    assert remote["waiting_on"] == "card t_abc12345 on hub"
+
+
+def test_tracker_does_not_rewake_for_a_status_it_already_handled(tmp_path, monkeypatch):
+    """A tracker woken because its owner went to review re-parks with the same default probe: the probe (run with
+    the dispatcher's HERMES_KANBAN_TASK/HERMES_KANBAN_DB) is not met again until the owner's status changes."""
+    db = tmp_path / "kanban.db"
+    probe = "hermes kanban wait-check task t_owner"
+    _board(db, [{"id": "t_owner", "status": "review", "session": "s"},
+                {"id": "t_tracker", "status": "scheduled", "session": "s",
+                 "events": [("condition_met", {"wake_check": probe, "output": "t_owner review"}, 1),
+                            ("scheduled", {"wake_check": probe}, 2)]}])
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    ns = SimpleNamespace(check="task", target="t_owner", board=None, until=None, since=None, gateway=None)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    assert kwc.run(ns) == 0  # not a probe run: plain default
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_tracker")
+    assert kwc.run(ns) == 1  # same status the tracker already handled
+    with sqlite3.connect(db) as c:
+        c.execute("UPDATE tasks SET status='triage' WHERE id='t_owner'")
+    assert kwc.run(ns) == 0  # a new status wakes it
+    assert kwc.handled_status("t_other", str(db), "t_owner") is None
+
+
+def test_parked_waits_keeps_local_cards_when_the_remote_read_fails(kanban_root, monkeypatch):
+    import time as _time
+    _board(kanban_root / "kanban.db", [
+        {"id": "t_b", "status": "blocked", "kind": "transient", "session": "s1",
+         "events": [("blocked", {"kind": "transient", "reason": "x"}, int(_time.time() - 60))]}])
+
+    def boom(stale_ok=False):
+        raise sqlite3.OperationalError("replica locked")
+    monkeypatch.setattr(ksa, "_remote_links", boom)
+    assert [r["id"] for r in ksa.parked_waits()] == ["t_b"]
