@@ -217,6 +217,7 @@ _PY_TEST_HARNESS = (
     "tests/e2e/core/_",
     "scripts/run_tests.sh",
     "scripts/run_tests_parallel.py",
+    "scripts/run_tests_host_slots.py",
 )
 # Both Desktop suites package the app and share this harness (the update
 # suite imports the core suite's harness and provider).

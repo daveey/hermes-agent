@@ -63,6 +63,7 @@ from typing import Dict, List, Optional, Tuple
 # "skipped on this host" note and the lanes can never disagree.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.ci.list_os_marked_tests import gated_specs, spec_hosts
+from scripts.run_tests_host_slots import HELD_ENV as HOST_SLOT_HELD_ENV, host_slot_count, host_slot_dir, host_test_slot
 
 
 def _sweep_killed_run_roots(root: str) -> None:
@@ -728,7 +729,29 @@ _FLAKY_TESTS: list[dict[str, str]] = []
 _flaky_lock = threading.Lock()
 
 
+_SLOT_WAIT_NOTED = threading.Event()
+
+
+def _note_host_slot_wait() -> None:
+    if not _SLOT_WAIT_NOTED.is_set():
+        _SLOT_WAIT_NOTED.set()
+        print(f"  (waiting for host test slots: other runs hold all {host_slot_count()} in {host_slot_dir()})",
+              flush=True)
+
+
 def _run_one_file_once(
+    file: Path,
+    pytest_args: list[str],
+    repo_root: Path,
+    file_timeout: float,
+    targets: list[str] | None = None,
+) -> tuple[Path, int, str, dict[str, int], float]:
+    """One attempt, run while holding a host-wide test slot (scripts/run_tests_host_slots.py)."""
+    with host_test_slot(on_wait=_note_host_slot_wait):
+        return _run_one_file_attempt(file, pytest_args, repo_root, file_timeout, targets)
+
+
+def _run_one_file_attempt(
     file: Path,
     pytest_args: list[str],
     repo_root: Path,
@@ -758,6 +781,7 @@ def _run_one_file_once(
     # One root for each subprocess removes the shared directory that the race
     # needs. The parent deletes the root after the attempt.
     env = os.environ.copy()
+    env[HOST_SLOT_HELD_ENV] = "1"  # a run nested in this file must not wait on the slot we hold
     temproot = tempfile.mkdtemp(prefix="r-", dir=_runner_scratch_root())
     env["PYTEST_DEBUG_TEMPROOT"] = temproot
     # Every tempfile.* call inside the test process lands in the same per-run root, so the
