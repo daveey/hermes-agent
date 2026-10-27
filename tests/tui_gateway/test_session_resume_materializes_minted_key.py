@@ -155,6 +155,19 @@ def test_resume_8hex_runtime_id_still_4007(real_db):
     assert len(real_db.list_sessions_rich(source="tui")) == 0
 
 
+def test_lazy_resume_preserves_stored_model_without_building(real_db):
+    real_db.create_session(EXISTING_KEY, source="desktop", model="claude-opus-5-5",
+                           model_config={"provider": "anthropic", "model": "claude-opus-5-5"})
+    resp = _resume(session_id=EXISTING_KEY, lazy=True)
+    _assert_resumed_ok(resp, EXISTING_KEY)
+    result = resp["result"]
+    assert result["info"]["model"] == "claude-opus-5-5"
+    assert result["info"]["provider"] == "anthropic"
+    record = server._sessions[result["session_id"]]
+    assert record["agent"] is None
+    assert record["model_override"]["model"] == "claude-opus-5-5"
+
+
 def test_resume_lazy_watch_missing_key_still_4007(real_db):
     """Lazy subagent watch windows must not mint phantom rows for dead children."""
     real_db.record_minted_session_key(MINTED_KEY)  # isolate the lazy gate
