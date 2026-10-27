@@ -558,3 +558,55 @@ def test_diff_counts_an_acknowledged_row_the_replica_has_not_pulled_yet_as_in_fl
     finally:
         shadow.close()
     assert report["clean"] and report["pending"] == 0 and report["checked"] == 1
+
+
+# --- capture gaps: trigger installs are atomic, skip when current, and heal missed rows --------------------------
+
+def _reinstall(kanban_home):
+    """A new process opening the board (its first connect runs install_or_remove)."""
+    kbc._INITIALIZED_PATHS.discard(str((kanban_home / "kanban.db").resolve()))
+    return kbc.connect(kanban_home / "kanban.db")
+
+
+def test_a_new_process_leaves_matching_triggers_untouched(live, kanban_home, monkeypatch):
+    drops = []
+    monkeypatch.setattr(sync, "drop_triggers", lambda conn: drops.append(1))
+    other = _reinstall(kanban_home)
+    other.close()
+    assert drops == []  # no drop/recreate window on an ordinary start
+
+
+def test_rows_written_in_a_capture_gap_are_queued_on_the_next_install(live, kanban_home):
+    tid = kb.create_task(live, title="gap", assignee="worker")
+    with kbc.write_txn(live):
+        live.execute("DELETE FROM kanban_sync_outbox")
+        sync.drop_triggers(live)  # the gap: another process's write lands with no trigger
+        live.execute("INSERT INTO task_runs (task_id, status, started_at) VALUES (?, 'running', 1)", (tid,))
+        live.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, 'me', 'missed', 1)", (tid,))
+    other = _reinstall(kanban_home)
+    try:
+        queued = {(r["table_name"], json.loads(r["fields"]).get("status") or json.loads(r["fields"]).get("body"))
+                  for r in other.execute("SELECT table_name, fields FROM kanban_sync_outbox")}
+        assert ("task_runs", "running") in queued and ("task_comments", "missed") in queued
+        assert other.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'kanban_sync_%'").fetchone()[0]
+    finally:
+        other.close()
+
+
+def test_rows_from_before_the_first_attach_are_left_to_import(kanban_home):
+    support.write_sync_config(kanban_home, True)
+    conn = kbc.connect(kanban_home / "kanban.db")  # never attached: board_id is local:…
+    try:
+        tid = kb.create_task(conn, title="pre", assignee="worker")
+        with kbc.write_txn(conn):
+            conn.execute("DELETE FROM kanban_sync_outbox")
+            sync.drop_triggers(conn)
+            conn.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, 'me', 'old', 1)", (tid,))
+    finally:
+        conn.close()
+    other = _reinstall(kanban_home)
+    try:
+        assert other.execute("SELECT COUNT(*) FROM kanban_sync_outbox").fetchone()[0] == 0
+        assert other.execute("SELECT uid FROM task_comments WHERE body = 'old'").fetchone()[0]
+    finally:
+        other.close()

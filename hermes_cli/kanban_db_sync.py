@@ -239,15 +239,37 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
         "SELECT ?, ?, '', 'shadow' WHERE NOT EXISTS (SELECT 1 FROM kanban_sync_state)",
         (f"local:{uuid7()}", f"gw_{uuid7()}"),
     )
-    if conn.execute("SELECT mode FROM kanban_sync_state").fetchone()[0] == "off":
-        drop_triggers(conn)
-        _SYNCED_PATHS.discard(db_path)
-        return
-    # Rows written before the first enable get their global identity now.
-    for table in _UID_TABLES:
-        conn.execute(f"UPDATE {table} SET uid = {_UUID7_SQL} WHERE uid IS NULL")
-    install_triggers(conn)
+    from hermes_cli.kanban_db_connect import write_txn
+    with write_txn(conn):  # one transaction: no other writer can land between dropping and recreating a trigger
+        state = conn.execute("SELECT mode, board_id FROM kanban_sync_state").fetchone()
+        if state[0] == "off":
+            drop_triggers(conn)
+            _SYNCED_PATHS.discard(db_path)
+            return
+        # Rows without a uid were written while no trigger captured them: before the first enable (import uploads
+        # those), or, on a board already attached to the service, in a capture gap. Give them their identity, and
+        # queue the gap's rows for upload so they cannot silently diverge.
+        attached = not str(state[1]).startswith("local:")
+        for table in _UID_TABLES:
+            missed = [r[0] for r in conn.execute(f"SELECT id FROM {table} WHERE uid IS NULL")] if attached else []
+            conn.execute(f"UPDATE {table} SET uid = {_UUID7_SQL} WHERE uid IS NULL")
+            if missed:
+                _queue_rows(conn, table, missed)
+                _log.warning("kanban sync: %d %s row(s) were written without capture; queued for upload", len(missed), table)
+        install_triggers(conn)
     _SYNCED_PATHS.add(db_path)
+
+
+def _queue_rows(conn: sqlite3.Connection, table: str, ids: list[int]) -> None:
+    """Queue full-row upserts for ``ids`` (rows a capture trigger never saw)."""
+    fields = "json_object(" + ", ".join(
+        f"'{_wire_name(table, c)}', json({_wire_value(table, c, 's')})" for c in captured_columns(conn, table)) + ")"
+    for chunk in range(0, len(ids), 500):
+        part = ids[chunk:chunk + 500]
+        conn.execute(
+            "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
+            f"SELECT {_UUID7_SQL}, '{table}', s.uid, 'upsert', {fields}, NULL, '', {_NOW_MS_SQL} "
+            f"FROM {table} AS s WHERE s.id IN ({','.join('?' * len(part))})", part)
 
 
 def drop_triggers(conn: sqlite3.Connection) -> None:
@@ -367,16 +389,32 @@ def _delete_trigger(table: str) -> str:
     return f"CREATE TRIGGER kanban_sync_{table}_del AFTER DELETE ON {table} WHEN {when} BEGIN {body} END"
 
 
-def install_triggers(conn: sqlite3.Connection) -> None:
-    """(Re)generate every capture trigger from the live column list."""
-    drop_triggers(conn)
+def wanted_triggers(conn: sqlite3.Connection) -> dict[str, str]:
+    """Trigger name -> CREATE statement, generated from the live column list."""
+    out: dict[str, str] = {}
     for table in SYNCED_TABLES:
         columns = captured_columns(conn, table)
-        conn.execute(_insert_trigger(table, columns))
+        sqls = [_insert_trigger(table, columns)]
         if table != "task_links":
-            conn.execute(_update_trigger(table, columns))
+            sqls.append(_update_trigger(table, columns))
         if table in _DELETE_CAPTURED:
-            conn.execute(_delete_trigger(table))
+            sqls.append(_delete_trigger(table))
+        for sql in sqls:
+            out[sql.split()[2]] = sql
+    return out
+
+
+def install_triggers(conn: sqlite3.Connection) -> None:
+    """(Re)generate every capture trigger from the live column list. A no-op when the installed set already
+    matches, so ordinary process starts never touch them; callers hold a write transaction so a rebuild has no
+    window in which another process's write goes uncaptured."""
+    wanted = wanted_triggers(conn)
+    have = dict(conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'kanban_sync_%'"))
+    if have == wanted:
+        return
+    drop_triggers(conn)
+    for sql in wanted.values():
+        conn.execute(sql)
 
 
 # --- Per-connection state -------------------------------------------------------------------------
