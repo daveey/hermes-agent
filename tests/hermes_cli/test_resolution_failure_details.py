@@ -25,7 +25,6 @@ def test_resolution_chain(surface, outcome, monkeypatch, caplog):
     caplog.set_level(logging.WARNING)
     from hermes_cli.runtime_provider import resolve_runtime_with_fallback
     from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
-    from agent import agent_init
 
     agent = SimpleNamespace(provider="openai-codex", requested_provider="openai-codex",
                             model="gpt-test", _fallback_model=chain, _fallback_activated=False)

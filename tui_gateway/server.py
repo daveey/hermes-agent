@@ -2551,7 +2551,7 @@ def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _Runti
             except Exception as fb_exc:
                 logging.getLogger(__name__).warning(
                     "Fallback %s model %s failed: %s: %s",
-                    fb_provider, fb_model, type(fb_exc).__name__, fb_exc)
+                    fb_provider, fb_model, type(fb_exc).__name__, fb_exc, exc_info=True)
                 failures.append((fb_provider, fb_model, fb_exc))
         if len(failures) > 1:
             raise ProviderFallbackError(failures) from primary_exc

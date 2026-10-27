@@ -435,8 +435,10 @@ class CLIAgentSetupMixin:
                 return runtime
             except Exception as fb_exc:
                 failures.append((_fb_provider, _fb_model, fb_exc))
-                logger.warning("Fallback entry %s/%s failed: %s: %s",
-                               _fb_provider, _fb_model, type(fb_exc).__name__, fb_exc)
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Fallback entry %s/%s failed: %s: %s",
+                    _fb_provider, _fb_model, type(fb_exc).__name__, fb_exc, exc_info=True)
                 continue
         if len(failures) > 1:
             raise ProviderFallbackError(failures) from primary_exc
