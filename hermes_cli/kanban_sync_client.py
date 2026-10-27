@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -465,9 +466,93 @@ def sync_all_once(hub: Optional[Hub] = None) -> list[RoundResult]:
     return results
 
 
+class FeedWatcher:
+    """The Board's push channel for one board: ``GET /v2/boards/<id>/ws`` (WebSocket, gateway key). Any change frame
+    sets ``wake`` so the sync loop pulls now instead of at its next poll. Keeps the socket alive with a ping every
+    ``ping_s`` and reconnects with backoff; polling still covers a closed socket."""
+
+    def __init__(self, ident: Identity, board: str, wake: threading.Event, keep_running: Callable[[], bool],
+                 ping_s: float = 25.0) -> None:
+        self.ident, self.board, self.wake, self.keep_running, self.ping_s = ident, board, wake, keep_running, ping_s
+        self.frames = 0
+
+    def url(self) -> str:
+        base = self.ident.url
+        base = "wss://" + base[len("https://"):] if base.startswith("https://") else "ws://" + base.split("://", 1)[-1]
+        return f"{base}/v2/boards/{self.board}/ws"
+
+    def run(self) -> None:
+        try:
+            from websockets.sync.client import connect
+        except ImportError:  # optional: without it the loop polls
+            _log.info("kanban sync: websockets not installed; %s is polled only", self.board)
+            return
+        backoff = 1.0
+        while self.keep_running():
+            try:
+                with connect(self.url(), additional_headers={"authorization": f"Bearer {self.ident.key}",
+                                                             "user-agent": "hermes-kanban-sync/1"},
+                             open_timeout=HTTP_TIMEOUT_S) as ws:
+                    backoff = 1.0
+                    while self.keep_running():
+                        try:
+                            raw = ws.recv(timeout=self.ping_s)
+                        except TimeoutError:
+                            ws.send("ping")
+                            continue
+                        try:
+                            kind = json.loads(raw).get("type")
+                        except (ValueError, AttributeError):
+                            continue
+                        if kind in ("changes", "changed", "resync"):
+                            self.frames += 1
+                            self.wake.set()
+            except Exception as exc:  # health: allow BLE001 -- any socket failure: back off and reconnect; polling covers the gap
+                _log.info("kanban sync: %s feed socket closed (%s: %s); reconnecting in %.0fs",
+                          self.board, type(exc).__name__, exc, backoff)
+                deadline = time.monotonic() + backoff
+                while self.keep_running() and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                backoff = min(backoff * 2, 60.0)
+
+
+def outbox_pending(paths: Iterable[Path]) -> bool:
+    """True when any synced board has a local change waiting to be pushed (one cheap read-only query each)."""
+    for path in paths:
+        try:
+            conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1)
+            try:
+                if conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1").fetchone():
+                    return True
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+    return False
+
+
+def wait_for_work(wake: threading.Event, paths: Iterable[Path], period: float,
+                  keep_running: Callable[[], bool], tick: float = 0.5) -> str:
+    """Block until there is sync work: a Board change frame (``wake``), a local change in an outbox, or the poll
+    period ran out. Returns which, so a local write is pushed within ``tick`` and a remote one pulled at once."""
+    paths = list(paths)
+    deadline = time.monotonic() + period
+    while keep_running():
+        if wake.wait(timeout=max(0.0, min(tick, deadline - time.monotonic()))):
+            wake.clear()
+            return "remote"
+        if outbox_pending(paths):
+            return "local"
+        if time.monotonic() >= deadline:
+            return "period"
+    return "stopped"
+
+
 def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = None,
                 sleep: Callable[[float], None] = time.sleep) -> None:
-    """The gateway's sync loop (call from a worker thread). Installs the lease client for primary boards."""
+    """The gateway's sync loop (call from a worker thread). Installs the lease client for primary boards, holds one
+    feed socket per synced board, and runs a round when the Board reports a change, a local change is waiting, or
+    the poll period passes."""
     try:
         ident = load_identity()
     except SyncUnavailable as exc:
@@ -476,14 +561,21 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     hub = Hub(ident)
     sync.set_lease_client(HubLeaseClient(hub))
     period = float(interval or sync.sync_config().get("interval_seconds") or DEFAULT_INTERVAL_S)
-    _log.info("kanban sync: running as gateway %s against %s every %.1fs", ident.gateway, ident.url, period)
+    _log.info("kanban sync: running as gateway %s against %s (feed sockets; poll every %.1fs)", ident.gateway, ident.url, period)
+    wake = threading.Event()
+    watchers: dict[str, threading.Thread] = {}
     while keep_running():
-        started = time.monotonic()
+        boards = board_paths()
+        for slug, _path in boards:
+            if slug not in watchers or not watchers[slug].is_alive():
+                watcher = FeedWatcher(ident, slug, wake, keep_running)
+                watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
+                watchers[slug].start()
         for r in sync_all_once(hub):
             if r.push and (r.push.sent or r.push.rejected):
                 _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
                           r.push.sent, r.push.rejected)
-        sleep(max(0.5, period - (time.monotonic() - started)))
+        wait_for_work(wake, [p for _s, p in boards], period, keep_running)
 
 
 # --- import ---------------------------------------------------------------------------------------

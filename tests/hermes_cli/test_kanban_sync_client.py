@@ -610,3 +610,66 @@ def test_rows_from_before_the_first_attach_are_left_to_import(kanban_home):
         assert other.execute("SELECT uid FROM task_comments WHERE body = 'old'").fetchone()[0]
     finally:
         other.close()
+
+
+# --- push channel: a Board change frame or a local write starts a round at once ---------------------------------
+
+def test_feed_watcher_wakes_the_loop_on_a_change_frame_and_keeps_the_socket_alive():
+    import threading
+    pytest.importorskip("websockets")
+    from websockets.sync.server import serve
+    seen = {"auth": None, "path": None, "pings": 0}
+    stop = threading.Event()
+
+    def handler(ws):
+        seen["auth"] = ws.request.headers.get("authorization")
+        seen["path"] = ws.request.path
+        ws.send(json.dumps({"type": "hello", "head": 1}))
+        ws.send(json.dumps({"type": "changes", "changes": [], "cursor": 2}))
+        while not stop.is_set():
+            try:
+                if ws.recv(timeout=0.2) == "ping":
+                    seen["pings"] += 1
+            except TimeoutError:
+                continue
+            except Exception:
+                return
+
+    with serve(handler, "127.0.0.1", 0) as server:
+        port = server.socket.getsockname()[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        wake = threading.Event()
+        ident = ksc.Identity(url=f"http://127.0.0.1:{port}", key="gw-key", gateway=ME)
+        watcher = ksc.FeedWatcher(ident, BOARD, wake, lambda: not stop.is_set(), ping_s=0.2)
+        t = threading.Thread(target=watcher.run, daemon=True)
+        t.start()
+        try:
+            assert wake.wait(timeout=5), "a change frame must wake the sync loop"
+            deadline = time.monotonic() + 5
+            while seen["pings"] == 0 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert seen["auth"] == "Bearer gw-key" and seen["path"] == f"/v2/boards/{BOARD}/ws"
+            assert seen["pings"] >= 1 and watcher.frames == 1  # hello is not a change
+        finally:
+            stop.set()
+            server.shutdown()
+            t.join(timeout=5)
+
+
+def test_wait_for_work_returns_on_a_remote_change_a_local_write_or_the_period(live, kanban_home):
+    import threading
+    path = kanban_home / "kanban.db"
+    with kbc.write_txn(live):
+        live.execute("DELETE FROM kanban_sync_outbox")
+    wake = threading.Event()
+    started = time.monotonic()
+    assert ksc.wait_for_work(wake, [path], period=0.3, keep_running=lambda: True, tick=0.05) == "period"
+    assert time.monotonic() - started >= 0.29
+    wake.set()
+    started = time.monotonic()
+    assert ksc.wait_for_work(wake, [path], period=10, keep_running=lambda: True) == "remote"
+    assert time.monotonic() - started < 0.2 and not wake.is_set()
+    kb.create_task(live, title="local write", assignee="worker")  # captured into the outbox
+    started = time.monotonic()
+    assert ksc.wait_for_work(wake, [path], period=10, keep_running=lambda: True, tick=0.05) == "local"
+    assert time.monotonic() - started < 0.5
