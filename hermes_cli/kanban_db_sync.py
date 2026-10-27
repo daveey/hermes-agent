@@ -474,6 +474,15 @@ def set_lease_client(client: Optional[LeaseClient]) -> Optional[LeaseClient]:
 
 
 def _client() -> LeaseClient:
+    """The registered lease client, or one built from this host's hub enrollment on first use: workers renew
+    their lease from their own process (the ``kanban_heartbeat`` tool), not the gateway's."""
+    global _LEASE_CLIENT
+    if _LEASE_CLIENT is None and sync_enabled():
+        try:
+            from hermes_cli import kanban_sync_client as ksc
+            _LEASE_CLIENT = ksc.HubLeaseClient(ksc.Hub(ksc.load_identity()))
+        except Exception as exc:  # health: allow BLE001 -- no enrollment / bad config: claims fail closed below
+            _log.info("kanban sync: no lease client (%s: %s)", type(exc).__name__, exc)
     if _LEASE_CLIENT is None:
         raise LeaseUnavailable("no lease client registered")
     return _LEASE_CLIENT

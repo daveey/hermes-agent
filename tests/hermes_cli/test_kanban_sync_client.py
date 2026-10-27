@@ -522,3 +522,21 @@ def test_sync_config_does_not_need_pyyaml(kanban_home, monkeypatch):
     support.write_sync_config(kanban_home, True)
     monkeypatch.setattr(builtins, "__import__", no_pyyaml)
     assert sync.sync_enabled()
+
+
+def test_a_worker_process_builds_its_own_lease_client_from_the_hub_enrollment(kanban_home, monkeypatch):
+    """Lease renewals happen in the worker (kanban_heartbeat), not the gateway: with sync on, the first lease
+    call builds a hub client from this host's enrollment; without one it fails closed."""
+    support.write_sync_config(kanban_home, True)
+    previous = sync.set_lease_client(None)
+    try:
+        with pytest.raises(sync.LeaseUnavailable):
+            sync._client()  # no enrollment files in this test home
+        mail = kanban_home.parent / ".config" / "hermes-mail"
+        mail.mkdir(parents=True)
+        (mail / "config.json").write_text(json.dumps({"url": "https://hub.test", "gateway": ME}))
+        (mail / "gateway.key").write_text("k\n")
+        client = sync._client()
+        assert isinstance(client, ksc.HubLeaseClient) and client.hub.ident.gateway == ME
+    finally:
+        sync.set_lease_client(previous)
