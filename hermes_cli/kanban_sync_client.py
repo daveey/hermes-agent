@@ -232,7 +232,35 @@ def _backoff_s(attempts: int) -> int:
 
 def transient_rejection(res: dict) -> bool:
     reason = str(res.get("reason") or "")
-    return reason in TRANSIENT_REASONS or (reason == "invalid" and "unknown table" in str(res.get("detail") or ""))
+    detail = str(res.get("detail") or "")
+    return (reason in TRANSIENT_REASONS or (reason == "invalid" and "unknown table" in detail)
+            or (reason == "not_found" and detail.startswith("no task")))  # its card is sent first next round
+
+
+def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -> list[tuple[dict, str]]:
+    """Full task upserts for cards that child rows in this batch belong to but the service has not acknowledged
+    (``sync_version`` NULL), sent ahead of them: a child captured before its card was queued (a board attached
+    while busy, then imported) would otherwise be refused ``not_found`` and hold the card back behind it."""
+    if not any(r["table_name"] != "tasks" for r in rows):
+        return []
+    in_batch = {r["row_uid"] for r in rows if r["table_name"] == "tasks"}
+    wanted: list[str] = []
+    for r in rows:
+        if r["table_name"] in ("tasks", "task_links"):
+            continue
+        fields = r["fields"] if isinstance(r["fields"], dict) else json.loads(r["fields"] or "{}")
+        tid = fields.get("task_id")
+        if tid and tid not in in_batch and tid not in wanted:
+            wanted.append(tid)
+    out: list[tuple[dict, str]] = []
+    for tid in wanted:
+        task = conn.execute("SELECT * FROM tasks WHERE id = ? AND sync_version IS NULL", (tid,)).fetchone()
+        if task is None:
+            continue
+        op = {"client_op_id": sync.uuid7(), "table": "tasks", "uid": tid, "op": "upsert",
+              "fields": _wire_fields("tasks", _row_fields(conn, "tasks", task)), "hlc": _next_hlc(conn, gateway)}
+        out.append((op, tid))
+    return out
 
 
 @dataclass
@@ -257,6 +285,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             break
         with write_txn(conn):
             wire = [translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway)) for r in rows]
+            parents = _unacked_parents(conn, rows, gateway)
+            wire = [op for op, _tid in parents] + wire
         try:
             resp = hub.ops(board, wire)
         except (HubError, OSError) as exc:
@@ -266,9 +296,15 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             raise
         out.sent += len(rows)
         authoritative: list[sync.RemoteChange] = []
+        parent_ops = {op["client_op_id"]: tid for op, tid in parents}
         with write_txn(conn):
             for res in resp.get("results", []):
                 status, op_id = res.get("status"), res.get("client_op_id")
+                if op_id in parent_ops:
+                    if status in ("applied", "merged") and res.get("version"):
+                        conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",
+                                     (res["version"], parent_ops[op_id]))
+                    continue
                 row = next((r for r in rows if r["op_id"] == op_id), None)
                 if row is None:
                     continue

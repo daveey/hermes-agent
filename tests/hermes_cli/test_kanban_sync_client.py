@@ -719,3 +719,16 @@ def test_a_child_row_update_is_sent_whole_so_it_stands_alone(live, svc):
     assert ksc.push(live, svc.hub(ME), BOARD, ME, primary=False).rejected == 0
     comment = next(c for c in svc.board(BOARD)["rows"]["task_comments"].values() if c["task_id"] == tid)
     assert comment["body"] == "edited" and comment["author"] == "me"
+
+
+def test_a_child_queued_before_its_card_does_not_hold_the_card_back(live, svc):
+    with kbc.write_txn(live):
+        sync.drop_triggers(live)
+    tid = kb.create_task(live, title="made before attach", assignee="worker")  # not captured, never acknowledged
+    sync.install_triggers(live)
+    kb.add_comment(live, tid, "me", "captured first")  # a child queued before any row of its card
+    res = ksc.push(live, svc.hub(ME), BOARD, ME, primary=False)
+    assert res.rejected == 0 and res.deferred == 0
+    assert svc.board(BOARD)["rows"]["tasks"][tid]["title"] == "made before attach"
+    assert live.execute("SELECT sync_version FROM tasks WHERE id = ?", (tid,)).fetchone()[0] is not None
+    assert any(c["body"] == "captured first" for c in svc.board(BOARD)["rows"]["task_comments"].values())
