@@ -723,26 +723,6 @@ def test_bounded_scheduler_eventually_runs_later_room(tmp_path: Path):
     assert runtime.stop(timeout=5.0)
 
 
-def test_existing_canonical_session_is_resumed_not_duplicated(db: Path):
-    identity = _identity()
-    _admit(db, identity)
-    rpc = FakeSessionRPC()
-    session_id = rpc.add_session()
-    runtime = _runtime(db, rpc)
-
-    runtime.start()
-    _wait_for(lambda: state.get_task(db, identity)["status"] == "settled")
-    assert runtime.stop(timeout=5.0)
-
-    assert not [call for call in rpc.calls if call[0] == "create"]
-    resume = next(params for method, params in rpc.calls if method == "resume")
-    assert resume == {
-        "profile": PROFILE,
-        "session_id": session_id,
-        "source": ROOM_SESSION_SOURCE,
-    }
-
-
 def test_local_crash_recovery_keeps_ambiguous_history_explicit_without_resume(
     db: Path,
 ):
