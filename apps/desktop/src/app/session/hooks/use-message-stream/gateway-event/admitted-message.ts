@@ -1,4 +1,4 @@
-import { registryBackendScopeKey } from '@hermes/shared'
+import { type GatewayEventMap, registryBackendScopeKey } from '@hermes/shared'
 
 import { toChatMessages } from '@/lib/chat-messages'
 import { knownOwnerForSession } from '@/store/session-states'
@@ -13,7 +13,7 @@ export function handleAdmittedMessageEvent(ctx: GatewayEventContext): boolean {
     return false
   }
 
-  const row = event.payload
+  const row = event.payload as GatewayEventMap['message.admitted'] | undefined
   const current = deps.sessionStateByRuntimeIdRef.current.get(explicitSid)
   const owner = knownOwnerForSession(explicitSid)
   const profile = typeof owner === 'string' ? owner : owner?.targetProfile ?? owner?.profile
