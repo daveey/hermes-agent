@@ -117,13 +117,36 @@ def _run(args: argparse.Namespace) -> int:
     return 1 if any(r["error"] for r in rows) else 0
 
 
-_ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run}
+def _links(args: argparse.Namespace) -> int:
+    """Reconcile this gateway's chat links in every synced board now (the sync loop does this every minute)."""
+    ident = ksc.load_identity()
+    ksc.reconcile_links(ksc.board_paths(), ident.gateway)
+    print("kanban sync: chat links reconciled")
+    return 0
+
+
+def _links_diff(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_chat_links
+    report = kanban_chat_links.links_diff(ksc.load_identity().gateway)
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        for k in ("clean", "chats", "ledger_links", "replica_links"):
+            print(f"{k:>16}: {report[k]}")
+        for k in ("only_in_ledger", "only_in_replica"):
+            items = [(s, c) for s, cards in report[k].items() for c in cards]
+            print(f"{k:>16}: {len(items)} {items[:8]}")
+    return 0 if report["clean"] else 1
+
+
+_ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run,
+            "links": _links, "links-diff": _links_diff}
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
     action = getattr(args, "sync_action", None)
     if action not in _ACTIONS:
-        print("usage: hermes kanban sync {status,attach,import,diff,run} [--board B]")
+        print("usage: hermes kanban sync {status,attach,import,diff,run,links,links-diff} [--board B]")
         return 2
     try:
         return _ACTIONS[action](args)

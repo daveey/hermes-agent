@@ -64,6 +64,10 @@ SYNCED_COLUMNS: dict[str, frozenset[str]] = {
     "task_attachments": frozenset({
         "task_id", "filename", "content_type", "size", "uploaded_by", "created_at", "blob_key",
     }),
+    # Which chats a card belongs to (created / shepherd), on any gateway (RFC "Retiring the origin ledger").
+    "task_chat_links": frozenset({
+        "task_id", "chat_gateway", "chat_profile", "chat_session", "kind", "released", "created_at",
+    }),
 }
 # Machine-local: host:pid claimers, PIDs, local paths, local session ids and the
 # read-only lease mirror. Stored locally, never pushed, never overwritten by a pull.
@@ -78,20 +82,22 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     "task_events": frozenset(),
     "task_runs": frozenset({"claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at"}),
     "task_attachments": frozenset({"stored_path"}),
+    "task_chat_links": frozenset(),
 }
 # Set by the service, never by a gateway: applied from the feed, never captured.
 SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"created_on"})}
 KEY_COLUMNS: dict[str, frozenset[str]] = {
     "tasks": frozenset({"id"}),
     "task_links": frozenset(),
-    **{t: frozenset({"id", "uid"}) for t in ("task_comments", "task_events", "task_runs", "task_attachments")},
+    **{t: frozenset({"id", "uid"}) for t in ("task_comments", "task_events", "task_runs", "task_attachments",
+                                             "task_chat_links")},
 }
 REF_COLUMNS: dict[tuple[str, str], str] = {
     ("tasks", "current_run_id"): "current_run_uid",
     ("task_events", "run_id"): "run_uid",
 }
 SYNCED_TABLES = tuple(SYNCED_COLUMNS)
-_UID_TABLES = ("task_comments", "task_events", "task_runs", "task_attachments")
+_UID_TABLES = ("task_comments", "task_events", "task_runs", "task_attachments", "task_chat_links")
 # Append-only rows leave only with their task; a delete trigger there would echo
 # every cascade row of a task delete the service already cascades itself.
 _DELETE_CAPTURED = ("tasks", "task_links", "task_attachments")
@@ -125,6 +131,18 @@ CREATE TABLE IF NOT EXISTS kanban_sync_tombstones (
     deleted_at INTEGER NOT NULL,
     PRIMARY KEY (table_name, row_uid)
 );
+CREATE TABLE IF NOT EXISTS task_chat_links (
+    id           INTEGER PRIMARY KEY,
+    uid          TEXT,
+    task_id      TEXT NOT NULL,
+    chat_gateway TEXT NOT NULL,
+    chat_profile TEXT,
+    chat_session TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    released     INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_chat_links_chat ON task_chat_links(chat_gateway, chat_session);
 CREATE TABLE IF NOT EXISTS kanban_sync_state (
     board_id        TEXT PRIMARY KEY,
     cursor          INTEGER NOT NULL DEFAULT 0,

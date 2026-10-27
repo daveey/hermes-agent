@@ -565,24 +565,31 @@ def _links_fingerprint() -> tuple:
     return tuple(signature)
 
 
-def _remote_links() -> list[dict[str, Any]]:
+def _remote_links(stale_ok: bool = False) -> list[dict[str, Any]]:
     """Shared origin-ledger projection, with preserved legacy associations.
 
-    One projection per scope serves every reader (counts, session task lists, plugins). Readers never wait for a
-    rebuild once a projection exists: when a store it reads changed (or ``_CACHE_TTL_S`` passed) the reader gets the
-    previous projection at once and one background rebuild replaces it, so a busy board (workers writing every few
-    seconds) cannot put the sidebar and the linked-card strip behind the projection lock. Only the first projection
-    for a scope is built inline (single-flight: concurrent readers share it). Failures are never cached; a failed
-    background rebuild keeps the previous projection."""
+    One projection per scope serves every reader (counts, session task lists, plugins) for ``_CACHE_TTL_S`` while
+    no store it reads has changed. Single-flight: concurrent readers wait for the running projection and share it
+    instead of each rebuilding. Failures are never cached.
+
+    ``stale_ok`` (the Desktop linked-card strip only): never wait for a rebuild once a projection exists. A reader
+    gets the previous projection at once and one background rebuild replaces it, so a busy board (workers writing
+    every few seconds) cannot hold the strip behind the projection lock. Every other reader keeps read-your-writes:
+    a release or association it just wrote is in the answer."""
     scope, fingerprint = _origin_scope(), _links_fingerprint()
     hit = _links_cache
     if hit is not None and hit[1] == scope:
-        if hit[2] != fingerprint or time.monotonic() >= hit[0]:
+        fresh = hit[2] == fingerprint and time.monotonic() < hit[0]
+        if fresh:
+            return list(hit[3])
+        if stale_ok:
             _refresh_links_in_background(scope)
-        return list(hit[3])
+            return list(hit[3])
     with _links_lock:
         hit = _links_cache
-        if hit is not None and hit[1] == scope:
+        if hit is not None and hit[1] == scope and hit[2] == fingerprint and time.monotonic() < hit[0]:
+            return list(hit[3])
+        if stale_ok and hit is not None and hit[1] == scope:
             return list(hit[3])
         return _store_links(scope, fingerprint)
 
@@ -936,7 +943,24 @@ def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]
         found[task_id]["pr_url"] = url
 
 
-def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED_STATUSES) -> list[dict[str, Any]]:
+def _remote_cards(ids: list[str], statuses: tuple[str, ...], stale_ok: bool) -> list[dict[str, Any]]:
+    """Cards on other gateways linked to these chats: from the synced chat links in the replicas when
+    ``kanban.sync.links_reader`` is ``replica`` (RFC phase 5), else from the origin-ledger projection."""
+    from hermes_cli import kanban_db_sync as _sync
+    if _sync.sync_config().get("links_reader") == "replica":
+        from hermes_cli import kanban_chat_links as _links
+        from hermes_cli import kanban_sync_client as _ksc
+        try:
+            gateway = _ksc.load_identity().gateway
+        except _ksc.SyncUnavailable:
+            gateway = None
+        if gateway:
+            return _links.replica_cards(ids, gateway, statuses)
+    return _remote_links(stale_ok=stale_ok)
+
+
+def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED_STATUSES, *,
+                  stale_ok: bool = False) -> list[dict[str, Any]]:
     """Every open/blocked/review task across all boards that the given session
     ids (one compression lineage) created or shepherd — exactly the cards the
     sidebar row's ``kanban_active``/``kanban_blocked`` counts cover. Failed
@@ -952,7 +976,7 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
     # [daveey] Cards on other gateways this lineage owns: the same rows the counts use, owner-qualified
     # (gateway/board/id), with ``stale``/``synced_at`` from the replica. One row per card.
     wanted, seen = set(ids), set()
-    for card in _remote_links():
+    for card in _remote_cards(ids, statuses, stale_ok):
         belongs = card['session'] in wanted or card.get('origin_session') in wanted
         listed = card.get('status') in statuses or (card.get('status') == 'unknown' and card.get('unfinished'))
         if belongs and listed and card['key'] not in seen:
