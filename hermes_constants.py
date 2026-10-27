@@ -225,9 +225,12 @@ def get_default_hermes_root(*, home: str | Path | None = None) -> Path:
         return memo[2]
     result = native_home
     if env_path is not None:
-        try:
-            env_path.resolve().relative_to(native_home.resolve())  # under ~/.hermes (normal or profile mode)
-        except ValueError:  # Docker/custom root: <root>/profiles/<name> -> <root>, else HERMES_HOME itself
+        # Only the native home and its immediate profiles (including symlink aliases)
+        # belong to the native root. A scratch home below ~/.hermes/cache is an
+        # independent installation: collapsing every descendant exposes real sessions.
+        resolved = env_path.resolve()
+        native_resolved = native_home.resolve()
+        if resolved != native_resolved and resolved.parent != native_resolved / "profiles":
             result = env_path.parent.parent if env_path.parent.name == "profiles" else env_path
     _default_hermes_root_memo = (*memo_key, result)
     return result
