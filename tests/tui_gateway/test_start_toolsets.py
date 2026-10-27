@@ -156,7 +156,7 @@ def _build(monkeypatch, store, key, wide=("terminal", "file", "code_execution"))
     monkeypatch.setattr(server, "_agent_cbs", lambda sid: {})
     monkeypatch.setattr(server, "_startup_system_prompt", lambda cfg, key: "")
     monkeypatch.setattr(server, "_resolve_agent_model_runtime", lambda m, p: ("model", {}))
-    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(server, "_load_cfg", dict)
     monkeypatch.setattr(server, "_resolve_agent_platform", lambda p=None: "desktop")
     return server._make_agent("sid", key, session_id=key, session_db=store.db)
 
