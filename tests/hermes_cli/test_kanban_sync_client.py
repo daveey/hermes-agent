@@ -540,3 +540,21 @@ def test_a_worker_process_builds_its_own_lease_client_from_the_hub_enrollment(ka
         assert isinstance(client, ksc.HubLeaseClient) and client.hub.ident.gateway == ME
     finally:
         sync.set_lease_client(previous)
+
+
+def test_diff_counts_an_acknowledged_row_the_replica_has_not_pulled_yet_as_in_flight(live, svc, kanban_home):
+    tid = kb.create_task(live, title="moving", assignee="worker")
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=False)  # acknowledged; the replica has not pulled it yet
+    shadow = _shadow()
+    try:
+        report = ksc.diff(live, shadow, ME)
+        assert report["clean"] and report["pending"] == 1, report
+        ksc.pull(shadow, svc.hub(ME), BOARD, observers=False)
+        report = ksc.diff(live, shadow, ME)
+    finally:
+        shadow.close()
+    assert report["clean"] and report["pending"] == 0 and report["checked"] == 1

@@ -324,6 +324,27 @@ describe('ModelPill with a stored model and no live agent', () => {
     }
   })
 
+  it.each([false, true])('names an empty draft immediately (live menu: %s)', liveMenu => {
+    const view = unloadedView()
+    const liveModel = atom('')
+    view.$model = liveModel
+    view.$storedId = atom<string | null>(null)
+
+    const { container } = render(
+      <SessionViewProvider value={view}>
+        <ModelPill disabled={false} model={modelState({ model: '', provider: '', modelMenuContent: liveMenu ? <div /> : undefined })} />
+      </SessionViewProvider>
+    )
+
+    expect(container.querySelector('.glyph-spinner')).toBeNull()
+    expect(container.textContent).toContain('Switch model')
+    act(() => liveModel.set('claude-opus-5-5'))
+    expect(container.textContent).toContain('Opus 5.5')
+    act(() => liveModel.set(''))
+    expect(container.querySelector('.glyph-spinner')).toBeNull()
+    expect(container.textContent).toContain('Switch model')
+  })
+
   it('never spins for a stored chat whose row is not loaded; names itself as the picker', () => {
     const { container } = render(
       <SessionViewProvider value={unloadedView()}>

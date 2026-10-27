@@ -35,6 +35,11 @@ def _resolve_refresh_toolsets(agent, enabled_override, disabled_override):
     and reuse the build-time selection."""
     enabled = getattr(agent, "enabled_toolsets", None)
     disabled = getattr(agent, "disabled_toolsets", None)
+    pin = getattr(agent, "_toolset_pin", None)
+    if pin:
+        # A session started with a closed allowlist can never be widened by a reload or config change.
+        enabled_override = list(pin)
+        agent.enabled_toolsets = enabled_override
     if enabled_override is not None or disabled_override is not None:
         enabled = enabled_override if enabled_override is not None else enabled
         if disabled_override is not None:

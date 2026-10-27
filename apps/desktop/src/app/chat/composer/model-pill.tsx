@@ -9,7 +9,6 @@ import { ModelMenuCloseContext } from '@/app/shell/model-menu-panel'
 import { isElementInHiddenPane } from '@/components/pane-shell/pane-visibility'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
-import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { releaseTypingFocus } from '@/components/ui/keyboard-first'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
@@ -31,11 +30,6 @@ import type { ChatBarState } from './types'
 // truncates when the row is genuinely out of room (#49340) — not at an
 // arbitrary 160px.
 const UNKNOWN_TIER = atom('')
-
-// How long a brand-new draft may show the bare loader while its default model
-// resolves. Past this nothing is plausibly in flight, so the pill names itself
-// as the picker instead of spinning forever (it read as a grip icon).
-const DRAFT_SPINNER_MS = 5_000
 
 const PILL = cn(
   'h-(--composer-control-size) min-w-0 shrink gap-1 rounded-md px-2 text-xs font-normal',
@@ -71,7 +65,6 @@ export function ModelPill({
   // No live model yet (agent not loaded): fall back to the chat's STORED model
   // rather than a bare spinner — the chat is still on it (#t_b319a52a).
   const stored = useStoredModelSelection(view)
-  const storedId = useStore(view.$storedId)
   const loadingStored = !liveModel.trim() && Boolean(stored.model.trim())
   const currentModel = liveModel || stored.model
   const currentProvider = (liveModel ? model.provider || viewProvider : stored.provider) || viewProvider
@@ -81,21 +74,6 @@ export function ModelPill({
   const modelSource = useStore($currentModelSource)
   const runtimeId = useStore(view.$runtimeId)
   const [open, setOpen] = useState(false)
-  const [draftSpinnerExpired, setDraftSpinnerExpired] = useState(false)
-  // A bare loader only for a draft (no stored chat) and only briefly.
-  const showSpinner = !currentModel.trim() && !storedId && !draftSpinnerExpired
-
-  useEffect(() => {
-    if (currentModel.trim() || storedId) {
-      setDraftSpinnerExpired(false)
-
-      return
-    }
-
-    const timer = window.setTimeout(() => setDraftSpinnerExpired(true), DRAFT_SPINNER_MS)
-
-    return () => window.clearTimeout(timer)
-  }, [currentModel, storedId])
   const restoreSelection = useRef<(() => void) | null>(null)
   const scope = useComposerScope()
   const hasLiveMenu = Boolean(model.modelMenuContent)
@@ -157,9 +135,7 @@ export function ModelPill({
   const pinnedOverride =
     view.kind === 'primary' && !runtimeId && modelSource === 'manual' && Boolean(liveModel.trim())
 
-  // The model resolves a beat after the gateway/session comes up. Rather than
-  // flash a literal "No model", show a quiet loader (inherits the pill text
-  // color at half opacity) until a model lands.
+  // Unknown does not imply a request is pending: keep the picker named.
   //
   // A `composer.modelPill` provider may override the LABEL (compact reasoning
   // label, custom naming) — the pill keeps its chrome, pin dot, and menu; only
@@ -178,8 +154,6 @@ export function ModelPill({
         >
           {pillLabel ?? formatModelPillLabel(currentModel, { fastMode, serviceTier })}
         </span>
-      ) : showSpinner ? (
-        <GlyphSpinner className="opacity-50" spinner="braille" />
       ) : (
         <span className="truncate">{copy.switchModel}</span>
       )}

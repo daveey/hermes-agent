@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from hermes_cli.fallback_errors import ProviderFallbackError
+
 
 def _agent(provider="openrouter"):
     return SimpleNamespace(
@@ -77,18 +79,18 @@ def test_fully_refusing_ladder_warns_with_each_reason(
     )
 
     with caplog.at_level(logging.WARNING, logger="run_agent"):
-        with pytest.raises(RuntimeError, match=raise_match):
+        with pytest.raises(ProviderFallbackError if ladder else RuntimeError, match=raise_match):
             agent_init._routed_client_kwargs(_agent(primary), ladder, 60)
 
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert len(warnings) == 1
-    text = warnings[0].getMessage()
+    assert len(warnings) == (len(ladder) + 1)
+    text = warnings[-1].getMessage()
     assert primary in text
     for fragment in expected:
         assert fragment in text
 
 
-def test_recovered_ladder_does_not_warn(monkeypatch, caplog):
+def test_recovered_ladder_warns_for_failed_entry(monkeypatch, caplog):
     """An entry refusing while a later one serves the init is degraded config, not a failure."""
     from agent import agent_init
 
@@ -117,4 +119,7 @@ def test_recovered_ladder_does_not_warn(monkeypatch, caplog):
     assert kwargs == {"api_key": "k"}
     assert agent.provider == "kimi"
     assert agent._fallback_activated
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "deepseek/deepseek-v4-pro" in warnings[0]
+    assert "ProviderNotConfiguredError: no usable credentials" in warnings[0]

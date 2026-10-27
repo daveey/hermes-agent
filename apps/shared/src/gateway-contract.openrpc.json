@@ -33188,6 +33188,13 @@
             },
             "title": "Metadata",
             "type": "object"
+          },
+          "toolsets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Toolsets",
+            "type": "array"
           }
         },
         "required": [

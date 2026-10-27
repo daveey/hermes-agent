@@ -1145,8 +1145,8 @@ def resolve_runtime_with_fallback(config: Optional[dict[str, Any]], *, requested
     walks ``get_fallback_chain(config)`` in order and returns the first entry that resolves — the single
     resolution-time walker shared by the gateway and oneshot. ``ValueError``/other errors are genuine
     misconfiguration (unknown ``--provider`` ...) and propagate unchanged, so a typo is never silently
-    rerouted onto a provider the operator did not ask for. When every entry fails, the *primary* error is
-    re-raised: a fallback entry's failure is not what the operator configured first (#81209). The entry's
+    rerouted onto a provider the operator did not ask for. When attempted fallbacks all fail,
+    ProviderFallbackError retains every cause; with no attempts the primary is re-raised. The entry's
     ``model`` is the model the caller must send.
     """
     from hermes_cli.auth import AuthError, primary_failure_wording
@@ -1162,6 +1162,12 @@ def resolve_runtime_with_fallback(config: Optional[dict[str, Any]], *, requested
                                         explicit_base_url=explicit_base_url, explicit_api_key=explicit_api_key), None
     except AuthError as primary_exc:
         from hermes_cli.fallback_config import effective_runtime_provider, get_fallback_chain, resolve_entry_api_key
+        from hermes_cli.fallback_errors import ProviderFallbackError
+        model_config = (config or {}).get("model") or {}
+        if not isinstance(model_config, dict):
+            model_config = {}
+        failures = [(requested or model_config.get("provider") or "",
+                     target_model or model_config.get("default") or "", primary_exc)]
         for entry in get_fallback_chain(config):
             provider = (entry.get("provider") or "").strip().lower()
             model = (entry.get("model") or "").strip()
@@ -1170,16 +1176,14 @@ def resolve_runtime_with_fallback(config: Optional[dict[str, Any]], *, requested
             kwargs: dict[str, Any] = {"requested": provider, "target_model": model}
             if entry.get("base_url"):
                 kwargs["explicit_base_url"] = entry["base_url"]
-            if entry_key := resolve_entry_api_key(entry):
-                kwargs["explicit_api_key"] = entry_key
             try:
+                if entry_key := resolve_entry_api_key(entry):
+                    kwargs["explicit_api_key"] = entry_key
                 runtime = resolve_runtime_provider(**kwargs)
-            except AuthError as fb_exc:
-                logger.debug("Fallback entry %s/%s failed: %s", provider, model, fb_exc)
-                continue
             except Exception as fb_exc:
-                # Not a credential problem: a mistyped provider/base_url must be visible, not silently skipped.
-                logger.warning("Fallback entry %s/%s is misconfigured and was skipped: %s", provider, model, fb_exc)
+                failures.append((provider, model, fb_exc))
+                logger.warning("Fallback entry %s/%s failed: %s: %s",
+                               provider, model, type(fb_exc).__name__, fb_exc)
                 continue
             # Named custom entries resolve to the bare "custom" class; persist the configured identity (#98739).
             runtime["provider"] = effective_runtime_provider(entry, runtime)
@@ -1188,4 +1192,6 @@ def resolve_runtime_with_fallback(config: Optional[dict[str, Any]], *, requested
             logger.warning("Primary provider %s (%s). Falling back to %s/%s",
                            primary_failure_wording(primary_exc)[0], primary_exc, provider, model)
             return runtime, entry
+        if len(failures) > 1:
+            raise ProviderFallbackError(failures) from primary_exc
         raise primary_exc

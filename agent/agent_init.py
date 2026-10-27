@@ -86,35 +86,8 @@ def _warn_memory_provider_unavailable(name: str, reason: str = "", say=None) -> 
 
 def _provider_default_routes(provider: str) -> set[str]:
     """Return known exact default routes for a canonical provider id."""
-    routes: set[str] = set()
-
-    def add(value):
-        route = normalize_route_base_url(value)
-        if route:
-            routes.add(route)
-
-    with suppress(Exception):
-        from hermes_cli.providers import HERMES_OVERLAYS, get_provider
-        overlay = HERMES_OVERLAYS.get(provider)
-        provider_def = get_provider(provider, allow_network=False)
-        add(getattr(overlay, "base_url_override", ""))
-        add(getattr(provider_def, "base_url", ""))
-
-    with suppress(Exception):
-        from providers import get_provider_profile
-        add(getattr(get_provider_profile(provider), "base_url", ""))
-
-    with suppress(Exception):
-        from hermes_cli.auth import PROVIDER_REGISTRY
-        from hermes_cli.models import normalize_provider as normalize_model_provider
-        from hermes_cli.providers import normalize_provider as normalize_registry_provider
-        for provider_id, config in PROVIDER_REGISTRY.items():
-            if normalize_registry_provider(normalize_model_provider(provider_id)) == provider:
-                add(getattr(config, "inference_base_url", ""))
-
-    if provider == "gemini":
-        routes.update(f"{route.rstrip('/')}/openai" for route in list(routes))
-    return routes
+    from agent.agent_init_routes import provider_default_routes
+    return provider_default_routes(provider)
 
 
 def _context_route_mismatch(
@@ -870,6 +843,7 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
     # #17929.
     _explicit = (agent.provider or "").strip().lower()
     _refused_entries = []
+    _failures = []
     for _fb in _fallback_entries(fallback_model):
         _fb_provider = str(_fb["provider"])
         try:
@@ -880,16 +854,20 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
                 explicit_base_url=_fb.get("base_url"), explicit_api_key=_fb_explicit_key,
             )
         except Exception as _fb_exc:
-            logger.debug("Init-time fallback entry %s failed: %s", _fb_provider, _fb_exc)
+            _failures.append((_fb_provider, str(_fb["model"]), _fb_exc))
+            logger.warning("Init-time fallback entry %s/%s failed: %s: %s",
+                           _fb_provider, _fb["model"], type(_fb_exc).__name__, _fb_exc)
             # A bare exception (``KeyError()``) stringifies empty; name its type instead.
             _refused_entries.append((_fb_provider, str(_fb_exc) or type(_fb_exc).__name__))
             continue
         if _fb_client is None:
             # The router returns None when no credentials are usable for the entry — a skip
             # that leaves no trace otherwise, hiding key-less fallback entries from the log.
-            logger.debug(
-                "Init-time fallback entry %s resolved no usable credentials", _fb_provider
-            )
+            from agent.auxiliary_unavailable import ProviderNotConfiguredError
+            _fb_exc = ProviderNotConfiguredError("no usable credentials")
+            _failures.append((_fb_provider, str(_fb["model"]), _fb_exc))
+            logger.warning("Init-time fallback entry %s/%s failed: %s: %s",
+                           _fb_provider, _fb["model"], type(_fb_exc).__name__, _fb_exc)
             _refused_entries.append((_fb_provider, "no usable credentials"))
             continue
         agent._fallback_activated = True
@@ -922,6 +900,14 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
             "credential pool exhausted" if _pool_exhausted else "no usable credentials",
             "; ".join(f"{_p} ({_r})" for _p, _r in _refused_entries) or "none configured",
         )
+    def _raise_resolution_error(primary_exc):
+        if _failures:
+            from hermes_cli.fallback_errors import ProviderFallbackError
+            raise ProviderFallbackError(
+                [(agent.provider or "auto", agent.model or "", primary_exc), *_failures]
+            ) from primary_exc
+        raise primary_exc
+
     # A fully-exhausted pool is a billing/quota failure, NOT a config problem: name it for EVERY
     # explicit provider. ``openrouter`` / ``custom`` have no provider-specific missing-credentials
     # branch, so a burned override pool there fell through to the generic "No LLM provider
@@ -940,19 +926,19 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
             or pool_cooldown_message(_explicit)
         )
         if _exhausted_message:
-            raise ProviderCredentialsExhaustedError(_exhausted_message, provider=_explicit)
+            _raise_resolution_error(ProviderCredentialsExhaustedError(_exhausted_message, provider=_explicit))
     if _explicit and _explicit not in {"auto", "openrouter", "custom"}:
         # Explicit non-OpenRouter provider with no creds and no usable fallback: fail fast.
         from agent.auxiliary_unavailable import ProviderNotConfiguredError, missing_provider_credentials_message
-        raise ProviderNotConfiguredError(missing_provider_credentials_message(_explicit))
+        _raise_resolution_error(ProviderNotConfiguredError(missing_provider_credentials_message(_explicit)))
     from hermes_constants import profile_cli_selector
     from agent.auxiliary_unavailable import ProviderNotConfiguredError
     _sel = profile_cli_selector()
-    raise ProviderNotConfiguredError(
+    _raise_resolution_error(ProviderNotConfiguredError(
         "No LLM provider configured. Run `hermes model` to "
         "select a provider, or run `hermes setup` for first-time "
         "configuration."
-    )
+    ))
 
 
 def _apply_openai_header_policy(agent, client_kwargs: dict[str, Any]) -> None:

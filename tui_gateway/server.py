@@ -1219,6 +1219,14 @@ def _start_agent_build(sid: str, session: dict) -> None:
             _announce_built_agent(sid, key, current, agent)
         except Exception as e:
             from agent.auxiliary_unavailable import ProviderNotConfiguredError
+            from hermes_cli.fallback_errors import ProviderFallbackError
+
+            def not_configured(error):
+                if isinstance(error, ProviderFallbackError):
+                    return bool(error.failures) and all(
+                        not_configured(failure) for _, _, failure in error.failures)
+                return isinstance(error, ProviderNotConfiguredError)
+
             current["agent_error"] = str(e)
             # Logged: a failed build otherwise leaves no trace, so a prompt waiting on it reads in agent.log as
             # a message that "never ran" (the client only got an event, which a disconnect can lose). [daveey]
@@ -1229,7 +1237,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # for the client; older clients keep matching the text.
             _emit("error", sid, {
                 "message": agent_init_failed_message(e),
-                **({"code": "provider_not_configured"} if isinstance(e, ProviderNotConfiguredError) else {})})
+                **({"code": "provider_not_configured"} if not_configured(e) else {})})
         finally:
             _finish_agent_build(
                 sid, key, current, notify_registered=notify_registered, scopes=scopes, session_db=session_db)
@@ -2516,6 +2524,10 @@ def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _Runti
     try:
         return _RuntimeFallbackResolution(resolve_runtime_provider(**(resolve_kwargs or {})), None, False)
     except AuthError as primary_exc:
+        from hermes_cli.fallback_errors import ProviderFallbackError
+        kwargs = resolve_kwargs or {}
+        failures = [(kwargs.get("requested") or primary_exc.provider,
+                     kwargs.get("target_model") or "", primary_exc)]
         for entry in _load_fallback_model() or []:
             fb_provider = str(entry.get("provider") or "").strip() if isinstance(entry, dict) else ""
             fb_model = str(entry.get("model") or "").strip() if isinstance(entry, dict) else ""
@@ -2536,8 +2548,13 @@ def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _Runti
                     "Primary %s (%s), falling back to %s model %s",
                     primary_failure_wording(primary_exc)[0], primary_exc, fb_provider, fb_model)
                 return _RuntimeFallbackResolution(runtime, fb_model, True)
-            except Exception:
-                continue
+            except Exception as fb_exc:
+                logging.getLogger(__name__).warning(
+                    "Fallback %s model %s failed: %s: %s",
+                    fb_provider, fb_model, type(fb_exc).__name__, fb_exc, exc_info=True)
+                failures.append((fb_provider, fb_model, fb_exc))
+        if len(failures) > 1:
+            raise ProviderFallbackError(failures) from primary_exc
         raise
 
 
@@ -2678,6 +2695,11 @@ def _make_agent(
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
     with _sessions_lock:
         session = _sessions.get(sid)
+    # A start that pinned a closed toolset allowlist keeps it for the whole lineage (resume, compression,
+    # branch). A failed lookup raises: never build a wider agent than the start allowed.
+    _build_db = session_db if session_db is not None else _get_db()
+    from tui_gateway.session_start_requests import StartStore
+    toolset_pin = StartStore.session_toolsets_for(_build_db, session_id or key)
     agent = AIAgent(
         model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
         requested_provider=runtime.get("requested_provider"),
@@ -2688,7 +2710,7 @@ def _make_agent(
         reasoning_config=(
             reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
         service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
-        enabled_toolsets=_load_enabled_toolsets(platform),
+        enabled_toolsets=list(toolset_pin) if toolset_pin else _load_enabled_toolsets(platform),
         disabled_toolsets=_load_disabled_toolsets(),
         # OpenRouter provider_routing prefs (gateway + CLI parity).
         providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
@@ -2698,7 +2720,7 @@ def _make_agent(
         # The dashboard login identity reaches memory providers as the runtime user, like a gateway user id.
         # Builds that run before the record exists (branch, eager resume, compute host) pass it explicitly.
         user_id=auth_user_id if auth_user_id is not None else _session_auth_user_id(session),
-        session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
+        session_db=_build_db, ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=_resolve_checkpoints_enabled(cfg),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
@@ -2708,6 +2730,7 @@ def _make_agent(
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)
+    agent._toolset_pin = toolset_pin
     if fallback_notice:
         # Emitted once on the first successful reply via _emit_pending_fallback_notice -> status_callback.
         agent._pending_fallback_notice = fallback_notice

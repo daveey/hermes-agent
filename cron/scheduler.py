@@ -1782,6 +1782,8 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
         if not (is_auth or is_transient_net):
             raise RuntimeError(format_runtime_provider_error(resolve_exc)) from resolve_exc
 
+        from hermes_cli.fallback_errors import ProviderFallbackError
+        failures = [(requested or getattr(resolve_exc, "provider", ""), model, resolve_exc)]
         chain = _job_fallback_chain(job, jc.cfg) or []
         logger.warning(
             "Job '%s': primary provider resolve failed (%s: %s), %s",
@@ -1819,7 +1821,11 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
                     model, runtime.get("provider"), fb_model)
                 return runtime, fb_model
             except Exception as fb_exc:
-                logger.debug("Job '%s': fallback %s failed: %s", job_id, fb_provider, fb_exc)
+                logger.warning("Job '%s': fallback %s model %s failed: %s: %s",
+                               job_id, fb_provider, fb_model, type(fb_exc).__name__, fb_exc)
+                failures.append((fb_provider, fb_model, fb_exc))
+        if len(failures) > 1:
+            raise ProviderFallbackError(failures) from resolve_exc
         raise RuntimeError(format_runtime_provider_error(resolve_exc)) from resolve_exc
 
 

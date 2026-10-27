@@ -185,6 +185,8 @@ class StartIntent:
     text: str
     source: str = "desktop"
     metadata: dict[str, str] | None = None
+    # Closed tool allowlist for the whole session lineage (None = normal toolsets).
+    toolsets: tuple[str, ...] | list[str] | None = None
 
     def __post_init__(self):
         if not isinstance(self.title, str) or not 1 <= len(self.title) <= 500:
@@ -199,6 +201,22 @@ class StartIntent:
                        or not isinstance(v, str) or len(v) > 1024 for k, v in metadata.items())):
             raise ValueError("start metadata must have at most 32 string pairs (keys 1–64, values 0–1024)")
         object.__setattr__(self, "metadata", MappingProxyType(dict(metadata)))
+        object.__setattr__(self, "toolsets", _validate_toolsets(self.toolsets))
+
+
+def _validate_toolsets(value) -> tuple[str, ...] | None:
+    """A closed allowlist: 1–64 distinct, known, concrete toolset names (never all/*)."""
+    if value is None:
+        return None
+    if (not isinstance(value, (list, tuple)) or not 1 <= len(value) <= 64
+            or any(not isinstance(v, str) or not 1 <= len(v) <= 128 for v in value)
+            or len(set(value)) != len(value) or any(v in ("all", "*") for v in value)):
+        raise ValueError("start toolsets must be 1–64 distinct concrete toolset names")
+    from toolsets import validate_toolset
+    unknown = [v for v in value if not validate_toolset(v)]
+    if unknown:
+        raise ValueError("start toolsets contain unknown toolsets: " + ", ".join(sorted(unknown)))
+    return tuple(sorted(value))
 
 
 _SCHEMA = """
@@ -244,6 +262,8 @@ class StartStore:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(session_start_requests)")}
             if "metadata_json" not in columns:
                 conn.execute("ALTER TABLE session_start_requests ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+            if "toolsets_json" not in columns:
+                conn.execute("ALTER TABLE session_start_requests ADD COLUMN toolsets_json TEXT")
         db._execute_write(initialize)
 
     @staticmethod
@@ -251,6 +271,32 @@ class StartStore:
         result = dict(row)
         result["metadata"] = json.loads(result.pop("metadata_json"))
         return result
+
+    def session_toolsets(self, session_id: str) -> tuple[str, ...] | None:
+        return self.session_toolsets_for(self.db, session_id)
+
+    @staticmethod
+    def session_toolsets_for(db, session_id: str) -> tuple[str, ...] | None:
+        """The allowlist pinned by the start that created this session's lineage, else None.
+
+        Walks parent_session_id (compression, branches) to the root, so every descendant
+        keeps the pin. A missing ledger or column means no pin; any other failure propagates
+        so a caller refuses to build rather than silently widening.
+        """
+        if db._read_one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_start_requests'") is None:
+            return None
+        if not any(r[1] == "toolsets_json" for r in db._read_all("PRAGMA table_info(session_start_requests)")):
+            return None
+        seen, current = set(), session_id
+        while current and current not in seen and len(seen) < 10_000:
+            seen.add(current)
+            row = db._read_one("SELECT toolsets_json FROM session_start_requests WHERE stored_session_id=?",
+                               (current,))
+            if row is not None:
+                return tuple(json.loads(row[0])) if row[0] else None
+            parent = db._read_one("SELECT parent_session_id FROM sessions WHERE id=?", (current,))
+            current = parent[0] if parent else None
+        return None
 
     def lookup(self, owner: StartOwner, namespace: str, request_id: str) -> dict | None:
         row = self.db._read_one("SELECT * FROM session_start_requests WHERE " + _WHERE,
@@ -264,6 +310,8 @@ class StartStore:
         # Preserve the original digest for old callers and pre-migration starts.
         if metadata:
             payload["metadata"] = metadata
+        if intent.toolsets is not None:
+            payload["toolsets"] = list(intent.toolsets)
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
         session_id, turn_id = uuid.uuid4().hex, uuid.uuid4().hex
         now = time.time()
@@ -289,9 +337,10 @@ class StartStore:
             conn.execute(
                 "INSERT INTO session_start_requests "
                 "(gateway_id,profile,principal,namespace,request_id,intent_digest,stored_session_id,"
-                "first_turn_id,user_row_id,state,runtime_token,created_at,updated_at,metadata_json) "
-                "VALUES (?,?,?,?,?,?,?,?,?,'queued',NULL,?,?,?)",
-                (*key, digest, session_id, turn_id, row_id, now, now, json.dumps(metadata, sort_keys=True)))
+                "first_turn_id,user_row_id,state,runtime_token,created_at,updated_at,metadata_json,toolsets_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'queued',NULL,?,?,?,?)",
+                (*key, digest, session_id, turn_id, row_id, now, now, json.dumps(metadata, sort_keys=True),
+                 json.dumps(list(intent.toolsets)) if intent.toolsets is not None else None))
             return self._decode(conn.execute("SELECT * FROM session_start_requests WHERE " + _WHERE, key).fetchone())
         return self.db._execute_write(write, patience_s=self.db._TRANSCRIPT_WRITE_PATIENCE_S)
 
@@ -319,6 +368,7 @@ class StartStore:
             "exists": row is not None, "archived": bool(row and row.get("archived")),
             "active_turn": active,
             "metadata": start["metadata"],
+            "toolsets": json.loads(start["toolsets_json"]) if start.get("toolsets_json") else [],
             "reconciliation": "unknown_outcome" if state == "running" and not active else state,
         }
 

@@ -46,7 +46,7 @@ def test_migration_http_boundary(monkeypatch, surface, mode, credential):
     app.middleware("http")(middleware.gated_auth_middleware)
     app.middleware("http")(token_auth.token_auth_middleware)
     with connect_closing() as conn:
-        tid = db.create_task(conn, title="Legacy", assignee="owner", initial_status="blocked")
+        tid = db.create_task(conn, title="Legacy", assignee="owner", initial_status="blocked", lint_blocked=False)
     path = f"{PREFIX}/tasks/{tid}" if surface == "patch" else f"{PREFIX}/tasks/bulk"
     if credential == "service":
         monkeypatch.setattr(token_auth, "_token_routes", {path})

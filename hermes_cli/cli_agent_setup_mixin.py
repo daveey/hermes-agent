@@ -268,7 +268,11 @@ class CLIAgentSetupMixin:
         except Exception as exc:
             _primary_exc = exc
         if _primary_exc is not None:
-            runtime = self._resolve_fallback_runtime(_primary_exc)
+            from hermes_cli.fallback_errors import ProviderFallbackError
+            try:
+                runtime = self._resolve_fallback_runtime(_primary_exc)
+            except ProviderFallbackError as exc:
+                _primary_exc = exc
             if runtime is not None:
                 _primary_exc = None
         if runtime is None:
@@ -390,13 +394,17 @@ class CLIAgentSetupMixin:
     def _resolve_fallback_runtime(self, primary_exc):
         """Primary provider resolution failed: on an AuthError try each fallback entry in
         order and switch the CLI's requested_provider/model to the first that resolves.
-        None when the error is not auth-related or no fallback resolves."""
+        None when the error is not auth-related or no fallback is attempted.
+        Failed attempts raise ProviderFallbackError with every cause."""
         from cli import _cprint, logger
         from hermes_cli.auth import AuthError, primary_failure_wording
         from hermes_cli.runtime_provider import resolve_runtime_provider
         if not isinstance(primary_exc, AuthError):
             return None
         _fb_chain = self._fallback_model if isinstance(self._fallback_model, list) else []
+        from hermes_cli.fallback_errors import ProviderFallbackError
+        failures = [(getattr(self, "requested_provider", None) or "",
+                     getattr(self, "model", None) or "", primary_exc)]
         for _fb in _fb_chain:
             _fb_provider = (_fb.get("provider") or "").strip().lower()
             _fb_model = (_fb.get("model") or "").strip()
@@ -425,8 +433,15 @@ class CLIAgentSetupMixin:
                 self.model = _fb_model
                 # reasoning_config follows the swap in _ensure_runtime_credentials (the only caller).
                 return runtime
-            except Exception:
+            except Exception as fb_exc:
+                failures.append((_fb_provider, _fb_model, fb_exc))
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Fallback entry %s/%s failed: %s: %s",
+                    _fb_provider, _fb_model, type(fb_exc).__name__, fb_exc, exc_info=True)
                 continue
+        if len(failures) > 1:
+            raise ProviderFallbackError(failures) from primary_exc
         return None
 
     def _runtime_credentials_ready(self) -> bool:
