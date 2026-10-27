@@ -145,8 +145,9 @@ def handled_status(waiter: Optional[str], db_path: Optional[str], target: str) -
 def run(args) -> int:
     until = tuple(u for u in (args.until or "").split(",") if u) or DEFAULT_UNTIL
     since = tuple(u for u in (getattr(args, "since", None) or "").split(",") if u)
-    if not since and args.check == "task":
-        # Implicit --from: the status the waiter already handled (see handled_status).
+    if not since and args.check == "task" and os.environ.get("HERMES_KANBAN_WAKE_PROBE") == "1":
+        # Implicit --from, for dispatcher probe runs only (a worker running wait-check by hand sees the plain
+        # status): the status the waiter already handled (see handled_status).
         seen = handled_status(os.environ.get("HERMES_KANBAN_TASK"), os.environ.get("HERMES_KANBAN_DB"), args.target)
         since = (seen,) if seen else ()
     gw = getattr(args, "gateway", None)

@@ -327,6 +327,7 @@ def _probe_env(task, db_path: str) -> dict:
         env.pop(key, None)
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_DB"] = db_path
+    env["HERMES_KANBAN_WAKE_PROBE"] = "1"  # wait-check's implicit --from applies only to probe runs [daveey]
     return env
 
 

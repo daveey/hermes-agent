@@ -24,6 +24,7 @@ H = 3600
 def _not_a_probe_run(monkeypatch):
     # wait-check reads the waiter from HERMES_KANBAN_TASK (set for dispatcher probes and kanban workers).
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_WAKE_PROBE", raising=False)
 
 
 def d(status, **kw) -> dict:
@@ -399,7 +400,9 @@ def test_tracker_does_not_rewake_for_a_status_it_already_handled(tmp_path, monke
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     assert kwc.run(ns) == 0  # not a probe run: plain default
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_tracker")
-    assert kwc.run(ns) == 1  # same status the tracker already handled
+    assert kwc.run(ns) == 0  # a worker running wait-check by hand: plain status
+    monkeypatch.setenv("HERMES_KANBAN_WAKE_PROBE", "1")
+    assert kwc.run(ns) == 1  # the dispatcher's probe run: same status the tracker already handled
     with sqlite3.connect(db) as c:
         c.execute("UPDATE tasks SET status='triage' WHERE id='t_owner'")
     assert kwc.run(ns) == 0  # a new status wakes it
