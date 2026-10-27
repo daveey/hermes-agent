@@ -148,3 +148,9 @@ def test_snapshot_does_not_resurrect_a_folded_or_released_alias(tmp_path, monkey
     rows = activity._legacy_remote_links()
     assert counted(rows) == []
     assert {r['key'] for r in rows} == {'owner/default/default/t_1'}
+
+
+def test_scope_heartbeat_between_one_and_two_collector_periods_still_releases(tmp_path):
+    """The owner publishes a scope heartbeat about every 180s; a 200s-old one must not flap the release."""
+    from hermes_cli import kanban_session_activity as ksa
+    assert ksa.SCOPE_HEARTBEAT_FRESH_S >= 400

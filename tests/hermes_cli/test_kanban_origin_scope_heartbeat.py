@@ -48,7 +48,7 @@ def test_fresh_scope_heartbeat_keeps_unchanged_task_current(world, published):
 
 
 @pytest.mark.parametrize('scope', [
-    {'observed_at': 800},                      # heartbeat older than the 180 s window
+    {'observed_at': 400},                      # heartbeat older than the 450 s window
     {},                                        # no heartbeat and no per-task stamp
     {'observed_at': 1000, 'state': 'unknown'},  # fresh heartbeat on a scope the owner could not read
     {'observed_at': 1000, 'board': 'other'},    # fresh heartbeat for a different board
