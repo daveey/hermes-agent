@@ -11,6 +11,19 @@ including another backend, claims within ~5 s, so it always wins that race). It 
 atomic cursor CAS the live poller uses, so a range is claimed by exactly one side, appends the notice to the chat's
 transcript (``display_kind="kanban_notice"``, deduped by range in the writer txn) and marks the row unread. A refused
 or failed append rewinds the claim, so the notice is retried instead of lost.
+
+A row is not a turn: on 2026-10-27, 19 chats sat on such rows until David opened them, 5 of them held by a backend
+whose live poller never claimed the event. So the sweeper first tries ONE turn with the notice
+(``server._wake_session_turn``: resumes the chat here if no backend holds it, refuses if another ATTACHED backend owns
+it, takes over a detached owner's lease) on a worker thread (at most ``MAX_PARALLEL_WAKES`` at once, one per chat; an
+agent build may take minutes and must not stall the pass), and writes the passive row only when that can't start, when the card is blocked on a human (the chat is already red),
+when the notice is diagnostic-only, when the chat's wake budget is spent (``HERMES_KANBAN_UNLOADED_WAKES_PER_HOUR``,
+default 4: a woken turn can create a card whose notice wakes it again) or when ``HERMES_KANBAN_UNLOADED_WAKE=0``.
+A chat another live backend holds reaching the sweeper means that backend's poller missed: it is logged with the
+holder ("poller miss"). Claimed events always end as a turn or a row: any error after the claim falls back to the row,
+and a failed row rewinds the claim. Once woken, the chat is live in that process, so later notices go through its live
+poller like any open chat's. Residual: if submit raises after the turn thread already started, the row is written too.
+[daveey]
 """
 
 from __future__ import annotations
@@ -29,8 +42,19 @@ GRACE_S = 30.0
 INTERVAL_S = 30.0
 FIRST_RUN_DELAY_S = 20.0
 
+WAKES_PER_HOUR = 4
+MAX_PARALLEL_WAKES = 2
+
 _sweeper_started = False
 _sweeper_lock = threading.Lock()
+_wake_lock = threading.Lock()
+_wake_times: dict[str, list[float]] = {}  # chat -> recent started wakes (this process)
+_wake_slots = threading.BoundedSemaphore(MAX_PARALLEL_WAKES)
+
+
+def _reset_wake_budget_for_tests() -> None:
+    with _wake_lock:
+        _wake_times.clear()
 
 
 def _env_float(name: str, default: float) -> float:
@@ -91,14 +115,119 @@ def find_session_db(chat_id: str) -> Iterator[tuple[Any, Optional[str]]]:
     yield None, None
 
 
+def wake_turn(session_id: str, text: str, metadata: dict) -> str:
+    """One agent turn carrying the notice (see ``server._wake_session_turn``); its verdict string."""
+    from tui_gateway import server
+    return server._wake_session_turn(session_id, text, display_kind="kanban_notice", display_metadata=metadata,
+                                     label="kanban-sweep-wake")
+
+
+def registry_holders() -> list[dict]:
+    """Live active-session leases (all backends on this host). Never raises."""
+    try:
+        from hermes_cli.active_sessions import active_session_registry_snapshot
+        return active_session_registry_snapshot()
+    except Exception:
+        logger.debug("active-session registry unreadable", exc_info=True)
+        return []
+
+
+def _other_holder(holders: Callable[[], list[dict]], ids: set[str]) -> Optional[str]:
+    """``pid N (surface@host)`` of another live backend holding one of ``ids``, else None."""
+    me = os.getpid()
+    for entry in holders() or ():
+        try:
+            pid = int(entry.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if str(entry.get("session_id") or "") in ids and pid != me:
+            where = "@".join(str(x) for x in (entry.get("surface"), entry.get("host")) if x)
+            return f"pid {entry.get('pid')}" + (f" ({where})" if where else "")
+    return None
+
+
+def _has_wake_budget(chat: str, now: float) -> bool:
+    limit = _env_float("HERMES_KANBAN_UNLOADED_WAKES_PER_HOUR", WAKES_PER_HOUR)
+    with _wake_lock:
+        _wake_times[chat] = [t for t in _wake_times.get(chat, ()) if t > now - 3600]
+        return len(_wake_times[chat]) < limit
+
+
+def _charge_wake(chat: str, now: float) -> None:
+    """Only a started turn spends budget: a refused or missing resume did not wake anything."""
+    with _wake_lock:
+        _wake_times.setdefault(chat, []).append(now)
+
+
+def _blocked_on_human(task) -> bool:
+    if task is None or getattr(task, "status", "") not in ("blocked", "triage"):
+        return False
+    import json
+
+    from hermes_cli.kanban_human_request import needs_human
+    request = getattr(task, "human_request", None)
+    if isinstance(request, str):
+        try:
+            request = json.loads(request)
+        except ValueError:
+            return False
+    return needs_human(request, kind=getattr(task, "block_kind", None))
+
+
+def _wake_skip_reason(task, texts: list) -> Optional[str]:
+    from gateway.warning_notifications import DiagnosticText
+    if _env_float("HERMES_KANBAN_UNLOADED_WAKE", 1) <= 0:
+        return "skipped:disabled"
+    if _blocked_on_human(task):
+        return "skipped:human"
+    if all(isinstance(t, DiagnosticText) for t in texts):
+        return "skipped:diagnostic"
+    return None
+
+
+def _spawn_thread(job: Callable[[], str]) -> str:
+    from agent.memory_provider import spawn_context_thread
+    spawn_context_thread(job, name="kanban-sweep-wake").start()  # keeps the sweeper's profile scope
+    return "dispatched"
+
+
+def _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now) -> str:
+    """Run on a worker: the wake, then (unless it started) the passive row on a fresh board connection."""
+    try:
+        try:
+            verdict = str(wake(tip, text, {**metadata, "woken": True}) or "error")
+        except Exception:
+            logger.warning("kanban sweep wake of %s failed", tip, exc_info=True)
+            verdict = "error"
+        if verdict == "started":
+            _charge_wake(tip, now)
+        else:
+            from hermes_cli import kanban_db_connect as _kbc
+            from hermes_cli import kanban_db_notify as _kbn
+            with contextlib.closing(_kbc.connect(board=slug)) as conn:
+                _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new)
+        logger.info("kanban sweep wake of %s for %s/%s: %s", tip, slug, ident["task_id"],
+                    "turn started" if verdict == "started" else f"{verdict}, notice row written")
+        return verdict
+    except Exception:
+        logger.warning("kanban sweep wake job for %s/%s failed", slug, ident["task_id"], exc_info=True)
+        return "error"
+    finally:
+        _wake_slots.release()
+
+
 def sweep_once(
     live_ids: set[str],
     *,
     grace_s: float = GRACE_S,
     now: Optional[float] = None,
     session_db: Callable[[str], Any] = find_session_db,
+    wake: Callable[[str, str, dict], str] = wake_turn,
+    holders: Callable[[], list[dict]] = registry_holders,
+    spawn: Callable[[Callable[[], str]], str] = _spawn_thread,
 ) -> list[dict]:
-    """One pass. Returns ``[{board, task_id, chat_id, session_id, texts}]`` for every notice persisted."""
+    """One pass. Returns ``[{board, task_id, chat_id, session_id, texts, woken, wake_result, held_by}]`` for every
+    notice delivered (a started turn or a persisted row)."""
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
@@ -123,7 +252,7 @@ def sweep_once(
                     continue
                 try:
                     done = _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn,
-                                      _KANBAN_NOTIFY_KINDS, _format_kanban_event_text)
+                                      _KANBAN_NOTIFY_KINDS, _format_kanban_event_text, wake, holders, spawn)
                 except Exception:
                     logger.warning("kanban unloaded sweep failed for %s/%s", slug, sub.get("task_id"), exc_info=True)
                     continue
@@ -132,7 +261,7 @@ def sweep_once(
     return delivered
 
 
-def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt) -> Optional[dict]:
+def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt, wake, holders, spawn) -> Optional[dict]:
     ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                  thread_id=sub.get("thread_id") or "")
     _cursor, events = _kbn.unseen_events_for_sub(conn, kinds=kinds, **ident)
@@ -145,25 +274,61 @@ def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt)
         old, new, claimed = _kbn.claim_unseen_events_for_sub(conn, kinds=kinds, **ident)
         if not claimed:
             return None  # a live poller or another sweeper got there first
-        texts = [t for t in (fmt(sub, task, ev, slug) for ev in claimed) if t]
-        if texts:
-            metadata = {"notice_id": f"{slug}:{ident['task_id']}:{old}-{new}", "board": slug,
-                        "display_text": "\n".join(texts),
-                        "task_id": ident["task_id"], "event_ids": [int(e.id) for e in claimed]}
-            try:
-                db.append_kanban_notice(tip, "\n".join(texts), metadata)
-            except Exception:
-                with contextlib.suppress(Exception):
-                    _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
-                raise
+    texts = [t for t in (fmt(sub, task, ev, slug) for ev in claimed) if t]
     if task and getattr(task, "status", "") == "archived":
         with contextlib.suppress(Exception):
             _kbn.remove_notify_sub(conn, **ident)
     if not texts:
         return None
-    logger.info("kanban notice for unloaded session %s persisted (board=%s task=%s events=%d)",
-                tip, slug, ident["task_id"], len(texts))
-    return {"board": slug, "task_id": ident["task_id"], "chat_id": ident["chat_id"], "session_id": tip, "texts": texts}
+    text = "\n".join(texts)
+    metadata = {"notice_id": f"{slug}:{ident['task_id']}:{old}-{new}", "board": slug, "display_text": text,
+                "task_id": ident["task_id"], "event_ids": [int(e.id) for e in claimed]}
+    held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s)
+    if verdict is None:  # a worker slot is ours: the job wakes, or writes the row itself
+        try:
+            verdict = spawn(lambda: _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now))
+        except Exception:
+            _wake_slots.release()
+            logger.warning("kanban sweep could not start a wake for %s", tip, exc_info=True)
+            verdict = "error"
+            _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new)
+    else:
+        _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new)
+    logger.info("kanban notice for unloaded session %s (board=%s task=%s events=%d wake=%s)",
+                tip, slug, ident["task_id"], len(texts), verdict)
+    return {"board": slug, "task_id": ident["task_id"], "chat_id": ident["chat_id"], "session_id": tip,
+            "texts": texts, "woken": verdict == "started", "wake_result": verdict, "held_by": held_by}
+
+
+def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s) -> tuple[Optional[str], Optional[str]]:
+    """``(held_by, verdict)``: verdict None means a wake slot was taken and the caller must spawn the wake; any other
+    verdict says why the row is written now. Never raises: the events are already claimed."""
+    held_by = None
+    try:
+        held_by = _other_holder(holders, {ident["chat_id"], tip})
+        if held_by:
+            logger.warning("kanban poller miss: chat %s is held by %s but its poller did not claim %s/%s within "
+                           "%.0fs; the sweeper is delivering it", tip, held_by, slug, ident["task_id"], grace_s)
+        skip = _wake_skip_reason(task, texts) or (None if _has_wake_budget(tip, now) else "skipped:budget")
+    except Exception:
+        logger.warning("kanban sweep routing for %s failed; writing the notice row", tip, exc_info=True)
+        return held_by, "error"
+    if skip:
+        return held_by, skip
+    return (held_by, None) if _wake_slots.acquire(blocking=False) else (held_by, "skipped:slots")
+
+
+def _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new) -> None:
+    """The passive transcript row; a failure rewinds the claim so the notice is retried, not lost."""
+    try:
+        with session_db(ident["chat_id"]) as (db, _tip):
+            if db is None:
+                raise RuntimeError(f"chat {ident['chat_id']} disappeared before its notice was written")
+            db.append_kanban_notice(tip, text, metadata)
+    except Exception:
+        with contextlib.suppress(Exception):
+            _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
+        raise
 
 
 def open_subscription_sessions(session_ids: list[str]) -> dict[str, int]:

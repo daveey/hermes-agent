@@ -28,6 +28,12 @@ def db(tmp_path):
     return d
 
 
+@pytest.fixture(autouse=True)
+def _row_path_only(monkeypatch):
+    """These tests specify the passive-row path; the wake path is test_kanban_unloaded_wake.py. [daveey]"""
+    monkeypatch.setenv("HERMES_KANBAN_UNLOADED_WAKE", "0")
+
+
 def _session_db(db):
     @contextlib.contextmanager
     def opener(chat_id):
