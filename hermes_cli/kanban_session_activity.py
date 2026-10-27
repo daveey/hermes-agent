@@ -425,7 +425,8 @@ def _scope_heartbeats(info_rows: list[tuple[str, str]]) -> dict[tuple[str, str, 
 
 
 def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | None, board: str,
-                            heartbeats: dict[tuple[str, str, str], float], now: float, stale: bool) -> bool:
+                            heartbeats: dict[tuple[str, str, str], float], now: float, stale: bool,
+                            evidence: dict[str, Any]) -> bool:
     """The owner itself, recently, published this card as closed.
 
     Release needs all of: a fresh hub sync; a profile-qualified record whose own identity fields match its
@@ -434,15 +435,13 @@ def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | 
     this exact (profile, board) within ``SCOPE_HEARTBEAT_FRESH_S``, so an offline owner's last word is not taken
     as current. Absence of a row is never release. This is the same rule a local board applies to its own
     cards (``done``/``archived`` are not counted), applied only to evidence the owner signed. Pre-ledger
-    cards had no other release path, so every one of them stayed open forever. [daveey]
+    cards had no other release path, so every one of them stayed open forever. ``evidence`` is the task's
+    ``_owner_evidence`` (``_decode_replica_task``). [daveey]
     """
-    from hermes_cli.kanban_origin_ledger import _owner_evidence
-
     if stale or owner_profile is None or task.get('status') not in TERMINAL_STATUSES:
         return False
     if task.get('profile') != owner_profile or task.get('board') != board or task.get('gateway') != gw:
         return False
-    evidence = _owner_evidence(task)
     if not evidence:
         return False
     # A card bound through the origin ledger keeps the ledger's stricter release: its owner must
@@ -485,6 +484,29 @@ def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, di
         del tasks[key]
 
 
+# (replica path, gw, record key) -> (row text, decoded row) from the last replica read: the projection rebuilds on
+# every kanban.db / hub.db change, and re-parsing and re-hashing thousands of unchanged rows cost ~0.3 s per
+# sidebar refresh. Keyed on the exact stored text, so an edited row always decodes afresh. [daveey]
+_replica_decoded: dict[tuple[str, str, str], tuple[Any, tuple[dict[str, Any], str | None, dict[str, Any]]]] = {}
+
+
+def _decode_replica_task(record_key: str, data: Any) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
+    """``(task, legacy record digest or None, owner evidence)`` of one replica row; a pure function of its text.
+    Callers treat ``task`` as read-only: it is shared across reads of an unchanged row."""
+    from hermes_cli.kanban_origin_ledger import _owner_evidence
+    from hermes_cli.kanban_origin_legacy import record_digest
+
+    try:
+        t = json.loads(data)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('invalid replica task data') from exc
+    if not isinstance(t, dict) or not t.get('id'):
+        raise ValueError('invalid replica task data')
+    digest = record_digest(t) if len(str(record_key).split('/')) == 2 else None
+    evidence = _owner_evidence(t) if t.get('status') in TERMINAL_STATUSES else {}
+    return t, digest, evidence
+
+
 def _read_remote_links(path: Path, now: float | None = None, *,
                        qualified_out: set | None = None) -> list[dict[str, Any]]:
     """Replica cards linked to a session on this gateway, one row per (session, card).
@@ -512,13 +534,14 @@ def _read_remote_links(path: Path, now: float | None = None, *,
     released: set[tuple[str, str | None, str, str]] = set()
     seen_at: dict[str, float] = {}
     legacy_records: dict[tuple, dict] = {}
+    global _replica_decoded
+    previous_decoded, decoded = _replica_decoded, {}
     for gw, record_key, data, updated, version in rows:
-        try:
-            t = json.loads(data)
-        except (TypeError, ValueError) as exc:
-            raise ValueError('invalid replica task data') from exc
-        if not isinstance(t, dict) or not t.get('id'):
-            raise ValueError('invalid replica task data')
+        memo_key = (str(path), str(gw), str(record_key))
+        hit = previous_decoded.get(memo_key)
+        row = hit[1] if hit is not None and hit[0] == data else _decode_replica_task(record_key, data)
+        decoded[memo_key] = (data, row)
+        t, digest, evidence = row
         if isinstance(t, dict) and t.get("id"):
             seen_at[str(gw)] = max(seen_at.get(str(gw), 0.0), (updated or 0) / 1000.0)
             parts = str(record_key).split('/')
@@ -527,16 +550,15 @@ def _read_remote_links(path: Path, now: float | None = None, *,
             elif len(parts) == 2:
                 owner_profile = None
                 board, tid = parts
-                from hermes_cli.kanban_origin_legacy import record_digest
                 legacy_records[(str(gw), None, board, tid)] = {
-                    'key': record_key, 'version': version, 'digest': record_digest(t)}
+                    'key': record_key, 'version': version, 'digest': digest}
             else:
                 raise ValueError('invalid replica task key')
             if not all(parts) or tid != str(t['id']):
                 raise ValueError('replica task identity mismatch')
             key = (str(gw), owner_profile, board, tid)
             raw[key] = t
-            if _owner_attests_terminal(t, str(gw), owner_profile, board, heartbeats, now, stale):
+            if _owner_attests_terminal(t, str(gw), owner_profile, board, heartbeats, now, stale, evidence):
                 released.add(key)
             elif owner_profile is None or t.get('status') not in LISTED_STATUSES:
                 # Legacy links carry no authoritative release receipt. Preserve
@@ -544,6 +566,7 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                 # terminal evidence or the qualified ledger projection supersedes it.
                 t = {**t, 'reported_status': t.get('status'), 'status': 'unknown', 'unfinished': True}
             tasks[key] = t
+    _replica_decoded = decoded
     blank_before = {key for key in tasks if key[1] is None}
     _fold_legacy_aliases(tasks, raw)
     # Only a proven-identity alias is the same card as its qualified twin (folded above, links carried
