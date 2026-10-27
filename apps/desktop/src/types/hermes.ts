@@ -600,6 +600,11 @@ export interface SessionInfo {
   last_active: number
   message_count: number
   model: null | string
+  /** Provider of the stored route (`model_config` → canonical
+   *  session_gateway_runtime reader), projected so a list row needs no heavy
+   *  `model_config`. Lets the composer show a chat's own model while its agent
+   *  is not loaded yet. Undefined against older backends. */
+  model_provider?: null | string
   output_tokens: number
   /** Parent conversation id. Written for genuine /branch forks *and* for
    *  /new / idle / daily resets (durable lineage). Nesting uses

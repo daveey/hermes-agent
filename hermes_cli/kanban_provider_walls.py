@@ -40,7 +40,7 @@ def walls_path() -> Path:
 
 def _load(path: Optional[Path] = None) -> dict[str, float]:
     try:
-        data = json.loads((path or walls_path()).read_text())
+        data = json.loads((path or walls_path()).read_text(encoding="utf-8-sig"))
         return {str(k): float(v) for k, v in data.items()}
     except Exception:
         return {}
@@ -87,7 +87,7 @@ def record_wall(provider: str, retry_after: Optional[int], *, now: Optional[floa
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(walls))
+        tmp.write_text(json.dumps(walls), encoding="utf-8")
         tmp.replace(p)
     except OSError as exc:
         logger.warning("kanban walls: cannot write %s (%s)", p, exc)

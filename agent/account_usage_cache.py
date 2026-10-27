@@ -281,6 +281,7 @@ def refresh_account_usage_entries_async(requests: Iterable[dict]) -> list[thread
 
 def _refresh_entries(requests: list[dict]) -> None:
     from agent.account_usage import fetch_account_usage
+    from agent.account_usage_recovery import clear_recovered_quota_benches
 
     claims = [(request.get("_claim_key") or _key(request["provider"], request["identity_id"]),
                request.get("_claim_token")) for request in requests]
@@ -288,10 +289,12 @@ def _refresh_entries(requests: list[dict]) -> None:
         for request, (key, token) in zip(requests, claims):
             try:
                 _touch_refresh(key, token)
-                fetch_account_usage(
+                snapshot = fetch_account_usage(
                     request["provider"], base_url=request.get("base_url"), api_key=request.get("api_key"),
                     read_only=True, identity_id=request["identity_id"],
                 )
+                # Fresh windows with quota left lift a stale quota bench (early reset, plan change).
+                clear_recovered_quota_benches(request["provider"], request["identity_id"], snapshot)
             except Exception as exc:  # one bad slot must not starve its siblings
                 logger.debug("account usage: refresh for %s/%s failed: %s",
                              request.get("provider"), request.get("identity_id"), exc)

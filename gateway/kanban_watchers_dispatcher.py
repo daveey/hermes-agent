@@ -174,17 +174,20 @@ class _KanbanDispatcher:
         self.disabled_corrupt_boards.pop(slug, None)
         return True
 
-    def tick_once_for_board(self, slug: str) -> Optional[object]:
+    def tick_once_for_board(self, slug: str, *, suppress_spawn: bool = False) -> Optional[object]:
         """Run one dispatch_once for a specific board.
 
         The per-board DB is opened explicitly so boards never share a
-        connection or claim across each other.
+        connection or claim across each other. ``suppress_spawn`` (core-update
+        drain hold) runs reclaim, wake probes and promotion but claims nothing.
         """
         conn = None
         fingerprint = self.board_db_fingerprint(slug)
         if not self._quarantine_lifted(slug, fingerprint):
             return None
         kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
+        if suppress_spawn:
+            kwargs["max_spawn"] = 0  # budget gate refuses every claim; bookkeeping phases still run
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
@@ -223,10 +226,12 @@ class _KanbanDispatcher:
                 with contextlib.suppress(Exception):
                     conn.close()
 
-    def tick_once(self) -> list[tuple[str, Optional[object]]]:
+    def tick_once(self, *, suppress_spawn: bool = False) -> list[tuple[str, Optional[object]]]:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""
         self.successful_scopes = []
-        return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
+        if not suppress_spawn:
+            return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
+        return [(slug, self.tick_once_for_board(slug, suppress_spawn=True)) for slug in self._board_slugs()]
 
     @staticmethod
     def _receipt_scope() -> tuple[set, set]:

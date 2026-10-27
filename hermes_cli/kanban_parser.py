@@ -497,6 +497,16 @@ _SPECS = [
         _arg("--log-retention-days", type=_nonnegative_int, default=30,
              help="Delete worker log files older than N days (default: 30; 0 disables)"),
     ], help="Garbage-collect archived-task workspaces, old events, and old logs"),
+    _cmd("sync", children=("sync_action", [
+        _cmd("status", [_json_flag()], help="Mode, service board, cursor, outbox depth and last error"),
+        _cmd("attach", [_arg("--mode", choices=("shadow", "primary", "off"), default="shadow",
+                             help="shadow (default): push, apply the feed to a shadow copy; primary: the service is "
+                                  "the source of truth; off: stop capturing")],
+             help="Bind the board to the central Board service under this gateway's hub name"),
+        _cmd("import", help="Queue every existing row of the board for upload (idempotent)"),
+        _cmd("diff", [_json_flag()], help="Compare this gateway's live cards with the shadow copy (exit 1 if not clean)"),
+        _cmd("run", [_json_flag()], help="Run one sync round for every synced board now"),
+    ]), help="Central Kanban sync (kanban.sync.*): attach, import, status, diff"),
     _cmd("repair", [_json_flag(help="Emit the repair report as JSON")],
          help="Check kanban.db integrity and auto-repair index-only corruption",
          description=(

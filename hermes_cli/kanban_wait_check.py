@@ -67,7 +67,8 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
     remote = "export PATH=$HOME/.local/bin:$HOME/.hermes/bin:$PATH; " + shlex.join(inner)
     try:
         p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_TIMEOUT}", host, remote],
-                           capture_output=True, text=True, timeout=SSH_TIMEOUT + 15, check=False)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=SSH_TIMEOUT + 15, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 2, f"error: ssh {host}: {exc}"
     out = (p.stdout + p.stderr).strip()

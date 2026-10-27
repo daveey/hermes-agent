@@ -10,6 +10,7 @@ in ``kanban_watchers_common``.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import time
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any, Optional
 from gateway.kanban_watchers_common import (
     _acquire_singleton_lock,
     _kanban_dispatch_allowed,
+    _kanban_dispatch_gate,
     _release_singleton_lock,
     _resolve_auto_decompose_settings,
     _gc_retention_days,
@@ -322,8 +324,16 @@ class GatewayKanbanWatchersMixin:
                 try:
                     # Emergency stop (`hermes pause`): no auto-decompose or
                     # dispatch while paused; running workers finish naturally.
-                    if not _kanban_dispatch_allowed():
+                    # Core-update drain hold: spawns only are suppressed; wake probes,
+                    # promotion and reclaim keep running. [daveey]
+                    gate = _kanban_dispatch_gate()
+                    if gate == "estop":
                         bad_ticks = 0
+                    elif gate == "drain":
+                        results = await _to_thread_process_service(
+                            functools.partial(dispatcher.tick_once, suppress_spawn=True))
+                        _log_spawn_results(results)
+                        bad_ticks = 0  # a held ready queue is expected, not "stuck"
                     else:
                         # Re-read the auto-decompose toggle live so disabling it
                         # takes effect on the next tick, not on restart.
@@ -359,3 +369,21 @@ class GatewayKanbanWatchersMixin:
 
         finally:
             self._release_kanban_dispatcher_lock()
+
+    async def _kanban_sync_watcher(self) -> None:
+        """Central Kanban sync (``kanban.sync.enabled``): pull the Board service's feed and push the outbox every
+        ``kanban.sync.interval_seconds`` in a worker thread. One gateway per host (advisory lock), like the
+        dispatcher. [daveey]"""
+        from hermes_cli import kanban_db_sync as _sync
+        if not _sync.sync_enabled():
+            return
+        from hermes_cli import kanban_db as _kb
+        from hermes_cli import kanban_sync_client as _ksc
+        lock_handle, lock_state = _acquire_singleton_lock(_kb.kanban_home() / "kanban" / ".sync.lock")
+        if lock_state == "contended":
+            logger.info("kanban sync: another gateway on this host already syncs; not starting")
+            return
+        try:
+            await asyncio.to_thread(_ksc.run_forever, lambda: self._running)
+        finally:
+            _release_singleton_lock(lock_handle)

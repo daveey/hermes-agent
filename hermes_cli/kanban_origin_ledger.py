@@ -329,7 +329,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     # Owner liveness: the collector's per-scope heartbeat (one record per sync) proves it read
                     # this whole board recently, so an unchanged, current task record is still observed. The
                     # per-task stamp is accepted too, for records published before scope heartbeats existed.
-                    live = (_recent(heartbeat, now)
+                    live = (_recent(heartbeat, now, 450)
                             or _recent(_owner_evidence(task).get('observed_at'), now))
                     current = current and readable and live
                 if (owner['gateway'], owner['profile']) == (gateway, profile):

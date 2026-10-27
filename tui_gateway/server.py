@@ -963,6 +963,14 @@ def _agent_build_wait_cap() -> float:
     return 600.0
 
 
+def _agent_build_in_flight(session: dict) -> bool:
+    """True while this record's deferred agent build is still running (ready unset, build thread alive)."""
+    ready = session.get("agent_ready")
+    build_thread = session.get("_agent_build_thread")
+    return (ready is not None and not ready.is_set()
+            and build_thread is not None and build_thread.is_alive())
+
+
 def _wait_agent_for_prompt(session: dict, rid: str, sid: str) -> dict | None:
     """Patient ``_wait_agent`` for deferred prompt.submit: the client already got ``streaming`` and the
     first message IS the turn, while a cold build routinely outlives the flat 30s ceiling (timing out
@@ -1212,6 +1220,10 @@ def _start_agent_build(sid: str, session: dict) -> None:
         except Exception as e:
             from agent.auxiliary_unavailable import ProviderNotConfiguredError
             current["agent_error"] = str(e)
+            # Logged: a failed build otherwise leaves no trace, so a prompt waiting on it reads in agent.log as
+            # a message that "never ran" (the client only got an event, which a disconnect can lose). [daveey]
+            logger.warning("agent build failed for session %s (%s): %s: %s",
+                           sid, key, type(e).__name__, str(e)[:300])
             # A client can route "no provider is set up" to its setup flow instead of a dead-end
             # error toast — but only if it can tell. The sentence is for the reader, the code is
             # for the client; older clients keep matching the text.
@@ -3121,8 +3133,19 @@ def _fallback_session_info(session: dict) -> dict:
     cwd = _session_cwd(session)
     return {
         "cwd": cwd, "branch": git_probe.branch(cwd), "project": _project_info_for_cwd(cwd), "lazy": True,
-        **_lazy_info_route(session, {}), "skills": {}, "tools": {}, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
+        # The session's own restored route (resume's model_override), not the profile default: an unbuilt
+        # resumed chat reported the default's model, so the desktop painted another model's options.
+        **_lazy_info_route(session, _stored_route_override(session)), "skills": {}, "tools": {},
+        "desktop_contract": DESKTOP_BACKEND_CONTRACT,
     }
+
+
+def _stored_route_override(session: dict) -> dict:
+    """``{model, provider}`` from an unbuilt session's restored ``model_override`` (empty when none)."""
+    override = session.get("model_override")
+    if not isinstance(override, dict) or not override.get("model"):
+        return {}
+    return {"model": override.get("model"), "provider": override.get("provider") or ""}
 
 
 def _reconcile_display_with_live(db_display: list[dict], in_memory: list[dict]) -> list[dict]:
@@ -3184,6 +3207,10 @@ def _live_session_payload(
     else:
         with _session_db(session) as db:
             history = _live_visible_history(session, db, in_memory_history)
+    if not (inflight or queued or running):
+        # A reattach after the frame that ended the turn was lost: show the unanswered message as not sent.
+        with contextlib.suppress(Exception), _session_db(session) as db:
+            inflight = _unanswered_turn_inflight(session, in_memory_history, db)
     # message_count follows _resume_response: the stored size when messages are omitted, else the wire count
     # (a hidden seed row is in ``history`` but never on the wire).
     messages = ([] if omit_messages else

@@ -3463,6 +3463,7 @@ export const ruOverrides = {
       switchModel: 'Сменить модель',
       openModelPicker: 'Открыть выбор модели',
       modelPinned: 'закреплено вами; новые чаты используют её вместо модели по умолчанию из настроек',
+      modelLoading: model => `${model} · загрузка модели этого чата…`,
       modelTitle: (provider, model) => `Модель · ${provider}: ${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }

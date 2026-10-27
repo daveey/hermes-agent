@@ -249,6 +249,9 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
 # by gateway/profile/board/id: equal task IDs in different owner profiles are separate cards.
 # Historical board/id records retain unknown ownership rather than default-profile inference.
 HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync for this long = stale
+# The owner collector publishes each scope heartbeat about every 180s (sawtooth 0..~200s as replicated), so a
+# 180s window flapped: a closed card was released half the time. Allow ~2.5 collector periods. [daveey]
+SCOPE_HEARTBEAT_FRESH_S = 450.0
 _REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority")
 _remote_last: list[dict[str, Any]] | None = None  # last good read (process lifetime)
 _remote_scope: tuple[str, ...] | None = None
@@ -293,7 +296,7 @@ def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | 
     Release needs all of: a fresh hub sync; a profile-qualified record whose own identity fields match its
     key; a terminal status inside the owner collector's hash-bound observation (``origin_observation``, so a
     replica row edited or truncated in transit proves nothing); and that collector's per-scope heartbeat for
-    this exact (profile, board) within ``HUB_STALE_AFTER_S``, so an offline owner's last word is not taken
+    this exact (profile, board) within ``SCOPE_HEARTBEAT_FRESH_S``, so an offline owner's last word is not taken
     as current. Absence of a row is never release. This is the same rule a local board applies to its own
     cards (``done``/``archived`` are not counted), applied only to evidence the owner signed. Pre-ledger
     cards had no other release path, so every one of them stayed open forever. [daveey]
@@ -312,7 +315,7 @@ def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | 
     if task.get('origin_bindings') and evidence.get('verified') is not True:
         return False
     beat = heartbeats.get((gw, owner_profile, board))
-    return beat is not None and 0 <= now - beat <= HUB_STALE_AFTER_S
+    return beat is not None and 0 <= now - beat <= SCOPE_HEARTBEAT_FRESH_S
 
 
 def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, dict[str, Any]]) -> None:
@@ -671,8 +674,15 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     # A folded legacy alias (``legacy_key``) is present under its qualified key: its last-known
     # unqualified row must not be resurrected as a stale obligation.
     present = {(c["session"], k) for c in cards for k in (c["key"], c.get("legacy_key")) if k}
+    # Likewise a remembered unqualified row whose profile-qualified twin is live now: the replica no longer
+    # carries the legacy record, so the snapshot's copy is a ghost of a card the owner already publishes (and
+    # may attest closed) under its qualified key. [daveey]
+    qualified_now = {(c["session"], c.get("gateway"), c.get("board"), c.get("id"))
+                     for c in cards if c.get("ownership_state") == "qualified"}
     cards.extend({**c, "stale": True} for c in (previous or [])
-                 if (c["session"], c["key"]) not in present)
+                 if (c["session"], c["key"]) not in present
+                 and not (c.get("ownership_state") == "unknown"
+                          and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now))
     if _snapshot_saved != (scope, cards):
         # The durable snapshot only speeds a cold start. Losing a write race (database is locked) must not
         # fail this read: the sidebar would mark every row kanban_unknown. The next changed read retries.

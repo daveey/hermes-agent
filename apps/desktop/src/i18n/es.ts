@@ -4746,6 +4746,7 @@ export const esOverrides = {
       switchModel: 'Cambiar modelo',
       openModelPicker: 'Abrir selector de modelo',
       modelPinned: 'fijado por ti; los chats nuevos lo usan en lugar del predeterminado de Configuración',
+      modelLoading: model => `${model} · cargando el modelo de este chat…`,
       modelTitle: (provider, model) => `Modelo · ${provider}: ${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }

@@ -5,6 +5,7 @@ import { atom } from 'nanostores'
 import { useRef } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
+import { useStoredModelSelection } from '@/app/chat/stored-model'
 import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
@@ -78,12 +79,13 @@ export function useModelMenuController({
   const modelPresets = useStore($modelPresets)
   const defaultEffort = useStore($defaultReasoningEffort) || DEFAULT_REASONING_EFFORT
   const touchesPrimary = view.kind === 'primary'
+  const storedSelection = useStoredModelSelection(view)
 
   // Subscribe to the SAME query the menu runs (identical key ⇒ React Query
   // dedupes, no second fetch). It must be a live subscription, not a cache
   // peek: with no model in the session store yet, currentPickerSelection falls
-  // back to the catalog's reported current, and a non-reactive read would
-  // never repaint that fallback once the catalog resolved.
+  // back to the chat's stored model, then the catalog's reported current, and a
+  // non-reactive read would never repaint that fallback once the catalog resolved.
   const modelOptions = useQuery({
     queryKey: modelOptionsQueryKey(profile, activeSessionId, ownerConnectionId),
     queryFn: (): Promise<ModelOptionsResult> =>
@@ -92,7 +94,8 @@ export function useModelMenuController({
 
   const { model: optionsModel, provider: optionsProvider } = currentPickerSelection(
     { model: currentModel, provider: currentProvider },
-    modelOptions.data
+    modelOptions.data,
+    storedSelection
   )
 
   const hostScope = `${ownerConnectionId ?? ''}::${profile}`

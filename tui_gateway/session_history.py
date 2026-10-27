@@ -459,6 +459,63 @@ def _fail_inflight_turn(session: dict, error: Any, error_surface: Optional[dict]
     session.pop("_submit_user_row", None)
 
 
+# A durable user message with no reply and no turn running: prompt.submit accepted and saved it, then the
+# turn ended before the agent ran (build failure, a cancel, a backend death the crash marker did not cover)
+# and the frame saying so went to a socket that was gone. Projected on resume as a retained failed turn so the
+# composer shows it as not sent with the error card's Retry, instead of a chat that idles as if it were fine.
+# [daveey]
+_UNANSWERED_TURN_ERROR = "Not sent: this message never reached the assistant. Retry to send it again."
+_UNANSWERED_TURN_SURFACE = {"layer": "runtime", "code": "turn_not_started", "retryable": True}
+
+
+def _unanswered_tail_text(row: dict | None) -> str:
+    """Display text of ``row`` when it is a plain user message (the newest transcript row), else ``""``."""
+    if not isinstance(row, dict) or row.get("role") != "user" or row.get("display_kind"):
+        return ""
+    return _content_display_text(row.get("content")).strip()
+
+
+def _unanswered_turn_inflight(session: dict, history: list | None = None, db=None) -> dict | None:
+    """The retained-failure ``inflight`` snapshot for an unanswered newest user row, or None.
+
+    ``history`` is the transcript the caller already holds (live record / cold restore); without one, the
+    newest durable row is read from ``db`` (deferred resume, whose transcript is still hydrating). Never
+    fires while a turn could still answer: this record is running, holds an in-flight or queued turn, is a
+    lazy watch window, or any live process holds the session's turn lease (a sibling backend mid-turn).
+    Fails closed to None."""
+    with session["history_lock"]:
+        if (session.get("running") or session.get("inflight_turn") or session.get("queued_prompt")
+                or session.get("queued_prompts") or session.get("lazy")):
+            return None
+    key = str(session.get("session_key") or "")
+    try:
+        if history:
+            tail = next((m for m in reversed(history) if isinstance(m, dict)
+                         and m.get("role") not in ("session_meta", "system")), None)
+        elif db is not None and callable(getattr(db, "latest_conversation_tail", None)):
+            tail = db.latest_conversation_tail(key)
+        else:
+            return None
+        text = _unanswered_tail_text(tail)
+        if not text:
+            return None
+        if key and db is not None and callable(lease_owner := getattr(db, "session_turn_lease_owner", None)):
+            if lease_owner(key):
+                return None
+        from tui_gateway.turn_marker import read_turn_marker
+        if key and read_turn_marker(_session_home(session), key) is not None:
+            return None  # a crash marker: auto-continue (or its live writer) owns this turn
+    except Exception:
+        logger.debug("unanswered-turn check failed for %s", key, exc_info=True)
+        return None
+    if session.get("_unanswered_logged") != text:  # once per message: reattaches repaint often
+        logger.info("session %s: newest user message has no reply and no turn is running; shown as not sent",
+                    key)
+    session["_unanswered_logged"] = text
+    return {"assistant": "", "user": text, "streaming": False, "error": _UNANSWERED_TURN_ERROR,
+            "status": "error", "recoverable": True, "error_surface": dict(_UNANSWERED_TURN_SURFACE)}
+
+
 _TURN_FAILURE_DETAIL_LIMIT = 240
 # Shortest prompt run counting as a quote-back: above shared boilerplate, below a quoted sentence.
 _TURN_PROMPT_ECHO_WINDOW = 24

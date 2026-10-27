@@ -743,6 +743,19 @@ class SessionMessagesMixin:
             "AND role NOT IN ('session_meta', 'system') ORDER BY id DESC LIMIT 1", (session_id,))
         return row[0] if row else None
 
+    def latest_conversation_tail(self, session_id: str) -> Optional[dict[str, Any]]:
+        """``{id, role, content, display_kind}`` of the newest active user/assistant/tool row, or ``None``
+        (same bookkeeping filter as :meth:`latest_conversation_role`). One indexed row: cheap enough for
+        ``session.resume``'s unanswered-message check before the transcript hydrates."""
+        if not session_id:
+            return None
+        row = self._read_one(
+            "SELECT id, role, content, display_kind FROM messages WHERE session_id = ? AND active = 1 "
+            "AND role NOT IN ('session_meta', 'system') ORDER BY id DESC LIMIT 1", (session_id,))
+        if not row:
+            return None
+        return {"id": row[0], "role": row[1], "content": row[2], "display_kind": row[3]}
+
     def get_message_role(self, session_id: str, row_id: int) -> Optional[str]:
         """Role of the active message at *row_id* in *session_id*, or ``None``."""
         if not session_id:

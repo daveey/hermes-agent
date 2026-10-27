@@ -5,7 +5,8 @@
  *  a model is never shown under a different provider. */
 export function currentPickerSelection(
   store: { model: string; provider: string },
-  options?: { model?: string; provider?: string }
+  options?: { model?: string; provider?: string; providers?: null | { models?: string[]; slug: string }[] },
+  stored?: { model?: null | string; provider?: null | string }
 ): { model: string; provider: string } {
   const storeSelection = {
     model: String(store.model || ''),
@@ -19,6 +20,24 @@ export function currentPickerSelection(
 
   if (storeSelection.model && storeSelection.provider) {
     return storeSelection
+  }
+
+  // The chat's own stored route (sessions row) outranks the catalog's current,
+  // which is the PROFILE default: with the agent not loaded yet, falling to it
+  // painted another model's capabilities (GPT's Ultrafast) as this chat's.
+  const storedModel = String(stored?.model || '')
+
+  if (storedModel && (!storeSelection.model || storeSelection.model === storedModel)) {
+    const provider =
+      storeSelection.provider ||
+      String(stored?.provider || '') ||
+      (optionsSelection.model === storedModel ? optionsSelection.provider : '') ||
+      options?.providers?.find(row => row.models?.includes(storedModel))?.slug ||
+      ''
+
+    // Even unresolved, never borrow the profile default's provider (or its
+    // capabilities): the stored model with no provider reads as "unknown".
+    return { model: storedModel, provider }
   }
 
   if (optionsSelection.model && optionsSelection.provider) {

@@ -35,6 +35,7 @@ import {
 import type { Session } from 'electron'
 
 import { type ActiveRuntimeState, classifyActiveRuntime } from './active-runtime-state'
+import { hideAgentTestInstance, isHiddenAgentTestInstance } from './agent-test-instance'
 import { HERMES_API_EXPECTED_404 } from './api-expected-404'
 import {
   destroyKeepaliveAgents,
@@ -1301,6 +1302,13 @@ if (process.env.HERMES_DESKTOP_TMPDIR) {
 
   if (leaked.length) {
     console.error(`[hermes] dropped inherited worker env: ${leaked.join(', ')}`)
+  }
+
+  // A worker's own test instance must not appear as a second Hermes on the owner's screen
+  // (see agent-test-instance.ts). [daveey]
+  if (isHiddenAgentTestInstance({ leakedWorkerEnv: leaked, isPackaged: app.isPackaged, argv: process.argv, env: process.env })) {
+    hideAgentTestInstance(app)
+    console.error('[hermes] worker-launched test instance: no Dock icon, windows stay hidden (HERMES_DESKTOP_AGENT_VISIBLE=1 to show)')
   }
 }
 

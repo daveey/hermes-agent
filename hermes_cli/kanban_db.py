@@ -2250,7 +2250,7 @@ def claim_review_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    gate = _sync.claim_gate(conn, task_id, expires)
+    gate = _sync.claim_gate(conn, task_id, expires, lane="review")
     if gate.deferred:
         return None
     with gate, write_txn(conn):

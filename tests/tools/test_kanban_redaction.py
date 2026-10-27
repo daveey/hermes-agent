@@ -75,7 +75,19 @@ def test_kanban_block_reason_scrubbed_jwt(worker_env):
         ".eyJzdWIiOiIxMjM0NTY3ODkwIn0"
         ".dozjgNryP4J3jVmNHl0w5N_5NjP1-iXkpHgcth826Iw"
     )
-    kt._handle_block({"reason": f"Bearer {jwt}"})
+    # An ownerless block is refused (agent_owned_block), so name the human ask.
+    out = kt._handle_block({
+        "reason": f"Bearer {jwt}",
+        "kind": "needs_input",
+        "human_request": {
+            "action": "Rotate the leaked token",
+            "why_human": "Only the account owner can rotate it",
+            "interaction": "external",
+            "scope": "test token",
+            "evidence": "token appeared in a block reason",
+        },
+    })
+    assert "error" not in out, out
     conn = kbc.connect()
     try:
         run = kb.latest_run(conn, worker_env)

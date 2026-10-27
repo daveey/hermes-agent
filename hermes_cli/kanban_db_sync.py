@@ -79,6 +79,8 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     "task_runs": frozenset({"claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at"}),
     "task_attachments": frozenset({"stored_path"}),
 }
+# Set by the service, never by a gateway: applied from the feed, never captured.
+SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"created_on"})}
 KEY_COLUMNS: dict[str, frozenset[str]] = {
     "tasks": frozenset({"id"}),
     "task_links": frozenset(),
@@ -140,6 +142,7 @@ _SYNC_COLUMN_DDL = (
     ("tasks", "field_hlc", "field_hlc TEXT"),
     ("tasks", "lease_holder", "lease_holder TEXT"),
     ("tasks", "lease_expires", "lease_expires INTEGER"),
+    ("tasks", "created_on", "created_on TEXT"),
 )
 
 # Resolved db paths whose triggers this process installed. Empty = no synced
@@ -160,17 +163,54 @@ def uuid7() -> str:
 
 # --- Config + install -----------------------------------------------------------------------------
 
+def sync_config() -> Mapping[str, Any]:
+    """``kanban.sync`` from the kanban root's ``config.yaml`` (empty when unset or unreadable).
+
+    Kanban storage is shared by every profile on the host (``kanban_db.kanban_home``), so the switch is read
+    there, never from the active profile: a worker running under a profile without the setting must not see
+    sync as off and drop the board's capture triggers under the gateway."""
+    try:
+        from hermes_cli import kanban_db
+        from utils import load_yaml_file_readonly
+        path = kanban_db.kanban_home() / "config.yaml"
+        kanban = ((load_yaml_file_readonly(path) if path.exists() else None) or {}).get("kanban") or {}
+    except Exception as exc:  # health: allow BLE001 -- an unreadable config reads as sync off; connect() must not break
+        _log.warning("kanban sync: cannot read config (%s: %s); sync stays off", type(exc).__name__, exc)
+        return {}
+    sync = kanban.get("sync") if isinstance(kanban, Mapping) else None
+    return sync if isinstance(sync, Mapping) else {}
+
+
 def sync_enabled() -> bool:
     """``kanban.sync.enabled`` (default False). An unreadable config reads as off,
     which is today's behaviour."""
-    try:
-        from hermes_cli.config import load_config
-        kanban = (load_config() or {}).get("kanban") or {}
-    except Exception as exc:  # health: allow BLE001 -- an unreadable config reads as sync off; connect() must not break
-        _log.warning("kanban sync: cannot read config (%s: %s); sync stays off", type(exc).__name__, exc)
-        return False
-    sync = kanban.get("sync") if isinstance(kanban, Mapping) else None
-    return bool(isinstance(sync, Mapping) and sync.get("enabled"))
+    return bool(sync_config().get("enabled"))
+
+
+SHADOW_DIR = "sync-shadow"
+
+
+def board_slug_for_path(db_path: str) -> str:
+    """``<root>/kanban.db`` -> ``default``; ``<root>/kanban/boards/<slug>/kanban.db`` -> ``<slug>``;
+    a shadow copy ``.../sync-shadow/<slug>.db`` -> ``<slug>``."""
+    from pathlib import Path
+    p = Path(db_path)
+    if p.parent.name == SHADOW_DIR:
+        return p.stem
+    if p.name == "kanban.db" and p.parent.parent.name == "boards":
+        return p.parent.name
+    return "default"
+
+
+def board_selected(db_path: str) -> bool:
+    """``kanban.sync.boards`` lists the boards that sync (absent = every board). A shadow copy always does."""
+    from pathlib import Path
+    if Path(db_path).parent.name == SHADOW_DIR:
+        return True
+    boards = sync_config().get("boards")
+    if not isinstance(boards, (list, tuple)):
+        return True
+    return board_slug_for_path(db_path) in {str(b) for b in boards}
 
 
 def _db_key(conn: sqlite3.Connection) -> Optional[str]:
@@ -181,8 +221,9 @@ def _db_key(conn: sqlite3.Connection) -> Optional[str]:
 def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
     """Init-time seam: with the flag on, create the sync tables and (unless the
     board was detached to ``off``) install the capture triggers; with it off,
-    drop any capture trigger an earlier enable left in the file."""
-    if not sync_enabled():
+    drop any capture trigger an earlier enable left in the file. A board not listed
+    in ``kanban.sync.boards`` is treated as off."""
+    if not sync_enabled() or not board_selected(db_path):
         _SYNCED_PATHS.discard(db_path)
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
                         "AND name LIKE 'kanban_sync_%' LIMIT 1").fetchone():
@@ -221,8 +262,8 @@ def table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 
 def captured_columns(conn: sqlite3.Connection, table: str) -> list[str]:
-    """Columns the triggers capture: everything but local-only and key columns."""
-    skip = LOCAL_COLUMNS[table] | KEY_COLUMNS[table]
+    """Columns the triggers capture: everything but local-only, server-set and key columns."""
+    skip = LOCAL_COLUMNS[table] | KEY_COLUMNS[table] | SERVER_COLUMNS.get(table, frozenset())
     return [c for c in table_columns(conn, table) if c not in skip]
 
 
@@ -231,7 +272,7 @@ def undeclared_columns(conn: sqlite3.Connection) -> dict[str, set[str]]:
     a migration added them and nobody decided whether they leave the gateway."""
     out: dict[str, set[str]] = {}
     for table in SYNCED_TABLES:
-        known = SYNCED_COLUMNS[table] | LOCAL_COLUMNS[table] | KEY_COLUMNS[table]
+        known = SYNCED_COLUMNS[table] | LOCAL_COLUMNS[table] | KEY_COLUMNS[table] | SERVER_COLUMNS.get(table, frozenset())
         extra = set(table_columns(conn, table)) - known
         if extra:
             out[table] = extra
@@ -368,6 +409,23 @@ def set_mode(conn: sqlite3.Connection, mode: str) -> None:
         (_SYNCED_PATHS.discard if mode == "off" else _SYNCED_PATHS.add)(key)
 
 
+def set_identity(conn: sqlite3.Connection, board_id: str, gateway_id: str) -> None:
+    """Bind the board file to its service board and this gateway's service name (the name the service records in
+    ``origin_gateway``, ``created_on`` and lease holders, so echo and lease checks compare like with like)."""
+    from hermes_cli.kanban_db_connect import write_txn
+    with write_txn(conn):
+        conn.execute("UPDATE kanban_sync_state SET board_id = ?, gateway_id = ?", (board_id, gateway_id))
+
+
+def sync_state(conn: sqlite3.Connection) -> Optional[dict[str, Any]]:
+    """The board's sync row (None when sync never ran on this file)."""
+    try:
+        row = conn.execute("SELECT * FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return dict(row) if row else None
+
+
 def new_task_id(conn: sqlite3.Connection) -> str:
     """Synced boards: ``t_`` + 16 hex (48-bit ms timestamp + 16 random bits), safe
     across gateways and offline creation; otherwise the classic 8-hex id."""
@@ -397,7 +455,8 @@ class Lease:
 
 
 class LeaseClient(Protocol):
-    def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> Lease: ...
+    def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
+                lane: str = "ready") -> Lease: ...
 
     def renew(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> Lease: ...
 
@@ -415,6 +474,15 @@ def set_lease_client(client: Optional[LeaseClient]) -> Optional[LeaseClient]:
 
 
 def _client() -> LeaseClient:
+    """The registered lease client, or one built from this host's hub enrollment on first use: workers renew
+    their lease from their own process (the ``kanban_heartbeat`` tool), not the gateway's."""
+    global _LEASE_CLIENT
+    if _LEASE_CLIENT is None and sync_enabled():
+        try:
+            from hermes_cli import kanban_sync_client as ksc
+            _LEASE_CLIENT = ksc.HubLeaseClient(ksc.Hub(ksc.load_identity()))
+        except Exception as exc:  # health: allow BLE001 -- no enrollment / bad config: claims fail closed below
+            _log.info("kanban sync: no lease client (%s: %s)", type(exc).__name__, exc)
     if _LEASE_CLIENT is None:
         raise LeaseUnavailable("no lease client registered")
     return _LEASE_CLIENT
@@ -445,7 +513,7 @@ class ClaimGate:
             _log.info("kanban sync: release of unused lease for %s failed: %s", task_id, err)
 
 
-def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int) -> ClaimGate:
+def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str = "ready") -> ClaimGate:
     """Lease seam before a claim CAS. Only ``primary`` boards ask the service;
     without a grant the card stays ``ready`` (no offline claims: every card is
     at-most-once in v1). A grant bounds the local claim to the lease deadline."""
@@ -456,7 +524,7 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int) -> ClaimGat
     run_uid = uuid7()
     try:
         lease = _client().acquire(board_id=ids[0], task_uid=task_id, run_uid=run_uid, gateway_id=ids[1],
-                                  ttl_s=max(expires - int(time.time()), 1))
+                                  ttl_s=max(expires - int(time.time()), 1), lane=lane)
     except _CLIENT_ERRORS as exc:  # fail closed: an unreachable service defers the claim
         _log.info("claim_deferred: offline task=%s (%s: %s)", task_id, type(exc).__name__, exc)
         return ClaimGate(expires, deferred=True)
@@ -604,6 +672,7 @@ _CLAIMABLE = ("ready", "review")
 
 def apply_remote_changes(
     conn: sqlite3.Connection, changes: Sequence[RemoteChange], *, new_cursor: int, board: Optional[str] = None,
+    observers: bool = True,
 ) -> ApplyResult:
     """Apply one feed page in ONE transaction, then fire local observers.
 
@@ -612,7 +681,8 @@ def apply_remote_changes(
     row, ``run_uid`` is translated to the local run id, local-only columns are
     never written from the wire, and the cursor advances in the same commit as
     the rows. Hooks fire once, after the commit, with ``remote=True`` and
-    ``origin_gateway``; a page that makes work claimable wakes the dispatcher."""
+    ``origin_gateway``; a page that makes work claimable wakes the dispatcher.
+    ``observers=False`` (a shadow copy) applies the rows and fires nothing."""
     from hermes_cli.kanban_db_connect import write_txn
     if board_mode(conn) == "off":
         raise RuntimeError("apply_remote_changes: kanban sync is not enabled on this board")
@@ -623,7 +693,8 @@ def apply_remote_changes(
         for change in changes:
             _apply_one(conn, change, own, result)
         conn.execute("UPDATE kanban_sync_state SET cursor = ?, applying = 0", (new_cursor,))
-    _after_commit(conn, result, board)
+    if observers:
+        _after_commit(conn, result, board)
     return result
 
 
@@ -664,7 +735,8 @@ def _local_run_id(conn: sqlite3.Connection, uid: Optional[str], task_id: Any) ->
 
 def _local_fields(conn: sqlite3.Connection, table: str, fields: Mapping[str, Any], task_id: Any) -> dict[str, Any]:
     """Wire fields -> local columns: drop local-only/key/unknown columns, uids -> local ids."""
-    allowed = set(captured_columns(conn, table))
+    present = set(table_columns(conn, table))
+    allowed = set(captured_columns(conn, table)) | (SERVER_COLUMNS.get(table, frozenset()) & present)
     out: dict[str, Any] = {}
     for column in allowed:
         wire = _wire_name(table, column)
@@ -679,7 +751,7 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
     if _tombstoned(conn, "tasks", ch.uid):
         return False
     old = conn.execute("SELECT * FROM tasks WHERE id = ?", (ch.uid,)).fetchone()
-    if old is not None and old["sync_version"] is not None and ch.version <= old["sync_version"]:
+    if old is not None and old["sync_version"] is not None and ch.version < old["sync_version"]:  # equal = the same row (a re-send or a revert)
         return False
     cols = _local_fields(conn, "tasks", ch.fields, ch.uid)
     if old is None:
@@ -692,8 +764,25 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
         assignments = ", ".join(f"{c} = ?" for c in cols)
         conn.execute(f"UPDATE tasks SET {assignments}{', ' if cols else ''}sync_version = ? WHERE id = ?",
                      (*cols.values(), ch.version, ch.uid))
+    if "lease_holder" in ch.fields:  # the service's full row carries its lease mirror
+        _mirror_lease(conn, ch.uid, ch.fields.get("lease_holder"), ch.fields.get("lease_expires"), own, result)
     _collect_task_observers(ch, cols.get("status"), changed, result)
     return True
+
+
+def _mirror_lease(conn: sqlite3.Connection, task_id: str, holder: Optional[str], expires: Optional[int],
+                  own: str, result: ApplyResult) -> None:
+    """Mirror the service's lease onto the task. A lease that moved away from this gateway while a local
+    worker holds the claim makes the claim stale now, so the dispatcher's stale-claim path stops the worker."""
+    row = conn.execute("SELECT status, claim_lock, lease_holder FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return
+    conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ? WHERE id = ?", (holder, expires, task_id))
+    if holder != own and row["claim_lock"] is not None and row["lease_holder"] == own:
+        conn.execute("UPDATE tasks SET claim_expires = ? WHERE id = ? AND claim_lock IS NOT NULL",
+                     (int(time.time()) - 1, task_id))
+    if holder is None and row["status"] in _CLAIMABLE:
+        result.wake_dispatcher = True
 
 
 def _collect_task_observers(ch: RemoteChange, new_status: Optional[str], changed: set[str],

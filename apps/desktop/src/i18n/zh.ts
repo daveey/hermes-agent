@@ -4169,6 +4169,7 @@ export const zhOverrides = {
       switchModel: '切换模型',
       openModelPicker: '打开模型选择器',
       modelPinned: '已由你固定；新对话将使用此模型而非“设置”中的默认模型',
+      modelLoading: model => `${model} · 正在加载此对话的模型…`,
       modelTitle: (provider, model) => `模型 · ${provider}: ${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }

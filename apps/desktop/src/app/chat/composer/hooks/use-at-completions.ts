@@ -1,5 +1,5 @@
 import type { Unstable_TriggerAdapter, Unstable_TriggerItem } from '@assistant-ui/core'
-import { useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 import { refChipLabel } from '@/components/assistant-ui/directive-text'
 import { useContributions } from '@/contrib/react/use-contributions'
@@ -132,6 +132,36 @@ export function useAtCompletions(options: {
   const enabled = Boolean(gateway)
 
   const contributed = useContributions(COMPOSER_AREAS.atCompletions)
+
+  // A source whose rows change behind its cache (a background fetch landed)
+  // signals through `subscribe`; bumping the adapter's epoch makes an open
+  // popover re-ask for the query it is showing instead of serving stale rows.
+  const [sourceEpoch, setSourceEpoch] = useState(0)
+
+  useEffect(() => {
+    const bump = () => setSourceEpoch(n => n + 1)
+    const unsubscribers: Array<() => void> = []
+
+    for (const contribution of contributed) {
+      const source = contribution.data as ComposerAtCompletionSource | undefined
+
+      if (typeof source?.subscribe !== 'function') {
+        continue
+      }
+
+      try {
+        const off = source.subscribe(bump)
+
+        if (typeof off === 'function') {
+          unsubscribers.push(off)
+        }
+      } catch {
+        /* a broken source must not take down @ completions */
+      }
+    }
+
+    return () => unsubscribers.forEach(off => off())
+  }, [contributed])
 
   // Contributed rows for the query, mapped into the gateway entry shape so
   // one classify/toItem path renders every row. Provider errors are isolated:
@@ -267,7 +297,7 @@ export function useAtCompletions(options: {
   // nothing when the answer is already in hand.
   const isCached = useCallback((query: string) => hasCachedPathCompletion(cacheKey(query)), [cacheKey])
 
-  return useLiveCompletionAdapter({ enabled, fetcher, isCached, toItem })
+  return useLiveCompletionAdapter({ enabled, epoch: sourceEpoch, fetcher, isCached, toItem })
 }
 
 /** Re-export `classify` for use by the formatter (insertion side). */

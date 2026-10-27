@@ -677,7 +677,15 @@ _SESSION_LIST_HEAVY_FIELDS = ("system_prompt", "model_config")
 
 
 def _strip_session_list_rows(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from hermes_state import SessionDB
     for s in sessions:
+        # Project the stored route's provider before ``model_config`` goes: the desktop composer shows a
+        # chat's own model/provider while its agent is not loaded, instead of the profile default's.
+        if "model_provider" not in s and ("model_config" in s or "billing_provider" in s):
+            try:
+                s["model_provider"] = str(SessionDB.session_gateway_runtime(s).get("provider") or "") or None
+            except Exception:
+                s["model_provider"] = None
         for key in _SESSION_LIST_HEAVY_FIELDS:
             s.pop(key, None)
     return sessions

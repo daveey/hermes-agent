@@ -146,5 +146,27 @@ describe('model-status-label', () => {
     it('falls back to the store while options are still loading', () => {
       expect(currentPickerSelection(store, undefined)).toEqual(store)
     })
+
+    it("prefers the chat's stored route over the catalog's profile default when the agent is unloaded", () => {
+      const stored = { model: 'claude-opus-5-5', provider: 'anthropic' }
+
+      expect(currentPickerSelection({ model: '', provider: '' }, options, stored)).toEqual(stored)
+      // A complete live pair still wins over the stored row.
+      expect(currentPickerSelection(store, options, stored)).toEqual(store)
+    })
+
+    it('resolves a stored model with no provider from the catalog row that lists it', () => {
+      const catalog = { ...options, providers: [{ models: ['claude-opus-5-5'], slug: 'anthropic' }] }
+
+      expect(currentPickerSelection({ model: '', provider: '' }, catalog, { model: 'claude-opus-5-5' })).toEqual({
+        model: 'claude-opus-5-5',
+        provider: 'anthropic'
+      })
+      // Unresolvable provider: never fall to the profile default's pair.
+      expect(currentPickerSelection({ model: '', provider: '' }, options, { model: 'mystery' })).toEqual({
+        model: 'mystery',
+        provider: ''
+      })
+    })
   })
 })

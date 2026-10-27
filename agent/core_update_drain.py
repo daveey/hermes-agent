@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -30,15 +29,9 @@ _logged: set[str] = set()
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    import psutil
+
+    return psutil.pid_exists(pid)
 
 
 def hold_paths() -> list[Path]:
@@ -56,7 +49,7 @@ def hold_paths() -> list[Path]:
 def read_hold(path: Path, now: Optional[float] = None) -> Optional[dict]:
     """The hold record when ``path`` is an active hold, else None."""
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8-sig")
         st = path.stat()
     except (FileNotFoundError, NotADirectoryError):
         return None

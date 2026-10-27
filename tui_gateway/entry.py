@@ -270,6 +270,12 @@ def _write_or_exit(payload: dict, reason: str) -> None:
         sys.exit(0)
 
 
+def _start_quota_recovery_watch() -> None:
+    from agent.account_usage_recovery import start_quota_recovery_watch
+
+    start_quota_recovery_watch()
+
+
 def main():
     # stdout is this process's JSON-RPC client channel: peer-less global broadcasts belong on it.
     server._stdio_is_rpc_channel = True
@@ -299,7 +305,8 @@ def main():
     for start, what in (
             (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
             (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling"),
-            (server._start_kanban_unloaded_sweeper, "kanban unloaded-session sweeper start")):
+            (server._start_kanban_unloaded_sweeper, "kanban unloaded-session sweeper start"),
+            (_start_quota_recovery_watch, "account quota recovery watch start")):
         try:
             start()
         except Exception:

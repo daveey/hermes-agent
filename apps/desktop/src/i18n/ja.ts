@@ -3161,6 +3161,7 @@ export const jaOverrides = {
       switchModel: 'モデルを切り替え',
       openModelPicker: 'モデルピッカーを開く',
       modelPinned: '手動で固定中 — 新しいチャットは設定のデフォルトではなくこのモデルを使用します',
+      modelLoading: model => `${model} · このチャットのモデルを読み込み中…`,
       modelTitle: (provider, model) => `モデル · ${provider}: ${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }
