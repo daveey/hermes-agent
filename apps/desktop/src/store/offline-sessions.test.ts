@@ -95,6 +95,29 @@ describe('offlineSessionsFromReplica', () => {
     expect(row.is_active).toBe(false)
   })
 
+  // [daveey] instant loads: an owner that published within OWNER_ASLEEP_AFTER_S is awake (hermes-hub watch keeps
+  // the replica within seconds), so its rows are ordinary rows and show its running turns.
+  it('an awake owner gives ordinary rows that show its running turn', () => {
+    const now = 20_000
+    const [row] = offlineSessionsFromReplica([rec('a', { running: true, synced_at: now - 5 })], connFor, now)
+
+    expect(row.offline_cached).toBe(false)
+    expect(row.is_active).toBe(true)
+  })
+
+  it('an owner silent past the threshold, or a stale replica, is asleep: cached and never running', () => {
+    const now = 20_000
+    const old = offlineSessionsFromReplica([rec('a', { running: true, synced_at: now - 181 })], connFor, now)[0]
+    const edge = offlineSessionsFromReplica([rec('b', { running: true, synced_at: now - 180 })], connFor, now)[0]
+    const stale = offlineSessionsFromReplica([rec('c', { running: true, stale: true, synced_at: now })], connFor, now)[0]
+    const never = offlineSessionsFromReplica([rec('d', { running: true, synced_at: null })], connFor, now)[0]
+
+    expect([old.offline_cached, old.is_active]).toEqual([true, false])
+    expect([edge.offline_cached, edge.is_active]).toEqual([false, true])
+    expect([stale.offline_cached, stale.is_active]).toEqual([true, false])
+    expect([never.offline_cached, never.is_active]).toEqual([true, false])
+  })
+
   it('skips sources the normal recents list excludes (cron, subagent, api_server, messaging…)', () => {
     const rows = offlineSessionsFromReplica(
       ['cron', 'subagent', 'api_server', 'telegram', 'kanban', 'oneshot', 'acp', 'tool'].map(source =>

@@ -155,7 +155,8 @@ export function recordSessionListResult(
  */
 export function offlineSessionsFromReplica(
   records: readonly OfflineReplicaRecord[],
-  connectionForGateway: (gateway: string) => string | undefined
+  connectionForGateway: (gateway: string) => string | undefined,
+  nowS: number = Date.now() / 1000
 ): SessionInfo[] {
   // Read lazily: callers that mock @/lib/session-source never reach the conversion.
   const excluded = new Set<string>(SIDEBAR_EXCLUDED_SOURCES)
@@ -186,7 +187,7 @@ export function offlineSessionsFromReplica(
     const connectionId = connectionForGateway(record.gateway)
 
     if (connectionId && isRecentsEligible(record, excluded) && !superseded.has(record)) {
-      out.push(rowFromRecord(record, connectionId, lineageOf(record, parentOf)))
+      out.push(rowFromRecord(record, connectionId, lineageOf(record, parentOf), nowS))
     }
   }
 
@@ -228,8 +229,20 @@ function lineageOf(
   return lineage
 }
 
-function rowFromRecord(record: OfflineReplicaRecord, connectionId: string, lineage: string[]): SessionInfo {
+/**
+ * [daveey] A replica owner that published within this window is awake: its rows are ordinary sidebar rows (they open
+ * the normal way and show its running turns; `hermes-hub watch` keeps them within seconds of the owner). Older than
+ * this, the owner is asleep or unreachable and its rows are cached (`offline_cached`): marked, never running.
+ */
+export const OWNER_ASLEEP_AFTER_S = 180
+
+export function ownerAsleep(record: Pick<OfflineReplicaRecord, 'stale' | 'synced_at'>, nowS: number): boolean {
+  return record.stale || record.synced_at == null || nowS - record.synced_at > OWNER_ASLEEP_AFTER_S
+}
+
+function rowFromRecord(record: OfflineReplicaRecord, connectionId: string, lineage: string[], nowS: number): SessionInfo {
   const startedAt = record.started_at ?? record.activity ?? 0
+  const asleep = ownerAsleep(record, nowS)
 
   return {
     ...(lineage.length ? { _lineage_ids: [...lineage, record.id], _lineage_root_id: lineage[0] } : {}),
@@ -238,11 +251,11 @@ function rowFromRecord(record: OfflineReplicaRecord, connectionId: string, linea
     ended_at: record.ended_at ?? null,
     id: record.id,
     input_tokens: 0,
-    is_active: false,
+    is_active: !asleep && record.running === true,
     last_active: record.activity ?? startedAt,
     message_count: record.message_count ?? 0,
     model: record.model ?? null,
-    offline_cached: true,
+    offline_cached: asleep,
     offline_gateway: record.gateway,
     offline_synced_at: record.synced_at,
     offline_version: record.version,

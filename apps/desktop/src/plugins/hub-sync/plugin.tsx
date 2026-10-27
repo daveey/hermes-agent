@@ -9,9 +9,12 @@
  */
 import { type HermesPlugin, host, publishOfflineSessions } from '@hermes/plugin-sdk'
 
-import { loadReplicaSidebarRows } from './api'
+import { loadReplicaSidebarRows, replicaCursor } from './api'
 
-const POLL_MS = 60_000
+// [daveey] The replica is fresh within about a second (`hermes-hub watch`). Poll its cursor (a cheap local read) and
+// reload rows only when it moved, plus a full reload at least every FULL_MS so owner freshness (asleep) re-evaluates.
+const CURSOR_POLL_MS = 2_000
+const FULL_MS = 30_000
 
 const plugin: HermesPlugin = {
   id: 'hub-sync',
@@ -52,7 +55,24 @@ const plugin: HermesPlugin = {
 
     void refresh()
 
-    const timer = setInterval(() => void refresh(), POLL_MS)
+    let lastCursor: null | number = null
+    let lastFull = Date.now()
+
+    const tick = async () => {
+      if (disposed) {
+        return
+      }
+
+      const cursor = await replicaCursor().catch(() => null)
+
+      if (cursor !== lastCursor || Date.now() - lastFull >= FULL_MS) {
+        lastCursor = cursor
+        lastFull = Date.now()
+        void refresh()
+      }
+    }
+
+    const timer = setInterval(() => void tick(), CURSOR_POLL_MS)
     const stopGateways = host.state.gateways.listen(() => void refresh())
 
     ctx.onDispose(() => {

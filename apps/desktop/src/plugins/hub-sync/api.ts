@@ -35,6 +35,27 @@ export async function reachableConnections(): Promise<Set<string>> {
   return new Set(answers.filter((id): id is string => Boolean(id)))
 }
 
+async function markUnreachableGateways(primary: string): Promise<void> {
+  try {
+    const reachable = await reachableConnections()
+
+    for (const connection of host.state.gateways.get()) {
+      if (connection.id !== primary && !reachable.has(connection.id)) {
+        recordSessionGatewayUnavailable(connection.id)
+      }
+    }
+  } catch {
+    // best effort
+  }
+}
+
+/** The replica's pull cursor: it moves only when new hub data arrived, so polling it is cheap. */
+export async function replicaCursor(): Promise<null | number> {
+  const st = await hubGet<{ cursor?: number }>('/status', hubReplicaConnectionId())
+
+  return typeof st?.cursor === 'number' ? st.cursor : null
+}
+
 /**
  * Status failure invalidates retained lists. Status success cannot repair a
  * failed owner list: only its next successful sidebar refresh can do that.
@@ -42,25 +63,19 @@ export async function reachableConnections(): Promise<Set<string>> {
 export async function loadReplicaSidebarRows(shouldPublish: () => boolean = () => true): Promise<HubSessionRow[]> {
   const primary = hubReplicaConnectionId()
 
-  const [result, reachable] = await Promise.all([
-    hubGet<{ sessions?: HubSessionRow[] }>(`/sessions?limit=${REPLICA_LIMIT}`, primary),
-    reachableConnections()
-  ])
+  // The replica read is local and answers in milliseconds; never wait on the reachability probes (each one goes over
+  // SSH to its gateway). They only invalidate retained live lists, in the background.
+  void markUnreachableGateways(primary)
+  const result = await hubGet<{ sessions?: HubSessionRow[] }>(`/sessions?limit=${REPLICA_LIMIT}`, primary)
 
   if (!shouldPublish()) {
     return []
   }
 
   const rows = Array.isArray(result?.sessions) ? result.sessions : []
-
-  for (const connection of host.state.gateways.get()) {
-    if (connection.id !== primary && !reachable.has(connection.id)) {
-      recordSessionGatewayUnavailable(connection.id)
-    }
-  }
-
   const primaryName = hubGatewayForConnection(primary)
 
+  // A live owner list wins over the replica only once it is fresh; until then (a cold start) the replica rows show.
   const isGatewayLive = (gateway: string, profile?: string) => {
     if (gateway === primaryName) {
       return true
@@ -68,7 +83,7 @@ export async function loadReplicaSidebarRows(shouldPublish: () => boolean = () =
 
     const connectionId = connectionForHubGateway(gateway)
 
-    return Boolean(connectionId && reachable.has(connectionId) && sessionOwnerIsFresh(connectionId, profile))
+    return Boolean(connectionId && sessionOwnerIsFresh(connectionId, profile))
   }
 
   return replicaSessionsToShow(
