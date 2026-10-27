@@ -1373,6 +1373,8 @@ describe('actual hub poller + list refresh freshness', () => {
         vi.useRealTimers()
         _resetOfflineSessionsForTests()
       }
-    }
+    },
+    // First case pays the cold dynamic imports; loaded CI exceeded the 15s default.
+    60_000
   )
 })

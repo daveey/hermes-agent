@@ -150,7 +150,8 @@ describe('probePluginRepo', () => {
     const result = await probePluginRepo('git', `${pathToFileURL(repo).href}#integrations/hermes`)
 
     expect(result).toMatchObject({ ok: true, agent: true, agentName: 'nested-agent' })
-  })
+    // Spawns real git (init/clone/sparse-checkout); can exceed 30s on loaded CI runners.
+  }, 120_000)
 })
 
 describe('installDesktopPluginFromGit', () => {
