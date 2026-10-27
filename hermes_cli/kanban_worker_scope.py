@@ -122,3 +122,135 @@ def release_failure(metadata: dict) -> None:
     unit = metadata.get("systemd_unit")
     if unit:
         _systemctl("reset-failed", unit)
+
+
+# --- Typed OOM recovery -------------------------------------------------------
+# An ``oom_killed`` run is a resource failure, not a generic crash: the retry
+# gets a doubled MemoryMax (bounded by MemAvailable admission) instead of dying
+# at the same cap again.
+OOM_CAP_CEILING_BYTES = 12 * 1024 ** 3
+OOM_ADMISSION_RESERVE_BYTES = 4 * 1024 ** 3   # always left for the host
+OOM_ALERT_THRESHOLD = 5                       # kills per 24h before a card opens
+OOM_ALERT_WINDOW_SECONDS = 24 * 3600
+_MEMORY_MAX_PROP = "MemoryMax="
+
+
+def mem_available_bytes() -> int | None:
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def raised_memory_max(base: int, consecutive_ooms: int, mem_available: int | None) -> int:
+    """Cap for the next run: base * 2**n, <= 12 GiB, admitted only if it fits in MemAvailable.
+
+    Unknown MemAvailable refuses the raise (returns base) rather than guessing.
+    """
+    if consecutive_ooms <= 0 or mem_available is None:
+        return base
+    want = min(base << min(consecutive_ooms, 8), OOM_CAP_CEILING_BYTES)
+    admitted = mem_available - OOM_ADMISSION_RESERVE_BYTES
+    if want <= base or admitted <= base:
+        return base
+    return min(want, admitted)
+
+
+def consecutive_oom_runs(task_id: str, board: str | None = None) -> int:
+    """Number of most-recent finished runs, in a row, that ended ``oom_killed``."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    try:
+        with kbc.connect_closing(board=board) as conn:
+            rows = conn.execute(
+                "SELECT outcome FROM task_runs WHERE task_id = ? AND outcome IS NOT NULL "
+                "ORDER BY id DESC LIMIT 8", (task_id,)).fetchall()
+    except Exception:
+        return 0
+    n = 0
+    for row in rows:
+        if row[0] != "oom_killed":
+            break
+        n += 1
+    return n
+
+
+def apply_oom_recovery(argv: list[str], task_id: str, board: str | None = None) -> list[str]:
+    """Rewrite the scope's MemoryMax property after prior OOM kills; no-op otherwise."""
+    n = consecutive_oom_runs(task_id, board)
+    if not n:
+        return argv
+    for i, arg in enumerate(argv):
+        if arg == "--":
+            break
+        if arg.startswith(_MEMORY_MAX_PROP):
+            try:
+                base = int(arg[len(_MEMORY_MAX_PROP):])
+            except ValueError:
+                return argv
+            new = raised_memory_max(base, n, mem_available_bytes())
+            if new > base:
+                argv = list(argv)
+                argv[i] = f"{_MEMORY_MAX_PROP}{new}"
+            return argv
+    return argv
+
+
+# Heavy JS toolchains get bounded parallelism by default inside workers
+# (an explicit repo/user env value still wins).
+WORKER_TOOLCHAIN_ENV = {
+    "VITEST_MAX_WORKERS": "2",
+    "VITEST_MIN_WORKERS": "1",
+    "JEST_MAX_WORKERS": "2",
+}
+_NODE_HEAP_FLAG = "--max-old-space-size=3072"
+
+
+def apply_toolchain_env(env: dict) -> None:
+    for key, value in WORKER_TOOLCHAIN_ENV.items():
+        env.setdefault(key, value)
+    node_options = env.get("NODE_OPTIONS", "")
+    if "max-old-space-size" not in node_options:
+        env["NODE_OPTIONS"] = (node_options + " " + _NODE_HEAP_FLAG).strip()
+
+
+def note_oom_kill(task_id: str, board: str | None = None, *, now: int | None = None) -> str | None:
+    """Count OOM kills in 24h; above the threshold open one card per incident.
+
+    Later kills in the same incident (an open alert card exists) become comments.
+    Returns the alert task id, or None. Never raises.
+    """
+    import time
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    now = int(now if now is not None else time.time())
+    try:
+        with kbc.connect_closing(board=board) as conn:
+            kills = conn.execute(
+                "SELECT COUNT(*) FROM task_runs WHERE outcome = 'oom_killed' AND ended_at >= ?",
+                (now - OOM_ALERT_WINDOW_SECONDS,)).fetchone()[0] + 1  # + this run, not yet booked
+            if kills <= OOM_ALERT_THRESHOLD:
+                return None
+            key = "worker-oom-rate-alert"
+            open_card = conn.execute(
+                "SELECT id FROM tasks WHERE idempotency_key = ? AND status NOT IN ('done', 'archived') "
+                "ORDER BY created_at DESC LIMIT 1", (key,)).fetchone()
+            if open_card:
+                kb.add_comment(conn, open_card[0], "oom-detector",
+                               f"Another worker OOM kill ({task_id}); {kills} in the last 24h.")
+                return open_card[0]
+            return kb.create_task(
+                conn, title=f"Worker OOM kills: {kills} in 24h",
+                body=(f"{kills} kanban worker scopes were OOM-killed in the last 24h "
+                      f"(threshold {OOM_ALERT_THRESHOLD}); latest: {task_id}. Retries get a doubled "
+                      "MemoryMax up to 12 GiB; check `journalctl --user | grep oom-kill` and the "
+                      "victims' last output for the heavy step."),
+                assignee="default", created_by="oom-detector", priority=70,
+                idempotency_key=key, board=board)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("oom detector failed", exc_info=True)
+        return None

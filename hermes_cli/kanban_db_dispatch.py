@@ -1188,6 +1188,8 @@ def _classify_dead_worker(
     failure = _worker_scope.read_failure(task_id, run_id, log or "") if task_id else None
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
+        if kind == "oom_killed":
+            _worker_scope.note_oom_kill(task_id, board)
         dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
                            {"pid": pid, "claimer": claimer, **failure})
     else:
@@ -2983,7 +2985,7 @@ def _open_worker_log(task: Task, board: Optional[str]):
     return open(log_path, "ab")
 
 
-def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
+def _restart_safe_worker_argv(task: Task, command: list[str], board: Optional[str] = None) -> list[str]:
     """Wrap a systemd-hosted dispatcher's worker in the shared restart-safe scope.
 
     Kanban workers are long-lived agentic runs that outlive the dispatcher
@@ -3013,12 +3015,14 @@ def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
             )
         return command
 
-    return _worker_scope.retain_failed_scope(restart_safe_gateway_child_argv(
+    argv = _worker_scope.retain_failed_scope(restart_safe_gateway_child_argv(
         command,
         unit_suffix=f"kanban-{task.id}-run-{task.current_run_id}",
         require_restart_safe_scope=True,
         outlives_parent=True,
     ).argv)
+    # Typed OOM recovery: a task whose last run(s) were OOM-killed gets a raised cap.
+    return _worker_scope.apply_oom_recovery(argv, task.id, board)
 
 
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:
@@ -3137,7 +3141,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
-    cmd = _restart_safe_worker_argv(task, cmd)
+    cmd = _restart_safe_worker_argv(task, cmd, board)
+    _worker_scope.apply_toolchain_env(env)
     from tools.process_registry import systemd_user_bus_env
     env = systemd_user_bus_env(env)
     log_f = _open_worker_log(task, board)
