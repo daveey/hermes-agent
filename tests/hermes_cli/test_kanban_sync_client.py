@@ -484,3 +484,27 @@ def test_own_partition_keeps_child_rows_of_own_cards_only(live):
         sync.RemoteChange(6, "task_links", f"{tid}>t_foreign", "upsert", {}, 1, "", OTHER),
     ]
     assert [c.seq for c in ksc.own_partition(live, ch, ME)] == [1, 2, 5]
+
+
+def test_an_edit_of_a_card_the_service_never_saw_is_sent_as_the_full_row(live, svc):
+    with kbc.write_txn(live):
+        sync.drop_triggers(live)
+    tid = kb.create_task(live, title="made before sync", assignee="worker")  # never captured, never imported
+    sync.install_triggers(live)
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET priority = 7 WHERE id = ?", (tid,))  # captures only {"priority": 7}
+    res = ksc.push(live, svc.hub(ME), BOARD, ME, primary=False)
+    assert res.rejected == 0
+    row = svc.board(BOARD)["rows"]["tasks"][tid]
+    assert (row["title"], row["priority"], row["created_on"]) == ("made before sync", 7, ME)
+
+
+def test_import_clears_rows_the_service_refused_before_it(live, svc):
+    tid = kb.create_task(live, title="x", assignee="worker")
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_outbox SET state = 'rejected'")
+    counts = ksc.import_board(live, tables=("tasks",))
+    assert counts["cleared_rejected"] >= 1 and counts["tasks"] == 1
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE state = 'rejected'").fetchone()
+    assert ksc.push(live, svc.hub(ME), BOARD, ME, primary=False).rejected == 0
+    assert tid in svc.board(BOARD)["rows"]["tasks"]

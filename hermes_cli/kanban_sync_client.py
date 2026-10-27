@@ -196,6 +196,18 @@ def translate(row: dict, hlc: str) -> dict:
     return out
 
 
+def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
+    """A task edit captured before the service has acknowledged the card (``sync_version`` NULL: it was created
+    before sync was switched on and not imported yet) carries only the changed columns, which the service cannot
+    insert. Send the card's full current row instead; a later edit is then a plain merge."""
+    if row["table_name"] != "tasks" or row["op"] != "upsert":
+        return row
+    task = conn.execute("SELECT * FROM tasks WHERE id = ?", (row["row_uid"],)).fetchone()
+    if task is None or task["sync_version"] is not None:
+        return row
+    return {**row, "fields": _row_fields(conn, "tasks", task)}
+
+
 @dataclass
 class PushResult:
     sent: int = 0
@@ -215,7 +227,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
         if not rows:
             break
         with write_txn(conn):
-            wire = [translate(r, _next_hlc(conn, gateway)) for r in rows]
+            wire = [translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway)) for r in rows]
         try:
             resp = hub.ops(board, wire)
         except (HubError, OSError) as exc:
@@ -507,6 +519,8 @@ def import_board(conn: sqlite3.Connection, *, tables: Iterable[str] = IMPORT_ORD
     counts: dict[str, int] = {}
     now = time.time_ns() // 1_000_000
     with write_txn(conn):
+        # Rows the service refused before the import (edits of cards it had not seen) are superseded by the full rows.
+        counts["cleared_rejected"] = conn.execute("DELETE FROM kanban_sync_outbox WHERE state = 'rejected'").rowcount
         for table in tables:
             order = "created_at, id" if table == "tasks" else ("parent_id, child_id" if table == "task_links" else "id")
             n = 0

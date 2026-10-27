@@ -75,7 +75,9 @@ def _import(args: argparse.Namespace) -> int:
         counts = ksc.import_board(conn)
     finally:
         conn.close()
-    print(f"kanban sync: queued {sum(counts.values())} rows from {slug} ({', '.join(f'{k}={v}' for k, v in counts.items())})")
+    cleared = counts.pop("cleared_rejected", 0)
+    print(f"kanban sync: queued {sum(counts.values())} rows from {slug} ({', '.join(f'{k}={v}' for k, v in counts.items())})"
+          + (f"; cleared {cleared} refused rows they supersede" if cleared else ""))
     return 0
 
 
