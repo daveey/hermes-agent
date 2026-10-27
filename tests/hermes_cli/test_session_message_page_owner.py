@@ -43,7 +43,10 @@ def test_message_pages_identify_the_serving_profile(tmp_path, monkeypatch, servi
     assert default["profile"] == "default"
     assert len(tail["messages"]) == 120
     assert len(older["messages"]) == 79
-    assert len(default["messages"]) == 1
+    # A named profile's "default" is the native home (1 row). A custom home nested under
+    # ~/.hermes but not in profiles/ is its own installation (f6a16700fd), so its
+    # "default" is itself: the same 199-row store, newest page.
+    assert len(default["messages"]) == (1 if serving_profile else 120)
     assert [row["content"] for row in older["messages"] + tail["messages"]] == [
         f"message-{index}" for index in range(199)
     ]
