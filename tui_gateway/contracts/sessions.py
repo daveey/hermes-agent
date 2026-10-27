@@ -53,6 +53,7 @@ class SessionStartRequestResult(Result):
     active_turn: bool
     reconciliation: StartReconciliation
     metadata: dict[str, str] = Field(default_factory=dict)
+    toolsets: list[str] = Field(default_factory=list)
 
 
 method("session.start_request", params=SessionStartRequestParams, result=SessionStartRequestResult)

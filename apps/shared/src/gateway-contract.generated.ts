@@ -3060,6 +3060,7 @@ export interface SessionStartRequestResult {
   active_turn: boolean
   reconciliation: StartReconciliation
   metadata?: Record<string, string>
+  toolsets?: string[]
 }
 export type FirstTurnState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type StartReconciliation = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown_outcome'
