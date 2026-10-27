@@ -95,24 +95,38 @@ def test_no_answer_survives_the_callers_later_config_save(monkeypatch):
     assert read_raw_config()["telemetry"]["shared_metrics"] == {"enabled": False, "send": False, "offer_version": 2}
 
 
-def test_chat_offer_asks_an_undecided_profile_once(monkeypatch):
-    from hermes_cli.config import read_raw_config
-    from hermes_cli.observability import shared_metrics_consent as consent
-
-    asked = []
-    monkeypatch.setattr("hermes_cli.curses_ui.curses_radiolist", lambda *a, **k: asked.append(a) or 1)
+def _ask_recorder(monkeypatch) -> list:
+    asked: list = []
+    monkeypatch.setattr("hermes_cli.curses_ui.curses_radiolist", lambda *a, **k: asked.append(a) or 0)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.delenv("HERMES_DESKTOP", raising=False)
     monkeypatch.delenv("HERMES_NONINTERACTIVE", raising=False)
+    return asked
 
-    consent.offer_consent_before_chat(argparse.Namespace(query="hi"))  # no person to ask
+
+OFF = {"enabled": False, "send": False, "decided": True, "reask": False}
+
+
+def test_chat_never_offers_an_unanswered_profile(monkeypatch):
+    """Fork default: an unanswered profile reads as "No thanks", so chat start never asks."""
+    from hermes_cli.config import read_raw_config
+    from hermes_cli.observability import shared_metrics_consent as consent
+
+    asked = _ask_recorder(monkeypatch)
+    consent.offer_consent_before_chat(argparse.Namespace())
+
     assert asked == []
-    consent.offer_consent_before_chat(argparse.Namespace())
-    consent.offer_consent_before_chat(argparse.Namespace())
+    assert consent.consent_state(read_raw_config()) == OFF
 
-    assert len(asked) == 1
-    assert consent.consent_state(read_raw_config()) == {"enabled": True, "send": False, "decided": True, "reask": False}
+
+def test_setup_end_never_offers_an_unanswered_profile(monkeypatch):
+    from hermes_cli.observability import shared_metrics_consent as consent
+
+    asked = _ask_recorder(monkeypatch)
+    consent.offer_consent_if_undecided({})
+
+    assert asked == []
 
 
 def test_offer_drops_keys_typed_before_it_appeared(monkeypatch):
@@ -128,29 +142,27 @@ def test_offer_drops_keys_typed_before_it_appeared(monkeypatch):
     assert events == ["flush", "ask"]
 
 
-def test_unseen_no_thanks_is_asked_once_more_and_then_settled(monkeypatch):
-    """A pre-fix "No thanks" is re-offered with the reason; Esc on the re-ask keeps it for good,
-    while a pre-fix opt-in was a deliberate pick and is never re-asked."""
+def test_pre_fix_answers_are_kept_and_never_re_asked(monkeypatch):
+    """A "No thanks" without offer_version stays "No thanks"; an explicit opt-in stays on."""
     from hermes_cli.config import read_raw_config, save_config
     from hermes_cli.observability import shared_metrics_consent as consent
 
-    shown = []
-    monkeypatch.setattr("hermes_cli.curses_ui.curses_radiolist", lambda *a, **k: shown.append(k["description"]) or -1)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
-    monkeypatch.delenv("HERMES_DESKTOP", raising=False)
-    monkeypatch.delenv("HERMES_NONINTERACTIVE", raising=False)
-
-    save_config({"telemetry": {"shared_metrics": {"enabled": True, "send": False}}}, strip_defaults=False)
-    consent.offer_consent_before_chat(argparse.Namespace())
-    assert shown == []
-
+    asked = _ask_recorder(monkeypatch)
     save_config({"telemetry": {"shared_metrics": {"enabled": False, "send": False}}}, strip_defaults=False)
     consent.offer_consent_before_chat(argparse.Namespace())
-    consent.offer_consent_before_chat(argparse.Namespace())
+    assert asked == []
+    assert consent.consent_state(read_raw_config()) == OFF
 
-    assert len(shown) == 1 and shown[0].startswith(consent._REASK_NOTE)
-    assert consent.consent_state(read_raw_config()) == {"enabled": False, "send": False, "decided": True, "reask": False}
+    save_config({"telemetry": {"shared_metrics": {"enabled": True, "send": True}}}, strip_defaults=False)
+    consent.offer_consent_before_chat(argparse.Namespace())
+    assert asked == []
+    assert consent.consent_state(read_raw_config()) == {**OFF, "enabled": True, "send": True}
+
+
+def test_dashboard_consent_reads_an_unanswered_profile_as_off():
+    from hermes_cli.web_routers.shared_metrics import _read_consent
+
+    assert {k: v for k, v in _read_consent().items() if k != "managed"} == OFF
 
 
 def test_every_cli_promise_that_pre_opt_in_data_stays_local_names_the_install_note():

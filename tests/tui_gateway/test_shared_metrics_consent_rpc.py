@@ -58,19 +58,21 @@ def test_send_without_collection_is_normalized_off_and_closes_the_consent_window
     assert not (launch / "telemetry").exists()
 
 
-def test_status_is_undecided_until_a_key_is_written(tmp_path, monkeypatch):
+def test_status_reads_an_unanswered_profile_as_no_thanks(tmp_path, monkeypatch):
+    """Fork default: the Desktop strip shows only for ``decided: False``, which no profile reports."""
     _launch, worker = _bind_homes(monkeypatch, tmp_path)
 
-    unasked = {"enabled": False, "send": False, "decided": False, "reask": False}
-    assert _call("shared_metrics.status", {"profile": "code"}) == unasked
+    off = {"enabled": False, "send": False, "decided": True, "reask": False}
+    assert _call("shared_metrics.status", {"profile": "code"}) == off
 
-    # A "No thanks" from before the type-ahead fix (no offer_version) may never have been seen:
-    # it is offered once more, and the answer to that settles it.
+    # A pre-fix "No thanks" (no offer_version) is kept, not re-offered.
     (worker / "config.yaml").write_text(
         yaml.safe_dump({"telemetry": {"shared_metrics": {"enabled": False}}}), encoding="utf-8")
-    assert _call("shared_metrics.status", {"profile": "code"}) == {**unasked, "reask": True}
-    _call("shared_metrics.set", {"profile": "code", "enabled": False, "send": False})
-    assert _call("shared_metrics.status", {"profile": "code"}) == {**unasked, "decided": True}
+    assert _call("shared_metrics.status", {"profile": "code"}) == off
+
+    # An explicit opt-in still reads as on.
+    _call("shared_metrics.set", {"profile": "code", "enabled": True, "send": False})
+    assert _call("shared_metrics.status", {"profile": "code"}) == {**off, "enabled": True}
 
 
 def test_only_the_first_run_answer_records_desktop_setup_completed(tmp_path, monkeypatch):

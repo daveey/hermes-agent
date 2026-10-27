@@ -56,18 +56,16 @@ OFFER_VERSION = 2
 
 
 def consent_state(raw_cfg: Any) -> dict:
-    """``{enabled, send, decided, reask}`` from a RAW config mapping (no defaults merged). ``reask``:
-    an "off" answer from before ``OFFER_VERSION`` that may never have been seen; it reads undecided
-    so every surface offers it once more. An opt-in was always a deliberate pick and stays."""
+    """``{enabled, send, decided, reask}`` from a RAW config mapping (no defaults merged). Fork
+    default: a profile that never answered (or answered "off" before ``OFFER_VERSION``) reads as
+    "No thanks", so no surface ever offers; ``hermes setup telemetry`` still opts in explicitly."""
     section = _section(raw_cfg)
     enabled = section.get("enabled") is True
-    answered = "enabled" in section or "send" in section
-    reask = answered and not enabled and section.get("offer_version") != OFFER_VERSION
     return {
         "enabled": enabled,
         "send": enabled and section.get("send") is True,
-        "decided": answered and not reask,
-        "reask": reask,
+        "decided": True,
+        "reask": False,
     }
 
 
