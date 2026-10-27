@@ -683,3 +683,33 @@ def test_waiting_source_failure_is_unknown_until_success(kanban_root, monkeypatc
     ksa.annotate_kanban_activity(rows)
     assert 'kanban_unknown' not in rows[0]
     assert 'kanban_active' not in rows[0]
+
+
+def test_session_tasks_carry_latest_activity_note_and_pr_link(kanban_root):
+    """What the linked-card rows show: the latest event, a one-line note (newest run summary or comment) and the
+    newest GitHub PR link from comments, results or run summaries."""
+    path = kanban_root / "kanban.db"
+    _make_full_board(path, [
+        ("t_pr", "With PR", "review", "default", "s_me", 100, 200, None),
+        ("t_bare", "Bare", "ready", "default", "s_me", 100, None, None),
+    ])
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, created_at INTEGER)")
+    conn.execute("CREATE TABLE task_comments (id INTEGER PRIMARY KEY, task_id TEXT, author TEXT, body TEXT, created_at INTEGER)")
+    conn.execute("ALTER TABLE task_runs ADD COLUMN ended_at INTEGER")
+    conn.execute("ALTER TABLE task_runs ADD COLUMN summary TEXT")
+    conn.execute("ALTER TABLE tasks ADD COLUMN result TEXT")
+    conn.execute("ALTER TABLE tasks ADD COLUMN completed_at INTEGER")
+    conn.executemany("INSERT INTO task_events (task_id, kind, created_at) VALUES (?, ?, ?)",
+                     [("t_pr", "claimed", 300), ("t_pr", "review_requested", 900)])
+    conn.execute("INSERT INTO task_runs (task_id, started_at, ended_at, summary) VALUES "
+                 "('t_pr', 300, 800, 'Opened https://github.com/o/r/pull/1\nmore detail')")
+    conn.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES "
+                 "('t_pr', 'w', 'Superseded by https://github.com/o/r/pull/2 (rebased)', 850)")
+    conn.commit()
+    conn.close()
+    got = {t["id"]: t for t in ksa.session_tasks(["s_me"])}
+    assert got["t_pr"]["activity_kind"] == "review_requested" and got["t_pr"]["activity_at"] == 900
+    assert got["t_pr"]["note"] == "Superseded by https://github.com/o/r/pull/2 (rebased)"
+    assert got["t_pr"]["pr_url"] == "https://github.com/o/r/pull/2"
+    assert "pr_url" not in got["t_bare"] and "note" not in got["t_bare"]

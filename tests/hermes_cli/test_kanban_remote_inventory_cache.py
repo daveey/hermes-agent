@@ -54,21 +54,43 @@ def test_unchanged_stores_share_one_projection(projection):
     assert calls['n'] == 1
 
 
-def test_a_store_change_reprojects(projection):
+def test_a_store_change_reprojects_in_the_background(projection):
     calls, board = projection
-    activity._remote_links()
+    first = activity._remote_links()
     with sqlite3.connect(board) as db:
         db.execute("INSERT INTO tasks VALUES ('t_two', 'ready')")
-    activity._remote_links()
-    assert calls['n'] == 2
+    assert activity._remote_links() == first  # served at once from the previous projection
+    wait_until(lambda: calls['n'] == 2, what='one background rebuild after the store change')
 
 
-def test_ttl_expiry_reprojects(projection, monkeypatch):
+def test_ttl_expiry_reprojects_in_the_background(projection, monkeypatch):
     calls, _ = projection
     monkeypatch.setattr(activity, '_CACHE_TTL_S', 0.0)
     activity._remote_links()
     activity._remote_links()
-    assert calls['n'] == 2
+    wait_until(lambda: calls['n'] == 2, what='one background rebuild after the TTL')
+
+
+def test_readers_never_wait_for_a_rebuild(projection):
+    """A busy board changes its stores every few seconds; a reader must get the previous projection immediately
+    while one rebuild runs, never queue behind it (the linked-card strip waited 11-19 s on a live gateway)."""
+    import time as _time
+    calls, board = projection
+    first = activity._remote_links()
+    gate = threading.Event()
+    calls['gate'] = gate  # the next projection is held open
+    with sqlite3.connect(board) as db:
+        db.execute("INSERT INTO tasks VALUES ('t_two', 'ready')")
+    try:
+        for _ in range(5):  # one rebuild running and held; every read still returns at once
+            started = _time.monotonic()
+            assert activity._remote_links() == first
+            assert _time.monotonic() - started < 0.5
+        wait_until(lambda: calls['n'] == 2, what='exactly one rebuild in flight')
+        assert calls['n'] == 2
+    finally:
+        gate.set()
+    wait_until(lambda: not activity._links_refreshing, what='the rebuild finished')
 
 
 def test_concurrent_readers_wait_for_one_projection(projection):
