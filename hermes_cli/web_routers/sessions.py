@@ -184,7 +184,8 @@ def get_session_kanban_tasks(ids: str = Query(..., max_length=4000)):
     board — the cards behind the sidebar row's kanban counts. Lets the desktop
     list them for the open chat without loading the whole board. [daveey]"""
     wanted = [s.strip() for s in ids.split(",") if s.strip()][:50]
-    return {"tasks": session_kanban_tasks(wanted)}
+    # The Desktop linked-card strip: serve the last remote-links projection rather than wait on a rebuild.
+    return {"tasks": session_kanban_tasks(wanted, stale_ok=True)}
 
 
 # ``le=100`` on limit: an unbounded limit lets one request drag every session
