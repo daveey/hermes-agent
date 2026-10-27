@@ -209,12 +209,24 @@ def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
     return {**row, "fields": _row_fields(conn, "tasks", task)}
 
 
+# Rejections the service lifts on its own; anything else is final. A capped number of retries keeps a real mismatch
+# (an old service that will never know the table) visible as rejected instead of retrying forever.
+TRANSIENT_REASONS = ("storage_error", "depends_on_rejected")
+MAX_TRANSIENT_ATTEMPTS = 10
+
+
+def transient_rejection(res: dict) -> bool:
+    reason = str(res.get("reason") or "")
+    return reason in TRANSIENT_REASONS or (reason == "invalid" and "unknown table" in str(res.get("detail") or ""))
+
+
 @dataclass
 class PushResult:
     sent: int = 0
     applied: int = 0
     merged: int = 0
     rejected: int = 0
+    deferred: int = 0
 
 
 def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primary: bool,
@@ -252,6 +264,13 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     setattr(out, status, getattr(out, status) + 1)
                     if status == "merged" and primary and res.get("row"):
                         authoritative.append(_row_change(row["table_name"], res["row"]))
+                elif transient_rejection(res) and row["attempts"] + 1 < MAX_TRANSIENT_ATTEMPTS:
+                    # The service will accept this later (a deploy still rolling out, a storage hiccup, an earlier op
+                    # on the card that was itself transient): keep it pending and retry next round.
+                    reason = f"{res.get('reason')}: {res.get('detail') or ''}".strip(": ")
+                    conn.execute("UPDATE kanban_sync_outbox SET attempts = attempts + 1, last_error = ? WHERE op_id = ?",
+                                 (f"retrying: {reason}"[:500], op_id))
+                    out.deferred += 1
                 else:
                     reason = f"{res.get('reason')}: {res.get('detail') or ''}".strip(": ")
                     conn.execute("UPDATE kanban_sync_outbox SET state = 'rejected', last_error = ?, attempts = attempts + 1 "
@@ -263,7 +282,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
         if authoritative:
             cursor = (sync.sync_state(conn) or {}).get("cursor", 0)
             sync.apply_remote_changes(conn, authoritative, new_cursor=cursor, board=board)
-        if len(rows) < PUSH_BATCH:
+        if out.deferred or len(rows) < PUSH_BATCH:  # deferred rows retry next round, not in a hot loop
             break
     return out
 

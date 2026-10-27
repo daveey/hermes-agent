@@ -673,3 +673,28 @@ def test_wait_for_work_returns_on_a_remote_change_a_local_write_or_the_period(li
     started = time.monotonic()
     assert ksc.wait_for_work(wake, [path], period=10, keep_running=lambda: True, tick=0.05) == "local"
     assert time.monotonic() - started < 0.5
+
+
+def test_transient_rejections_retry_next_round_and_give_up_after_a_cap(live, svc, monkeypatch):
+    tid = kb.create_task(live, title="during a deploy", assignee="worker")
+    real = svc.hub(ME).ops
+    calls = {"n": 0}
+
+    def rolling_out(board, ops):  # the service has not picked up the new code yet
+        calls["n"] += 1
+        return {"results": [{"client_op_id": o["client_op_id"], "status": "rejected", "reason": "invalid",
+                             "detail": f"unknown table {o['table']}"} for o in ops], "head": 0}
+    hub = svc.hub(ME)
+    hub.ops = rolling_out
+    res = ksc.push(live, hub, BOARD, ME, primary=False)
+    assert res.rejected == 0 and res.deferred >= 1 and calls["n"] == 1  # one batch, no hot loop
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE state = 'rejected'").fetchone()
+    hub.ops = real  # the rollout finished
+    assert ksc.push(live, hub, BOARD, ME, primary=False).rejected == 0
+    assert tid in svc.board(BOARD)["rows"]["tasks"] and not _pending(live)
+    # A rejection that never clears ends up rejected after the cap.
+    kb.create_task(live, title="old service forever", assignee="worker")
+    hub.ops = rolling_out
+    for _ in range(ksc.MAX_TRANSIENT_ATTEMPTS + 1):
+        ksc.push(live, hub, BOARD, ME, primary=False)
+    assert live.execute("SELECT COUNT(*) FROM kanban_sync_outbox WHERE state = 'rejected'").fetchone()[0] >= 1
