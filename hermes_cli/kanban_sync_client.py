@@ -200,8 +200,17 @@ def translate(row: dict, hlc: str) -> dict:
 def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
     """A task edit captured before the service has acknowledged the card (``sync_version`` NULL: it was created
     before sync was switched on and not imported yet) carries only the changed columns, which the service cannot
-    insert. Send the card's full current row instead; a later edit is then a plain merge."""
-    if row["table_name"] != "tasks" or row["op"] != "upsert":
+    insert. Send the card's full current row instead; a later edit is then a plain merge.
+
+    Child rows (runs, comments, events, attachments, chat links) are small and always go whole: an update captured
+    for a row whose insert the service refused earlier (a deploy still rolling out) would otherwise reach it with no
+    ``task_id`` and be refused ``not_found``."""
+    if row["op"] != "upsert":
+        return row
+    if row["table_name"] in sync._UID_TABLES:
+        child = conn.execute(f"SELECT * FROM {row['table_name']} WHERE uid = ?", (row["row_uid"],)).fetchone()
+        return {**row, "fields": _row_fields(conn, row["table_name"], child)} if child is not None else row
+    if row["table_name"] != "tasks":
         return row
     task = conn.execute("SELECT * FROM tasks WHERE id = ?", (row["row_uid"],)).fetchone()
     if task is None or task["sync_version"] is not None:
@@ -212,7 +221,13 @@ def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
 # Rejections the service lifts on its own; anything else is final. A capped number of retries keeps a real mismatch
 # (an old service that will never know the table) visible as rejected instead of retrying forever.
 TRANSIENT_REASONS = ("storage_error", "depends_on_rejected")
-MAX_TRANSIENT_ATTEMPTS = 10
+# Backed off 2 s doubling to 5 min: 20 attempts span about an hour, longer than a Durable Object takes to pick up
+# a deploy (observed: minutes to an hour on a busy board).
+MAX_TRANSIENT_ATTEMPTS = 20
+
+
+def _backoff_s(attempts: int) -> int:
+    return min(2 ** (attempts + 1), 300)
 
 
 def transient_rejection(res: dict) -> bool:
@@ -236,7 +251,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
     out = PushResult()
     for _ in range(max_batches):
         rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' ORDER BY created_at, rowid LIMIT ?", (PUSH_BATCH,))]
+            "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' AND (retry_after IS NULL OR retry_after <= ?) "
+            "ORDER BY created_at, rowid LIMIT ?", (int(time.time()), PUSH_BATCH))]
         if not rows:
             break
         with write_txn(conn):
@@ -268,8 +284,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     # The service will accept this later (a deploy still rolling out, a storage hiccup, an earlier op
                     # on the card that was itself transient): keep it pending and retry next round.
                     reason = f"{res.get('reason')}: {res.get('detail') or ''}".strip(": ")
-                    conn.execute("UPDATE kanban_sync_outbox SET attempts = attempts + 1, last_error = ? WHERE op_id = ?",
-                                 (f"retrying: {reason}"[:500], op_id))
+                    conn.execute("UPDATE kanban_sync_outbox SET attempts = attempts + 1, last_error = ?, retry_after = ? "
+                                 "WHERE op_id = ?", (f"retrying: {reason}"[:500], int(time.time()) + _backoff_s(row["attempts"]), op_id))
                     out.deferred += 1
                 else:
                     reason = f"{res.get('reason')}: {res.get('detail') or ''}".strip(": ")

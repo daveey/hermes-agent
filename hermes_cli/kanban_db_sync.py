@@ -161,6 +161,7 @@ _SYNC_COLUMN_DDL = (
     ("tasks", "lease_holder", "lease_holder TEXT"),
     ("tasks", "lease_expires", "lease_expires INTEGER"),
     ("tasks", "created_on", "created_on TEXT"),
+    ("kanban_sync_outbox", "retry_after", "retry_after INTEGER"),
 )
 
 # Resolved db paths whose triggers this process installed. Empty = no synced

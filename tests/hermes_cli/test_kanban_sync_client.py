@@ -690,6 +690,9 @@ def test_transient_rejections_retry_next_round_and_give_up_after_a_cap(live, svc
     assert res.rejected == 0 and res.deferred >= 1 and calls["n"] == 1  # one batch, no hot loop
     assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE state = 'rejected'").fetchone()
     hub.ops = real  # the rollout finished
+    assert ksc.push(live, hub, BOARD, ME, primary=False).sent == 0  # backing off: not retried at once
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_outbox SET retry_after = 0")  # the backoff elapsed
     assert ksc.push(live, hub, BOARD, ME, primary=False).rejected == 0
     assert tid in svc.board(BOARD)["rows"]["tasks"] and not _pending(live)
     # A rejection that never clears ends up rejected after the cap.
@@ -697,4 +700,22 @@ def test_transient_rejections_retry_next_round_and_give_up_after_a_cap(live, svc
     hub.ops = rolling_out
     for _ in range(ksc.MAX_TRANSIENT_ATTEMPTS + 1):
         ksc.push(live, hub, BOARD, ME, primary=False)
+        with kbc.write_txn(live):
+            live.execute("UPDATE kanban_sync_outbox SET retry_after = 0")
     assert live.execute("SELECT COUNT(*) FROM kanban_sync_outbox WHERE state = 'rejected'").fetchone()[0] >= 1
+
+
+def test_transient_backoff_doubles_to_five_minutes():
+    assert [ksc._backoff_s(a) for a in (0, 1, 2, 7, 8, 30)] == [2, 4, 8, 256, 300, 300]
+
+
+def test_a_child_row_update_is_sent_whole_so_it_stands_alone(live, svc):
+    tid = kb.create_task(live, title="parent", assignee="worker")
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=False)
+    kb.add_comment(live, tid, "me", "first")
+    with kbc.write_txn(live):
+        live.execute("DELETE FROM kanban_sync_outbox")  # the insert was lost (refused during a rollout)
+        live.execute("UPDATE task_comments SET body = 'edited' WHERE task_id = ?", (tid,))  # captures {"body": ...}
+    assert ksc.push(live, svc.hub(ME), BOARD, ME, primary=False).rejected == 0
+    comment = next(c for c in svc.board(BOARD)["rows"]["task_comments"].values() if c["task_id"] == tid)
+    assert comment["body"] == "edited" and comment["author"] == "me"
