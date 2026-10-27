@@ -13,36 +13,73 @@ def record_digest(task: dict) -> str:
 
 def validate_alias(alias: dict, binding: dict) -> None:
     owner = binding['owner']
-    if (not isinstance(alias, dict) or set(alias) != {'key', 'version', 'digest', 'evidence'}
+    if (not isinstance(alias, dict) or set(alias) not in ({'key', 'version', 'digest', 'evidence'},
+                                                         {'key', 'version', 'digest', 'evidence', 'path'})
             or alias.get('key') != f"{owner['board']}/{owner['task_id']}"
             or type(alias.get('version')) is not int or alias['version'] < 1
             or not isinstance(alias.get('digest'), str)
             or not re.fullmatch('[0-9a-f]{64}', alias['digest'])
             or not isinstance(alias.get('evidence'), str) or not alias['evidence'].strip()):
         raise ValueError('origin_legacy_invalid')
+    if 'path' in alias:
+        _validate_path(alias, owner['board'])
 
 
-def verify_publication(conn, alias: dict, binding: dict) -> bool:
-    """Return pending only for missing/behind publication; reject changed evidence."""
-    owner, origin = binding['owner'], binding['origin']
+def _validate_path(alias: dict, board: str) -> None:
+    path = alias['path']
+    if not isinstance(path, list) or not 2 <= len(path) <= 32:
+        raise ValueError('origin_legacy_invalid')
+    seen = set()
+    for node in path:
+        if (not isinstance(node, dict) or set(node) != {'key', 'version', 'digest'}
+                or not isinstance(node.get('key'), str)
+                or not node['key'].startswith(board + '/') or node['key'].count('/') != 1
+                or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}', node['key'].split('/')[1])
+                or node['key'] in seen
+                or type(node.get('version')) is not int or node['version'] < 1
+                or not isinstance(node.get('digest'), str)
+                or not re.fullmatch('[0-9a-f]{64}', node['digest'])):
+            raise ValueError('origin_legacy_invalid')
+        seen.add(node['key'])
+    if path[-1] != {k: alias[k] for k in ('key', 'version', 'digest')}:
+        raise ValueError('origin_legacy_invalid')
+
+
+def _publication(conn, node: dict, owner: dict):
     row = conn.execute("SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
-                       (owner['gateway'], alias['key'])).fetchone()
-    if not row or row[0] < alias['version']:
-        return False
+                       (owner['gateway'], node['key'])).fetchone()
+    if not row or row[0] < node['version']:
+        return None
     task = json.loads(row[1])
-    if (row[0] != alias['version'] or not isinstance(task, dict)
-            or record_digest(task) != alias['digest']
-            or task.get('id') != owner['task_id'] or task.get('board') != owner['board']
+    if (row[0] != node['version'] or not isinstance(task, dict)
+            or record_digest(task) != node['digest']
+            or task.get('id') != node['key'].split('/')[1] or task.get('board') != owner['board']
             or task.get('gateway') not in (None, owner['gateway'])
             or task.get('profile') is not None):
         raise ValueError('origin_legacy_publication_mismatch')
-    links = task.get('sessions')
-    if not isinstance(links, list) or not any(
-            isinstance(link, dict) and link.get('rel') == 'shepherd'
-            and link.get('gw') == origin['gateway'] and link.get('profile') == origin['profile']
-            and link.get('session') == origin['session'] for link in links):
-        raise ValueError('origin_legacy_association_mismatch')
-    return True
+    return task
+
+
+def verify_publication(conn, alias: dict, binding: dict) -> bool:
+    """Exact task-graph evidence proves association, never qualified ownership."""
+    owner, origin = binding['owner'], binding['origin']
+    nodes = alias.get('path', [alias])
+    tasks = [_publication(conn, node, owner) for node in nodes]
+    for parent, child in zip(tasks, nodes[1:]):
+        if parent is None:
+            continue
+        children = parent.get('children')
+        if not isinstance(children, list) or child['key'].split('/')[1] not in children:
+            raise ValueError('origin_legacy_association_mismatch')
+    root = tasks[0]
+    if root is not None:
+        links = root.get('sessions')
+        if not isinstance(links, list) or not any(
+                isinstance(link, dict) and link.get('rel') == 'shepherd'
+                and link.get('gw') == origin['gateway'] and link.get('profile') == origin['profile']
+                and link.get('session') == origin['session'] for link in links):
+            raise ValueError('origin_legacy_association_mismatch')
+    return all(task is not None for task in tasks)
 
 
 def check_conflicts(conn, alias: dict, binding: dict) -> None:
