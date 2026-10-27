@@ -567,6 +567,11 @@ def _print_max_retries(task) -> None:
         print(f"  max-retries: {kb.DEFAULT_FAILURE_LIMIT} (default)")
 
 
+def _cmd_wait_check(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_wait_check
+    return kanban_wait_check.run(args)
+
+
 def _cmd_show(args: argparse.Namespace) -> int:
     rsk, rc = _run_state_kwargs(args, "show")
     if rc:
@@ -1091,6 +1096,9 @@ def _cli_wake_check(args: argparse.Namespace):
 
     cmd = kwc.normalize_cmd(getattr(args, "wake_check", None))
     every = kwc.normalize_every(getattr(args, "check_every", None)) if cmd else None
+    err = kwc.dry_run_error(cmd)
+    if err:
+        raise ValueError(err)
     return cmd, every, bool(getattr(args, "clock_only", False))
 
 
@@ -1481,7 +1489,7 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
 
 _HANDLERS = {
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
-    "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
+    "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show, "wait-check": _cmd_wait_check,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
     "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,

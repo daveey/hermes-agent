@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import threading
@@ -52,6 +53,42 @@ OUTPUT_TAIL_CHARS = 500
 MAX_CMD_CHARS = 2000
 CONDITION_MET_EVENT = "condition_met"
 BROKEN_EVENT = "wake_check_broken"
+# Output that shows a probe crashed even though it exited 1 ("not yet"): a traceback, a
+# shell syntax/lookup error, a sqlite failure, or a script's own ``error:`` line. Such a
+# probe can never succeed, so it counts toward BROKEN_AFTER instead of looking like waiting.
+ERROR_OUTPUT_RE = re.compile(
+    r"Traceback \(most recent call last\)|^\s*(?:\S+: )?(?:line \d+: )?.*(?:syntax error|command not found"
+    r"|No such file or directory|unexpected EOF)|OperationalError|database is locked"
+    r"|unable to open database file|^\s*error:", re.IGNORECASE | re.MULTILINE)
+
+
+def output_error(out: str) -> Optional[str]:
+    """The matching error line when a probe's output shows it crashed, else None."""
+    m = ERROR_OUTPUT_RE.search(out or "")
+    return m.group(0).strip() or "error" if m else None
+
+
+def dry_run_error(cmd: Optional[str], *, cwd: Optional[str] = None, env: Optional[dict] = None) -> Optional[str]:
+    """Run ``cmd`` once at park time; refusal text when it can never succeed (rc >= 2, could
+    not start, or exit 0/1 with error output), else None. A timeout is accepted: slow is not
+    broken. ``HERMES_KANBAN_WAKE_DRYRUN=0`` skips it (tests)."""
+    if not cmd or os.environ.get("HERMES_KANBAN_WAKE_DRYRUN") == "0":
+        return None
+    rc, out = _run_probe(("dry-run", cmd), cmd, cwd or str(Path.home()), env if env is not None else dict(os.environ))
+    if rc == "timeout":
+        return None
+    bad = None
+    if not isinstance(rc, int) or rc >= 2:
+        bad = f"exited {rc}"
+    elif output_error(out):
+        bad = f"exit {rc} but its output shows an error ({output_error(out)})"
+    if bad is None:
+        return None
+    return (f"refused: the wake_check was run once at park time and {bad}, so it could never "
+            "succeed and would wait silently forever. Exit codes: 0 = condition holds, 1 = not "
+            "yet, anything else = broken. For a wait on another card use "
+            "`hermes kanban wait-check task <id> --gateway <name> --until done,blocked`; do not "
+            f"hand-roll ssh+SQL (ssh re-splits quoted args). Output: {_tail(out)!r}")
 
 
 GUARD_HELP = (
@@ -348,12 +385,14 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
         rc_col = rc if isinstance(rc, int) else -1
         if rc == 0:
             return _wake(conn, task_id, CONDITION_MET_EVENT, {"wake_check": cmd, "output": tail})
-        if rc == 1:
+        if rc == 1 and not output_error(out):
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
                 "next_at = ? WHERE task_id = ?", (now, tail, now + int(state["every"]), task_id))
             return None
         fails = int(state["fails"] or 0) + 1
+        if rc == 1:  # exit 1 with error output: a crashed probe posing as "not yet"
+            rc, rc_col = f"exit 1 with error output: {output_error(out)}", 1
         if fails >= BROKEN_AFTER:
             return _wake(conn, task_id, BROKEN_EVENT, {
                 "wake_check": cmd, "rc": rc, "fails": fails, "output": tail,

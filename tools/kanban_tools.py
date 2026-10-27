@@ -963,6 +963,9 @@ def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
     try:
         cmd = kwc.normalize_cmd(args.get("wake_check"))
         every = kwc.normalize_every(raw_every) if cmd else None
+        err = kwc.dry_run_error(cmd)
+        if err:
+            raise ValueError(err)
     except ValueError as exc:
         _check(False, str(exc))
     return (_redact(cmd) if cmd else None), every, clock_only

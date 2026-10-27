@@ -285,6 +285,13 @@ _SPECS = [
         _arg("--step-key", dest="current_step_key", metavar="KEY",
              help="Restrict to tasks with this current_step_key"),
     ], aliases=["ls"], help="List tasks"),
+    _cmd("wait-check", [
+        _arg("check", choices=("task", "board-empty"), help="task <id> | board-empty <slug>"),
+        _arg("target", help="Task id (task) or board slug (board-empty)"),
+        _arg("--gateway", default=None, help="Gateway to read via ssh (e.g. hub); omit for this machine"),
+        _arg("--board", default=None, help="Board slug for `task` (default board if omitted)"),
+        _arg("--until", default="done,blocked,archived", help="Comma-separated statuses that count as met"),
+    ], help="Wake-probe primitive: exit 0 met, 1 not yet, 2 cannot tell. The only supported cross-gateway wait idiom"),
     _cmd("show", [_TASK_ID, _json_flag(), *_run_state_args("filter listed runs by task_runs column")],
          help="Show a task with comments + events"),
     _cmd("assign", [_TASK_ID, _arg("profile", help="Profile name (or 'none' to unassign)")],
