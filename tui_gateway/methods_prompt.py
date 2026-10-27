@@ -667,10 +667,15 @@ def _run_after_agent_ready(
     # expires. See #63078.
     err = _wait_agent_for_prompt(session, rid, sid)
     if err:
+        message = (err.get("error") or {}).get("message", "agent initialization failed")
+        # Every exit before _run_prompt_submit is logged: its "tui prompt accepted" line never comes, and
+        # without this the accepted message reads in agent.log as one that silently never ran. [daveey]
+        logger.warning("prompt.submit: turn for session %s (%s) failed before the agent was ready: %s",
+                       sid, session.get("session_key") or "", str(message)[:300])
         # Terminal frame + retained snapshot (not a bare "error" event): the snapshot is
         # the only way resume shows this to a disconnected client.
         _emit_terminal_turn_error(
-            sid, session, (err.get("error") or {}).get("message", "agent initialization failed"),
+            sid, session, message,
             error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
         with session["history_lock"]:
             session["running"] = False
@@ -681,6 +686,10 @@ def _run_after_agent_ready(
         if session.get("_turn_cancel_requested") or not session.get("running"):
             session["running"] = False
             _clear_inflight_turn(session)
+            reason = ("cancelled" if session.get("_turn_cancel_requested") else "session no longer running")
+            logger.info("prompt.submit: turn for session %s (%s) ended before the agent was ready: %s%s",
+                        sid, session.get("session_key") or "", reason,
+                        " (client gone)" if session.get("_client_gone_interrupt_requested") else "")
             # Without this emit the turn vanishes silently after {"status": "streaming"}.
             _emit("error", sid, {"message": (
                 "Turn cancelled before the agent was ready"

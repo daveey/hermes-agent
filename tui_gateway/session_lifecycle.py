@@ -901,6 +901,12 @@ def _ws_orphan_turn_activity_is_fresh(session: dict) -> bool:
             return (session.get("running", False) and isinstance(stamp, int)
                     and 0 <= (time.perf_counter_ns() - stamp) / 1_000_000_000 < _WS_ORPHAN_ACTIVITY_STALE_S)
     agent = session.get("agent")
+    if agent is None and _agent_build_in_flight(session):
+        # An accepted prompt parked on the deferred build has no activity clock yet, so the checks below read it
+        # as wedged and the reaper interrupted it at grace: the user's message was dropped with only a bare error
+        # to the dead socket. The build is live work, and the prompt's own wait is bounded
+        # (_agent_build_wait_cap), so keep it running detached. [daveey]
+        return True
     # Awake-time first: the wall-clock summary counts host sleep as idleness, so a turn that was healthy when
     # the lid closed looked >600s stale the instant the Mac woke and got interrupted before the Desktop could
     # reattach (same sleep/wake class as #44183, but on the activity clock instead of the reap Timer).

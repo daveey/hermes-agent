@@ -922,6 +922,7 @@ def _resume_response(
     ctx: _Resume, sid: str, record: dict, *, info: dict, display: list = (), count_source: list | None = None,
     messages: list | None = None, message_count: int | None = None, running: bool = False,
     status: str = "idle", hydrating: bool | None = None, started_at=None, auto_continue=None,
+    inflight: dict | None = None,
 ) -> dict:
     """Common resume payload; omit_messages counts ``count_source`` (client still learns the stored size)."""
     if messages is None:
@@ -930,7 +931,7 @@ def _resume_response(
         message_count = len(count_source) if ctx.omit_messages else len(messages)
     payload = {"session_id": sid, "resumed": ctx.target, "message_count": message_count, "messages": messages,
                **({"messages_omitted": ctx.omit_messages} if hydrating is None else {"hydrating": hydrating}),
-               "info": info, "inflight": None, "running": running, "session_key": ctx.target,
+               "info": info, "inflight": inflight, "running": running, "session_key": ctx.target,
                "started_at": record["created_at"] if started_at is None else started_at, "status": status}
     if auto_continue is not None:
         payload["auto_continue"] = auto_continue
@@ -984,10 +985,13 @@ def _resume_deferred(ctx: _Resume) -> dict:
     _schedule_resume_hydration(
         sid, ctx.target, ctx.db, close_db=ctx.owns_db,
         model_history_only=source == "desktop" and ctx.omit_messages)
+    # Before the handle moves to the hydration worker: one indexed read of the newest durable row.
+    unanswered = _unanswered_turn_inflight(record, None, ctx.db)
     ctx.owns_db = False  # the hydration worker now owns (and closes) the profile-scoped handle
     _schedule_session_cap_enforcement()
     return _resume_response(ctx, sid, record, info=ctx.info(cwd, overrides), messages=[],
-                            message_count=record["resume_message_count"], status="resuming", hydrating=True)
+                            message_count=record["resume_message_count"], status="resuming", hydrating=True,
+                            inflight=unanswered)
 
 
 def _resume_cold(ctx: _Resume) -> dict:
@@ -1007,9 +1011,12 @@ def _resume_cold(ctx: _Resume) -> dict:
         return reused
     _schedule_agent_build(sid)
     _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
+    auto_continue = _maybe_schedule_auto_continue(sid, record, ctx.target)
     return _resume_response(ctx, sid, record, info=ctx.info(cwd, overrides), display=display_history,
                             count_source=raw_history,
-                            auto_continue=_maybe_schedule_auto_continue(sid, record, ctx.target))
+                            auto_continue=auto_continue,
+                            # A scheduled auto-continue is about to answer it; otherwise flag it as not sent.
+                            inflight=None if auto_continue else _unanswered_turn_inflight(record, history, ctx.db))
 
 
 def _resume_eager(ctx: _Resume) -> dict:
