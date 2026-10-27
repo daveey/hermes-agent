@@ -35,7 +35,7 @@ def host_slot_count() -> int:
 
 
 def host_slot_dir() -> str:
-    return os.environ.get("HERMES_TEST_SLOT_DIR") or f"/tmp/hermes-test-slots-{os.getuid()}"
+    return os.environ.get("HERMES_TEST_SLOT_DIR") or f"/tmp/hermes-test-slots-{os.getuid()}"  # windows-footgun: ok — POSIX test host slots
 
 
 def host_slots_enabled() -> bool:

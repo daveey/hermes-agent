@@ -82,7 +82,7 @@ def _write_private(path: Path, text: str) -> None:
 
 def _read_matching(path: Path, pattern: re.Pattern) -> str:
     with contextlib.suppress(OSError):
-        value = path.read_text(encoding="utf-8").strip()
+        value = path.read_text(encoding="utf-8-sig").strip()
         if pattern.fullmatch(value):
             return value
     return ""
@@ -238,7 +238,7 @@ def _log_path() -> Path:
 
 
 def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+    return subprocess.run(cmd, check=check, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -249,7 +249,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         plist = _launchd_plist_path(home)
         plist.parent.mkdir(parents=True, exist_ok=True)
         plist.write_bytes(render_launchd_plist(hermes=hermes, port=args.port, home=home, log_path=_log_path()))
-        domain = f"gui/{os.getuid()}"
+        domain = f"gui/{os.getuid()}"  # windows-footgun: ok — launchd path is macOS only
         _run(["launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"], check=False)
         _run(["launchctl", "bootstrap", domain, str(plist)])
         print(f"installed {plist} (launchd {domain}/{LAUNCHD_LABEL}, port {args.port})")
@@ -269,7 +269,7 @@ def cmd_install(args: argparse.Namespace) -> int:
 def cmd_uninstall(args: argparse.Namespace) -> int:
     home = Path.home()
     if sys.platform == "darwin":
-        _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], check=False)
+        _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], check=False)  # windows-footgun: ok — launchd path is macOS only
         _launchd_plist_path(home).unlink(missing_ok=True)
     elif sys.platform.startswith("linux"):
         _run(["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT], check=False)
@@ -282,7 +282,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 def read_record(home: Optional[Path] = None) -> Optional[dict]:
     with contextlib.suppress(OSError, ValueError):
-        record = json.loads((state_dir(home) / "record.json").read_text(encoding="utf-8"))
+        record = json.loads((state_dir(home) / "record.json").read_text(encoding="utf-8-sig"))
         if isinstance(record, dict) and record.get("schemaVersion") == RECORD_SCHEMA:
             return record
     return None
@@ -295,7 +295,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1
     alive = False
     with contextlib.suppress(OSError):
-        os.kill(int(record["pid"]), 0)
+        os.kill(int(record["pid"]), 0)  # windows-footgun: ok — supervisor is POSIX only
         alive = True
     print(json.dumps({**record, "alive": alive}))
     return 0 if alive else 1
