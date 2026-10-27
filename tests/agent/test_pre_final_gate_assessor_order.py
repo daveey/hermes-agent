@@ -27,7 +27,10 @@ def test_initial_assessor_runs_before_ordinary_hold(reverse):
         callbacks.reverse()
     with patch("agent.pre_final_gate.eligible_callbacks", return_value=callbacks):
         result = evaluate(SimpleNamespace(), "Diagnosis", [], 0)
-    assert calls == ["assessor"]
+    # F3 replacement consensus inspects every callback; disposition priority
+    # still chooses the unresolved owner and its nudge, not the ordinary hold.
+    assert calls == ["assessor", "ordinary"]
+    assert result.nudge == "Continue the repair."
     assert result.hold and result.unresolved_fallback.recheck_callback is assessor
 
 
@@ -44,10 +47,10 @@ def test_pending_owner_precedes_new_assessor_and_legacy_order_is_unchanged():
     callbacks = [ordinary, assessor]
     with patch("agent.pre_final_gate.eligible_callbacks", return_value=callbacks):
         assert evaluate(SimpleNamespace(), "Diagnosis", [], 0).hold
-        assert calls == ["ordinary"]
+        assert calls == ["ordinary", "assessor"]
         calls.clear()
         assessor.assess_before_holds = True
         pending = UnresolvedFallback("Repair example", ("user:0",), ordinary)
         result = evaluate(SimpleNamespace(), "Diagnosis", [], 1, pending)
-    assert calls == ["ordinary"]
+    assert calls == ["ordinary", "assessor"]
     assert result.unresolved_fallback is pending

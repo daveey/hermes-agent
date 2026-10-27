@@ -139,6 +139,12 @@ def _resolve_budget_fallback(
         and str(_turn_exit_reason) in {"unknown", "budget_exhausted"}
     ):
         _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
+        from agent.pre_final_gate import eligible_callbacks, needs_buffer, turn_messages
+        _gate_budget_output = bool(eligible_callbacks(agent))
+        _budget_context = turn_messages(messages)
+        _budget_start = len(messages)
+        if needs_buffer(agent):
+            agent._final_gate_buffer = []
         if _pending_verification_response:
             # A verification gate withheld a composed answer, then the budget ran out:
             # preserve it rather than make another fallible call. The explicit pending
@@ -178,6 +184,16 @@ def _resolve_budget_fallback(
                 interrupted = True
                 _turn_exit_reason = interrupted_during_api_call_reason(agent)
                 final_response = f"{INTERRUPT_WAITING_FOR_MODEL_PREFIX}{time.time() - _summary_start:.1f}s elapsed)."
+
+        from agent.pre_final_gate import UnresolvedFallback
+        if _gate_budget_output and not isinstance(_pending_verification_response, UnresolvedFallback):
+            from agent.final_gate_fallback import validate_budget_response
+            # The summary helper adds an unflagged user nudge. Keep the real
+            # turn context for validation, not that internal summary instruction.
+            _budget_context.extend(row for row in messages[_budget_start:] if row.get("role") == "assistant")
+            final_response, replaced = validate_budget_response(agent, final_response, _budget_context)
+            if replaced:
+                preserved_verification_fallback = False
 
     # A kanban worker must record a terminal outcome whether or not a fallback path
     # was eligible, so the dispatcher learns the worker could not complete. Only the
@@ -551,13 +567,12 @@ def _prepare_final_gate_fallback(
         if isinstance(final_response, str) and final_response and final_response not in held_text:
             boundary_response += "\n\n" + final_response
         final_response = boundary_response
+    # Accepted text was flushed by the stop/tool gates. Remaining deltas were
+    # never validated (including error/interrupt exits), so cannot be released.
     try:
-        if unresolved:
-            agent._discard_final_gate_buffer()
-        else:
-            agent._flush_final_gate_buffer()
+        agent._discard_final_gate_buffer()
     except Exception:
-        logger.debug("pre_final_gate buffer flush failed", exc_info=True)
+        logger.debug("pre_final_gate buffer discard failed", exc_info=True)
     agent._final_gate_buffer = None
     return final_response, unresolved
 
@@ -578,6 +593,7 @@ def finalize_turn(
 ):
     """Run the post-loop finalization and return the turn ``result`` dict."""
     from agent.conversation_loop import logger
+
     final_response, unresolved = _prepare_final_gate_fallback(
         agent, final_response, _pending_verification_response, interrupted=interrupted, failed=failed,
         exit_reason=_turn_exit_reason, api_call_count=api_call_count, messages=messages, logger=logger,

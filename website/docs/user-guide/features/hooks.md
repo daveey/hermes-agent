@@ -903,6 +903,25 @@ def my_gate(session_id: str, platform: str, model: str, final_response: str,
 - `None` — deliver unchanged.
 - `{"hold": True, "nudge": "..."}` — withhold the answer and continue the turn. The nudge goes to the model as a private synthetic user message. The held answer is kept only as the fallback if the iteration budget runs out.
 - `{"append": "..."}` — deliver with `"\n\n" + text` appended.
+- `{"replace": "..."}` — replace the entire candidate with nonempty safe text even when
+  no holds remain. Set `needs_buffer = True` to avoid prior streaming. All callbacks inspect
+  the original candidate; conflicting replacements yield neutral withheld text. Replacement
+  does not bypass completion guards or another callback's unresolved-fallback rejection.
+
+**Compatibility:** `agent.pre_final_gate.PRE_FINAL_GATE_CAPABILITIES` explicitly advertises
+version `1` with `replace`, `accepts_hold_budget`, `needs_buffer`, and
+`post_transform_release` set to `True`. Plugins requiring these behaviors can check the
+advertisement before registering hooks; the existence of the hook alone is insufficient.
+This is not a security permission or proof of an individual transport's behavior.
+`accepts_hold_budget = True` on a callback opts in to the `hold_budget` keyword (including
+zero), allowing a plugin to replace instead of returning a hold that cannot be honored.
+Strict legacy signatures receive no additional keyword. `post_transform_release` means
+accepted buffered final text is released only after output transforms and secret scrubbing,
+not directly from the original pre-transform model draft. Buffered candidates that trigger
+verify-on-stop or `pre_verify` continuation remain private model context: no interim callback
+or durable assistant row is emitted before output transforms. If the budget runs out, the
+candidate still passes through final output transforms before it is returned and persisted.
+Unbuffered legacy verification interims retain their existing delivery behavior.
 
 **Bounded:** `agent.pre_final_gate_max` (default 2) holds per turn. After that a hold is treated as deliver, and its `append` (if any) is still applied. A callback that raises, or runs longer than `agent.pre_final_gate_timeout` seconds (default 30), is logged and the answer is delivered unchanged.
 

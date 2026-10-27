@@ -10,6 +10,12 @@ a candidate; unbuffered legacy gates run after verification and the kanban guard
   The held row plus the nudge (a synthetic user row) stay in the in-memory turn so the model sees
   them, and are stripped from the returned/live history at turn end. The turn continues.
 - ``{"append": str}`` → deliver with ``"\\n\\n" + text`` appended.
+- ``{"replace": str}`` → replace the entire candidate with nonempty safe text, independent of
+  hold budget. Clears native replay carriers and the rejected stream buffer; other completion
+  guards still run against the safe candidate. Requires ``needs_buffer`` to prevent prior streaming.
+  All callbacks inspect the original candidate. Replacements take precedence over ordinary holds
+  and appends regardless of registration order; conflicting replacements yield neutral withheld
+  text. An unresolved rejection or unavailable owning recheck still fails closed.
 
 A hold may also carry ``unresolved_fallback={"goal": str, "evidence_refs": list[str]}``.
 Only these two keys are allowed: a nonblank goal (at most 2000 characters), and 1–32
@@ -34,10 +40,12 @@ Callback attributes (set on the function before ``ctx.register_hook``):
   gate delivers, or at turn end. A held answer is discarded from the buffer, so it never reaches
   the screen. Neither Desktop nor CLI/gateway streams can retract text already shown, hence the
   buffer: without it, a held answer that already streamed stays visible.
-- ``assess_before_holds = True``: run before ordinary gates can short-circuit the initial
-  assessment. Use for buffered disposition guards that provide an unresolved fallback.
-  Pending callback ownership still takes precedence; legacy registration order is unchanged
-  when no callback opts in.
+- ``accepts_hold_budget = True``: opt in to the ``hold_budget`` keyword, the configured total
+  holds allowed this turn (including zero). A callback can replace a rejected draft instead of
+  returning an unusable hold at exhaustion. Strict legacy signatures receive no new keyword.
+- ``assess_before_holds = True``: assess before ordinary gates so the disposition guard's
+  nudge wins. Use for buffered guards that provide an unresolved fallback. Pending callback
+  ownership still takes precedence; registration order is unchanged when no callback opts in.
 - ``include_background = True``: also run in kanban workers, delegate_task subagents and cron jobs
   (skipped there by default).
 """
@@ -56,6 +64,16 @@ HOOK = "pre_final_gate"
 FLAG = "_pre_final_gate_synthetic"
 DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_TIMEOUT_S = 30.0
+
+# Explicit plugin compatibility handshake. Publish only with the matching turn
+# consumers: replacement, exhausted-budget kwargs and post-transform emission.
+PRE_FINAL_GATE_CAPABILITIES = {
+    "version": 1,
+    "replace": True,
+    "accepts_hold_budget": True,
+    "needs_buffer": True,
+    "post_transform_release": True,
+}
 
 
 def _agent_cfg() -> dict[str, Any]:
@@ -188,6 +206,7 @@ class GateDecision:
     hold: bool = False
     nudge: str = ""
     append: str = ""
+    replacement: Optional[str] = None
     unresolved_fallback: Optional[UnresolvedFallback] = None
     boundary: str = ""
     recheck_accepted: bool = False
@@ -203,12 +222,62 @@ def _call(cb: Callable, kwargs: dict[str, Any], limit: float) -> Any:
         pool.shutdown(wait=False)
 
 
+_FAILED = object()
+
+
+def _invoke(cb: Callable, kwargs: dict[str, Any], budget: int, limit: float) -> Any:
+    """Run one gate callback; a timeout or exception yields ``_FAILED``."""
+    name = getattr(cb, "__qualname__", repr(cb))
+    call_kwargs = dict(kwargs)
+    if getattr(cb, "accepts_hold_budget", False):
+        call_kwargs["hold_budget"] = budget
+    try:
+        return _call(cb, call_kwargs, limit)
+    except concurrent.futures.TimeoutError:
+        logger.warning("pre_final_gate hook %s timed out after %.1fs", name, limit)
+    except Exception:
+        logger.warning("pre_final_gate hook %s raised", name, exc_info=True)
+    return _FAILED
+
+
+def _absorb_hold(
+    decision: GateDecision, result: dict, cb: Callable, pending: Any, can_hold: bool, name: str,
+    attempt: int,
+) -> bool:
+    """Fold a hold result into ``decision``; True when the callback's result is consumed."""
+    nudge = result.get("nudge")
+    if not (result.get("hold") and isinstance(nudge, str) and nudge.strip()):
+        return False
+    fallback = _unresolved_fallback(result.get("unresolved_fallback"))
+    if fallback is not None:
+        fallback = replace(fallback, recheck_callback=cb)
+    if fallback is None and isinstance(pending, UnresolvedFallback):
+        fallback = pending
+    if can_hold:
+        if not decision.hold:
+            decision.hold = True
+            decision.nudge = nudge.strip()
+        if decision.unresolved_fallback is None:
+            decision.unresolved_fallback = fallback
+        return True
+    if fallback is not None:
+        if decision.unresolved_fallback is None:
+            decision.unresolved_fallback = fallback
+            decision.boundary = "pre-final hold limit reached"
+        return True
+    logger.info("pre_final_gate hold from %s ignored: limit reached (attempt %d)", name, attempt)
+    return False
+
+
 def evaluate(
     agent: Any, final_response: Any, messages: list[dict[str, Any]], attempt: int,
     pending: Any = None,
 ) -> GateDecision:
     """Recheck the pending owner first, then disposition assessors, then ordinary gates.
-    First hold wins (while under the limit); appends accumulate. Never raises."""
+    Inspect the original candidate throughout. Replacement consensus wins over
+    ordinary holds, but cannot erase an unresolved owner's rejection or failed recheck.
+    Otherwise the first hold wins; appends accumulate.
+    """
     decision = GateDecision()
     if not isinstance(final_response, str) or not final_response.strip():
         return decision
@@ -223,7 +292,8 @@ def evaluate(
         # Another gate cannot skip the owning recheck. Reload is not acceptance.
         callbacks = [owner, *(cb for cb in callbacks if cb is not owner)]
     check_failed = False
-    limit, can_hold, appends = timeout_s(), attempt < max_attempts(), []
+    budget = max_attempts()
+    limit, can_hold, appends = timeout_s(), attempt < budget, []
     kwargs = dict(
         session_id=getattr(agent, "session_id", None) or "",
         platform=getattr(agent, "platform", "") or "",
@@ -232,18 +302,11 @@ def evaluate(
         turn_messages=turn_messages(messages),
         attempt=attempt,
     )
+    replacements: list[str] = []
     for cb in callbacks:
         name = getattr(cb, "__qualname__", repr(cb))
-        try:
-            result = _call(cb, kwargs, limit)
-        except concurrent.futures.TimeoutError:
-            logger.warning("pre_final_gate hook %s timed out after %.1fs", name, limit)
-            if cb is owner:
-                return _unavailable(pending)
-            check_failed = True
-            continue
-        except Exception:
-            logger.warning("pre_final_gate hook %s raised", name, exc_info=True)
+        result = _invoke(cb, kwargs, budget, limit)
+        if result is _FAILED:
             if cb is owner:
                 return _unavailable(pending)
             check_failed = True
@@ -253,27 +316,28 @@ def evaluate(
             decision.recheck_accepted = True
         if not isinstance(result, dict):
             continue
-        nudge = result.get("nudge")
-        if result.get("hold") and isinstance(nudge, str) and nudge.strip():
-            fallback = _unresolved_fallback(result.get("unresolved_fallback"))
-            if fallback is not None:
-                fallback = replace(fallback, recheck_callback=cb)
-            if fallback is None and isinstance(pending, UnresolvedFallback):
-                fallback = pending
-            if can_hold:
-                return GateDecision(
-                    hold=True, nudge=nudge.strip(),
-                    unresolved_fallback=fallback,
-                    recheck_accepted=decision.recheck_accepted,
-                )
-            if fallback is not None:
-                return GateDecision(unresolved_fallback=fallback, boundary="pre-final hold limit reached")
-            logger.info("pre_final_gate hold from %s ignored: limit reached (attempt %d)", name, attempt)
+        replacement = result.get("replace")
+        if isinstance(replacement, str) and replacement.strip():
+            replacements.append(replacement.strip())
+            continue
+        if _absorb_hold(decision, result, cb, pending, can_hold, name, attempt):
+            continue
         extra = result.get("append")
         if isinstance(extra, str) and extra.strip():
             appends.append(extra.strip())
     if check_failed and isinstance(pending, UnresolvedFallback):
         return _unavailable(pending)
+    # A different callback cannot turn a still-unresolved goal into completion.
+    if decision.unresolved_fallback is not None:
+        return decision
+    if replacements:
+        # Every validator inspects the same candidate. Do not let registration
+        # order choose between contradictory replacements or revive rejected
+        # text through an append. Completion guards still inspect the outcome.
+        replacement = replacements[0] if len(set(replacements)) == 1 else (
+            "Response withheld because validation gates disagreed."
+        )
+        return GateDecision(replacement=replacement, recheck_accepted=decision.recheck_accepted)
     decision.append = "\n\n".join(appends)
     return decision
 

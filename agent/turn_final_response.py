@@ -329,11 +329,13 @@ def finish_text_response(
     ):
         messages.pop()
 
+    _held = (final_response, "".join(getattr(agent, "_final_gate_buffer", None) or []))
     _sg = apply_stop_gates(
         agent, final_msg, final_response=final_response, messages=messages,
         conversation_history=conversation_history,
         pending_verification_response=_pending_verification_response,
         pending_verification_response_previewed=_pending_verification_response_previewed,
+        defer_stream=True,
     )
     _pending_verification_response = _sg.pending_verification_response
     _pending_verification_response_previewed = _sg.pending_verification_response_previewed
@@ -353,10 +355,8 @@ def finish_text_response(
             agent, final_response, turn_id=getattr(agent, "_current_turn_id", "") or "", logger=logger,
         )
     if _transformed:
-        if _promoted:
-            final_msg["api_content"] = final_response
-        else:
-            final_msg["content"] = final_response
+        final_msg["api_content" if _promoted else "content"] = final_response
+    _release_deferred_stream(agent, _sg, final_response, *_held)
 
     append_message(messages, final_msg)
     # Make the answer durable before leaving the loop (_DB_PERSISTED_MARKER keeps
@@ -375,3 +375,32 @@ def finish_text_response(
     if not agent.quiet_mode:
         agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
     return _verdict("break")
+
+
+def _release_deferred_stream(agent, verdict, response, candidate, buffered):
+    """Release only the reconciled reply, preserving streaming egress rules.
+
+    A buffered candidate is private until output transforms reconcile it too: releasing in
+    the stop gate leaks a retired ask even when the durable reply is replaced by a transform.
+    """
+    if not verdict.stream_deferred:
+        return
+    from agent.memory_manager import StreamingContextScrubber
+    from agent.think_scrubber import StreamingThinkScrubber
+
+    agent._discard_final_gate_buffer()
+    if getattr(agent, "_interrupt_requested", False):
+        return
+    if response == candidate:
+        # Keep original sanitization and paragraph breaks, including when an
+        # equal gate replacement already cleared the mutable buffer.
+        text = buffered
+    else:
+        # Replacements need fresh scrubbers, not the exhausted original state.
+        think, context = StreamingThinkScrubber(), StreamingContextScrubber()
+        text = think.feed(response) + think.flush()
+        text = context.feed(text) + context.flush()
+        prefix = "\n\n" if buffered.startswith("\n\n") else ""
+        text = prefix + text.lstrip("\n") if text else ""
+    if text:
+        agent._deliver_stream_text(text)

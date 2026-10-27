@@ -105,6 +105,208 @@ def test_hold_once_never_shows_or_persists_first_answer(agent):
     assert result["messages"][-1]["content"] == "Done: I minted it myself."
 
 
+@pytest.mark.parametrize("limit", [0, 2])
+def test_replacement_never_exposes_retired_ask(agent, limit):
+    run = Run(agent, ["Please reconnect the retired account."])
+    safe = "The retired request was suppressed."
+    with patch("agent.pre_final_gate.max_attempts", return_value=limit):
+        result = _run(agent, _buffered(lambda **kw: {"replace": safe}))
+    assert result["final_response"] == safe
+    assert run.shown == safe
+    assert result["messages"][-1]["content"] == safe
+    assert "Please reconnect" not in str(result["messages"])
+
+
+def test_replacement_precedes_interim_verification(agent):
+    run = Run(agent, ["Please reconnect the retired account.", "Verified."])
+    safe = "The retired request was suppressed."
+    with patch("agent.turn_stop_gates._verify_on_stop_nudge", side_effect=["Verify again", None]):
+        result = _run(agent, _buffered(lambda **kw: {"replace": safe}))
+    assert result["final_response"] == safe
+    assert "Please reconnect" not in run.shown
+    # Even a replacement still awaits final output transforms.
+    assert run.interims == []
+    assert run.shown == safe
+    assert result["messages"][-1]["content"] == safe
+    assert len(run.requests) == 2
+
+
+@pytest.mark.parametrize("buffered", [False, True])
+@pytest.mark.parametrize("pending", [False, True])
+def test_budget_fallback_validated_before_delivery(agent, pending, buffered):
+    from agent.turn_finalizer import _resolve_budget_fallback
+    run = Run(agent, [])
+    unsafe = "Please reconnect the retired account."
+    safe = "The retired request was suppressed."
+    messages = [{"role": "user", "content": "Summarize progress"}]
+    if pending:
+        messages.extend([
+            {"role": "assistant", "content": unsafe, "codex_message_items": [{"text": unsafe}]},
+            {"role": "user", "content": "Verify", "_pre_verify_synthetic": True},
+        ])
+
+    def summary(rows, count):
+        rows.append({"role": "user", "content": "Runtime summary request"})
+        agent._fire_stream_delta(unsafe)
+        rows.append({"role": "assistant", "content": unsafe,
+                     "codex_message_items": [{"text": unsafe}]})
+        return unsafe
+
+    def hook(turn_messages, **kw):
+        assert turn_messages[0]["content"] == "Summarize progress"
+        return {"replace": safe}
+
+    if buffered:
+        hook = _buffered(hook)
+    with (
+        patch("agent.pre_final_gate.eligible_callbacks", return_value=[hook]),
+        patch.object(agent, "_handle_max_iterations", side_effect=summary),
+    ):
+        result, _, preserved, _ = _resolve_budget_fallback(
+            agent, final_response=None, api_call_count=agent.max_iterations,
+            interrupted=False, failed=False, messages=messages,
+            _turn_exit_reason="budget_exhausted",
+            _pending_verification_response=unsafe if pending else None,
+            _pending_verification_response_previewed=False, logger=logging.getLogger(__name__),
+        )
+    assert result == safe
+    assert not preserved
+    if buffered:
+        assert unsafe not in run.shown
+    assert unsafe not in str(messages)
+    assert agent._final_gate_buffer is None
+
+
+def test_replacement_wins_over_earlier_hold(agent):
+    run = Run(agent, ["Please reconnect the retired account."])
+    safe = "The retired request was suppressed."
+    hold = _buffered(lambda **kw: {"hold": True, "nudge": "Retry"})
+    replace = _buffered(lambda **kw: {"replace": safe})
+    with (
+        patch("agent.pre_final_gate.eligible_callbacks", return_value=[hold, replace]),
+        patch("hermes_cli.plugins.invoke_hook", return_value=[]),
+    ):
+        result = agent.run_conversation("hi")
+    assert result["final_response"] == safe
+    assert run.shown == safe
+    assert len(run.requests) == 1
+
+
+@pytest.mark.parametrize("carrier", ["codex_message_items", "anthropic_content_blocks", "bedrock_content_blocks"])
+def test_replacement_clears_native_answer_carriers(agent, carrier):
+    from agent.turn_stop_gates import apply_stop_gates
+    row = {"role": "assistant", "content": "retired ask", carrier: [{"text": "retired ask"}]}
+    hook = _buffered(lambda **kw: {"replace": "Suppressed."})
+    with patch("agent.pre_final_gate.eligible_callbacks", return_value=[hook]):
+        verdict = apply_stop_gates(
+            agent, row, final_response="retired ask", messages=[], conversation_history=[],
+            pending_verification_response="old rejected ask", pending_verification_response_previewed=False,
+        )
+    assert row == {"role": "assistant", "content": "Suppressed."}
+    assert verdict.final_response == "Suppressed."
+    assert verdict.pending_verification_response is None
+
+
+@pytest.mark.parametrize("exit_kind", ["interrupt", "error"])
+def test_unaccepted_stream_is_discarded_on_abnormal_exit(agent, exit_kind):
+    run = Run(agent, [])
+    calls = []
+
+    def interrupted_call(*args, **kwargs):
+        agent._fire_stream_delta("Please reconnect the retired account.")
+        agent._interrupt_requested = exit_kind == "interrupt"
+        if exit_kind == "error":
+            raise ValueError("synthetic non-retryable stream failure")
+        return _response("Please reconnect the retired account.")
+
+    agent._interruptible_api_call = interrupted_call
+    agent._interruptible_streaming_api_call = interrupted_call
+
+    @_buffered
+    def hook(**kwargs):
+        calls.append(1)
+        return {"replace": "Suppressed."}
+
+    result = _run(agent, hook)
+    assert "Please reconnect" not in run.shown
+    assert "Please reconnect" not in str(result["messages"])
+    assert "Please reconnect" not in (result["final_response"] or "")
+    assert not calls  # cancellation must not wait on plugin/model work
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_interrupt_during_gate_never_releases_candidate(agent, raises):
+    from agent.pre_final_gate import GateDecision
+    run = Run(agent, ["Please reconnect the retired account."])
+
+    def evaluate(*args):
+        agent._interrupt_requested = True
+        if raises:
+            raise RuntimeError("gate unavailable")
+        return GateDecision()
+
+    with patch("agent.pre_final_gate.evaluate", side_effect=evaluate):
+        result = _run(agent, _buffered(lambda **kw: None))
+    assert "Please reconnect" not in run.shown
+    assert "Please reconnect" not in str(result["messages"])
+    assert "Please reconnect" not in (result["final_response"] or "")
+
+
+def test_finalizer_discards_unvalidated_buffer(agent):
+    from agent.turn_finalizer import finalize_turn
+    run = Run(agent, [])
+    agent._final_gate_buffer = ["Please reconnect the retired account."]
+
+    class ReachedBudgetResolution(Exception):
+        pass
+
+    # Stop after the real finalizer buffer boundary, before unrelated persistence
+    # and summary work. The ordinary API-error path may already drop its buffer.
+    with patch("agent.turn_finalizer._resolve_budget_fallback", side_effect=ReachedBudgetResolution):
+        with pytest.raises(ReachedBudgetResolution):
+            finalize_turn(
+                agent, final_response=None, api_call_count=1, interrupted=True,
+                failed=False, messages=[], conversation_history=[],
+                effective_task_id=None, turn_id="test-turn", user_message="hi",
+                original_user_message="hi", _should_review_memory=False,
+                _turn_exit_reason="interrupted",
+            )
+    assert run.shown == ""
+    assert agent._final_gate_buffer is None
+
+
+@pytest.mark.parametrize("budget", [False, True])
+def test_conflicting_replacements_sanitize_visible_and_durable_output(agent, budget):
+    rejected = "Please reconnect the retired account."
+    run = Run(agent, [rejected])
+    callbacks = [
+        _buffered(lambda **kw: {"replace": "First replacement."}),
+        _buffered(lambda **kw: {"replace": "Second replacement."}),
+    ]
+    safe = "Response withheld because validation gates disagreed."
+    with (
+        patch("hermes_cli.lifecycle.has_hook", side_effect=lambda name: name == "pre_final_gate"),
+        patch("hermes_cli.plugins.iter_hook_callbacks",
+              side_effect=lambda name: callbacks if name == "pre_final_gate" else ()),
+        patch("hermes_cli.plugins.invoke_hook", return_value=[]),
+    ):
+        if budget:
+            from agent.final_gate_fallback import validate_budget_response
+            messages = [{"role": "assistant", "content": rejected, "api_content": rejected}]
+            agent._final_gate_buffer = [rejected]
+            response, changed = validate_budget_response(agent, rejected, messages)
+            assert changed
+            assert response == safe
+            assert messages == [{"role": "assistant", "content": safe}]
+            assert run.shown == ""
+            assert agent._final_gate_buffer is None
+        else:
+            result = agent.run_conversation("hi")
+            assert result["final_response"] == safe
+            assert run.shown == safe
+            assert rejected not in str(result["messages"])
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 def test_unresolved_hold_at_budget_never_releases_diagnosis(agent, streaming):
     agent.max_iterations = 1

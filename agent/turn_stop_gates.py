@@ -34,6 +34,7 @@ class StopGateVerdict:
     pending_verification_response: Any
     pending_verification_response_previewed: Any
     boundary: str = ""
+    stream_deferred: bool = False
 
     def exit_reason(self, finish_reason: Any) -> str:
         if self.boundary:
@@ -102,8 +103,18 @@ def _kanban_stop_nudge(agent, messages) -> Optional[str]:
 
 
 def _append_interim_answer(agent, final_msg, messages, conversation_history, flush_fail_msg: str) -> None:
-    """Real content: persist and emit as interim so the user sees the attempted answer;
-    only the nudge is flagged synthetic (#65919)."""
+    """Keep buffered candidates private until final output transformation.
+
+    Unbuffered legacy responses still emit and persist as verification interims.
+    """
+    if getattr(agent, "_final_gate_buffer", None) is not None:
+        # Output transforms have not reconciled this candidate yet. Retain it
+        # only as ephemeral model context, exactly like a held gate candidate.
+        # The budget fallback still traverses final output transformation.
+        agent._discard_final_gate_buffer()
+        final_msg[_PFG_FLAG] = True
+        append_message(messages, final_msg)
+        return
     agent._emit_interim_assistant_message(final_msg)
     append_message(messages, final_msg)
     try:
@@ -116,6 +127,7 @@ def apply_stop_gates(
     agent: Any, final_msg: dict[str, Any], *, final_response: Any, messages: list[dict[str, Any]],
     conversation_history: Any, pending_verification_response: Any,
     pending_verification_response_previewed: Any,
+    defer_stream: bool = False,
 ) -> StopGateVerdict:
     """Check buffered candidates before verify-on-stop → pre_verify → kanban. Nudges
     are user-role rows appended only after the assistant answer row, so role alternation
@@ -154,11 +166,20 @@ def apply_stop_gates(
     _decision = _pre_final_gate_decision(agent, final_response, messages, pending_verification_response)
     if _decision.recheck_accepted:
         pending_verification_response = None
+    if _decision.replacement is not None:
+        agent._discard_final_gate_buffer()
+        final_response = _decision.replacement
+        final_msg.clear()
+        final_msg.update(role="assistant", content=final_response)
+        pending_verification_response = None
+        pending_verification_response_previewed = False
     if _decision.hold or (
         _decision.unresolved_fallback is not None and getattr(agent, "_interrupt_requested", False)
     ):
         # Silent hold [daveey]: no interim emit, no flush, buffered deltas dropped. The candidate
         # survives only as the budget-exhaustion fallback; both rows are ephemeral scaffolding.
+        # hold=True is bounded: every hold increments _pre_final_gate_attempts, which
+        # max_attempts() caps, so a plugin cannot hold a turn indefinitely.
         agent._pre_final_gate_attempts = getattr(agent, "_pre_final_gate_attempts", 0) + 1
         agent._discard_final_gate_buffer()
         final_msg["finish_reason"] = "pre_final_gate_hold"
@@ -173,8 +194,8 @@ def apply_stop_gates(
     if _decision.unresolved_fallback is not None:
         agent._discard_final_gate_buffer()
         final_response = _decision.unresolved_fallback.render(_decision.boundary)
-        final_msg["content"] = final_response
-        final_msg.pop("api_content", None)
+        final_msg.clear()
+        final_msg.update(role="assistant", content=final_response)
         return StopGateVerdict(False, final_response, None, False, _decision.boundary)
     if early_gate:
         # Acceptance clears the old rejection before another gate can nudge.
@@ -184,9 +205,14 @@ def apply_stop_gates(
                                           conversation_history, _continue)
         if verdict is not None:
             return verdict
-    if _decision.append:
-        final_response = _append_to_final(agent, final_msg, final_response, _decision.append)
-    else:
+    stream_deferred = defer_stream and getattr(agent, "_final_gate_buffer", None) is not None
+    if _decision.replacement is not None and not stream_deferred:
+        agent._deliver_stream_text(final_response)
+    elif _decision.append:
+        final_response = _append_to_final(
+            agent, final_msg, final_response, _decision.append, deliver=not stream_deferred,
+        )
+    elif not stream_deferred:
         agent._flush_final_gate_buffer()
     return StopGateVerdict(
         continue_turn=False, final_response=final_response,
@@ -195,6 +221,7 @@ def apply_stop_gates(
             else pending_verification_response
         ),
         pending_verification_response_previewed=pending_verification_response_previewed,
+        stream_deferred=stream_deferred,
     )
 
 
@@ -251,16 +278,23 @@ _PFG_FLAG = "_pre_final_gate_synthetic"
 def _pre_final_gate_decision(agent, final_response, messages, pending=None):
     from agent.pre_final_gate import GateDecision, _unavailable, evaluate
 
-    if getattr(agent, "_interrupt_requested", False):
-        return GateDecision()
-    try:
-        return evaluate(agent, final_response, messages, getattr(agent, "_pre_final_gate_attempts", 0), pending)
-    except Exception:
-        logger.warning("pre_final_gate evaluation failed", exc_info=True)
-        return _unavailable(pending)
+    decision = GateDecision()
+    if not getattr(agent, "_interrupt_requested", False):
+        try:
+            decision = evaluate(agent, final_response, messages, getattr(agent, "_pre_final_gate_attempts", 0), pending)
+        except Exception:
+            logger.warning("pre_final_gate evaluation failed", exc_info=True)
+            decision = _unavailable(pending)
+    # Check after callback completion too: cancellation can arrive during a slow
+    # callback or its failure path. Unvalidated buffered text must not escape.
+    if (getattr(agent, "_interrupt_requested", False)
+            and getattr(agent, "_final_gate_buffer", None) is not None):
+        return GateDecision(hold=True, nudge="Turn interrupted.",
+                            replacement="Response interrupted before validation.")
+    return decision
 
 
-def _append_to_final(agent, final_msg, final_response: str, extra: str) -> str:
+def _append_to_final(agent, final_msg, final_response: str, extra: str, *, deliver: bool = True) -> str:
     """Deliver with ``extra`` appended: rewrite the row, release the buffer, stream the suffix so
     streamed text and the final answer still match."""
     suffix = "\n\n" + extra
@@ -268,7 +302,8 @@ def _append_to_final(agent, final_msg, final_response: str, extra: str) -> str:
     key = "api_content" if final_msg.get("api_content") and not final_msg.get("content") else "content"
     if isinstance(final_msg.get(key), str):
         final_msg[key] = final_msg[key].rstrip() + suffix
-    agent._flush_final_gate_buffer()
-    if getattr(agent, "_streamed_assistant_text_parts", None):  # only extend a live stream
-        agent._deliver_stream_text(suffix)
+    if deliver:
+        agent._flush_final_gate_buffer()
+        if getattr(agent, "_streamed_assistant_text_parts", None):  # only extend a live stream
+            agent._deliver_stream_text(suffix)
     return final_response
