@@ -80,6 +80,22 @@ describe('applyRuntimeInfo approval mode', () => {
 const initialOnboardingState = $desktopOnboarding.get()
 
 describe('applyRuntimeInfo credential warnings', () => {
+  it('defers exhaustion metadata and ignores background warnings and background clears', () => {
+    const failure = {
+      credential_warning: 'Capacity unavailable',
+      failure_kind: 'exhausted' as const,
+      provider: 'anthropic',
+      reset_at: 1800000000
+    }
+
+    applyRuntimeInfo(failure, { foreground: false })
+    expect(consumePendingCredentialWarning()).toBeNull()
+    applyRuntimeInfo(failure)
+    applyRuntimeInfo({ model: 'healthy' }, { foreground: false })
+    expect(consumePendingCredentialWarning()).toMatchObject({ reason: 'Capacity unavailable', failure })
+    expect($desktopOnboarding.get().requested).toBe(false)
+  })
+
   beforeEach(() => {
     consumePendingCredentialWarning()
     $desktopOnboarding.set({ ...initialOnboardingState, reason: null, requested: false })

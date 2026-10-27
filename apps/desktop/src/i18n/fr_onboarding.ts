@@ -1,6 +1,14 @@
 import type { TranslationOverrides } from './define-locale'
 
 export const frOnboarding: TranslationOverrides['onboarding'] = {
+  exhaustedProvider: 'Fournisseur',
+  exhaustedTitle: (provider: string) => `Capacité de ${provider} épuisée`,
+  exhaustedBody:
+    'Vos comptes sont connectés, mais aucun ne peut traiter cette demande pour le moment. Choisissez un autre modèle pour cette conversation ou ajoutez un compte.',
+  exhaustedReset: (time: string) => `Réinitialisation prévue : ${time}`,
+  exhaustedResetUnknown: 'Le fournisseur n’a pas indiqué d’heure de réinitialisation.',
+  exhaustedChooseModel: 'Choisir un modèle pour cette conversation',
+  exhaustedAddAccount: 'Ajouter un compte',
   headerTitle: 'Configurons Hermes Agent pour vous',
   headerDesc:
     'Connectez un fournisseur de modèles pour commencer à discuter. La plupart des options nécessitent un clic.',

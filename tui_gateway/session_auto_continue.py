@@ -598,6 +598,12 @@ def _emit_terminal_turn_error(
     payload = {"text": text, "usage": _get_usage(agent) if agent is not None else {}, "status": "error",
                "error": message, "recoverable": True, **({"error_surface": error_surface} if error_surface else {}),
                **({"partial": True} if partial else {}), **({"rendered": rendered} if rendered else {})}
+    if isinstance(error, BaseException):
+        from tui_gateway.credential_failure import exception_failure_fields
+        with _session_profile_runtime_scope(session):
+            payload.update(exception_failure_fields(
+                error, str(getattr(agent, "provider", "") or ""),
+                pool=getattr(agent, "_credential_pool", None)))
     if retire_marker:
         _retire_turn_marker(session)
     _emit("message.complete", sid, payload)

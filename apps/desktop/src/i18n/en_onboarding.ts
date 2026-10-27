@@ -1,6 +1,14 @@
 import type { Translations } from './types'
 
 export const enOnboarding: Translations['onboarding'] = {
+  exhaustedProvider: 'Provider',
+  exhaustedTitle: (provider: string) => `${provider} capacity is exhausted`,
+  exhaustedBody:
+    'Your accounts are connected, but none can serve this request right now. Choose another model for this chat or add an account.',
+  exhaustedReset: (time: string) => `Expected reset: ${time}`,
+  exhaustedResetUnknown: 'The provider has not reported a reset time.',
+  exhaustedChooseModel: 'Choose model for this chat',
+  exhaustedAddAccount: 'Add account',
   headerTitle: "Let's get you setup with Hermes Agent",
   headerDesc: 'Connect a model provider to start chatting. Most options take one click.',
   preparingInstall: 'Hermes is finishing install. This usually takes under a minute on first run.',

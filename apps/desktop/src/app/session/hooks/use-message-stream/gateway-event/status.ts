@@ -319,8 +319,8 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
       title: translateNow('notifications.native.turnErrorTitle')
     })
 
-    if (looksLikeProviderSetup) {
-      requestDesktopOnboarding(errorMessage)
+    if ((looksLikeProviderSetup || payload?.failure_kind) && isActiveEvent && ctx.fromActiveSource()) {
+      requestDesktopOnboarding(errorMessage, payload)
     } else if (surface?.code === 'disk_full') {
       notifyError(new Error(errorMessage), translateNow('notifications.errors.diskFull'))
     } else {

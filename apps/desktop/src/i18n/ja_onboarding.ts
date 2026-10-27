@@ -1,6 +1,14 @@
 import type { TranslationOverrides } from './define-locale'
 
 export const jaOnboarding: TranslationOverrides['onboarding'] = {
+  exhaustedProvider: 'プロバイダー',
+  exhaustedTitle: (provider: string) => `${provider} の利用上限に達しました`,
+  exhaustedBody:
+    'アカウントは接続されていますが、現在このリクエストを処理できるものがありません。このチャットで別のモデルを選択するか、アカウントを追加してください。',
+  exhaustedReset: (time: string) => `リセット予定: ${time}`,
+  exhaustedResetUnknown: 'プロバイダーはリセット時刻を通知していません。',
+  exhaustedChooseModel: 'このチャットのモデルを選択',
+  exhaustedAddAccount: 'アカウントを追加',
   headerTitle: 'Hermes Agent のセットアップをしましょう',
   headerDesc: 'チャットを始めるにはモデルプロバイダーを接続してください。ほとんどのオプションはワンクリックです。',
   preparingInstall: 'Hermes はインストールを完了中です。初回実行では通常 1 分以内に完了します。',

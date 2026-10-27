@@ -1,6 +1,13 @@
 import type { TranslationOverrides } from './define-locale'
 
 export const zhOnboarding: TranslationOverrides['onboarding'] = {
+  exhaustedProvider: '提供商',
+  exhaustedTitle: (provider: string) => `${provider} 的额度已用尽`,
+  exhaustedBody: '你的账户已连接，但目前没有账户可以处理此请求。请为此聊天选择其他模型或添加账户。',
+  exhaustedReset: (time: string) => `预计重置时间：${time}`,
+  exhaustedResetUnknown: '提供商尚未报告重置时间。',
+  exhaustedChooseModel: '为此聊天选择模型',
+  exhaustedAddAccount: '添加账户',
   headerTitle: '开始设置 Hermes Agent',
   headerDesc: '连接模型提供方即可开始对话。大多数选项只需一次点击。',
   preparingInstall: 'Hermes 正在完成安装。首次运行通常不到一分钟。',

@@ -1,3 +1,5 @@
+import { translateNow } from '@/i18n'
+
 export interface SetupStatusSnapshot {
   provider_configured?: boolean
   /** Additive launch-profile fields (newer backends only; absent on older
@@ -17,7 +19,13 @@ export interface SetupStatusSnapshot {
   retry_after?: number
 }
 
-export interface RuntimeCheckSnapshot {
+export interface CredentialFailureMetadata {
+  failure_kind?: 'exhausted' | 'auth_missing' | null
+  provider?: string | null
+  reset_at?: number | null
+}
+
+export interface RuntimeCheckSnapshot extends CredentialFailureMetadata {
   error?: string
   /** True when the resolved route is the free tier rather than a credential of
    *  the user's own. Absent on older backends. */
@@ -40,7 +48,7 @@ export interface RuntimeReadinessOptions {
   unknownReady?: boolean
 }
 
-export interface RuntimeReadinessResult {
+export interface RuntimeReadinessResult extends CredentialFailureMetadata {
   checksDisagree: boolean
   /** Passed through from `setup.runtime_check`: the resolved route is the free
    *  tier. Undefined when the check did not answer (older backend, transport
@@ -117,7 +125,14 @@ export function interpretRuntimeReadiness(
   signals: RuntimeReadinessSignals,
   options: RuntimeReadinessOptions = {}
 ): RuntimeReadinessResult {
-  const defaultReason = options.defaultReason ?? DEFAULT_NOT_READY_REASON
+  const defaultReason =
+    signals.runtime?.failure_kind === 'exhausted'
+      ? translateNow(
+          'onboarding.exhaustedTitle',
+          signals.runtime.provider || translateNow('onboarding.exhaustedProvider')
+        )
+      : (options.defaultReason ?? DEFAULT_NOT_READY_REASON)
+
   const unknownReady = options.unknownReady ?? false
 
   const setupConfigured =
@@ -131,6 +146,9 @@ export function interpretRuntimeReadiness(
   // (free-tier chrome) don't have to re-issue setup.runtime_check. Left
   // undefined when the check said nothing — "absent" and "false" differ.
   const route = {
+    failure_kind: signals.runtime?.failure_kind,
+    provider: signals.runtime?.provider,
+    reset_at: signals.runtime?.reset_at,
     freeTier: typeof signals.runtime?.free_tier_route === 'boolean' ? signals.runtime.free_tier_route : undefined,
     model: normalizeMessage(signals.runtime?.model) ?? undefined
   }
@@ -195,7 +213,7 @@ export function runtimeReadinessDisplay(status: RuntimeReadinessResult | null): 
   // Credentials exist but runtime resolution failed. Calling that "needs
   // setup" sends users back through onboarding for provider/quota failures
   // that setup cannot repair; the reason tooltip carries the specific cause.
-  return status.checksDisagree ? 'unavailable' : 'needs_setup'
+  return status.failure_kind === 'exhausted' || status.checksDisagree ? 'unavailable' : 'needs_setup'
 }
 
 export async function evaluateRuntimeReadiness(

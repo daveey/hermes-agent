@@ -39,6 +39,7 @@ import {
 import { $onboardingSurfaces, onboardingSurfaceActive } from '@/store/onboarding-presence'
 import type { OAuthProvider } from '@/types/hermes'
 
+import { ExhaustedRecovery } from './exhausted'
 import { DocsLink, FlowPanel, Status } from './flow'
 import { FreeTierSetupNotice } from './free-tier-setup-notice'
 import { DecodedLabel } from './glyph'
@@ -366,7 +367,9 @@ export function DesktopOnboardingOverlay({
   // do we know whether to dismiss (true) or surface the picker (false).
   // EXCEPTION: manual mode (user opened the selector from a working app to
   // add/switch a provider) shows the overlay regardless of configured state.
-  if (onboarding.configured === true && !onboarding.manual && !onboarding.freeTierReady) {
+  const exhausted = !onboarding.manual && onboarding.requested ? onboarding.exhausted : undefined
+
+  if (onboarding.configured === true && !onboarding.manual && !onboarding.freeTierReady && !exhausted) {
     return null
   }
 
@@ -407,8 +410,8 @@ export function DesktopOnboardingOverlay({
   // configured, so there is no picker to show and no runtime gate to wait on.
   // A manual open (the user asked for the picker) outranks it.
   const freeTierIntro = onboarding.freeTierReady && !onboarding.manual && flow.status === 'idle'
-  const ready = freeTierIntro || onboarding.manual || (enabled && onboarding.configured === false)
-  const showPicker = !freeTierIntro && (flow.status === 'idle' || flow.status === 'success')
+  const ready = Boolean(exhausted) || freeTierIntro || onboarding.manual || (enabled && onboarding.configured === false)
+  const showPicker = !exhausted && !freeTierIntro && (flow.status === 'idle' || flow.status === 'success')
   // The final "you're in" screen drops the card chrome and floats centered on
   // the surface — same bare, cinematic treatment as the connecting overlay.
   const bare = ready && (freeTierIntro || (!showPicker && flow.status === 'confirming_model'))
@@ -441,7 +444,7 @@ export function DesktopOnboardingOverlay({
         )}
       >
         {showPicker || !ready ? <Header /> : null}
-        {onboarding.manual ? (
+        {onboarding.manual || exhausted ? (
           <Button
             aria-label={t.common.close}
             className="absolute right-3 top-3 z-10 text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground"
@@ -453,10 +456,12 @@ export function DesktopOnboardingOverlay({
           </Button>
         ) : null}
         <div className="grid gap-3 p-5">
-          {reason ? <ReasonNotice reason={reason} /> : null}
+          {reason && !exhausted ? <ReasonNotice reason={reason} /> : null}
           {ready && showPicker && !freeTierIntro && !onboarding.manual ? <FreeTierSetupNotice ctx={ctx} /> : null}
           {ready ? (
-            freeTierIntro ? (
+            exhausted ? (
+              <ExhaustedRecovery ctx={ctx} failure={exhausted} />
+            ) : freeTierIntro ? (
               <FreeTierReadyPanel leaving={leaving} onDismiss={dismissFreeTierIntro} />
             ) : showPicker ? (
               <Picker ctx={ctx} />

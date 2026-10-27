@@ -265,6 +265,13 @@ export const zhHantBoot = {
   },
 
   onboarding: {
+    exhaustedProvider: '供應商',
+    exhaustedTitle: (provider: string) => `${provider} 的額度已用盡`,
+    exhaustedBody: '你的帳戶已連線，但目前沒有帳戶可以處理此請求。請為此聊天選擇其他模型或新增帳戶。',
+    exhaustedReset: (time: string) => `預計重設時間：${time}`,
+    exhaustedResetUnknown: '供應商尚未回報重設時間。',
+    exhaustedChooseModel: '為此聊天選擇模型',
+    exhaustedAddAccount: '新增帳戶',
     headerTitle: '開始設定 Hermes Agent',
     headerDesc: '連線模型提供方即可開始聊天。大多數選項只需一次點擊。',
     preparingInstall: 'Hermes 正在完成安裝。首次執行通常不到一分鐘。',

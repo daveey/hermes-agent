@@ -41,6 +41,21 @@ afterEach(() => {
 })
 
 describe('DesktopOnboardingOverlay first-run skip gate', () => {
+  it('shows exhausted recovery instead of the first-run picker, including after skip', () => {
+    $desktopOnboarding.set(
+      skippedState({
+        configured: true,
+        requested: true,
+        exhausted: { failure_kind: 'exhausted', provider: 'anthropic', reset_at: null }
+      })
+    )
+    render(<DesktopOnboardingOverlay enabled profile="default" requestGateway={pendingGateway} />)
+    expect(screen.queryByText(HEADER)).toBeNull()
+    expect(screen.queryByText('Nous Portal')).toBeNull()
+    expect(screen.getByRole('heading', { name: 'anthropic capacity is exhausted' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Choose model for this chat' })).toBeTruthy()
+  })
+
   it('stays out of the way for a user who chose "I\'ll choose a provider later"', () => {
     $desktopOnboarding.set(skippedState())
 

@@ -95,6 +95,8 @@ class SessionLiveInfo(OpenModel):
     mcp_servers: list[McpServerStatus] = Field(default_factory=list)
     system_prompt: str | None = None
     credential_warning: str | None = None
+    failure_kind: Literal["exhausted", "auth_missing"] | None = None
+    reset_at: float | None = None
     lazy: bool | None = None
 
 

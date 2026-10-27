@@ -87,6 +87,28 @@ function fallbackTimeoutGateway(): OnboardingContext['requestGateway'] {
 }
 
 describe('refreshOnboarding', () => {
+  it('routes exhausted credentials to recovery without deleting the configured cache or loading the first-run picker', async () => {
+    $desktopOnboarding.set(baseState({ configured: null }))
+    window.localStorage.setItem('hermes-desktop-onboarded-v1', '1')
+    const api = vi.fn(async () => ({ providers: [] }))
+    installApiMock(api)
+    await refreshOnboarding({
+      scope: { connectionId: 'remote', profile: 'beta' },
+      requestGateway: async method =>
+        (method === 'setup.status'
+          ? { provider_configured: false }
+          : { ok: false, failure_kind: 'exhausted', provider: 'anthropic', reset_at: 1800000000 }) as never
+    })
+    expect($desktopOnboarding.get()).toMatchObject({
+      configured: true,
+      manual: false,
+      exhausted: { failure_kind: 'exhausted', provider: 'anthropic', reset_at: 1800000000 },
+      targetScope: { connectionId: 'remote', profile: 'beta' }
+    })
+    expect(window.localStorage.getItem('hermes-desktop-onboarded-v1')).toBe('1')
+    expect(api).not.toHaveBeenCalled()
+  })
+
   it('keeps onboarding work in its initiating lifetime and profile', async () => {
     const { startManualOnboarding, startProviderOAuth, saveOnboardingApiKey, closeManualOnboarding } =
       await import('./onboarding')

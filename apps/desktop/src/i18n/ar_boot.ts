@@ -248,6 +248,14 @@ export const arBoot = {
     reloadRetry: 'إعادة التحميل وإعادة المحاولة'
   },
   onboarding: {
+    exhaustedProvider: 'المزوّد',
+    exhaustedTitle: (provider: string) => `نفدت سعة ${provider}`,
+    exhaustedBody:
+      'حساباتك متصلة، لكن لا يمكن لأي منها معالجة هذا الطلب الآن. اختر نموذجًا آخر لهذه المحادثة أو أضف حسابًا.',
+    exhaustedReset: (time: string) => `إعادة الضبط المتوقعة: ${time}`,
+    exhaustedResetUnknown: 'لم يعلن المزوّد عن موعد إعادة الضبط.',
+    exhaustedChooseModel: 'اختيار نموذج لهذه المحادثة',
+    exhaustedAddAccount: 'إضافة حساب',
     headerTitle: 'لنُعِدّ لك Hermes Agent',
     headerDesc: 'اربط مزوّد نماذج لبدء المحادثة. معظم الخيارات تتطلب نقرة واحدة.',
     preparingInstall: 'يُكمل Hermes التثبيت. عادة ما يستغرق ذلك أقل من دقيقة في أول تشغيل.',

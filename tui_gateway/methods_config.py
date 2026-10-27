@@ -440,16 +440,27 @@ def _(rid, params: dict) -> dict:
         requested = str(params.get("provider") or "").strip() or None
 
         def probe(profile, scoped):
+            from tui_gateway.credential_failure import credential_failure_fields
             startup_model, startup_provider = _resolve_startup_runtime()
+            cfg_model = _load_cfg().get("model")
+            pinned = (requested or startup_provider
+                      or (str(cfg_model.get("provider") or "").strip() if isinstance(cfg_model, dict) else ""))
             from agent.model_routing import is_class_selector
-            if requested:
-                model, runtime = startup_model, resolve_runtime_provider(
-                    requested=requested, target_model=None if is_class_selector(startup_model) else startup_model or None)
-            else:
-                model, runtime = _resolve_agent_model_runtime(None, None)
-                from tui_gateway.class_routing import probe_class_runtime
-                if is_class_selector(model):
-                    model, runtime = probe_class_runtime(model, runtime.get("provider"), _load_cfg())
+            try:
+                if requested:
+                    model, runtime = startup_model, resolve_runtime_provider(
+                        requested=requested, target_model=None if is_class_selector(startup_model) else startup_model or None)
+                else:
+                    model, runtime = _resolve_agent_model_runtime(None, None)
+                    from tui_gateway.class_routing import probe_class_runtime
+                    if is_class_selector(model):
+                        model, runtime = probe_class_runtime(model, runtime.get("provider"), _load_cfg())
+            except Exception as exc:
+                # Still inside the probe's profile/secret scope, including on the readiness worker.
+                provider = pinned or getattr(exc, "provider", "") or ""
+                from tui_gateway.credential_failure import exception_failure_fields
+                fields = exception_failure_fields(exc, provider) or credential_failure_fields(provider)
+                return {"ok": False, "model": startup_model, "error": str(exc), **fields, **scoped}
             provider_configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
             provider = runtime.get("provider") or "provider"
             source = str(runtime.get("source") or "")
@@ -457,14 +468,11 @@ def _(rid, params: dict) -> dict:
             # configured fallback chain; when the chain only resolves at its tail, ``runtime``
             # stops there and the failure blames a provider the user never pinned (#124939).
             # Attribute failures to the pin (startup pin, else the config model pin).
-            cfg_model = _load_cfg().get("model")
-            pinned = (requested or startup_provider
-                      or (str(cfg_model.get("provider") or "").strip() if isinstance(cfg_model, dict) else ""))
             blamed = pinned or provider
 
             def fail(error, src):
                 return {"ok": False, "provider": blamed, "model": model,
-                        "source": src, "error": error, **scoped}
+                        "source": src, "error": error, **credential_failure_fields(blamed), **scoped}
             if (not provider_configured and provider == "bedrock"
                     and source in {"iam-role", "aws-sdk-default-chain"}):
                 return fail("No Hermes provider is configured.", source)
@@ -480,10 +488,15 @@ def _(rid, params: dict) -> dict:
                     "source": runtime.get("source"),
                     "free_tier_route": provider == "nous" and route_is_welcome_host(runtime.get("base_url")),
                     **scoped}
-        return _readiness_check(rid, params, probe, probe_key=f"runtime:{requested or ''}",
-                                wait_seconds=_READINESS_SHARE_WAIT_SECONDS)
+        response = _readiness_check(rid, params, probe, probe_key=f"runtime:{requested or ''}",
+                                    wait_seconds=_READINESS_SHARE_WAIT_SECONDS)
+        result = response.get("result", {})
+        if result.get("ok") is False and "failure_kind" not in result:
+            result.update(failure_kind="auth_missing", provider=requested or "", reset_at=None)
+        return response
     except Exception as e:
-        return _ok(rid, {"ok": False, "error": str(e)})
+        return _ok(rid, {"ok": False, "error": str(e), "failure_kind": "auth_missing",
+                         "provider": str(params.get("provider") or ""), "reset_at": None})
 
 
 def _redact_client_text(text: str, cap: int) -> str:

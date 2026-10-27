@@ -8,6 +8,7 @@ import { optimisticAttachmentRef } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { sessionNotOwnedSurface } from '@/lib/error-surface'
 import { setMutableRef } from '@/lib/mutable-ref'
+import { credentialFailureMetadata } from '@/lib/provider-setup-errors'
 import {
   isVoicePlaybackActive,
   markVoicePlaybackInterrupted,
@@ -268,10 +269,18 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       // stays in the composer; once a provider is configured they just hit
       // Enter again.
       if (!options?.fromQueue) {
-        const deferredCredentialWarning = consumePendingCredentialWarning()
+        const deferredCredentialWarning = consumePendingCredentialWarning(undefined, guardSessionId)
 
         if (deferredCredentialWarning) {
-          requestDesktopOnboarding(deferredCredentialWarning)
+          if (typeof deferredCredentialWarning === 'string') {
+            requestDesktopOnboarding(deferredCredentialWarning)
+          } else {
+            requestDesktopOnboarding(
+              deferredCredentialWarning.reason,
+              deferredCredentialWarning.failure,
+              deferredCredentialWarning.scope
+            )
+          }
 
           return false
         }
@@ -1068,8 +1077,20 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           targetStoredSessionId
         )
 
-        if (targetIsCurrentView() && isProviderSetupError(err)) {
-          requestDesktopOnboarding(copy.providerCredentialRequired)
+        const failure = credentialFailureMetadata(err)
+
+        if (targetIsCurrentView() && (failure || isProviderSetupError(err))) {
+          const owner = targetStoredSessionId ? await resolveSessionOwner(targetStoredSessionId) : undefined
+
+          if (!targetIsCurrentView()) {
+            return false
+          }
+
+          requestDesktopOnboarding(
+            message || copy.providerCredentialRequired,
+            failure,
+            owner ? profileScopeForSessionOwner(owner) : undefined
+          )
 
           return false
         }

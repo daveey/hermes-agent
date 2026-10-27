@@ -1,6 +1,14 @@
 import type { TranslationOverrides } from './define-locale'
 
 export const deOnboarding: TranslationOverrides['onboarding'] = {
+  exhaustedProvider: 'Anbieter',
+  exhaustedTitle: (provider: string) => `Kapazität von ${provider} erschöpft`,
+  exhaustedBody:
+    'Deine Konten sind verbunden, aber keines kann diese Anfrage derzeit bearbeiten. Wähle ein anderes Modell für diesen Chat oder füge ein Konto hinzu.',
+  exhaustedReset: (time: string) => `Voraussichtliche Zurücksetzung: ${time}`,
+  exhaustedResetUnknown: 'Der Anbieter hat keinen Zeitpunkt für die Zurücksetzung gemeldet.',
+  exhaustedChooseModel: 'Modell für diesen Chat wählen',
+  exhaustedAddAccount: 'Konto hinzufügen',
   headerTitle: 'Hermes Agent für Sie einrichten',
   headerDesc:
     'Verbinden Sie einen Modell-Anbieter, um mit dem Chatten zu beginnen. Die meisten Optionen brauchen nur einen Klick.',

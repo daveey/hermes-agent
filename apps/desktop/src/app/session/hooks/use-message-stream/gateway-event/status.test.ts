@@ -69,8 +69,10 @@ describe('gateway `error` event → error card + toast', () => {
     )
   })
 
-  it('carries the taker\'s machine on a takeover error so the card can name it', () => {
-    const message = 'This chat was taken over by another Hermes window.\nDetails: session s1 opened by desktop on MacBook-Pro-177 0m ago.'
+  it("carries the taker's machine on a takeover error so the card can name it", () => {
+    const message =
+      'This chat was taken over by another Hermes window.\nDetails: session s1 opened by desktop on MacBook-Pro-177 0m ago.'
+
     const { ctx, failAssistantMessage } = errorContext(message)
 
     const payload = {
@@ -84,7 +86,10 @@ describe('gateway `error` event → error card + toast', () => {
       'sess-1',
       message,
       1_700_000_100,
-      expect.objectContaining({ code: 'SESSION_NOT_OWNED', owner: { age: '0m', host: 'MacBook-Pro-177', surface: 'desktop' } })
+      expect.objectContaining({
+        code: 'SESSION_NOT_OWNED',
+        owner: { age: '0m', host: 'MacBook-Pro-177', surface: 'desktop' }
+      })
     )
   })
 
@@ -123,9 +128,19 @@ describe('gateway `error` event → error card + toast', () => {
       'provider_not_configured'
     )
 
-    handleStatusEvent(ctx)
+    handleStatusEvent({ ...ctx, isActiveEvent: true })
 
     expect(requestDesktopOnboarding).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves exhaustion metadata and never opens recovery for background sessions or owners', () => {
+    const { ctx } = errorContext('Capacity unavailable', 'provider_not_configured')
+    const payload = { ...ctx.payload, failure_kind: 'exhausted' as const, provider: 'anthropic', reset_at: 1800000000 }
+    handleStatusEvent({ ...ctx, payload })
+    handleStatusEvent({ ...ctx, payload, isActiveEvent: true, fromActiveSource: () => false })
+    expect(requestDesktopOnboarding).not.toHaveBeenCalled()
+    handleStatusEvent({ ...ctx, payload, isActiveEvent: true })
+    expect(requestDesktopOnboarding).toHaveBeenCalledWith('Capacity unavailable', payload)
   })
 
   it('does not route an unrelated failure to onboarding', () => {

@@ -1,3 +1,27 @@
+import type { CredentialFailureMetadata } from './runtime-readiness'
+
+export function credentialFailureMetadata(error: unknown): CredentialFailureMetadata | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined
+  }
+
+  const data = 'data' in error ? error.data : error
+
+  if (!data || typeof data !== 'object' || !('failure_kind' in data)) {
+    return undefined
+  }
+
+  if (data.failure_kind !== 'exhausted' && data.failure_kind !== 'auth_missing') {
+    return undefined
+  }
+
+  return {
+    failure_kind: data.failure_kind,
+    provider: 'provider' in data && typeof data.provider === 'string' ? data.provider : undefined,
+    reset_at: 'reset_at' in data && typeof data.reset_at === 'number' ? data.reset_at : null
+  }
+}
+
 // Fallback for gateways that send no `code` on the error event. Every alternative here is a
 // sentence the backend actually produces today: `agent_init` raises "No LLM provider configured"
 // on a blank install and `missing_provider_credentials_message()` the "is set in config.yaml

@@ -2420,7 +2420,9 @@ export function applyRuntimeInfo(
     reconcileApprovalModeForProfile($activeGatewayProfile.get(), info.approval_mode)
   }
 
-  requestDesktopOnboardingForCredentialWarning(info.credential_warning)
+  if (foreground) {
+    requestDesktopOnboardingForCredentialWarning(info.credential_warning, info)
+  }
 
   reportInstallMethodWarning(info.install_warning)
 

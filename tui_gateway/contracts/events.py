@@ -15,6 +15,8 @@ closed, so a drifted emitter fails the suite (``registry.check_payload`` raises 
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from .base import JsonValue, Payload, WireEnum
@@ -94,7 +96,11 @@ class ErrorPayload(Payload):
     already knows the machine code (the takeover watcher's ``SESSION_NOT_OWNED``)."""
 
     message: str
+    code: str | None = None
     error_surface: ErrorSurface | None = None
+    failure_kind: Literal["exhausted", "auth_missing"] | None = None
+    reset_at: float | None = None
+    provider: str | None = None
 
 
 event("error", ErrorPayload, doc="A session-level failure outside a turn (agent init, model switch, compression, resume).")
@@ -225,6 +231,9 @@ class MessageCompletePayload(Payload):
     rendered: str | None = None
     error: str | None = None
     recoverable: bool | None = None
+    failure_kind: Literal["exhausted", "auth_missing"] | None = None
+    reset_at: float | None = None
+    provider: str | None = None
     error_surface: ErrorSurface | None = None
     partial: bool | None = None
     persisted_turn: PersistedTurn | None = None

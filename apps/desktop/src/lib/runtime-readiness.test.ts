@@ -3,6 +3,23 @@ import { describe, expect, it } from 'vitest'
 import { fetchRuntimeReadinessSignals, interpretRuntimeReadiness, runtimeReadinessDisplay } from './runtime-readiness'
 
 describe('interpretRuntimeReadiness', () => {
+  it('preserves exhaustion metadata even when setup reports unconfigured', () => {
+    const result = interpretRuntimeReadiness({
+      setup: { provider_configured: false },
+      setupError: null,
+      runtimeError: null,
+      runtime: { ok: false, failure_kind: 'exhausted', provider: 'anthropic', reset_at: 1800000000 }
+    })
+
+    expect(result).toMatchObject({
+      failure_kind: 'exhausted',
+      provider: 'anthropic',
+      reset_at: 1800000000,
+      ready: false
+    })
+    expect(runtimeReadinessDisplay(result)).toBe('unavailable')
+  })
+
   it('prefers runtime_check when both signals exist', () => {
     const result = interpretRuntimeReadiness({
       setup: { provider_configured: false },

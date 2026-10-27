@@ -122,6 +122,8 @@ export type GatewayEventPayload = {
   branch?: string
   terminal_backend?: string
   credential_warning?: string
+  failure_kind?: 'exhausted' | 'auth_missing' | null
+  reset_at?: number | null
   install_warning?: string
   personality?: string
   usage?: Partial<UsageStats>

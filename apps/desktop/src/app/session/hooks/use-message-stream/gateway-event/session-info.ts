@@ -483,7 +483,9 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
       }))
     }
 
-    requestDesktopOnboardingForCredentialWarning(payload?.credential_warning)
+    if (apply) {
+      requestDesktopOnboardingForCredentialWarning(payload?.credential_warning, payload, undefined, sessionId)
+    }
 
     if (apply) {
       reportInstallMethodWarning(payload?.install_warning)

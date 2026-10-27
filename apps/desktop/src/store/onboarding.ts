@@ -15,13 +15,18 @@ import {
 } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
-import { evaluateRuntimeReadiness, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
+import {
+  type CredentialFailureMetadata,
+  evaluateRuntimeReadiness,
+  type RuntimeReadinessResult
+} from '@/lib/runtime-readiness'
 import { ackFreeTierNotice, freeTierReadyPending, refreshFreeTierStatus, setFreeTierRoute } from '@/store/free-tier'
 import { $gatewayBootGeneration } from '@/store/live-sync'
 import { setMainModelAssignment } from '@/store/model-assignment'
 import { dismissNotification, notify, notifyError } from '@/store/notifications'
 import { afterOnboardingStateRead, guidedOnboardingActive } from '@/store/onboarding-gate'
 import { captureOnboardingScope, type OnboardingScope } from '@/store/onboarding-scope'
+import { $activeSessionId } from '@/store/session'
 import type { OAuthProvider, OAuthStartResponse } from '@/types/hermes'
 
 type PkceStart = Extract<OAuthStartResponse, { flow: 'pkce' }>
@@ -83,6 +88,7 @@ export interface DesktopOnboardingState {
    *  picker's "Add provider" button). Forces the overlay to show the picker
    *  even when configured === true, and adds a close affordance. */
   manual: boolean
+  exhausted?: CredentialFailureMetadata
   targetScope?: OnboardingScope
   /** True when the overlay was opened specifically to configure a local /
    *  custom OpenAI-compatible endpoint (e.g. from Settings → Model's "Set up
@@ -596,7 +602,12 @@ async function refreshProviders() {
   await providersRefreshPromise
 }
 
-export function requestDesktopOnboarding(reason = DEFAULT_ONBOARDING_REASON) {
+export function requestDesktopOnboarding(
+  reason = DEFAULT_ONBOARDING_REASON,
+  failure?: CredentialFailureMetadata,
+  profile?: ProfileScope
+) {
+  const targetScope = captureOnboardingScope(profile)
   // Not during the guided first launch. The free tier carries inference
   // there, and a credential probe that fires anyway (a free-tier token mid
   // refresh, a setup-profile session before its runtime settles) would drop
@@ -607,7 +618,13 @@ export function requestDesktopOnboarding(reason = DEFAULT_ONBOARDING_REASON) {
       return
     }
 
-    patch({ reason: reason.trim() || DEFAULT_ONBOARDING_REASON, requested: true })
+    patch({
+      reason: reason.trim() || DEFAULT_ONBOARDING_REASON,
+      requested: true,
+      targetScope,
+      exhausted: failure?.failure_kind === 'exhausted' ? failure : undefined,
+      ...(failure?.failure_kind === 'exhausted' ? { configured: true, manual: false, freeTierReady: false } : {})
+    })
   })
 }
 
@@ -620,25 +637,51 @@ export function requestDesktopOnboarding(reason = DEFAULT_ONBOARDING_REASON) {
  *  doomed send. The latest warning wins; a session event without a warning
  *  clears the stash (the profile became configured, or the user switched
  *  back to a healthy one). */
-let pendingCredentialWarning: null | string = null
+interface PendingCredentialFailure {
+  reason: string
+  failure: CredentialFailureMetadata
+  scope: OnboardingScope
+}
+let pendingCredentialWarning: null | string | PendingCredentialFailure = null
+let pendingCredentialScope: OnboardingScope | undefined
+let pendingCredentialSession: string | null = null
 
-export function requestDesktopOnboardingForCredentialWarning(reason: null | string | undefined) {
+export function requestDesktopOnboardingForCredentialWarning(
+  reason: null | string | undefined,
+  failure?: CredentialFailureMetadata,
+  profile?: ProfileScope,
+  sessionId = $activeSessionId.get()
+) {
   const warning = reason?.trim()
 
-  if (!warning || !isProviderSetupErrorMessage(warning) || guidedOnboardingActive()) {
+  if ((!failure?.failure_kind && (!warning || !isProviderSetupErrorMessage(warning))) || guidedOnboardingActive()) {
     pendingCredentialWarning = null
 
     return
   }
 
-  pendingCredentialWarning = warning
+  pendingCredentialSession = sessionId
+  pendingCredentialScope = captureOnboardingScope(profile)
+  pendingCredentialWarning = failure?.failure_kind
+    ? { reason: warning || DEFAULT_ONBOARDING_REASON, failure, scope: pendingCredentialScope }
+    : warning || null
 }
 
 /** Submit-time gate: returns the deferred credential warning (and clears it)
  *  so the caller can open onboarding instead of sending a prompt that the
  *  gateway already said will fail. Null when the active profile is healthy. */
-export function consumePendingCredentialWarning(): null | string {
-  const warning = pendingCredentialWarning
+export function consumePendingCredentialWarning(
+  profile?: ProfileScope,
+  sessionId = $activeSessionId.get()
+): null | string | PendingCredentialFailure {
+  const scope = captureOnboardingScope(profile)
+
+  const warning =
+    pendingCredentialSession === sessionId &&
+    pendingCredentialScope?.connectionId === scope.connectionId &&
+    pendingCredentialScope?.profile === scope.profile
+      ? pendingCredentialWarning
+      : null
 
   pendingCredentialWarning = null
 
@@ -658,6 +701,7 @@ export function startManualOnboarding(
   providersRefreshPromise = null
   patch({
     manual: true,
+    exhausted: undefined,
     targetScope: captureOnboardingScope(profile),
     providers: null,
     requested: true,
@@ -683,6 +727,7 @@ export function startManualLocalEndpoint(reason: null | string = null, profile?:
   pendingProviderOAuthId = null
   patch({
     manual: true,
+    exhausted: undefined,
     targetScope: captureOnboardingScope(profile),
     providers: null,
     requested: true,
@@ -799,6 +844,10 @@ export async function refreshOnboarding(ctx: OnboardingContext, stillWanted?: ()
   // auto-dismiss on runtime-ready — the whole point is to let them add /
   // switch a provider while already configured. Just ensure the provider
   // list is loaded and show the picker.
+  if ($desktopOnboarding.get().exhausted && $desktopOnboarding.get().requested) {
+    return false
+  }
+
   if ($desktopOnboarding.get().manual) {
     await refreshProviders()
 
@@ -823,6 +872,22 @@ export async function refreshOnboarding(ctx: OnboardingContext, stillWanted?: ()
   }
 
   const state = $desktopOnboarding.get()
+
+  if (runtime.failure_kind === 'exhausted') {
+    // Credentials still exist. Never erase the configured cache or fetch the
+    // first-run picker for a capacity limit. A passive refresh must not cover
+    // an already-open chat; submit/error paths explicitly request recovery.
+    patch({
+      configured: true,
+      exhausted: runtime,
+      targetScope: captureOnboardingScope(ctx.scope ?? ctx.profile),
+      requested: state.requested || state.configured !== true,
+      freeTierReady: false,
+      reason: runtime.reason
+    })
+
+    return false
+  }
 
   if (shouldPreserveConfiguredOnFallback(runtime, state)) {
     // Gateway probes timed out — don't downgrade to the blocking onboarding
@@ -856,7 +921,7 @@ export async function refreshOnboarding(ctx: OnboardingContext, stillWanted?: ()
   }
 
   writeCachedConfigured(false)
-  patch({ configured: false, reason })
+  patch({ configured: false, exhausted: undefined, reason })
 
   if (state.providers !== null && !state.requested) {
     return false

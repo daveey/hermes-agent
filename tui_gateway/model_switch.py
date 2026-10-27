@@ -531,8 +531,11 @@ def _sync_agent_model_with_config(sid: str, session: dict) -> None:
     except Exception as e:
         logger.warning("Configured model %s could not be adopted for session %s: %s", model, sid, e)
         from gateway.warning_notifications import render_notification
+        from tui_gateway.credential_failure import exception_failure_fields
+        with _session_profile_runtime_scope(session):
+            failure = exception_failure_fields(e, provider)
         render_notification(
-            lambda: _emit("error", sid, {"message": f"Could not switch to configured model {model}: {e}"}),
+            lambda: _emit("error", sid, {"message": f"Could not switch to configured model {model}: {e}", **failure}),
             platform="tui", user_config=getattr(session.get("agent"), "_notification_config", None))
 
 

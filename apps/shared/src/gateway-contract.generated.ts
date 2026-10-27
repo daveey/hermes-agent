@@ -544,6 +544,8 @@ export interface SessionLiveInfo {
   mcp_servers?: McpServerStatus[]
   system_prompt?: string | null
   credential_warning?: string | null
+  failure_kind?: 'exhausted' | 'auth_missing' | null
+  reset_at?: number | null
   lazy?: boolean | null
   [key: string]: unknown
 }
@@ -616,6 +618,8 @@ export interface SetupRuntimeCheckResult {
   error?: string | null
   free_tier_route?: boolean | null
   profile?: string | null
+  failure_kind?: 'exhausted' | 'auth_missing' | null
+  reset_at?: number | null
 }
 export interface DiagnosticsShareNousParams {
   error_context?: string | null
@@ -3423,6 +3427,8 @@ export interface SessionCwdSetResult {
   mcp_servers?: McpServerStatus[]
   system_prompt?: string | null
   credential_warning?: string | null
+  failure_kind?: 'exhausted' | 'auth_missing' | null
+  reset_at?: number | null
   lazy?: boolean | null
   [key: string]: unknown
 }
@@ -4789,7 +4795,11 @@ export interface SetupReadyPayload {
 /** Every ``_emit("error", …)`` site sets ``message``; ``error_surface`` rides when the gateway already knows the machine code (the takeover watcher's ``SESSION_NOT_OWNED``). */
 export interface ErrorPayload {
   message: string
+  code?: string | null
   error_surface?: ErrorSurface | null
+  failure_kind?: 'exhausted' | 'auth_missing' | null
+  reset_at?: number | null
+  provider?: string | null
 }
 /** ``agent/error_surface.py::_surface`` — advisory {layer, code, retryable} (+ identity, + auth hint, + ``resets_at`` epoch seconds when the provider named when its limit lifts). */
 export interface ErrorSurface {
@@ -4840,6 +4850,9 @@ export interface MessageCompletePayload {
   rendered?: string | null
   error?: string | null
   recoverable?: boolean | null
+  failure_kind?: 'exhausted' | 'auth_missing' | null
+  reset_at?: number | null
+  provider?: string | null
   error_surface?: ErrorSurface | null
   partial?: boolean | null
   persisted_turn?: PersistedTurn | null

@@ -943,6 +943,8 @@ export interface SessionRuntimeInfo {
   branch?: string
   config_warning?: string
   credential_warning?: string
+  failure_kind?: 'exhausted' | 'auth_missing' | null
+  reset_at?: number | null
   cwd?: string
   desktop_contract?: number
   fast?: boolean

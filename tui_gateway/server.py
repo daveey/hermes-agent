@@ -710,6 +710,9 @@ def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
     from agent.notification_presentation import event_presentation_muted
     if event_presentation_muted(event, sid):
         return False
+    if event in {"error", "message.complete"} and payload:
+        from tui_gateway.credential_failure import session_failure_payload
+        payload = session_failure_payload(event, payload, _sessions.get(sid) or {})
     return write_json(_event_frame(event, sid, payload))
 
 
@@ -943,7 +946,7 @@ def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     ready = session.get("agent_ready")
     if ready is not None and not ready.wait(timeout=timeout):
         return _err(rid, 5032, AGENT_STILL_STARTING)
-    return _err(rid, 5032, err) if (err := session.get("agent_error")) else None
+    return _err(rid, 5032, err, data=session.get("agent_failure")) if (err := session.get("agent_error")) else None
 
 
 # The deferred prompt path waits in short slices so a cancel is honored promptly and a slow
@@ -1001,7 +1004,8 @@ def _wait_agent_for_prompt(session: dict, rid: str, sid: str) -> dict | None:
         build_thread = session.get("_agent_build_thread")
         if build_thread is not None and not build_thread.is_alive() and not ready.is_set():
             # _build's finally guarantees ready.set(); dead thread + unset ready = died hard.
-            return _err(rid, 5032, session.get("agent_error") or "agent initialization failed before completing")
+            return _err(rid, 5032, session.get("agent_error") or "agent initialization failed before completing",
+                        data=session.get("agent_failure"))
         if not notified_slow and waited >= _AGENT_BUILD_SLOW_NOTICE_AFTER:
             notified_slow = True  # one keyed, replace-in-place notice (toast / status bar)
             _emit("notification.show", sid, {
@@ -1010,7 +1014,7 @@ def _wait_agent_for_prompt(session: dict, rid: str, sid: str) -> dict | None:
                 "key": _AGENT_BUILD_SLOW_NOTICE_KEY, "id": _AGENT_BUILD_SLOW_NOTICE_KEY})
     if notified_slow:
         _emit("notification.clear", sid, {"key": _AGENT_BUILD_SLOW_NOTICE_KEY})
-    return _err(rid, 5032, err) if (err := session.get("agent_error")) else None
+    return _err(rid, 5032, err, data=session.get("agent_failure")) if (err := session.get("agent_error")) else None
 
 
 def _bind_build_profile_scopes(profile_home: str | None) -> "_TurnScopes | None":
@@ -1218,15 +1222,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
             notify_registered = _wire_session_agent(sid, key, agent)
             _announce_built_agent(sid, key, current, agent)
         except Exception as e:
-            from agent.auxiliary_unavailable import ProviderNotConfiguredError
-            from hermes_cli.fallback_errors import ProviderFallbackError
-
-            def not_configured(error):
-                if isinstance(error, ProviderFallbackError):
-                    return bool(error.failures) and all(
-                        not_configured(failure) for _, _, failure in error.failures)
-                return isinstance(error, ProviderNotConfiguredError)
-
+            from tui_gateway.credential_failure import build_failure_fields, provider_not_configured
+            current["agent_failure"] = build_failure_fields(e, current)
             current["agent_error"] = str(e)
             # Logged: a failed build otherwise leaves no trace, so a prompt waiting on it reads in agent.log as
             # a message that "never ran" (the client only got an event, which a disconnect can lose). [daveey]
@@ -1236,8 +1233,9 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # error toast — but only if it can tell. The sentence is for the reader, the code is
             # for the client; older clients keep matching the text.
             _emit("error", sid, {
-                "message": agent_init_failed_message(e),
-                **({"code": "provider_not_configured"} if not_configured(e) else {})})
+                "message": agent_init_failed_message(e), **current["agent_failure"],
+                **({"code": "provider_not_configured"} if provider_not_configured(e)
+                   and current["agent_failure"].get("failure_kind") != "exhausted" else {})})
         finally:
             _finish_agent_build(
                 sid, key, current, notify_registered=notify_registered, scopes=scopes, session_db=session_db)
@@ -2445,7 +2443,13 @@ def _session_info(agent, session: dict | None = None) -> dict:
         info["update_behind"] = get_update_result(timeout=0.5)
         info["update_command"] = recommended_update_command()
     if live_agent and (warn := _probe_credentials(agent)):
-        info["credential_warning"] = warn
+        from tui_gateway.credential_failure import credential_failure_fields
+        with _session_profile_runtime_scope(sess):
+            info.update(credential_failure_fields(
+                provider, pool=getattr(agent, "_credential_pool", None)))
+        info["credential_warning"] = (
+            f"All configured credentials for '{provider}' are rate limited or out of quota."
+            if info["failure_kind"] == "exhausted" else warn)
     return info
 
 

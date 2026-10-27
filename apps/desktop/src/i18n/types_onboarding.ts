@@ -1,4 +1,11 @@
 export interface OnboardingTranslations {
+  exhaustedProvider: string
+  exhaustedTitle: (provider: string) => string
+  exhaustedBody: string
+  exhaustedReset: (time: string) => string
+  exhaustedResetUnknown: string
+  exhaustedChooseModel: string
+  exhaustedAddAccount: string
   headerTitle: string
   headerDesc: string
   preparingInstall: string

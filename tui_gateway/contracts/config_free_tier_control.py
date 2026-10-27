@@ -149,6 +149,8 @@ class SetupRuntimeCheckResult(Result):
     error: str | None = None
     free_tier_route: bool | None = None
     profile: str | None = None
+    failure_kind: Literal["exhausted", "auth_missing"] | None = None
+    reset_at: float | None = None
 
 
 method("setup.runtime_check", params=SetupRuntimeCheckParams, result=SetupRuntimeCheckResult,

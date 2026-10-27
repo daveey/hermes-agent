@@ -14303,6 +14303,18 @@
             "title": "Message",
             "type": "string"
           },
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Code"
+          },
           "error_surface": {
             "anyOf": [
               {
@@ -14313,6 +14325,46 @@
               }
             ],
             "default": null
+          },
+          "failure_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "exhausted",
+                  "auth_missing"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failure Kind"
+          },
+          "reset_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reset At"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Provider"
           }
         },
         "required": [
@@ -19389,6 +19441,46 @@
             ],
             "default": null,
             "title": "Recoverable"
+          },
+          "failure_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "exhausted",
+                  "auth_missing"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failure Kind"
+          },
+          "reset_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reset At"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Provider"
           },
           "error_surface": {
             "anyOf": [
@@ -31466,6 +31558,34 @@
             "default": null,
             "title": "Credential Warning"
           },
+          "failure_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "exhausted",
+                  "auth_missing"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failure Kind"
+          },
+          "reset_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reset At"
+          },
           "lazy": {
             "anyOf": [
               {
@@ -32344,6 +32464,34 @@
             ],
             "default": null,
             "title": "Credential Warning"
+          },
+          "failure_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "exhausted",
+                  "auth_missing"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failure Kind"
+          },
+          "reset_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reset At"
           },
           "lazy": {
             "anyOf": [
@@ -34204,6 +34352,34 @@
             ],
             "default": null,
             "title": "Profile"
+          },
+          "failure_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "exhausted",
+                  "auth_missing"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failure Kind"
+          },
+          "reset_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reset At"
           }
         },
         "required": [

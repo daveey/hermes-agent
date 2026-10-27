@@ -1,6 +1,14 @@
 import type { TranslationOverrides } from './define-locale'
 
 export const ruOnboarding: TranslationOverrides['onboarding'] = {
+  exhaustedProvider: 'Провайдер',
+  exhaustedTitle: (provider: string) => `Лимит ${provider} исчерпан`,
+  exhaustedBody:
+    'Ваши аккаунты подключены, но сейчас ни один не может обработать этот запрос. Выберите другую модель для этого чата или добавьте аккаунт.',
+  exhaustedReset: (time: string) => `Ожидаемый сброс: ${time}`,
+  exhaustedResetUnknown: 'Провайдер не сообщил время сброса лимита.',
+  exhaustedChooseModel: 'Выбрать модель для этого чата',
+  exhaustedAddAccount: 'Добавить аккаунт',
   headerTitle: 'Настроим для вас Hermes Agent',
   headerDesc: 'Подключите провайдера модели, чтобы начать общение. Большинство вариантов — в один клик.',
   preparingInstall: 'Hermes завершает установку. Обычно это занимает меньше минуты при первом запуске.',
