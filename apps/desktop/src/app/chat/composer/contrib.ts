@@ -77,6 +77,11 @@ export interface ComposerAtCompletionItem {
  *  lookups belong behind the source's own cache. */
 export interface ComposerAtCompletionSource {
   provide: (query: string) => ComposerAtCompletionItem[]
+  /** Optional: call `onChange` when rows `provide` would return have changed
+   *  (e.g. a background fetch behind the source's cache landed). An open
+   *  popover re-asks for its current query; without this it keeps what it
+   *  got on the last keystroke. Returns an unsubscribe function. */
+  subscribe?: (onChange: () => void) => () => void
 }
 
 export interface ComposerAttachmentContext {

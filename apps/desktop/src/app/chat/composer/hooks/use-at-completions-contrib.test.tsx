@@ -183,4 +183,39 @@ describe('contributed @ completion sources', () => {
     expect(rows[0]).toBe('@researcher')
     expect(rows.length).toBeGreaterThan(1)
   })
+  it('re-asks an open popover when a source signals its rows changed', async () => {
+    vi.useFakeTimers()
+    let rows: Array<{ insert: string; meta?: string }> = []
+    const listeners = new Set<() => void>()
+
+    disposers.push(
+      registry.register({
+        id: 'sessions',
+        area: COMPOSER_AREAS.atCompletions,
+        data: {
+          provide: () => rows,
+          subscribe: (onChange: () => void) => {
+            listeners.add(onChange)
+
+            return () => listeners.delete(onChange)
+          }
+        } satisfies ComposerAtCompletionSource
+      })
+    )
+
+    const { result, unmount } = renderHook(() =>
+      useAtCompletions({ gateway: gatewayStub([]) as never, sessionId: 's1', cwd: '/repo' })
+    )
+
+    expect(await searchAndRead(result, 'the')).not.toContain('@runners-panel')
+
+    // The source's background fetch lands; the query in the popover is unchanged.
+    rows = [{ insert: '@runners-panel', meta: 'Session' }]
+    act(() => listeners.forEach(fn => fn()))
+
+    expect(await searchAndRead(result, 'the')).toContain('@runners-panel')
+
+    unmount()
+    expect(listeners.size).toBe(0)
+  })
 })
