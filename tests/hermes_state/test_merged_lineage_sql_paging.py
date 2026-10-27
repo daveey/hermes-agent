@@ -1,0 +1,124 @@
+"""Multi-segment lineage reads page in SQL with exactly the old Python fold's results.
+
+``get_messages(include_ancestors=True)`` on a compression lineage used to read every row of every
+segment and dedupe/page in Python. The SQL path groups on the stored ``display_identity`` instead.
+These fixtures drive real rotations (a protected tail copied into the child), in-place compaction
+generations inside segments, model-only rows and tool rows, then compare every page shape against
+the reference ``_merged_lineage_page_python``.
+"""
+
+import itertools
+
+import pytest
+
+from agent.context_compressor import MODEL_ONLY_DISPLAY_METADATA_KEY
+from hermes_state import SessionDB
+
+
+@pytest.fixture
+def db(tmp_path):
+    return SessionDB(tmp_path / "state.db")
+
+
+def _rotate(db, parent, child, *, carried):
+    """End *parent* on compression and start *child* with copies of its last *carried* rows."""
+    tail = db.get_messages(parent)[-carried:] if carried else []
+    db.end_session(parent, "compression")
+    db.create_session(child, source="desktop", parent_session_id=parent)
+    for row in tail:
+        db.append_message(child, row["role"], row["content"], timestamp=row["timestamp"],
+                          tool_call_id=row.get("tool_call_id"), tool_name=row.get("tool_name"))
+
+
+def _turns(db, sid, tag, count, *, ts):
+    for i in range(count):
+        db.append_message(sid, "user", f"{tag} ask {i}", timestamp=ts + i * 2)
+        db.append_message(sid, "assistant", f"{tag} answer {i}", timestamp=ts + i * 2 + 1)
+
+
+def _lineage(db):
+    """root -> mid -> tip, with compaction generations, carried tails, model-only and tool rows."""
+    db.create_session("root", source="desktop")
+    _turns(db, "root", "root", 6, ts=1000)
+    db.append_message("root", "assistant", "internal nudge", timestamp=1100,
+                      display_metadata={MODEL_ONLY_DISPLAY_METADATA_KEY: True})
+    live = db.get_messages_as_conversation("root")
+    db.archive_and_compact("root", [{"role": "user", "content": "[summary root]"}] + live[-2:], tail_count=2)
+    _turns(db, "root", "root-late", 3, ts=1200)
+    _rotate(db, "root", "mid", carried=3)
+
+    _turns(db, "mid", "mid", 5, ts=2000)
+    db.append_message("mid", "tool", '{"ok": true}', tool_call_id="call-1", tool_name="terminal", timestamp=2100)
+    live = db.get_messages_as_conversation("mid")
+    db.archive_and_compact("mid", [{"role": "user", "content": "[summary mid]"}] + live[-3:], tail_count=3)
+    _rotate(db, "mid", "tip", carried=2)
+
+    _turns(db, "tip", "tip", 7, ts=3000)
+    db.append_message("tip", "assistant", "tip internal", timestamp=3100,
+                      display_metadata={MODEL_ONLY_DISPLAY_METADATA_KEY: True})
+    return ["root", "mid", "tip"]
+
+
+def _ids(rows):
+    return [row["id"] for row in rows]
+
+
+def test_sql_page_matches_python_fold_for_every_page_shape(db):
+    session_ids = _lineage(db)
+    assert db._resume_lineage_ids("tip") == session_ids
+    for sid in session_ids:
+        assert db._ensure_display_order(sid)
+
+    full = db._merged_lineage_page_python(session_ids, active_clause=" AND (active = 1 OR compacted = 1)",
+                                          limit=None, offset=0, latest=False)
+    assert len(full) > 30  # the fixture really spans generations and segments
+
+    clauses = [" AND (active = 1 OR compacted = 1)", " AND active = 1"]
+    limits = [None, 1, 7, 20, 200]
+    offsets = [0, 1, 5, 19, 40, 500]
+    checked = 0
+    for clause, limit, offset, latest in itertools.product(clauses, limits, offsets, [False, True]):
+        expected = db._merged_lineage_page_python(
+            session_ids, active_clause=clause, limit=limit, offset=offset, latest=latest)
+        with db._read_ctx() as conn:
+            actual = db._merged_lineage_page_from_conn(
+                conn, session_ids, active_clause=clause, limit=limit, offset=offset, latest=latest)
+        assert _ids(actual) == _ids(expected), (clause, limit, offset, latest)
+        checked += 1
+    assert checked == len(clauses) * len(limits) * len(offsets) * 2
+
+
+def test_get_messages_lineage_read_is_unchanged_end_to_end(db, monkeypatch):
+    _lineage(db)
+    calls = []
+    original = db._merged_lineage_page_from_conn
+    monkeypatch.setattr(db, "_merged_lineage_page_from_conn",
+                        lambda *a, **k: calls.append(1) or original(*a, **k))
+
+    for include_compacted, limit, offset, latest in itertools.product([True, False], [None, 5, 120], [0, 3], [True, False]):
+        got = db.get_messages("tip", include_compacted=include_compacted, include_ancestors=True,
+                              limit=limit, offset=offset, latest=latest)
+        clause = db._active_clause(False, include_compacted)
+        reference = [db._row_to_message_dict(row, warn_context="test", summary_flag=True)
+                     for row in db._merged_lineage_page_python(
+                         db._resume_lineage_ids("tip"), active_clause=clause, limit=limit, offset=offset, latest=latest)]
+        assert got == reference
+    assert calls, "the SQL path served the lineage reads"
+
+
+def test_model_only_and_duplicated_tail_rows_fold_once(db):
+    session_ids = _lineage(db)
+    rows = db.get_messages("tip", include_compacted=True, include_ancestors=True)
+    contents = [row["content"] for row in rows]
+    assert "internal nudge" not in contents and "tip internal" not in contents
+    assert len(contents) == len(set(zip(contents, [r["timestamp"] for r in rows])))
+    assert contents.count("root-late answer 2") == 1  # carried into mid as a protected-tail copy
+    assert session_ids == ["root", "mid", "tip"]
+
+
+def test_rewind_reads_keep_the_python_fold(db, monkeypatch):
+    _lineage(db)
+    monkeypatch.setattr(db, "_merged_lineage_page_from_conn",
+                        lambda *a, **k: pytest.fail("include_inactive must not use the identity index"))
+    rows = db.get_messages("tip", include_inactive=True, include_ancestors=True, limit=10, latest=True)
+    assert len(rows) == 10
