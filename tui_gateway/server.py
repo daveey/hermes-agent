@@ -1243,10 +1243,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 sid, key, current, notify_registered=notify_registered, scopes=scopes, session_db=session_db)
             ready.set()
 
-    build_thread = threading.Thread(target=_build, daemon=True)
-    # _wait_agent_for_prompt handle: dead thread + unset agent_ready = died hard; waiters must not sit out the cap.
-    session["_agent_build_thread"] = build_thread
-    build_thread.start()
+    from tui_gateway.turn_admission import start_build_work
+    start_build_work(session, _build)
 
 
 def _sess_nowait(params, rid):
@@ -2967,9 +2965,8 @@ def _schedule_agent_build(sid: str, delay: float = 0.05) -> None:
     def _run():
         if (session := _sessions.get(sid)) is not None:
             _start_agent_build(sid, session)
-    timer = threading.Timer(delay, _run)
-    timer.daemon = True
-    timer.start()
+    from tui_gateway.turn_admission import start_build_work
+    start_build_work(_sessions.get(sid) or {}, _run, delay=delay)
 
 
 def _load_resume_transcript(db, stored_id: str, *, model_history_only: bool = False) -> tuple[list, list, list]:

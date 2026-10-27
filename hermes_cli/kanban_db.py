@@ -31,6 +31,7 @@ from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db_sync as _sync
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
+from hermes_cli.kanban_admission import claim_transaction, claim_and_open_run
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
 
@@ -2153,55 +2154,6 @@ def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[st
     return [(row["id"], row["status"]) for row in rows]
 
 
-def _claim_and_open_run(
-    conn: sqlite3.Connection, task_id: str, source_status: str, lock: str, expires: int, now: int,
-    *, event_extra: Optional[dict] = None, gate: Optional[_sync.ClaimGate] = None,
-) -> Optional[int]:
-    """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
-    when the CAS lost. Caller holds the txn."""
-    cur = conn.execute(
-        f"""
-        UPDATE tasks
-           SET status        = 'running',
-               human_request = NULL,
-               claim_lock    = ?,
-               claim_expires = ?,
-               started_at    = COALESCE(started_at, ?)
-         WHERE id = ?
-           AND status = '{source_status}'
-           AND claim_lock IS NULL
-        """,
-        (lock, expires, now, task_id),
-    )
-    if cur.rowcount != 1:
-        return None
-    _sync.stage_claim(conn, task_id, gate)
-    trow = conn.execute(
-        "SELECT assignee, max_runtime_seconds, current_step_key "
-        "FROM tasks WHERE id = ?", (task_id,),
-    ).fetchone()
-    run_cur = conn.execute(
-        """
-        INSERT INTO task_runs (
-            task_id, profile, step_key, status,
-            claim_lock, claim_expires, max_runtime_seconds,
-            started_at
-        ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
-        """,
-        (
-            task_id, trow["assignee"] if trow else None, trow["current_step_key"] if trow else None,
-            lock, expires, trow["max_runtime_seconds"] if trow else None, now,
-        ),
-    )
-    run_id = run_cur.lastrowid
-    conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
-    _append_event(
-        conn, task_id, "claimed",
-        {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {})}, run_id=run_id,
-    )
-    return run_id
-
-
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
@@ -2217,7 +2169,9 @@ def claim_task(
     gate = _sync.claim_gate(conn, task_id, expires)
     if gate.deferred:
         return None
-    with gate, write_txn(conn):
+    with gate, claim_transaction(conn) as admitted:
+        if not admitted:
+            return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
         # recompute_ready re-promotes when the parents finish.
@@ -2232,7 +2186,7 @@ def claim_task(
         _reclaim_dangling_run(
             conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
         )
-        run_id = _claim_and_open_run(conn, task_id, "ready", lock, gate.expires, now, gate=gate)
+        run_id = claim_and_open_run(conn, task_id, "ready", lock, gate.expires, now, gate=gate)
         if run_id is None:
             return None
         claimed = get_task(conn, task_id)
@@ -2253,7 +2207,9 @@ def claim_review_task(
     gate = _sync.claim_gate(conn, task_id, expires, lane="review")
     if gate.deferred:
         return None
-    with gate, write_txn(conn):
+    with gate, claim_transaction(conn) as admitted:
+        if not admitted:
+            return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -2265,7 +2221,7 @@ def claim_review_task(
                     {"reason": "parent_reopened", "source_status": "review"},
                 )
             return None
-        run_id = _claim_and_open_run(
+        run_id = claim_and_open_run(
             conn, task_id, "review", lock, gate.expires, now, event_extra={"source_status": "review"}, gate=gate,
         )
         if run_id is None:

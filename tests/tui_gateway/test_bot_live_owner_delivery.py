@@ -25,7 +25,7 @@ def test_refused_input_commits_failed_mailbox_receipt(tmp_path):
     session = dict(agent=agent, session_key="chat", history_lock=threading.RLock(), running=True)
     retired = []
     noop = lambda *args, **kwargs: None
-    submit = rebind(prompt_turn._run_prompt_submit, {
+    submit = rebind(prompt_turn._run_admitted_prompt, {
         "threading": threading, "time": time, "logger": logging.getLogger(__name__),
         "_start_session_work": _start_session_work,
         "_sessions_lock": threading.RLock(), "_sessions": {},
@@ -86,6 +86,7 @@ def test_local_work_blocks_mailbox_claim_without_consuming_envelope(monkeypatch,
         "_session_home": lambda session: tmp_path,
         "_session_turn_admission": _session_turn_admission,
         "_run_prompt_submit": submit,
+        "_notif_run_submit": submit,
         "_notif_release_turn": lambda session: session.update(running=False),
     })
     mailbox._root(tmp_path).mkdir(parents=True)  # a delivery was admitted for this profile
@@ -165,6 +166,7 @@ def test_mailbox_poll_delivers_past_a_schema_damaged_ticket(monkeypatch, tmp_pat
         "_session_home": lambda session: tmp_path,
         "_session_turn_admission": _session_turn_admission,
         "_run_prompt_submit": submit,
+        "_notif_run_submit": submit,
         "_notif_release_turn": lambda session: session.update(running=False),
     })
     session = {"history_lock": threading.RLock(), "agent": object(), "session_key": "chat",

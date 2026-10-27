@@ -134,6 +134,10 @@ def _admit_prompt_turn(
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
+    from tui_gateway.turn_admission import owns
+    with session["history_lock"]:
+        if not owns(session):
+            return None
     held_lease = session.get("active_session_lease")
     # When the session already holds its lease this is a cheap dict check. See #94778.
     if not session.get("_closing") and (ownership_refusal := _ensure_active_session_slot(sid, session)) is not None:
@@ -142,6 +146,8 @@ def _admit_prompt_turn(
             session.get("session_key") or sid,
             getattr(ownership_refusal, "reason", None) or "refused")
         with session["history_lock"]:
+            if not owns(session):
+                return None
             session["running"] = False
             staged = session.pop("_submit_user_row", None)
             if _retain_unadmitted_submit_row(session["history"], staged):
@@ -152,6 +158,8 @@ def _admit_prompt_turn(
             error_surface={"layer": "gateway", "code": reason, "retryable": False})
         return None
     with session["history_lock"]:
+        if not owns(session):
+            return None
         if session.get("_closing") or (
             queued_prompt_generation is not None
             and int(session.get("_queued_prompt_generation", 0)) != queued_prompt_generation):
@@ -464,6 +472,14 @@ def _after_complete_turn(sid: str, session: dict, st: _TurnRun, raw: Any) -> Non
 
 def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str, *,
                             on_done=None, on_error=None) -> None:
+    # This is an explicitly claimed NEW continuation, unlike an old build waiter
+    # entering _run_prompt_submit. Adopt its generation before nested dispatch.
+    from tui_gateway.turn_admission import stage
+    with stage(session):
+        _dispatch_claimed_followup(rid, sid, session, prompt, what, on_done=on_done, on_error=on_error)
+
+
+def _dispatch_claimed_followup(rid, sid, session, prompt, what, *, on_done=None, on_error=None):
     """Chain one follow-up turn (caller set ``running``); on failure run ``on_error``, log,
     release ``running``."""
     try:
@@ -474,9 +490,9 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
     except Exception as exc:
         if on_error is not None:
             on_error()
+        logger.exception("Follow-up turn dispatch failed: %s", what)
         _hook_failure(what, exc)
-        with session["history_lock"]:
-            session["running"] = False
+        _notif_release_turn(session)
 
 
 def _run_post_turn_followups(
@@ -1175,7 +1191,13 @@ def _reopen_routed_session_row(db, sid: str, session: dict) -> None:
         logger.debug("routing-provenance reopen failed for %s", session_id, exc_info=True)
 
 
-def _run_prompt_submit(
+def _run_prompt_submit(rid, sid, session, text, **kwargs):
+    from tui_gateway.turn_admission import stage
+    with stage(session, inherit=True):
+        return _run_admitted_prompt(rid, sid, session, text, **kwargs)
+
+
+def _run_admitted_prompt(
     rid, sid: str, session: dict, text: Any, *, display_kind: str | None = None,
     display_metadata: dict | None = None, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
@@ -1192,6 +1214,9 @@ def _run_prompt_submit(
     admitted = _admit_prompt_turn(
         sid, session, text, image_paths, queued_prompt_generation, display_kind, display_metadata)
     if admitted is None:
+        from tui_gateway.turn_admission import settle
+        with session["history_lock"]:
+            settle(session)
         return False
     images, agent = admitted
     from gateway.warning_notifications import diagnostic_turn_muted
@@ -1260,22 +1285,15 @@ def _run_prompt_submit(
             # structured control snapshot now so the Desktop card never paints the pre-judge turn count.
             _publish_session_control_snapshot(sid, session, only_if_present=True)
         except Exception as e:
+            logger.exception("Prompt turn failed")
             _recover_turn_exception(sid, session, st, e)
         finally:
             _release_turn_scopes(sid, session, st)
             try:  # a raising settle step must not skip the trim / HERMES_HOME reset
                 _current_runtime_session_record.reset(runtime_session_token)
                 reset_transport(transport_token)
-                # A stale interim closure must not fire during a later turn.
-                st.agent.interim_assistant_callback = None
-                with session["history_lock"]:
-                    session["running"] = False
-                    session["last_active"] = time.time()
-                    session.pop("_turn_user_input", None)  # per turn: never leaks into the next one
-                    session.pop("_stop_issuer", None)  # [daveey] ditto: a raised turn never consumed it
-                    if not st.error_retained:
-                        _clear_inflight_turn(session)
-                    _release_hosted_room_turn_slot(session)
+                from tui_gateway.turn_admission import settle_prompt_state
+                settle_prompt_state(session, st)
                 # Closing bookend of "tui prompt accepted" — exactly one per accepted prompt.
                 # agent.session_id is re-read because compression may have rotated it (an
                 # accepted/finished pair whose id changed IS a rotation trace).
@@ -1295,8 +1313,13 @@ def _run_prompt_submit(
                     with session["history_lock"]:
                         if session.get("_active_turn_marker_key") == st.marker_key:
                             session.pop("_active_turn_marker_key", None)
-                        session.pop("_hosted_room_task", None)
-                session.pop("_auto_continue_scheduled", None)
+                        from tui_gateway.turn_admission import owns
+                        if owns(session):
+                            session.pop("_hosted_room_task", None)
+                with session["history_lock"]:
+                    from tui_gateway.turn_admission import owns
+                    if owns(session):
+                        session.pop("_auto_continue_scheduled", None)
                 _emit_settled_session_info(sid, session, st.agent)
             finally:
                 _post_turn_housekeeping(sid, session, st)
@@ -1322,8 +1345,11 @@ def _run_prompt_submit(
                 _reopen_routed_session_row(routing_db, sid, session)
             can_start = _start_session_work(run, name=f"prompt-turn-{sid}", session=session) is not None
     if not can_start:
+        from tui_gateway.turn_admission import owns
         with session["history_lock"]:
-            session["running"] = False
+            if owns(session):
+                session["running"] = False
+                _clear_inflight_turn(session)
     return can_start
 
 

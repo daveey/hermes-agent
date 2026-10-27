@@ -66,7 +66,16 @@ class GatewayStartRuntime:
         if error:
             finish("failed")
             return
+        from tui_gateway.turn_admission import stage
+        with stage(record):
+            self._schedule_admitted(sid, key, record, intent, finish)
+
+    def _schedule_admitted(self, sid, key, record, intent, finish):
+        server = self.server
         if server._claim_or_reuse_live(sid, key, record, None) is not None:
+            with record["history_lock"]:
+                record["running"] = False
+                server._clear_inflight_turn(record)
             finish("failed")
             return
         server._schedule_agent_build(sid)

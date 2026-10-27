@@ -56,6 +56,40 @@ class RetirementFence:
             if admitted:
                 self.release()
 
+    @contextmanager
+    def reservation(self, home=None):
+        """Compose process retirement with the cross-process update reservation.
+
+        Neither lock is held while acquiring the other, or while callers hold
+        session locks. The pending reservation remains visible until publication.
+        """
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+        from hermes_cli.admission_fence import reserve, HOLD_MESSAGE, SUPPORTED
+
+        if not SUPPORTED:
+            with self.work() as admitted:
+                yield admitted
+            return
+
+        admitted = self.acquire()
+        pending = None
+        try:
+            if admitted:
+                try:
+                    pending = reserve(get_default_hermes_root(home=home or get_hermes_home()))
+                except (OSError, TimeoutError):
+                    logging.getLogger(__name__).warning("Update admission unavailable", exc_info=True)
+                if pending is None:
+                    logging.getLogger(__name__).info(HOLD_MESSAGE)
+            yield admitted and pending is not None
+        finally:
+            try:
+                if pending is not None:
+                    pending.close()
+            finally:
+                if admitted:
+                    self.release()
+
     def prepare(self):
         from hermes_cli.web_server_idle_proof import idle_proof
 

@@ -667,6 +667,10 @@ def _run_after_agent_ready(
     # the user once past the slow threshold, and only errors when the build itself fails or the bounded cap
     # expires. See #63078.
     err = _wait_agent_for_prompt(session, rid, sid)
+    from tui_gateway.turn_admission import owns
+    with session["history_lock"]:
+        if not owns(session):
+            return
     if err:
         message = (err.get("error") or {}).get("message", "agent initialization failed")
         # Every exit before _run_prompt_submit is logged: its "tui prompt accepted" line never comes, and
@@ -679,11 +683,15 @@ def _run_after_agent_ready(
             sid, session, message,
             error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
         with session["history_lock"]:
+            if not owns(session):
+                return
             session["running"] = False
             session["last_active"] = time.time()
         _emit("session.info", sid, _session_info(session.get("agent"), session))
         return
     with session["history_lock"]:
+        if not owns(session):
+            return
         if session.get("_turn_cancel_requested") or not session.get("running"):
             session["running"] = False
             _clear_inflight_turn(session)
@@ -713,7 +721,7 @@ def _lock_in_submit_turn(
     fields = {}
     with _session_turn_admission(session) as admitted:
         if not admitted:
-            return _err(rid, 5035, "backend is retiring; reconnect to continue"), fields
+            return _err(rid, 5035, "backend is retiring or update admission is paused; retry after the update"), fields
         if session.get("running"):
             return _err(rid, 4009, "session busy", {"reason": "turn_claim_busy"}), fields
         # A watch session's run lives in the PARENT turn (own running flag False); typing
@@ -860,6 +868,14 @@ def _(rid, params: dict) -> dict:
             display_kind=display_kind)
         if busy_response is not None:
             return busy_response
+    from tui_gateway.turn_admission import stage
+    with stage(session):
+        return _dispatch_admitted_prompt(rid, sid, session, text, turn_isolation, turn_author,
+            display_kind, display_metadata, survivor_fields, hosted_terminal_callback)
+
+
+def _dispatch_admitted_prompt(rid, sid, session, text, turn_isolation, turn_author,
+        display_kind, display_metadata, survivor_fields, hosted_terminal_callback):
     if turn_isolation:
         if turn_author:
             logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",
@@ -897,13 +913,10 @@ def _(rid, params: dict) -> dict:
     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
     if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
         _start_agent_build(sid, session)
-    run_thread = threading.Thread(
-        target=lambda: _run_after_agent_ready(
+    _start_session_work(
+        lambda: _run_after_agent_ready(
             rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author),
-        daemon=True)
-    # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
-    session["_run_thread"] = run_thread
-    run_thread.start()
+        name=f"prompt-wait-{sid}", session=session)
     return _ok(rid, {"status": "streaming", **survivor_fields})
 
 
@@ -1386,8 +1399,8 @@ def _spawn_side_agent(
                 cleanup()
             _clear_session_context(session_tokens)
 
-    if _start_session_work(run, name=f"side-agent-{task_id}") is None:
-        return _err(rid, 5035, "backend is retiring; reconnect to continue")
+    if _start_session_work(run, name=f"side-agent-{task_id}", home=session.get("profile_home")) is None:
+        return _err(rid, 5035, "backend is retiring or update admission is paused; retry after the update")
     return _ok(rid, {"task_id": task_id})
 
 

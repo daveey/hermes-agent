@@ -243,6 +243,9 @@ def _apply_compute_host_metadata_mirror(session: dict, frame: dict | None) -> No
 
 def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -> None:
     with session["history_lock"]:
+        from tui_gateway.turn_admission import owns
+        if not owns(session):
+            return
         _compute_host_adopt_frame_meta(session, frame)
         session["running"] = False
         session["last_active"] = time.time()
@@ -290,9 +293,12 @@ def _submit_prompt_to_compute_host(
                 session.pop("_compute_host_turn_id", None)
                 session.pop("_compute_host_activity_ns", None)
             _on_compute_host_turn_done(rid, sid, session, done)
+    from tui_gateway.turn_admission import retained_callback
+    complete, cancel_admission = retained_callback(session, _complete, settle_on_error=True)
     try:
-        _get_compute_host_supervisor(cfg).submit_turn(frame, on_complete=_complete)
+        _get_compute_host_supervisor(cfg).submit_turn(frame, on_complete=complete)
     except Exception as exc:
+        cancel_admission()
         with session["history_lock"]:
             if session.get("_compute_host_turn_id") == turn_id:
                 session.pop("_compute_host_turn_id", None)

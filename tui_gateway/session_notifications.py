@@ -141,8 +141,10 @@ _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = _BOT_DELIVERY_POLL_SECONDS = 5.0
 
 
 def _notif_release_turn(session: dict) -> None:
+    from tui_gateway.turn_admission import settle
     with session["history_lock"]:
-        session["running"] = False
+        if settle(session):
+            session["running"] = False
 
 
 def _notif_claim_turn(session: dict) -> bool:
@@ -160,6 +162,16 @@ def _notif_log_failure(what: str, exc: BaseException) -> None:
     print(f"[tui_gateway] {what}: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
+def _notif_run_submit(rid, sid, session, text, **kwargs):
+    """Run a turn this caller just claimed via _notif_claim_turn.
+
+    A plain stage() adopts the freshly claimed generation instead of inheriting a stale
+    one from an enclosing worker context (which would refuse the new turn and leak it)."""
+    from tui_gateway.turn_admission import stage
+    with stage(session):
+        return _run_prompt_submit(rid, sid, session, text, **kwargs)
+
+
 def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwargs) -> Any:
     """message.start + _run_prompt_submit for a claimed (running=True) turn; releases on failure.
     Returns the gate's verdict (False = refused, no turn runs)."""
@@ -170,7 +182,7 @@ def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwa
                                 diagnostic=(kwargs.get("display_metadata") or {}).get("notification_category") == "diagnostic")
         # The admission gate's verdict: False = refused (e.g. SESSION_NOT_OWNED, another backend owns the
         # chat). Callers that already took the notice off a durable store must put it back. [daveey]
-        return _run_prompt_submit(rid, sid, session, text, **kwargs)
+        return _notif_run_submit(rid, sid, session, text, **kwargs)
     except Exception as exc:
         _notif_log_failure(what, exc)
         _notif_release_turn(session)
@@ -255,7 +267,7 @@ def _maybe_fire_tui_heartbeat_tick(sid: str, session: dict) -> None:
     started = False
     try:
         _emit("status.update", sid, {"kind": "heartbeat", "text": f"♥ heartbeat #{mgr.state.fire_count} firing…"})
-        started = bool(_run_prompt_submit(f"__heartbeat__{int(time.time() * 1000)}", sid, session, prompt))
+        started = bool(_notif_run_submit(f"__heartbeat__{int(time.time() * 1000)}", sid, session, prompt))
     except Exception as exc:
         _notif_log_failure("heartbeat dispatch failed", exc)
     if not started:
@@ -319,7 +331,7 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
             _notif_slash_loop_tick(rid, sid, session, mgr, wakeup)
         else:
             _emit("message.start", sid)
-            _run_prompt_submit(rid, sid, session, wakeup)
+            _notif_run_submit(rid, sid, session, wakeup)
     except Exception as exc:
         _notif_log_failure("loop wakeup dispatch failed", exc)
         _notif_release_turn(session)
@@ -808,7 +820,7 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
                           error=error, reason=reason)
 
     try:
-        started = _run_prompt_submit(f"__bot_dm__{delivery_id}", sid, session, claimed["message"],
+        started = _notif_run_submit(f"__bot_dm__{delivery_id}", sid, session, claimed["message"],
                                      image_paths=[], terminal_callback=terminal_receipt,
                                      turn_author=claimed.get("author") or None,
                                      **({"display_metadata": {"notification_category": "diagnostic"}}

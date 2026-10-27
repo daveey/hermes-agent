@@ -138,7 +138,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
             _notif_release_turn(session)  # rebound from session_notifications
-    if _start_session_work(kickoff, name=f"auto-continue-{sid}") is None:
+    if _start_session_work(kickoff, name=f"auto-continue-{sid}", home=session.get("profile_home")) is None:
         session["_auto_continue_scheduled"] = False
         return None
     logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago, writer pid %s: %s, "
@@ -465,7 +465,10 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     """Fire a queued next-turn prompt if one is waiting and the session is idle. True when dispatched: the caller
     skips lower-priority follow-ups this cycle (the user's message wins)."""
     with _session_turn_admission(session) as admitted:
-        if not admitted or session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
+        if not admitted:
+            from tui_gateway.admission_retry import retry_queued_prompt
+            return retry_queued_prompt(rid, sid, session)
+        if session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
             return False
         queue_generation = int(session.get("_queued_prompt_generation", 0))
         _ac_set_queue(session, session.get("queued_prompts") or [])
@@ -477,6 +480,12 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         # prompt still runs, only the dead pin is dropped.
         if queued_transport is not None and not _transport_is_dead(queued_transport):
             _attach_session_transport(session, queued_transport)
+    from tui_gateway.turn_admission import stage
+    with stage(session):
+        return _dispatch_claimed_queue(rid, sid, session, queued, queue_generation)
+
+
+def _dispatch_claimed_queue(rid, sid, session, queued, queue_generation):
     use_compute_host = _session_uses_compute_host(session)
     with session["history_lock"]:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:
@@ -486,6 +495,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             advanced = session.get("queued_prompt")
             _ac_set_queue(session, [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])])
             session["running"] = False
+            _clear_inflight_turn(session)
             return True
     kwargs: dict = {"queued_prompt_generation": queue_generation}
     if queued.get("image_paths"):
@@ -521,6 +531,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
             dispatch_failed = True
     except Exception as exc:
+        logger.exception("Queued prompt dispatch failed")
         _notif_log_failure("queued prompt dispatch failed", exc)
         _notif_release_turn(session)
         dispatch_failed = True

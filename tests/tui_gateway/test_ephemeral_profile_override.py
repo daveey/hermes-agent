@@ -20,6 +20,7 @@ from ``tui_gateway.server._methods`` with ``threading.Thread`` patched to run th
 target inline, then asserts on the recorded override set/reset calls and the agent.
 """
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,10 +45,17 @@ class _InlineThread:
             self._target()
 
 @pytest.fixture
-def fake_session():
-    """A minimal session carrying a non-default ``profile_home``."""
+def fake_session(tmp_path, monkeypatch):
+    """A minimal session carrying a non-default ``profile_home``.
+
+    The profile home is a real temp dir: side-agent admission goes through the
+    cross-process update fence, which creates ``<root>/core-update`` there.
+    """
+    home = tmp_path / "profiles" / "work"
+    home.mkdir(parents=True)
+    monkeypatch.setattr(sys.modules[__name__], "PROFILE_HOME", str(home))
     agent = MagicMock()
-    return {"agent": agent, "session_key": "sess_k", "profile_home": PROFILE_HOME}
+    return {"agent": agent, "session_key": "sess_k", "profile_home": str(home)}
 
 @pytest.fixture
 def override_calls():
