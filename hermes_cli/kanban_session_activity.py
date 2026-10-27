@@ -43,6 +43,9 @@ _waiting_cache: list[dict[str, frozenset[str]]] = [{}]
 _parked_cache: list[tuple[dict[str, int], dict[str, int]]] = [({}, {})]
 _parked_sink = threading.local()  # .maps: (parked, held) or None; per thread, so concurrent reads never mix
 _pairs_lock = threading.Lock()
+# _all_counts single flight: held for a whole recompute; the generation bumps when one publishes.
+_counts_flight = threading.Lock()
+_counts_generation = 0
 WAITING_ON_CAP = 50
 
 
@@ -902,8 +905,12 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
 
 
 def _all_counts(*, include_waiting: bool = False) -> tuple:
-    """Cached counts, optionally with waiting IDs from the same scoped snapshot."""
-    global _cache, _cache_scope, _cache_fingerprint
+    """Cached counts, optionally with waiting IDs from the same scoped snapshot.
+
+    Single flight: one caller recomputes, and every caller that queued behind it takes that result. The
+    fingerprint moves with every kanban write, so without this each queued sidebar request recomputed in
+    turn behind ``_pairs_lock``; under load the Desktop's 4 s retries outran it and ~24 threadpool workers
+    sat in this function, starving ``/api/status`` (2026-10-27). [daveey]"""
     scope = _origin_scope()
     now = time.monotonic()
     fingerprint = _activity_fingerprint()
@@ -911,6 +918,18 @@ def _all_counts(*, include_waiting: bool = False) -> tuple:
         if _cache is not None and _cache_scope == scope and now < _cache[0] and fingerprint == _cache_fingerprint:
             counts = _cache[1:5]
             return (*counts, dict(_waiting_cache[0])) if include_waiting else counts
+        seen = _counts_generation
+    with _counts_flight:
+        with _cache_lock:
+            if _counts_generation != seen and _cache is not None and _cache_scope == scope:
+                counts = _cache[1:5]
+                return (*counts, dict(_waiting_cache[0])) if include_waiting else counts
+        return _recompute_all_counts(scope, now, fingerprint, include_waiting=include_waiting)
+
+
+def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bool) -> tuple:
+    """Read every local board and the remote links into fresh counts and publish them to the cache."""
+    global _cache, _cache_scope, _cache_fingerprint, _counts_generation
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
     unseen: dict[str, int] = {}
@@ -942,6 +961,7 @@ def _all_counts(*, include_waiting: bool = False) -> tuple:
         _cache_scope = scope
         _cache = (now + _CACHE_TTL_S, active, blocked, unseen, stale)
         _cache_fingerprint = fingerprint
+        _counts_generation += 1
         _waiting_cache[0] = {sid: frozenset(ids) for sid, ids in waiting.items()}
         _parked_cache[0] = (parked, held)
     counts = (active, blocked, unseen, stale)

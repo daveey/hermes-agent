@@ -796,3 +796,38 @@ def test_failed_read_drops_parked_and_held(kanban_root):
     rows = [{"id": "s1", "kanban_parked": 2, "kanban_held": 1}]
     ksa.annotate_kanban_activity(rows)
     assert rows[0]["kanban_unknown"] is True and "kanban_parked" not in rows[0] and "kanban_held" not in rows[0]
+
+
+def test_concurrent_sidebar_reads_share_one_recompute_while_the_board_keeps_changing(kanban_root, monkeypatch):
+    """Every kanban write moves the fingerprint, so queued readers used to recompute one after another behind
+    ``_pairs_lock`` (24 Desktop threadpool workers stuck there on 2026-10-27). Readers that queued behind a
+    recompute take its result instead."""
+    import threading
+    import time
+
+    _make_board(kanban_root / "kanban.db", [("t_run", "running", "s_live")])
+    ticks = iter(range(10**6))
+    monkeypatch.setattr(ksa, "_activity_fingerprint", lambda: (next(ticks),))  # a write between every two reads
+    real_read = ksa._read_local_pairs_into
+    reads: list[int] = []
+    first_read_started = threading.Event()
+
+    def _slow_read(*args):
+        reads.append(1)
+        first_read_started.set()
+        time.sleep(0.3)
+        return real_read(*args)
+
+    monkeypatch.setattr(ksa, "_read_local_pairs_into", _slow_read)
+    results: list = []
+    readers = [threading.Thread(target=lambda: results.append(ksa._all_counts()[0])) for _ in range(8)]
+    readers[0].start()
+    assert first_read_started.wait(5)
+    for t in readers[1:]:
+        t.start()
+    for t in readers:
+        t.join(10)
+
+    assert len(results) == 8
+    assert all(active == {"s_live": 1} for active in results)
+    assert len(reads) <= 2, f"{len(reads)} recomputes for 8 concurrent readers"

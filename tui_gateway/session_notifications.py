@@ -5,6 +5,7 @@ desktop UI wiring, HUD surface note. Bodies are rebound onto server.py's globals
 from __future__ import annotations
 
 import contextlib
+import threading
 
 from .method_ctx import bind_module
 
@@ -46,20 +47,31 @@ def _notif_resolve_event_key(evt_key: str, session: dict | None = None) -> str:
         return evt_key
 
 
-def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) -> bool:
-    """True if ``evt`` is owned by a *different* live session. Background completions carry the ``session_key`` of the
+def _notif_live_session_matching(keys, exclude: dict | None = None) -> dict | None:
+    """The first non-finalized live session (other than ``exclude``) matching ``keys``; None if none or the registry
+    can't be read."""
+    return _notif_locked_sessions(
+        lambda ss: next((s for s in ss.values() if s is not exclude and not s.get("_finalized")
+                         and _notif_session_matches(s, keys)), None),
+        None)
+
+
+def _notification_event_owner_elsewhere(sid: str, session: dict, evt: dict) -> dict | None:
+    """The *different* live session that owns ``evt``, or None. Background completions carry the ``session_key`` of the
     session that started the work; async delegation completions also carry ``origin_ui_session_id`` (the live TUI tab)."""
     evt_ui_sid = str(evt.get("origin_ui_session_id") or "")
     if evt_ui_sid:
         if evt_ui_sid == str(sid or "") and not session.get("_finalized"):
-            return False
-        if _notif_locked_sessions(lambda ss: evt_ui_sid in ss and not ss[evt_ui_sid].get("_finalized"), False):
-            return True
+            return None
+        owner = _notif_locked_sessions(
+            lambda ss: ss[evt_ui_sid] if evt_ui_sid in ss and not ss[evt_ui_sid].get("_finalized") else None, None)
+        if owner is not None:
+            return owner
         # Exact UI tab gone: fall through to durable session_key routing so a resumed continuation with the same
         # key/lineage can still claim it.
     evt_key = str(evt.get("session_key") or "")
     if not evt_key:
-        return False
+        return None
     current_keys = _notif_current_keys(sid, session)
     # Compression can rotate AIAgent.session_id while the detached child is still running: map the event's original
     # key to its continuation tip so it reaches the live session instead of becoming an orphan any poller may consume.
@@ -67,28 +79,37 @@ def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) ->
     resolved_key = _notif_resolve_event_key(evt_key, session)
     if resolved_key != evt_key:
         if resolved_key in current_keys:
-            return False
-        if _notif_live_session_matches({resolved_key}):
-            return True
+            return None
+        owner = _notif_live_session_matching({resolved_key})
+        if owner is not None:
+            return owner
     if evt_key in current_keys:
-        return False
-    if resolved_key == evt_key and _notif_other_profile_session_owns(sid, session, evt):
-        return True
-    return _notif_live_session_matches({evt_key, resolved_key}, exclude=session)
+        return None
+    if resolved_key == evt_key:
+        owner = _notif_other_profile_session_owner(sid, session, evt)
+        if owner is not None:
+            return owner
+    return _notif_live_session_matching({evt_key, resolved_key}, exclude=session)
 
 
-def _notif_other_profile_session_owns(sid: str, session: dict, evt: dict) -> bool:
-    """True when a live session on ANOTHER profile store provably owns ``evt`` (its compression lineage
-    resolves there). Every poller drains one process-wide queue, but lineage is looked up in the
-    dequeuer's own store; without this, profile B dequeuing an event keyed on profile A's compressed
-    parent found no owner anywhere and dropped it for good. Snapshot under the lock, resolve outside it."""
+def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) -> bool:
+    """True if ``evt`` is owned by a *different* live session (``_notification_event_owner_elsewhere``)."""
+    return _notification_event_owner_elsewhere(sid, session, evt) is not None
+
+
+def _notif_other_profile_session_owner(sid: str, session: dict, evt: dict) -> dict | None:
+    """The live session on ANOTHER profile store that provably owns ``evt`` (its compression lineage resolves
+    there), or None. Every poller drains one process-wide queue, but lineage is looked up in the dequeuer's own
+    store; without this, profile B dequeuing an event keyed on profile A's compressed parent found no owner
+    anywhere and dropped it for good. Snapshot under the lock, resolve outside it."""
     own_home = str(session.get("profile_home") or "")
     candidates = _notif_locked_sessions(
         lambda ss: [(other_sid, other) for other_sid, other in ss.items()
                     if other is not session and not other.get("_finalized")
                     and str(other.get("profile_home") or "") != own_home],
         [])
-    return any(_session_owns_notification_event(other_sid, other, evt) for other_sid, other in candidates)
+    return next((other for other_sid, other in candidates
+                 if _session_owns_notification_event(other_sid, other, evt)), None)
 
 
 def _session_owns_notification_event(sid: str, session: dict, evt: dict) -> bool:
@@ -636,19 +657,46 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
     complete_event_delivery(evt, claim)
 
 
+def _notif_hold_for(owner: dict, evt: dict, queue) -> bool:
+    """Hand ``evt`` to ``owner``'s poller (its ``_notif_held`` list) instead of the shared completion queue; False if
+    ``owner`` has no running poller (none started, or its shutdown drain already took the list). Every live
+    session's poller drains the one process-wide queue, so an event put back there while its owner was mid-turn
+    was dequeued, lineage-resolved against state.db and re-queued by every other poller, ten times a second
+    each, for the whole turn (a 22-chat Desktop backend at 300% CPU, 2026-10-27). [daveey]"""
+    with _notif_held_lock:
+        held = owner.get("_notif_held")
+        if held is None:
+            return False
+        held.append(evt)
+    return True
+
+
+def _notif_take_held(session: dict) -> list:
+    """Remove and return every event held for ``session`` (oldest first)."""
+    held = session.get("_notif_held")
+    if not held:
+        return []
+    with _notif_held_lock:
+        taken = list(held)
+        held.clear()
+    return taken
+
+
 def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, completions=None, *, owned=False) -> bool:
-    """Route one dequeued event: foreign (another live session owns it) → requeued, or onto ``deferred`` during the
-    shutdown drain; unowned (addressed but unprovable — never adopt an orphan) → dropped, except delegation payloads
-    deferred for a resume; ours (or ownerless legacy, kept process-global) → status.update once, then an agent turn if
-    idle. False = the drain must stop (session busy). ``owned`` skips the ownership gates for events a caller already
+    """Route one dequeued event: foreign (another live session owns it) → handed to its owner's poller
+    (``_notif_hold_for``; the shared queue only if it has none), or onto ``deferred`` during the shutdown drain;
+    unowned (addressed but unprovable — never adopt an orphan) → dropped, except delegation payloads deferred for a
+    resume; ours (or ownerless legacy, kept process-global) → status.update once, then an agent turn if idle, else
+    held for this session's idle boundary (ownerless legacy: re-queued). False = the drain must stop (session busy). ``owned`` skips the ownership gates for events a caller already
     drained through ``_session_owns_notification_event`` (the post-turn safety net), so lineage resolves once."""
     queue = registry.completion_queue
     evt_type, is_delegation = evt.get("type", "completion"), evt.get("type") == "async_delegation"
-    if not owned and _notification_event_belongs_elsewhere(sid, session, evt):
+    owner = None if owned else _notification_event_owner_elsewhere(sid, session, evt)
+    if owner is not None:
         if deferred is not None:
             deferred.append(evt)
-        else:  # otherwise a process started in session A surfaces in whichever poller wakes first
-            queue.put(evt)
+        elif not _notif_hold_for(owner, evt, queue):
+            queue.put(evt)  # owner has no poller to hold it: the shared queue is its only route
             time.sleep(0.1)
         return True
     if not owned and _notification_event_requires_owner(evt) and not _session_owns_notification_event(sid, session, evt):
@@ -698,9 +746,12 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
         completions.append((evt, text))
         return True
     if not _notif_claim_turn(session):
-        queue.put(evt)
         if deferred is not None:
+            queue.put(evt)
             return False
+        if _notification_event_requires_owner(evt) and _notif_hold_for(session, evt, queue):
+            return True  # ours: wait in this session's held list until it is idle, off the shared queue
+        queue.put(evt)
         time.sleep(0.25)  # back off: the re-queued event keeps the queue non-empty, else this loop spins at 100% CPU
         return True
     _notif_dispatch_event(sid, session, evt, text)
@@ -725,9 +776,15 @@ def _notif_dispatch_completions(sid, session, notifications, registry, deferred)
     if not notifications:
         return
     if not _notif_claim_turn(session):
+        requeued = False
         for event, _text in notifications:
-            (deferred.append if deferred is not None else registry.completion_queue.put)(event)
-        if deferred is None:
+            if deferred is not None:
+                deferred.append(event)
+            elif not (_notification_event_requires_owner(event)
+                      and _notif_hold_for(session, event, registry.completion_queue)):
+                registry.completion_queue.put(event)
+                requeued = True
+        if requeued:
             time.sleep(0.25)
         return
     from tui_gateway.process_consumer_health import begin_delivery
@@ -1035,6 +1092,8 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     process_registry.restore_completions()  # first consumer in a TUI process (#123265)
     queue = process_registry.completion_queue
     emitted = session.setdefault("_notification_emitted", set())
+    with _notif_held_lock:
+        session["_notif_held"] = session.get("_notif_held") or []
     handle = lambda events, deferred: _notif_handle_ready(
         sid, session, events, emitted, process_registry, format_process_notification, deferred)
     last_kanban_poll = last_loop_poll = last_bot_poll = last_parked_poll = 0.0
@@ -1060,6 +1119,11 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
         if now - last_parked_poll >= _PARKED_POLL_SECONDS:
             last_parked_poll = now
             _notif_take_parked(sid, session, process_registry, handle)
+        if session.get("_notif_held") and not session.get("running") and not session.get("_turn_cancel_requested"):
+            try:
+                handle(_notif_take_held(session), None)  # still busy → held again by the claim gate
+            except Exception as exc:
+                _notif_log_failure("held notification dispatch failed", exc)
         try:
             evt = queue.get(timeout=0.5)
         except Exception:
@@ -1079,7 +1143,8 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     # Drain remaining events after the stop signal so nothing is lost on shutdown; foreign and orphaned-delegation
     # events are handed back to the shared queue afterwards.
     deferred: list = []
-    ready = []
+    with _notif_held_lock:  # from here on a handoff to this session falls back to the shared queue
+        ready = list(session.pop("_notif_held", None) or ())
     for _ in range(queue.qsize()):
         try:
             ready.append(queue.get_nowait())
@@ -1137,6 +1202,9 @@ def _wire_desktop_sinks() -> None:
 # (stop_event, thread) for every poller started in this process, pruned of dead threads on each spawn. Test teardowns
 # reap leaked pollers through it: an unjoined poller steals events off the process-global queue in a LATER test.
 _notification_pollers: list = []
+
+# Guards every session's ``_notif_held`` list (events handed to that session's poller, _notif_hold_for).
+_notif_held_lock = threading.Lock()
 
 
 def _start_notification_poller(sid: str, session: dict) -> threading.Event:
