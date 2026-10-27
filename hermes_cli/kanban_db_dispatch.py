@@ -186,6 +186,8 @@ class DispatchResult:
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
+    agent_block_escalated: list[str] = field(default_factory=list)
+    """Agent-owned blocks older than 2h re-spawned through triage."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
     woken_continuations: list[str] = field(default_factory=list)
@@ -2542,6 +2544,13 @@ def _dispatch_once_locked(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
     )
+    if not dry_run:
+        # Agent-owned blocks (no human ask / wake probe) get one triage respawn after 2h.
+        try:
+            from hermes_cli.kanban_block_policy import sweep_agent_owned_blocks
+            result.agent_block_escalated.extend(sweep_agent_owned_blocks(conn))
+        except sqlite3.Error:
+            _kb._log.exception("kanban: agent-owned block sweep failed")
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )

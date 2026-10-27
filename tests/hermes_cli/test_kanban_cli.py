@@ -293,3 +293,22 @@ def test_run_slash_reclaim_running_task(kanban_home):
 # ---------------------------------------------------------------------------
 
 
+
+
+def test_cli_block_agent_owned_is_rejected_with_typed_error(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="stuck", assignee="alice")
+    for extra in ("", "--kind capability", "--kind transient"):
+        out = kc.run_slash(f"block {tid} no video tool {extra}".strip())
+        assert "agent_owned_block" in out
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_cli_block_agent_owned_allowed_with_wake_check(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="waiting", assignee="alice")
+    out = kc.run_slash(f"block {tid} disk full --kind transient --wake-check 'test -f /tmp/x'")
+    assert "agent_owned_block" not in out
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status in ("blocked", "scheduled")

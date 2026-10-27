@@ -435,7 +435,7 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
 
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
-    out = kt._handle_block({"reason": "need clarification"})
+    out = kt._handle_block({"reason": "need clarification", "kind": "needs_input"})
     d = json.loads(out)
     assert d["ok"] is True
     from hermes_cli import kanban_db as kb
@@ -768,7 +768,8 @@ def test_create_blocked_open_parent_explicit_present_human_need(worker_env):
 
     result = json.loads(kt._handle_create(dict(
         title="Grant test account now while implementation continues", assignee="peer",
-        parents=[worker_env], initial_status="blocked", human_action_now=True)))
+        parents=[worker_env], initial_status="blocked", human_action_now=True,
+        human_request=dict(action="grant", why_human="needs David", interaction="reply", scope="x", evidence="y"))))
     assert result.get("ok"), result
     assert result["status"] == "blocked"
     with kbc.connect() as conn:
@@ -788,7 +789,8 @@ def test_create_immediate_block_without_open_parents_unchanged(worker_env, paren
             conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (worker_env,))
         parents = [worker_env]
     result = json.loads(kt._handle_create(dict(
-        title="Approve release now", assignee="peer", parents=parents, initial_status="blocked")))
+        title="Approve release now", assignee="peer", parents=parents, initial_status="blocked",
+        human_request=dict(action="grant", why_human="needs David", interaction="reply", scope="x", evidence="y"))))
     assert result.get("ok"), result
     assert result["status"] == "blocked"
 
@@ -1626,3 +1628,81 @@ def test_worker_comment_never_subscribes(monkeypatch, worker_env, tmp_path):
 
     assert d["ok"] is True and "subscribed" not in d
     assert _list_subs_for_task(worker_env) == []
+
+
+# ---------------------------------------------------------------------------
+# Agent-owned block policy (kanban_block_policy)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", [None, "capability", "transient"])
+def test_block_agent_owned_is_rejected_with_typed_error(worker_env, kind):
+    from tools import kanban_tools as kt
+    args = {"reason": "no video tool"}
+    if kind:
+        args["kind"] = kind
+    d = json.loads(kt._handle_block(args))
+    assert "error" in d and "agent_owned_block" in json.dumps(d)
+    assert "human_request" in json.dumps(d) and "wake_check" in json.dumps(d)
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, worker_env).status == "running"
+    finally:
+        conn.close()
+
+
+def test_block_agent_owned_allowed_with_wake_check_routes_scheduled(worker_env):
+    from tools import kanban_tools as kt
+    d = json.loads(kt._handle_block({
+        "reason": "waiting on disk", "kind": "transient",
+        "wake_check": "test -f /tmp/never", "check_every": 600}))
+    assert d.get("ok") is True
+
+
+def test_block_capability_with_human_request_allowed():
+    from hermes_cli.kanban_block_policy import block_policy_error
+    assert block_policy_error("capability", human_request={"action": "x"}) is None
+    assert block_policy_error("needs_input") is None
+    assert block_policy_error("assignment") is None
+    assert block_policy_error("capability", clock_only=True) is None
+    assert block_policy_error("transient", blocker_id="gh-billing") is None
+    assert block_policy_error("transient", reason="SCHEDULED_UNTIL=2026-10-27T00:00:00Z") is None
+    assert block_policy_error("capability") is not None
+
+
+def test_create_blocked_without_human_request_rejected(worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        with pytest.raises(ValueError, match="agent_owned_block"):
+            kb.create_task(conn, title="For you: pick one", initial_status="blocked")
+        ok = kb.create_task(conn, title="Choose a thing", initial_status="blocked",
+                            human_request={"action": "pick", "why_human": "taste",
+                                           "interaction": "reply", "scope": "x", "evidence": "y"})
+        assert ok
+    finally:
+        conn.close()
+
+
+def test_sweep_escalates_old_agent_owned_block_once(worker_env):
+    import time
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_block_policy import sweep_agent_owned_blocks
+    conn = kbc.connect()
+    try:
+        tid = worker_env
+        conn.execute("UPDATE tasks SET status='blocked', block_kind='capability', "
+                     "human_request=NULL, current_run_id=NULL WHERE id=?", (tid,))
+        conn.commit()
+        assert sweep_agent_owned_blocks(conn) == []  # not old enough
+        later = int(time.time()) + 3 * 3600
+        assert sweep_agent_owned_blocks(conn, now=later) == [tid]
+        assert kb.get_task(conn, tid).status == "triage"
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+        conn.commit()
+        assert sweep_agent_owned_blocks(conn, now=later) == []  # only one respawn per block
+    finally:
+        conn.close()

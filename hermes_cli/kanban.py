@@ -1157,6 +1157,11 @@ def _cmd_block(args: argparse.Namespace) -> int:
             wake = _cli_wake_check(args)
         except ValueError as exc:
             return _err(f"kanban block: {exc}", 2)
+        from hermes_cli.kanban_block_policy import block_policy_error
+        policy = block_policy_error(kind, human_request=request, wake_check=wake[0],
+                                    clock_only=wake[2], reason=reason)
+        if policy:
+            return _err(f"kanban block: {policy}", 2)
         refused: dict = {}
         op = _guarded_park(conn, "block", wake, refused, _commented(
             conn, reason, author, "BLOCKED", lambda tid: kb.block_task(

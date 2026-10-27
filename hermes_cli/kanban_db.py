@@ -1205,9 +1205,12 @@ def create_task(
     human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None,
     requires: Optional[list[str]] = None,
+    lint_blocked: bool = True,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
+    ``lint_blocked=False`` is for internal trackers parked blocked without a human ask
+    (swarm root); everything else must pass ``human_request`` with ``initial_status='blocked'``.
     ``origin_intent`` atomically persists the task and receipt intent, not origin readback.
     ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project
     ``worktree`` workspace that could never resolve at spawn with
@@ -1241,6 +1244,10 @@ def create_task(
     from hermes_cli.kanban_human_request import validate_initial_request
 
     human_request = validate_initial_request(human_request, initial_status, triage)
+    from hermes_cli.kanban_block_policy import creation_lint_error
+    _lint = creation_lint_error(title, initial_status, human_request, triage=triage) if lint_blocked else None
+    if _lint:
+        raise ValueError(_lint)
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)

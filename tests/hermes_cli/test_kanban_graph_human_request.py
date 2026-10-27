@@ -21,7 +21,7 @@ def test_persisted_human_request_survives_both_graph_directions(tmp_path):
         child = db.create_task(conn, title="Release follow-up", assignee="worker", parents=[parent],
                                initial_status="blocked", human_request=REQUEST)
         dependent = db.create_task(conn, title="Deploy after decision", assignee="worker", parents=[parent])
-        unknown = db.create_task(conn, title="Investigate", assignee="worker", initial_status="blocked")
+        unknown = db.create_task(conn, title="Investigate", assignee="worker", initial_status="blocked", lint_blocked=False)
         operational_child = db.create_task(conn, title="Investigation follow-up", assignee="worker", parents=[unknown])
     with connect(path) as conn:
         graph = db.task_graph_contexts(conn, [parent, child, dependent, operational_child])

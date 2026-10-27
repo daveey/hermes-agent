@@ -194,7 +194,7 @@ def _create_swarm_uncommitted(
         assignee=created_by,
         priority=priority,
         idempotency_key=idempotency_key,
-        initial_status="blocked",
+        initial_status="blocked", lint_blocked=False,
         **common,
     )
 
