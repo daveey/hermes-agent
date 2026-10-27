@@ -282,7 +282,12 @@ class StartStore:
         Walks parent_session_id (compression, branches) to the root, so every descendant
         keeps the pin. A missing ledger or column means no pin; any other failure propagates
         so a caller refuses to build rather than silently widening.
+
+        No session store (``_get_db()`` returned None: the gateway runs without state.db
+        features) means no ledger, so no start could have pinned anything: no pin.
         """
+        if db is None:
+            return None
         if db._read_one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_start_requests'") is None:
             return None
         if not any(r[1] == "toolsets_json" for r in db._read_all("PRAGMA table_info(session_start_requests)")):

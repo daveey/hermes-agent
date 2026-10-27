@@ -176,6 +176,24 @@ def test_make_agent_without_pin_is_unchanged(monkeypatch, store):
     assert getattr(agent, "_toolset_pin", None) is None
 
 
+def test_no_session_store_means_no_pin_and_the_build_proceeds(monkeypatch, store):
+    # _get_db() returns None when state.db cannot open; the gateway keeps running without
+    # state.db features, so _make_agent must not crash on the pin lookup.
+    assert StartStore.session_toolsets_for(None, "any") is None
+    import run_agent
+    monkeypatch.setattr(run_agent, "AIAgent", _FakeAgent)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda platform=None: ["terminal"])
+    monkeypatch.setattr(server, "_agent_cbs", lambda sid: {})
+    monkeypatch.setattr(server, "_startup_system_prompt", lambda cfg, key: "")
+    monkeypatch.setattr(server, "_resolve_agent_model_runtime", lambda m, p: ("model", {}))
+    monkeypatch.setattr(server, "_load_cfg", dict)
+    monkeypatch.setattr(server, "_resolve_agent_platform", lambda p=None: "desktop")
+    agent = server._make_agent("sid", "no-db")
+    assert agent.kwargs["enabled_toolsets"] == ["terminal"]
+    assert getattr(agent, "_toolset_pin", None) is None
+
+
 def test_pin_lookup_failure_refuses_the_build(monkeypatch, store):
     sid = _pinned_session(store)
     def boom(*a, **kw):

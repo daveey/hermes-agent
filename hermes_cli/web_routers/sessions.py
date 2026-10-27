@@ -591,6 +591,10 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
         # clients resolve them to whichever gateway happened to be active.
         session["profile"] = _serving_profile(profile)
         session["is_default_profile"] = session["profile"] == "default"
+        # Older/open sidebar rows can be restored from detail rather than a
+        # recency page. They need fresh task evidence over the same lineage.
+        session["_lineage_ids"] = db.get_compression_chain(sid)
+        annotate_kanban_activity([session])
         # A cron run's liveness is scheduler ownership, not the 300s activity
         # window (#88443): a run inside a long tool call is still owned.
         from hermes_cli.web_routers.cron import cron_run_scheduler_owned

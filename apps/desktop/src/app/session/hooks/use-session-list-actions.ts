@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 
-import { getApiRequestConnection, listAllProfileSessions, listSidebarSessions, type SessionInfo } from '@/hermes'
+import { getApiRequestConnection, getSession, listAllProfileSessions, listSidebarSessions, type SessionInfo } from '@/hermes'
 import { sameCronSignature } from '@/lib/session-signatures'
 import {
   isMessagingSource,
@@ -8,7 +8,7 @@ import {
   normalizeSessionSource,
   SIDEBAR_EXCLUDED_SOURCES
 } from '@/lib/session-source'
-import { gatewayActivationEpoch } from '@/store/gateway'
+import { gatewayActivationEpoch, primaryGatewayConnectionId } from '@/store/gateway'
 import {
   $pinnedSessionIds,
   $sessionsLimit,
@@ -53,6 +53,8 @@ import {
 import { $sessionTiles, $workingSessionIds, getRecentlySettledSessionIds } from '@/store/session-states'
 
 import { refreshCronJobs as refreshCronJobsStore } from '../../cron/cron-actions'
+
+import { refreshRetainedKanban, withKanbanEvidence } from './refresh-retained-kanban'
 
 function sidebarRequestConnection(): string | undefined {
   return getApiRequestConnection() ?? undefined
@@ -387,23 +389,39 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
             messagingExclude: MESSAGING_EXCLUDED_SOURCES
           })
 
-        let activationEpoch = gatewayActivationEpoch()
-        let result = await fetchPage()
+        let activationEpoch: number
+        let result: Awaited<ReturnType<typeof fetchPage>>
+        let primaryConnection: ReturnType<typeof primaryGatewayConnectionId>
+        let refreshed: SessionInfo[] = []
 
-        // A gateway activation that landed mid-request voids this page: it may
-        // describe the source the window just left. But every activation bumps
-        // the epoch, including a re-activation of the route already in front
-        // (a resume or profile click through ensureGatewayAgent), and those
-        // move no route atom, so no effect asks for the list again. Dropping
-        // the page there left the sidebar on "No sessions" while the backend
-        // held the rows (#67600). Still the newest refresh for this scope, so
-        // re-read under the current epoch instead.
-        while (owns() && gatewayActivationEpoch() !== activationEpoch) {
+        // Re-activating the same route moves no route atom, so no effect starts
+        // another refresh. Retry the entire observation (page AND details) when
+        // activation changes, unless a newer request/scope already owns it.
+        do {
           activationEpoch = gatewayActivationEpoch()
+          primaryConnection = primaryGatewayConnectionId()
           result = await fetchPage()
-        }
 
-        if (owns()) {
+          if (!owns()) { return }
+
+          if (gatewayActivationEpoch() !== activationEpoch) { continue }
+
+          // Open/restored older rows survive paging, but otherwise their task
+          // counts never refresh. Pin reads to the owner captured before await.
+          const page = result.recents.sessions ?? []
+
+          const retained = mergeSessionPage($sessions.get(), page, sessionsToKeep())
+            .filter(row => !page.some(item => item.id === row.id &&
+              (item.profile ?? 'default') === (row.profile ?? 'default') &&
+              (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection)))
+
+          refreshed = await refreshRetainedKanban(retained, row => getSession(row.id, {
+            connectionId: row.connection_id ?? primaryConnection,
+            profile: row.profile ?? 'default'
+          }))
+        } while (owns() && gatewayActivationEpoch() !== activationEpoch)
+
+        if (owns() && gatewayActivationEpoch() === activationEpoch) {
           const recents = result.recents
           const recentsErrors = recents.errors ?? result.errors
           recordSidebarFreshness(result, requestConnection, sessionProfile)
@@ -436,7 +454,15 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
             // Filter AFTER the merge: the guard must also catch survivors
             // (a stale previous slice can still hold the doomed row through
             // the keep set once the tombstone prune has cleared membership).
-            const next = dropRemovalRaced(mergeSessionPage(prev, incoming, sessionsToKeep()), removalSnapshot)
+            const observed = prev.map(row => {
+              const fresh = refreshed.find(item => item.id === row.id &&
+                (item.profile ?? 'default') === (row.profile ?? 'default') &&
+                (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection))
+
+              return fresh ? withKanbanEvidence(row, fresh) : row
+            })
+
+            const next = dropRemovalRaced(mergeSessionPage(observed, incoming, sessionsToKeep()), removalSnapshot)
 
             return sameCronSignature(prev, next) ? prev : next
           })
