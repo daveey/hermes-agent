@@ -4800,6 +4800,15 @@ export interface ErrorSurface {
   resets_at?: number | null
   [key: string]: unknown
 }
+/** ``methods_prompt_admission._dispatch``: committed input, before worker output. */
+export interface AdmittedMessagePayload {
+  stored_session_id: string
+  profile: string
+  user_row_id: number
+  message_uid: string
+  text: string
+  timestamp: number
+}
 /** ``tui_gateway/model_switch.py`` capability-refresh notice. */
 export interface NoticePayload {
   message: string
@@ -6024,6 +6033,8 @@ export interface BackendGatewayEventMap {
   'gateway.ready': GatewayReadyPayload
   /** Apply a named desktop layout preset. */
   'layout.apply': LayoutApplyPayload
+  /** Authoritative user row for an externally admitted turn; merge by identity, never submit or resume. */
+  'message.admitted': AdmittedMessagePayload
   /** The turn ended: final text, usage and outcome. */
   'message.complete': MessageCompletePayload
   /** One streamed chunk of the assistant reply. */
@@ -6161,6 +6172,7 @@ export const GATEWAY_EVENT_TYPES = [
   'free_tier.challenge',
   'gateway.ready',
   'layout.apply',
+  'message.admitted',
   'message.complete',
   'message.delta',
   'message.interim',

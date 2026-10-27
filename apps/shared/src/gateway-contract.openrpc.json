@@ -5021,6 +5021,46 @@
         "title": "ActiveSubagent",
         "type": "object"
       },
+      "AdmittedMessagePayload": {
+        "additionalProperties": false,
+        "description": "``methods_prompt_admission._dispatch``: committed input, before worker output.",
+        "properties": {
+          "stored_session_id": {
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "user_row_id": {
+            "title": "User Row Id",
+            "type": "integer"
+          },
+          "message_uid": {
+            "title": "Message Uid",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "stored_session_id",
+          "profile",
+          "user_row_id",
+          "message_uid",
+          "text",
+          "timestamp"
+        ],
+        "title": "AdmittedMessagePayload",
+        "type": "object"
+      },
       "AgentPluginRow": {
         "additionalProperties": false,
         "description": "``methods_tools._plugin_rows`` + ``plugins_cmd_catalog.catalog_row_fields`` provenance.",
@@ -41580,6 +41620,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/LayoutApplyPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "message.admitted",
+      "summary": "Authoritative user row for an externally admitted turn; merge by identity, never submit or resume.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/AdmittedMessagePayload"
           }
         }
       ]

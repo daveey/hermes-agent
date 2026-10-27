@@ -114,5 +114,10 @@ transport. Cold/unloaded and busy-owner queue admission are deliberately unsuppo
 busy requests can retry the same operation once the owner becomes idle. No completion
 receipt, automatic execution reconciliation, deployment, or real user decision was
 performed as part of this implementation.
-The Desktop still needs transcript rehydration to render the admitted user bubble;
-no new client event or renderer handling is included here.
+The dispatch winner emits `message.admitted` on the existing owner transport before
+model output. Desktop merges only that committed user row into the bound session,
+checks connection/profile/stored-session identity, and deduplicates by row ID or
+message UID without replacing live assistant output. Cancelled unstarted callbacks
+emit no event. Reconnect continues to use canonical transcript hydration. Focused
+Python transport/contract and Desktop event tests cover this seam; packaged live
+acceptance remains a separate release gate.

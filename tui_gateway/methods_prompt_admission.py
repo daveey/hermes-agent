@@ -99,18 +99,30 @@ def _live_owner(server, params, home):
     return sid, session
 
 
-def _dispatch(server, rid, sid, session, text):
+def _dispatch(server, rid, sid, session, text, profile):
     # Existing build/turn implementation adopts _submit_user_row and retains the
     # owner's transport. A plugin RPC must not steal the Desktop's connection.
     if not server._restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
         server._start_agent_build(sid, session)
     gate = session['_admission_dispatch_gate']
+    staged = session['_submit_user_row']
+    user_event = {
+        'stored_session_id': staged['_submit_row_session_id'],
+        'profile': profile,
+        'user_row_id': staged['_row_id'],
+        'message_uid': staged['message_uid'],
+        'text': staged['content'],
+        'timestamp': staged['timestamp'],
+    }
 
     def run():
         with gate['lock']:
             if gate['cancelled']:
                 return
             gate['started'] = True
+        # Only the committed transaction winner projects this row, before any
+        # model output. An unstarted cancellation must never paint permission.
+        server._emit("message.admitted", sid, user_event)
         server._run_after_agent_ready(rid, sid, session, text, None, None, None, auto_continue=False)
 
     worker = server._start_session_work(run, name="prompt-admission", session=session)
@@ -212,7 +224,7 @@ def _accept_claimed(server, rid, sid, session, params, text):
     try:
         if session.get("_turn_cancel_requested") or session.get("_closing") or not session.get("running"):
             raise RuntimeError("turn cancelled after durable acceptance")
-        _dispatch(server, rid, sid, session, text)
+        _dispatch(server, rid, sid, session, text, params['profile'])
     except Exception as exc:
         server.logger.exception("Prompt accepted but dispatch failed: %s", params["operation_id"])
         with gate['lock']:
