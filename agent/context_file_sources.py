@@ -31,6 +31,9 @@ _STATUS_DISPLAY = {
     "empty": ("○", "not loaded — empty file"),
     "unreadable": ("✗", "not loaded — could not be read"),
     "suppressed": ("○", "not loaded — cwd fell back to the Hermes install tree"),
+    # [daveey] agent.global_context_files rows
+    "duplicate": ("○", "not loaded — same content as a loaded project file"),
+    "missing": ("○", "not loaded — file not found"),
 }
 
 
@@ -59,20 +62,34 @@ def _loaded_status(content: str, rendered_len: int, max_chars: int, user_authore
 
 def list_context_file_sources(
     cwd: Optional[str] = None, context_length: Optional[int] = None, allow_install_tree_fallback: bool = False,
-    home_override: Path | None = None, skip_soul: bool = False,
+    home_override: Path | None = None, skip_soul: bool = False, include_project: bool = True,
 ) -> list[dict[str, Any]]:
     """One dict per context file Hermes considered, in the builder's priority order.
 
     Same signature semantics as ``build_context_files_prompt`` (``cwd=None`` → launch dir, install-tree guard
     unless *allow_install_tree_fallback*). Keys: ``label``, ``path``, ``chars``, ``est_tokens``, ``loaded``
-    and ``status`` ∈ loaded / truncated / flagged / shadowed / blocked / empty / unreadable / suppressed.
+    and ``status`` ∈ loaded / truncated / flagged / shadowed / blocked / empty / unreadable / suppressed /
+    duplicate / missing. Global files (``agent.global_context_files``) come first, labelled ``<path> (global)``;
+    ``include_project=False`` lists only them (``build_global_context_prompt``: cron without a workdir).
     """
     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
     max_chars = _pb._get_context_file_max_chars(context_length)
     suppressed = _pb._project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback)
     sources: list[dict[str, Any]] = []
+    global_paths = _pb.global_context_file_paths(home_override)
+    if global_paths:
+        seen = _pb._loaded_project_contents(cwd_path) if include_project and not suppressed else set()
+        for label, path, content in _pb._global_context_candidates(global_paths):
+            if not content:
+                status = "missing" if not path.exists() else _empty_status(path)
+            elif content in seen:
+                status = "duplicate"
+            else:
+                seen.add(content)
+                status = _loaded_status(content, len(f"## {label}\n\n{content}"), max_chars)
+            sources.append(_entry(label, path, content, status))
     winner: Optional[str] = None
-    for kind, label, path, content in _pb.discover_context_files(cwd_path):
+    for kind, label, path, content in (_pb.discover_context_files(cwd_path) if include_project else []):
         if not content:
             status = _empty_status(path)
         elif suppressed:
@@ -99,10 +116,17 @@ def list_context_file_sources(
 def context_file_sources_for_agent(agent: Any) -> list[dict[str, Any]]:
     """The manifest for a live agent, resolved exactly like ``agent.system_prompt._context_files_part``
     (session cwd, install-tree policy per platform, the agent's own profile home)."""
-    if getattr(agent, "skip_context_files", False):
-        return []
     from agent.runtime_cwd import resolve_context_cwd
     from agent.system_prompt import _agent_home
+    if getattr(agent, "skip_context_files", False):
+        # [daveey] cron without a workdir keeps SOUL.md (identity slot) + the global files, nothing else.
+        if not getattr(agent, "load_soul_identity", False):
+            return []
+        ctx_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)
+        return list_context_file_sources(
+            context_length=ctx_len if isinstance(ctx_len, int) else None, home_override=_agent_home(agent),
+            skip_soul=True, include_project=False,
+        )
     launch_artifact = getattr(agent, "_context_cwd_is_launch_artifact", False)
     cwd = resolve_context_cwd(include_session_override=not launch_artifact)
     ctx_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)

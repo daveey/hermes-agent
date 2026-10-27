@@ -714,6 +714,10 @@ def _context_files_part(agent: Any, ctx_len: Optional[int], soul_loaded: bool) -
     still honor the profile-scoped TERMINAL_CWD; without one, the fallback guard
     can reject Hermes's bundled AGENTS.md."""
     if agent.skip_context_files:
+        # [daveey] Sessions that keep the identity slot while skipping project context (cron jobs without a
+        # workdir) still get the profile's agent.global_context_files — user-level rules, not project files.
+        if getattr(agent, "load_soul_identity", False):
+            return [_pb.build_global_context_prompt(context_length=ctx_len, home_override=_agent_home(agent))]
         return []
     launch_artifact = getattr(agent, "_context_cwd_is_launch_artifact", False)
     cwd = resolve_context_cwd(include_session_override=not launch_artifact)

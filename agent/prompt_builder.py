@@ -1866,30 +1866,131 @@ def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> s
                              read_path=str(cwd_path / ".cursorrules"))
 
 
+# --- Global context files [daveey] -------------------------------------------------------------------------
+# ``agent.global_context_files`` (list of paths, default ``[]`` = upstream behaviour): user-level instruction
+# files (e.g. ``~/AGENTS.md``) loaded for EVERY session of the profile whatever its cwd — Kanban workers in
+# scratch dirs and cron jobs included — right before the project chain. A file whose content is already loaded
+# from the cwd chain (cwd == ~) is skipped so the prompt never carries two copies.
+
+
+def global_context_file_paths(home_override: Path | None = None) -> list[Path]:
+    """``agent.global_context_files`` of the profile at *home_override* (ambient home when None), ``~``-expanded.
+    Read straight from that home's ``config.yaml`` (signature-cached parse; no full config merge on the prompt
+    path, and the right profile even on a thread that lost the HERMES_HOME ContextVar). Never raises: a missing
+    or unreadable config means no global files."""
+    try:
+        from utils import load_yaml_file_readonly
+        home = Path(home_override) if home_override is not None else get_hermes_home()
+        cfg_path = home / "config.yaml"
+        cfg = load_yaml_file_readonly(cfg_path) if cfg_path.is_file() else {}
+        raw = ((cfg or {}).get("agent") or {}).get("global_context_files") if isinstance(cfg, dict) else None
+    except Exception as e:
+        logger.debug("Could not read agent.global_context_files: %s", e)
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [Path(os.path.expanduser(str(p).strip())) for p in raw if isinstance(p, (str, Path)) and str(p).strip()]
+
+
+def _display_path(path: Path) -> str:
+    """*path* with the user's home collapsed to ``~`` (labels only)."""
+    try:
+        home = Path.home()
+        return "~/" + str(path.relative_to(home)) if path.is_relative_to(home) else str(path)
+    except Exception:
+        return str(path)
+
+
+def _global_context_candidates(paths: list[Path]) -> list[tuple[str, Path, str]]:
+    """``(label, path, content)`` per configured global file; ``content == ""`` when missing, empty or
+    unreadable — each such path is logged (info) and never loaded."""
+    found: list[tuple[str, Path, str]] = []
+    for path in paths:
+        label = f"{_display_path(path)} (global)"
+        if not path.exists():
+            logger.info("global context file %s skipped: not found", path)
+            found.append((label, path, ""))
+            continue
+        try:
+            content = (_read_text_with_timeout(path) or "").strip()
+        except Exception as e:
+            logger.info("global context file %s skipped: not readable (%s)", path, e)
+            content = ""
+        found.append((label, path, content))
+    return found
+
+
+def _loaded_project_contents(cwd_path: Path) -> set[str]:
+    """Raw contents of the project files the ladder actually loads (the first context type with any non-empty
+    file wins, same rule as ``build_context_files_prompt``) — used to dedupe global files against them."""
+    winner: Optional[str] = None
+    contents: set[str] = set()
+    for kind, _label, _path, content in discover_context_files(cwd_path):
+        if not content:
+            continue
+        if winner is None:
+            winner = kind
+        if kind == winner:
+            contents.add(content)
+    return contents
+
+
+def _load_global_context(paths: list[Path], context_length: Optional[int], exclude: set[str]) -> list[str]:
+    """One provenance-labelled, threat-scanned, capped section per readable global file, skipping content in
+    *exclude* (already loaded from the cwd chain) and duplicates among the globals themselves."""
+    sections: list[str] = []
+    seen = set(exclude)
+    for label, path, content in _global_context_candidates(paths):
+        if not content:
+            continue
+        if content in seen:
+            logger.debug("global context file %s skipped: same content already loaded", path)
+            continue
+        seen.add(content)
+        sections.append(_context_section(content, label, label, path, context_length))
+    return sections
+
+
+_CONTEXT_HEADER = "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n"
+
+
+def build_global_context_prompt(context_length: Optional[int] = None, home_override: Path | None = None) -> str:
+    """Only the global context files — for sessions that skip project context but keep the identity slot
+    (cron jobs without a workdir: ``skip_context_files=True, load_soul_identity=True``)."""
+    sections = _load_global_context(global_context_file_paths(home_override), context_length, set())
+    return _CONTEXT_HEADER + "\n".join(sections) if sections else ""
+
+
 def build_context_files_prompt(
     cwd: Optional[str] = None, skip_soul: bool = False, context_length: Optional[int] = None,
     allow_install_tree_fallback: bool = False, home_override: Path | None = None,
 ) -> str:
     """Discover and load context files for the system prompt (each capped, see ``_get_context_file_max_chars``).
 
-    Only ONE project context type loads, first found wins: .hermes.md/HERMES.md (walk to git root) →
-    AGENTS.md chain (git root → cwd) → CLAUDE.md (cwd) → .cursorrules + .cursor/rules/*.mdc (cwd). SOUL.md
-    from HERMES_HOME is independent and always included unless *skip_soul* (already the identity slot).
+    Global files (``agent.global_context_files`` of the profile) load first, each as its own section, unless
+    identical to a loaded project file. Then only ONE project context type loads, first found wins:
+    .hermes.md/HERMES.md (walk to git root) → AGENTS.md chain (git root → cwd) → CLAUDE.md (cwd) → .cursorrules +
+    .cursor/rules/*.mdc (cwd). SOUL.md from HERMES_HOME is independent and always included unless *skip_soul*
+    (already the identity slot).
     """
     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
+    global_paths = global_context_file_paths(home_override)
     if _project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback):
         logger.warning(
             "skipping project-context discovery: working-directory resolution fell back to the Hermes "
             "install tree (%s) — set terminal.cwd to your project directory", cwd_path,
         )
-        sections = []
+        sections = _load_global_context(global_paths, context_length, set())
     else:
-        sections = [_load_hermes_md(cwd_path, context_length) or _load_agents_md(cwd_path, context_length)
-                    or _load_claude_md(cwd_path, context_length) or _load_cursorrules(cwd_path, context_length)]
+        exclude = _loaded_project_contents(cwd_path) if global_paths else set()
+        sections = _load_global_context(global_paths, context_length, exclude)
+        sections.append(_load_hermes_md(cwd_path, context_length) or _load_agents_md(cwd_path, context_length)
+                        or _load_claude_md(cwd_path, context_length) or _load_cursorrules(cwd_path, context_length))
     if not skip_soul:
         sections.append(load_soul_md(context_length, home_override=home_override))
     sections = [s for s in sections if s]
     if not sections:
         return ""
-    return ("# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n"
-            + "\n".join(sections))
+    return _CONTEXT_HEADER + "\n".join(sections)

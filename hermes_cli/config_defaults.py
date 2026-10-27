@@ -210,6 +210,10 @@ DEFAULT_CONFIG = {
         # Also fire `pre_verify` on turns without file edits (changed_paths=[]), so a plugin can check
         # any final answer (e.g. a hand-off or an unverified "done"). False = upstream: edits only.
         "pre_verify_every_turn": False,
+        # [daveey] User-level instruction files (e.g. ["~/AGENTS.md"]) loaded for EVERY session of this profile
+        # whatever its cwd (Kanban scratch dirs, cron jobs included), before the project chain; content identical
+        # to a loaded project file is loaded once. [] = upstream: only the git-root -> cwd chain.
+        "global_context_files": [],
         # [daveey] Max silent `pre_final_gate` holds per turn; the next text stop delivers.
         "pre_final_gate_max": 2,
         # [daveey] Seconds one `pre_final_gate` callback may take before it is skipped (delivers).
