@@ -1380,11 +1380,12 @@ class SessionSessionsMixin:
             where_clauses.append("s.hidden = 0")
         where_sql = _where_sql(where_clauses)
         # Shared projection head of the three list queries (whitespace is part of the SQL text).
-        select_head = (
+        select_cols = (
             f"SELECT {self._compact_session_cols() if compact_rows else 's.*'}"
             + ("" if compact_rows else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved")
-            + f",\n                    {_sql_preview_raw()},\n                    "
+            + ",\n                    "
         )
+        select_head = f"{select_cols}{_sql_preview_raw()},\n                    "
         prompt_join = (
             "" if compact_rows else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"
         )
@@ -1397,6 +1398,10 @@ class SessionSessionsMixin:
             outer_where, id_params = self._chain_search_where(
                 where_sql, (id_query or "").strip().lower(), (search_query or "").strip().lower(),
             )
+            # The page is picked first and the preview projected onto it afterwards:
+            # SQLite computes every result column for each admitted row before
+            # ORDER BY ... LIMIT, so an inline preview read one message per session
+            # in the store, not per listed row. OFFSET keeps ``page`` unflattened.
             query = f"""
                 WITH RECURSIVE chain(root_id, cur_id) AS (
                     SELECT s.id, s.id FROM sessions s {where_sql}
@@ -1418,14 +1423,18 @@ class SessionSessionsMixin:
                     FROM chain
                     GROUP BY root_id
                 )
-                {select_head}{_sql_session_last_active("s")} AS last_active,
-                    COALESCE(cm.effective_last_active, {_sql_in_window("s.started_at")}) AS _effective_last_active
-                FROM sessions s
-                LEFT JOIN chain_max cm ON cm.root_id = s.id
-                {prompt_join}
-                {outer_where}
-                ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
-                LIMIT ? OFFSET ?
+                SELECT page.*, {_sql_preview_raw("page.id")}
+                FROM (
+                    {select_cols}{_sql_session_last_active("s")} AS last_active,
+                        COALESCE(cm.effective_last_active, {_sql_in_window("s.started_at")}) AS _effective_last_active
+                    FROM sessions s
+                    LEFT JOIN chain_max cm ON cm.root_id = s.id
+                    {prompt_join}
+                    {outer_where}
+                    ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
+                    LIMIT ? OFFSET ?
+                ) page
+                ORDER BY page._effective_last_active DESC, page.started_at DESC, page.id DESC
             """
             params = params + params + id_params + [limit, offset]  # WHERE binds twice (seed + outer)
         else:
