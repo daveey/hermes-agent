@@ -41,6 +41,17 @@ export async function refreshRetainedKanban(
           throw new Error('Task evidence owner mismatch')
         }
 
+        // Older gateways return session details without task annotations. A
+        // successful HTTP read is not proof of zero linked work.
+        const stamp = fresh.kanban_observed_at
+        const counts = [fresh.kanban_active, fresh.kanban_blocked, fresh.kanban_attention, fresh.kanban_remote_stale]
+
+        if (typeof stamp !== 'number' || !Number.isFinite(stamp) || stamp <= 0 ||
+          fresh.kanban_unknown || counts.some(value => value !== undefined &&
+            (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0))) {
+          throw new Error('Task evidence unavailable')
+        }
+
         output[index] = withKanbanEvidence(row, fresh)
       } catch {
         output[index] = { ...row, kanban_unknown: true }

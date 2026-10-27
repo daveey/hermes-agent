@@ -24,6 +24,14 @@ describe('retained older sidebar task evidence', () => {
     expect(result).toMatchObject({ kanban_active: 16, kanban_unknown: true })
   })
 
+  it.each([{}, { kanban_observed_at: null }, { kanban_observed_at: '123' },
+    { kanban_observed_at: NaN }, { kanban_observed_at: Infinity }, { kanban_observed_at: -1 },
+    { kanban_observed_at: 124, kanban_active: -1 }, { kanban_observed_at: 124, kanban_active: '16' },
+    { kanban_observed_at: 124, kanban_unknown: true }])('preserves counts for absent or invalid evidence %j', async evidence => {
+    const [result] = await refreshRetainedKanban([row({ kanban_active: 16, kanban_observed_at: 123 })], async () => row(evidence))
+    expect(result).toMatchObject({ kanban_active: 16, kanban_observed_at: 123, kanban_unknown: true })
+  })
+
   it('rejects another profile with the same session id', async () => {
     const [result] = await refreshRetainedKanban([row()], async () => row({ profile: 'other', kanban_active: 99 }))
     expect(result.kanban_unknown).toBe(true)

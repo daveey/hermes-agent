@@ -389,36 +389,37 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
             messagingExclude: MESSAGING_EXCLUDED_SOURCES
           })
 
-        let activationEpoch = gatewayActivationEpoch()
-        let result = await fetchPage()
+        let activationEpoch: number
+        let result: Awaited<ReturnType<typeof fetchPage>>
+        let primaryConnection: ReturnType<typeof primaryGatewayConnectionId>
+        let refreshed: SessionInfo[] = []
 
-        // A gateway activation that landed mid-request voids this page: it may
-        // describe the source the window just left. But every activation bumps
-        // the epoch, including a re-activation of the route already in front
-        // (a resume or profile click through ensureGatewayAgent), and those
-        // move no route atom, so no effect asks for the list again. Dropping
-        // the page there left the sidebar on "No sessions" while the backend
-        // held the rows (#67600). Still the newest refresh for this scope, so
-        // re-read under the current epoch instead.
-        while (owns() && gatewayActivationEpoch() !== activationEpoch) {
+        // Re-activating the same route moves no route atom, so no effect starts
+        // another refresh. Retry the entire observation (page AND details) when
+        // activation changes, unless a newer request/scope already owns it.
+        do {
           activationEpoch = gatewayActivationEpoch()
+          primaryConnection = primaryGatewayConnectionId()
           result = await fetchPage()
-        }
 
-        // Open/restored older rows survive paging, but otherwise their task
-        // counts never refresh. Capture the primary owner before any await.
-        const primaryConnection = primaryGatewayConnectionId()
-        const page = result.recents.sessions ?? []
+          if (!owns()) { return }
 
-        const retained = mergeSessionPage($sessions.get(), page, sessionsToKeep())
-          .filter(row => !page.some(item => item.id === row.id &&
-            (item.profile ?? 'default') === (row.profile ?? 'default') &&
-            (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection)))
+          if (gatewayActivationEpoch() !== activationEpoch) { continue }
 
-        const refreshed = await refreshRetainedKanban(retained, row => getSession(row.id, {
-          connectionId: row.connection_id ?? primaryConnection,
-          profile: row.profile ?? 'default'
-        }))
+          // Open/restored older rows survive paging, but otherwise their task
+          // counts never refresh. Pin reads to the owner captured before await.
+          const page = result.recents.sessions ?? []
+
+          const retained = mergeSessionPage($sessions.get(), page, sessionsToKeep())
+            .filter(row => !page.some(item => item.id === row.id &&
+              (item.profile ?? 'default') === (row.profile ?? 'default') &&
+              (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection)))
+
+          refreshed = await refreshRetainedKanban(retained, row => getSession(row.id, {
+            connectionId: row.connection_id ?? primaryConnection,
+            profile: row.profile ?? 'default'
+          }))
+        } while (owns() && gatewayActivationEpoch() !== activationEpoch)
 
         if (owns() && gatewayActivationEpoch() === activationEpoch) {
           const recents = result.recents

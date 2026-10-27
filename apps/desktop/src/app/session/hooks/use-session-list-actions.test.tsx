@@ -212,7 +212,12 @@ it.each(['rename', 'remove', 'switch'])('guards retained task refresh against a 
 
   if (change === 'rename') { setSessions([row('old', { connection_id: 'remote', title: 'New title' })]) }
 
-  if (change === 'switch') { gatewayScope.epoch++ }
+  if (change === 'switch') {
+    gatewayScope.epoch++
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('fresh-page')] }))
+    getSession.mockResolvedValue(row('old', { kanban_active: 7, kanban_observed_at: 125 }))
+  }
+
   await act(async () => {
     pending.resolve(row('old', { kanban_active: 16, kanban_observed_at: 123 }))
     await refreshing
@@ -222,7 +227,11 @@ it.each(['rename', 'remove', 'switch'])('guards retained task refresh against a 
 
   if (change === 'rename') { expect($sessions.get()[0]).toMatchObject({ title: 'New title', kanban_active: 16 }) }
 
-  if (change === 'switch') { expect($sessions.get()[0].kanban_active).toBeUndefined() }
+  if (change === 'switch') {
+    expect(listSidebarSessions).toHaveBeenCalledTimes(2)
+    expect($sessions.get().find(s => s.id === 'fresh-page')).toBeDefined()
+    expect($sessions.get().find(s => s.id === 'old')).toMatchObject({ kanban_active: 7 })
+  }
 })
 
 // #67600: a cold-start read that fails must not render as "No sessions yet".
