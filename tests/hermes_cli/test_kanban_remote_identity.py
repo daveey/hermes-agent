@@ -55,15 +55,15 @@ def test_origin_profile_and_relation_are_part_of_the_session_join(tmp_path, monk
     assert {r['session'] for r in activity._read_remote_links(path, now=100)} == {'s1'}
 
 
-def test_descendants_stay_in_the_roots_owner_profile(tmp_path):
+def test_linked_card_is_observed_without_descendants_or_cross_profile_twins(tmp_path):
     path = replica(tmp_path, [
         ('work/default/t_root', card('work', id='t_root', children=['t_same'])),
         ('work/default/t_same', card('work', sessions=[])),
         ('default/default/t_same', card('default', sessions=[], status='blocked', block_kind='needs_input')),
     ])
     rows = activity._read_remote_links(path, now=100)
-    assert {r['key'] for r in rows} == {'owner/work/default/t_root', 'owner/work/default/t_same'}
-    assert all(r['status'] == 'running' for r in rows)
+    assert {r['key'] for r in rows} == {'owner/work/default/t_root'}
+    assert all(r['status'] == 'running' and r['via'] == 'shepherd' for r in rows)
 
 
 @pytest.mark.parametrize('actionable', [False, True])
