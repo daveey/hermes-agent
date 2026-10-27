@@ -943,6 +943,22 @@ def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]
         found[task_id]["pr_url"] = url
 
 
+def _remote_cards(ids: list[str], statuses: tuple[str, ...], stale_ok: bool) -> list[dict[str, Any]]:
+    """Cards on other gateways linked to these chats: from the synced chat links in the replicas when
+    ``kanban.sync.links_reader`` is ``replica`` (RFC phase 5), else from the origin-ledger projection."""
+    from hermes_cli import kanban_db_sync as _sync
+    if _sync.sync_config().get("links_reader") == "replica":
+        from hermes_cli import kanban_chat_links as _links
+        from hermes_cli import kanban_sync_client as _ksc
+        try:
+            gateway = _ksc.load_identity().gateway
+        except _ksc.SyncUnavailable:
+            gateway = None
+        if gateway:
+            return _links.replica_cards(ids, gateway, statuses)
+    return _remote_links(stale_ok=stale_ok)
+
+
 def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED_STATUSES, *,
                   stale_ok: bool = False) -> list[dict[str, Any]]:
     """Every open/blocked/review task across all boards that the given session
@@ -960,7 +976,7 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
     # [daveey] Cards on other gateways this lineage owns: the same rows the counts use, owner-qualified
     # (gateway/board/id), with ``stale``/``synced_at`` from the replica. One row per card.
     wanted, seen = set(ids), set()
-    for card in _remote_links(stale_ok=stale_ok):
+    for card in _remote_cards(ids, statuses, stale_ok):
         belongs = card['session'] in wanted or card.get('origin_session') in wanted
         listed = card.get('status') in statuses or (card.get('status') == 'unknown' and card.get('unfinished'))
         if belongs and listed and card['key'] not in seen:

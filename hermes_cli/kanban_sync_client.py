@@ -45,7 +45,7 @@ SNAPSHOT_PAGE = 1000
 HTTP_TIMEOUT_S = 30.0
 EVENT_IMPORT_WINDOW_S = 30 * 24 * 3600  # the service's event retention (worker board.ts EVENT_RETENTION_MS)
 # Row order for an import: links need both tasks, everything else names its task.
-IMPORT_ORDER = ("tasks", "task_links", "task_runs", "task_comments", "task_events", "task_attachments")
+IMPORT_ORDER = ("tasks", "task_links", "task_runs", "task_comments", "task_events", "task_attachments", "task_chat_links")
 
 
 class SyncUnavailable(RuntimeError):
@@ -516,6 +516,27 @@ class FeedWatcher:
                 backoff = min(backoff * 2, 60.0)
 
 
+LINKS_EVERY_S = 60.0
+
+
+def reconcile_links(boards: list[tuple[str, Path]], gateway: str) -> None:
+    """Bring this gateway's chat links up to date in every synced board (kanban_chat_links.reconcile)."""
+    from hermes_cli import kanban_chat_links
+    for slug, path in boards:
+        try:
+            conn = _connect(path)
+            try:
+                if sync.board_mode(conn) == "off":
+                    continue
+                counts = kanban_chat_links.reconcile(conn, slug, gateway)
+            finally:
+                conn.close()
+            if any(counts.values()):
+                _log.info("kanban sync: %s chat links %s", slug, counts)
+        except Exception as exc:  # health: allow BLE001 -- one board's links must not stop the sync loop
+            _log.warning("kanban sync: chat links for %s failed (%s: %s)", slug, type(exc).__name__, exc)
+
+
 def outbox_pending(paths: Iterable[Path]) -> bool:
     """True when any synced board has a local change waiting to be pushed (one cheap read-only query each)."""
     for path in paths:
@@ -564,6 +585,7 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     _log.info("kanban sync: running as gateway %s against %s (feed sockets; poll every %.1fs)", ident.gateway, ident.url, period)
     wake = threading.Event()
     watchers: dict[str, threading.Thread] = {}
+    next_links = 0.0
     while keep_running():
         boards = board_paths()
         for slug, _path in boards:
@@ -575,6 +597,9 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
             if r.push and (r.push.sent or r.push.rejected):
                 _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
                           r.push.sent, r.push.rejected)
+        if time.monotonic() >= next_links:
+            reconcile_links(boards, ident.gateway)
+            next_links = time.monotonic() + LINKS_EVERY_S
         wait_for_work(wake, [p for _s, p in boards], period, keep_running)
 
 
@@ -692,7 +717,7 @@ def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> 
         if bad:
             fields[tid] = bad
     children: dict[str, int] = {}
-    for table in ("task_links", "task_comments", "task_runs"):
+    for table in ("task_links", "task_comments", "task_runs", "task_chat_links"):
         lv = _child_uids(live, table, checked)
         sh = _child_uids(shadow, table, checked)
         n = len(lv ^ sh)
