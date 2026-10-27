@@ -9,6 +9,9 @@ from hermes_cli import kanban_db_connect as kbc
 from tests.hermes_cli.test_kanban_park_invariants import kanban_home
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_dispatch_pr_state as prs
+from tests.hermes_cli.kanban_guard_helpers import worker_ran
+
+__all__ = ["kanban_home", "worker_ran"]  # register shared fixtures
 
 _REAL_LOOKUP = prs._gh_pr_state
 URL = "https://github.com/example/project/pull/12"
@@ -28,7 +31,11 @@ def lookup(monkeypatch, state, bodies):
     monkeypatch.setattr(prs.subprocess, 'run', run)
 
 
-def test_rejected_open_pr_spawns_with_reason(kanban_home, monkeypatch, all_assignees_spawnable):
+@pytest.mark.parametrize('ran', [True, False], ids=['worker-ran', 'never-run'])
+def test_rejected_open_pr_spawns_with_reason(kanban_home, monkeypatch, all_assignees_spawnable, request, ran):
+    # never-run: a repair card whose handoff names the rejected PR still gets the repair note.
+    if ran:
+        request.getfixturevalue('worker_ran')
     lookup(monkeypatch, 'OPEN', [marker('queued', False, 0), marker('rejected')])
     spawned = []
     with kbc.connect() as conn:
@@ -45,6 +52,7 @@ def test_rejected_open_pr_spawns_with_reason(kanban_home, monkeypatch, all_assig
         assert spawned == [tid]
 
 
+@pytest.mark.usefixtures('worker_ran')
 @pytest.mark.parametrize('state,bodies,expected', [
     ('OPEN', [marker('rejected'), marker('queued', False, 0)], 'active_pr'),
     ('OPEN', [marker('rejected', False)], 'active_pr'),
@@ -64,6 +72,7 @@ def test_newest_queue_result(kanban_home, monkeypatch, state, bodies, expected):
             assert conn.execute('SELECT COUNT(*) FROM task_comments WHERE task_id = ?', (tid,)).fetchone()[0] == 1
 
 
+@pytest.mark.usefixtures('worker_ran')
 def test_requeue_after_rejection_is_not_cached(kanban_home, monkeypatch):
     bodies = [marker('rejected')]
     lookup(monkeypatch, 'OPEN', bodies)
@@ -73,3 +82,12 @@ def test_requeue_after_rejection_is_not_cached(kanban_home, monkeypatch):
         assert kbd.check_respawn_guard(conn, tid) is None
         bodies.append(marker('queued', False, 0))
         assert kbd.check_respawn_guard(conn, tid) == 'active_pr'
+
+
+def test_never_run_card_names_open_pr_is_not_held_and_not_noted(kanban_home, monkeypatch):
+    lookup(monkeypatch, 'OPEN', [marker('queued', False, 0)])
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title='review', assignee='a')
+        kb.add_comment(conn, tid, 'impl', f'please review {URL}')
+        assert kbd.check_respawn_guard(conn, tid) is None
+        assert conn.execute('SELECT COUNT(*) FROM task_comments WHERE task_id = ?', (tid,)).fetchone()[0] == 1

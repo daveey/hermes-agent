@@ -199,6 +199,12 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     if not pr_times:
         return None
     if _pr_comments_predate_first_run(conn, task_id, max(pr_times)):
+        # Not held, but a queue-rejected PR in the handoff still gets its repair note,
+        # exactly as when the guard releases a worker that opened it.
+        from hermes_cli.kanban_db_dispatch_pr_rejection import comment_rejection
+        for url in dict.fromkeys(pr_urls):
+            if pr_state(url) == "REJECTED":
+                comment_rejection(conn, task_id, url, _rejections[url.rstrip("/").lower()])
         return None
     if _immediate_checkpoint_after(conn, task_id, max(pr_times), latest_pr_comment_id):
         return None
