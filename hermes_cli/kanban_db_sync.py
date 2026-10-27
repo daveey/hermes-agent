@@ -75,7 +75,7 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     "tasks": frozenset({
         "claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at",
         "workspace_path", "session_id", "project_id", "sync_version", "field_hlc", "lease_holder",
-        "lease_expires",
+        "lease_expires", "lease_version",
     }),
     "task_links": frozenset(),
     "task_comments": frozenset(),
@@ -160,6 +160,7 @@ _SYNC_COLUMN_DDL = (
     ("tasks", "field_hlc", "field_hlc TEXT"),
     ("tasks", "lease_holder", "lease_holder TEXT"),
     ("tasks", "lease_expires", "lease_expires INTEGER"),
+    ("tasks", "lease_version", "lease_version INTEGER"),
     ("tasks", "created_on", "created_on TEXT"),
     ("kanban_sync_outbox", "retry_after", "retry_after INTEGER"),
 )
@@ -514,6 +515,7 @@ class Lease:
     expires_ms: Optional[int] = None
     holder: Optional[str] = None
     reason: Optional[str] = None
+    version: Optional[int] = None
 
 
 class LeaseClient(Protocol):
@@ -604,8 +606,9 @@ def stage_claim(conn: sqlite3.Connection, task_id: str, gate: Optional[ClaimGate
         return
     lease = gate.lease
     conn.execute("UPDATE kanban_sync_state SET pending_run_uid = ?", (lease.run_uid,))
-    conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ? WHERE id = ?",
-                 (gate._ids[1], lease.expires_ms, task_id))
+    conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ?, "
+                 "lease_version = COALESCE(?, lease_version) WHERE id = ?",
+                 (gate._ids[1], lease.expires_ms, lease.version, task_id))
     gate.consumed = True
 
 
@@ -649,7 +652,9 @@ def _renew(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str], ttl_s
         return None
     with write_txn(conn):
         if lease.granted:
-            conn.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (lease.expires_ms, task_id))
+            conn.execute("UPDATE tasks SET lease_expires = ?, "
+                         "lease_version = COALESCE(?, lease_version) WHERE id = ?",
+                         (lease.expires_ms, lease.version, task_id))
             return lease.expires_ms
         _log.warning("kanban sync: lease for %s lost to %s (%s)", task_id, lease.holder, lease.reason)
         conn.execute("UPDATE tasks SET lease_holder = ? WHERE id = ?", (lease.holder, task_id))
@@ -827,24 +832,30 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
         conn.execute(f"UPDATE tasks SET {assignments}{', ' if cols else ''}sync_version = ? WHERE id = ?",
                      (*cols.values(), ch.version, ch.uid))
     if "lease_holder" in ch.fields:  # the service's full row carries its lease mirror
-        _mirror_lease(conn, ch.uid, ch.fields.get("lease_holder"), ch.fields.get("lease_expires"), own, result)
+        _mirror_lease(conn, ch.uid, ch.fields.get("lease_holder"), ch.fields.get("lease_expires"),
+                      ch.version, own, result)
     _collect_task_observers(ch, cols.get("status"), changed, result)
     return True
 
 
 def _mirror_lease(conn: sqlite3.Connection, task_id: str, holder: Optional[str], expires: Optional[int],
-                  own: str, result: ApplyResult) -> None:
+                  version: int, own: str, result: ApplyResult) -> bool:
     """Mirror the service's lease onto the task. A lease that moved away from this gateway while a local
     worker holds the claim makes the claim stale now, so the dispatcher's stale-claim path stops the worker."""
-    row = conn.execute("SELECT status, claim_lock, lease_holder FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    if row is None:
-        return
-    conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ? WHERE id = ?", (holder, expires, task_id))
+    # RPC grants/renewals acknowledge only the lease, not the rest of the task.
+    # An older full-row echo may still carry task fields we have never applied.
+    row = conn.execute("SELECT status, claim_lock, lease_holder, lease_version FROM tasks WHERE id = ?",
+                       (task_id,)).fetchone()
+    if row is None or (row["lease_version"] is not None and version < row["lease_version"]):
+        return False
+    conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ?, lease_version = ? WHERE id = ?",
+                 (holder, expires, version, task_id))
     if holder != own and row["claim_lock"] is not None and row["lease_holder"] == own:
         conn.execute("UPDATE tasks SET claim_expires = ? WHERE id = ? AND claim_lock IS NOT NULL",
                      (int(time.time()) - 1, task_id))
     if holder is None and row["status"] in _CLAIMABLE:
         result.wake_dispatcher = True
+    return True
 
 
 def _collect_task_observers(ch: RemoteChange, new_status: Optional[str], changed: set[str],
@@ -908,21 +919,9 @@ def _tombstone(conn: sqlite3.Connection, table: str, uid: str) -> None:
 
 
 def _lease_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> bool:
-    """Mirror a lease change. A lease that moved away from this gateway while a
-    local worker holds the claim makes the claim stale now, so the dispatcher's
-    stale-claim path stops the worker (run outcome ``lease_lost``)."""
-    row = conn.execute("SELECT status, claim_lock, sync_version FROM tasks WHERE id = ?", (ch.uid,)).fetchone()
-    if row is None or (row["sync_version"] is not None and ch.version <= row["sync_version"]):
-        return False
-    holder, expires = ch.fields.get("lease_holder"), ch.fields.get("lease_expires")
-    conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ?, sync_version = ? WHERE id = ?",
-                 (holder, expires, ch.version, ch.uid))
-    if holder != own and row["claim_lock"] is not None:
-        conn.execute("UPDATE tasks SET claim_expires = ? WHERE id = ? AND claim_lock IS NOT NULL",
-                     (int(time.time()) - 1, ch.uid))
-    if holder is None and row["status"] in _CLAIMABLE:
-        result.wake_dispatcher = True
-    return True
+    """Lease-only changes share the lease fence and never acknowledge task fields."""
+    return _mirror_lease(conn, ch.uid, ch.fields.get("lease_holder"), ch.fields.get("lease_expires"),
+                         ch.version, own, result)
 
 
 _APPLY_HANDLERS = {

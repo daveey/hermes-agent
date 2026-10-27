@@ -7,14 +7,17 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
     """CAS to running and publish its run/event. Caller owns the fenced transaction."""
     from hermes_cli import kanban_db as kb
 
+    # Activity belongs to this run, not the previous worker. Seed it atomically
+    # so the first expired TTL cannot treat a freshly woken worker as wedged.
     cur = conn.execute(
         """
         UPDATE tasks
            SET status = 'running', human_request = NULL, claim_lock = ?,
-               claim_expires = ?, started_at = COALESCE(started_at, ?)
+               claim_expires = ?, started_at = COALESCE(started_at, ?),
+               last_heartbeat_at = ?
          WHERE id = ? AND status = ? AND claim_lock IS NULL
         """,
-        (lock, expires, now, task_id, source_status),
+        (lock, expires, now, now, task_id, source_status),
     )
     if cur.rowcount != 1:
         return None

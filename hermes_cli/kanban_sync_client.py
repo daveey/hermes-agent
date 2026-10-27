@@ -855,7 +855,8 @@ class HubLeaseClient:
         lease = res.get("lease") or {}
         granted = res.get("status") == "applied" and lease.get("run_uid") == run_uid
         return sync.Lease(granted=granted, run_uid=run_uid, expires_ms=lease.get("expires"),
-                          holder=lease.get("holder"), reason=None if granted else res.get("reason"))
+                          holder=lease.get("holder"), reason=None if granted else res.get("reason"),
+                          version=res.get("version"))
 
     def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
                 lane: str = "ready") -> sync.Lease:
