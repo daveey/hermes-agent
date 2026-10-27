@@ -24,15 +24,16 @@ import {
   preserveLocalAssistantErrors,
   restorePendingClarifyToolCall,
   settlePendingClarifyToolCall,
-  stripPendingClarifyProjectionForCache,
   textPart,
   toChatMessages
 } from '@/lib/chat-messages'
 import { markReasoningEffortPending } from '@/lib/chat-runtime'
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { purgeInFlightTurnJournals, recoverInFlightTurnJournal } from '@/lib/inflight-turn-journal'
+import { markOpenPaint, markOpenReconciled, markOpenStage, markOpenStart } from '@/lib/open-timing'
 import { latestSessionTodoSnapshot } from '@/lib/todos'
 import { setSessionYolo } from '@/lib/yolo-session'
+import { asleepOpenFor, clearAsleepOpen } from '@/store/asleep-session'
 import { $clarifyRequests, clearClarifyRequest } from '@/store/clarify'
 import {
   announceGoneSessionDraft,
@@ -147,7 +148,12 @@ import { forgetSessionUnread } from '@/store/session-unread'
 import { $archivedSessions } from '@/store/sidebar-archive'
 import { clearSessionSubagents } from '@/store/subagents'
 import { clearSessionTodos, restoreSessionTodosFromSnapshot } from '@/store/todos'
-import { dropTranscriptTail, dropTranscriptTailEverywhere, saveTranscriptTail } from '@/store/transcript-tail-cache'
+import {
+  dropTranscriptTail,
+  dropTranscriptTailEverywhere,
+  loadTranscriptTail,
+  saveTranscriptTail
+} from '@/store/transcript-tail-cache'
 import { isWatchWindow } from '@/store/windows'
 import type {
   SessionCreateResponse,
@@ -1234,6 +1240,8 @@ export function useSessionActions({
         return
       }
 
+      markOpenStart(storedSessionId, capturedOwner?.connectionId)
+
       const requestId = resumeRequestRef.current + 1
       const routeToken = getRouteToken()
       resumeRequestRef.current = requestId
@@ -1403,11 +1411,73 @@ export function useSessionActions({
 
         if (hasPersistedDisplayTranscriptProvenance(warmAtEntry.state, entryProvenance)) {
           setMessages(warmAtEntry.state.messages)
+          markOpenPaint(storedSessionId, 'warm', warmAtEntry.state.messages.length)
         }
+      }
+
+      // [daveey] The user opened this chat from an asleep gateway's cached row:
+      // show every row cached on this Mac, read-only, and never dial the
+      // gateway (that wait is the 45 s readiness timeout). No runtime binds, so
+      // a send is refused with the asleep notice (use-prompt-actions/submit).
+      const asleep = asleepOpenFor(storedSessionId)
+
+      if (asleep) {
+        const cachedTranscript = loadTranscriptTail(
+          storedSessionId,
+          { connectionId: asleep.connectionId, profile: asleep.profile },
+          { all: true }
+        )
+
+        if (cachedTranscript) {
+          setMessages(cachedTranscript)
+          markOpenPaint(storedSessionId, 'cache', cachedTranscript.length)
+          markOpenReconciled(storedSessionId, 'asleep')
+
+          return
+        }
+
+        clearAsleepOpen()
+      }
+
+      // [daveey] A click hands over the exact owner (connection + profile), so the
+      // REST page need not wait out the owner lookup and gateway switch below
+      // (seconds on a busy or remote backend). Start it now and show it as soon
+      // as it lands, display-only like the cached paint; the cold path reuses
+      // this same request when its resolved scope matches, so it reads once.
+      const earlyRestScope =
+        capturedOwner && !resumedSameSelectedSession && !warmAtEntry && !isWatchWindow()
+          ? transcriptRestScope(ownerRoute, listedStored, ambientConnectionId)
+          : undefined
+
+      const earlyRest = earlyRestScope ? getLatestSessionMessages(storedSessionId, earlyRestScope) : null
+
+      if (earlyRest) {
+        earlyRest.then(
+          page => {
+            if (!isCurrentResume()) {
+              return
+            }
+
+            markOpenStage(storedSessionId, 'rest')
+
+            if (!page.session_id || page.session_id === storedSessionId) {
+              saveTranscriptTail(storedSessionId, page.messages, earlyRestScope)
+            }
+
+            const shown = provisional.replace(toChatMessages(page.messages))
+
+            if (shown.shown) {
+              markOpenPaint(storedSessionId, 'rest', $messages.get().length)
+              markOpenReconciled(storedSessionId, 'rest', shown.changed)
+            }
+          },
+          () => undefined
+        )
       }
 
       const storedForProfile = await resolveStoredSession(storedSessionId, ownerRoute)
       const sessionProfile = storedForProfile?.profile
+      markOpenStage(storedSessionId, 'owner')
 
       if (!isCurrentResume()) {
         return
@@ -2028,19 +2098,11 @@ export function useSessionActions({
               }
 
               hydration.release()
-              // Cache backend transcript truth only. The pending/running bit and
-              // any synthetic clarify row are a live resume projection and must
-              // not survive after the server-side request expires.
-              saveTranscriptTail(
-                storedSessionId,
-                stripPendingClarifyProjectionForCache(
-                  activatedMessages,
-                  pendingClarify?.requestId ??
-                    pendingClarifyState.cleared?.requestId ??
-                    $clarifyRequests.get()[cachedRuntimeId]?.requestId
-                ),
-                sessionRestScope
-              )
+              // The durable transcript cache holds backend rows only (REST
+              // reads and the prefetcher write it); a warm runtime projection
+              // is not one, so nothing is cached here.
+              markOpenPaint(storedSessionId, 'warm', activatedMessages.length)
+              markOpenReconciled(storedSessionId, 'warm')
 
               return
             }
@@ -2151,7 +2213,13 @@ export function useSessionActions({
         // max(prefetch, resume) instead of their sum. The prefetch paints the
         // transcript as soon as it lands; the RPC binds the runtime id.
         // Watch windows skip the prefetch — lazy resume attaches the live mirror.
-        const prefetchPromise = watchWindow ? null : getLatestSessionMessages(storedSessionId, sessionRestScope)
+        markOpenStage(storedSessionId, 'gateway')
+
+        const prefetchPromise = watchWindow
+          ? null
+          : earlyRest && JSON.stringify(earlyRestScope) === JSON.stringify(sessionRestScope)
+            ? earlyRest
+            : getLatestSessionMessages(storedSessionId, sessionRestScope)
 
         let resumeRuntimeBaselineMessages: ChatMessage[] = []
         const resumeStartedAt = Date.now() / 1000
@@ -2188,6 +2256,7 @@ export function useSessionActions({
         try {
           if (prefetchPromise) {
             prefetchedResult = await prefetchPromise
+            markOpenStage(storedSessionId, 'rest')
           }
         } catch {
           // Non-fatal: gateway resume below can still hydrate the session.
@@ -2210,7 +2279,7 @@ export function useSessionActions({
           displayRead.owns() &&
           (!prefetchedResult.session_id || prefetchedResult.session_id === stored.id)
         ) {
-          saveTranscriptTail(storedSessionId, toChatMessages(prefetchedResult.messages), sessionRestScope)
+          saveTranscriptTail(storedSessionId, prefetchedResult.messages, sessionRestScope)
         }
 
         // Paint the persisted transcript as soon as REST returns instead of
@@ -2243,8 +2312,15 @@ export function useSessionActions({
           prefetchedStoredSessionId = prefetchedResult.session_id || storedSessionId
 
           // The overlap reads await; skip painting if this resume went stale.
-          if (isCurrentResume() && !chatMessageArraysEquivalent($messages.get(), localSnapshot)) {
-            setMessages(localSnapshot)
+          if (isCurrentResume()) {
+            const changed = !chatMessageArraysEquivalent($messages.get(), localSnapshot)
+
+            if (changed) {
+              setMessages(localSnapshot)
+            }
+
+            markOpenPaint(storedSessionId, 'rest', localSnapshot.length)
+            markOpenReconciled(storedSessionId, 'rest', cachedTailPaint === null ? undefined : changed)
           }
         }
 
@@ -2253,6 +2329,9 @@ export function useSessionActions({
         if (!isCurrentResume()) {
           return
         }
+
+        // No REST page (watch window, failed read): the runtime resume is the reconcile.
+        markOpenReconciled(storedSessionId, 'rest')
 
         const currentMessages = viewMessagesForReconcile()
 
@@ -2517,22 +2596,12 @@ export function useSessionActions({
           setMessages(visibleMessagesForView)
         }
 
-        // Refresh the durable tail cache with backend transcript truth only;
-        // the live pending clarify projection expires with the server request.
-        saveTranscriptTail(
-          storedSessionId,
-          stripPendingClarifyProjectionForCache(
-            messagesForView,
-            pendingClarify?.requestId ??
-              pendingClarifyState.cleared?.requestId ??
-              $clarifyRequests.get()[resumed.session_id]?.requestId
-          ),
-          sessionRestScope
-        )
       } catch (err) {
         if (!isCurrentResume()) {
           return
         }
+
+        markOpenReconciled(storedSessionId, 'failed')
 
         // 4007 from the gateway this resume was dispatched on: that gateway
         // never minted the id, which proves the ROUTE wrong, not the session

@@ -595,6 +595,7 @@ import { createStreamThrottle } from './stream-throttle'
 import { installSystemCaTrust } from './system-ca'
 import { registerTerminalIpc } from './terminal-ipc'
 import { nativeOverlayWidth as computeNativeOverlayWidth, titleBarOverlayOptions } from './titlebar-overlay-width'
+import { installTranscriptCache } from './transcript-cache-host'
 import {
   backgroundMaterialFor,
   defaultTranslucencyState,
@@ -1955,6 +1956,7 @@ function registerMediaProtocol(): void {
 }
 
 let mainWindow = null
+let transcriptCacheHost: null | ReturnType<typeof installTranscriptCache> = null
 const backendConnectionState = createBackendConnectionState<ReturnType<typeof spawn>, any>()
 
 const localBackendLifecycle = createLocalBackendLifecycle<ChildProcess>({
@@ -18278,6 +18280,7 @@ app.on('before-quit', () => {
 // hold the event loop open or leak FDs past app teardown.
 app.on('will-quit', () => {
   killTimedGitChildren()
+  transcriptCacheHost?.stop()
   sshIsolatedKeepalives.stopAll()
   destroyKeepaliveAgents()
   nativeNotifications.dispose()
@@ -19483,6 +19486,30 @@ app.whenReady().then(() => {
   void minimizeToTray.start()
   mainProcessLagWatchdog.start()
   f12Blocked = readPersistedDisableF12()
+
+  // [daveey] Local transcript cache + prefetch (instant session loads, C1). Before the
+  // first window: the renderer's cache read is a sync IPC. Prefetch waits out boot.
+  try {
+    transcriptCacheHost = installTranscriptCache({
+      backendFor: (connectionId, { passive }) =>
+        backendDialClaims.run(backendScopeKey(connectionId, null), () =>
+          ensureRegistryBackend(connectionId, null, '', { passive })
+        ),
+      getJson: (descriptor, requestPath, opts) => getJsonForBackend(descriptor, requestPath, opts),
+      ipcMain,
+      log: line => rememberLog(`[transcript-cache] ${line}`),
+      registry: () => {
+        const registry = readDesktopConnectionsRegistry()
+
+        return { connectionIds: registry.connections.map(c => c.id), primary: registry.primary }
+      },
+      userDataDir: app.getPath('userData')
+    })
+    setTimeout(() => transcriptCacheHost?.start(), 15_000).unref?.()
+  } catch (error) {
+    rememberLog(`[transcript-cache] disabled: ${(error as Error)?.message || error}`)
+  }
+
   // Seed this before the first window exists: a picker can open before
   // startHermes() finishes resolving the configured backend.
   const primaryProfile = primaryProfileKey()

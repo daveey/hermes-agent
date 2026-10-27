@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SidebarProvider } from '@/components/ui/sidebar'
+import { asleepOpenFor, clearAsleepOpen } from '@/store/asleep-session'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $pinnedSessionIds, $sidebarShowAutomated } from '@/store/layout'
 import { $notifications } from '@/store/notifications'
@@ -15,6 +16,7 @@ import {
 } from '@/store/offline-sessions'
 import { $profiles } from '@/store/profile'
 import { $sessions } from '@/store/session'
+import { clearTranscriptTails, saveTranscriptTail } from '@/store/transcript-tail-cache'
 import { makeSessionInfo } from '@/test/session-info'
 
 import { ChatSidebar } from './index'
@@ -136,7 +138,25 @@ describe('ChatSidebar offline fallback rows', () => {
     expect(screen.getByText('Chat ok')).toBeTruthy()
   })
 
-  it('refuses to open a cached row, honestly, without calling resume', () => {
+  it('opens a cached row read-only when this Mac has its transcript [daveey]', () => {
+    setCached([rec('a')])
+    saveTranscriptTail('a', [{ content: 'kept on this mac', id: 1, role: 'user', timestamp: 1 } as never], {
+      connectionId: 'conn-mini',
+      profile: 'default'
+    })
+    const resume = vi.fn()
+    mount(resume)
+
+    fireEvent.click(screen.getByText('Chat a'))
+
+    expect(resume).toHaveBeenCalledWith('a', expect.objectContaining({ id: 'a', offline_cached: true }))
+    expect(asleepOpenFor('a')).toMatchObject({ connectionId: 'conn-mini', gateway: 'mini', profile: 'default' })
+    expect($notifications.get()).toHaveLength(0)
+    clearTranscriptTails()
+    clearAsleepOpen()
+  })
+
+  it('refuses to open a cached row with no cached transcript, honestly, without calling resume', () => {
     setCached([rec('a')])
     const resume = vi.fn()
     mount(resume)

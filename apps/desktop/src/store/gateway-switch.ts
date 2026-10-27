@@ -35,7 +35,6 @@ import { resetSessionPinMirror } from '@/store/session-pin-sync'
 import { clearAllSessionStates } from '@/store/session-states'
 import { clearAllSessionTodos } from '@/store/todos'
 import { clearTranscriptTailPaging } from '@/store/transcript-tail'
-import { clearTranscriptTails } from '@/store/transcript-tail-cache'
 
 // True while a connection switch is mid-flight — a Settings → Gateway apply
 // (wipe → re-dial, use-gateway-boot softSwitch) or a Sessions-switcher source
@@ -265,13 +264,12 @@ export function wipeSessionListsForGatewaySwitch(): void {
   // registry and any rail tab pointing into it go with them.
   clearArtifactRegistry()
 
-  // Cached transcript tails belong to the PREVIOUS backend's sessions; a
-  // different backend can recycle stored ids, and painting another machine's
-  // conversation under a same-named id is worse than a loader. Wipe both the
-  // persisted cache and the in-memory paging entries — the latter are keyed by
-  // owner, so a survivor from the old backend would sit beside the new one and
-  // fail the unique-match lookup that shows "Show earlier".
-  clearTranscriptTails()
+  // In-memory paging entries are keyed by owner, so a survivor from the old
+  // backend would sit beside the new one and fail the unique-match lookup that
+  // shows "Show earlier". The durable transcript cache stays [daveey]: it is
+  // keyed by registry connection id + profile, so another machine's same-named
+  // id can never paint here, and wiping it on every cross-gateway open would
+  // throw away the prefetched transcripts that make those opens instant.
   clearTranscriptTailPaging()
 
   // Narrowed: account/marketplace/onboarding caches are global, not gateway-

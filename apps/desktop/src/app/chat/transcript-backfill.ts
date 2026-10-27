@@ -24,6 +24,7 @@ import {
   type TranscriptProfileScope,
   transcriptTailState
 } from '@/store/transcript-tail'
+import { saveOlderTranscriptPage, type TranscriptTailScope } from '@/store/transcript-tail-cache'
 import type { SessionMessage, SessionMessagesResponse } from '@/types/hermes'
 
 /**
@@ -592,6 +593,9 @@ export function backfillOlderTranscriptPage(request: BackfillRequest): Promise<b
     // below prepends whatever prefix the store is missing, and the recorded
     // state marks the session fully loaded so the REST action retires.
     recordTranscriptBackfillPage(storedSessionId, page, profile)
+    // [daveey] Loaded pages join the durable cache, so the next open (or an
+    // asleep gateway's read-only open) shows the history already read.
+    saveOlderTranscriptPage(storedSessionId, page.messages, tail.profile as TranscriptTailScope)
     const olderRows = unhideOpeningUserRows(page.messages)
     request.applyOlderPage(toChatMessages(olderRows))
 

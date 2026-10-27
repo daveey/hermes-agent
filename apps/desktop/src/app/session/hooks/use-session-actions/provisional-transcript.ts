@@ -1,8 +1,11 @@
 import type { SessionInfo } from '@/hermes'
 import type { ChatMessage } from '@/lib/chat-messages'
+import { markOpenPaint } from '@/lib/open-timing'
 import { $messages, setMessages } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import { loadTranscriptTail, type TranscriptTailScope } from '@/store/transcript-tail-cache'
+
+import { chatMessageArraysEquivalent } from './utils'
 
 export function transcriptRestScope(
   owner: SessionProfileRoute | undefined,
@@ -50,7 +53,30 @@ export function provisionalTranscriptPaint(storedSessionId: string, isCurrent: (
 
       if (messages) {
         setMessages(messages)
+        markOpenPaint(storedSessionId, 'cache', messages.length)
       }
+    },
+    /** [daveey] Swap the display-only paint for a fresher page (still display-only:
+     *  the resume's reconcile treats it exactly like the cached paint). Only while
+     *  nothing else owns the view; keeps the current array when equivalent, so an
+     *  unchanged session never re-renders. Returns whether `next` is on screen. */
+    replace(next: ChatMessage[]): { changed: boolean; shown: boolean } {
+      const current = $messages.get()
+
+      if (!isCurrent() || next.length === 0 || (current.length > 0 && current !== messages)) {
+        return { changed: false, shown: false }
+      }
+
+      if (current.length > 0 && chatMessageArraysEquivalent(current, next)) {
+        messages = current
+
+        return { changed: false, shown: true }
+      }
+
+      messages = next
+      setMessages(next)
+
+      return { changed: true, shown: true }
     }
   }
 }

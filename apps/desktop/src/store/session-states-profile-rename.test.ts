@@ -34,12 +34,12 @@ describe('migrateTilesForProfile', () => {
     ])
 
     const tails = await import('@/store/transcript-tail-cache')
-    tails.saveTranscriptTail('s-1', [{ id: 'm1', parts: [{ text: 'hello', type: 'text' }], role: 'user' } as never], {
+    tails.saveTranscriptTail('s-1', [{ content: 'hello', id: 1, role: 'user', timestamp: 1 } as never], {
       connectionId: 'local',
       profile: 'webdesign_bhp'
     })
     // Same-named profile on a remote connection: not renamed, its tail must stay put.
-    tails.saveTranscriptTail('s-9', [{ id: 'm9', parts: [{ text: 'remote', type: 'text' }], role: 'user' } as never], {
+    tails.saveTranscriptTail('s-9', [{ content: 'remote', id: 9, role: 'user', timestamp: 1 } as never], {
       connectionId: 'remote-1',
       profile: 'webdesign_bhp'
     })

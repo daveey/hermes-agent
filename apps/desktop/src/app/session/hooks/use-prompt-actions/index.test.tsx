@@ -7,6 +7,7 @@ import { getLatestSessionMessages, getSession } from '@/hermes'
 import { en } from '@/i18n/en'
 import { textPart } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { clearAsleepOpen, markAsleepOpen } from '@/store/asleep-session'
 import { $compactingSessions, setSessionCompacting } from '@/store/compaction'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
 import { $queuedPromptsBySession, getQueuedPrompts } from '@/store/composer-queue'
@@ -6394,5 +6395,66 @@ describe('usePromptActions cron run write gate (#88443)', () => {
       expect.objectContaining({ text: 'still running' }),
       1_800_000
     )
+  })
+})
+
+describe('[daveey] send into a chat opened read-only from an asleep gateway', () => {
+  const storedId = 'asleep-chat'
+
+  afterEach(() => {
+    cleanup()
+    $notifications.set([])
+    clearAsleepOpen()
+  })
+
+  it('refuses the send with the asleep notice and never dials the gateway', async () => {
+    markAsleepOpen(
+      sessionInfo({
+        connection_id: 'mac-mini',
+        id: storedId,
+        offline_cached: true,
+        offline_gateway: 'mini',
+        offline_synced_at: Date.now() / 1000 - 600,
+        profile: 'default'
+      })
+    )
+
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway as never}
+        storedSessionId={storedId}
+      />
+    )
+
+    expect(await handle!.submitText('hello sleepy mini')).toBe(false)
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect(requestGatewayForAgent).not.toHaveBeenCalled()
+
+    const note = $notifications.get().at(-1)
+    expect(note?.kind).toBe('warning')
+    expect(note?.message).toContain('mini is asleep')
+    expect(note?.message).toContain('synced 10m ago')
+  })
+
+  it('sends normally once the open is no longer an asleep one', async () => {
+    markAsleepOpen(sessionInfo({ connection_id: 'mac-mini', id: 'some-other-chat', offline_cached: true }))
+
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway as never}
+        storedSessionId={storedId}
+      />
+    )
+
+    await handle!.submitText('hello')
+    expect($notifications.get().some(note => String(note.message).includes('asleep'))).toBe(false)
   })
 })

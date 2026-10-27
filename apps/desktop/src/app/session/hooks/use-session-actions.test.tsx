@@ -21,7 +21,10 @@ import {
   type SessionResumeResult,
   setSessionArchived
 } from '@/hermes'
+import { toChatMessages } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { type OpenTimingRecord, resetOpenTimings } from '@/lib/open-timing'
+import { asleepOpenFor, clearAsleepOpen, markAsleepOpen } from '@/store/asleep-session'
 import { $clarifyRequests, clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
 import { clearSessionDraft, type ComposerAttachment, stashSessionDraft, takeSessionDraft } from '@/store/composer'
 import { $backgroundStatusBySession, type ComposerStatusItem } from '@/store/composer-status'
@@ -108,7 +111,7 @@ import {
 import { $sessionSeenCounts, $unreadFinishedMarkers } from '@/store/session-unread'
 import { $subagentsBySession, type SubagentProgress } from '@/store/subagents'
 import { $retainedTodosBySession, $todosBySession, clearSessionTodos } from '@/store/todos'
-import { loadTranscriptTail, saveTranscriptTail } from '@/store/transcript-tail-cache'
+import { clearTranscriptTails, loadTranscriptTail, saveTranscriptTail } from '@/store/transcript-tail-cache'
 
 import sessionResumeActiveTurn from '../../../../../../tests/fixtures/session-resume-active-turn.json'
 import { deferred } from '../../../test/deferred'
@@ -3835,6 +3838,7 @@ describe('resumeSession warm-cache mapping integrity', () => {
     // not-called assertions below only see this describe's traffic.
     vi.mocked(requestGatewayForProfile).mockReset()
     vi.mocked(requestGatewayForAgent).mockReset()
+    clearTranscriptTails()
   })
 
   afterEach(() => {
@@ -3971,6 +3975,7 @@ describe('resumeSession warm-cache mapping integrity', () => {
         resumedA.resolve({ session_id: 'rt-background-A', resumed: rowA.id, messages: [], info: {} } as never)
         await pending
         window.localStorage.clear()
+        clearTranscriptTails()
       }
     }
   )
@@ -3989,26 +3994,24 @@ describe('resumeSession warm-cache mapping integrity', () => {
       const persisted = deferred<Awaited<ReturnType<typeof getLatestSessionMessages>>>()
       const resumed = deferred<SessionResumeResult>()
 
-      const cachedMessages = [
-        {
-          id: 'cached-answer',
-          role: 'assistant' as const,
-          parts: [{ type: 'text' as const, text: 'cached display history' }]
-        }
-      ]
+      // The durable cache holds raw REST rows; the paint is their conversion.
+      const cachedRows = [{ content: 'cached display history', id: 41, role: 'assistant' as const, timestamp: 1 }]
+      const cachedMessages = toChatMessages(cachedRows)
 
       window.localStorage.clear()
 
+      clearTranscriptTails()
+
       if (metadataOnly) {
         setConnection({ mode: 'remote', connectionId: 'remote-linux' } as never)
-        saveTranscriptTail('stored-first-paint', [{ ...cachedMessages[0], id: 'guessed-default' }], {
+        saveTranscriptTail('stored-first-paint', [{ ...cachedRows[0], content: 'guessed-default' }], {
           connectionId: 'remote-linux',
           profile: 'default'
         })
       }
 
-      saveTranscriptTail('stored-first-paint', cachedMessages, { connectionId: 'remote-linux', profile: 'work' })
-      saveTranscriptTail('stored-first-paint', [{ ...cachedMessages[0], id: 'wrong-owner' }], 'work')
+      saveTranscriptTail('stored-first-paint', cachedRows, { connectionId: 'remote-linux', profile: 'work' })
+      saveTranscriptTail('stored-first-paint', [{ ...cachedRows[0], content: 'wrong-owner' }], 'work')
       vi.mocked(getSession).mockReturnValue(storedLookup.promise)
       vi.mocked(ensureGatewayAgent).mockClear().mockReturnValueOnce(gatewayReady.promise)
       vi.mocked(getLatestSessionMessages).mockReturnValue(persisted.promise)
@@ -4070,6 +4073,7 @@ describe('resumeSession warm-cache mapping integrity', () => {
         } as never)
         await pending
         window.localStorage.clear()
+        clearTranscriptTails()
       }
     }
   )
@@ -4963,10 +4967,15 @@ describe('resumeSession warm-cache mapping integrity', () => {
       } else {
         expect(JSON.stringify(stateMap.current.get('rt-A')?.messages)).toContain('durable background A')
         expect(stateMap.current.get('rt-A')?.transcriptProvenance?.source).toBe('persisted-display')
-        expect(JSON.stringify(loadTranscriptTail('stored-A'))).toContain('durable background A')
+        // No owner scope on these rows: the durable cache keys by (connection,
+        // profile), and an unscoped entry could never paint, so none is written.
+        expect(loadTranscriptTail('stored-A')).toBeNull()
+        expect(loadTranscriptTail('stored-A', 'default')).toBeNull()
       }
 
       window.localStorage.clear()
+
+      clearTranscriptTails()
       setMessagingSessions([])
     }
   )
@@ -5840,7 +5849,14 @@ describe('resumeSession warm-cache mapping integrity', () => {
     const publications: Array<{ older: boolean; latest: boolean }> = []
 
     setSessions([storedSession({ message_count: 4, profile: 'default' })])
-    saveTranscriptTail('stored-1', cachedState.messages, 'default')
+    saveTranscriptTail(
+      'stored-1',
+      [
+        { content: 'latest question after long-context completion', id: 3, role: 'user', timestamp: 3 },
+        { content: 'latest answer after long-context completion', id: 4, role: 'assistant', timestamp: 4 }
+      ],
+      'default'
+    )
 
     const stopListening = $messages.listen(messages => {
       const snapshot = JSON.stringify(messages)
@@ -5914,6 +5930,7 @@ describe('resumeSession warm-cache mapping integrity', () => {
 
     stopListening()
     window.localStorage.clear()
+    clearTranscriptTails()
     expect(publications.some(snapshot => snapshot.latest && snapshot.older)).toBe(true)
     expect(
       publications.filter(snapshot => snapshot.latest && !snapshot.older),
@@ -7349,5 +7366,185 @@ describe('branchStoredSession failure retry', () => {
       expect(errorNotifications[0].message).not.toBe(longRawMessage)
       expect(errorNotifications[0].message.length).toBeLessThan(180)
     })
+  })
+})
+
+describe('[daveey] instant opens from the durable transcript cache', () => {
+  const owner = { connectionId: 'mac-mini', profile: 'default' } as SessionProfileRoute
+  const row = (id: number, role: 'assistant' | 'user', content: string) => ({ content, id, role, timestamp: id })
+  const lastTiming = () => (globalThis as { __hermesOpenTimings?: OpenTimingRecord[] }).__hermesOpenTimings?.at(-1)
+
+  beforeEach(() => {
+    window.localStorage.clear()
+    clearTranscriptTails()
+    clearAsleepOpen()
+    resetOpenTimings()
+    setMessages([])
+    vi.mocked(getSession).mockReset()
+    vi.mocked(ensureGatewayAgent).mockReset().mockResolvedValue(undefined as never)
+    vi.mocked(getLatestSessionMessages).mockReset()
+    vi.mocked(requestGatewayForAgent).mockReset()
+  })
+
+  async function openWith(rest: Promise<unknown>, resumed: Promise<unknown>, storedId = 'stored-mini') {
+    vi.mocked(getSession).mockResolvedValue(
+      storedSession({ connection_id: 'mac-mini', id: storedId, message_count: 3, profile: 'default' })
+    )
+    vi.mocked(getLatestSessionMessages).mockReturnValue(rest as never)
+    vi.mocked(requestGatewayForAgent).mockReturnValue(resumed as never)
+
+    let resume!: Parameters<Parameters<typeof ResumeHarness>[0]['onReady']>[0]
+    render(<ResumeHarness onReady={ready => (resume = ready)} requestGateway={vi.fn(async () => ({}) as never)} />)
+
+    return resume(storedId, true, owner)
+  }
+
+  const resumedAck = (storedId: string) => ({
+    info: {},
+    message_count: 3,
+    messages: [],
+    messages_omitted: true,
+    resumed: storedId,
+    running: false,
+    session_id: `rt-${storedId}`,
+    session_key: storedId
+  })
+
+  it('paints the cached rows before any await, then reconciles new rows without duplicates', async () => {
+    saveTranscriptTail('stored-mini', [row(1, 'user', 'cached question'), row(2, 'assistant', 'cached answer')], owner)
+
+    const rest = deferred<unknown>()
+    const resumed = deferred<unknown>()
+    const pending = openWith(rest.promise, resumed.promise)
+
+    // Synchronously on the click: the cached rows are on screen and the REST
+    // read is already in flight against the clicked row's exact owner.
+    expect(JSON.stringify($messages.get())).toContain('cached answer')
+    expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+    expect(getLatestSessionMessages).toHaveBeenCalledWith('stored-mini', owner)
+
+    rest.resolve({
+      messages: [
+        row(1, 'user', 'cached question'),
+        row(2, 'assistant', 'cached answer'),
+        row(3, 'user', 'fresh follow-up'),
+        row(4, 'assistant', 'fresh reply')
+      ],
+      pagination: { limit: 120, offset: 0, order: 'latest', returned: 4 },
+      session_id: 'stored-mini'
+    })
+    await waitFor(() => expect(JSON.stringify($messages.get())).toContain('fresh reply'))
+    resumed.resolve(resumedAck('stored-mini'))
+    await pending
+
+    const text = JSON.stringify($messages.get())
+
+    for (const content of ['cached question', 'cached answer', 'fresh follow-up', 'fresh reply']) {
+      expect(text.split(content).length - 1).toBe(1)
+    }
+
+    expect($messages.get()).toHaveLength(4)
+
+    expect(lastTiming()).toMatchObject({ changed: true, outcome: 'rest', paint: 'cache', paintRows: 2 })
+    expect(lastTiming()!.paintMs!).toBeLessThanOrEqual(lastTiming()!.reconciledMs!)
+    // The fresh page is now the cached copy for the next open, and it was read once.
+    expect(JSON.stringify(loadTranscriptTail('stored-mini', owner))).toContain('fresh reply')
+    expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the fresh page while the owner lookup is still pending', async () => {
+    saveTranscriptTail('stored-slow', [row(1, 'user', 'old question')], owner)
+
+    const lookup = deferred<SessionInfo>()
+    const resumed = deferred<unknown>()
+    vi.mocked(getSession).mockReturnValue(lookup.promise)
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({
+      messages: [row(1, 'user', 'old question'), row(2, 'assistant', 'answer from the gateway')],
+      pagination: { limit: 120, offset: 0, order: 'latest', returned: 2 },
+      session_id: 'stored-slow'
+    } as never)
+    vi.mocked(requestGatewayForAgent).mockReturnValue(resumed.promise as never)
+
+    let resume!: Parameters<Parameters<typeof ResumeHarness>[0]['onReady']>[0]
+    render(<ResumeHarness onReady={ready => (resume = ready)} requestGateway={vi.fn(async () => ({}) as never)} />)
+    const pending = resume('stored-slow', true, owner)
+
+    await waitFor(() => expect(JSON.stringify($messages.get())).toContain('answer from the gateway'))
+    expect(ensureGatewayAgent).not.toHaveBeenCalled() // still waiting on the owner lookup
+    expect(lastTiming()).toMatchObject({ changed: true, id: 'stored-slow', outcome: 'rest', paint: 'cache' })
+
+    lookup.resolve(storedSession({ connection_id: 'mac-mini', id: 'stored-slow', message_count: 2, profile: 'default' }))
+    resumed.resolve(resumedAck('stored-slow'))
+    await pending
+
+    expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+    expect($messages.get()).toHaveLength(2)
+  })
+
+  it('an unchanged session reconciles to the painted transcript without replacing it', async () => {
+    const rows = [row(1, 'user', 'same question'), row(2, 'assistant', 'same answer')]
+    saveTranscriptTail('stored-same', rows, owner)
+
+    const rest = deferred<unknown>()
+    const resumed = deferred<unknown>()
+    const pending = openWith(rest.promise, resumed.promise, 'stored-same')
+    const painted = $messages.get()
+
+    rest.resolve({
+      messages: rows,
+      pagination: { limit: 120, offset: 0, order: 'latest', returned: 2 },
+      session_id: 'stored-same'
+    })
+    await waitFor(() => expect(lastTiming()?.id).toBe('stored-same'))
+    expect($messages.get()).toBe(painted) // no re-render: no flicker
+    resumed.resolve(resumedAck('stored-same'))
+    await pending
+
+    expect(lastTiming()).toMatchObject({ changed: false, outcome: 'rest', paint: 'cache' })
+    expect($messages.get()).toHaveLength(2)
+  })
+
+  it('opens an asleep gateway chat read-only from every cached row without dialing it', async () => {
+    const cached = Array.from({ length: 150 }, (_, index) =>
+      row(index + 1, index % 2 ? 'assistant' : 'user', `asleep row ${index + 1}`)
+    )
+
+    saveTranscriptTail('stored-asleep', cached, owner)
+    markAsleepOpen(
+      storedSession({
+        connection_id: 'mac-mini',
+        id: 'stored-asleep',
+        offline_cached: true,
+        offline_gateway: 'mini',
+        profile: 'default'
+      })
+    )
+
+    let resume!: Parameters<Parameters<typeof ResumeHarness>[0]['onReady']>[0]
+    render(<ResumeHarness onReady={ready => (resume = ready)} requestGateway={vi.fn(async () => ({}) as never)} />)
+    await resume('stored-asleep', true, owner)
+
+    const text = JSON.stringify($messages.get())
+    expect(text).toContain('asleep row 1"') // beyond the 120-row REST page: every cached row
+    expect(text).toContain('asleep row 150')
+    expect(getSession).not.toHaveBeenCalled()
+    expect(ensureGatewayAgent).not.toHaveBeenCalled()
+    expect(getLatestSessionMessages).not.toHaveBeenCalled()
+    expect(requestGatewayForAgent).not.toHaveBeenCalled()
+    expect(lastTiming()).toMatchObject({ id: 'stored-asleep', outcome: 'asleep', paint: 'cache' })
+  })
+
+  it('an asleep row with nothing cached falls back to the normal resume path', async () => {
+    markAsleepOpen(storedSession({ connection_id: 'mac-mini', id: 'stored-uncached', offline_cached: true }))
+
+    const pending = openWith(
+      Promise.resolve({ messages: [row(1, 'user', 'woke up')], session_id: 'stored-uncached' }),
+      Promise.resolve(resumedAck('stored-uncached')),
+      'stored-uncached'
+    )
+
+    await pending
+    expect(getLatestSessionMessages).toHaveBeenCalled()
+    expect(asleepOpenFor('stored-uncached')).toBeNull()
   })
 })

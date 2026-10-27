@@ -44,6 +44,18 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   getProfileRoutes: profiles => ipcRenderer.invoke('hermes:plugin-profile-routes', profiles),
   revalidateConnection: () => ipcRenderer.invoke('hermes:connection:revalidate'),
   touchBackend: (profile, options) => ipcRenderer.invoke('hermes:backend:touch', profile, options),
+  // [daveey] Local transcript cache (instant session loads). `read` is synchronous so a
+  // click paints the cached transcript in the same tick; writes are fire-and-forget.
+  transcriptCache: {
+    read: key => ipcRenderer.sendSync('hermes:transcript-cache:read', key),
+    put: (key, messages, kind) => ipcRenderer.send('hermes:transcript-cache:put', { key, messages, kind }),
+    drop: key => ipcRenderer.send('hermes:transcript-cache:drop', { key }),
+    dropEverywhere: sessionId => ipcRenderer.send('hermes:transcript-cache:drop', { everywhere: true, sessionId }),
+    migrateProfile: (connectionId, from, to) =>
+      ipcRenderer.send('hermes:transcript-cache:migrate-profile', { connectionId, from, to }),
+    clear: () => ipcRenderer.send('hermes:transcript-cache:clear'),
+    stats: () => ipcRenderer.invoke('hermes:transcript-cache:stats')
+  },
   getPoolLimits: () => ipcRenderer.invoke('hermes:pool-limits:get'),
   setPoolLimits: limits => ipcRenderer.invoke('hermes:pool-limits:set', limits),
   getGatewayWsUrl: profile => ipcRenderer.invoke('hermes:gateway:ws-url', profile),

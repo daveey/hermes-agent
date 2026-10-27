@@ -1,45 +1,32 @@
+import { LATEST_SESSION_MESSAGES_LIMIT } from '@/api/sessions'
+import type { SessionMessage } from '@/hermes'
 import type { ChatMessage } from '@/lib/chat-messages'
-import { withUniqueToolCallIdsWithinMessage } from '@/lib/chat-messages'
+import { toChatMessages, withUniqueToolCallIdsWithinMessage } from '@/lib/chat-messages'
 
-// ── Durable transcript-tail cache (#89206 "feels instant" layer) ────────────
+// ── Durable transcript cache ([daveey] instant session loads, C1) ───────────
 // The in-memory warm cache (sessionStateByRuntimeIdRef) makes same-window
-// re-opens instant, but dies with the window — so every app launch, backend
-// reap, or profile respawn pays a full network round-trip before ANYTHING
-// paints, and on a cold multi-profile boot that round-trip sits behind a
-// backend spawn. This cache persists a bounded tail of each stored session's
-// transcript in localStorage: a wake paints the cached tail at ~0ms, the
-// paint-first hydration completes immediately, and the REST prefetch /
-// runtime resume reconcile the authoritative transcript when they land
-// (the existing reconcilers already treat painted content as "previous").
+// re-opens instant, but dies with the window, and a remote gateway's first
+// REST read waits seconds on SSH. This cache is a SQLite file owned by
+// Electron main (electron/transcript-cache.ts): the raw `/messages` rows of
+// recently active sessions on every gateway, refreshed in the background by
+// the prefetcher (electron/transcript-prefetch.ts) and by every open's REST
+// read. A click paints the cached rows synchronously; the REST read and the
+// runtime resume reconcile the authoritative transcript when they land (the
+// reconcilers treat the painted cache as "nothing on screen yet").
 //
-// Scope and bounds:
-//   - TAIL ONLY (last TAIL_MESSAGES), size-capped per entry; oversized
-//     messages evict the entry rather than truncating a message mid-parts.
-//   - LRU across MAX_ENTRIES sessions; corrupt entries self-evict.
-//   - Same trust domain as state.db on the same disk — no new exposure.
-//   - Keyed by stored session id (durable identity), never runtime id,
-//     SCOPED by the owning {connectionId, profile} (#94828). Stored ids are
-//     only unique WITHIN one profile's state.db, and localStorage survives
-//     profile switches in the same window: an unscoped key let profile A's
-//     tail be painted against profile B's backend, which then retried a
-//     session id that does not exist there ("session not found") on every
-//     wake. The scope is the REQUEST scope the resume path passes (always a
-//     named profile); the in-memory twin (transcript-tail.ts) keys by the
-//     resolved owner instead and the two are never cross-read. Entries
-//     persisted before scoping shipped (v1,
-//     bare-id keys) carry no owner and are unreachable by construction —
-//     they are swept once per window so a stale tail can never paint again.
-
-const PREFIX = 'hermes.transcript-tail.v2:'
-const LEGACY_ROOT = 'hermes.transcript-tail.v1'
-const INDEX_KEY = 'hermes.transcript-tail.v2-index'
-const TAIL_MESSAGES = 40
-const MAX_ENTRY_BYTES = 256 * 1024
-const MAX_ENTRIES = 50
+// Rows, not ChatMessages: the cache holds backend truth (what REST returns),
+// so a paint converts exactly the rows the next REST page would and an
+// unchanged session reconciles to an equivalent transcript (no re-render).
+//
+// Scoping (#94828): stored ids are only unique within one profile's state.db,
+// so entries are keyed by (connectionId, profile, storedId). '' connection
+// means the registry primary (main normalizes it). An unknown owner never
+// reads: there is no unscoped entry to fall back on.
+//
+// Same trust domain as state.db on this disk; nothing here leaves the Mac.
 
 /** Owning scope of an entry — same shape the REST layer threads through
- *  `getLatestSessionMessages(id, scope)` and the in-memory twin stores in
- *  each TranscriptTailState. */
+ *  `getLatestSessionMessages(id, scope)`. */
 export type TranscriptTailScope =
   | null
   | string
@@ -48,369 +35,221 @@ export type TranscriptTailScope =
       profile?: null | string
     }
 
-interface CacheEntry {
-  messages: ChatMessage[]
+interface BridgeKey {
+  connectionId: string
+  profile: string
+  sessionId: string
+}
+
+interface BridgeEntry {
+  activity: null | number
+  messageCount: null | number
+  messages: unknown[]
   savedAt: number
 }
 
-let legacyPurged = false
+type Bridge = NonNullable<NonNullable<Window['hermesDesktop']>['transcriptCache']>
 
-/** One-time sweep of pre-scoping v1 entries (#94828): a bare-id key cannot
- *  be attributed to a profile, so it must never paint again. Best effort —
- *  worst case a stale entry lingers unread until quota eviction. */
-function purgeLegacyV1(store: Storage): void {
-  if (legacyPurged) {
-    return
-  }
+// No Electron bridge (unit tests, a browser build): an in-memory twin with the
+// same keying, so callers and tests exercise one contract.
+const memory = new Map<string, BridgeEntry>()
+const memoryKey = (key: BridgeKey) => JSON.stringify([key.connectionId || '', key.profile, key.sessionId])
 
-  try {
-    const doomed: string[] = []
-
-    for (let index = 0; index < store.length; index += 1) {
-      const key = store.key(index)
-
-      if (key && key.startsWith(LEGACY_ROOT)) {
-        doomed.push(key)
+const memoryBridge: Bridge = {
+  clear: () => memory.clear(),
+  drop: key => void memory.delete(memoryKey(key)),
+  dropEverywhere: sessionId => {
+    for (const [entry] of memory) {
+      if (JSON.parse(entry)[2] === sessionId) {
+        memory.delete(entry)
       }
     }
+  },
+  migrateProfile: (connectionId, from, to) => {
+    for (const [entry, value] of [...memory]) {
+      const [conn, profile, id] = JSON.parse(entry)
 
-    for (const key of doomed) {
-      store.removeItem(key)
+      if (profile === from && (conn || 'local') === (connectionId || 'local')) {
+        memory.delete(entry)
+        memory.set(JSON.stringify([conn, to, id]), value)
+      }
+    }
+  },
+  put: (key, messages, kind) => {
+    const current = memory.get(memoryKey(key))
+
+    if (kind === 'older') {
+      if (current) {
+        memory.set(memoryKey(key), { ...current, messages: [...messages, ...current.messages] })
+      }
+
+      return
     }
 
-    // Only latch on a completed sweep: a mid-sweep throw retries on the next
-    // storage() touch instead of leaving a partial purge latched for the
-    // window's lifetime.
-    legacyPurged = true
-  } catch {
-    // best effort
-  }
+    memory.set(memoryKey(key), {
+      activity: current?.activity ?? null,
+      messageCount: current?.messageCount ?? null,
+      messages: messages.slice(-200),
+      savedAt: Date.now()
+    })
+  },
+  read: key => memory.get(memoryKey(key)) ?? null,
+  stats: async () => ({ bytes: 0, sessions: memory.size })
 }
 
-function storage(): Storage | null {
+function bridge(): Bridge {
   try {
-    const store = window.localStorage
-
-    purgeLegacyV1(store)
-
-    return store
+    return (typeof window !== 'undefined' && window.hermesDesktop?.transcriptCache) || memoryBridge
   } catch {
-    return null
+    return memoryBridge
   }
 }
 
-function normalizedScope(scope?: TranscriptTailScope): { connectionId: string; profile: string } | null {
-  if (typeof scope === 'string') {
-    return { connectionId: '', profile: scope.trim() || 'default' }
+function bridgeKey(storedSessionId: string, scope?: TranscriptTailScope): BridgeKey | null {
+  const sessionId = (storedSessionId ?? '').trim()
+
+  if (!sessionId || !scope) {
+    return null
   }
 
-  if (!scope) {
-    return null
+  if (typeof scope === 'string') {
+    return { connectionId: '', profile: scope.trim() || 'default', sessionId }
   }
 
   return {
     connectionId: String(scope.connectionId ?? '').trim(),
-    profile: String(scope.profile ?? '').trim() || 'default'
+    profile: String(scope.profile ?? '').trim() || 'default',
+    sessionId
   }
 }
 
-/** Index identity of an entry: the bare stored id (legacy/unscoped callers)
- *  or the JSON [connectionId, profile, storedId] composite. */
-function entrySuffix(storedSessionId: string, scope?: TranscriptTailScope): string {
-  const scoped = normalizedScope(scope)
+/** Persist the latest REST page of a session (raw rows, chronological). */
+export function saveTranscriptTail(storedSessionId: string, messages: SessionMessage[], scope?: TranscriptTailScope): void {
+  const key = bridgeKey(storedSessionId, scope)
 
-  return scoped ? JSON.stringify([scoped.connectionId, scoped.profile, storedSessionId]) : storedSessionId
-}
-
-function readIndex(store: Storage): string[] {
-  try {
-    const raw = store.getItem(INDEX_KEY)
-    const parsed = raw ? JSON.parse(raw) : []
-
-    return Array.isArray(parsed) ? parsed.filter(id => typeof id === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-function writeIndex(store: Storage, ids: string[]): void {
-  try {
-    store.setItem(INDEX_KEY, JSON.stringify(ids))
-  } catch {
-    // Quota — drop the index; entries become orphaned and are rewritten lazily.
-  }
-}
-
-function touchIndex(store: Storage, suffix: string): void {
-  const ids = readIndex(store).filter(id => id !== suffix)
-  ids.push(suffix)
-
-  while (ids.length > MAX_ENTRIES) {
-    const evicted = ids.shift()
-
-    if (evicted) {
-      try {
-        store.removeItem(PREFIX + evicted)
-      } catch {
-        // best effort
-      }
-    }
-  }
-
-  writeIndex(store, ids)
-}
-
-/** Persist the tail of a session's transcript. No-op on empty/oversized.
- *  Pass the session's owning scope ({connectionId, profile}, or just the
- *  profile name) so the entry can only ever be read against that backend. */
-export function saveTranscriptTail(
-  storedSessionId: string,
-  messages: ChatMessage[],
-  scope?: TranscriptTailScope
-): void {
-  const id = (storedSessionId ?? '').trim()
-  const store = storage()
-
-  if (!store || !id || !Array.isArray(messages) || messages.length === 0) {
+  if (!key || !Array.isArray(messages) || messages.length === 0) {
     return
   }
 
-  const entry: CacheEntry = { messages: messages.slice(-TAIL_MESSAGES), savedAt: Date.now() }
-
-  let serialized: string
-
   try {
-    serialized = JSON.stringify(entry)
+    bridge().put(key, messages, 'latest')
   } catch {
-    return // non-serializable parts (live handles) — skip, never throw
-  }
-
-  if (serialized.length > MAX_ENTRY_BYTES) {
-    // Retry with a shorter tail before giving up; a session dominated by a
-    // few huge tool results still caches its recent turns.
-    const shorter: CacheEntry = { messages: messages.slice(-8), savedAt: entry.savedAt }
-
-    try {
-      serialized = JSON.stringify(shorter)
-    } catch {
-      return
-    }
-
-    if (serialized.length > MAX_ENTRY_BYTES) {
-      return
-    }
-  }
-
-  const suffix = entrySuffix(id, scope)
-
-  try {
-    store.setItem(PREFIX + suffix, serialized)
-    touchIndex(store, suffix)
-  } catch {
-    // Quota exceeded — evict everything and retry once (small cache >> stale cache).
-    try {
-      clearTranscriptTails()
-      store.setItem(PREFIX + suffix, serialized)
-      touchIndex(store, suffix)
-    } catch {
-      // Storage genuinely unavailable; instant paint just won't happen.
-    }
+    // Non-serializable rows or a torn-down bridge: the paint just won't be instant.
   }
 }
 
-/** Cached tail for a stored session, or null. Corrupt entries self-evict.
- *  Only entries saved under the SAME owning scope are returned (#94828). */
-export function loadTranscriptTail(storedSessionId: string, scope?: TranscriptTailScope): ChatMessage[] | null {
-  const id = (storedSessionId ?? '').trim()
-  const store = storage()
+/** Persist an older page the user loaded ("Show earlier") above the cached run. */
+export function saveOlderTranscriptPage(
+  storedSessionId: string,
+  messages: SessionMessage[],
+  scope?: TranscriptTailScope
+): void {
+  const key = bridgeKey(storedSessionId, scope)
 
-  if (!store || !id) {
-    return null
-  }
-
-  let raw: null | string = null
-
-  try {
-    raw = store.getItem(PREFIX + entrySuffix(id, scope))
-  } catch {
-    return null
-  }
-
-  if (!raw) {
-    return null
+  if (!key || !Array.isArray(messages) || messages.length === 0) {
+    return
   }
 
   try {
-    const parsed = JSON.parse(raw) as CacheEntry
-
-    if (!parsed || !Array.isArray(parsed.messages) || parsed.messages.length === 0) {
-      throw new Error('empty')
-    }
-
-    // Repair, don't just trust: a tail persisted by an older build (or by a
-    // producer bug) can carry two `tool-call` parts with one `toolCallId`
-    // inside a single message. This path paints DIRECTLY into the view, and a
-    // poisoned entry is re-read identically on every launch — the "one pane
-    // permanently broken" shape of #87857. Renaming at read keeps already-
-    // affected installs from crash-looping forever on upgraded builds.
-    return parsed.messages.map(withUniqueToolCallIdsWithinMessage)
+    bridge().put(key, messages, 'older')
   } catch {
+    // best effort
+  }
+}
+
+/** Raw cached entry, or null. */
+export function readCachedTranscript(storedSessionId: string, scope?: TranscriptTailScope): BridgeEntry | null {
+  const key = bridgeKey(storedSessionId, scope)
+
+  if (!key) {
+    return null
+  }
+
+  try {
+    const entry = bridge().read(key)
+
+    return entry && Array.isArray(entry.messages) && entry.messages.length > 0 ? entry : null
+  } catch {
+    return null
+  }
+}
+
+/** Cached transcript for a stored session, converted for display, or null.
+ *  By default only the newest LATEST_SESSION_MESSAGES_LIMIT rows: the page the
+ *  open's REST read fetches, so an unchanged session reconciles without a
+ *  re-render. `all` paints every cached row (read-only open of an asleep
+ *  gateway, where nothing will replace it). */
+export function loadTranscriptTail(
+  storedSessionId: string,
+  scope?: TranscriptTailScope,
+  options: { all?: boolean } = {}
+): ChatMessage[] | null {
+  const entry = readCachedTranscript(storedSessionId, scope)
+
+  if (!entry) {
+    return null
+  }
+
+  try {
+    const rows = (options.all ? entry.messages : entry.messages.slice(-LATEST_SESSION_MESSAGES_LIMIT)) as SessionMessage[]
+    const messages = toChatMessages(rows)
+
+    // Repair, don't just trust: a poisoned entry would be re-read identically
+    // on every launch (#87857), so duplicate tool-call ids are renamed at read.
+    return messages.length > 0 ? messages.map(withUniqueToolCallIdsWithinMessage) : null
+  } catch {
+    dropTranscriptTail(storedSessionId, scope)
+
+    return null
+  }
+}
+
+/** Drop one scope's entry (failed resume / poisoned cache). Other backends'
+ *  entries for the same stored id stay intact. */
+export function dropTranscriptTail(storedSessionId: string, scope?: TranscriptTailScope): void {
+  const key = bridgeKey(storedSessionId, scope)
+
+  if (key) {
     try {
-      store.removeItem(PREFIX + entrySuffix(id, scope))
+      bridge().drop(key)
     } catch {
       // best effort
     }
-
-    return null
   }
 }
 
-/** Drop one session's cached tail (session deleted / cache poisoned). With a
- *  scope, only that scope's entry is dropped — other backends' tails for the
- *  same stored id stay intact. */
-export function dropTranscriptTail(storedSessionId: string, scope?: TranscriptTailScope): void {
-  const id = (storedSessionId ?? '').trim()
-  const store = storage()
-
-  if (!store || !id) {
-    return
-  }
-
-  try {
-    const suffix = entrySuffix(id, scope)
-
-    store.removeItem(PREFIX + suffix)
-    writeIndex(
-      store,
-      readIndex(store).filter(entry => entry !== suffix)
-    )
-  } catch {
-    // best effort
-  }
-}
-
-/** Drop EVERY scope's entry for a stored id. Delete-path only: the save-path
- *  scope (ownerRoute) and the delete-path scope (the removed row's
- *  connection_id) are derived from different sources, so a shape drift
- *  between them would orphan the entry until LRU eviction (#94914 review,
- *  defect 1). A DELETED stored id cannot be legitimately reused, so sweeping
- *  all scopes is safe there — but never on the failed-resume path, where a
- *  same-id twin in another profile must keep its own tail. */
+/** Drop EVERY scope's entry for a deleted stored id (delete path only: a
+ *  same-id twin in another profile keeps its entry on a failed resume). */
 export function dropTranscriptTailEverywhere(storedSessionId: string): void {
   const id = (storedSessionId ?? '').trim()
-  const store = storage()
 
-  if (!store || !id) {
-    return
-  }
-
-  try {
-    const namesId = (entry: string): boolean => {
-      if (entry === id) {
-        return true
-      }
-
-      if (!entry.startsWith('[')) {
-        return false
-      }
-
-      try {
-        const parsed = JSON.parse(entry)
-
-        return Array.isArray(parsed) && parsed[2] === id
-      } catch {
-        return false
-      }
+  if (id) {
+    try {
+      bridge().dropEverywhere(id)
+    } catch {
+      // best effort
     }
-
-    const index = readIndex(store)
-
-    for (const entry of index.filter(namesId)) {
-      store.removeItem(PREFIX + entry)
-    }
-
-    writeIndex(
-      store,
-      index.filter(entry => !namesId(entry))
-    )
-  } catch {
-    // best effort
   }
 }
 
-/** Re-key every cached tail owned by `oldProfile` under `newProfile` (profile
- *  rename; the sessions still exist, only their owner's name changed). Entries
- *  stay unreachable under the old name by construction, so without this a
- *  rename costs a cold paint for every open chat. Local connection only. Best effort. */
+/** Re-key the local connection's entries after a profile rename. */
 export function migrateTranscriptTailsForProfile(oldProfile: string, newProfile: string): void {
-  const store = storage()
   const from = oldProfile.trim() || 'default'
   const to = newProfile.trim() || 'default'
 
-  if (!store || from === to) {
-    return
-  }
-
-  const ids = readIndex(store)
-
-  for (const [position, suffix] of ids.entries()) {
-    let parsed: unknown
-
+  if (from !== to) {
     try {
-      parsed = JSON.parse(suffix)
-    } catch {
-      continue // bare-id legacy suffix: carries no owner
-    }
-
-    if (!Array.isArray(parsed) || parsed.length !== 3 || parsed[1] !== from) {
-      continue
-    }
-
-    const [connectionId, , storedId] = parsed as [string, string, string]
-
-    // Local-connection state only (same rule as migrateTilesForProfile): a same-named
-    // profile on a remote connection was not renamed.
-    if ((String(connectionId ?? '').trim() || 'local') !== 'local') {
-      continue
-    }
-
-    const next = JSON.stringify([connectionId, to, storedId])
-
-    try {
-      const raw = store.getItem(PREFIX + suffix)
-
-      if (raw !== null) {
-        store.setItem(PREFIX + next, raw)
-      }
-
-      store.removeItem(PREFIX + suffix)
-      ids[position] = next
+      bridge().migrateProfile('local', from, to)
     } catch {
       // best effort
     }
   }
-
-  writeIndex(store, ids)
 }
 
-/** Wipe the whole cache (connection/mode re-home, quota recovery). */
+/** Wipe the whole cache (connection/mode re-home). */
 export function clearTranscriptTails(): void {
-  const store = storage()
-
-  if (!store) {
-    return
-  }
-
-  for (const id of readIndex(store)) {
-    try {
-      store.removeItem(PREFIX + id)
-    } catch {
-      // best effort
-    }
-  }
-
   try {
-    store.removeItem(INDEX_KEY)
+    bridge().clear()
   } catch {
     // best effort
   }

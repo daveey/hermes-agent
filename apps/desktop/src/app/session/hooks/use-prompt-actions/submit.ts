@@ -15,6 +15,7 @@ import {
   stopVoicePlayback,
   takeVoicePlaybackInterrupted
 } from '@/lib/voice-playback'
+import { asleepOpenFor, asleepSendNotice } from '@/store/asleep-session'
 import {
   $composerAttachments,
   type ComposerAttachment,
@@ -166,6 +167,18 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
   return useCallback(
     async (rawText: string, options?: SubmitTextOptions) => {
+      // [daveey] A chat opened read-only from an asleep gateway has no runtime
+      // and no reachable owner: say so instead of dialing it (draft kept).
+      const asleep = asleepOpenFor(
+        options?.storedSessionId ?? selectedStoredSessionIdRef.current ?? getRoutedStoredSessionId()
+      )
+
+      if (asleep && !options?.fromQueue) {
+        notify({ durationMs: 8_000, kind: 'warning', message: asleepSendNotice(asleep), title: 'Machine asleep' })
+
+        return false
+      }
+
       const usingComposerAttachments = !options?.attachments
 
       // Drop undefined/null holes a session switch or draft restore can leave in

@@ -73,6 +73,22 @@ declare global {
       // a prompt turn leases the backend (early skip for cooperative
       // retirement; the backend probe is the proof).
       touchBackend: (profile?: string | null, options?: { activeTurn?: boolean }) => Promise<{ ok: boolean }>
+      // [daveey] Local transcript cache (Electron main, SQLite). Raw /messages rows keyed by
+      // (connection, profile, stored session id); '' connection means the registry primary.
+      transcriptCache?: {
+        read: (key: TranscriptCacheBridgeKey) => null | {
+          activity: null | number
+          messageCount: null | number
+          messages: unknown[]
+          savedAt: number
+        }
+        put: (key: TranscriptCacheBridgeKey, messages: unknown[], kind: 'latest' | 'older') => void
+        drop: (key: TranscriptCacheBridgeKey) => void
+        dropEverywhere: (sessionId: string) => void
+        migrateProfile: (connectionId: string, from: string, to: string) => void
+        clear: () => void
+        stats: () => Promise<{ bytes: number; sessions: number }>
+      }
       // Pool sizing (Settings → Advanced): device-local, live-applied by the
       // main process. get resolves the limits currently in force; set applies
       // (and persists) new ones, evicting/reaping to converge immediately.
@@ -717,6 +733,12 @@ export interface DesktopMarketplaceThemeResult {
   extensionId: string
   displayName: string
   themes: DesktopMarketplaceThemeFile[]
+}
+
+export interface TranscriptCacheBridgeKey {
+  connectionId: string
+  profile: string
+  sessionId: string
 }
 
 export interface HermesTerminalSession {
