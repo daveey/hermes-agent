@@ -2746,6 +2746,30 @@ export interface PromptSubmitResult {
   turn_isolation?: boolean | null
 }
 export type PromptSubmitStatus = 'streaming' | 'queued' | 'steered' | 'redirected'
+export interface PromptAdmitParams {
+  profile: string
+  stored_session_id: string
+  operation_id: string
+  payload_digest: string
+  text: string
+}
+export interface PromptAdmissionResult {
+  status: string
+  stored_session_id: string
+  operation_id: string
+  payload_digest: string
+  profile: string
+  user_row_id?: number | null
+  message_uid?: string | null
+  execution_status?: string
+  dispatch?: string
+}
+export interface PromptAdmissionGetParams {
+  profile: string
+  stored_session_id: string
+  operation_id: string
+  payload_digest: string
+}
 export interface ClipboardPasteParams {
   session_id: string
   profile?: string | null
@@ -4777,6 +4801,15 @@ export interface ErrorSurface {
   resets_at?: number | null
   [key: string]: unknown
 }
+/** ``methods_prompt_admission._dispatch``: committed input, before worker output. */
+export interface AdmittedMessagePayload {
+  stored_session_id: string
+  profile: string
+  user_row_id: number
+  message_uid: string
+  text: string
+  timestamp: number
+}
 /** ``tui_gateway/model_switch.py`` capability-refresh notice. */
 export interface NoticePayload {
   message: string
@@ -5439,6 +5472,10 @@ export interface RpcMethods {
   'projects.tree': { params: ProjectsTreeParams; result: ProjectsTreeResult }
   /** Patch a project's display fields; answers the refreshed project. */
   'projects.update': { params: ProjectsUpdateParams; result: ProjectResult }
+  /** Verify the exact accepted user row; acceptance does not assert execution. */
+  'prompt.admission.get': { params: PromptAdmissionGetParams; result: PromptAdmissionResult }
+  /** Durably accept once into an idle exact live owner. Never cold-resume or replay execution. */
+  'prompt.admit': { params: PromptAdmitParams; result: PromptAdmissionResult }
   /** Run a task on a fresh agent in the background; the answer arrives as background.complete. */
   'prompt.background': { params: SideAgentParams; result: TaskIdResult }
   /** Side question over a snapshot of the live conversation; the answer arrives as btw.complete. */
@@ -5802,6 +5839,8 @@ export const RPC_METHODS = [
   'projects.set_primary',
   'projects.tree',
   'projects.update',
+  'prompt.admission.get',
+  'prompt.admit',
   'prompt.background',
   'prompt.btw',
   'prompt.submit',
@@ -5995,6 +6034,8 @@ export interface BackendGatewayEventMap {
   'gateway.ready': GatewayReadyPayload
   /** Apply a named desktop layout preset. */
   'layout.apply': LayoutApplyPayload
+  /** Authoritative user row for an externally admitted turn; merge by identity, never submit or resume. */
+  'message.admitted': AdmittedMessagePayload
   /** The turn ended: final text, usage and outcome. */
   'message.complete': MessageCompletePayload
   /** One streamed chunk of the assistant reply. */
@@ -6132,6 +6173,7 @@ export const GATEWAY_EVENT_TYPES = [
   'free_tier.challenge',
   'gateway.ready',
   'layout.apply',
+  'message.admitted',
   'message.complete',
   'message.delta',
   'message.interim',

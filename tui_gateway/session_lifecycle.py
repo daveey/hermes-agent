@@ -146,11 +146,13 @@ def _durable_owner_refusal(session: dict):
         f"Writer: {holder}", SESSION_NOT_OWNED)
 
 
-def _ensure_active_session_slot(sid: str, session: dict) -> str | None:
+def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool = True) -> str | None:
     """Claim this session's cap slot on its first real turn; None when ok. session.create/resume deliberately
     do NOT claim: tile paints, reconnect-resumes and abandoned drafts would hold invisible slots (no DB row)
     that starve the messaging gateway sharing the cap. Anything holding a slot must be user-visible. An
-    inert borrowed token (see _install_borrowed_lease) also lands here: present = slot held upstream."""
+    inert borrowed token (see _install_borrowed_lease) also lands here: present = slot held upstream.
+    Exact admission passes allow_takeover=False: it must not move a detached owner's lease,
+    and already holds the non-reentrant resume lock used by takeover."""
     # A registry slot is not the SQLite writer lease. Check even on a warm Desktop session.
     # Its own running agent is excluded by exact holder, preserving ordinary steer/stop.
     if (refusal := _durable_owner_refusal(session)) is not None:
@@ -164,7 +166,8 @@ def _ensure_active_session_slot(sid: str, session: dict) -> str | None:
         _attach_lease(session, lease)
         return None
     from hermes_cli.active_sessions import SESSION_NOT_OWNED
-    if getattr(limit_message, "reason", None) == SESSION_NOT_OWNED and _take_over_detached_runtime_lease(sid, session, key):
+    if (allow_takeover and getattr(limit_message, "reason", None) == SESSION_NOT_OWNED
+            and _take_over_detached_runtime_lease(sid, session, key)):
         return None
     return limit_message
 

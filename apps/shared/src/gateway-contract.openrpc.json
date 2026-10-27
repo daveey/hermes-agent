@@ -2977,6 +2977,42 @@
       }
     },
     {
+      "name": "prompt.admission.get",
+      "summary": "Verify the exact accepted user row; acceptance does not assert execution.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PromptAdmissionGetParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/PromptAdmissionResult"
+        }
+      }
+    },
+    {
+      "name": "prompt.admit",
+      "summary": "Durably accept once into an idle exact live owner. Never cold-resume or replay execution.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PromptAdmitParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/PromptAdmissionResult"
+        }
+      }
+    },
+    {
       "name": "prompt.background",
       "summary": "Run a task on a fresh agent in the background; the answer arrives as background.complete.",
       "params": [
@@ -4983,6 +5019,46 @@
           "subagent_id"
         ],
         "title": "ActiveSubagent",
+        "type": "object"
+      },
+      "AdmittedMessagePayload": {
+        "additionalProperties": false,
+        "description": "``methods_prompt_admission._dispatch``: committed input, before worker output.",
+        "properties": {
+          "stored_session_id": {
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "user_row_id": {
+            "title": "User Row Id",
+            "type": "integer"
+          },
+          "message_uid": {
+            "title": "Message Uid",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "stored_session_id",
+          "profile",
+          "user_row_id",
+          "message_uid",
+          "text",
+          "timestamp"
+        ],
+        "title": "AdmittedMessagePayload",
         "type": "object"
       },
       "AgentPluginRow": {
@@ -27027,6 +27103,153 @@
         "title": "ProjectsUpdateParams",
         "type": "object"
       },
+      "PromptAdmissionGetParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Profile",
+            "type": "string"
+          },
+          "stored_session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "payload_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Payload Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile",
+          "stored_session_id",
+          "operation_id",
+          "payload_digest"
+        ],
+        "title": "PromptAdmissionGetParams",
+        "type": "object"
+      },
+      "PromptAdmissionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stored_session_id": {
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "payload_digest": {
+            "title": "Payload Digest",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "user_row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Row Id"
+          },
+          "message_uid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Message Uid"
+          },
+          "execution_status": {
+            "default": "unknown",
+            "title": "Execution Status",
+            "type": "string"
+          },
+          "dispatch": {
+            "default": "unknown",
+            "title": "Dispatch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "stored_session_id",
+          "operation_id",
+          "payload_digest",
+          "profile"
+        ],
+        "title": "PromptAdmissionResult",
+        "type": "object"
+      },
+      "PromptAdmitParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Profile",
+            "type": "string"
+          },
+          "stored_session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "payload_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Payload Digest",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 1000000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile",
+          "stored_session_id",
+          "operation_id",
+          "payload_digest",
+          "text"
+        ],
+        "title": "PromptAdmitParams",
+        "type": "object"
+      },
       "PromptSubmitParams": {
         "additionalProperties": false,
         "description": "``text`` is normally a string; the relay / hosted paths may hand a structured (parts list)\npayload, and the busy path renders it. Truncation (rewind / edit / regenerate) needs explicit\nconsent: ``confirm_truncate`` plus one durable target (``truncate_before_row_id`` preferred,\n``truncate_before_message_id``, or the legacy ``truncate_before_user_ordinal``).",
@@ -41404,6 +41627,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/LayoutApplyPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "message.admitted",
+      "summary": "Authoritative user row for an externally admitted turn; merge by identity, never submit or resume.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/AdmittedMessagePayload"
           }
         }
       ]

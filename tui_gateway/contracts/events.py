@@ -100,6 +100,21 @@ class ErrorPayload(Payload):
 event("error", ErrorPayload, doc="A session-level failure outside a turn (agent init, model switch, compression, resume).")
 
 
+class AdmittedMessagePayload(Payload):
+    """``methods_prompt_admission._dispatch``: committed input, before worker output."""
+
+    stored_session_id: str
+    profile: str
+    user_row_id: int
+    message_uid: str
+    text: str
+    timestamp: float
+
+
+event("message.admitted", AdmittedMessagePayload,
+      doc="Authoritative user row for an externally admitted turn; merge by identity, never submit or resume.")
+
+
 class NoticePayload(Payload):
     """``tui_gateway/model_switch.py`` capability-refresh notice."""
 
