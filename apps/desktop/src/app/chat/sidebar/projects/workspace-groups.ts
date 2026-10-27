@@ -434,9 +434,9 @@ export function liveSessionProjectId(
   explicitProjects: ProjectInfo[],
   owners: ReadonlyMap<string, string> = NO_OWNERS
 ): null | string {
-  const owner = owners.get(session.id)
+  const owner = ownerOf(owners, session)
 
-  if (owner && owner !== NO_PROJECT_ID) {
+  if (owner) {
     return owner
   }
 
@@ -487,13 +487,165 @@ export function liveSessionProjectId(
   return repoRoot
 }
 
-/** The lane a row files under: its live project, or Home for detached (cwd-less) rows. */
+/**
+ * What the full (unfiltered) tree already knows, for placing rows the backend
+ * hasn't assigned yet: every node id, plus each folder a node's lanes would
+ * file a live row under (repo roots and non-root lane paths). Build it once
+ * per tree with {@link knownProjectsOf}.
+ */
+export interface KnownProjects {
+  ids: ReadonlySet<string>
+  roots: readonly { path: string; projectId: string }[]
+}
+
+export function knownProjectsOf(tree: readonly SidebarProjectTree[]): KnownProjects {
+  const roots: { path: string; projectId: string }[] = []
+
+  for (const project of tree) {
+    if (project.isNoProject) {
+      continue
+    }
+
+    for (const repo of project.repos) {
+      const repoPath = normalizePath(repo.path)
+
+      if (repoPath) {
+        roots.push({ path: repoPath, projectId: project.id })
+      }
+
+      // A linked worktree lane can sit outside its repo root; the live lane
+      // overlay joins rows to it by its own path, so placement must too.
+      for (const group of repo.groups) {
+        const lanePath = normalizePath(group.path)
+
+        if (lanePath && pathKey(lanePath) !== pathKey(repoPath)) {
+          roots.push({ path: lanePath, projectId: project.id })
+        }
+      }
+    }
+  }
+
+  return { ids: new Set(tree.map(project => project.id)), roots }
+}
+
+/** The known project whose deepest folder holds this row's cwd, if any. */
+function knownClaimant(known: KnownProjects, session: SessionInfo): null | string {
+  const cwd = (session.cwd || '').trim()
+  let claimant: null | string = null
+  let bestLen = -1
+
+  if (!cwd) {
+    return null
+  }
+
+  for (const root of known.roots) {
+    const len = segments(root.path).length
+
+    if (len > bestLen && isPathUnder(root.path, cwd)) {
+      bestLen = len
+      claimant = root.projectId
+    }
+  }
+
+  return claimant
+}
+
+/** Visible placement: authoritative owner, inferred project, then provisional Home. */
 export function sessionBucketId(
   session: SessionInfo,
   explicitProjects: ProjectInfo[],
-  owners: ReadonlyMap<string, string> = NO_OWNERS
+  owners: ReadonlyMap<string, string> = NO_OWNERS,
+  known?: KnownProjects
 ): null | string {
-  return liveSessionProjectId(session, explicitProjects, owners) ?? (isDetachedSession(session) ? NO_PROJECT_ID : null)
+  const projectId = liveSessionProjectId(session, explicitProjects, owners)
+
+  // Only a guess (no owner, no named project) that names no known node needs
+  // more: such a row has no lane to render in yet.
+  if (
+    !projectId ||
+    !known ||
+    known.ids.has(projectId) ||
+    ownerOf(owners, session) ||
+    explicitProjects.some(project => !project.archived && project.id === projectId)
+  ) {
+    return projectId ?? (isDetachedSession(session) ? NO_PROJECT_ID : null)
+  }
+
+  // Inside a folder the tree already knows (a repo subfolder, an unprobed
+  // in-tree worktree, a sibling worktree lane): that project's lanes take the
+  // row, so every other surface files it there too.
+  const claimant = knownClaimant(known, session)
+
+  if (claimant) {
+    return claimant
+  }
+
+  // A cwd alone is not proof of a project (notably a CLI started in the
+  // user's home). Keep that row visible in Home until the tree resolves it;
+  // git evidence or a worktree path still waits for the backend's probe.
+  if (session.git_repo_root?.trim() || /(?:^|[/\\])\.worktrees(?:[/\\]|$)/.test(session.cwd ?? '')) {
+    return projectId
+  }
+
+  return NO_PROJECT_ID
+}
+
+/**
+ * The tree with a Home node for rows only Home can show. The backend emits
+ * Home only once a persisted row lands there, so a brand-new chat in an
+ * unclaimed folder (or with no folder) has no node to render under until the
+ * next snapshot. Synthesize one — from the same placement the previews,
+ * filter and lanes use, before any filtering — so it shows at once. A tree
+ * that already has Home, or has nothing yet (still loading, or no projects:
+ * the flat list shows the rows), is returned as-is. Never authoritative: the
+ * owner map is built from the backend tree, not from this.
+ */
+export function withProvisionalHome(
+  tree: SidebarProjectTree[],
+  live: readonly SessionInfo[],
+  explicitProjects: ProjectInfo[],
+  {
+    owners = NO_OWNERS,
+    known = knownProjectsOf(tree),
+    removed = NO_REMOVED,
+    label = 'Home'
+  }: { owners?: ReadonlyMap<string, string>; known?: KnownProjects; removed?: ReadonlySet<string>; label?: string } = {}
+): SidebarProjectTree[] {
+  if (!tree.length || tree.some(project => project.isNoProject)) {
+    return tree
+  }
+
+  const rows = uniqueConversations(
+    live.filter(
+      session =>
+        !removed.has(session.id) && sessionBucketId(session, explicitProjects, owners, known) === NO_PROJECT_ID
+    )
+  ).sort((a, b) => sessionRecency(b) - sessionRecency(a))
+
+  if (!rows.length) {
+    return tree
+  }
+
+  const home: SidebarProjectTree = {
+    id: NO_PROJECT_ID,
+    isNoProject: true,
+    label,
+    lastActive: sessionRecency(rows[0]),
+    path: null,
+    previewSessions: rows,
+    repos: [
+      {
+        groups: [{ id: NO_PROJECT_ID, label, path: null, sessions: rows }],
+        id: NO_PROJECT_ID,
+        label,
+        path: null,
+        sessionCount: rows.length
+      }
+    ],
+    sessionCount: rows.length
+  }
+
+  return [home, ...tree]
 }
 
 /**
@@ -506,13 +658,14 @@ export function sessionMatchesProjectFilter(
   session: SessionInfo,
   filter: readonly string[],
   explicitProjects: ProjectInfo[],
-  owners: ReadonlyMap<string, string> = NO_OWNERS
+  owners: ReadonlyMap<string, string> = NO_OWNERS,
+  known?: KnownProjects
 ): boolean {
   if (!filter.length) {
     return true
   }
 
-  const id = sessionBucketId(session, explicitProjects, owners)
+  const id = sessionBucketId(session, explicitProjects, owners, known)
 
   return id !== null && filter.includes(id)
 }
@@ -800,8 +953,8 @@ export function overlayRepoLanes(
 }
 
 /**
- * Home's overlay: its rows have no cwd to place, so this is a plain upsert of
- * detached live sessions into its single lane — a brand-new project-less chat
+ * Home's overlay uses the same visible placement as previews and filters.
+ * Upsert its live sessions into the single lane — a brand-new project-less chat
  * shows the instant it's created, matching the flat Recents list. A chat the
  * authoritative owner map gives to a named project stays out, even while its
  * live copy is briefly detached (else it lists in both places).
@@ -810,7 +963,8 @@ function overlayHomeLane(
   project: SidebarProjectTree,
   live: SessionInfo[],
   removed: ReadonlySet<string>,
-  owners: ReadonlyMap<string, string>
+  owners: ReadonlyMap<string, string>,
+  { explicitProjects = [], known }: LivePlacementContext
 ): SidebarProjectTree {
   const ownedElsewhere = (session: SessionInfo): boolean => {
     const owner = ownerOf(owners, session)
@@ -820,14 +974,18 @@ function overlayHomeLane(
 
   const belongs = (session: SessionInfo): boolean => !removed.has(session.id) && !ownedElsewhere(session)
   const lane = project.repos[0]?.groups[0]
-  const detached = live.filter(session => isDetachedSession(session) && belongs(session))
+
+  const homeRows = live.filter(
+    session => sessionBucketId(session, explicitProjects, owners, known) === NO_PROJECT_ID && belongs(session)
+  )
+
   const kept = (lane?.sessions ?? []).filter(belongs)
 
-  if (!detached.length && kept.length === (lane?.sessions.length ?? 0)) {
+  if (!homeRows.length && kept.length === (lane?.sessions.length ?? 0)) {
     return project
   }
 
-  const sessions = detached.reduce(upsertSession, kept)
+  const sessions = homeRows.reduce(upsertSession, kept)
   const nextLane = { id: NO_PROJECT_ID, label: project.label, path: null, sessions }
 
   return {
@@ -896,15 +1054,29 @@ export function excludeProjectSessions(
   }
 }
 
+interface LivePlacementContext {
+  explicitProjects?: ProjectInfo[]
+  known?: KnownProjects
+}
+
 /** Project-level overlay: {@link overlayRepoLanes} across every repo subtree. */
 export function overlayLiveLanes(
   project: SidebarProjectTree,
   live: SessionInfo[],
   removed: ReadonlySet<string> = NO_REMOVED,
-  authoritativeOwners: ReadonlyMap<string, string> = NO_OWNERS
+  authoritativeOwners: ReadonlyMap<string, string> = NO_OWNERS,
+  placement: LivePlacementContext = {}
 ): SidebarProjectTree {
+  // The overview owner can refresh before an entered project's full lanes.
+  // Remove stale rows there too, not just from the incoming live candidates.
+  project = excludeProjectSessions(project, session => {
+    const owner = ownerOf(authoritativeOwners, session)
+
+    return Boolean(owner) && owner !== project.id
+  })
+
   if (project.isNoProject) {
-    return overlayHomeLane(project, live, removed, authoritativeOwners)
+    return overlayHomeLane(project, live, removed, authoritativeOwners, placement)
   }
 
   let changed = false
@@ -951,6 +1123,8 @@ export function reconcileEnteredProjectSessions(
 }
 
 interface PreviewOverlayOptions {
+  owners?: ReadonlyMap<string, string>
+  known?: KnownProjects
   removed?: ReadonlySet<string>
   /** The active sort key as an id order; recency when empty. */
   rankIds?: string[]
@@ -962,17 +1136,21 @@ export function overlayLivePreviews(
   live: SessionInfo[],
   explicitProjects: ProjectInfo[],
   limit: number,
-  { removed = NO_REMOVED, rankIds }: PreviewOverlayOptions = {}
+  {
+    removed = NO_REMOVED,
+    rankIds,
+    owners = projectOwnerBySessionId(projects),
+    known = knownProjectsOf(projects)
+  }: PreviewOverlayOptions = {}
 ): Record<string, SessionInfo[]> {
   const byProject = new Map<string, SessionInfo[]>()
-  const authoritativeOwners = projectOwnerBySessionId(projects)
 
   for (const session of live) {
     if (removed.has(session.id)) {
       continue
     }
 
-    const projectId = ownerOf(authoritativeOwners, session) ?? sessionBucketId(session, explicitProjects)
+    const projectId = sessionBucketId(session, explicitProjects, owners, known)
 
     if (!projectId) {
       continue
@@ -987,9 +1165,16 @@ export function overlayLivePreviews(
 
   for (const node of projects) {
     const liveRows = byProject.get(node.id) ?? []
-    const base = (node.previewSessions ?? []).filter(session => !removed.has(session.id))
 
-    if (!liveRows.length && !base.length) {
+    const base = (node.previewSessions ?? []).filter(session => {
+      const owner = ownerOf(owners, session)
+
+      return !removed.has(session.id) && (!owner || owner === node.id)
+    })
+
+    // Emit [] when eviction empties a snapshot preview: undefined would make
+    // the overview fall back to those stale rows.
+    if (!liveRows.length && !node.previewSessions?.length) {
       continue
     }
 

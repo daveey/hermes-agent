@@ -12,6 +12,7 @@ import type * as ChatRuntime from '@/lib/chat-runtime'
 import { SESSION_ROW_AREAS, type SessionRowSlotProps } from '@/lib/session-row-slots'
 import type * as Time from '@/lib/time'
 import type * as ComposerStatusStore from '@/store/composer-status'
+import { $projectTree } from '@/store/project-tree'
 import type * as SessionStore from '@/store/session'
 import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import type * as SessionStatesStore from '@/store/session-states'
@@ -471,6 +472,42 @@ describe('SidebarSessionRow continuation badge', () => {
     const branch = renderRow(makeSession({ parent_session_id: 'parent', title: 'A real branch' }))
 
     expect(continuationGlyph(branch.container)).toBeNull()
+  })
+})
+
+// The card header names the row's project. A backend-Home-owned row files
+// under the Home bucket, so the card names Home in human copy, never the
+// bucket's internal id.
+describe('SidebarSessionRow card project label', () => {
+  afterEach(() => {
+    $projectTree.set([])
+  })
+
+  it('names Home for a Home-owned row with a cwd, not the internal sentinel', () => {
+    $projectTree.set([
+      {
+        id: '__no_project__',
+        isNoProject: true,
+        label: 'Home',
+        path: null,
+        repos: [],
+        sessionCount: 1,
+        sessionIds: ['home-row']
+      }
+    ])
+
+    const { container } = renderRow(makeSession({ cwd: '/Users/daveey', id: 'home-row', title: 'Fresh home chat' }), {
+      card: true
+    })
+
+    expect(container.textContent).not.toContain('__no_project__')
+    expect(screen.getByText('Home')).toBeTruthy()
+  })
+
+  it('keeps naming an unowned cwd row by its folder', () => {
+    renderRow(makeSession({ cwd: '/work/scratch', id: 'loose-row', title: 'Loose' }), { card: true })
+
+    expect(screen.getByText('scratch')).toBeTruthy()
   })
 })
 

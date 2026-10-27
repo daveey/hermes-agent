@@ -12,6 +12,8 @@ export { ProjectMenu } from './project-menu'
 export { SidebarWorkspaceGroup } from './workspace-group'
 export {
   excludeProjectSessions,
+  type KnownProjects,
+  knownProjectsOf,
   liveSessionProjectId,
   overlayLiveLanes,
   overlayLivePreviews,
@@ -22,6 +24,7 @@ export {
   sessionRecency,
   type SidebarProjectTree,
   type SidebarSessionGroup,
-  type SidebarWorkspaceTree
+  type SidebarWorkspaceTree,
+  withProvisionalHome
 } from './workspace-groups'
 export { StartWorkButton } from './workspace-header'

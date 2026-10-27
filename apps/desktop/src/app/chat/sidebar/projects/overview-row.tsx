@@ -134,7 +134,9 @@ export function ProjectOverviewRow({
   const [expanding, setExpanding] = useState(false)
   const limit = showAllSessions || expanded ? Infinity : PROJECT_PREVIEW_COUNT
   const fetched = (previewSessions ?? []).slice(0, limit)
-  const recent = fetched.length ? fetched : latestProjectSessions(project, limit)
+  // A preview override (even an empty one: its rows moved away) is the live
+  // overlay's answer; only its absence falls back to the snapshot lanes.
+  const recent = previewSessions ? fetched : latestProjectSessions(project, limit)
   // The hydrated lanes come straight from the backend, so — like the drill-in
   // (index.tsx) — they haven't been through the tree's exclusion filter yet.
   const visible = expanded && isSessionHidden ? excludeProjectSessions(expanded, isSessionHidden) : expanded

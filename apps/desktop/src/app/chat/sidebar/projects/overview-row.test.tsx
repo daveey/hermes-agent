@@ -14,6 +14,9 @@ afterEach(cleanup)
 
 const workspaceOpen = vi.hoisted(() => ({ value: false }))
 
+// The snapshot's lane rows the row falls back to when no preview override is given.
+const laneFallback = vi.hoisted(() => ({ rows: [] as SessionInfo[] }))
+
 const projectsStore = vi.hoisted(() => ({
   fetchProjectSessions:
     vi.fn<(id: string, options?: { supersedable?: boolean }) => Promise<null | SidebarProjectTree>>(),
@@ -47,7 +50,7 @@ vi.mock('@/store/projects', async importOriginal => ({
 // persisted open/collapse hook and the in-memory fallback preview.
 vi.mock('./model', async () => ({
   ...(await vi.importActual<typeof Model>('./model')),
-  latestProjectSessions: () => [],
+  latestProjectSessions: () => laneFallback.rows,
   useWorkspaceNodeOpen: () => [workspaceOpen.value, vi.fn()]
 }))
 
@@ -72,6 +75,7 @@ beforeEach(() => {
 describe('ProjectOverviewRow', () => {
   afterEach(() => {
     workspaceOpen.value = false
+    laneFallback.rows = []
     projectsStore.fetchProjectSessions.mockReset()
     projectsStore.projectProfile.mockReset().mockReturnValue('default')
   })
@@ -80,6 +84,25 @@ describe('ProjectOverviewRow', () => {
     render(<ProjectOverviewRow project={project} />)
 
     expect(screen.queryByRole('button', { name: 'Show Test D sessions' })).toBeNull()
+  })
+
+  // `previewSessions` is the live overlay's answer for this project. An empty
+  // list means "nothing here now" (e.g. the only row moved to another
+  // project), so the row must not fall back to its stale snapshot lanes; only
+  // an absent override (undefined) falls back.
+  it('treats an empty preview override as authoritative and an absent one as lane fallback', () => {
+    workspaceOpen.value = true
+    laneFallback.rows = [session('stale', 100)]
+    const one = { ...project, sessionCount: 1 } as SidebarProjectTree
+    const rows = (items: SessionInfo[]) => <div data-testid="rows">{items.map(item => item.id).join(',')}</div>
+
+    const { rerender } = render(<ProjectOverviewRow previewSessions={[]} project={one} renderRows={rows} />)
+
+    expect(screen.queryByTestId('rows')).toBeNull()
+
+    rerender(<ProjectOverviewRow project={one} renderRows={rows} />)
+
+    expect(screen.getByTestId('rows').textContent).toBe('stale')
   })
 
   // Group by → Projects previews only the 3 most-recent sessions per project;

@@ -275,6 +275,97 @@ describe('ChatSidebar project entry', () => {
   })
 })
 
+// A brand-new chat in a folder no project claims (a CLI started in ~) has no
+// backend owner yet, and the tree may carry no Home node at all (Home only
+// exists once a persisted row lands there). It must still show in the grouped
+// overview at once — under Home, not nowhere — and a fresh chat in a known
+// repo's subfolder must show under that repo only, never twice.
+describe('ChatSidebar fresh chat before the tree knows it', () => {
+  const repoRow = makeSessionInfo({
+    cwd: '/work/repo',
+    git_repo_root: '/work/repo',
+    id: 'repo-row',
+    last_active: 5,
+    message_count: 3,
+    profile: 'default',
+    started_at: 5,
+    title: 'Repo chat'
+  })
+
+  const repoProject = {
+    id: '/work/repo',
+    isAuto: true,
+    label: 'repo',
+    path: '/work/repo',
+    previewSessions: [repoRow],
+    repos: [{ groups: [], id: '/work/repo', label: 'repo', path: '/work/repo', sessionCount: 1 }],
+    sessionCount: 1,
+    sessionIds: ['repo-row']
+  }
+
+  const fresh = (cwd: string, id: string, title: string) =>
+    makeSessionInfo({ cwd, id, last_active: 10, message_count: 0, profile: 'default', started_at: 10, title })
+
+  beforeEach(() => {
+    setSidebarAgentsGrouped(true)
+    $projectTree.set([repoProject])
+  })
+
+  afterEach(() => {
+    cleanup()
+    $projectScope.set(ALL_PROJECTS)
+    $projectTree.set([])
+    setSidebarAgentsGrouped(false)
+    $sessions.set([])
+  })
+
+  // The overview project row a rendered chat sits under.
+  const rowOwner = (title: string) =>
+    screen.getByText(title).closest('[data-sessions-project]')?.getAttribute('data-sessions-project')
+
+  it('shows a fresh zero-message home-folder chat under a Home row the tree never sent', () => {
+    $sessions.set([repoRow, fresh('/Users/example', 'fresh-home', 'Fresh home chat')])
+
+    renderSidebar('/', 'chat')
+
+    expect(screen.getAllByText('Fresh home chat')).toHaveLength(1)
+    expect(rowOwner('Fresh home chat')).toBe('__no_project__')
+    expect(rowOwner('Repo chat')).toBe('/work/repo')
+  })
+
+  it('lists the fresh home-folder chat when Home is entered before the tree has a Home node', () => {
+    $sessions.set([repoRow, fresh('/Users/example', 'fresh-home', 'Fresh home chat')])
+    $projectScope.set('__no_project__')
+
+    renderSidebar('/', 'chat')
+
+    expect($projectScope.get()).toBe('__no_project__')
+    expect(screen.getAllByText('Fresh home chat')).toHaveLength(1)
+    expect(screen.queryByText('Repo chat')).toBeNull()
+  })
+
+  it('files a fresh chat in a known repo subfolder under that repo only, even with a Home node', () => {
+    const homeNode = {
+      id: '__no_project__',
+      isNoProject: true,
+      label: 'Home',
+      path: null,
+      previewSessions: [],
+      repos: [],
+      sessionCount: 0,
+      sessionIds: []
+    }
+
+    $projectTree.set([homeNode, repoProject])
+    $sessions.set([repoRow, fresh('/work/repo/apps', 'fresh-sub', 'Fresh subfolder chat')])
+
+    renderSidebar('/', 'chat')
+
+    expect(screen.getAllByText('Fresh subfolder chat')).toHaveLength(1)
+    expect(rowOwner('Fresh subfolder chat')).toBe('/work/repo')
+  })
+})
+
 // Messaging platforms group rows by owner the same way recents does once every
 // profile is on screen, so a Telegram thread is attributable to its profile
 // (#87715). The platform's row cap and load-more stay the section's.

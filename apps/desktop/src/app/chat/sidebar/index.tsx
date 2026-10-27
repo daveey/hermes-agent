@@ -167,6 +167,7 @@ import { ProjectDialog } from './project-dialog'
 import { filterToSessionBearingProjects, resolveLiveProjectFilter } from './project-filter'
 import {
   excludeProjectSessions,
+  knownProjectsOf,
   orderProjectsByIds,
   overlayLiveLanes,
   overlayLivePreviews,
@@ -182,7 +183,8 @@ import {
   type SidebarWorkspaceTree,
   sortProjectsForOverview,
   StartWorkButton,
-  useRepoWorktreeMap
+  useRepoWorktreeMap,
+  withProvisionalHome
 } from './projects'
 import { WorktreeDialog } from './projects/worktree-dialog'
 import {
@@ -533,15 +535,7 @@ export function ChatSidebar({
   const projects = useStore($projects)
   const projectTree = useStore($projectTree)
   const projectOwners = useStore($projectOwnerBySessionId)
-
-  // The persisted project filter's storage is shared across profiles, so ids
-  // picked in another profile don't resolve in the active one and the raw
-  // membership whitelist empties every tier of the sidebar (#96246). Narrow
-  // to ids the ACTIVE tree resolves; dead ids are inert, not fatal.
-  const projectFilter = useMemo(
-    () => resolveLiveProjectFilter(persistedProjectFilter, projectTree),
-    [persistedProjectFilter, projectTree]
-  )
+  const knownProjects = useMemo(() => knownProjectsOf(projectTree), [projectTree])
 
   const projectTreeLoading = useStore($projectTreeLoading)
   const removedSessionIds = useStore($removedSessionIds)
@@ -637,6 +631,30 @@ export function ChatSidebar({
     return filterSessionsByProfileScope(pool, profileScope)
   }, [sessions, archivedSessions, showArchived, profileScope])
 
+  // The tree the sidebar renders and filters by: the backend's, plus a Home
+  // node when a fresh row only Home can show arrives before the tree has one.
+  // Built from the unfiltered rows, so filters narrow it like any other node.
+  const visibleProjectTree = useMemo(
+    () =>
+      showArchived
+        ? projectTree
+        : withProvisionalHome(projectTree, scopedSessions, projects, {
+            known: knownProjects,
+            owners: projectOwners,
+            removed: removedSessionIds
+          }),
+    [showArchived, projectTree, scopedSessions, projects, knownProjects, projectOwners, removedSessionIds]
+  )
+
+  // The persisted project filter's storage is shared across profiles, so ids
+  // picked in another profile don't resolve in the active one and the raw
+  // membership whitelist empties every tier of the sidebar (#96246). Narrow
+  // to ids the ACTIVE tree resolves; dead ids are inert, not fatal.
+  const projectFilter = useMemo(
+    () => resolveLiveProjectFilter(persistedProjectFilter, visibleProjectTree),
+    [persistedProjectFilter, visibleProjectTree]
+  )
+
   // One predicate for the status/project filters, so the flat list and the
   // project lanes narrow by the same rule. A project lane holds rows the loaded
   // page may not, so it has to be answerable per session rather than by
@@ -684,7 +702,7 @@ export function ChatSidebar({
       // Same membership the sidebar groups and colors by (backend owner first,
       // cwd walk otherwise), so a filtered row lands in the lane the user
       // picked it from.
-      return sessionMatchesProjectFilter(session, projectFilter, projects, projectOwners)
+      return sessionMatchesProjectFilter(session, projectFilter, projects, projectOwners, knownProjects)
     },
     [
       hiddenGatewayIds,
@@ -699,6 +717,7 @@ export function ChatSidebar({
       pullRequests,
       projects,
       projectOwners,
+      knownProjects,
       dotStates
     ]
   )
@@ -1053,7 +1072,7 @@ export function ChatSidebar({
   // overview sort. Membership is the backend tree's — never re-derived here.
   const projectModel = useMemo<SidebarProjectTree[]>(() => {
     const sorted = sortProjectsForOverview(
-      filterToSessionBearingProjects(filterVisibleProjects(projectTree, dismissedAutoProjects))
+      filterToSessionBearingProjects(filterVisibleProjects(visibleProjectTree, dismissedAutoProjects))
         // A filtered-out project drops its whole lane, header included — hiding
         // only its rows would leave a row of empty folders behind.
         .filter(project => !projectFilter.length || projectFilter.includes(project.id))
@@ -1091,7 +1110,7 @@ export function ChatSidebar({
 
     return orderProjectsByIds(deduped, projectOrderIds)
   }, [
-    projectTree,
+    visibleProjectTree,
     dismissedAutoProjects,
     orderRepos,
     activeProjectId,
@@ -1169,9 +1188,12 @@ export function ChatSidebar({
   const enteredProjectContent = useMemo(
     () =>
       enteredProject
-        ? overlayLiveLanes(enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners)
+        ? overlayLiveLanes(enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners, {
+            explicitProjects: projects,
+            known: knownProjects
+          })
         : undefined,
-    [enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners]
+    [enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners, projects, knownProjects]
   )
 
   const scopedRepoPaths = useMemo(
@@ -1278,12 +1300,14 @@ export function ChatSidebar({
         showAllSessions ? Infinity : PROJECT_PREVIEW_COUNT,
         {
           removed: removedSessionIds,
+          owners: projectOwners,
+          known: knownProjects,
           // Rank before the trim, so "3 priciest in this project" isn't "3 most
           // recent, priciest first".
           rankIds: sortOrderIds
         }
       ),
-    [projectOverview, agentSessions, projects, removedSessionIds, sortOrderIds, showAllSessions]
+    [projectOverview, agentSessions, projects, removedSessionIds, sortOrderIds, showAllSessions, projectOwners, knownProjects]
   )
 
   // A row's "Show all" hydrates raw backend lanes, which — like the drill-in —
@@ -1297,7 +1321,7 @@ export function ChatSidebar({
     const counts: Record<string, number> = {}
 
     for (const session of sessions) {
-      const projectId = isHidden(session) ? sessionBucketId(session, projects, projectOwners) : null
+      const projectId = isHidden(session) ? sessionBucketId(session, projects, projectOwners, knownProjects) : null
 
       if (projectId) {
         counts[projectId] = (counts[projectId] ?? 0) + 1
@@ -1305,7 +1329,7 @@ export function ChatSidebar({
     }
 
     return { isHidden, counts }
-  }, [sessions, projects, projectOwners, isHiddenFromProjects, removedSessionIds])
+  }, [sessions, projects, projectOwners, knownProjects, isHiddenFromProjects, removedSessionIds])
 
   const onEnterProject = useCallback(
     (id: string) => {

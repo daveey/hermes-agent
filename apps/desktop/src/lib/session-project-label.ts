@@ -1,4 +1,4 @@
-import { liveSessionProjectId } from '@/app/chat/sidebar/projects/workspace-groups'
+import { liveSessionProjectId, NO_PROJECT_ID } from '@/app/chat/sidebar/projects/workspace-groups'
 import { pathLeaf } from '@/lib/display-path'
 import { $projectOwnerBySessionId } from '@/store/projects'
 import type { ProjectInfo, SessionInfo } from '@/types/hermes'
@@ -13,6 +13,10 @@ import type { ProjectInfo, SessionInfo } from '@/types/hermes'
  *   2. the recorded `git_repo_root` leaf.
  *   3. null (a chat with no workspace at all).
  *
+ * A row the backend files under Home resolves to the Home bucket's internal
+ * id; that id is never shown — the caller's translated `homeLabel` is (null
+ * when none is given, so the caller's own fallback names it).
+ *
  * Why step 2 exists: `liveSessionProjectId` deliberately refuses to place a
  * worktree that lives OUTSIDE its repo root (`bb/<slug>` beside the checkout
  * rather than in-tree `.worktrees/`), because for LANE MEMBERSHIP a sibling
@@ -26,8 +30,16 @@ import type { ProjectInfo, SessionInfo } from '@/types/hermes'
  * This never widens membership — it only names a row that placement leaves
  * unplaced.
  */
-export function sessionProjectLabel(session: SessionInfo, projects: ProjectInfo[]): null | string {
+export function sessionProjectLabel(
+  session: SessionInfo,
+  projects: ProjectInfo[],
+  homeLabel: null | string = null
+): null | string {
   const projectId = liveSessionProjectId(session, projects, $projectOwnerBySessionId.get())
+
+  if (projectId === NO_PROJECT_ID) {
+    return homeLabel
+  }
 
   if (projectId) {
     const explicit = projects.find(project => project.id === projectId)

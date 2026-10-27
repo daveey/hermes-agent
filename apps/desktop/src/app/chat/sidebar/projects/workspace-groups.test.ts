@@ -8,6 +8,7 @@ import {
   baseName,
   excludeProjectSessions,
   kanbanWorktreeDir,
+  knownProjectsOf,
   laneSwitchTarget,
   liveSessionProjectId,
   mergeRepoWorktreeGroups,
@@ -21,7 +22,8 @@ import {
   sessionProjectColor,
   type SidebarProjectTree,
   type SidebarSessionGroup,
-  sortWorktreeGroups
+  sortWorktreeGroups,
+  withProvisionalHome
 } from './workspace-groups'
 
 // The grouping itself now lives on the backend (tui_gateway/project_tree.py,
@@ -647,6 +649,15 @@ describe('sessionProjectColor', () => {
     expect(sessionProjectColor(makeCwdSession(null), [colored('p_app', ['/www/app'], '#4a9eff')])).toBeNull()
   })
 
+  it('follows backend Home ownership: no project tint, even under a colored folder', () => {
+    // Color follows the membership the sidebar groups by; a Home-owned row
+    // sits in Home, so it must not wear the folder project's tint.
+    const session = makeCwdSession('/www/app/src', { id: 'home-owned' })
+    const owners = new Map([['home-owned', NO_PROJECT_ID]])
+
+    expect(sessionProjectColor(session, [colored('p_app', ['/www/app'], '#4a9eff')], owners)).toBeNull()
+  })
+
   it('uses the longest-prefix project when nested projects both match', () => {
     const session = makeCwdSession('/www/app/packages/api/src', { git_repo_root: '/www/app' })
 
@@ -1148,13 +1159,141 @@ describe('overlayLiveLanes', () => {
     expect(overlaid.sessionCount).toBe(1)
   })
 
-  it('leaves Home alone for a session that has a cwd', () => {
-    // A cwd-carrying row the backend hasn't placed yet (junk root, deleted
-    // workspace) needs its probes — guessing here would flicker it into Home
-    // and back out on the next snapshot.
+  it.each([false, true])('honors backend Home ownership despite a named-project cwd (compressed=%s)', compressed => {
+    const session = makeCwdSession('/named', {
+      id: 'fresh',
+      message_count: 0,
+      git_repo_root: null,
+      ...(compressed ? { _lineage_root_id: 'root' } : {})
+    })
+
+    const owners = new Map([[compressed ? 'root' : session.id, NO_PROJECT_ID]])
+    const home = homeNode([])
+    const explicitProjects = [makeProject('p_named', ['/named'])]
+
+    expect(sessionMatchesProjectFilter(session, [NO_PROJECT_ID], explicitProjects, owners)).toBe(true)
+    expect(sessionMatchesProjectFilter(session, ['p_named'], explicitProjects, owners)).toBe(false)
+    expect(overlayLiveLanes(home, [session], new Set(), owners, { explicitProjects }).repos[0].groups[0].sessions).toEqual([session])
+    expect(overlayLivePreviews([home], [session], explicitProjects, 3, { owners })[NO_PROJECT_ID]).toEqual([session])
+  })
+
+  it.each(['preview', 'lane', 'filter'] as const)('keeps an unowned cwd-only fresh chat visible in Home (%s)', surface => {
+    const home = homeNode([])
+    const session = makeCwdSession('/Users/example', { id: 'fresh', message_count: 0, git_repo_root: null })
+    const known = knownProjectsOf([home])
+    const owners = projectOwnerBySessionId([home])
+
+    if (surface === 'preview') {
+      expect(overlayLivePreviews([home], [session], [], 3)[NO_PROJECT_ID]).toEqual([session])
+    } else if (surface === 'lane') {
+      expect(overlayLiveLanes(home, [session], new Set(), owners, { known }).repos[0].groups[0].sessions).toEqual([session])
+    } else {
+      expect(sessionMatchesProjectFilter(session, [NO_PROJECT_ID], [], owners, known)).toBe(true)
+    }
+  })
+
+  it.each([
+    ['known cwd project', '/work/app', null, '/work/app'],
+    ['named project', '/named/app', null, 'p_named'],
+    ['repo root', '/work/repo', '/work/repo', '/work/repo'],
+    ['in-tree worktree', '/work/repo/.worktrees/feature', '/work/repo', '/work/repo'],
+    ['unprobed worktree', '/work/repo/.worktrees/feature', null, '/work/repo/.worktrees/feature'],
+    ['sibling worktree', '/work/repo-feature', '/work/repo', null],
+    ['kanban worktree', '/work/repo/.worktrees/t_abcdef', '/work/repo', null]
+  ])('does not misfile a %s in provisional Home', (_label, cwd, gitRepoRoot, expected) => {
+    const session = makeCwdSession(cwd, { git_repo_root: gitRepoRoot })
+    const explicitProjects = [makeProject('p_named', ['/named'])]
     const home = homeNode([])
 
-    expect(overlayLiveLanes(home, [makeCwdSession('/www/app', { id: 'fresh' })])).toBe(home)
+    const known = knownProjectsOf([
+      home,
+      projectNode({
+        id: '/work/app',
+        repos: [{ id: '/work/app', label: 'app', path: '/work/app', sessionCount: 0, groups: [] }]
+      })
+    ])
+
+    const owners = new Map<string, string>()
+
+    expect(sessionBucketId(session, explicitProjects, owners, known)).toBe(expected)
+    expect(sessionMatchesProjectFilter(session, [NO_PROJECT_ID], explicitProjects, owners, known)).toBe(false)
+    expect(overlayLiveLanes(home, [session], new Set(), owners, { explicitProjects, known })).toBe(home)
+    expect(overlayLivePreviews([home], [session], explicitProjects, 3, { owners, known })[NO_PROJECT_ID]).toBeUndefined()
+  })
+
+  // One ownership policy across surfaces: a fresh row (no backend owner, no
+  // git evidence yet) whose cwd sits inside a folder the tree already knows
+  // files under THAT project everywhere — preview, filter, Home lane and the
+  // project's own lanes — never Home in one and the repo in another.
+  it.each([
+    ['subfolder of a known repo', '/work/repo/apps', '/work/repo'],
+    ['unprobed in-tree worktree of a known repo', '/work/repo/.worktrees/feature', '/work/repo'],
+    ['folder under a known sibling worktree lane', '/work/repo-ci/src', '/work/repo'],
+    ['folder no known project claims', '/Users/example', NO_PROJECT_ID]
+  ])('files a fresh %s under exactly one owner on every surface', (_label, cwd, expected) => {
+    const session = makeCwdSession(cwd, { id: 'fresh', message_count: 0, git_repo_root: null })
+    const home = homeNode([])
+
+    const repo = projectNode({
+      id: '/work/repo',
+      isAuto: true,
+      repos: [
+        {
+          id: '/work/repo',
+          label: 'repo',
+          path: '/work/repo',
+          sessionCount: 0,
+          groups: [lane({ id: '/work/repo-ci', label: 'ci', path: '/work/repo-ci', isMain: false })]
+        }
+      ]
+    })
+
+    const tree = [home, repo]
+    const owners = projectOwnerBySessionId(tree)
+    const known = knownProjectsOf(tree)
+    const other = expected === NO_PROJECT_ID ? repo.id : NO_PROJECT_ID
+
+    const rowsOf = (node: SidebarProjectTree) =>
+      overlayLiveLanes(node, [session], new Set(), owners, { known }).repos.flatMap(r =>
+        r.groups.flatMap(g => g.sessions.map(row => row.id))
+      )
+
+    expect(sessionBucketId(session, [], owners, known)).toBe(expected)
+    expect(sessionMatchesProjectFilter(session, [expected], [], owners, known)).toBe(true)
+    expect(sessionMatchesProjectFilter(session, [other], [], owners, known)).toBe(false)
+
+    const previews = overlayLivePreviews(tree, [session], [], 3, { owners, known })
+    expect(previews[expected]?.map(row => row.id)).toEqual(['fresh'])
+    expect(previews[other] ?? []).toEqual([])
+
+    expect(rowsOf(expected === NO_PROJECT_ID ? home : repo)).toEqual(['fresh'])
+    expect(rowsOf(expected === NO_PROJECT_ID ? repo : home)).toEqual([])
+  })
+
+  it.each([NO_PROJECT_ID, 'p_named'])('evicts stale placement when the authoritative owner becomes %s', owner => {
+    const session = makeCwdSession('/named', { id: 'fresh', git_repo_root: null })
+    const home = { ...homeNode([session]), previewSessions: [session] }
+
+    const named = projectNode({
+      id: 'p_named',
+      previewSessions: [session],
+      repos: [{ id: '/named', label: 'named', path: '/named', sessionCount: 1, groups: [lane({ id: '/named', label: 'named', path: '/named', isMain: true, sessions: [session] })] }]
+    })
+
+    const owners = new Map([[session.id, owner]])
+    const known = knownProjectsOf([home, named])
+    const explicitProjects = [makeProject(named.id, ['/named'])]
+    const previews = overlayLivePreviews([home, named], [session], explicitProjects, 3, { owners, known })
+    const other = owner === NO_PROJECT_ID ? named.id : NO_PROJECT_ID
+
+    expect(previews[owner]).toEqual([session])
+    // An explicit empty override prevents the overview from falling back to its stale preview.
+    expect(previews[other]).toEqual([])
+
+    for (const node of [home, named]) {
+      const overlaid = overlayLiveLanes(node, [session], new Set(), owners, { explicitProjects, known })
+      expect(overlaid.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))).toEqual(node.id === owner ? [session] : [])
+    }
   })
 
   // #77591 C: compression rotates the live id (root -> tip) while the snapshot
@@ -1476,5 +1615,70 @@ describe('project filter row rule (#97762)', () => {
     expect(sessionMatchesProjectFilter(sibling, ['p_app'], explicit, owners)).toBe(true)
     expect(sessionBucketId(sibling, explicit, owners)).toBe('p_app')
     expect(sessionProjectColor(sibling, explicit, owners)).toBe('#abc')
+  })
+})
+
+describe('withProvisionalHome', () => {
+  const repo = projectNode({
+    id: '/work/repo',
+    isAuto: true,
+    repos: [{ id: '/work/repo', label: 'repo', path: '/work/repo', sessionCount: 0, groups: [] }]
+  })
+
+  const freshHome = () => makeCwdSession('/Users/example', { id: 'fresh', message_count: 0, git_repo_root: null })
+  const home = (tree: SidebarProjectTree[]) => tree.find(node => node.isNoProject)
+
+  it('adds a Home node carrying a fresh unclaimed row when the tree has none', () => {
+    const session = freshHome()
+    const tree = withProvisionalHome([repo], [session], [])
+    const node = home(tree)!
+
+    expect(tree.map(n => n.id)).toEqual([NO_PROJECT_ID, repo.id])
+    expect(node.previewSessions).toEqual([session])
+    expect(node.repos[0].groups[0].sessions).toEqual([session])
+    expect(node.sessionCount).toBe(1)
+  })
+
+  it('keeps Home filter, previews and entered lane on that same row', () => {
+    const session = freshHome()
+    const tree = withProvisionalHome([repo], [session], [])
+    const known = knownProjectsOf([repo])
+    const owners = projectOwnerBySessionId([repo])
+
+    expect(sessionMatchesProjectFilter(session, [NO_PROJECT_ID], [], owners, known)).toBe(true)
+    expect(overlayLivePreviews(tree, [session], [], 3, { owners, known })[NO_PROJECT_ID]).toEqual([session])
+    expect(overlayLiveLanes(home(tree)!, [session], new Set(), owners, { known }).repos[0].groups[0].sessions).toEqual([
+      session
+    ])
+  })
+
+  it('leaves a tree that already has Home, or has no nodes yet, untouched', () => {
+    const withHome = [homeNode([]), repo]
+    const session = freshHome()
+
+    expect(withProvisionalHome(withHome, [session], [])).toBe(withHome)
+    expect(withProvisionalHome([], [session], [])).toEqual([])
+  })
+
+  it.each([
+    ['a known repo subfolder', makeCwdSession('/work/repo/apps', { git_repo_root: null })],
+    ['a row the backend gave a project', makeCwdSession('/Users/example', { id: 'owned', git_repo_root: null })],
+    ['a removed row', makeCwdSession('/Users/example', { id: 'gone', git_repo_root: null })],
+    ['a git row', makeCwdSession('/elsewhere/repo', { git_repo_root: '/elsewhere/repo' })]
+  ])('adds no Home for %s', (_label, session) => {
+    const tree = [repo]
+
+    expect(
+      withProvisionalHome(tree, [session], [], {
+        owners: new Map([['owned', repo.id]]),
+        removed: new Set(['gone'])
+      })
+    ).toBe(tree)
+  })
+
+  it('adds Home for a detached (cwd-less) fresh row too', () => {
+    const session = makeCwdSession(null, { id: 'detached', git_repo_root: null })
+
+    expect(home(withProvisionalHome([repo], [session], []))?.previewSessions).toEqual([session])
   })
 })

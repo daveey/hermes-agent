@@ -385,7 +385,10 @@ function SidebarSessionRowImpl({
   // a row only repaints when its own label actually changes — and one-line
   // rows always select null.
   const context = useStoreSelector($projects, projects =>
-    card ? (sessionProjectLabel(session, projects) ?? (pathLeaf(session.cwd) || t.sidebar.projects.home)) : null
+    card
+      ? (sessionProjectLabel(session, projects, t.sidebar.projects.home) ??
+        (pathLeaf(session.cwd) || t.sidebar.projects.home))
+      : null
   )
 
   // Card footer line: which model worked on it and how big it got. Rendered
