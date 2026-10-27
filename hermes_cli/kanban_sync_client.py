@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -45,6 +46,7 @@ SNAPSHOT_PAGE = 1000
 HTTP_TIMEOUT_S = 30.0
 EVENT_IMPORT_WINDOW_S = 30 * 24 * 3600  # the service's event retention (worker board.ts EVENT_RETENTION_MS)
 # Row order for an import: links need both tasks, everything else names its task.
+BOARD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")  # the service's BOARD_RE
 IMPORT_ORDER = ("tasks", "task_links", "task_runs", "task_comments", "task_events", "task_attachments", "task_chat_links")
 
 
@@ -135,7 +137,9 @@ def board_paths() -> list[tuple[str, Path]]:
     found = [("default", root / "kanban.db")] if (root / "kanban.db").exists() else []
     boards = kanban_db.boards_root()
     if boards.is_dir():
-        found += [(p.parent.name, p) for p in sorted(boards.glob("*/kanban.db")) if p.is_file()]
+        # Only real board slugs (the service's board-id rule): ``_archived/`` holds archived boards, not a board.
+        found += [(p.parent.name, p) for p in sorted(boards.glob("*/kanban.db"))
+                  if p.is_file() and BOARD_ID_RE.match(p.parent.name)]
     return [(slug, path) for slug, path in found if sync.board_selected(str(path))]
 
 
@@ -320,8 +324,11 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     # The service will accept this later (a deploy still rolling out, a storage hiccup, an earlier op
                     # on the card that was itself transient): keep it pending and retry next round.
                     reason = f"{res.get('reason')}: {res.get('detail') or ''}".strip(": ")
-                    conn.execute("UPDATE kanban_sync_outbox SET attempts = attempts + 1, last_error = ?, retry_after = ? "
-                                 "WHERE op_id = ?", (f"retrying: {reason}"[:500], int(time.time()) + _backoff_s(row["attempts"]), op_id))
+                    # A fresh op id: the service remembers every answer by op id (idempotency), so a retry under the
+                    # old id would get the same rejection back forever.
+                    conn.execute("UPDATE kanban_sync_outbox SET op_id = ?, attempts = attempts + 1, last_error = ?, "
+                                 "retry_after = ? WHERE op_id = ?",
+                                 (sync.uuid7(), f"retrying: {reason}"[:500], int(time.time()) + _backoff_s(row["attempts"]), op_id))
                     out.deferred += 1
                 else:
                     reason = f"{res.get('reason')}: {res.get('detail') or ''}".strip(": ")

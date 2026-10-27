@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
 
 import pytest
@@ -680,8 +681,11 @@ def test_transient_rejections_retry_next_round_and_give_up_after_a_cap(live, svc
     real = svc.hub(ME).ops
     calls = {"n": 0}
 
+    remembered = set()
+
     def rolling_out(board, ops):  # the service has not picked up the new code yet
         calls["n"] += 1
+        remembered.update(o["client_op_id"] for o in ops)
         return {"results": [{"client_op_id": o["client_op_id"], "status": "rejected", "reason": "invalid",
                              "detail": f"unknown table {o['table']}"} for o in ops], "head": 0}
     hub = svc.hub(ME)
@@ -693,6 +697,8 @@ def test_transient_rejections_retry_next_round_and_give_up_after_a_cap(live, svc
     assert ksc.push(live, hub, BOARD, ME, primary=False).sent == 0  # backing off: not retried at once
     with kbc.write_txn(live):
         live.execute("UPDATE kanban_sync_outbox SET retry_after = 0")  # the backoff elapsed
+    # The retry goes under a fresh op id: the service would replay its remembered rejection for the old one.
+    assert not ({r[0] for r in live.execute("SELECT op_id FROM kanban_sync_outbox")} & remembered)
     assert ksc.push(live, hub, BOARD, ME, primary=False).rejected == 0
     assert tid in svc.board(BOARD)["rows"]["tasks"] and not _pending(live)
     # A rejection that never clears ends up rejected after the cap.
@@ -732,3 +738,12 @@ def test_a_child_queued_before_its_card_does_not_hold_the_card_back(live, svc):
     assert svc.board(BOARD)["rows"]["tasks"][tid]["title"] == "made before attach"
     assert live.execute("SELECT sync_version FROM tasks WHERE id = ?", (tid,)).fetchone()[0] is not None
     assert any(c["body"] == "captured first" for c in svc.board(BOARD)["rows"]["task_comments"].values())
+
+
+def test_board_discovery_skips_the_archive_folder(kanban_home):
+    support.write_sync_config(kanban_home, True)
+    for slug in ("_archived", "runners"):
+        d = kanban_home / "kanban" / "boards" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        sqlite3.connect(d / "kanban.db").close()
+    assert [s for s, _ in ksc.board_paths()] == ["runners"]
