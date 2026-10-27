@@ -41,6 +41,7 @@ import {
   setRememberedSessionId,
   setSessionOwnerHint
 } from '@/store/session'
+import { markSessionListRefreshReason } from '@/store/session-dot-state'
 import { $botChatScopes, $sessionTiles, storedSessionIdForRuntimeId } from '@/store/session-states'
 import { onSessionsChanged } from '@/store/session-sync'
 import { requestSkillInstallFromDeepLink } from '@/store/skill-deeplink-install'
@@ -571,6 +572,9 @@ export function useDesktopIntegrations({
       return
     }
 
-    return onSessionsChanged(() => void refreshSessions())
+    return onSessionsChanged(() => {
+      markSessionListRefreshReason('window-sessions-changed')
+      void refreshSessions()
+    })
   }, [refreshSessions])
 }

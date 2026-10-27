@@ -37,6 +37,7 @@ import {
   sessionMatchesStoredId,
   setCurrentCwd
 } from '@/store/session'
+import { markSessionListRefreshReason } from '@/store/session-dot-state'
 import type { SessionOwnerRoute } from '@/store/session-request-router'
 import {
   $sessionStates,
@@ -1333,6 +1334,7 @@ export function useBackgroundSync({
 
     const run = () => {
       lastRunAt = Date.now()
+      markSessionListRefreshReason('sessions.changed')
       void refreshSessions()
       void refreshMessagingSessions()
 

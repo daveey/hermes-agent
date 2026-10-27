@@ -495,3 +495,165 @@ export const $unreadSessionCount = computed(
   [$sessionDotStateById, $sessions, $messagingSessions],
   (byId, sessions, messaging) => unreadSessionCount(byId, sessions, messaging)
 )
+
+// [daveey] Stripe-transition trace. Rows keep getting reported painted `done` (green) while their work is still
+// queued, and every time someone looks the row is right again, so no bad payload was ever captured. This writes one
+// desktop.log line (`stripe-transition <sid> …`) whenever a session's stripe changes, carrying the raw row fields that
+// fed it and where the row came from. Change-only and capped per session per minute, so a steady sidebar costs a Map
+// lookup per row render and a flapping row can't flood the log.
+
+/** Where the sidebar's `$sessions` page last came from: `sessions.changed` (backend change event), `list-refetch`
+ *  (any other refresh: boot, turn end, reconnect, filter), or `initial` before the first page. Rows not in
+ *  `$sessions` come from the project tree; `offline_cached` rows from the offline cache. */
+let sessionListSource = 'initial'
+let pendingRefreshReason: null | string = null
+
+/** Tag the NEXT sidebar list refresh with why it ran (e.g. `sessions.changed`). */
+export const markSessionListRefreshReason = (reason: string): void => {
+  pendingRefreshReason = reason
+}
+
+/** Consume the pending refresh reason at the start of a refresh (default `list-refetch`). */
+export const takeSessionListRefreshReason = (): string => {
+  const reason = pendingRefreshReason ?? 'list-refetch'
+  pendingRefreshReason = null
+
+  return reason
+}
+
+/** Record the source of the page just written into `$sessions`. */
+export const noteSessionListSource = (source: string): void => {
+  sessionListSource = source
+}
+
+export const STRIPE_TRANSITION_LOG_CAP_PER_MIN = 6
+const STRIPE_TRANSITION_WINDOW_MS = 60_000
+
+interface StripeTraceEntry {
+  stripe: null | SessionStatusStripe
+  emitted: number[]
+  suppressed: number
+}
+
+const stripeTrace = new Map<string, StripeTraceEntry>()
+
+/** Test hook: forget every remembered stripe. */
+export const resetStripeTransitionLog = (): void => {
+  stripeTrace.clear()
+  sessionListSource = 'initial'
+  pendingRefreshReason = null
+}
+
+export type StripeTraceRow = Pick<SessionInfo, 'id'> &
+  Partial<
+    Pick<
+      SessionInfo,
+      | 'background_active'
+      | 'connection_id'
+      | 'goal_active'
+      | 'kanban_active'
+      | 'kanban_blocked'
+      | 'kanban_held'
+      | 'kanban_observed_at'
+      | 'kanban_parked'
+      | 'kanban_waiting_on'
+      | 'offline_cached'
+      | 'profile'
+    >
+  >
+
+const traceValue = (value: unknown): string =>
+  value === undefined ? '-' : Array.isArray(value) ? `[${value.join(',')}]` : String(value)
+
+function rowListSource(row: StripeTraceRow): string {
+  if (row.offline_cached) {
+    return 'cache'
+  }
+
+  const conn = row.connection_id ?? ''
+
+  return $sessions.get().some(s => s.id === row.id && (s.connection_id ?? '') === conn)
+    ? sessionListSource
+    : 'project-tree'
+}
+
+/** Build the desktop.log line for one transition. Exported for tests. */
+export function formatStripeTransition(
+  row: StripeTraceRow,
+  from: null | SessionStatusStripe,
+  to: null | SessionStatusStripe,
+  dotState: SessionDotState,
+  suppressed = 0
+): string {
+  const fields: [string, unknown][] = [
+    ['conn', row.connection_id ?? 'primary'],
+    ['profile', row.profile],
+    ['state', dotState],
+    ['kanban_active', row.kanban_active],
+    ['kanban_parked', row.kanban_parked],
+    ['kanban_held', row.kanban_held],
+    ['kanban_blocked', row.kanban_blocked],
+    ['kanban_waiting_on', row.kanban_waiting_on],
+    ['kanban_observed_at', row.kanban_observed_at],
+    ['goal_active', row.goal_active],
+    ['background_active', row.background_active],
+    ['delegating', $delegatingSessionIds.get().includes(row.id)],
+    ['bg_running', $backgroundRunningSessionIds.get().includes(row.id)],
+    ['source', rowListSource(row)]
+  ]
+
+  if (suppressed > 0) {
+    fields.push(['suppressed', suppressed])
+  }
+
+  return `stripe-transition ${row.id} ${from ?? 'none'}->${to ?? 'none'} ${fields
+    .map(([key, value]) => `${key}=${traceValue(value)}`)
+    .join(' ')}`
+}
+
+/** Remember `stripe` for the row and, when it differs from the last one seen, write a desktop.log line. The first
+ *  sighting only records (a cold sidebar would otherwise log every row). At most
+ *  `STRIPE_TRANSITION_LOG_CAP_PER_MIN` lines per session per rolling minute; the next line after a capped burst
+ *  reports how many were skipped. Never throws. */
+export function recordStripeTransition(
+  row: StripeTraceRow,
+  stripe: null | SessionStatusStripe,
+  dotState: SessionDotState,
+  now: number = Date.now()
+): void {
+  try {
+    const key = `${row.connection_id ?? ''}\u0000${row.profile ?? ''}\u0000${row.id}`
+    const entry = stripeTrace.get(key)
+
+    if (!entry) {
+      stripeTrace.set(key, { emitted: [], stripe, suppressed: 0 })
+
+      return
+    }
+
+    if (entry.stripe === stripe) {
+      return
+    }
+
+    const from = entry.stripe
+    entry.stripe = stripe
+    entry.emitted = entry.emitted.filter(at => now - at < STRIPE_TRANSITION_WINDOW_MS)
+
+    if (entry.emitted.length >= STRIPE_TRANSITION_LOG_CAP_PER_MIN) {
+      entry.suppressed += 1
+
+      return
+    }
+
+    entry.emitted.push(now)
+    const line = formatStripeTransition(row, from, stripe, dotState, entry.suppressed)
+    entry.suppressed = 0
+
+    if (typeof window !== 'undefined') {
+      const win = new URLSearchParams(window.location.search).get('win') || 'main'
+      window.hermesDesktop?.logLine?.(`[sidebar win=${win}] ${line}`)
+    }
+  } catch {
+    // Diagnostics only: a trace failure must never break a row render.
+  }
+}

@@ -43,6 +43,7 @@ import {
   setSessionsLoading,
   stampMessagingRowsWithListServer
 } from '@/store/session'
+import { noteSessionListSource, takeSessionListRefreshReason } from '@/store/session-dot-state'
 import {
   $removedSessionIds,
   captureSessionTombstoneGenerations,
@@ -340,6 +341,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       }
 
       const requestConnection = sidebarRequestConnection()
+      const refreshReason = takeSessionListRefreshReason()
       const requestId = refreshSessionsRequestRef.current + 1
       refreshSessionsRequestRef.current = requestId
       // The loading flag exists to drive the initial skeletons (they only render
@@ -432,6 +434,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
             result.profiles_failed?.[sessionProfile]?.retry === true
 
           setCorruptSessionStores(result.storage)
+          noteSessionListSource(refreshReason)
           // A damaged store already has its own notice; Retry can't repair it.
           const retryableErrors = recentsErrors?.filter(e => !result.storage?.[e.profile])
           setSessionsLoadError(

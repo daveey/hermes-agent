@@ -26,8 +26,14 @@ import {
   $unreadSessionCount,
   hasLiveTurn,
   kanbanStripeCounts,
+  markSessionListRefreshReason,
+  noteSessionListSource,
+  recordStripeTransition,
+  resetStripeTransitionLog,
   sessionStatusStripe,
   showsRunningArc,
+  STRIPE_TRANSITION_LOG_CAP_PER_MIN,
+  takeSessionListRefreshReason,
   unreadSessionCount,
   withoutBackgroundProcess,
   withRowActivity
@@ -699,5 +705,109 @@ describe('kanbanStripeCounts', () => {
 
   it('no kanban work: zero counts', () => {
     expect(kanbanStripeCounts({})).toEqual({ blocked: 0, waiting: 0 })
+  })
+})
+
+describe('recordStripeTransition', () => {
+  const logLine = vi.fn()
+  let previousBridge: unknown
+
+  const row = {
+    connection_id: 'hub-ec2',
+    goal_active: false,
+    id: '20261027_085427_ac4078',
+    kanban_active: 1,
+    kanban_observed_at: 1793140000,
+    kanban_parked: 1,
+    kanban_waiting_on: ['t_01a17e8a62a6ef7b'],
+    profile: 'default'
+  }
+
+  beforeEach(() => {
+    resetStripeTransitionLog()
+    logLine.mockReset()
+    previousBridge = (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    ;(window as unknown as { hermesDesktop?: unknown }).hermesDesktop = { logLine }
+  })
+
+  afterEach(() => {
+    ;(window as unknown as { hermesDesktop?: unknown }).hermesDesktop = previousBridge
+    setSessions([])
+    resetStripeTransitionLog()
+  })
+
+  it('logs exactly one line per transition of a done -> waiting -> done flip, with the row inputs', () => {
+    setSessions([{ ...row, message_count: 3 } as unknown as SessionInfo])
+    markSessionListRefreshReason('sessions.changed')
+    noteSessionListSource(takeSessionListRefreshReason())
+
+    recordStripeTransition(row, 'done', 'idle', 1_000)
+    expect(logLine).not.toHaveBeenCalled()
+
+    recordStripeTransition(row, 'waiting', 'background', 2_000)
+    recordStripeTransition(row, 'waiting', 'background', 2_500)
+    expect(logLine).toHaveBeenCalledTimes(1)
+
+    recordStripeTransition(row, 'done', 'idle', 3_000)
+    expect(logLine).toHaveBeenCalledTimes(2)
+
+    const [first, second] = logLine.mock.calls.map(call => String(call[0]))
+
+    expect(first).toContain(`stripe-transition ${row.id} done->waiting`)
+    expect(second).toContain(`stripe-transition ${row.id} waiting->done`)
+
+    for (const field of [
+      'conn=hub-ec2',
+      'kanban_active=1',
+      'kanban_parked=1',
+      'kanban_waiting_on=[t_01a17e8a62a6ef7b]',
+      'goal_active=false',
+      'kanban_observed_at=1793140000',
+      'delegating=false',
+      'bg_running=false',
+      'source=sessions.changed'
+    ]) {
+      expect(second).toContain(field)
+    }
+
+    expect(second).toContain('state=idle')
+    expect(first).toContain('state=background')
+  })
+
+  it('emits nothing while the stripe is unchanged (control)', () => {
+    for (let i = 0; i < 20; i += 1) {
+      recordStripeTransition(row, 'waiting', 'background', 1_000 + i)
+    }
+
+    expect(logLine).not.toHaveBeenCalled()
+  })
+
+  it('tags rows outside the sidebar page by origin: project tree, offline cache, plain refetch', () => {
+    recordStripeTransition(row, 'waiting', 'background', 1_000)
+    recordStripeTransition(row, 'done', 'idle', 2_000)
+    expect(String(logLine.mock.calls[0][0])).toContain('source=project-tree')
+
+    const cached = { ...row, id: 'cached', offline_cached: true }
+    recordStripeTransition(cached, 'done', 'idle', 1_000)
+    recordStripeTransition(cached, null, 'idle', 2_000)
+    expect(String(logLine.mock.calls[1][0])).toContain('cached done->none')
+    expect(String(logLine.mock.calls[1][0])).toContain('source=cache')
+
+    expect(takeSessionListRefreshReason()).toBe('list-refetch')
+  })
+
+  it('caps a flapping session per minute and reports what it skipped', () => {
+    const stripes = ['done', 'waiting'] as const
+    recordStripeTransition(row, 'done', 'idle', 0)
+
+    for (let i = 1; i <= STRIPE_TRANSITION_LOG_CAP_PER_MIN + 4; i += 1) {
+      recordStripeTransition(row, stripes[i % 2], 'idle', i * 1_000)
+    }
+
+    expect(logLine).toHaveBeenCalledTimes(STRIPE_TRANSITION_LOG_CAP_PER_MIN)
+
+    recordStripeTransition(row, 'stuck', 'stalled', 70_000)
+    expect(logLine).toHaveBeenCalledTimes(STRIPE_TRANSITION_LOG_CAP_PER_MIN + 1)
+    expect(String(logLine.mock.lastCall?.[0])).toContain('suppressed=4')
   })
 })

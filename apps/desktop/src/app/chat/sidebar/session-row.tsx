@@ -1,6 +1,6 @@
 import { compactNumber } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
-import { memo } from 'react'
+import { memo, useEffect } from 'react'
 import type * as React from 'react'
 
 import { PrTag } from '@/app/chat/pr-tag'
@@ -36,7 +36,13 @@ import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
 import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
-import { hasLiveTurn, kanbanStripeCounts, rowBackgroundProcesses, sessionStatusStripe } from '@/store/session-dot-state'
+import {
+  hasLiveTurn,
+  kanbanStripeCounts,
+  recordStripeTransition,
+  rowBackgroundProcesses,
+  sessionStatusStripe
+} from '@/store/session-dot-state'
 import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
 import { sessionCostUsd } from '@/store/sidebar-archive'
@@ -373,6 +379,12 @@ function SidebarSessionRowImpl({
           session.kanban_attention,
           kanbanStripeCounts(session).waiting
         )
+
+  // [daveey] desktop.log trace of every stripe change with the row inputs that fed it (`stripe-transition <sid>`),
+  // so the next "green while work is queued" report has the payload. Change-only and capped inside.
+  useEffect(() => {
+    recordStripeTransition(session, statusStripe, dotState)
+  }, [session, statusStripe, dotState])
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
