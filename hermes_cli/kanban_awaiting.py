@@ -239,6 +239,15 @@ def confirm_remote(awaiting: Optional[dict]) -> None:
 
 def _check_card(conn: sqlite3.Connection, task_id: str, awaiting: dict, text: str) -> None:
     ref = awaiting.get("ref") or ""
+    if ref.startswith("capability-owner:"):
+        # A cross-gateway capability owner card, named by its hermes-hub request id until the holder
+        # applies it (kanban_capability_routing). Live while the request is pending or the card runs.
+        from hermes_cli.kanban_capability_routing import owner_status
+        rc, out = owner_status(ref)
+        if rc == 2:
+            raise AwaitingError(INVALID_AWAITING, f"capability owner request is not live: {out[-200:]}")
+        awaiting["observed"] = out[-120:]
+        return
     if not _TASK_ID.fullmatch(ref):
         raise AwaitingError(INVALID_AWAITING, f"awaiting kind='card' needs ref=<task id> (got {ref!r})")
     if ref == task_id:

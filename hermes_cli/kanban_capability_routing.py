@@ -319,8 +319,11 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
                 "worker will hit the wall and can block with needs (the same owner request is reused).",
                 details={"routes": routes})
         source = kb._retry_status_for_run(conn, task_id) if cur and cur[0] == "running" else "ready"
+        first = routes[0]
         ok = ktp.park(conn, task_id, reason=park_reason, requested_kind="capability", source_status=source,
-                      expected_run_id=expected_run_id, wake_check=wake_check, check_every=WAKE_EVERY)
+                      expected_run_id=expected_run_id, wake_check=wake_check, check_every=WAKE_EVERY,
+                      awaiting={"kind": "card", "ref": first["request_id"], "gateway": first["gateway"],
+                                "why": f"capability owner for {', '.join(x['need'] for x in routes)}"})
         if not ok:
             raise CapabilityRouteError(
                 "capability_route_invalid_state",

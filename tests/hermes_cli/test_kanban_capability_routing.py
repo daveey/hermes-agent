@@ -165,6 +165,10 @@ def test_replay_t5bc8e125_block_opens_macbook_owner_card_and_parks(env, monkeypa
         assert routed["routes"][0]["request_id"] == rid
         assert routed["awaiting"][0] == {"kind": "card", "ref": f"macbook/request/{rid}",
                                          "why": f"capability {NEED}"}
+        # The no-producer-no-park contract sees a declared, live producer card.
+        parked = [e for e in kb.list_events(conn, tid) if e.kind == "scheduled"][-1].payload
+        assert parked["awaiting"]["kind"] == "card" and parked["awaiting"]["ref"] == rid
+        assert parked["awaiting"]["gateway"] == "macbook" and "request local" in parked["awaiting"]["observed"]
 
     # The hub card waits on the owner card: pending -> running -> done wakes it.
     assert kcr.wait_check(rid)[0] == 1
