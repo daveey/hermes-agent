@@ -814,6 +814,65 @@ async function disconnect(ssh, ownershipId) {
   await cleanupStale(ssh, ownershipId, lock, pidAlive)
 }
 
+// Normal disconnect that keeps the owned backend for the next connect (W0, ssh-teardown-policy.ts): nothing is
+// killed and the lockfile stays, so reconnecting with the persisted token reuses the backend instead of paying a
+// cold spawn. The backend's idle watchdog retires it if nobody comes back. Skewed or missing records are left alone.
+async function release(ssh, ownershipId, log: (line: string) => void = () => {}) {
+  if (!ssh || !ownershipId) {
+    return
+  }
+
+  const lock = await readLockfile(ssh, ownershipId)
+
+  if (!lock || isLockfileSkew(lock)) {
+    return
+  }
+
+  log(`[ssh-lifecycle] released remote dashboard pid=${lock.pid} port=${lock.port}; it exits on its own when idle`)
+}
+
+// Log why a present lockfile was not reused, so reuse misses can be counted from the lifecycle log.
+function logReuseMiss(log: (line: string) => void, lock, ctx) {
+  if (!ctx.reusable) {
+    log(`reuse miss: ${reuseMissReasons(lock, ctx).join('; ') || 'unknown'}`)
+  }
+}
+
+// Why a present lockfile was not reused. Empty when every reuse condition holds.
+function reuseMissReasons(lock, { pidAlive, owned, profile, reuseToken, hermesPath, hermesHome }): string[] {
+  const reasons: string[] = []
+
+  if (!pidAlive) {
+    reasons.push(`pid ${lock.pid} not alive`)
+  } else if (!owned) {
+    reasons.push(`pid ${lock.pid} is not our dashboard`)
+  }
+
+  if (!(lock.port > 0)) {
+    reasons.push('no port recorded')
+  }
+
+  if (lock.profile !== profile) {
+    reasons.push(`profile ${lock.profile || "''"} != ${profile || "''"}`)
+  }
+
+  if (!reuseToken) {
+    reasons.push('no stored token')
+  } else if (lock.tokenFingerprint !== fingerprintToken(reuseToken)) {
+    reasons.push('token fingerprint mismatch')
+  }
+
+  if (lock.hermesPath !== hermesPath) {
+    reasons.push(`hermes path ${lock.hermesPath} != ${hermesPath}`)
+  }
+
+  if (lock.hermesHome !== hermesHome) {
+    reasons.push(`hermes home ${lock.hermesHome} != ${hermesHome}`)
+  }
+
+  return reasons
+}
+
 function buildOwnedStaleTerminationCommand(lock, ownershipId) {
   const pid = Number(lock.pid)
   // expandRemotePath() output is already a shell-quoted fragment; embed it
@@ -1596,6 +1655,8 @@ async function connect(deps) {
       lock.hermesPath === hermesPath &&
       lock.hermesHome === hermesHome
 
+    logReuseMiss(log, lock, { reusable, pidAlive, owned, profile, reuseToken, hermesPath, hermesHome })
+
     if (reusable) {
       const creationTime = lock.creationTime || (await remoteProcessCreationTime(ssh, lock.pid))
 
@@ -1838,6 +1899,7 @@ export {
   readLockfile,
   readRemoteInstallId,
   READY_RE,
+  release,
   REMOTE_LOCK_DIR,
   remotePidAlive,
   remoteProcessCreationTime,
