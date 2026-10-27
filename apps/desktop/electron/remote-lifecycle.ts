@@ -1549,6 +1549,163 @@ async function openForward(deps, remotePort, attempts = 3) {
   throw lastError
 }
 
+// Always-on remote dashboard (hermes_cli/always_on_dashboard.py): one launchd/systemd-supervised `serve` per host
+// with a persisted token, a fixed port and no idle exit. Desktop never owns it: it is reused when it proves itself
+// with the token it publishes, and never reaped, terminated or given a lockfile here.
+const ALWAYS_ON_DIR = '~/.hermes/desktop-ssh/always-on'
+const ALWAYS_ON_RECORD_SCHEMA = 1
+// A supervisor restart (code-skew retirement after an update, a crash) takes a few seconds; wait that out instead
+// of spawning a second backend next to it.
+const ALWAYS_ON_RESTART_WAIT_MS = 20_000
+const ALWAYS_ON_POLL_MS = 1_000
+
+// One remote command: is it installed, is the recorded pid alive, the record, the token. NONE = not installed.
+async function readAlwaysOnState(ssh) {
+  const dir = expandRemotePath(ALWAYS_ON_DIR)
+
+  const raw = await ssh.exec(
+    `d=${dir}; [ -f "$d/token" ] && [ -f "$d/record.json" ] || { echo NONE; exit 0; }; ` +
+      `rec=$(cat "$d/record.json"); pid=$(printf '%s' "$rec" | sed -n 's/.*"pid": *\\([0-9][0-9]*\\).*/\\1/p'); ` +
+      `if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then echo ALIVE; else echo DEAD; fi; ` +
+      `printf '%s\\n' "$rec"; cat "$d/token"`
+  )
+
+  const [state = '', recordLine = '', tokenLine = ''] = String(raw || '').trim().split('\n')
+
+  if (state.trim() === 'NONE' || !state.trim()) {
+    return null
+  }
+
+  let record
+
+  try {
+    record = JSON.parse(recordLine)
+  } catch {
+    return { installed: true, alive: false, record: null, token: '' }
+  }
+
+  const token = tokenLine.trim()
+
+  const valid =
+    record?.schemaVersion === ALWAYS_ON_RECORD_SCHEMA &&
+    Number.isInteger(record.pid) &&
+    Number.isInteger(record.port) &&
+    record.port > 0 &&
+    /^[0-9a-f]{16}$/.test(String(record.spawnNonce || '')) &&
+    /^[0-9a-f]{64}$/.test(token)
+
+  return valid
+    ? { installed: true, alive: state.trim() === 'ALIVE', record, token }
+    : { installed: true, alive: false, record: null, token: '' }
+}
+
+async function connectAlwaysOn(deps, { ssh, platform, hermesPath, hermesVersion, hermesHome, log, signal }) {
+  const { probeReuseProof, adoptServedToken, ownershipId } = deps
+  const waitMs = deps.alwaysOnRestartWaitMs ?? ALWAYS_ON_RESTART_WAIT_MS
+  const pollMs = deps.alwaysOnPollMs ?? ALWAYS_ON_POLL_MS
+  const sleep = deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
+  const now = deps.now ?? Date.now
+  const deadline = now() + waitMs
+  let lastReason = ''
+
+  for (;;) {
+    assertBootstrapNotSuperseded(signal)
+    const state = await readAlwaysOnState(ssh)
+
+    if (!state) {
+      return null
+    }
+
+    if (!state.record) {
+      // The supervisor writes the record atomically; an unusable one will not fix itself while we wait.
+      log('always-on dashboard record or token is malformed; not reusing it')
+
+      return null
+    }
+
+    let reason = ''
+
+    if (state.record.hermesHome && state.record.hermesHome !== hermesHome) {
+      log(`always-on dashboard serves ${state.record.hermesHome}, not ${hermesHome}; not reusing it`)
+
+      return null
+    }
+
+    if (!state.alive) {
+      reason = `pid ${state.record.pid} not running`
+    } else {
+      const { pid, port, spawnNonce } = state.record
+      const localPort = await openForward(deps, port)
+      const baseUrl = `http://127.0.0.1:${localPort}`
+      let classification = ''
+
+      try {
+        classification = await probeReuseProof(baseUrl, state.token, spawnNonce)
+      } catch {
+        classification = 'unreachable'
+      }
+
+      if (classification === 'authenticated-ok') {
+        try {
+          const token = await adoptOwnedServedToken(
+            adoptServedToken,
+            baseUrl,
+            state.token,
+            ssh,
+            pid,
+            'always-on remote dashboard'
+          )
+
+          assertBootstrapNotSuperseded(signal)
+          log(`reusing always-on remote dashboard pid=${pid} port=${port}`)
+
+          return {
+            baseUrl,
+            token,
+            tokenFingerprint: fingerprintToken(token),
+            remotePort: port,
+            localPort,
+            pid,
+            reused: true,
+            alwaysOn: true,
+            platform,
+            hermesPath,
+            hermesVersion,
+            ownershipId,
+            spawnNonce,
+            logPath: '',
+            hermesHome,
+            startedAt: state.record.startedAt || '',
+            creationTime: ''
+          }
+        } catch (error) {
+          await cancelForwardSafe(deps, localPort, port)
+          throw error
+        }
+      }
+
+      await cancelForwardSafe(deps, localPort, port)
+      reason =
+        classification === 'authenticated-stale'
+          ? `pid ${pid} runs a replaced runtime (stale after an update)`
+          : `pid ${pid} not answering on port ${port}`
+    }
+
+    if (now() >= deadline) {
+      log(`always-on dashboard unavailable (${reason}) after ${waitMs} ms; falling back to an owned backend`)
+
+      return null
+    }
+
+    if (reason !== lastReason) {
+      log(`always-on dashboard ${reason}; waiting for its supervisor restart`)
+      lastReason = reason
+    }
+
+    await sleep(pollMs)
+  }
+}
+
 /**
  * Establish (or reuse) a remote dashboard and a tunnel to it. `deps` injects the
  * opened SshConnection, forward/pickLocalPort/waitForHermes, a token-gated
@@ -1629,6 +1786,15 @@ async function connect(deps) {
 
   if (hermesVersion) {
     log(`remote hermes version: ${hermesVersion}`)
+  }
+
+  // The always-on dashboard serves the default profile; named profiles keep their own owned backends.
+  if (!profile && deps.alwaysOn !== false) {
+    const alwaysOn = await connectAlwaysOn(deps, { ssh, platform, hermesPath, hermesVersion, hermesHome, log, signal })
+
+    if (alwaysOn) {
+      return alwaysOn
+    }
   }
 
   const reuseToken = deps.reuseToken || ''
@@ -1895,11 +2061,14 @@ async function connect(deps) {
 
 export {
   adoptOwnedServedToken,
+  ALWAYS_ON_DIR,
+  ALWAYS_ON_RESTART_WAIT_MS,
   assertRemoteInstallUpdateClear,
   buildSpawnCommand,
   classifySshReuseProof,
   cleanupStale,
   connect,
+  connectAlwaysOn,
   connectReservationPath,
   DEFAULT_READY_TIMEOUT_MS,
   disconnect,
@@ -1921,6 +2090,7 @@ export {
   probeRemoteHermesHome,
   probeRemotePlatform,
   PROTOCOL_VERSION,
+  readAlwaysOnState,
   readLockfile,
   readRemoteInstallId,
   READY_RE,

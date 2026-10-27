@@ -57,7 +57,8 @@ const REMOTE_PROBE_TIMEOUT_SECS = 15
 // is the connection reported dead.
 const DEFAULT_TUNNEL_RESTART_LIMIT = 5
 const DEFAULT_TUNNEL_RESTART_DELAY_MS = 1_000
-const CONTROL_PERSIST_SECONDS = 300
+// Long: Desktop prewarms and holds every remote gateway (remote-prewarm.ts), so a quiet hour must not cost a re-auth.
+const CONTROL_PERSIST_SECONDS = 3600
 const CONTROL_FORWARD_KEEPALIVE_MS = Math.min(60_000, Math.floor((CONTROL_PERSIST_SECONDS * 1_000) / 2))
 
 // eslint-disable-next-line no-control-regex -- deliberately reject control chars in ssh targets

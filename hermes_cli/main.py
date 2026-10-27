@@ -3437,6 +3437,8 @@ def _build_cli_parser():
     build_auth_parser(subparsers, cmd_auth=cmd_auth)
     build_status_parser(subparsers, cmd_status=cmd_status)
     build_pause_parser(subparsers)
+    from hermes_cli.always_on_dashboard import build_always_on_dashboard_parser
+    build_always_on_dashboard_parser(subparsers)
     build_cron_parser(subparsers, cmd_cron=cmd_cron)
     build_webhook_parser(subparsers, cmd_webhook=cmd_webhook)
 

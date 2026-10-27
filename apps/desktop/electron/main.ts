@@ -533,8 +533,10 @@ import { createSshReuseProbe, wireRegistryReconnect } from './registry-reconnect
 import * as remoteLifecycle from './remote-lifecycle'
 import {
   attachPowerResumeRemoteRevalidation,
+  DISPATCH_PROBE_SKIP_WINDOW_MS,
   ensureHealthyPooledRemoteBackendForDispatch,
   REMOTE_POOLED_LIVENESS_FAILURE_WINDOW_MS,
+  remoteAnswerLedger,
   RemoteLivenessTracker,
   RemoteRevalidationCoordinator,
   revalidatePooledRemoteBackends,
@@ -543,6 +545,7 @@ import {
 } from './remote-liveness'
 import { resolveRemoteOauthTicket, rosterSourceEnumerationTimeoutMs } from './remote-oauth-ticket'
 import { createRemoteOwnerCache } from './remote-owner-cache'
+import { RemotePrewarmer } from './remote-prewarm'
 import { remoteSessionCookies } from './remote-session-cookies'
 import {
   attachRemoteRequestHeaderListener,
@@ -10172,6 +10175,8 @@ async function rollbackSshBootstrapResult(ssh, result, profile, sshConfig, bound
 
 async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, source, metadata, fingerprint, lease) {
   const scope = sshScopeKey(profile)
+  const timingStartedAt = Date.now()
+  rememberLog(`[remote-timing] ${scope} connect-start`)
   const hostLabel = sshConfig.user ? `${sshConfig.user}@${sshConfig.host}` : sshConfig.host
   const existing = sshConnections.get(scope)
 
@@ -10210,6 +10215,7 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
     )
     removeForceCleanup = lease.onForceCleanup(() => ssh.close())
     await ssh.open({ signal: lease.signal })
+    rememberLog(`[remote-timing] ${scope} ssh dial +${Date.now() - timingStartedAt} ms`)
   }
 
   let result: any
@@ -10319,6 +10325,11 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
     rollback: error => rollbackSshBootstrapResult(ssh, result, profile, sshConfig, error)
   })
 
+  rememberLog(
+    `[remote-timing] ${scope} ${result.alwaysOn ? 'reuse always-on' : result.reused ? 'reuse owned' : 'spawn'} ` +
+      `pid=${result.pid} ssh=${created ? 'dialed' : 'master reused'} +${Date.now() - timingStartedAt} ms`
+  )
+  remoteFirstRequestPending.set(result.baseUrl, { scope, startedAt: timingStartedAt })
   sshRememberLog(
     `[ssh] connection ${result.reused ? 'REUSED' : 'spawned'} dashboard: ` +
       `${result.hermesVersion || 'hermes (version unknown)'} at ${result.hermesPath || '?'}`
@@ -11053,11 +11064,24 @@ async function ensureBackend(
 // a genuinely-local child when the v1 mode says remote; non-local connections
 // pool under the composite key from backendScopeKey() and reuse the same pool
 // entry lifecycle (LRU, idle reaper, touch) as per-profile local backends.
+// Part B (instant session loads): dial every SSH gateway at startup and keep it warm (remote-prewarm.ts).
+const remotePrewarmer = new RemotePrewarmer({
+  listConnectionIds: () =>
+    process.env.HERMES_DESKTOP_REMOTE_PREWARM === '0'
+      ? []
+      : readDesktopConnectionsRegistry()
+          .connections.filter(connection => connection.kind === 'ssh')
+          .map(connection => connection.id),
+  ensure: (connectionId, { forceProbe }) =>
+    ensureRegistryBackend(connectionId, 'default', '', { forceProbe, spawnPriority: 'background' }),
+  log: line => rememberLog(line)
+})
+
 async function ensureRegistryBackend(
   connectionId,
   profile,
   managedUpdateCorrelation = '',
-  opts: { passive?: boolean; spawnPriority?: LocalBackendSpawnPriority } = {}
+  opts: { forceProbe?: boolean; passive?: boolean; spawnPriority?: LocalBackendSpawnPriority } = {}
 ) {
   const spawnPriority = spawnPriorityFrom(opts.spawnPriority)
   const passive = Boolean(opts.passive)
@@ -11266,6 +11290,13 @@ async function ensureRegistryBackend(
         connectionPromise,
         currentConnectionPromise: () => backendPool.get(key)?.connectionPromise || null,
         probe: (connection, requestPath, options) => fetchJsonForBackend(connection, requestPath, options),
+        answers: remoteAnswerLedger,
+        skipWindowMs: opts.forceProbe ? 0 : DISPATCH_PROBE_SKIP_WINDOW_MS,
+        onProbe: (outcome, elapsedMs) => {
+          if (!opts.forceProbe) {
+            rememberLog(`[remote-timing] ${key} dispatch probe ${outcome} (${elapsedMs} ms)`)
+          }
+        },
         reconnect: () => ensureRegistryBackend(id, profile, '', { passive }),
         retire: async (error: any) => {
           // A late failure from an old descriptor must never tear down a newer
@@ -16781,20 +16812,42 @@ async function fetchJsonForBackend(
       headers: descriptor.headers
     }
 
-    return requestWithOauthFallback(descriptor.baseUrl, {
+    const answer = await requestWithOauthFallback(descriptor.baseUrl, {
       ensureNativeAccessToken,
       requestWithBearer: (bearer: string) => fetchJson(url, null, { ...options, bearer }),
       requestWithCookie: () => fetchJsonViaOauthSession(url, options)
     })
+
+    noteRemoteAnswer(descriptor.baseUrl, path)
+
+    return answer
   }
 
-  return fetchJson(url, descriptor.token, {
+  const answer = await fetchJson(url, descriptor.token, {
     method: opts.method,
     body: opts.body,
     upload: opts.upload,
     timeoutMs: opts.timeoutMs,
     headers: descriptor.headers
   })
+
+  noteRemoteAnswer(descriptor.baseUrl, path)
+
+  return answer
+}
+
+// Remote connection timing (part B, instant session loads): connect-start, reuse/spawn and the first request a
+// new descriptor serves, per scope, as `[remote-timing]` lines in desktop.log.
+const remoteFirstRequestPending = new Map<string, { scope: string; startedAt: number }>()
+
+function noteRemoteAnswer(baseUrl: string, path: string) {
+  remoteAnswerLedger.recordAnswer(baseUrl)
+  const pending = remoteFirstRequestPending.get(baseUrl)
+
+  if (pending) {
+    remoteFirstRequestPending.delete(baseUrl)
+    rememberLog(`[remote-timing] ${pending.scope} first-request ${path} served +${Date.now() - pending.startedAt} ms`)
+  }
 }
 
 ipcMain.handle('hermes:connection-config:probe', async (_event, rawUrl) => probeRemoteAuthMode(rawUrl))
@@ -19491,6 +19544,8 @@ app.whenReady().then(() => {
     handleDeepLink(_coldStartLink)
   }
 
+  void remotePrewarmer.start().catch(error => rememberLog(`[remote-prewarm] start failed: ${String(error)}`))
+
   app.on('activate', () => {
     // Recreate the primary window if it's gone. Guard on mainWindow directly
     // (not just total window count) so a dock click still restores the main
@@ -19691,6 +19746,7 @@ app.on('before-quit', event => {
 
   minimizeToTray.beginQuit()
   mainProcessLagWatchdog.stop()
+  remotePrewarmer.stop()
 
   // A detached remote updater can outlive this Electron process. Do not tear
   // down its SSH observer/restore transaction at the generic SSH shutdown

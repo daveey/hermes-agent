@@ -22,6 +22,40 @@ export const REMOTE_LIVENESS_FAILURE_WINDOW_MS = 60_000
 // streak via recordSuccess(), so a wide window cannot produce false drops.
 export const REMOTE_POOLED_LIVENESS_FAILURE_WINDOW_MS = 15 * 60_000
 
+// A dispatch skips its /api/health probe when this backend answered a request within this window: the probe
+// would only re-prove what the last answer already proved, and it costs a tunnel round trip on every send.
+export const DISPATCH_PROBE_SKIP_WINDOW_MS = 30_000
+
+/** When each remote backend (by its forwarded baseUrl) last answered a request successfully. */
+export class RemoteAnswerLedger {
+  readonly #lastAnswerAt = new Map<string, number>()
+  readonly #now: () => number
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now
+  }
+
+  recordAnswer(baseUrl: null | string | undefined): void {
+    if (baseUrl) {
+      this.#lastAnswerAt.set(baseUrl, this.#now())
+    }
+  }
+
+  forget(baseUrl: null | string | undefined): void {
+    if (baseUrl) {
+      this.#lastAnswerAt.delete(baseUrl)
+    }
+  }
+
+  answeredWithin(baseUrl: null | string | undefined, windowMs: number): boolean {
+    const at = baseUrl ? this.#lastAnswerAt.get(baseUrl) : undefined
+
+    return at !== undefined && windowMs > 0 && this.#now() - at < windowMs
+  }
+}
+
+export const remoteAnswerLedger = new RemoteAnswerLedger()
+
 export interface RemoteLivenessFailure {
   failures: number
   shouldReset: boolean
@@ -86,6 +120,10 @@ interface EnsureHealthyPooledRemoteBackendForDispatchOptions<TConnection extends
   probe: (connection: TConnection, path: string, options: { timeoutMs: number }) => Promise<unknown>
   reconnect: () => Promise<TConnection>
   retire: (error: unknown) => Promise<void> | void
+  // Skip the probe when the backend answered within skipWindowMs (0 forces it, e.g. the prewarm keepalive).
+  answers?: RemoteAnswerLedger
+  skipWindowMs?: number
+  onProbe?: (outcome: 'ran' | 'skipped', elapsedMs: number) => void
 }
 
 /**
@@ -101,15 +139,25 @@ export async function ensureHealthyPooledRemoteBackendForDispatch<TConnection ex
   currentConnectionPromise,
   probe,
   reconnect,
-  retire
+  retire,
+  answers,
+  skipWindowMs = DISPATCH_PROBE_SKIP_WINDOW_MS,
+  onProbe
 }: EnsureHealthyPooledRemoteBackendForDispatchOptions<TConnection>): Promise<TConnection> {
-  let connection: TConnection
+  let connection: TConnection | undefined
+  const startedAt = Date.now()
 
   try {
     connection = await connectionPromise
 
     if (currentConnectionPromise() !== connectionPromise) {
       return reconnect()
+    }
+
+    if (answers?.answeredWithin(connection.baseUrl, skipWindowMs)) {
+      onProbe?.('skipped', Date.now() - startedAt)
+
+      return connection
     }
 
     try {
@@ -129,12 +177,17 @@ export async function ensureHealthyPooledRemoteBackendForDispatch<TConnection ex
       })
     }
   } catch (error) {
+    answers?.forget(connection?.baseUrl)
+
     if (currentConnectionPromise() === connectionPromise) {
       await retire(error)
     }
 
     return reconnect()
   }
+
+  answers?.recordAnswer(connection.baseUrl)
+  onProbe?.('ran', Date.now() - startedAt)
 
   if (currentConnectionPromise() !== connectionPromise) {
     return reconnect()

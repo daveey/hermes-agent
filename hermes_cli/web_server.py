@@ -1428,6 +1428,29 @@ def _publish_host_rendezvous(host: str, port: int) -> None:
     hr.cleanup_on_exit(role)
 
 
+def _arm_ssh_isolated_idle_exit(server) -> bool:
+    """Start the idle-exit watchdog on an SSH-isolated backend; True when armed.
+
+    The supervised always-on backend (``hermes_cli/always_on_dashboard.py``) is the one SSH-isolated
+    backend that must NOT idle-exit: its point is being warm when Desktop next connects. Its env flag
+    is read once and dropped so agent children never inherit it."""
+    from hermes_cli.always_on_dashboard import ENV_FLAG as always_on_flag
+
+    always_on = os.environ.pop(always_on_flag, "") == "1"
+    if getattr(app.state, "ssh_isolated_clients", None) is None:
+        return False
+    if always_on:
+        _log.info("always-on dashboard: idle-exit watchdog disabled (supervised backend)")
+        return False
+    from hermes_cli.web_server_idle_exit import DEFAULT_IDLE_GRACE_S, start_idle_watchdog
+    try:
+        grace = float((load_config().get("dashboard") or {}).get("ssh_isolated_idle_grace_s", DEFAULT_IDLE_GRACE_S))
+    except (TypeError, ValueError):
+        grace = DEFAULT_IDLE_GRACE_S
+    start_idle_watchdog(server, app.state.ssh_isolated_clients, grace_s=grace)
+    return True
+
+
 def _on_server_started(
     server,
     *,
@@ -1470,13 +1493,7 @@ def _on_server_started(
     _start_parent_death_watchdog()
     # SSH-isolated backends are detached from any parent on purpose (#91668); their liveness signal
     # is "does a client still hold a WebSocket" (#101626).
-    if getattr(app.state, "ssh_isolated_clients", None) is not None:
-        from hermes_cli.web_server_idle_exit import DEFAULT_IDLE_GRACE_S, start_idle_watchdog
-        try:
-            grace = float((load_config().get("dashboard") or {}).get("ssh_isolated_idle_grace_s", DEFAULT_IDLE_GRACE_S))
-        except (TypeError, ValueError):
-            grace = DEFAULT_IDLE_GRACE_S
-        start_idle_watchdog(server, app.state.ssh_isolated_clients, grace_s=grace)
+    _arm_ssh_isolated_idle_exit(server)
     if getattr(app.state, "ssh_isolated_clients", None) is not None or is_desktop_owned_backend():
         # The host's updater never restarts this backend (SSH-isolated: only the remote Desktop
         # client holds its token and owner nonce, #91668/#101626; Desktop-owned local serve:
