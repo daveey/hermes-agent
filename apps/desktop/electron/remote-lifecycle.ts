@@ -1707,6 +1707,7 @@ async function connect(deps) {
         }
 
         if (reuseClassification === 'authenticated-stale') {
+          log(`reuse miss: pid ${lock.pid} runs a replaced runtime (stale after an update)`)
           assertBootstrapNotSuperseded(signal)
           await cancelForwardSafe(deps, localPort, lock.port)
           await assertRemoteInstallUpdateClear(ssh, hermesHome, hermesPath)

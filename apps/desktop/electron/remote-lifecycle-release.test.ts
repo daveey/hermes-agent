@@ -165,3 +165,27 @@ test('teardown policy: normal disconnects release, deliberate ones terminate, un
   assert.equal(remoteTeardownAction('something-new' as any, 'Linux'), 'terminate')
   assert.equal(remoteTeardownAction('quit', 'Windows'), 'skip-windows')
 })
+
+test('connect() logs a reason when the backend is alive and ours but its runtime was replaced', async () => {
+  const logs: string[] = []
+
+  const ssh = fakeRemote(ownedLock(), [
+    [/grep -q ssh-session-token-file/, 'YES\n'],
+    [/setsid/, '777\n'],
+    [/cat .*\.log/, 'HERMES_DASHBOARD_READY port=51999\n']
+  ])
+
+  try {
+    await connect(
+      connectDeps(ssh, {
+        reuseToken: 'stored-token',
+        probeReuseProof: async () => 'authenticated-stale',
+        rememberLog: line => logs.push(line)
+      })
+    )
+  } catch {
+    // Replacing the stale backend may fail in this double; only the logged reason matters here.
+  }
+
+  assert.ok(logs.some(line => /reuse miss: pid 333 runs a replaced runtime/.test(line)), logs.join('\n'))
+})
