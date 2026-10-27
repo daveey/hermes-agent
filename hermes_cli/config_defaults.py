@@ -1978,6 +1978,12 @@ DEFAULT_CONFIG = {
         "default_provider": "",
         "default_model_profiles": [],
         "default_model_keep_patterns": [],
+        # Strong tier [daveey]: the model (+ optional provider; "" = inferred from the model) that
+        # review-lane, retry-after-failure and keep-pattern cards run on while default_model is set.
+        # "" = the old behaviour (the profile's own model, or class:deep with a class default), which
+        # silently followed every change of the profile's default model.
+        "strong_model": "",
+        "strong_provider": "",
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.

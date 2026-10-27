@@ -12,6 +12,9 @@ and a later run re-decides. Cards keep the profile's model when:
 * its title/body matches one of ``kanban.default_model_keep_patterns`` (case-insensitive regexes);
 * its assignee is not in ``kanban.default_model_profiles`` (empty = every profile).
 
+``kanban.strong_model`` (+ optional ``kanban.strong_provider``, else inferred from the model) names the model
+those review/retry/keep-pattern cards run on instead of the profile's model; unset keeps the old behaviour.
+
 Unset ``kanban.default_model`` (the default) = upstream behaviour: every card runs on its profile's model.
 With a class default, review/retry/keep-pattern work explicitly requests ``class:deep`` rather than
 inheriting a potentially weaker profile default. Explicit card pins and out-of-scope profiles are unchanged.
@@ -93,9 +96,14 @@ def resolve_model_tier(
     # Class defaults opt into class-preserving routing. Strong work must not
     # fall back to a profile that may itself now default to standard/fast.
     from agent.model_routing import is_class_selector
-    strong: tuple[Optional[str], Optional[str]] = (
-        ("class:deep", "auto") if is_class_selector(default_model) else (None, None)
-    )
+    strong_model = _str(cfg.get("strong_model"))
+    strong: tuple[Optional[str], Optional[str]]
+    if strong_model:
+        # An explicit strong tier names its model, so review/retry work no longer follows whatever the
+        # profile's default happens to be (a profile switch once moved 558 strong runs to a GPT).
+        strong = (strong_model, _str(cfg.get("strong_provider")) or infer_provider(strong_model))
+    else:
+        strong = ("class:deep", "auto") if is_class_selector(default_model) else (None, None)
     if lane == "review" or REVIEW_SKILL in (getattr(task, "skills", None) or []):
         return *strong, "review"
     try:
