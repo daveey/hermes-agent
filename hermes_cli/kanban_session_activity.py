@@ -674,8 +674,15 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     # A folded legacy alias (``legacy_key``) is present under its qualified key: its last-known
     # unqualified row must not be resurrected as a stale obligation.
     present = {(c["session"], k) for c in cards for k in (c["key"], c.get("legacy_key")) if k}
+    # Likewise a remembered unqualified row whose profile-qualified twin is live now: the replica no longer
+    # carries the legacy record, so the snapshot's copy is a ghost of a card the owner already publishes (and
+    # may attest closed) under its qualified key. [daveey]
+    qualified_now = {(c["session"], c.get("gateway"), c.get("board"), c.get("id"))
+                     for c in cards if c.get("ownership_state") == "qualified"}
     cards.extend({**c, "stale": True} for c in (previous or [])
-                 if (c["session"], c["key"]) not in present)
+                 if (c["session"], c["key"]) not in present
+                 and not (c.get("ownership_state") == "unknown"
+                          and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now))
     if _snapshot_saved != (scope, cards):
         # The durable snapshot only speeds a cold start. Losing a write race (database is locked) must not
         # fail this read: the sidebar would mark every row kanban_unknown. The next changed read retries.
