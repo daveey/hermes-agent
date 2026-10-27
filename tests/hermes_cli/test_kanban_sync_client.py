@@ -508,3 +508,17 @@ def test_import_clears_rows_the_service_refused_before_it(live, svc):
     assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE state = 'rejected'").fetchone()
     assert ksc.push(live, svc.hub(ME), BOARD, ME, primary=False).rejected == 0
     assert tid in svc.board(BOARD)["rows"]["tasks"]
+
+
+def test_sync_config_does_not_need_pyyaml(kanban_home, monkeypatch):
+    """Some installs ship only ruamel (no PyYAML): the switch must still read as on."""
+    import builtins
+    real_import = builtins.__import__
+
+    def no_pyyaml(name, *args, **kwargs):
+        if name == "yaml":
+            raise ModuleNotFoundError("No module named 'yaml'")
+        return real_import(name, *args, **kwargs)
+    support.write_sync_config(kanban_home, True)
+    monkeypatch.setattr(builtins, "__import__", no_pyyaml)
+    assert sync.sync_enabled()

@@ -170,10 +170,10 @@ def sync_config() -> Mapping[str, Any]:
     there, never from the active profile: a worker running under a profile without the setting must not see
     sync as off and drop the board's capture triggers under the gateway."""
     try:
-        import yaml
         from hermes_cli import kanban_db
+        from utils import load_yaml_file_readonly
         path = kanban_db.kanban_home() / "config.yaml"
-        kanban = ((yaml.safe_load(path.read_text(encoding="utf-8-sig")) if path.exists() else None) or {}).get("kanban") or {}
+        kanban = ((load_yaml_file_readonly(path) if path.exists() else None) or {}).get("kanban") or {}
     except Exception as exc:  # health: allow BLE001 -- an unreadable config reads as sync off; connect() must not break
         _log.warning("kanban sync: cannot read config (%s: %s); sync stays off", type(exc).__name__, exc)
         return {}
