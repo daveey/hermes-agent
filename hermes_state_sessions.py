@@ -564,25 +564,27 @@ class SessionSessionsMixin:
         children, skipping explicit fork/delegate provenance and children that predate the parent itself.
         The guard compares against the parent's started_at, not its current ended_at: a parent that was
         reopened and re-ended later still owns reset children from its earlier boundaries."""
-        def _do(conn):
-            self._retire_undrained_queue_rows_conn(conn, session_id)
-            conn.execute(
-                "UPDATE sessions AS child SET model_config = json_set("
-                "COALESCE(child.model_config, '{}'), '$._reset_from', child.parent_session_id) "
-                f"WHERE child.parent_session_id = ? AND {_sql_json_extract('child.model_config', '$._reset_from')} IS NULL "
-                f"AND {_sql_json_extract('child.model_config', '$._branched_from')} IS NULL "
-                f"AND {_sql_json_extract('child.model_config', '$._delegate_from')} IS NULL "
-                "AND COALESCE(child.source, '') != 'tool' "
-                "AND child.started_at >= (SELECT p.started_at FROM sessions p WHERE p.id = child.parent_session_id) "
-                f"AND {_legacy_reset_child_sql('child', _session_ids_placeholders(_RESET_END_REASONS))}",
-                (session_id, *_RESET_END_REASONS),
-            )
-            conn.execute(
-                "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?", (session_id,),
-            )
-            # Resuming re-activates the chat: drop the idle sweep's archive (never a manual one).
-            self._unarchive_auto_archived_lineage(conn, session_id)
-        self._execute_write(_do)
+        self._execute_write(lambda conn: self._reopen_session_conn(conn, session_id))
+
+    def _reopen_session_conn(self, conn, session_id: str) -> None:
+        """Reopen on the caller's transaction, preserving queue and lineage invariants."""
+        self._retire_undrained_queue_rows_conn(conn, session_id)
+        conn.execute(
+            "UPDATE sessions AS child SET model_config = json_set("
+            "COALESCE(child.model_config, '{}'), '$._reset_from', child.parent_session_id) "
+            f"WHERE child.parent_session_id = ? AND {_sql_json_extract('child.model_config', '$._reset_from')} IS NULL "
+            f"AND {_sql_json_extract('child.model_config', '$._branched_from')} IS NULL "
+            f"AND {_sql_json_extract('child.model_config', '$._delegate_from')} IS NULL "
+            "AND COALESCE(child.source, '') != 'tool' "
+            "AND child.started_at >= (SELECT p.started_at FROM sessions p WHERE p.id = child.parent_session_id) "
+            f"AND {_legacy_reset_child_sql('child', _session_ids_placeholders(_RESET_END_REASONS))}",
+            (session_id, *_RESET_END_REASONS),
+        )
+        conn.execute(
+            "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?", (session_id,),
+        )
+        # Resuming re-activates the chat: drop the idle sweep's archive (never a manual one).
+        self._unarchive_auto_archived_lineage(conn, session_id)
 
     def promote_to_session_reset(self, session_id: str, reason: str = "session_reset") -> bool:
         """Durably mark an intentional reset boundary on live rows or rows with a *recoverable* accidental

@@ -79,6 +79,37 @@ method("prompt.submit", params=PromptSubmitParams, result=PromptSubmitResult,
        doc="Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing.")
 
 
+# ── exact-session durable admission ───────────────────────────────────────────────────────────
+
+class PromptAdmissionGetParams(Params):
+    profile: str = Field(min_length=1, max_length=128)
+    stored_session_id: str = Field(min_length=1, max_length=256)
+    operation_id: str = Field(min_length=1, max_length=256)
+    payload_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PromptAdmitParams(PromptAdmissionGetParams):
+    text: str = Field(min_length=1, max_length=1000000)
+
+
+class PromptAdmissionResult(Result):
+    status: str
+    stored_session_id: str
+    operation_id: str
+    payload_digest: str
+    profile: str
+    user_row_id: int | None = None
+    message_uid: str | None = None
+    execution_status: str = "unknown"
+    dispatch: str = "unknown"  # cancelled = positively unstarted; audit user row is inactive
+
+
+method("prompt.admit", params=PromptAdmitParams, result=PromptAdmissionResult,
+       doc="Durably accept once into an idle exact live owner. Never cold-resume or replay execution.")
+method("prompt.admission.get", params=PromptAdmissionGetParams, result=PromptAdmissionResult,
+       doc="Verify the exact accepted user row; acceptance does not assert execution.")
+
+
 # ── attachments ───────────────────────────────────────────────────────────────────────────────
 
 
