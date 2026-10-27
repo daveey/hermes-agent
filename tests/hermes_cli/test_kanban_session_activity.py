@@ -600,7 +600,7 @@ def test_unverified_completion_keeps_origin_and_other_sessions_finish_normally(k
     ann = [{"id": "s_origin"}, {"id": "s_other"}]
     ksa.annotate_kanban_activity(ann)
     assert [{k: v for k, v in row.items() if k != 'kanban_observed_at'} for row in ann] == [
-        {"id": "s_origin", "kanban_active": 13}, {"id": "s_other"}]
+        {"id": "s_origin", "kanban_active": 13, "kanban_parked": 0}, {"id": "s_other"}]  # unverified = live, not parked
     cards = ksa.session_tasks(["s_origin"])
     assert len(cards) == 13
     assert all(c['status'] == 'unknown' and c['reported_status'] == terminal_status for c in cards)
@@ -713,3 +713,86 @@ def test_session_tasks_carry_latest_activity_note_and_pr_link(kanban_root):
     assert got["t_pr"]["note"] == "Superseded by https://github.com/o/r/pull/2 (rebased)"
     assert got["t_pr"]["pr_url"] == "https://github.com/o/r/pull/2"
     assert "pr_url" not in got["t_bare"] and "note" not in got["t_bare"]
+
+
+def _add_links(path: Path, links: list[tuple[str, str]]) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE task_links (parent_id TEXT, child_id TEXT)")
+        conn.executemany("INSERT INTO task_links VALUES (?, ?)", links)
+
+
+def test_parked_cards_are_counted_apart_from_live_ones(kanban_root):
+    """[daveey] Parked = open but nobody is working it: scheduled on a time/event wake, blocked on a non-human
+    kind, or todo behind an unfinished parent. A todo whose parents are all done is about to be promoted and stays
+    live. ``kanban_active`` keeps counting all of them (archive guard); ``kanban_parked`` is the parked subset."""
+    path = kanban_root / "kanban.db"
+    _make_board(path, [
+        ("t_run", "running", "s_live"),
+        ("t_sched", "scheduled", "s_parked"),
+        ("t_trans", "blocked", "s_parked"),          # non-human block: operational, parked
+        ("t_par", "running", None),
+        ("t_child", "todo", "s_chain"),              # parent still running -> parked
+        ("t_done_par", "done", None),
+        ("t_promotable", "todo", "s_promotable"),    # only parent done -> live
+        ("t_sched2", "scheduled", "s_live"),
+    ])
+    _add_links(path, [("t_par", "t_child"), ("t_done_par", "t_promotable")])
+    rows = [{"id": s} for s in ("s_live", "s_parked", "s_chain", "s_promotable")]
+
+    ksa.annotate_kanban_activity(rows)
+    got = {r["id"]: r for r in rows}
+
+    assert got["s_live"]["kanban_active"] == 2 and got["s_live"]["kanban_parked"] == 1
+    assert got["s_parked"]["kanban_active"] == 2 and got["s_parked"]["kanban_parked"] == 2
+    assert got["s_chain"]["kanban_parked"] == 1 and "kanban_held" not in got["s_chain"]
+    assert got["s_promotable"]["kanban_active"] == 1 and got["s_promotable"]["kanban_parked"] == 0
+
+
+def test_todo_behind_a_human_blocked_ancestor_is_held_not_parked(kanban_root):
+    """[daveey] A queued card whose chain waits on David (any ancestor blocked with a validated human request) is
+    ``kanban_held``: the chat is waiting on a human even though its own card is only ``todo``."""
+    path = kanban_root / "kanban.db"
+    _make_board(path, [
+        ("t_ask", "blocked", None),
+        ("t_mid", "todo", None),
+        ("t_leaf", "todo", "s_held"),
+        ("t_ops", "blocked", None),                  # non-human block upstream: parked, not held
+        ("t_after_ops", "todo", "s_parked"),
+    ])
+    _add_human_requests(path, "t_ask")
+    _add_links(path, [("t_ask", "t_mid"), ("t_mid", "t_leaf"), ("t_ops", "t_after_ops")])
+    rows = [{"id": "s_held"}, {"id": "s_parked"}]
+
+    ksa.annotate_kanban_activity(rows)
+
+    assert rows[0]["kanban_active"] == 1 and rows[0]["kanban_held"] == 1 and rows[0]["kanban_parked"] == 0
+    assert rows[1]["kanban_parked"] == 1 and "kanban_held" not in rows[1]
+
+
+def test_board_without_links_table_still_classifies_scheduled(kanban_root):
+    _make_board(kanban_root / "kanban.db", [("t1", "scheduled", "s1"), ("t2", "todo", "s1")])
+    rows = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0]["kanban_active"] == 2 and rows[0]["kanban_parked"] == 1
+
+
+def test_replica_scheduled_and_todo_cards_count_as_parked(kanban_root):
+    """A replica row carries no parent links, but the owner's dispatcher promotes a todo with finished parents to
+    ready on its next tick, so a replicated todo is waiting on a parent: parked, like scheduled."""
+    _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_r1", "status": "scheduled", "sessions": [_shep("s_remote")]},
+        {"_gw": "hub", "id": "t_r2", "status": "running", "sessions": [_shep("s_remote")]},
+        {"_gw": "hub", "id": "t_r3", "status": "todo", "sessions": [_shep("s_remote")]},
+        {"_gw": "hub", "id": "t_r4", "status": "todo", "sessions": [_shep("s_todo_only")]},
+    ])
+    rows = [{"id": "s_remote"}, {"id": "s_todo_only"}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0].get("kanban_active") == 3 and rows[0].get("kanban_parked") == 2
+    assert rows[1].get("kanban_active") == 1 and rows[1].get("kanban_parked") == 1
+
+
+def test_failed_read_drops_parked_and_held(kanban_root):
+    (kanban_root / "kanban.db").write_bytes(b"not sqlite")
+    rows = [{"id": "s1", "kanban_parked": 2, "kanban_held": 1}]
+    ksa.annotate_kanban_activity(rows)
+    assert rows[0]["kanban_unknown"] is True and "kanban_parked" not in rows[0] and "kanban_held" not in rows[0]

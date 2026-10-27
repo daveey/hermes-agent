@@ -25,6 +25,7 @@ import {
   $sessionDotStateById,
   $unreadSessionCount,
   hasLiveTurn,
+  kanbanStripeCounts,
   sessionStatusStripe,
   showsRunningArc,
   unreadSessionCount,
@@ -652,5 +653,51 @@ describe('kanban results waiting for an unloaded session ($kanbanUnseenSessionId
     expect(withRowActivity('idle', { kanban_active: 0, kanban_unseen: 1, kanban_observed_at: Date.now() / 1000 })).toBe('unread')
     expect(withRowActivity('idle', { kanban_active: 1, kanban_unseen: 1 })).toBe('background')
     expect(withRowActivity('idle', { kanban_active: 0, kanban_observed_at: Date.now() / 1000 })).toBe('idle')
+  })
+})
+
+// [daveey] Parked vs live kanban work: a chat whose open cards are only parked (scheduled on a timed/event wake,
+// blocked on a non-human kind, queued behind an unfinished parent) waits (grey); one whose queue waits on a human
+// ask upstream is stuck (red); only live cards (running/ready/review/promotable) read as working (no stripe).
+describe('kanbanStripeCounts', () => {
+  it('live cards are working: no waiting count, background dot, no stripe', () => {
+    const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 3, kanban_parked: 1 }
+    expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, waiting: 0 })
+    const state = withRowActivity('idle', row)
+    expect(state).toBe('background')
+    expect(sessionStatusStripe(state, true, false, 0, false, null, 0, kanbanStripeCounts(row).waiting)).toBeNull()
+  })
+
+  it('parked-only work waits (grey) and does not paint the dot as running', () => {
+    const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 2 }
+    const counts = kanbanStripeCounts(row)
+    expect(counts).toEqual({ blocked: 0, waiting: 2 })
+    const state = withRowActivity('idle', row)
+    expect(state).toBe('idle')
+    expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('waiting')
+  })
+
+  it('a queue held behind a human ask is stuck (red)', () => {
+    const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 1, kanban_parked: 0, kanban_held: 1 }
+    const counts = kanbanStripeCounts(row)
+    expect(counts).toEqual({ blocked: 1, waiting: 0 })
+    expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
+  })
+
+  it('held plus live: a live turn still is not red, but a background row is', () => {
+    const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 0, kanban_held: 1 }
+    const counts = kanbanStripeCounts(row)
+    expect(sessionStatusStripe('working', true, false, counts.blocked, false, null, 0, counts.waiting)).toBeNull()
+    expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
+  })
+
+  it('a backend without kanban_parked keeps the old behaviour (all open cards wait)', () => {
+    const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_blocked: 1 }
+    expect(kanbanStripeCounts(row)).toEqual({ blocked: 1, waiting: 2 })
+    expect(withRowActivity('idle', row)).toBe('background')
+  })
+
+  it('no kanban work: zero counts', () => {
+    expect(kanbanStripeCounts({})).toEqual({ blocked: 0, waiting: 0 })
   })
 })

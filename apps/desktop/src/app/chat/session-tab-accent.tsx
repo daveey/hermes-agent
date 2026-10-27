@@ -4,7 +4,7 @@ import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useSessionDotState } from '@/lib/use-session-dot-state'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
-import { sessionStatusStripe } from '@/store/session-dot-state'
+import { kanbanStripeCounts, sessionStatusStripe } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 
 interface SessionTabAccentProps {
@@ -26,11 +26,11 @@ export function SessionTabAccent({ children, session, storedSessionId }: Session
         state,
         (session?.message_count ?? 0) > 0,
         blocked,
-        session?.kanban_blocked,
+        kanbanStripeCounts(session ?? {}).blocked,
         session?.cron_active,
         session?.review_wait,
         session?.kanban_attention,
-        session?.kanban_active
+        kanbanStripeCounts(session ?? {}).waiting
       )
 
   return (

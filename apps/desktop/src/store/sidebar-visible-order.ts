@@ -1,6 +1,6 @@
 import { $messagingSessions, $sessions } from '@/store/session'
 import { isSessionBlocked } from '@/store/session-blocked'
-import { $sessionDotStateById, sessionStatusStripe, withRowActivity } from '@/store/session-dot-state'
+import { $sessionDotStateById, kanbanStripeCounts, sessionStatusStripe, withRowActivity } from '@/store/session-dot-state'
 import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -146,11 +146,11 @@ export function sessionHasStatusStripe(id: string): boolean {
         withRowActivity($sessionDotStateById.get()[id] ?? 'idle', session ?? {}),
         hasTurns,
         false,
-        session?.kanban_blocked ?? 0,
+        kanbanStripeCounts(session ?? {}).blocked,
         session?.cron_active === true,
         session?.review_wait,
         session?.kanban_attention ?? 0,
-        session?.kanban_active ?? 0
+        kanbanStripeCounts(session ?? {}).waiting
       )
     )
   )

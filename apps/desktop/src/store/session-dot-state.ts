@@ -278,6 +278,31 @@ export const sessionStatusStripe = (
         : 'done'
       : null
 
+type KanbanCounts = Pick<SessionInfo, 'kanban_active' | 'kanban_blocked' | 'kanban_held' | 'kanban_parked'>
+
+/** [daveey] Open kanban cards someone is actually working (running/ready/review, or a todo about to be promoted).
+ *  `kanban_parked` (scheduled, non-human blocks, todo behind an open parent) and `kanban_held` (todo behind a human
+ *  ask upstream) are subsets of `kanban_active`. A backend that predates them stamps no `kanban_parked`: then every
+ *  open card counts as live, as before. */
+export const liveKanbanCount = (row: KanbanCounts): number =>
+  row.kanban_parked === undefined
+    ? (row.kanban_active ?? 0)
+    : Math.max(0, (row.kanban_active ?? 0) - row.kanban_parked - (row.kanban_held ?? 0))
+
+/** [daveey] The kanban inputs of `sessionStatusStripe`: `blocked` = cards blocked on a human plus queued cards held
+ *  behind one (red); `waiting` = parked cards when nothing is live (grey). Live cards give neither, so a chat whose
+ *  cards are running reads as working (no stripe) instead of grey like one parked until Thursday. Against a
+ *  backend without `kanban_parked` every open card waits, as before. */
+export const kanbanStripeCounts = (row: KanbanCounts): { blocked: number; waiting: number } => {
+  const blocked = (row.kanban_blocked ?? 0) + (row.kanban_held ?? 0)
+
+  if (row.kanban_parked === undefined) {
+    return { blocked, waiting: row.kanban_active ?? 0 }
+  }
+
+  return { blocked, waiting: liveKanbanCount(row) > 0 ? 0 : row.kanban_parked }
+}
+
 /** [daveey] Fold the row's OWN backend activity stamps into its resolved state.
  *  `$sessionDotStateById` only reads those stamps off `$sessions` /
  *  `$messagingSessions`, but a project-mode row older than the recents page
@@ -287,13 +312,14 @@ export const sessionStatusStripe = (
 export const withRowActivity = (
   state: SessionDotState,
   row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active' | 'kanban_blocked'> &
+    Partial<Pick<SessionInfo, 'kanban_held' | 'kanban_parked'>> &
     Partial<Pick<SessionInfo, 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen' | 'offline_cached'>>
 ): SessionDotState =>
   row.offline_cached
     ? 'idle'
     : (state === 'idle' || state === 'unread' || state === 'draft') &&
         (row.goal_active === true ||
-          (row.kanban_active ?? 0) > 0 ||
+          liveKanbanCount(row) > 0 ||
           row.kanban_unknown === true ||
           (row.kanban_remote_stale ?? 0) > 0 ||
           !hasFreshKanbanObservation(row) ||

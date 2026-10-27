@@ -2,7 +2,7 @@ import type { SessionInfo } from '@/types/hermes'
 
 import { $pinnedSessionIds, $sidebarShowAutomated } from './layout'
 import { isSessionBlocked } from './session-blocked'
-import { $sessionDotStateById, type SessionDotState, sessionStatusStripe } from './session-dot-state'
+import { $sessionDotStateById, kanbanStripeCounts, type SessionDotState, sessionStatusStripe } from './session-dot-state'
 
 /**
  * [daveey] Automated / test sessions in the sidebar.
@@ -27,6 +27,8 @@ type AutomatedRow = Pick<
   | 'kanban_attention'
   | 'kanban_active'
   | 'kanban_blocked'
+  | 'kanban_held'
+  | 'kanban_parked'
   | 'message_count'
   | 'pinned'
   | 'review_wait'
@@ -51,11 +53,11 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
     state,
     (row.message_count ?? 0) > 0,
     userBlocked,
-    row.kanban_blocked ?? 0,
+    kanbanStripeCounts(row).blocked,
     row.cron_active === true,
     row.review_wait,
     row.kanban_attention ?? 0,
-    row.kanban_active ?? 0
+    kanbanStripeCounts(row).waiting
   )
 
   return stripe === 'stuck' || stripe === 'blocked' || stripe === 'attention'

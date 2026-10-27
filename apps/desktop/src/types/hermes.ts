@@ -662,6 +662,13 @@ export interface SessionInfo {
    *  are blocked on a human, summed over its compression lineage. Shown next
    *  to the open count on the sidebar row. Absent when zero. */
   kanban_blocked?: number
+  /** [daveey] How many of `kanban_active` nobody is working: scheduled on a timed/event wake, blocked on a
+   *  non-human kind, or todo behind an unfinished parent. Stamped (even 0) whenever `kanban_active` is, so its
+   *  absence means a backend that predates it. */
+  kanban_parked?: number
+  /** [daveey] How many of `kanban_active` are queued behind a card blocked on a human ask (painted red). Absent
+   *  when zero. */
+  kanban_held?: number
   /** [daveey] Finished kanban cards (created or subscribed) whose result this
    *  conversation has not been handed — it was not loaded in any backend when
    *  they completed. Paints the row green (unread) until the gateway's

@@ -36,7 +36,7 @@ import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
 import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
-import { hasLiveTurn, rowBackgroundProcesses, sessionStatusStripe } from '@/store/session-dot-state'
+import { hasLiveTurn, kanbanStripeCounts, rowBackgroundProcesses, sessionStatusStripe } from '@/store/session-dot-state'
 import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
 import { sessionCostUsd } from '@/store/sidebar-archive'
@@ -367,11 +367,11 @@ function SidebarSessionRowImpl({
           dotState,
           session.message_count > 0,
           userBlocked,
-          kanbanBlocked,
+          kanbanStripeCounts(session).blocked,
           session.cron_active === true,
           session.review_wait,
           session.kanban_attention,
-          kanbanOpen
+          kanbanStripeCounts(session).waiting
         )
 
   // Card header line: the workspace this belongs to — the project when it
