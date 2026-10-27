@@ -113,7 +113,7 @@ def test_named_profile_failure_is_classified_before_scope_exits(tmp_path, monkey
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "named")
     monkeypatch.setattr(server, "_profile_home", lambda name: named)
     monkeypatch.setattr(server, "_resolve_startup_runtime", lambda: ("m", "anthropic"))
-    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(server, "_load_cfg", dict)
     def fail(*a, **kw):
         raise AuthError("opaque")
     monkeypatch.setattr(server, "_resolve_agent_model_runtime", fail)
@@ -133,7 +133,7 @@ def test_deferred_build_error_and_rpc_carry_exhaustion(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     pool(tmp_path, [row(4102444800)])
     monkeypatch.setattr(server, "_resolve_startup_runtime", lambda: ("m", "anthropic"))
-    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(server, "_load_cfg", dict)
     events = []
     monkeypatch.setattr(server, "_emit", lambda kind, sid, payload: events.append((kind, payload)))
     session = _fail_build(monkeypatch, ProviderNotConfiguredError("opaque"))

@@ -30,6 +30,8 @@ vi.mock('@/i18n', () => ({
 
 vi.mock('@/hermes', () => ({
   HermesGateway: class {},
+  getApiRequestConnection: () => null,
+  getApiRequestProfile: () => null,
   PROMPT_SUBMIT_REQUEST_TIMEOUT_MS: 1_000,
   setApiRequestProfile: vi.fn(),
   transcribeAudio: vi.fn()
