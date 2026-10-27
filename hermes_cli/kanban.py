@@ -459,6 +459,11 @@ def _cmd_create(args: argparse.Namespace) -> int:
             _maybe_auto_subscribe(conn, task_id)
         if origin is not None:  # idempotent, so a retried create still (re)binds
             origin_binding = kanban_origin.bind(conn, task_id, origin, board=getattr(args, "board", None))
+        placement = None
+        if getattr(args, "requires", None) and not idem_hit:
+            # Placement preflight: declared gateway needs this gateway lacks are owned first. [daveey]
+            from hermes_cli.kanban_capability_routing import preflight
+            placement = preflight(conn, task_id, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
     if not in_worker and not session_id and not idem_hit and _agent_invoked():
         # An agent shelled out but no chat could be stamped (unknown/missing session env:
@@ -473,9 +478,16 @@ def _cmd_create(args: argparse.Namespace) -> int:
         out = _task_to_dict(task)
         if origin_binding:
             out["origin_binding"] = origin_binding
+        if placement:
+            out["capability_placement"] = placement
         _print_json(out)
     else:
         print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
+        for r in (placement or {}).get("routes") or []:
+            print(f"Pre-routed {r['need']}: owner card requested on {r['gateway']} "
+                  f"(hermes-hub request {r['request_id']}); {task_id} waits on it")
+        if placement and placement.get("warning"):
+            print(f"⚠  {placement['warning']}", file=sys.stderr)
         if origin_binding:
             print(f"Bound to {origin_binding['origin']} (readback pending: on the origin gateway run "
                   f"`{origin_binding['verify_on_origin']}`)")
@@ -582,6 +594,36 @@ def _print_max_retries(task) -> None:
 def _cmd_wait_check(args: argparse.Namespace) -> int:
     from hermes_cli import kanban_wait_check
     return kanban_wait_check.run(args)
+
+
+def _cmd_capabilities(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_capability_registry
+    return kanban_capability_registry.run_cli(args)
+
+
+def _cli_route_needs(op: str, args: argparse.Namespace, reason: str) -> Optional[int]:
+    """``--need`` on block/schedule: route to the gateway holding the capability. [daveey]"""
+    needs = getattr(args, "needs", None)
+    if not needs:
+        return None
+    from hermes_cli import kanban_capability_routing as kcr
+    ids = _bulk_ids(args)
+    if len(ids) != 1:
+        return _err(f"kanban {op}: --need routes one card at a time", 2)
+    if getattr(args, "human_request", None) is not None:
+        return _err(f"kanban {op}: --need routes to an agent; --human-request asks David. Pass one.", 2)
+    tid = ids[0]
+    with kbc.connect_closing() as conn:
+        try:
+            res = kcr.route(conn, tid, needs, reason=reason or "", expected_run_id=_worker_run_id_for(tid))
+        except kcr.CapabilityRouteError as exc:
+            return _err(f"kanban {op}: {exc}", 2)
+        except ValueError as exc:
+            return _err(f"kanban {op}: {exc}", 2)
+    for r in res["routes"]:
+        print(f"{tid} → scheduled: owner card for {r['need']} requested on {r['gateway']} "
+              f"(hermes-hub request {r['request_id']})")
+    return 0
 
 
 def _cmd_show(args: argparse.Namespace) -> int:
@@ -1170,6 +1212,9 @@ def _parked_msg(conn, verb: str, suffix: str):
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)
+    routed = _cli_route_needs("block", args, reason)
+    if routed is not None:
+        return routed
     from hermes_cli.kanban_human_request import validate_human_request
     request = validate_human_request(getattr(args, "human_request", None), kind=kind)
     if getattr(args, "metadata_only", False):
@@ -1218,6 +1263,9 @@ def _cmd_block(args: argparse.Namespace) -> int:
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
+    routed = _cli_route_needs("schedule", args, reason)
+    if routed is not None:
+        return routed
     author = _profile_author()
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
@@ -1551,6 +1599,7 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
 _HANDLERS = {
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show, "wait-check": _cmd_wait_check,
+    "capabilities": _cmd_capabilities,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
     "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,

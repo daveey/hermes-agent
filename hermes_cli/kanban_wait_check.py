@@ -80,6 +80,13 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
 def run(args) -> int:
     until = tuple(u for u in (args.until or "").split(",") if u) or DEFAULT_UNTIL
     gw = getattr(args, "gateway", None)
+    if args.check == "capability-owner":
+        # Owner cards live on another gateway; the hermes-hub replica on THIS gateway is the
+        # source (request result -> owner task id -> replicated status). [daveey]
+        from hermes_cli.kanban_capability_routing import wait_check
+        rc, msg = wait_check(args.target)
+        print(msg, file=sys.stderr if rc == 2 else sys.stdout)
+        return rc
     if gw in (None, "", "local"):
         rc, msg = check_local(args.check, args.target, board=args.board, until=until)
     else:

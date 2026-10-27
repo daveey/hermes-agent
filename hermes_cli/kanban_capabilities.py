@@ -39,11 +39,20 @@ def _required_capabilities(requires, workspace_kind: str) -> list[str]:
         requires = []
     if not isinstance(requires, (list, tuple, set, frozenset)):
         raise ValueError("requires must be a collection of capability names")
+    # Namespaced gateway capabilities (``aws:<acct>:<role>``, ``ssh:<host>`` ...) are needs of
+    # the card, not of the profile: kept in order after the profile ones and never checked
+    # against profile policy. Placement/routing lives in kanban_capability_routing. [daveey]
+    from hermes_cli.kanban_capability_registry import is_gateway_need
+    gateway_needs: list[str] = []
     for name in requires:
+        if is_gateway_need(name):
+            if name not in gateway_needs:
+                gateway_needs.append(name)
+            continue
         if not isinstance(name, str) or name not in _CAPABILITIES:
             raise ValueError(f"Unknown required capability: {name!r}")
     required = set(requires) | set(_WORKSPACE_REQUIRES[workspace_kind])
-    return [name for name in _CAPABILITIES if name in required]
+    return [name for name in _CAPABILITIES if name in required] + gateway_needs
 
 
 def _check_policy_shape(config) -> None:
@@ -113,14 +122,14 @@ def validate_assignment(
     guessed into requirements. Callers must supply explicit ``requires`` instead.
     """
     required = _required_capabilities(requires, workspace_kind)
-    if not required or assignee is None:
+    if not any(name in _CAPABILITIES for name in required) or assignee is None:
         # Unassigned drafts cannot dispatch; assign_task validates before binding.
         return required
     try:
         available = _profile_capabilities(assignee)
     except Exception as exc:
         raise CapabilityMismatchError(assignee, required, reason=f"profile policy unavailable: {exc}") from exc
-    missing = [name for name in required if name not in available]
+    missing = [name for name in required if name in _CAPABILITIES and name not in available]
     if missing:
         raise CapabilityMismatchError(assignee, missing)
     return required

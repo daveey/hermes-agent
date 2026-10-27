@@ -243,6 +243,8 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
     from hermes_cli.kanban_wake_check import run_due_wake_checks
 
     run_due_wake_checks(conn)  # condition wakes: start due probes off-thread, never waits [daveey]
+    from hermes_cli.kanban_capability_registry import maybe_refresh_async
+    maybe_refresh_async()  # live-check this gateway's capabilities off-thread, throttled [daveey]
     now = int(time.time()) if now is None else int(now)
     woken: list[str] = []
     for row in conn.execute("SELECT id, block_kind FROM tasks WHERE status = 'scheduled'").fetchall():

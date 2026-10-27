@@ -1022,6 +1022,36 @@ def _park_guard(conn, tid: str, op: str, wake: tuple, **plan: Any) -> None:
     _check(err is None, f"kanban_{op} {err}", "invalid_args")
 
 
+def _route_needs(op: str, args: dict, tid: str, reason: Optional[str]) -> Optional[str]:
+    """Cross-gateway capability routing for ``needs`` on block/schedule; None when absent. [daveey]"""
+    needs = args.get("needs")
+    if needs in (None, [], ""):
+        return None
+    from hermes_cli import kanban_capability_routing as kcr
+    try:
+        needs = kcr.reg.normalize_needs(needs)
+    except ValueError as exc:
+        raise _Reject(str(exc), "invalid_args") from None
+    _check(args.get("human_request") is None,
+           "needs routes the wall to the gateway that holds the capability; a human_request asks David. "
+           "Pass one: if only David can grant it, drop needs.")
+    _check(not args.get("blocker_id"), "needs cannot be combined with blocker_id")
+    with _board(args.get("board")) as (kb, conn):
+        task = kb.get_task(conn, tid)
+        _check(not (task and task.goal_mode),
+               "goal_mode tasks cannot park on an owner card; finish with kanban_complete")
+        try:
+            res = kcr.route(conn, tid, needs, reason=reason or "", expected_run_id=_worker_run_id(tid),
+                            board=args.get("board"))
+        except kcr.CapabilityRouteError as exc:
+            raise _Reject(str(exc), exc.code) from None
+        return _ok_landed(kb, conn, tid, "scheduled", requested_kind=args.get("kind"), op=op,
+                          capability_routes=res["routes"], wake_check=res["wake_check"],
+                          note=("Parked on the capability owner card(s) above; it wakes when they are "
+                                "done. Do not ask David: the owner card does, if the action exceeds "
+                                "the approved scope. End your turn."))
+
+
 @_kanban_handler("kanban_block")
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
@@ -1029,6 +1059,9 @@ def _handle_block(args: dict, **kw) -> str:
     reason = _redact(
         _require_text(args, "reason", "reason is required — explain what input you need"))
     kind = args.get("kind")
+    routed = _route_needs("block", args, tid, reason)
+    if routed is not None:
+        return routed
     with _board(args.get("board")) as (kb, conn):
         _check(kind is None or kind in kb.VALID_BLOCK_KINDS,
                f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)")
@@ -1094,6 +1127,9 @@ def _handle_schedule(args: dict, **kw) -> str:
     raw_reason = args.get("reason")
     _check(raw_reason is None or isinstance(raw_reason, str), "reason must be a string")
     reason = _redact(raw_reason.strip()) if raw_reason and raw_reason.strip() else None
+    routed = _route_needs("schedule", args, tid, reason)
+    if routed is not None:
+        return routed
     with _board(args.get("board")) as (kb, conn):
         # The goal loop treats ``scheduled`` as terminal like ``blocked``, so
         # parking would bypass the completion judge (see kanban_block, #38696).
@@ -1488,6 +1524,13 @@ def _handle_create(args: dict, **kw) -> str:
             }}
         if origin is not None:
             extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
+        if origin_intent is None and args.get("requires"):
+            # Placement preflight: declared gateway needs this gateway lacks are owned first. [daveey]
+            from hermes_cli.kanban_capability_routing import preflight
+            placed = preflight(conn, new_tid, board=args.get("board"))
+            if placed:
+                extra["capability_placement"] = placed
+                landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
         if origin_intent is not None:
             return json.dumps({"ok": False, "created": True, "code": "origin_bind_pending",
                                "task_id": new_tid, **landed, **gate,

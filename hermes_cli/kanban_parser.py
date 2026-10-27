@@ -100,6 +100,9 @@ def _WAKE_CHECK_ARGS():
                   "agent-action conditions (grant, permission, install, fix) are work, not waits."),
         _arg("--awaiting-why", dest="awaiting_why", default=None, help="Evidence for --awaiting"),
     )
+_NEED = _arg("--need", dest="needs", action="append", default=None, metavar="CAPABILITY",
+             help="Gateway capability the wall needs (repeatable), e.g. aws:<acct>:<action>, ssh:<host>. "
+                  "If another gateway holds it, an owner card opens there and this card parks on it.")
 _TASK_IDS = _arg("task_ids", nargs="+")
 _SLUG = _arg("slug")
 _TENANT = _arg("--tenant", help="Tenant namespace")
@@ -209,8 +212,10 @@ _SPECS = [
                   "newlines or flag-like lines survive shell quoting. "
                   "Mutually exclusive with --body."),
         _arg("--assignee", help="Profile name to assign"),
-        _arg("--requires", action="append", choices=["terminal", "file", "git", "host_repo"],
-             help="Required configured capability (repeatable); repo work also infers requirements"),
+        _arg("--requires", action="append",
+             help="Required configured capability (repeatable): terminal, file, git, host_repo, or a "
+                  "namespaced gateway capability such as aws:<acct>:<action> or ssh:<host> "
+                  "(placed/pre-routed where it is held); repo work also infers requirements"),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
         _arg("--workspace",
              help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "
@@ -295,8 +300,9 @@ _SPECS = [
              help="Restrict to tasks with this current_step_key"),
     ], aliases=["ls"], help="List tasks"),
     _cmd("wait-check", [
-        _arg("check", choices=("task", "board-empty"), help="task <id> | board-empty <slug>"),
-        _arg("target", help="Task id (task) or board slug (board-empty)"),
+        _arg("check", choices=("task", "board-empty", "capability-owner"),
+             help="task <id> | board-empty <slug> | capability-owner <hermes-hub request id[,id...]>"),
+        _arg("target", help="Task id (task), board slug (board-empty) or owner request ids (capability-owner)"),
         _arg("--gateway", default=None, help="Gateway to read via ssh (e.g. hub); omit for this machine"),
         _arg("--board", default=None, help="Board slug for `task` (default board if omitted)"),
         _arg("--until", default="done,blocked,archived", help="Comma-separated statuses that count as met"),
@@ -381,12 +387,14 @@ _SPECS = [
                   "mismatches to a capable supervisor; 'transient' marks a maybe-flaky failure. "
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
+        _NEED,
         *_WAKE_CHECK_ARGS(),
     ], help="Mark one or more tasks blocked"),
     _cmd("schedule", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason/timing note (also appended as a comment)"),
         _bulk_ids("schedule"),
+        _NEED,
         *_WAKE_CHECK_ARGS(),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
@@ -498,6 +506,12 @@ _SPECS = [
               "routed to specialist profiles by description. Falls back "
               "to specify-style single-task promotion when the task "
               "doesn't benefit from fan-out. Uses auxiliary.kanban_decomposer."),
+    _cmd("capabilities", children=("cap_action", [
+        _cmd("list", help="Capabilities held by this gateway and its hermes-hub peers, with check age"),
+        _cmd("refresh", help="Run every capability probe now and rewrite kanban/capabilities.json"),
+        _cmd("locate", [_arg("needs", nargs="+", metavar="CAPABILITY")],
+             help="Where each capability is held (exit 1 if some need has no fresh holder)"),
+    ]), help="Gateway capability registry used for cross-gateway owner-card routing"),
     _cmd("gc", [
         _arg("--worktree-retention-days", type=_nonnegative_int, default=None,
              help="Archive committed work and reap terminal task worktrees after N days (config/default: 7; 0 disables)"),

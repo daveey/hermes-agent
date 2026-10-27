@@ -177,6 +177,17 @@ KANBAN_COMPLETE_SCHEMA = _schema(
     [],
 )
 
+_NEEDS_PROP = {
+    "needs": {"type": "array", "items": {"type": "string"}, "description": (
+        "Optional. Gateway capabilities the wall needs, namespaced: 'aws:<account>:<action-or-role>', "
+        "'ssh:<host>', 'github:<owner>:<scope>', 'token-broker:<scope>', 'sudo:nopasswd', "
+        "'browser:signed-in'. When this gateway lacks one and another gateway holds it (live-checked "
+        "hermes-hub capability registry), ONE owner card is opened on that gateway with your reason as "
+        "its scoped action, and this card parks on it (no human ask; the owner card asks David only if "
+        "the action exceeds the approved plan). A need no gateway holds is refused with a typed error: "
+        "then use kind='needs_input' with a human_request.")},
+}
+
 _WAKE_CHECK_PROPS = {
     "wake_check": _prop("string", (
         "Shell command probed by the dispatcher while the card is parked (bash -lc, 30 s "
@@ -306,6 +317,7 @@ KANBAN_BLOCK_SCHEMA = _schema(
             "dispatcher then holds every card behind it and runs one probe card per "
             "interval; a run that ends without the id clears it and releases the rest."
         )),
+        **_NEEDS_PROP,
         **_WAKE_CHECK_PROPS,
     },
     ["reason"],
@@ -334,6 +346,7 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
             "Optional reason or machine-readable wake-up marker recorded on "
             "the completed run and scheduled event."
         )),
+        **_NEEDS_PROP,
         **_WAKE_CHECK_PROPS,
     },
     [],
@@ -578,9 +591,13 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "Omit to use the creating agent's profile. Requirements are checked before creation."
         )),
         "requires": {"type": "array", "items": {"type": "string",
-                     "enum": ["terminal", "file", "git", "host_repo", "kanban"]},
+                     "pattern": "^(terminal|file|git|host_repo|kanban|[a-z][a-z0-9-]*(:[A-Za-z0-9._@/+-]+)+)$"},
                      "description": "Required configured capabilities, including skill prerequisites. "
-                     "Worktree/dir workspaces infer host repo access; git means terminal access, not an executable probe."},
+                     "Worktree/dir workspaces infer host repo access; git means terminal access, not an executable probe. "
+                     "Gateway capabilities the plan needs (namespaced, e.g. 'aws:767406518141:ec2-describe', "
+                     "'ssh:mini', 'github:daveey:admin', 'sudo:nopasswd') are placement needs: if this "
+                     "gateway lacks one and another holds it, an owner card is opened there first and "
+                     "this card waits on it."},
         "body": _prop("string", (
                 "Opening post: full spec, acceptance criteria, "
                 "links. The assigned worker reads this as part of "
