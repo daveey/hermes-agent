@@ -305,7 +305,13 @@ _SPECS = [
         _arg("target", help="Task id (task), board slug (board-empty) or owner request ids (capability-owner)"),
         _arg("--gateway", default=None, help="Gateway to read via ssh (e.g. hub); omit for this machine"),
         _arg("--board", default=None, help="Board slug for `task` (default board if omitted)"),
-        _arg("--until", default="done,blocked,archived", help="Comma-separated statuses that count as met"),
+        _arg("--until", default=None,
+             help="Comma-separated statuses that count as met (default: done,review,blocked,triage,parked-agent,archived "
+                  "-- a tracker wakes when its owner finishes, wants review, blocks, goes to triage, or parks on "
+                  "something only an agent can do; parked-agent = scheduled with no live producer)"),
+        _arg("--from", dest="since", default=None,
+             help="Comma-separated statuses the card had when you parked: not met while it is still in one of them "
+                  "(re-park after handling a wake without waking again at once)"),
     ], help="Wake-probe primitive: exit 0 met, 1 not yet, 2 cannot tell. The only supported cross-gateway wait idiom"),
     _cmd("show", [_TASK_ID, _json_flag(), *_run_state_args("filter listed runs by task_runs column")],
          help="Show a task with comments + events"),

@@ -5,7 +5,8 @@ unreadable DB). The wake-check scheduler treats 2 as broken (3 in a row wakes th
 never as "not yet". Arguments travel as argv (``shlex.join`` for ssh), so SQL/quoting
 never gets re-split by a remote shell.
 
-    hermes kanban wait-check task t_x [--gateway hub] [--board SLUG] [--until done,blocked,archived]
+    hermes kanban wait-check task t_x [--gateway hub] [--board SLUG] [--until done,review,blocked,triage,scheduled,archived]
+                                     [--from running]
     hermes kanban wait-check board-empty SLUG [--gateway hub]
 """
 from __future__ import annotations
@@ -18,7 +19,14 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_UNTIL = ("done", "blocked", "archived")
+# [daveey] The default is a tracker's wake: the owner finished, wants review, blocked, went to triage, or parked on
+# something only an agent can do (``parked-agent``: a scheduled card whose wait has no live producer, per
+# kanban_wait_info). A narrower list (done/review/triage) left a chat asleep for hours while its remote owner sat
+# parked. Plain ``scheduled`` is not in the default: continuation checkpoints park a running card ``scheduled``
+# between runs, and a tracker woken by each of them would loop. An older remote that does not know
+# ``parked-agent`` just never matches it (exactly the old behaviour).
+PARKED_AGENT = "parked-agent"
+DEFAULT_UNTIL = ("done", "review", "blocked", "triage", PARKED_AGENT, "archived")
 GATEWAY_SSH = {"hub": "ubuntu@100.104.201.88"}
 SSH_TIMEOUT = 25
 
@@ -44,13 +52,23 @@ def _query(path: Path, sql: str, args=()):
     raise last  # type: ignore[misc]
 
 
-def check_local(kind: str, target: str, *, board: Optional[str] = None, until=DEFAULT_UNTIL) -> tuple[int, str]:
+def check_local(kind: str, target: str, *, board: Optional[str] = None, until=DEFAULT_UNTIL,
+                since=()) -> tuple[int, str]:
+    """``since``: statuses the target had when the waiter parked; still in one of them = not yet (exit 1), so a
+    tracker that re-parks after handling a wake waits for the NEXT change instead of waking again at once."""
     try:
         if kind == "task":
             rows = _query(_db(board), "select status from tasks where id=?", (target,))
             if not rows:
                 return 2, f"error: {target} not found"
-            return (0 if rows[0][0] in set(until) else 1), f"{target} {rows[0][0]}"
+            status = rows[0][0]
+            if status in set(since or ()):
+                return 1, f"{target} {status} (unchanged since park)"
+            if status in set(until):
+                return 0, f"{target} {status}"
+            if PARKED_AGENT in set(until) and status in ("scheduled", "blocked") and _agent_owned_park(board, target):
+                return 0, f"{target} {status} (agent-owned park: nothing else will produce what it waits for)"
+            return 1, f"{target} {status}"
         if kind == "board-empty":
             n = _query(_db(target), "select count(*) from tasks where status not in ('done','archived')")[0][0]
             return (0 if n == 0 else 1), f"{target} open={n}"
@@ -59,8 +77,22 @@ def check_local(kind: str, target: str, *, board: Optional[str] = None, until=DE
     return 2, f"error: unknown check {kind!r}"
 
 
-def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] = None, until=DEFAULT_UNTIL) -> tuple[int, str]:
+def _agent_owned_park(board: Optional[str], target: str) -> bool:
+    """The target parked on something only an agent can end (certain, or a legacy park that has stalled)."""
+    from hermes_cli.kanban_session_activity import _local_wait_info, _open_ro
+
+    conn = _open_ro(_db(board))
+    try:
+        info = _local_wait_info(conn, [target]).get(target) or {}
+    finally:
+        conn.close()
+    return bool(info.get("agent_owned") and (info.get("agent_owned_certain") or info.get("wait_state") == "stalled"))
+
+
+def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] = None, until=DEFAULT_UNTIL,
+                 since=()) -> tuple[int, str]:
     inner = ["hermes", "kanban", "wait-check", kind, target, "--until", ",".join(until)]
+    # ``since`` (--from) is applied here, on the reply, so an older remote never sees a flag it would reject.
     if board:
         inner += ["--board", board]
     host = GATEWAY_SSH.get(gateway, gateway)
@@ -72,6 +104,10 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 2, f"error: ssh {host}: {exc}"
     out = (p.stdout + p.stderr).strip()
+    if p.returncode == 0 and since and kind == "task":
+        words = (p.stdout or "").split()
+        if len(words) >= 2 and words[0] == target and words[1] in set(since):
+            return 1, f"{out} (unchanged since park)"
     if p.returncode in (0, 1):
         return p.returncode, out
     return 2, f"error: remote wait-check on {host} exited {p.returncode}: {out[-300:]}"
@@ -79,6 +115,7 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
 
 def run(args) -> int:
     until = tuple(u for u in (args.until or "").split(",") if u) or DEFAULT_UNTIL
+    since = tuple(u for u in (getattr(args, "since", None) or "").split(",") if u)
     gw = getattr(args, "gateway", None)
     if args.check == "capability-owner":
         # Owner cards live on another gateway; the hermes-hub replica on THIS gateway is the
@@ -88,8 +125,8 @@ def run(args) -> int:
         print(msg, file=sys.stderr if rc == 2 else sys.stdout)
         return rc
     if gw in (None, "", "local"):
-        rc, msg = check_local(args.check, args.target, board=args.board, until=until)
+        rc, msg = check_local(args.check, args.target, board=args.board, until=until, since=since)
     else:
-        rc, msg = check_remote(gw, args.check, args.target, board=args.board, until=until)
+        rc, msg = check_remote(gw, args.check, args.target, board=args.board, until=until, since=since)
     print(msg, file=sys.stderr if rc == 2 else sys.stdout)
     return rc

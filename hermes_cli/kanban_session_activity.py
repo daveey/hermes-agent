@@ -42,6 +42,9 @@ _waiting_cache: list[dict[str, frozenset[str]]] = [{}]
 # ``_all_counts`` reads local boards, like ``_pairs_sink``. [daveey]
 _parked_cache: list[tuple[dict[str, int], dict[str, int]]] = [({}, {})]
 _parked_sink = threading.local()  # .maps: (parked, held) or None; per thread, so concurrent reads never mix
+# [daveey] Per session, parked cards whose agent-owned wait is older than kanban_wait_info.STALL_AFTER_S (amber
+# "stalled" in the sidebar), from the same snapshot as ``_cache``.
+_stalled_cache: list[dict[str, int]] = [{}]
 _pairs_lock = threading.Lock()
 # _all_counts single flight: held for a whole recompute; the generation bumps when one publishes.
 _counts_flight = threading.Lock()
@@ -184,6 +187,57 @@ PARKED_STATUSES = ("scheduled",) + BLOCKED_STATUSES
 _FINISHED_STATUSES = ("done", "archived")
 
 
+def _local_wait_info(conn: sqlite3.Connection, task_ids: Iterable[str], now: float | None = None,
+                     ) -> dict[str, dict[str, Any]]:
+    """[daveey] ``{task_id: wait info}`` (``kanban_wait_info.describe``) for the parked cards among ``task_ids``: what
+    each waits on, since when, and whether only an agent can end it. One query for the cards, one for their newest
+    park events. Missing columns/tables degrade to status-only info."""
+    from hermes_cli import kanban_wait_info as kwi
+
+    ids = [str(t) for t in dict.fromkeys(task_ids)]
+    if not ids:
+        return {}
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    pick = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in ("id", "status", "block_kind", "human_request",
+                                                                          "awaiting"))
+    out: dict[str, dict[str, Any]] = {}
+    parked: dict[str, tuple] = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        ph = ",".join("?" for _ in chunk)
+        for tid, status, kind, request, awaiting in conn.execute(
+                f"SELECT {pick} FROM tasks t WHERE t.id IN ({ph}) AND t.status IN ('scheduled', 'blocked', 'triage')",
+                chunk):
+            parked[str(tid)] = (status, kind, request, awaiting)
+    if not parked:
+        return {}
+    events: dict[str, tuple] = {}
+    keys = list(parked)
+    kph = ",".join("?" for _ in kwi.PARK_EVENT_KINDS)
+    for i in range(0, len(keys), 500):
+        chunk = keys[i:i + 500]
+        ph = ",".join("?" for _ in chunk)
+        try:
+            for tid, kind, payload, at in conn.execute(
+                    f"SELECT e.task_id, e.kind, e.payload, e.created_at FROM task_events e WHERE e.id IN ("
+                    f"SELECT MAX(id) FROM task_events WHERE task_id IN ({ph}) AND kind IN ({kph}) GROUP BY task_id)",
+                    (*chunk, *kwi.PARK_EVENT_KINDS)):
+                events[str(tid)] = (kind, payload, at)
+        except sqlite3.Error:  # board predates task_events
+            break
+    for tid, (status, kind, request, awaiting) in parked.items():
+        ev_kind, payload, at = events.get(tid, (None, None, None))
+        try:
+            human = _stored_needs_human(request, kind)
+        except Exception:
+            human = False
+        info = kwi.describe(status, block_kind=kind, human=human, park=payload, park_kind=ev_kind, since=at,
+                            awaiting=awaiting, now=now)
+        if info is not None:
+            out[tid] = info
+    return out
+
+
 def _read_parked(path: Path) -> tuple[dict[str, int], dict[str, int]]:
     """``(parked, held)`` per session over the same (session, task) pairs ``_read_counts`` counts as active.
 
@@ -256,6 +310,43 @@ def _read_parked(path: Path) -> tuple[dict[str, int], dict[str, int]]:
             continue
         into[sid] = into.get(sid, 0) + 1
     return parked, held
+
+
+def _parked_pairs(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """(session, task) for every parked card (scheduled/blocked/triage) a session created or shepherds."""
+    if "session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+        return set()
+    parked = "t.status IN ('scheduled', 'blocked', 'triage')"
+    pairs: set[tuple[str, str]] = {
+        (str(sid), str(tid)) for sid, tid in conn.execute(
+            f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL AND session_id != '' AND {parked}")}
+    try:
+        pairs.update(
+            (str(sid), str(tid)) for sid, tid in conn.execute(
+                f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {parked}"))
+    except sqlite3.Error:  # board predates notify subscriptions
+        pass
+    return pairs
+
+
+def _read_stalled(path: Path, now: float | None = None) -> dict[str, int]:
+    """[daveey] Per session, its parked cards whose wait is agent-owned and older than
+    ``kanban_wait_info.STALL_AFTER_S`` (nothing outside the agents will end it): the sidebar's amber "stalled".
+    Same (session, task) pairs as the counts."""
+    conn = _open_ro(path)
+    try:
+        pairs = _parked_pairs(conn)
+        if not pairs:
+            return {}
+        info = _local_wait_info(conn, (tid for _, tid in pairs), now=now)
+    finally:
+        conn.close()
+    out: dict[str, int] = {}
+    for sid, tid in pairs:
+        if (info.get(tid) or {}).get("wait_state") == "stalled":
+            out[sid] = out.get(sid, 0) + 1
+    return out
 
 
 # Terminal kinds that produce a visible notice (mirrors tui_gateway.session_notifications; silent kinds such as
@@ -617,8 +708,20 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                 "synced_at": synced, "stale": stale,
                 "legacy_record": legacy_records.get((gw, owner_profile, board, tid)),
                 "legacy_key": t.get('_legacy_key'),
+                # [daveey] What the card waits on is recomputed at read time from these (``_remote_wait``).
+                "park": _park_of(t),
+                **{k: t[k] for k in ("awaiting", "wake_check") if t.get(k)},
             }
     return list(found.values())
+
+
+def _park_of(task: dict[str, Any]) -> dict[str, Any] | None:
+    """[daveey] The bounded run fields a replicated card's wait info needs (``kanban_wait_info.park_fields``)."""
+    try:
+        from hermes_cli import kanban_wait_info as kwi
+        return kwi.park_fields(task.get("run"))
+    except Exception:  # display-only
+        return None
 
 
 def _activity_fingerprint() -> tuple:
@@ -944,11 +1047,14 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
     stale: dict[str, int] = {}
     parked: dict[str, int] = {}
     held: dict[str, int] = {}
+    stalled: dict[str, int] = {}
     _parked_sink.maps = (parked, held)
+    _parked_sink.stalled = stalled
     try:
         pairs = _read_local_pairs_into(active, blocked, unseen)
     finally:
         _parked_sink.maps = None
+        _parked_sink.stalled = None
     waiting: dict[str, set[str]] = {}
     for sid, tid in pairs:
         waiting.setdefault(sid, set()).add(tid)
@@ -963,6 +1069,8 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         # replicated todo waits on a parent (parked). Held needs those links, so remote cards are never held.
         if bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo"):
             parked[sid] = parked.get(sid, 0) + 1
+        if (_remote_wait(card) or {}).get("wait_state") == "stalled":
+            stalled[sid] = stalled.get(sid, 0) + 1
         if card.get("stale"):
             stale[sid] = stale.get(sid, 0) + 1
     with _cache_lock:
@@ -972,6 +1080,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         _counts_generation += 1
         _waiting_cache[0] = {sid: frozenset(ids) for sid, ids in waiting.items()}
         _parked_cache[0] = (parked, held)
+        _stalled_cache[0] = stalled
     counts = (active, blocked, unseen, stale)
     return (*counts, {sid: frozenset(ids) for sid, ids in waiting.items()}) if include_waiting else counts
 
@@ -1005,6 +1114,13 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
             for src, into in zip((board_parked, board_held), sink):
                 for sid, n in src.items():
                     into[sid] = into.get(sid, 0) + n
+        stalled = getattr(_parked_sink, "stalled", None)
+        if stalled is not None:
+            try:
+                for sid, n in _read_stalled(path).items():
+                    stalled[sid] = stalled.get(sid, 0) + n
+            except Exception as exc:  # display-only: a failed read never fails the counts
+                _log.debug("kanban stalled read failed for %s: %s", path, exc)
 
 
 # [daveey] Extra "this chat still waits" sources (plugins): name -> fn() -> {session_id: iterable of task ids}. A
@@ -1052,6 +1168,68 @@ def parked_task_counts() -> tuple[dict[str, int], dict[str, int]]:
         return _parked_cache[0]
 
 
+def stalled_task_counts() -> dict[str, int]:
+    """``{session_id: stalled count}``: parked cards whose agent-owned wait passed ``STALL_AFTER_S``. Same cache as
+    the counts. [daveey]"""
+    _all_counts()
+    with _cache_lock:
+        return _stalled_cache[0]
+
+
+def _remote_wait(card: dict[str, Any]) -> dict[str, Any] | None:
+    """Wait info of a remote card row, computed now from its fields (never a stored copy, which would freeze the
+    age). Stale (last-known) rows get none: they prove nothing about how long a wait has run."""
+    if card.get("stale"):
+        return None
+    try:
+        from hermes_cli import kanban_wait_info as kwi
+        return kwi.describe_replica(card)
+    except Exception:
+        return None
+
+
+def parked_waits(now: float | None = None) -> list[dict[str, Any]]:
+    """[daveey] Every parked card a session created or shepherds, local and on other gateways, with its wait info
+    (``kanban_wait_info``): ``{session, id, board, key, title, remote, gateway, wait}``. For the owner wake (the
+    chat-closeout plugin), which starts a supervise turn in the owning chat when a card parks for an agent-owned
+    reason. Local read failures skip that board; a failed remote read propagates (unknown is not "none")."""
+    out: list[dict[str, Any]] = []
+    for path in _board_db_paths():
+        try:
+            conn = _open_ro(path)
+        except sqlite3.Error:
+            continue
+        try:
+            pairs = _parked_pairs(conn)
+            info = _local_wait_info(conn, {tid for _, tid in pairs}, now=now) if pairs else {}
+            titles: dict[str, str] = {}
+            ids = list(info)
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                titles.update((str(t), str(n or "")) for t, n in conn.execute(
+                    f"SELECT id, title FROM tasks WHERE id IN ({','.join('?' for _ in chunk)})", chunk))
+        except Exception as exc:
+            _log.debug("kanban parked waits read failed for %s: %s", path, exc)
+            continue
+        finally:
+            conn.close()
+        board = _board_slug(path)
+        for sid, tid in sorted(pairs):
+            if tid in info:
+                out.append({"session": sid, "id": tid, "board": board, "key": f"{board}/{tid}",
+                            "title": titles.get(tid, ""), "remote": False, "gateway": None, "wait": info[tid]})
+    for card in _remote_links():
+        if card.get("stale"):
+            continue
+        wait = _remote_wait(card)
+        if wait is None:
+            continue
+        out.append({"session": str(card.get("session")), "id": str(card.get("id")), "board": card.get("board"),
+                    "key": str(card.get("key")), "title": str(card.get("title") or ""), "remote": True,
+                    "gateway": card.get("gateway"), "wait": wait})
+    return out
+
+
 def blocked_task_counts() -> dict[str, int]:
     """``{session_id: blocked task count}`` across every kanban board."""
     return _all_counts()[1]
@@ -1096,6 +1274,11 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         except sqlite3.Error:  # board predates notify subscriptions
             pass
         _add_card_details(conn, found)
+        try:
+            for tid, info in _local_wait_info(conn, found).items():
+                found[tid]["wait"] = info
+        except Exception as exc:  # display-only: never fails the task list
+            _log.debug("kanban wait info read failed for %s: %s", path, exc)
     board = _board_slug(path)
     return [{**t, "board": board} for t in found.values()]
 
@@ -1191,7 +1374,11 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
         listed = card.get('status') in statuses or (card.get('status') == 'unknown' and card.get('unfinished'))
         if belongs and listed and card['key'] not in seen:
             seen.add(card["key"])
-            out.append({**card, "session_id": card["session"]})
+            row = {**card, "session_id": card["session"]}
+            wait = _remote_wait(card)
+            if wait is not None:
+                row["wait"] = wait
+            out.append(row)
     return out
 
 
@@ -1324,6 +1511,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         active, blocked, unseen, remote_stale, waiting = _all_counts(include_waiting=True)
         with _cache_lock:  # the snapshot that call just read or wrote: never a second projection
             parked, held = _parked_cache[0]
+            stalled = _stalled_cache[0]
         extra = _extra_waiting()
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
@@ -1331,7 +1519,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         _log.warning("kanban activity unavailable; rows marked kanban_unknown", exc_info=True)
         for row in rows:
             for key in ("kanban_active", "kanban_blocked", "kanban_unseen", "kanban_attention", "kanban_remote_stale",
-                        "kanban_parked", "kanban_held"):
+                        "kanban_parked", "kanban_held", "kanban_stalled"):
                 row.pop(key, None)
             row.pop("kanban_observed_at", None)
             row.pop("kanban_waiting_on", None)
@@ -1371,6 +1559,12 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row["kanban_held"] = n_held
         else:
             row.pop("kanban_held", None)
+        # [daveey] Stalled: parked cards whose agent-owned wait passed 2 h (amber, not grey waiting or red needs-you).
+        n_stalled = sum(stalled.get(sid, 0) for sid in ids)
+        if n_stalled and row.get("kanban_active"):
+            row["kanban_stalled"] = n_stalled
+        else:
+            row.pop("kanban_stalled", None)
         ids_waiting = sorted(open_ids | pending)
         if ids_waiting:
             row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
@@ -1391,6 +1585,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
             _snapshot_saved = None
         _waiting_cache[0] = {}
         _parked_cache[0] = ({}, {})
+        _stalled_cache[0] = {}
     with _RO_CACHE_LOCK:
         held = [entry[0] for entry in _RO_CACHE.values()]
         _RO_CACHE.clear()

@@ -195,6 +195,15 @@ def _recent(observed_at: object, now: float, window: float = 180) -> bool:
     return type(observed_at) in (int, float) and 0 <= now - observed_at <= window
 
 
+def _park_of(task: dict) -> dict | None:
+    """[daveey] Display-only run fields of an owner record (``kanban_wait_info.park_fields``); never raises."""
+    try:
+        from hermes_cli.kanban_wait_info import park_fields
+        return park_fields(task.get('run')) if isinstance(task, dict) else None
+    except Exception:
+        return None
+
+
 def _owner_evidence(task: dict) -> dict:
     evidence = task.get('origin_observation')
     if not isinstance(evidence, dict) or type(evidence.get('schema')) is not int or evidence['schema'] != 1:
@@ -361,6 +370,9 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     'stale': not current, 'synced_at': last_ok,
                     'remote': True, 'via': 'origin',
                     'legacy_aliases': aliases_for_projection(alias_receipts.get(binding_hash(binding), []), binding),
+                    # [daveey] Bounded run fields for what the card waits on (kanban_wait_info, display only).
+                    'park': _park_of(task),
+                    **{k: task[k] for k in ('awaiting', 'wake_check', 'human_request') if task.get(k)},
                 })
         return result
     finally:
