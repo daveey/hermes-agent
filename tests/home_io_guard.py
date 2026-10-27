@@ -11,6 +11,19 @@ import sqlite3
 import sys
 import threading
 
+
+def linked_worktree_git_dirs(checkout: Path) -> set[Path]:
+    """The git dir a linked worktree's ``.git`` file points to (empty for a plain clone)."""
+    dot_git = checkout / ".git"
+    if not dot_git.is_file():
+        return set()
+    first = (dot_git.read_text().splitlines() or [""])[0]
+    if not first.startswith("gitdir:"):
+        return set()
+    target = Path(first.split(":", 1)[1].strip())
+    return {(target if target.is_absolute() else checkout / target).resolve()}
+
+
 _INTERPRETER_PREFIXES = tuple({
     Path(p).resolve() for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 } | {
@@ -24,7 +37,10 @@ _INTERPRETER_PREFIXES = tuple({
     # checkout's own .venv is not Hermes state; without this every run from a default install
     # trips on its first traceback.
     Path(__file__).resolve().parent.parent,
-})
+} | linked_worktree_git_dirs(Path(__file__).resolve().parent.parent))
+# ^ A linked worktree of that checkout (hermes-core-wt) keeps its git dir under the home's
+# ``hermes-agent/.git/worktrees/<name>``, where the CLI's interrupted-update probe reads it. That is
+# the checkout's own metadata, which a plain clone already gets through the checkout line above.
 # The same prefixes as plain strings for the check() fast path. PurePath comparison folds case on
 # Windows; ``os.path.normcase`` (identity on POSIX) reproduces that for string compares. Prefixes
 # resolve once at import, as before: they are fixed for the process lifetime.

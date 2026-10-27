@@ -229,3 +229,26 @@ def test_hermes_exported_scratch_tmp_is_not_the_test_temp_root(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
+
+
+def test_linked_worktree_git_dir_is_the_checkouts_own_metadata(tmp_path):
+    """A linked worktree's ``.git`` file names its git dir (under the home's checkout for
+    hermes-core-wt trees); that dir counts as the checkout's, a plain clone contributes nothing,
+    and the rest of the home stays refused."""
+    from tests.home_io_guard import linked_worktree_git_dirs
+
+    home = tmp_path / "home"
+    own = home / "hermes-agent" / ".git" / "worktrees" / "mine"
+    own.mkdir(parents=True)
+    tree = tmp_path / "wt"
+    tree.mkdir()
+    (tree / ".git").write_text(f"gitdir: {own}\n")
+    assert linked_worktree_git_dirs(tree) == {own.resolve()}
+    relative = tmp_path / "rel"
+    relative.mkdir()
+    (relative / ".git").write_text("gitdir: ../home/hermes-agent/.git/worktrees/mine\n")
+    assert linked_worktree_git_dirs(relative) == {own.resolve()}
+    plain = tmp_path / "plain"
+    (plain / ".git").mkdir(parents=True)
+    assert linked_worktree_git_dirs(plain) == set()
+    assert linked_worktree_git_dirs(tmp_path / "absent") == set()
