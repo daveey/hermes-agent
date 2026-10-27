@@ -1,0 +1,486 @@
+"""Central Kanban sync client (phase 2): push the outbox as row ops, pull the feed (into a shadow copy or the live
+board), snapshot resync, import, diff and the hub lease client. The service is an in-memory fake of the hermes-hub
+Board contract (``kanban_sync_fake_board``). Design: hermes-mods ``core/kanban-central-service.md``."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_sync_client as ksc
+from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli.kanban_sync_fake_board import FakeService
+
+ME, OTHER, BOARD = "macbook", "mini", "default"
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    return support.kanban_home(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def svc():
+    return FakeService()
+
+
+@pytest.fixture
+def live(kanban_home):
+    support.write_sync_config(kanban_home, True)
+    conn = kbc.connect(kanban_home / "kanban.db")
+    ksc.ensure_identity(conn, BOARD, ME)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _pending(conn) -> list[dict]:
+    return [dict(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox WHERE state = 'pending'")]
+
+
+def _round(kanban_home, svc, gateway=ME):
+    return ksc.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(gateway), gateway)
+
+
+def _shadow():
+    return kbc.connect(ksc.shadow_path(BOARD))
+
+
+def _other_creates(svc, task_id, **fields):
+    """Another gateway pushes a card straight to the service."""
+    hub = svc.hub(OTHER)
+    return hub.ops(BOARD, [{"client_op_id": f"other-{task_id}-op", "op": "upsert", "table": "tasks", "uid": task_id,
+                            "hlc": f"{1:013d}-0000-{OTHER}",
+                            "fields": {"title": task_id, "status": "ready", "created_at": 1, **fields}}])
+
+
+def _tables_digest(conn) -> str:
+    h = hashlib.sha256()
+    for table in ("tasks", "task_links", "task_comments", "task_runs", "task_events"):
+        cols = [c for c in sync.table_columns(conn, table) if c not in ("sync_version", "lease_holder", "lease_expires")]
+        for row in conn.execute(f"SELECT {', '.join(cols)} FROM {table} ORDER BY 1"):
+            h.update(repr(tuple(row)).encode())
+    return h.hexdigest()
+
+
+# --- translate --------------------------------------------------------------------------------------------------
+
+def test_translate_upsert_import_and_delete_rows():
+    up = ksc.translate({"op_id": "0192-a", "table_name": "tasks", "row_uid": "t_1", "op": "upsert",
+                        "fields": json.dumps({"title": "x", "status": "ready", "lease_holder": "me", "brand_new": 1})},
+                       "0000000000001-0000-me")
+    assert up == {"client_op_id": "0192-a", "table": "tasks", "uid": "t_1", "hlc": "0000000000001-0000-me",
+                  "op": "upsert", "fields": {"title": "x", "status": "ready"}}  # local/undeclared columns stay home
+    imp = ksc.translate({"op_id": "0192-b", "table_name": "tasks", "row_uid": "t_1", "op": "import",
+                         "fields": {"title": "x"}}, "h")
+    assert imp["op"] == "upsert" and imp["import"] is True
+    child = ksc.translate({"op_id": "0192-c", "table_name": "task_runs", "row_uid": "r-1", "op": "import",
+                           "fields": {"task_id": "t_1", "status": "done"}}, "h")
+    assert child["op"] == "upsert" and "import" not in child
+    gone = ksc.translate({"op_id": "0192-d", "table_name": "task_links", "row_uid": "a>b", "op": "delete",
+                          "fields": "{}"}, "h")
+    assert gone == {"client_op_id": "0192-d", "table": "task_links", "uid": "a>b", "hlc": "h", "op": "delete"}
+
+
+def test_hlc_is_monotonic_and_survives_a_reopen(live, kanban_home):
+    with kbc.write_txn(live):
+        a = ksc._next_hlc(live, ME)
+        b = ksc._next_hlc(live, ME)
+    assert b > a and a.endswith(f"-{ME}")
+    live.close()
+    conn = kbc.connect(kanban_home / "kanban.db")
+    with kbc.write_txn(conn):
+        assert ksc._next_hlc(conn, ME) > b
+    conn.close()
+
+
+# --- push -------------------------------------------------------------------------------------------------------
+
+def test_push_drains_the_outbox_and_the_service_records_this_gateway_as_creator(live, svc):
+    tid = kb.create_task(live, title="pushed", assignee="worker")
+    kb.add_comment(live, tid, "me", "a note")
+    assert _pending(live)
+    res = ksc.push(live, svc.hub(ME), BOARD, ME, primary=False)
+    assert res.rejected == 0 and res.sent >= 2 and not _pending(live)
+    row = svc.board(BOARD)["rows"]["tasks"][tid]
+    assert row["title"] == "pushed" and row["created_on"] == ME
+    assert any(r["body"] == "a note" for r in svc.board(BOARD)["rows"]["task_comments"].values())
+    assert kb.get_task(live, tid) is not None
+    assert live.execute("SELECT sync_version FROM tasks WHERE id = ?", (tid,)).fetchone()[0] >= 1
+
+
+def test_transport_failure_keeps_rows_pending_and_counts_the_attempt(live, svc):
+    kb.create_task(live, title="offline", assignee="worker")
+    n = len(_pending(live))
+    svc.offline = True
+    with pytest.raises(OSError):
+        ksc.push(live, svc.hub(ME), BOARD, ME, primary=False)
+    rows = _pending(live)
+    assert len(rows) == n and all(r["attempts"] == 1 and "unreachable" in r["last_error"] for r in rows)
+
+
+def test_outbox_survives_a_restart_and_a_lost_ack_replays_idempotently(live, svc, kanban_home):
+    tid = kb.create_task(live, title="replay", assignee="worker")
+    wire = [ksc.translate(r, f"{i + 1:013d}-0000-{ME}") for i, r in enumerate(_pending(live))]
+    svc.hub(ME).ops(BOARD, wire)  # the service applied them, but the answer never arrived
+    live.close()
+    conn = kbc.connect(kanban_home / "kanban.db")  # restart: the rows are still queued
+    assert len(_pending(conn)) == len(wire)
+    res = ksc.push(conn, svc.hub(ME), BOARD, ME, primary=False)
+    assert res.rejected == 0 and not _pending(conn)
+    assert len([c for c in svc.board(BOARD)["changes"] if c["table"] == "tasks" and c["uid"] == tid]) == 1
+    conn.close()
+
+
+def test_rejected_op_is_marked_and_a_primary_board_restores_the_service_row(live, svc):
+    tid = kb.create_task(live, title="contested", assignee="worker")
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=False)
+    svc.board(BOARD)["leases"][tid] = {"task_id": tid, "holder": OTHER, "run_uid": "run-other-1", "expires": 9e15}
+    sync.set_mode(live, "primary")
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
+    res = ksc.push(live, svc.hub(ME), BOARD, ME, primary=True)
+    assert res.rejected == 1
+    rej = live.execute("SELECT state, last_error FROM kanban_sync_outbox").fetchone()
+    assert rej["state"] == "rejected" and rej["last_error"].startswith("live_claim")
+    assert kb.get_task(live, tid).status == "ready"  # the service's row, not the refused local edit
+
+
+# --- pull -------------------------------------------------------------------------------------------------------
+
+def test_shadow_pull_fills_the_shadow_copy_and_never_touches_the_live_board(live, svc, kanban_home):
+    mine = kb.create_task(live, title="mine", assignee="worker")
+    _other_creates(svc, "t_theirs")
+    live_before = _tables_digest(live)
+    result = _round(kanban_home, svc)
+    assert result.mode == "shadow" and result.error is None
+    shadow = _shadow()
+    try:
+        rows = {r["id"]: r["created_on"] for r in shadow.execute("SELECT id, created_on FROM tasks")}
+    finally:
+        shadow.close()
+    assert rows.get("t_theirs") == OTHER  # the other gateway's card reached our shadow copy
+    _round(kanban_home, svc)  # our own push comes back on the next pull
+    shadow = _shadow()
+    try:
+        assert shadow.execute("SELECT created_on FROM tasks WHERE id = ?", (mine,)).fetchone()[0] == ME
+    finally:
+        shadow.close()
+    assert kb.get_task(live, "t_theirs") is None
+    assert _tables_digest(live) == live_before  # pushes only clear outbox rows; no remote row lands live
+
+
+def test_pull_advances_the_cursor_with_the_page_and_keeps_it_when_apply_fails(live, svc, monkeypatch):
+    sync.set_mode(live, "primary")
+    _other_creates(svc, "t_a")
+    _other_creates(svc, "t_b")
+    hub = svc.hub(ME)
+    assert ksc.pull(live, hub, BOARD, observers=False) == 2
+    assert sync.sync_state(live)["cursor"] == svc.board(BOARD)["seq"]
+    _other_creates(svc, "t_c")
+    real = sync.apply_remote_changes
+
+    def broken(conn, changes, **kw):
+        real(conn, changes, **kw)
+        raise RuntimeError("crash after apply, before the caller saw it")
+    monkeypatch.setattr(sync, "apply_remote_changes", broken)
+    with pytest.raises(RuntimeError):
+        ksc.pull(live, hub, BOARD, observers=False)
+    monkeypatch.setattr(sync, "apply_remote_changes", real)
+    # The page committed with its cursor: a replay reads nothing new and the row is there once.
+    assert ksc.pull(live, hub, BOARD, observers=False) == 0
+    assert kb.get_task(live, "t_c") is not None
+
+
+def test_cursor_below_the_retention_floor_rebuilds_the_shadow_from_a_snapshot(live, svc, kanban_home):
+    _other_creates(svc, "t_old")
+    _round(kanban_home, svc)
+    _other_creates(svc, "t_new")
+    svc.compact(BOARD)
+    svc.board(BOARD)["floor"] += 1  # our cursor is now below the floor
+    result = _round(kanban_home, svc)
+    assert result.error is None
+    shadow = _shadow()
+    try:
+        ids = {r[0] for r in shadow.execute("SELECT id FROM tasks")}
+        assert {"t_old", "t_new"} <= ids
+        assert sync.sync_state(shadow)["cursor"] == svc.board(BOARD)["seq"]
+    finally:
+        shadow.close()
+
+
+def test_primary_pull_keeps_fields_with_an_unanswered_local_edit(live, svc):
+    tid = kb.create_task(live, title="local", assignee="worker")
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=False)
+    sync.set_mode(live, "primary")
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET title = 'local edit' WHERE id = ?", (tid,))
+    svc.hub(OTHER).ops(BOARD, [{"client_op_id": "other-title-op1", "op": "upsert", "table": "tasks", "uid": tid,
+                                "hlc": f"{time.time_ns() // 1_000_000 + 1000:013d}-0000-{OTHER}",
+                                "fields": {"title": "remote edit", "priority": 5}}])
+    ksc.pull(live, svc.hub(ME), BOARD, observers=False)
+    t = kb.get_task(live, tid)
+    assert t.title == "local edit" and t.priority == 5
+
+
+def test_primary_pull_mirrors_the_lease_from_the_task_row(live, svc):
+    sync.set_mode(live, "primary")
+    _other_creates(svc, "t_leased")
+    b = svc.board(BOARD)
+    row = b["rows"]["tasks"]["t_leased"]
+    svc._put(b, "tasks", "t_leased", {"lease_holder": OTHER, "lease_expires": 123}, OTHER, None, row["hlc"])
+    ksc.pull(live, svc.hub(ME), BOARD, observers=False)
+    r = live.execute("SELECT lease_holder, lease_expires, created_on FROM tasks WHERE id = 't_leased'").fetchone()
+    assert (r["lease_holder"], r["lease_expires"], r["created_on"]) == (OTHER, 123, OTHER)
+
+
+# --- import -----------------------------------------------------------------------------------------------------
+
+def test_import_queues_every_row_once_and_is_safe_to_rerun(live, svc, kanban_home):
+    with kbc.write_txn(live):
+        sync.drop_triggers(live)  # rows written before sync was switched on
+    a = kb.create_task(live, title="old a", assignee="worker")
+    b = kb.create_task(live, title="old b", assignee="worker", parents=[a])
+    kb.add_comment(live, a, "me", "history")
+    sync.install_triggers(live)
+    with kbc.write_txn(live):
+        for table in sync._UID_TABLES:
+            live.execute(f"UPDATE {table} SET uid = lower(hex(randomblob(8))) WHERE uid IS NULL")
+    counts = ksc.import_board(live)
+    assert counts["tasks"] == 2 and counts["task_links"] == 1 and counts["task_comments"] == 1
+    assert ksc.push(live, svc.hub(ME), BOARD, ME, primary=False).rejected == 0
+    ksc.import_board(live)
+    assert ksc.push(live, svc.hub(ME), BOARD, ME, primary=False).rejected == 0  # a re-import is accepted
+    rows = svc.board(BOARD)["rows"]
+    assert set(rows["tasks"]) == {a, b} and f"{a}>{b}" in rows["task_links"]
+
+
+def test_import_of_an_id_another_gateway_created_is_rejected_and_shows_in_the_diff(live, svc, kanban_home):
+    tid = kb.create_task(live, title="clash", assignee="worker")
+    with kbc.write_txn(live):
+        live.execute("DELETE FROM kanban_sync_outbox")
+    _other_creates(svc, tid)
+    ksc.import_board(live, tables=("tasks",))
+    assert ksc.push(live, svc.hub(ME), BOARD, ME, primary=False).rejected == 1
+    _round(kanban_home, svc)
+    shadow = _shadow()
+    try:
+        report = ksc.diff(live, shadow, ME)
+    finally:
+        shadow.close()
+    assert not report["clean"] and report["rejected_ops"] == 1
+
+
+# --- diff -------------------------------------------------------------------------------------------------------
+
+def test_diff_is_clean_after_sync_and_reports_an_injected_mismatch(live, svc, kanban_home):
+    tid = kb.create_task(live, title="same", assignee="worker")
+    kb.add_comment(live, tid, "me", "c")
+    _other_creates(svc, "t_foreign")
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    shadow = _shadow()
+    try:
+        report = ksc.diff(live, shadow, ME)
+        assert report["clean"], report
+        assert report["checked"] == 1 and report["foreign_cards"] == 1
+        with kbc.write_txn(shadow):
+            shadow.execute("UPDATE kanban_sync_state SET applying = 1")
+            shadow.execute("UPDATE tasks SET title = 'drifted' WHERE id = ?", (tid,))
+            shadow.execute("UPDATE kanban_sync_state SET applying = 0")
+        report = ksc.diff(live, shadow, ME)
+    finally:
+        shadow.close()
+    assert not report["clean"] and report["field_mismatch"] == {tid: ["title"]}
+
+
+def test_diff_reports_unpushed_rows_as_pending_not_as_differences(live, svc, kanban_home):
+    _round(kanban_home, svc)
+    kb.create_task(live, title="not yet pushed", assignee="worker")
+    shadow = _shadow()
+    try:
+        report = ksc.diff(live, shadow, ME)
+    finally:
+        shadow.close()
+    assert report["clean"] and report["pending"] == 1
+
+
+# --- leases -----------------------------------------------------------------------------------------------------
+
+def test_hub_lease_client_acquire_renew_release(svc):
+    svc.board(BOARD)
+    client = ksc.HubLeaseClient(svc.hub(ME))
+    got = client.acquire(board_id=BOARD, task_uid="t_l", run_uid="run-me-0001", gateway_id=ME, ttl_s=60, lane="review")
+    assert got.granted and got.holder == ME and got.expires_ms
+    assert client.renew(board_id=BOARD, task_uid="t_l", run_uid="run-me-0001", gateway_id=ME, ttl_s=60).granted
+    other = ksc.HubLeaseClient(svc.hub(OTHER)).acquire(board_id=BOARD, task_uid="t_l", run_uid="run-ot-0001",
+                                                        gateway_id=OTHER, ttl_s=60)
+    assert not other.granted and other.holder == ME and other.reason == "lease_held"
+    client.release(board_id=BOARD, task_uid="t_l", run_uid="run-me-0001", gateway_id=ME)
+    assert "t_l" not in svc.board(BOARD)["leases"]
+    svc.offline = True
+    with pytest.raises(sync.LeaseUnavailable):
+        client.renew(board_id=BOARD, task_uid="t_l", run_uid="run-me-0001", gateway_id=ME, ttl_s=60)
+
+
+# --- config -----------------------------------------------------------------------------------------------------
+
+def test_only_listed_boards_capture(kanban_home):
+    (kanban_home / "config.yaml").write_text("kanban:\n  sync:\n    enabled: true\n    boards: [other]\n")
+    conn = kbc.connect(kanban_home / "kanban.db")
+    try:
+        kb.create_task(conn, title="not synced", assignee="worker")
+        assert sync.board_mode(conn) == "off"
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'kanban_sync_%'").fetchone()
+    finally:
+        conn.close()
+
+
+def test_identity_comes_from_the_hub_enrollment_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(ksc.Path, "home", lambda: tmp_path)
+    mail = tmp_path / ".config" / "hermes-mail"
+    mail.mkdir(parents=True)
+    (mail / "config.json").write_text(json.dumps({"url": "https://hub.example", "gateway": "mini"}))
+    (mail / "gateway.key").write_text("secret\n")
+    ident = ksc.load_identity({})
+    assert (ident.url, ident.gateway, ident.key) == ("https://hub.example", "mini", "secret")
+    assert ksc.load_identity({"url": "https://other/", "gateway": "x"}).url == "https://other"
+    (mail / "gateway.key").unlink()
+    with pytest.raises(ksc.SyncUnavailable):
+        ksc.load_identity({})
+
+
+# --- entry paths: CLI and gateway watcher -------------------------------------------------------------------------
+
+def _cli(*argv: str) -> int:
+    import argparse
+    from hermes_cli import kanban as kc
+    parser = argparse.ArgumentParser()
+    kc.build_parser(parser.add_subparsers(dest="cmd"))
+    return kc.kanban_command(parser.parse_args(["kanban", *argv]))
+
+
+def test_cli_attach_import_run_diff_status(kanban_home, svc, monkeypatch, capsys):
+    support.write_sync_config(kanban_home, True)
+    conn = kbc.connect(kanban_home / "kanban.db")
+    tid = kb.create_task(conn, title="cli card", assignee="worker")
+    conn.close()
+    hub = svc.hub(ME)
+    monkeypatch.setattr(ksc, "load_identity", lambda cfg=None: hub.ident)
+    monkeypatch.setattr(ksc, "Hub", lambda ident, **kw: hub)
+    assert _cli("sync", "attach", "--mode", "shadow") == 0
+    assert _cli("sync", "import") == 0
+    assert _cli("sync", "run") == 0
+    assert _cli("sync", "run") == 0  # second round pulls our own rows back into the shadow
+    assert svc.board(BOARD)["rows"]["tasks"][tid]["created_on"] == ME
+    assert _cli("sync", "diff") == 0
+    capsys.readouterr()
+    assert _cli("sync", "status", "--json") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["mode"] == "shadow" and out["board_id"] == BOARD and out["gateway"] == ME and out["pending"] == 0
+
+
+def test_cli_attach_refuses_when_sync_is_off(kanban_home, capsys):
+    support.write_sync_config(kanban_home, False)
+    assert _cli("sync", "attach") == 2
+    assert "enable it first" in capsys.readouterr().out
+
+
+def test_gateway_watcher_runs_the_loop_once_per_host_and_not_when_disabled(kanban_home, monkeypatch):
+    import asyncio
+    from gateway import kanban_watchers as watchers
+    calls = []
+
+    def fake_run_forever(keep_running, interval=None, sleep=None):
+        calls.append(keep_running())
+    monkeypatch.setattr(ksc, "run_forever", fake_run_forever)
+    runner = watchers.GatewayKanbanWatchersMixin()
+    runner._running = True
+    support.write_sync_config(kanban_home, False)
+    asyncio.run(runner._kanban_sync_watcher())
+    assert calls == []
+    support.write_sync_config(kanban_home, True)
+    asyncio.run(runner._kanban_sync_watcher())
+    assert calls == [True]
+    from gateway.kanban_watchers_common import _acquire_singleton_lock, _release_singleton_lock
+    held, state = _acquire_singleton_lock(kb.kanban_home() / "kanban" / ".sync.lock")
+    try:
+        assert state == "held"
+        asyncio.run(runner._kanban_sync_watcher())  # another gateway on this host holds it
+        assert calls == [True]
+    finally:
+        _release_singleton_lock(held)
+
+
+def test_import_skips_events_older_than_the_service_retention(live):
+    tid = kb.create_task(live, title="evented", assignee="worker")
+    old = int(time.time()) - ksc.EVENT_IMPORT_WINDOW_S - 60
+    with kbc.write_txn(live):
+        live.execute("INSERT INTO task_events (task_id, kind, payload, created_at, uid) VALUES (?, 'ancient', '{}', ?, 'ev-old')",
+                     (tid, old))
+        live.execute("DELETE FROM kanban_sync_outbox")
+    ksc.import_board(live, tables=("task_events",))
+    uids = {r[0] for r in live.execute("SELECT row_uid FROM kanban_sync_outbox WHERE table_name = 'task_events'")}
+    assert "ev-old" not in uids and uids  # the recent "created" event is still imported
+
+
+def test_a_worker_under_another_profile_keeps_the_hosts_sync_on(kanban_home, monkeypatch):
+    """The switch lives in the kanban root's config: a profile process (HERMES_HOME=<root>/profiles/x, its own
+    config without the setting) must not see sync as off and drop the board's capture triggers."""
+    support.write_sync_config(kanban_home, True)
+    conn = kbc.connect(kanban_home / "kanban.db")
+    conn.close()
+    profile = kanban_home / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model: {}\n")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setattr(kbc, "_INITIALIZED_PATHS", set())
+    assert sync.sync_enabled()
+    conn = kbc.connect(kanban_home / "kanban.db")
+    try:
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'kanban_sync_%'").fetchone()
+    finally:
+        conn.close()
+
+
+# --- primary: the live board holds this gateway's cards; the replica holds the whole board ------------------------
+
+def test_primary_keeps_other_gateways_cards_out_of_the_live_board_but_in_the_replica(live, svc, kanban_home):
+    mine = kb.create_task(live, title="mine", assignee="worker")
+    sync.set_mode(live, "primary")
+    _other_creates(svc, "t_theirs")
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    assert kb.get_task(live, "t_theirs") is None  # the dispatcher never sees another gateway's card
+    replica = _shadow()
+    try:
+        assert {r[0] for r in replica.execute("SELECT id FROM tasks")} >= {mine, "t_theirs"}
+    finally:
+        replica.close()
+    # Another device edits OUR card on the service: the edit lands on the live board.
+    svc.hub(OTHER).ops(BOARD, [{"client_op_id": "other-edit-mine-1", "op": "upsert", "table": "tasks", "uid": mine,
+                                "hlc": f"{time.time_ns() // 1_000_000 + 1000:013d}-0000-{OTHER}",
+                                "fields": {"title": "renamed elsewhere"}}])
+    _round(kanban_home, svc)
+    assert kb.get_task(live, mine).title == "renamed elsewhere"
+    assert live.execute("SELECT created_on FROM tasks WHERE id = ?", (mine,)).fetchone()[0] == ME
+
+
+def test_own_partition_keeps_child_rows_of_own_cards_only(live):
+    tid = kb.create_task(live, title="own", assignee="worker")
+    ch = [
+        sync.RemoteChange(1, "tasks", "t_new_mine", "upsert", {"created_on": ME, "title": "n"}, 1, "", ME),
+        sync.RemoteChange(2, "task_comments", "c1", "upsert", {"task_id": "t_new_mine"}, 1, "", ME),
+        sync.RemoteChange(3, "task_comments", "c2", "upsert", {"task_id": "t_foreign"}, 1, "", OTHER),
+        sync.RemoteChange(4, "tasks", "t_foreign", "upsert", {"created_on": OTHER, "title": "f"}, 1, "", OTHER),
+        sync.RemoteChange(5, "task_links", f"{tid}>t_new_mine", "upsert", {}, 1, "", ME),
+        sync.RemoteChange(6, "task_links", f"{tid}>t_foreign", "upsert", {}, 1, "", OTHER),
+    ]
+    assert [c.seq for c in ksc.own_partition(live, ch, ME)] == [1, 2, 5]
