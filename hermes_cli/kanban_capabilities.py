@@ -128,7 +128,8 @@ def validate_assignment(
     try:
         available = _profile_capabilities(assignee)
     except Exception as exc:
-        raise CapabilityMismatchError(assignee, required, reason=f"profile policy unavailable: {exc}") from exc
+        raise CapabilityMismatchError(assignee, [n for n in required if n in _CAPABILITIES],
+                                      reason=f"profile policy unavailable: {exc}") from exc
     missing = [name for name in required if name in _CAPABILITIES and name not in available]
     if missing:
         raise CapabilityMismatchError(assignee, missing)

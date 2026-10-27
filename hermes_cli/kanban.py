@@ -612,10 +612,17 @@ def _cli_route_needs(op: str, args: argparse.Namespace, reason: str) -> Optional
         return _err(f"kanban {op}: --need routes one card at a time", 2)
     if getattr(args, "human_request", None) is not None:
         return _err(f"kanban {op}: --need routes to an agent; --human-request asks David. Pass one.", 2)
+    if getattr(args, "wake_check", None) or getattr(args, "clock_only", False):
+        return _err(f"kanban {op}: --need parks on the owner card's own probe; drop --wake-check/--clock-only", 2)
     tid = ids[0]
     with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        if task is not None and task.goal_mode:
+            return _err(f"kanban {op}: goal_mode tasks cannot park on an owner card", 2)
         try:
-            res = kcr.route(conn, tid, needs, reason=reason or "", expected_run_id=_worker_run_id_for(tid))
+            from agent.redact import redact_sensitive_text
+            res = kcr.route(conn, tid, needs, reason=redact_sensitive_text(reason or "", force=True),
+                            expected_run_id=_worker_run_id_for(tid))
         except kcr.CapabilityRouteError as exc:
             return _err(f"kanban {op}: {exc}", 2)
         except ValueError as exc:

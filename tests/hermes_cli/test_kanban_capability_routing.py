@@ -337,3 +337,123 @@ def test_cli_block_need_without_holder_exits_2_and_keeps_card(env, capsys):
     assert "no_capability_holder" in capsys.readouterr().err
     with kbc.connect_closing() as conn:
         assert kb.get_task(conn, tid).status == "running"
+
+
+# --- review follow-ups ---------------------------------------------------------------------------
+
+def test_admin_covers_only_at_depth_three():
+    assert not reg.satisfies("ssh:admin", "ssh:mini")
+    assert reg.satisfies(f"aws:{ACCOUNT}:admin", f"aws:{ACCOUNT}:ec2-describe")
+
+
+def test_request_ids_never_merge_distinct_needs():
+    a = kcr.request_id("t_1", "token-broker:user/x")
+    b = kcr.request_id("t_1", "token-broker:user-x")
+    long1 = kcr.request_id("t_1", "aws:" + "a" * 150 + ":one")
+    long2 = kcr.request_id("t_1", "aws:" + "a" * 150 + ":two")
+    assert len({a, b}) == 2 and len({long1, long2}) == 2
+    assert all(len(x) <= 128 for x in (a, b, long1, long2))
+    assert kcr.request_id("t_1", NEED) == f"capability-owner:t_1:{NEED}"
+
+
+def test_partial_failure_retry_resends_identical_envelopes(env, monkeypatch):
+    now = time.time()
+    publish(env["hub"], "macbook", {f"aws:{ACCOUNT}:admin": now})
+    publish(env["hub"], "mini", {"ssh:mini-lan": now})
+    real = kcr.hub_runner
+    fail = {"on": "mini"}
+
+    def flaky(argv):
+        if argv[2] == fail["on"]:
+            env["calls"].append(argv)
+            return 2, "boom"
+        return real(argv)
+
+    monkeypatch.setattr(kcr, "hub_runner", flaky)
+    with kbc.connect_closing() as conn:
+        tid = running(conn)
+        with pytest.raises(kcr.CapabilityRouteError) as exc:
+            kcr.route(conn, tid, [NEED, "ssh:mini-lan"], reason=REASON_2239)
+        assert exc.value.code == "capability_hub_unavailable"
+        assert "retrying this call resends them unchanged" in str(exc.value)
+        assert kb.get_task(conn, tid).status == "running"
+        # The macbook holder record is re-checked meanwhile; the retry must still be an exact resend.
+        publish(env["hub"], "macbook", {f"aws:{ACCOUNT}:admin": time.time() + 5})
+        fail["on"] = None
+        res = kcr.route(conn, tid, [NEED, "ssh:mini-lan"], reason=REASON_2239)
+    assert [r["gateway"] for r in res["routes"]] == ["macbook", "mini"]
+    mac = [c for c in env["calls"] if c[2] == "macbook"]
+    assert len(mac) == 2 and mac[0] == mac[1]
+
+
+def test_preflight_does_not_park_a_card_claimed_during_the_hub_call(env, monkeypatch):
+    publish(env["hub"], "macbook", {f"aws:{ACCOUNT}:admin": time.time()})
+    real = kcr.hub_runner
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="pilot", assignee="worker", requires=[NEED])
+
+        def claim_meanwhile(argv):
+            out = real(argv)
+            with kbc.connect_closing() as other:
+                assert kb.claim_task(other, tid, claimer="worker") is not None
+            return out
+
+        monkeypatch.setattr(kcr, "hub_runner", claim_meanwhile)
+        placed = kcr.preflight(conn, tid)
+        assert placed["code"] == "capability_route_invalid_state"
+        assert kb.get_task(conn, tid).status == "running"
+
+
+def test_owner_body_is_redacted(env):
+    publish(env["hub"], "macbook", {f"aws:{ACCOUNT}:admin": time.time()})
+    secret = "AKIA" + "Q" * 16
+    with kbc.connect_closing() as conn:
+        tid = running(conn)
+        kcr.route(conn, tid, [NEED], reason=f"denied; key {secret} aws_secret_access_key=abcd1234abcd1234abcd")
+    body = env["calls"][0][env["calls"][0].index("--body") + 1]
+    assert secret not in body
+
+
+def test_rejected_owner_request_may_be_rerouted_once(env):
+    publish(env["hub"], "macbook", {f"aws:{ACCOUNT}:admin": time.time()})
+    with kbc.connect_closing() as conn:
+        tid = running(conn)
+        kcr.route(conn, tid, [NEED], reason="x")
+        rid = kcr.request_id(tid, NEED)
+        env["hub"].execute("UPDATE sent SET state='rejected', result='{}' WHERE id=?", (rid,))
+        env["hub"].commit()
+        kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        res = kcr.route(conn, tid, [NEED], reason="x")
+        assert res["routes"][0]["request_id"] == kcr.request_id(tid, NEED, 2) == f"{rid}:g2"
+        env["hub"].execute("UPDATE sent SET state='rejected', result='{}' WHERE id=?", (f"{rid}:g2",))
+        env["hub"].commit()
+        kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        with pytest.raises(kcr.CapabilityRouteError) as exc:
+            kcr.route(conn, tid, [NEED], reason="x")
+    assert exc.value.code == "capability_route_exhausted"
+
+
+def test_hub_collector_output_is_what_routing_reads(env, tmp_path, monkeypatch):
+    """Cross-repo contract: the hermes-hub client's collect_capabilities record routes."""
+    import importlib.util
+    path = Path("/home/ubuntu/code/hermes-hub/client/hermes_hub.py")
+    if not path.exists():
+        pytest.skip("hermes-hub checkout not present")
+    spec = importlib.util.spec_from_file_location("hub_client_contract", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if not hasattr(mod, "collect_capabilities"):
+        pytest.skip("hermes-hub client predates the capabilities collection")
+    peer = tmp_path / "peer"
+    (peer / "kanban").mkdir(parents=True)
+    (peer / "kanban" / "capabilities.json").write_text(json.dumps({
+        "schema": 1, "refreshed_at": time.time(),
+        "capabilities": [{"name": f"aws:{ACCOUNT}:admin", "ok": True, "checked_at": time.time()}]}))
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    rec = mod.collect_capabilities(peer)["info"]
+    env["hub"].execute("INSERT INTO replica VALUES ('macbook', 'capabilities', 'info', 1, 1, ?, 0)",
+                       (mod.canon(rec),))
+    env["hub"].commit()
+    assert reg.locate(NEED)["holders"][0][0] == "macbook"

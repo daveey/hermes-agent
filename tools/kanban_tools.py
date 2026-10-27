@@ -1036,6 +1036,8 @@ def _route_needs(op: str, args: dict, tid: str, reason: Optional[str]) -> Option
            "needs routes the wall to the gateway that holds the capability; a human_request asks David. "
            "Pass one: if only David can grant it, drop needs.")
     _check(not args.get("blocker_id"), "needs cannot be combined with blocker_id")
+    _check(not args.get("wake_check") and not args.get("clock_only"),
+           "needs parks on the owner card's own wake probe; drop wake_check/clock_only")
     with _board(args.get("board")) as (kb, conn):
         task = kb.get_task(conn, tid)
         _check(not (task and task.goal_mode),

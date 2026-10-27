@@ -40,7 +40,8 @@ from typing import Optional
 
 SCHEMA = 1
 NEED_RE = re.compile(r"[a-z][a-z0-9-]*(?::[A-Za-z0-9._@/+-]+)+")
-COVERING_LEAVES = ("admin", "*")
+COVERING_LEAF = "admin"
+CONFIG_TTL = 60
 DEFAULT_REFRESH_SECONDS = 600
 DEFAULT_STALE_AFTER_SECONDS = 1800
 PROBE_TIMEOUT = 20
@@ -78,26 +79,37 @@ def normalize_needs(value) -> list[str]:
 
 
 def satisfies(held: str, need: str) -> bool:
-    """``held`` covers ``need``: equal; a covering leaf (``aws:1:admin`` covers ``aws:1:x``);
-    or a more specific holding of a broader need (``aws:1:admin`` covers ``aws:1``)."""
+    """``held`` covers ``need``: equal; an ``admin`` leaf at depth >= 3 covers its scope
+    (``aws:1:admin`` covers ``aws:1:x``, but ``ssh:admin`` is just a host named admin); or a more
+    specific holding of a broader need (``aws:1:admin`` covers ``aws:1``)."""
     if held == need:
         return True
     h, n = held.split(":"), need.split(":")
-    if h[-1] in COVERING_LEAVES and len(n) >= len(h) and n[: len(h) - 1] == h[:-1]:
+    if len(h) >= 3 and h[-1] == COVERING_LEAF and len(n) >= len(h) and n[: len(h) - 1] == h[:-1]:
         return True
     return len(h) > len(n) and h[: len(n)] == n
 
 
 # --- config / paths ------------------------------------------------------------------------
 
+_config_cache: tuple[float, dict] = (0.0, {})
+
+
 def _config() -> dict:
+    """``kanban.capabilities`` (cached for CONFIG_TTL seconds: the dispatcher tick reads it)."""
+    global _config_cache
+    at, cached = _config_cache
+    if time.monotonic() - at < CONFIG_TTL and at:
+        return cached
     try:
         from hermes_cli.config import load_config_readonly
         cfg = (load_config_readonly() or {}).get("kanban", {}) or {}
         caps = cfg.get("capabilities") or {}
-        return caps if isinstance(caps, dict) else {}
+        caps = caps if isinstance(caps, dict) else {}
     except Exception:
-        return {}
+        caps = {}
+    _config_cache = (time.monotonic(), caps)
+    return caps
 
 
 def _seconds(cfg: dict, key: str, default: int) -> int:
@@ -165,7 +177,9 @@ def _builtin_github() -> list[tuple[str, bool]]:
     if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", login or ""):
         return []
     found = [(f"github:{login}", True)]
-    rc, status = _run(["gh", "auth", "status"])
+    rc, status = _run(["gh", "auth", "status", "--active"])
+    if rc != 0:
+        rc, status = _run(["gh", "auth", "status"])
     m = re.search(r"Token scopes:\s*(.+)", status or "") if rc == 0 else None
     for scope in re.findall(r"'([a-z:_]+)'", m.group(1) if m else ""):
         found.append((f"github:{login}:{scope.replace(':', '-')}", True))
@@ -203,7 +217,7 @@ def refresh(cfg: Optional[dict] = None, *, now: Optional[float] = None) -> dict:
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [pool.submit(one, s) for s in specs]
         if cfg.get("builtin", True):
-            futures.append(pool.submit(lambda: ("sudo:nopasswd", _run(["sudo", "-n", "true"])[0] == 0, time.time())))
+            futures.append(pool.submit(lambda: ("sudo:nopasswd", _run(["sudo", "-k", "-n", "true"])[0] == 0, time.time())))
             gh = pool.submit(_builtin_github)
         else:
             gh = None

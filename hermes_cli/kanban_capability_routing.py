@@ -23,7 +23,12 @@ Refusals are typed (:class:`CapabilityRouteError`), and nothing is written:
 * ``capability_held_locally`` -- this gateway holds it: the wall is the worker's profile
   (kind='assignment') or a real failure, not a missing capability.
 * ``capability_route_exhausted`` -- this card already routed that need once; the existing owner
-  card must finish or report why.
+  card must finish or report why. A REJECTED owner request may be re-routed once more (a new
+  generation of the request id).
+
+Retries are safe: the owner envelope is a pure function of (card, need, reason), and an id that
+was already sent is re-sent from its stored envelope (same gateway), so ``hermes-hub`` sees an
+exact retry, never a conflicting one.
 """
 from __future__ import annotations
 
@@ -31,7 +36,8 @@ import json
 import re
 import subprocess
 import time
-from datetime import datetime, timezone, UTC
+import hashlib
+from datetime import UTC, datetime
 from typing import Callable, Optional
 
 from hermes_cli import kanban_capability_registry as reg
@@ -52,9 +58,19 @@ class CapabilityRouteError(ValueError):
         super().__init__(f"{code}: {message}")
 
 
-def request_id(task_id: str, need: str) -> str:
-    """Stable hermes-hub request id (and owner idempotency) for one card's need."""
-    return re.sub(r"[^A-Za-z0-9._:-]", "-", f"{OWNER_PREFIX}{task_id}:{need}")[:128]
+def request_id(task_id: str, need: str, generation: int = 1) -> str:
+    """Stable hermes-hub request id (and owner idempotency) for one card's need.
+
+    Readable ``capability-owner:<card>:<need>`` when the need fits the id alphabet and length;
+    otherwise a digest suffix keeps distinct needs distinct (no truncation/substitution merges).
+    """
+    gen = f":g{generation}" if generation > 1 else ""
+    plain = f"{OWNER_PREFIX}{task_id}:{need}{gen}"
+    if re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", plain):
+        return plain
+    safe = re.sub(r"[^A-Za-z0-9._:-]", "-", need)[:48]
+    digest = hashlib.sha256(need.encode("utf-8")).hexdigest()[:16]
+    return f"{OWNER_PREFIX}{task_id}:{safe}:{digest}{gen}"[:128]
 
 
 def needs_from_requires(requires) -> list[str]:
@@ -128,6 +144,40 @@ def plan(needs: list[str], *, now: Optional[float] = None, **lookup) -> dict:
     return {"routes": routes, "local": local}
 
 
+def _sent(rid: str) -> Optional[dict]:
+    """The stored hermes-hub envelope + state for ``rid`` on this gateway (None if never queued)."""
+    try:
+        db = reg._ro(reg.hub_db_path())
+    except Exception:
+        return None
+    try:
+        row = db.execute("SELECT body, state FROM sent WHERE id = ?", (rid,)).fetchone()
+        if row is None:
+            return None
+        return {"body": json.loads(row[0] or "{}"), "state": row[1]}
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+
+def _sent(rid: str) -> Optional[dict]:
+    """The stored hermes-hub envelope + state for ``rid`` on this gateway (None if never queued)."""
+    try:
+        db = reg._ro(reg.hub_db_path())
+    except Exception:
+        return None
+    try:
+        row = db.execute("SELECT body, state FROM sent WHERE id = ?", (rid,)).fetchone()
+        if row is None:
+            return None
+        return {"body": json.loads(row[0] or "{}"), "state": row[1]}
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+
 def _previous_routes(conn, task_id: str) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for (payload,) in conn.execute(
@@ -141,14 +191,16 @@ def _previous_routes(conn, task_id: str) -> dict[str, dict]:
     return out
 
 
-def owner_body(task, need: str, *, self_gw: str, board: str, reason: str, checked_at: float, now: float) -> str:
+def owner_body(task, need: str, *, self_gw: str, board: str, reason: str) -> str:
+    """Deterministic for (card, need, reason): retries resend an identical envelope."""
+    from agent.redact import redact_sensitive_text
     ref = f"{self_gw}/default/{board}/{task.id}"
-    excerpt = (reason or "").strip()
+    excerpt = redact_sensitive_text((reason or "").strip(), force=True)
     if len(excerpt) > 3000:
         excerpt = excerpt[:3000] + "…"
     return (
         f"Capability owner card for waiting card {ref} (\"{(task.title or '')[:160]}\").\n"
-        f"It needs `{need}`. This gateway holds it (live-checked {_ago(checked_at, now)} before routing); "
+        f"It needs `{need}`. This gateway holds it (live-checked in the hermes-hub capability registry); "
         f"{self_gw} does not.\n\n"
         "## Action (from the waiting card, inside its approved plan)\n"
         f"{excerpt or '(no reason given; read the waiting card first)'}\n\n"
@@ -171,10 +223,14 @@ def owner_body(task, need: str, *, self_gw: str, board: str, reason: str, checke
 
 
 def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[int] = None,
-          board: Optional[str] = None, now: Optional[float] = None, **lookup) -> dict:
+          board: Optional[str] = None, now: Optional[float] = None, require_unclaimed: bool = False,
+          **lookup) -> dict:
     """Route ``needs`` for a running/ready card: create owner cards, then park it on them.
 
-    Raises CapabilityRouteError (typed, nothing written) or ValueError for bad input.
+    Raises CapabilityRouteError or ValueError. Refusals decided before any hermes-hub call write
+    nothing. A failure after some owner requests were queued says so; retrying the same call is
+    safe (exact resend of the stored envelopes). ``require_unclaimed`` (placement preflight) parks
+    only a ``ready`` card nobody has claimed meanwhile.
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_timed_park as ktp
@@ -190,16 +246,24 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
                                    f"{task_id} is {task.status}; only a running or ready card can be routed")
     now = time.time() if now is None else now
     previous = _previous_routes(conn, task_id)
-    repeat = [n for n in needs if n in previous]
-    if repeat:
-        p = previous[repeat[0]]
+    generations: dict[str, int] = {}
+    for need in needs:
+        p = previous.get(need)
+        if p is None:
+            continue
+        sent = _sent(p.get("request_id") or "")
+        gen = int(p.get("generation") or 1)
+        if sent is not None and sent["state"] in ("rejected", "expired") and gen < 2:
+            generations[need] = gen + 1  # the owner never got a card: one fresh attempt
+            continue
         raise CapabilityRouteError(
             "capability_route_exhausted",
-            f"{task_id} already routed {repeat[0]} to {p.get('gateway')} (hermes-hub request "
-            f"{p.get('request_id')}). That owner card must finish or report why; check it with "
-            f"`hermes kanban wait-check capability-owner {p.get('request_id')}` and `hermes-hub requests`. "
-            "If it is done and the grant was insufficient, comment the exact gap on it and reopen it.",
-            details={"need": repeat[0], **p})
+            f"{task_id} already routed {need} to {p.get('gateway')} (hermes-hub request "
+            f"{p.get('request_id')}, {sent['state'] if sent else 'state unknown'}). That owner card must "
+            f"finish or report why; check it with `hermes kanban wait-check capability-owner "
+            f"{p.get('request_id')}` and `hermes-hub requests`. If it is done and the grant was "
+            "insufficient, comment the exact gap on it and reopen it there.",
+            details={"need": need, **p})
     self_gw = lookup.pop("self_gw", None) or reg.self_gateway()
     if not self_gw:
         raise CapabilityRouteError("capability_hub_unavailable",
@@ -207,21 +271,34 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
     decided = plan(needs, now=now, self_gw=self_gw, **lookup)
     board_slug = board or kb.get_current_board() or "default"
     hub = _hub_cli()
-    routes = []
+    routes: list[dict] = []
     for r in decided["routes"]:
-        rid = request_id(task_id, r["need"])
-        title = f"Capability owner: {r['need']} for {self_gw}/{task_id} ({(task.title or '')[:80]})"
-        body = owner_body(task, r["need"], self_gw=self_gw, board=board_slug, reason=reason,
-                          checked_at=r["checked_at"], now=now)
-        argv = [hub, "create-task", r["gateway"], title, "--body", body, "--assignee", _owner_assignee(),
+        gen = generations.get(r["need"], 1)
+        rid = request_id(task_id, r["need"], gen)
+        stored = _sent(rid)
+        if stored is not None:
+            # Exact resend of what was already queued: same gateway, title and body.
+            env = stored["body"]
+            args = env.get("args") or {}
+            gw, title, body = env.get("to_gw") or r["gateway"], args.get("title") or "", args.get("body") or ""
+            assignee = args.get("assignee") or _owner_assignee()
+        else:
+            gw = r["gateway"]
+            title = f"Capability owner: {r['need']} for {self_gw}/{task_id} ({(task.title or '')[:80]})"
+            body = owner_body(task, r["need"], self_gw=self_gw, board=board_slug, reason=reason)
+            assignee = _owner_assignee()
+        argv = [hub, "create-task", gw, title, "--body", body, "--assignee", assignee,
                 "--origin-session", "", "--id", rid]
         rc, out = hub_runner(argv)
         # 0 = sent, 3 = queued locally (hub unreachable; sent on the next sync). Both are durable.
         if rc not in (0, 3):
-            raise CapabilityRouteError("capability_hub_unavailable",
-                                       f"hermes-hub create-task to {r['gateway']} failed (exit {rc}): {out[-400:]}",
-                                       details={"need": r["need"], "gateway": r["gateway"]})
-        routes.append({**r, "request_id": rid, "queued_only": rc == 3})
+            done = ", ".join(x["request_id"] for x in routes)
+            raise CapabilityRouteError(
+                "capability_hub_unavailable",
+                f"hermes-hub create-task to {gw} failed (exit {rc}): {out[-400:]}"
+                + (f". Already queued: {done}; retrying this call resends them unchanged." if done else ""),
+                details={"need": r["need"], "gateway": gw, "queued": [x["request_id"] for x in routes]})
+        routes.append({**r, "gateway": gw, "request_id": rid, "generation": gen, "queued_only": rc == 3})
     ids = ",".join(x["request_id"] for x in routes)
     until = datetime.fromtimestamp(int(now) + WAKE_HORIZON, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     summary = "; ".join(f"{x['need']} on {x['gateway']} (request {x['request_id']})" for x in routes)
@@ -229,7 +306,13 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
                    f"SCHEDULED_UNTIL={until}\n{(reason or '').strip()[:1500]}")
     wake_check = f"hermes kanban wait-check capability-owner {ids}"
     with kb.write_txn(conn):
-        cur = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        cur = conn.execute("SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if require_unclaimed and (cur is None or cur[0] != "ready" or cur[1] is not None):
+            raise CapabilityRouteError(
+                "capability_route_invalid_state",
+                f"{task_id} was claimed while its owner request(s) {ids} were queued; not parked. The "
+                "worker will hit the wall and can block with needs (the same owner request is reused).",
+                details={"routes": routes})
         source = kb._retry_status_for_run(conn, task_id) if cur and cur[0] == "running" else "ready"
         ok = ktp.park(conn, task_id, reason=park_reason, requested_kind="capability", source_status=source,
                       expected_run_id=expected_run_id, wake_check=wake_check, check_every=WAKE_EVERY)
@@ -264,8 +347,10 @@ def preflight(conn, task_id: str, *, board: Optional[str] = None, **lookup) -> O
             return None
         if task.status != "ready":
             return {"warning": f"declared needs {needs} not preflighted: card is {task.status}"}
+        if _previous_routes(conn, task_id):
+            return None  # an idempotent create retry: already pre-routed
         return route(conn, task_id, needs, reason=(task.body or task.title or "")[:3000],
-                     board=board, **lookup)
+                     board=board, require_unclaimed=True, **lookup)
     except CapabilityRouteError as exc:
         if exc.code == "capability_held_locally":
             return None
