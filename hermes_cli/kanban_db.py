@@ -1176,6 +1176,17 @@ def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str
     return cleaned
 
 
+def _default_ready_assignee() -> str:
+    """``kanban.default_assignee`` (config) or the ``default`` profile."""
+    try:
+        from hermes_cli.config import load_config
+
+        name = str(((load_config().get("kanban") or {}).get("default_assignee")) or "").strip()
+    except Exception:
+        name = ""
+    return name or "default"
+
+
 def create_task(
     conn: sqlite3.Connection, *, title: str, body: Optional[str] = None,
     assignee: Optional[str] = None, created_by: Optional[str] = None,

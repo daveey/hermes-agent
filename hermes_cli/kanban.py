@@ -217,6 +217,16 @@ _AGENT_ENV_MARKERS = ("HERMES_SESSION_KEY", "HERMES_SESSION_ID", "HERMES_SESSION
                       "HERMES_RPC_SOCKET", "HERMES_KERNEL_SENTINEL")
 
 
+def _cli_default_assignee(args) -> Optional[str]:
+    """Dispatchable cards need an assignee: an unassigned ``ready``/``todo`` card is
+    never spawned. Default it (``kanban.default_assignee`` or ``default``); triage and
+    blocked drafts stay unassigned. Trackers for remote work should use
+    ``kanban_schedule`` with a ``wake_check`` instead."""
+    if getattr(args, "triage", False) or getattr(args, "initial_status", "running") == "blocked":
+        return None
+    return kb._default_ready_assignee()
+
+
 def _agent_invoked() -> bool:
     """Whether this CLI call came from an agent tool (terminal / execute_code)."""
     return any(os.environ.get(name) for name in _AGENT_ENV_MARKERS)
@@ -417,7 +427,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
         try:
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
-                assignee=args.assignee or (_profile_author() if in_worker or _agent_invoked() else None),
+                assignee=args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
+                or _cli_default_assignee(args),
                 session_id=session_id, requires=getattr(args, "requires", None),
                 created_by=args.created_by or _profile_author(),
                 workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
