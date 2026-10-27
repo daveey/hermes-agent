@@ -138,6 +138,25 @@ class TestGoalManager:
         assert "port goal command to hermes" in prompt
         assert prompt.strip()  # non-empty
 
+    def test_continuation_prompts_reject_status_only_turns(self, hermes_home):
+        """[daveey] Every goal continuation says a status-only turn is not progress."""
+        from hermes_cli import goals
+
+        rule = (
+            "A turn that only restates status is not progress. Take the next "
+            "concrete action, or say exactly what blocks it."
+        )
+        for name in (
+            "CONTINUATION_PROMPT_TEMPLATE",
+            "CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE",
+            "CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE",
+            "KANBAN_GOAL_CONTINUATION_TEMPLATE",
+        ):
+            assert rule in getattr(goals, name), name
+        mgr = goals.GoalManager(session_id="status-only-sid")
+        mgr.set("ship the thing")
+        assert rule in mgr.next_continuation_prompt()
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Smoke: CommandDef is wired

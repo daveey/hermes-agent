@@ -61,6 +61,9 @@ CONTINUATION_PROMPT_TEMPLATE = (
     "[Continuing toward your standing goal]\n"
     "Goal: {goal}\n\n"
     "Continue working toward this goal. Take the next concrete step. "
+    # [daveey] status-only turns count as no progress
+    "A turn that only restates status is not progress. Take the next "
+    "concrete action, or say exactly what blocks it. "
     "If you believe the goal is complete, state so explicitly and stop. "
     "If you are blocked and need input from the user, say so clearly and stop."
 )
@@ -73,6 +76,9 @@ CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE = (
     "Completion contract:\n"
     "{contract_block}\n\n"
     "Continue working toward the outcome above. Take the next concrete step. "
+    # [daveey] status-only turns count as no progress
+    "A turn that only restates status is not progress. Take the next "
+    "concrete action, or say exactly what blocks it. "
     "Stay within the stated boundaries and do not violate the constraints. "
     "Before claiming the goal is done, satisfy the Verification criterion and "
     "show the concrete evidence (command output, file contents, test result). "
@@ -87,7 +93,11 @@ CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE = (
     "Additional criteria the user added mid-loop:\n"
     "{subgoals_block}\n\n"
     "Continue working toward the goal AND all additional criteria. Take "
-    "the next concrete step. If you believe the goal and every "
+    "the next concrete step. "
+    # [daveey] status-only turns count as no progress
+    "A turn that only restates status is not progress. Take the next "
+    "concrete action, or say exactly what blocks it. "
+    "If you believe the goal and every "
     "additional criterion are complete, state so explicitly and stop. "
     "If you are blocked and need input from the user, say so clearly "
     "and stop."
@@ -1611,7 +1621,11 @@ class GoalManager:
 KANBAN_GOAL_CONTINUATION_TEMPLATE = (
     "[Continuing toward this kanban task — judge says it is not done yet]\n"
     "Reason: {reason}\n\n"
-    "Take the next concrete step toward completing the task. When the work "
+    "Take the next concrete step toward completing the task. "
+    # [daveey] status-only turns count as no progress
+    "A turn that only restates status is not progress. Take the next "
+    "concrete action, or say exactly what blocks it. "
+    "When the work "
     "is genuinely finished, call kanban_complete with a summary. If it is a "
     "code change that needs same-card review before counting as done, call "
     "kanban_request_review with a summary instead. If you are blocked and "
