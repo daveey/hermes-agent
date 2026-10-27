@@ -5,6 +5,11 @@ import { knownOwnerForSession } from '@/store/session-states'
 
 import type { GatewayEventContext } from './types'
 
+function isCommittedUserRow(row: GatewayEventMap['message.admitted']): boolean {
+  return Number.isSafeInteger(row.user_row_id) && row.user_row_id > 0 &&
+    Boolean(row.message_uid) && typeof row.text === 'string' && Number.isFinite(row.timestamp)
+}
+
 /** Merge only the committed user row: a busy stream still owns all assistant parts. */
 export function handleAdmittedMessageEvent(ctx: GatewayEventContext): boolean {
   const { event, deps, explicitSid } = ctx
@@ -27,8 +32,7 @@ export function handleAdmittedMessageEvent(ctx: GatewayEventContext): boolean {
     current.storedSessionId !== row.stored_session_id || profile !== row.profile ||
     registryBackendScopeKey(connectionId ?? null, sourceProfile ?? null) !==
       registryBackendScopeKey(event.connectionId ?? null, event.profile ?? null) ||
-    !Number.isSafeInteger(row.user_row_id) || row.user_row_id <= 0 ||
-    !row.message_uid || typeof row.text !== 'string' || !Number.isFinite(row.timestamp)
+    !isCommittedUserRow(row)
   ) {
     return true
   }

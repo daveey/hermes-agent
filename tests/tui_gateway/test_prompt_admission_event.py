@@ -1,6 +1,9 @@
 """Admission projects its committed row before output, never on cancelled dispatch."""
-from tests.tui_gateway.test_prompt_admission import call, owner
+from tests.tui_gateway import test_prompt_admission as admission
 from tui_gateway import server
+
+call = admission.call
+owner = admission.owner
 
 
 def test_committed_user_event_precedes_turn_and_retry_does_not_reemit(owner, monkeypatch):
