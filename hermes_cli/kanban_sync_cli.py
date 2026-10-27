@@ -87,6 +87,10 @@ def _diff(args: argparse.Namespace) -> int:
     live = kbc.connect(_path(slug))
     shadow = ksc.open_shadow(slug, ident.gateway)
     try:
+        try:  # compare against the service's current state, not the replica's last round
+            ksc.pull(shadow, ksc.Hub(ident), slug, observers=False)
+        except (ksc.HubError, ksc.Resync, OSError) as exc:
+            print(f"kanban sync: could not refresh the replica first ({exc}); comparing with its last round")
         report = ksc.diff(live, shadow, ident.gateway)
     finally:
         live.close()

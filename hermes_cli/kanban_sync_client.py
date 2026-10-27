@@ -580,6 +580,11 @@ def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> 
     pending_tasks = {r[0] for r in live.execute(
         "SELECT DISTINCT CASE WHEN table_name = 'tasks' THEN row_uid ELSE json_extract(fields, '$.task_id') END "
         "FROM kanban_sync_outbox WHERE state = 'pending'")}
+    # Acknowledged by the service but not pulled back into the replica yet (the replica lags one round):
+    # in flight, like an unpushed row, not a difference.
+    acked = {r[0]: r[1] for r in live.execute("SELECT id, sync_version FROM tasks WHERE sync_version IS NOT NULL")}
+    seen = {r[0]: r[1] or 0 for r in shadow.execute("SELECT id, sync_version FROM tasks")}
+    pending_tasks |= {t for t, v in acked.items() if v > seen.get(t, 0)}
     live_tasks = _task_rows(live)
     mine = {r[0] for r in shadow.execute("SELECT id FROM tasks WHERE created_on = ? OR created_on IS NULL", (gateway,))}
     shadow_tasks = _task_rows(shadow, mine | set(live_tasks))
