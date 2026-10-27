@@ -74,6 +74,9 @@ class _ReadDB:
     def get_session_rich_row(self, sid):
         return self._hit(None)
 
+    def get_compression_chain(self, sid):
+        return self._hit([sid])
+
     def get_compression_tip(self, root_id):
         return self._hit(None)
 

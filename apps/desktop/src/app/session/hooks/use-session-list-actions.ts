@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 
-import { getApiRequestConnection, listAllProfileSessions, listSidebarSessions, type SessionInfo } from '@/hermes'
+import { getApiRequestConnection, getSession, listAllProfileSessions, listSidebarSessions, type SessionInfo } from '@/hermes'
 import { sameCronSignature } from '@/lib/session-signatures'
 import {
   isMessagingSource,
@@ -8,7 +8,7 @@ import {
   normalizeSessionSource,
   SIDEBAR_EXCLUDED_SOURCES
 } from '@/lib/session-source'
-import { gatewayActivationEpoch } from '@/store/gateway'
+import { gatewayActivationEpoch, primaryGatewayConnectionId } from '@/store/gateway'
 import {
   $pinnedSessionIds,
   $sessionsLimit,
@@ -53,6 +53,8 @@ import {
 import { $sessionTiles, $workingSessionIds, getRecentlySettledSessionIds } from '@/store/session-states'
 
 import { refreshCronJobs as refreshCronJobsStore } from '../../cron/cron-actions'
+
+import { refreshRetainedKanban, withKanbanEvidence } from './refresh-retained-kanban'
 
 function sidebarRequestConnection(): string | undefined {
   return getApiRequestConnection() ?? undefined
@@ -403,7 +405,22 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
           result = await fetchPage()
         }
 
-        if (owns()) {
+        // Open/restored older rows survive paging, but otherwise their task
+        // counts never refresh. Capture the primary owner before any await.
+        const primaryConnection = primaryGatewayConnectionId()
+        const page = result.recents.sessions ?? []
+
+        const retained = mergeSessionPage($sessions.get(), page, sessionsToKeep())
+          .filter(row => !page.some(item => item.id === row.id &&
+            (item.profile ?? 'default') === (row.profile ?? 'default') &&
+            (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection)))
+
+        const refreshed = await refreshRetainedKanban(retained, row => getSession(row.id, {
+          connectionId: row.connection_id ?? primaryConnection,
+          profile: row.profile ?? 'default'
+        }))
+
+        if (owns() && gatewayActivationEpoch() === activationEpoch) {
           const recents = result.recents
           const recentsErrors = recents.errors ?? result.errors
           recordSidebarFreshness(result, requestConnection, sessionProfile)
@@ -436,7 +453,15 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
             // Filter AFTER the merge: the guard must also catch survivors
             // (a stale previous slice can still hold the doomed row through
             // the keep set once the tombstone prune has cleared membership).
-            const next = dropRemovalRaced(mergeSessionPage(prev, incoming, sessionsToKeep()), removalSnapshot)
+            const observed = prev.map(row => {
+              const fresh = refreshed.find(item => item.id === row.id &&
+                (item.profile ?? 'default') === (row.profile ?? 'default') &&
+                (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection))
+
+              return fresh ? withKanbanEvidence(row, fresh) : row
+            })
+
+            const next = dropRemovalRaced(mergeSessionPage(observed, incoming, sessionsToKeep()), removalSnapshot)
 
             return sameCronSignature(prev, next) ? prev : next
           })

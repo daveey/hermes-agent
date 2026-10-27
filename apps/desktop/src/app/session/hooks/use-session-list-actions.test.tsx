@@ -75,6 +75,7 @@ const sidebar = (
 const listSidebarSessions = vi.fn()
 const listAllProfileSessions = vi.fn()
 const getCronJobs = vi.fn()
+const getSession = vi.fn()
 const gatewayScope = vi.hoisted(() => ({ epoch: 0 }))
 
 interface Deferred<T> {
@@ -87,6 +88,7 @@ interface Deferred<T> {
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   getCronJobs: (...args: unknown[]) => getCronJobs(...args),
+  getSession: (...args: unknown[]) => getSession(...args),
   listAllProfileSessions: (...args: unknown[]) => listAllProfileSessions(...args),
   listSidebarSessions: (...args: unknown[]) => listSidebarSessions(...args)
 }))
@@ -116,6 +118,7 @@ vi.mock('@/store/session-states', async importActual => ({
 }))
 
 beforeEach(() => {
+  getSession.mockReset()
   gatewayScope.epoch = 0
   settled.ids = []
   getCronJobs.mockReset()
@@ -179,6 +182,47 @@ describe('workspace-only sidebar refresh', () => {
       })
     }
   )
+})
+
+it('refreshes a retained remote row outside the recency page on its own owner', async () => {
+  setSessions([row('old', { connection_id: 'remote', kanban_active: 2 })])
+  settled.ids = ['old']
+  listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('new')] }))
+  getSession.mockResolvedValue(row('old', { kanban_active: 16, kanban_observed_at: 123 }))
+  const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+  await act(async () => { await result.current.refreshSessions() })
+  expect(getSession).toHaveBeenCalledWith('old', { connectionId: 'remote', profile: 'default' })
+  expect($sessions.get().find(s => s.id === 'old')).toMatchObject({ kanban_active: 16, connection_id: 'remote' })
+})
+
+it.each(['rename', 'remove', 'switch'])('guards retained task refresh against a concurrent %s', async change => {
+  setSessions([row('old', { connection_id: 'remote' })])
+  settled.ids = ['old']
+  listSidebarSessions.mockResolvedValue(sidebar({ sessions: [] }))
+  const pending = deferred<SessionInfo>()
+  getSession.mockReturnValue(pending.promise)
+  const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+  let refreshing: Promise<void>
+  await act(async () => {
+    refreshing = result.current.refreshSessions()
+    await Promise.resolve()
+  })
+
+  if (change === 'remove') { setSessions([]) }
+
+  if (change === 'rename') { setSessions([row('old', { connection_id: 'remote', title: 'New title' })]) }
+
+  if (change === 'switch') { gatewayScope.epoch++ }
+  await act(async () => {
+    pending.resolve(row('old', { kanban_active: 16, kanban_observed_at: 123 }))
+    await refreshing
+  })
+
+  if (change === 'remove') { expect($sessions.get()).toEqual([]) }
+
+  if (change === 'rename') { expect($sessions.get()[0]).toMatchObject({ title: 'New title', kanban_active: 16 }) }
+
+  if (change === 'switch') { expect($sessions.get()[0].kanban_active).toBeUndefined() }
 })
 
 // #67600: a cold-start read that fails must not render as "No sessions yet".
