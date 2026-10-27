@@ -187,9 +187,8 @@ def _insert_decomposed_child(
     with no lock; leaving it unset makes dispatch materialize a fresh
     ``<repo>/.worktrees/<child-id>`` per child from the board anchor.
     """
-    from hermes_cli.kanban_db import (
-        _new_task_id, _canonical_assignee, _append_event,
-    )
+    from hermes_cli.kanban_db import _canonical_assignee, _append_event
+    from hermes_cli.kanban_db_sync import new_task_id
 
     root_ws_kind = root_row["workspace_kind"] or "scratch"
     child_ws_kind = child.get("workspace_kind") or root_ws_kind
@@ -201,7 +200,7 @@ def _insert_decomposed_child(
         child_ws_path = root_row["workspace_path"]
     else:
         child_ws_path = None
-    new_id = _new_task_id()
+    new_id = new_task_id(conn)
     import json
     from hermes_cli.kanban_capabilities import validate_assignment
     assignee = _canonical_assignee(child.get("assignee"))

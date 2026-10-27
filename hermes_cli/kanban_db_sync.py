@@ -1,0 +1,807 @@
+"""Client-side seams for the central Kanban sync service (core patch 0193).
+
+Everything here is inert unless ``kanban.sync.enabled`` is true when a board
+file is first opened. With the flag off no sync table or trigger is created
+(and triggers left by an earlier enable are dropped), so every kanban code path
+behaves exactly as before.
+
+With the flag on, each board file gets:
+
+- ``kanban_sync_state`` (one row: mode ``off|shadow|primary``, feed cursor,
+  ``applying`` echo guard, the run uid a granted lease reserved),
+  ``kanban_sync_outbox`` and ``kanban_sync_tombstones``;
+- a ``uid`` on comments/events/runs/attachments and the lease mirror columns on
+  ``tasks``;
+- ``AFTER INSERT/UPDATE/DELETE`` triggers that copy synced columns into the
+  outbox inside the writer's own transaction. They are generated from
+  ``PRAGMA table_info`` minus the declared local-only columns, so a column an
+  upstream migration adds is captured by default; ``undeclared_columns`` names
+  it so a test forces the synced/local decision.
+
+The network side (outbox drain, change feed, enrollment) is not here: it lives
+in a plugin on top of :func:`apply_remote_changes` and :func:`set_lease_client`.
+Design: hermes-mods ``core/kanban-central-service.md``.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import secrets
+import sqlite3
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Optional, Protocol, Sequence
+
+from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
+
+_log = logging.getLogger(__name__)
+
+MODES = ("off", "shadow", "primary")
+# A worker whose lease cannot be renewed is stopped this long before the
+# server-side expiry, so it is gone before another gateway can be granted the card.
+LEASE_SAFETY_MARGIN_SECONDS = 60
+
+# Columns that travel to the service. Integer cross-references travel as uids
+# (``REF_COLUMNS``); identity columns (``KEY_COLUMNS``) are the row key, never a field.
+SYNCED_COLUMNS: dict[str, frozenset[str]] = {
+    "tasks": frozenset({
+        "title", "body", "assignee", "status", "priority", "created_by", "created_at", "started_at",
+        "completed_at", "workspace_kind", "branch_name", "tenant", "result", "idempotency_key",
+        "consecutive_failures", "last_failure_error", "max_runtime_seconds", "current_run_id",
+        "workflow_template_id", "current_step_key", "skills", "requires", "model_override",
+        "provider_override", "reasoning_effort", "max_retries", "goal_mode", "goal_max_turns",
+        "block_kind", "human_request", "block_recurrences", "completion_contract",
+    }),
+    "task_links": frozenset({"parent_id", "child_id"}),
+    "task_comments": frozenset({"task_id", "author", "body", "created_at"}),
+    "task_events": frozenset({"task_id", "run_id", "kind", "payload", "created_at"}),
+    "task_runs": frozenset({
+        "task_id", "profile", "step_key", "status", "max_runtime_seconds", "started_at", "ended_at",
+        "outcome", "summary", "metadata", "error",
+    }),
+    "task_attachments": frozenset({
+        "task_id", "filename", "content_type", "size", "uploaded_by", "created_at", "blob_key",
+    }),
+}
+# Machine-local: host:pid claimers, PIDs, local paths, local session ids and the
+# read-only lease mirror. Stored locally, never pushed, never overwritten by a pull.
+LOCAL_COLUMNS: dict[str, frozenset[str]] = {
+    "tasks": frozenset({
+        "claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at",
+        "workspace_path", "session_id", "project_id", "sync_version", "field_hlc", "lease_holder",
+        "lease_expires",
+    }),
+    "task_links": frozenset(),
+    "task_comments": frozenset(),
+    "task_events": frozenset(),
+    "task_runs": frozenset({"claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at"}),
+    "task_attachments": frozenset({"stored_path"}),
+}
+KEY_COLUMNS: dict[str, frozenset[str]] = {
+    "tasks": frozenset({"id"}),
+    "task_links": frozenset(),
+    **{t: frozenset({"id", "uid"}) for t in ("task_comments", "task_events", "task_runs", "task_attachments")},
+}
+REF_COLUMNS: dict[tuple[str, str], str] = {
+    ("tasks", "current_run_id"): "current_run_uid",
+    ("task_events", "run_id"): "run_uid",
+}
+SYNCED_TABLES = tuple(SYNCED_COLUMNS)
+_UID_TABLES = ("task_comments", "task_events", "task_runs", "task_attachments")
+# Append-only rows leave only with their task; a delete trigger there would echo
+# every cascade row of a task delete the service already cascades itself.
+_DELETE_CAPTURED = ("tasks", "task_links", "task_attachments")
+
+_NOW_MS_SQL = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
+# UUIDv7 inline (no subquery: SQLite may evaluate an uncorrelated subquery once per statement).
+_UUID7_SQL = (
+    f"printf('%08x-%04x-7%03x-%x%03x-%012x', ({_NOW_MS_SQL}) >> 16, ({_NOW_MS_SQL}) & 65535, "
+    "abs(random()) % 4096, 8 + abs(random()) % 4, abs(random()) % 4096, abs(random()) % 281474976710656)"
+)
+_NOT_APPLYING = "COALESCE((SELECT applying FROM kanban_sync_state LIMIT 1), 0) = 0"
+
+SYNC_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS kanban_sync_outbox (
+    op_id        TEXT PRIMARY KEY,
+    table_name   TEXT NOT NULL,
+    row_uid      TEXT NOT NULL,
+    op           TEXT NOT NULL,
+    fields       TEXT NOT NULL,
+    base_version INTEGER,
+    hlc          TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT,
+    state        TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON kanban_sync_outbox(state, created_at);
+CREATE TABLE IF NOT EXISTS kanban_sync_tombstones (
+    table_name TEXT NOT NULL,
+    row_uid    TEXT NOT NULL,
+    deleted_at INTEGER NOT NULL,
+    PRIMARY KEY (table_name, row_uid)
+);
+CREATE TABLE IF NOT EXISTS kanban_sync_state (
+    board_id        TEXT PRIMARY KEY,
+    cursor          INTEGER NOT NULL DEFAULT 0,
+    gateway_id      TEXT NOT NULL,
+    hlc_last        TEXT NOT NULL,
+    mode            TEXT NOT NULL,
+    applying        INTEGER NOT NULL DEFAULT 0,
+    pending_run_uid TEXT
+);
+"""
+_SYNC_COLUMN_DDL = (
+    *((t, "uid", "uid TEXT") for t in _UID_TABLES),
+    ("task_attachments", "blob_key", "blob_key TEXT"),
+    ("tasks", "sync_version", "sync_version INTEGER"),
+    ("tasks", "field_hlc", "field_hlc TEXT"),
+    ("tasks", "lease_holder", "lease_holder TEXT"),
+    ("tasks", "lease_expires", "lease_expires INTEGER"),
+)
+
+# Resolved db paths whose triggers this process installed. Empty = no synced
+# board was opened here, and every seam returns without touching SQLite.
+_SYNCED_PATHS: set[str] = set()
+_DISPATCHER_WAKE = threading.Event()
+_RENEW_ATTEMPTS: dict[str, float] = {}
+
+
+def uuid7() -> str:
+    """Time-ordered UUIDv7 string (48-bit ms timestamp + 74 random bits)."""
+    ms = time.time_ns() // 1_000_000
+    rand = int.from_bytes(secrets.token_bytes(10), "big")
+    value = (ms & ((1 << 48) - 1)) << 80 | 0x7 << 76 | (rand >> 68 & 0xFFF) << 64 | 0b10 << 62 | rand & ((1 << 62) - 1)
+    h = f"{value:032x}"
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+
+# --- Config + install -----------------------------------------------------------------------------
+
+def sync_enabled() -> bool:
+    """``kanban.sync.enabled`` (default False). An unreadable config reads as off,
+    which is today's behaviour."""
+    try:
+        from hermes_cli.config import load_config
+        kanban = (load_config() or {}).get("kanban") or {}
+    except Exception as exc:  # health: allow BLE001 -- an unreadable config reads as sync off; connect() must not break
+        _log.warning("kanban sync: cannot read config (%s: %s); sync stays off", type(exc).__name__, exc)
+        return False
+    sync = kanban.get("sync") if isinstance(kanban, Mapping) else None
+    return bool(isinstance(sync, Mapping) and sync.get("enabled"))
+
+
+def _db_key(conn: sqlite3.Connection) -> Optional[str]:
+    from hermes_cli.kanban_db_connect import _main_db_file
+    return _main_db_file(conn)
+
+
+def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
+    """Init-time seam: with the flag on, create the sync tables and (unless the
+    board was detached to ``off``) install the capture triggers; with it off,
+    drop any capture trigger an earlier enable left in the file."""
+    if not sync_enabled():
+        _SYNCED_PATHS.discard(db_path)
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+                        "AND name LIKE 'kanban_sync_%' LIMIT 1").fetchone():
+            drop_triggers(conn)
+        return
+    conn.executescript(SYNC_SCHEMA_SQL)
+    for table, column, ddl in _SYNC_COLUMN_DDL:
+        _add_column_if_missing(conn, table, column, ddl)
+    for table in _UID_TABLES:
+        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
+    conn.execute(
+        "INSERT OR IGNORE INTO kanban_sync_state (board_id, gateway_id, hlc_last, mode) "
+        "SELECT ?, ?, '', 'shadow' WHERE NOT EXISTS (SELECT 1 FROM kanban_sync_state)",
+        (f"local:{uuid7()}", f"gw_{uuid7()}"),
+    )
+    if conn.execute("SELECT mode FROM kanban_sync_state").fetchone()[0] == "off":
+        drop_triggers(conn)
+        _SYNCED_PATHS.discard(db_path)
+        return
+    # Rows written before the first enable get their global identity now.
+    for table in _UID_TABLES:
+        conn.execute(f"UPDATE {table} SET uid = {_UUID7_SQL} WHERE uid IS NULL")
+    install_triggers(conn)
+    _SYNCED_PATHS.add(db_path)
+
+
+def drop_triggers(conn: sqlite3.Connection) -> None:
+    names = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'kanban_sync_%'")]
+    for name in names:
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+
+def table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def captured_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    """Columns the triggers capture: everything but local-only and key columns."""
+    skip = LOCAL_COLUMNS[table] | KEY_COLUMNS[table]
+    return [c for c in table_columns(conn, table) if c not in skip]
+
+
+def undeclared_columns(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """Per synced table, columns that are neither synced, local-only nor a key:
+    a migration added them and nobody decided whether they leave the gateway."""
+    out: dict[str, set[str]] = {}
+    for table in SYNCED_TABLES:
+        known = SYNCED_COLUMNS[table] | LOCAL_COLUMNS[table] | KEY_COLUMNS[table]
+        extra = set(table_columns(conn, table)) - known
+        if extra:
+            out[table] = extra
+    return out
+
+
+def _wire_name(table: str, column: str) -> str:
+    return REF_COLUMNS.get((table, column), column)
+
+
+def _wire_value(table: str, column: str, ref: str) -> str:
+    """SQL for one captured value as JSON text (``ref`` is ``NEW`` or a row alias).
+    JSON cannot hold a BLOB, and a capture trigger must never fail the writer's
+    statement, so a BLOB cell travels as ``{"$blob": "<hex>"}``."""
+    if (table, column) in REF_COLUMNS:
+        return f"json_quote((SELECT r.uid FROM task_runs AS r WHERE r.id = {ref}.{column}))"
+    value = f"{ref}.{column}"
+    return f"CASE WHEN typeof({value}) = 'blob' THEN json_object('$blob', hex({value})) ELSE json_quote({value}) END"
+
+
+def _from_wire(value: Any) -> Any:
+    if isinstance(value, Mapping) and set(value) == {"$blob"}:
+        return bytes.fromhex(value["$blob"])
+    return value
+
+
+def _row_uid_sql(table: str, ref: str) -> str:
+    if table == "tasks":
+        return f"{ref}.id"
+    if table == "task_links":
+        return f"{ref}.parent_id || '>' || {ref}.child_id"
+    return f"{ref}.uid"
+
+
+def _outbox_insert(table: str, op: str, row_uid: str, fields_sql: str, base_version: str = "NULL") -> str:
+    return (
+        "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
+        f"VALUES ({_UUID7_SQL}, '{table}', {row_uid}, '{op}', {fields_sql}, {base_version}, '', {_NOW_MS_SQL});"
+    )
+
+
+def _insert_trigger(table: str, columns: list[str]) -> str:
+    name = f"kanban_sync_{table}_ins"
+    if table in _UID_TABLES:
+        uid = _UUID7_SQL
+        prelude = ""
+        if table == "task_runs":
+            uid = f"COALESCE((SELECT pending_run_uid FROM kanban_sync_state LIMIT 1), {_UUID7_SQL})"
+            prelude = "UPDATE kanban_sync_state SET pending_run_uid = NULL WHERE pending_run_uid IS NOT NULL;"
+        fields = "json_object(" + ", ".join(f"'{_wire_name(table, c)}', json({_wire_value(table, c, 's')})" for c in columns) + ")"
+        body = (
+            f"UPDATE {table} SET uid = {uid} WHERE id = NEW.id AND uid IS NULL; {prelude}"
+            "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
+            f"SELECT {_UUID7_SQL}, '{table}', s.uid, 'upsert', {fields}, NULL, '', {_NOW_MS_SQL} "
+            f"FROM {table} AS s WHERE s.id = NEW.id;"
+        )
+    else:
+        fields = "json_object(" + ", ".join(f"'{_wire_name(table, c)}', json({_wire_value(table, c, 'NEW')})" for c in columns) + ")"
+        body = _outbox_insert(table, "upsert", _row_uid_sql(table, "NEW"), fields)
+        if table == "task_links":  # add-wins: re-linking clears an earlier removal
+            body = (f"DELETE FROM kanban_sync_tombstones WHERE table_name = 'task_links' "
+                    f"AND row_uid = {_row_uid_sql(table, 'NEW')}; " + body)
+    return f"CREATE TRIGGER {name} AFTER INSERT ON {table} WHEN {_NOT_APPLYING} BEGIN {body} END"
+
+
+def _update_trigger(table: str, columns: list[str]) -> str:
+    changed = " OR ".join(f"OLD.{c} IS NOT NEW.{c}" for c in columns)
+    pairs = " UNION ALL ".join(
+        f"SELECT '{_wire_name(table, c)}' AS k, {_wire_value(table, c, 'NEW')} AS v WHERE OLD.{c} IS NOT NEW.{c}"
+        for c in columns
+    )
+    fields = f"(SELECT json_group_object(k, json(v)) FROM ({pairs}))"
+    base = "NEW.sync_version" if table == "tasks" else "NULL"
+    body = _outbox_insert(table, "upsert", _row_uid_sql(table, "NEW"), fields, base)
+    return (f"CREATE TRIGGER kanban_sync_{table}_upd AFTER UPDATE ON {table} "
+            f"WHEN {_NOT_APPLYING} AND ({changed}) BEGIN {body} END")
+
+
+def _delete_trigger(table: str) -> str:
+    when = _NOT_APPLYING
+    if table == "task_links":  # links removed by a task delete ride on the task's tombstone
+        when += (" AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.parent_id)"
+                 " AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.child_id)")
+    elif table == "task_attachments":
+        when += " AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)"
+    uid = _row_uid_sql(table, "OLD")
+    body = (
+        _outbox_insert(table, "delete", uid, "'{}'")
+        + " INSERT OR REPLACE INTO kanban_sync_tombstones (table_name, row_uid, deleted_at) "
+        f"VALUES ('{table}', {uid}, {_NOW_MS_SQL});"
+    )
+    return f"CREATE TRIGGER kanban_sync_{table}_del AFTER DELETE ON {table} WHEN {when} BEGIN {body} END"
+
+
+def install_triggers(conn: sqlite3.Connection) -> None:
+    """(Re)generate every capture trigger from the live column list."""
+    drop_triggers(conn)
+    for table in SYNCED_TABLES:
+        columns = captured_columns(conn, table)
+        conn.execute(_insert_trigger(table, columns))
+        if table != "task_links":
+            conn.execute(_update_trigger(table, columns))
+        if table in _DELETE_CAPTURED:
+            conn.execute(_delete_trigger(table))
+
+
+# --- Per-connection state -------------------------------------------------------------------------
+
+def board_mode(conn: sqlite3.Connection) -> str:
+    """``off`` unless this process installed sync on the connection's file."""
+    if not _SYNCED_PATHS or _db_key(conn) not in _SYNCED_PATHS:
+        return "off"
+    row = conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone()
+    return row[0] if row else "off"
+
+
+def _state(conn: sqlite3.Connection) -> sqlite3.Row:
+    return conn.execute("SELECT board_id, gateway_id, cursor FROM kanban_sync_state LIMIT 1").fetchone()
+
+
+def set_mode(conn: sqlite3.Connection, mode: str) -> None:
+    """Switch the board's sync mode; ``off`` drops the capture triggers."""
+    if mode not in MODES:
+        raise ValueError(f"unknown kanban sync mode {mode!r}")
+    from hermes_cli.kanban_db_connect import write_txn
+    key = _db_key(conn)
+    with write_txn(conn):
+        conn.execute("UPDATE kanban_sync_state SET mode = ?", (mode,))
+        if mode == "off":
+            drop_triggers(conn)
+        else:
+            install_triggers(conn)
+    if key:
+        (_SYNCED_PATHS.discard if mode == "off" else _SYNCED_PATHS.add)(key)
+
+
+def new_task_id(conn: sqlite3.Connection) -> str:
+    """Synced boards: ``t_`` + 16 hex (48-bit ms timestamp + 16 random bits), safe
+    across gateways and offline creation; otherwise the classic 8-hex id."""
+    from hermes_cli import kanban_db as _kb
+    if board_mode(conn) == "off":
+        return _kb._new_task_id()
+    return f"t_{time.time_ns() // 1_000_000 & ((1 << 48) - 1):012x}{secrets.token_hex(2)}"
+
+
+# --- Leases ---------------------------------------------------------------------------------------
+
+class LeaseUnavailable(Exception):
+    """The lease service could not be reached (offline, timeout, not enrolled).
+    Clients raise this (or let a socket ``OSError`` through) for every transport failure."""
+
+
+_CLIENT_ERRORS = (LeaseUnavailable, OSError)
+
+
+@dataclass(frozen=True)
+class Lease:
+    granted: bool
+    run_uid: str
+    expires_ms: Optional[int] = None
+    holder: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class LeaseClient(Protocol):
+    def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> Lease: ...
+
+    def renew(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> Lease: ...
+
+    def release(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str) -> None: ...
+
+
+_LEASE_CLIENT: Optional[LeaseClient] = None
+
+
+def set_lease_client(client: Optional[LeaseClient]) -> Optional[LeaseClient]:
+    """Install the process's lease client (the sync plugin); returns the previous one."""
+    global _LEASE_CLIENT
+    previous, _LEASE_CLIENT = _LEASE_CLIENT, client
+    return previous
+
+
+def _client() -> LeaseClient:
+    if _LEASE_CLIENT is None:
+        raise LeaseUnavailable("no lease client registered")
+    return _LEASE_CLIENT
+
+
+class ClaimGate:
+    """Outcome of asking for a lease before a claim CAS.
+
+    Used as the OUTER context manager around the claim's ``write_txn`` so a
+    lease granted for a CAS that then lost is released after the commit, never
+    while the SQLite write lock is held."""
+
+    def __init__(self, expires: int, *, deferred: bool = False, lease: Optional[Lease] = None,
+                 ids: Optional[tuple[str, str, str]] = None) -> None:
+        self.expires, self.deferred, self.lease, self._ids = expires, deferred, lease, ids
+        self.consumed = False
+
+    def __enter__(self) -> ClaimGate:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self.lease is None or self.consumed:
+            return
+        board_id, gateway_id, task_id = self._ids
+        try:
+            _client().release(board_id=board_id, task_uid=task_id, run_uid=self.lease.run_uid, gateway_id=gateway_id)
+        except _CLIENT_ERRORS as err:  # the lease then simply expires on the server
+            _log.info("kanban sync: release of unused lease for %s failed: %s", task_id, err)
+
+
+def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int) -> ClaimGate:
+    """Lease seam before a claim CAS. Only ``primary`` boards ask the service;
+    without a grant the card stays ``ready`` (no offline claims: every card is
+    at-most-once in v1). A grant bounds the local claim to the lease deadline."""
+    if board_mode(conn) != "primary":
+        return ClaimGate(expires)
+    state = _state(conn)
+    ids = (state["board_id"], state["gateway_id"], task_id)
+    run_uid = uuid7()
+    try:
+        lease = _client().acquire(board_id=ids[0], task_uid=task_id, run_uid=run_uid, gateway_id=ids[1],
+                                  ttl_s=max(expires - int(time.time()), 1))
+    except _CLIENT_ERRORS as exc:  # fail closed: an unreachable service defers the claim
+        _log.info("claim_deferred: offline task=%s (%s: %s)", task_id, type(exc).__name__, exc)
+        return ClaimGate(expires, deferred=True)
+    if not lease.granted:
+        _log.info("claim_deferred: %s task=%s holder=%s", lease.reason or "denied", task_id, lease.holder)
+        return ClaimGate(expires, deferred=True)
+    deadline = lease.expires_ms // 1000 - LEASE_SAFETY_MARGIN_SECONDS
+    return ClaimGate(min(expires, deadline), lease=lease, ids=ids)
+
+
+def stage_claim(conn: sqlite3.Connection, task_id: str, gate: Optional[ClaimGate]) -> None:
+    """Inside the claim txn, after the CAS won: mirror the lease onto the task
+    and reserve its run uid for the run row the caller inserts next."""
+    if gate is None or gate.lease is None:
+        return
+    lease = gate.lease
+    conn.execute("UPDATE kanban_sync_state SET pending_run_uid = ?", (lease.run_uid,))
+    conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ? WHERE id = ?",
+                 (gate._ids[1], lease.expires_ms, task_id))
+    gate.consumed = True
+
+
+def _renewal_due(task_id: str, lease_expires_ms: int, ttl_s: int) -> bool:
+    """At most one renewal attempt per ``ttl/3``, and only once a third of the lease is used."""
+    remaining_s = lease_expires_ms / 1000 - time.time()
+    last = _RENEW_ATTEMPTS.get(task_id)
+    if remaining_s > ttl_s * 2 / 3 or (last is not None and time.monotonic() - last < ttl_s / 3):
+        return False
+    _RENEW_ATTEMPTS[task_id] = time.monotonic()
+    return True
+
+
+def heartbeat_expiry(conn: sqlite3.Connection, task_id: str, expires: int) -> int:
+    """Heartbeat seam: renew the lease when due and bound the claim extension to
+    the lease deadline. A worker that cannot renew therefore goes stale at
+    ``lease_expires - margin`` and the dispatcher's stale-claim path stops it."""
+    if board_mode(conn) != "primary":
+        return expires
+    row = conn.execute(
+        "SELECT t.lease_expires, r.uid AS run_uid FROM tasks t "
+        "LEFT JOIN task_runs r ON r.id = t.current_run_id WHERE t.id = ?", (task_id,),
+    ).fetchone()
+    if row is None or row["lease_expires"] is None:
+        return expires
+    lease_expires = row["lease_expires"]
+    ttl_s = max(expires - int(time.time()), 1)
+    if _renewal_due(task_id, lease_expires, ttl_s):
+        lease_expires = _renew(conn, task_id, row["run_uid"], ttl_s) or lease_expires
+    return min(expires, lease_expires // 1000 - LEASE_SAFETY_MARGIN_SECONDS)
+
+
+def _renew(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str], ttl_s: int) -> Optional[int]:
+    from hermes_cli.kanban_db_connect import write_txn
+    state = _state(conn)
+    try:
+        lease = _client().renew(board_id=state["board_id"], task_uid=task_id, run_uid=run_uid or "",
+                                gateway_id=state["gateway_id"], ttl_s=ttl_s)
+    except _CLIENT_ERRORS as exc:
+        _log.warning("kanban sync: lease renewal for %s failed (%s: %s)", task_id, type(exc).__name__, exc)
+        return None
+    with write_txn(conn):
+        if lease.granted:
+            conn.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (lease.expires_ms, task_id))
+            return lease.expires_ms
+        _log.warning("kanban sync: lease for %s lost to %s (%s)", task_id, lease.holder, lease.reason)
+        conn.execute("UPDATE tasks SET lease_holder = ? WHERE id = ?", (lease.holder, task_id))
+    return None
+
+
+def lease_lost(conn: sqlite3.Connection, task_id: str, now: int) -> bool:
+    """True when this gateway no longer holds the card's lease, or the lease is
+    within the safety margin of expiring (renewal kept failing)."""
+    if board_mode(conn) != "primary":
+        return False
+    row = conn.execute("SELECT lease_holder, lease_expires FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or row["lease_expires"] is None:
+        return False
+    own = _state(conn)["gateway_id"]
+    return row["lease_holder"] != own or now >= row["lease_expires"] // 1000 - LEASE_SAFETY_MARGIN_SECONDS
+
+
+def release_lease(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str]) -> None:
+    """Best-effort release after an operator reclaim (post-commit)."""
+    if board_mode(conn) != "primary" or run_uid is None:
+        return
+    state = _state(conn)
+    try:
+        _client().release(board_id=state["board_id"], task_uid=task_id, run_uid=run_uid,
+                          gateway_id=state["gateway_id"])
+    except _CLIENT_ERRORS as exc:
+        _log.info("kanban sync: lease release for %s failed (%s); it expires on the server", task_id, exc)
+
+
+def run_uid(conn: sqlite3.Connection, run_id: Optional[int]) -> Optional[str]:
+    if run_id is None or board_mode(conn) == "off":
+        return None
+    row = conn.execute("SELECT uid FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+    return row[0] if row else None
+
+
+# --- Dispatcher wake ------------------------------------------------------------------------------
+
+def wake_dispatcher() -> None:
+    _DISPATCHER_WAKE.set()
+
+
+def consume_dispatcher_wake() -> bool:
+    """True once after :func:`apply_remote_changes` made work claimable."""
+    if not _DISPATCHER_WAKE.is_set():
+        return False
+    _DISPATCHER_WAKE.clear()
+    return True
+
+
+# --- Apply path -----------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RemoteChange:
+    seq: int
+    table: str
+    uid: str
+    op: str  # 'upsert' | 'delete' | 'lease'
+    fields: Mapping[str, Any]
+    version: int
+    hlc: str
+    origin_gateway: str
+    client_op_id: Optional[str] = None
+
+
+@dataclass
+class ApplyResult:
+    cursor: int
+    applied: int = 0
+    skipped_echo: int = 0
+    skipped: int = 0
+    hooks: list[tuple[str, str, dict]] = field(default_factory=list)
+    changed_fields: dict[str, set[str]] = field(default_factory=dict)
+    wake_dispatcher: bool = False
+    blobs_to_fetch: list[str] = field(default_factory=list)
+
+
+_STATUS_HOOKS = {"running": "kanban_task_claimed", "done": "kanban_task_completed", "blocked": "kanban_task_blocked"}
+_CLAIMABLE = ("ready", "review")
+
+
+def apply_remote_changes(
+    conn: sqlite3.Connection, changes: Sequence[RemoteChange], *, new_cursor: int, board: Optional[str] = None,
+) -> ApplyResult:
+    """Apply one feed page in ONE transaction, then fire local observers.
+
+    The ``applying`` flag suppresses the capture triggers (no echo), our own op
+    coming back (``client_op_id`` still in the outbox) only clears that outbox
+    row, ``run_uid`` is translated to the local run id, local-only columns are
+    never written from the wire, and the cursor advances in the same commit as
+    the rows. Hooks fire once, after the commit, with ``remote=True`` and
+    ``origin_gateway``; a page that makes work claimable wakes the dispatcher."""
+    from hermes_cli.kanban_db_connect import write_txn
+    if board_mode(conn) == "off":
+        raise RuntimeError("apply_remote_changes: kanban sync is not enabled on this board")
+    result = ApplyResult(cursor=new_cursor)
+    with write_txn(conn):
+        conn.execute("UPDATE kanban_sync_state SET applying = 1")
+        own = _state(conn)["gateway_id"]
+        for change in changes:
+            _apply_one(conn, change, own, result)
+        conn.execute("UPDATE kanban_sync_state SET cursor = ?, applying = 0", (new_cursor,))
+    _after_commit(conn, result, board)
+    return result
+
+
+def _apply_one(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> None:
+    if ch.table not in SYNCED_COLUMNS:
+        raise ValueError(f"apply_remote_changes: unknown table {ch.table!r}")
+    if ch.client_op_id and conn.execute(
+            "DELETE FROM kanban_sync_outbox WHERE op_id = ?", (ch.client_op_id,)).rowcount:
+        if ch.table == "tasks":
+            conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",
+                         (ch.version, ch.uid))
+        result.skipped_echo += 1
+        return
+    handler = _APPLY_HANDLERS[(ch.table == "tasks", ch.op)]
+    if handler(conn, ch, own, result):
+        result.applied += 1
+    else:
+        result.skipped += 1
+
+
+def _tombstoned(conn: sqlite3.Connection, table: str, uid: Any) -> bool:
+    return conn.execute("SELECT 1 FROM kanban_sync_tombstones WHERE table_name = ? AND row_uid = ?",
+                        (table, uid)).fetchone() is not None
+
+
+def _local_run_id(conn: sqlite3.Connection, uid: Optional[str], task_id: Any) -> Optional[int]:
+    """Local integer id for a run uid; a run not seen yet gets a placeholder row
+    that its own upsert fills in later."""
+    if uid is None:
+        return None
+    row = conn.execute("SELECT id FROM task_runs WHERE uid = ?", (uid,)).fetchone()
+    if row:
+        return row[0]
+    return conn.execute(
+        "INSERT INTO task_runs (uid, task_id, status, started_at) VALUES (?, ?, 'pending_sync', 0)", (uid, task_id),
+    ).lastrowid
+
+
+def _local_fields(conn: sqlite3.Connection, table: str, fields: Mapping[str, Any], task_id: Any) -> dict[str, Any]:
+    """Wire fields -> local columns: drop local-only/key/unknown columns, uids -> local ids."""
+    allowed = set(captured_columns(conn, table))
+    out: dict[str, Any] = {}
+    for column in allowed:
+        wire = _wire_name(table, column)
+        if wire not in fields:
+            continue
+        value = _from_wire(fields[wire])
+        out[column] = _local_run_id(conn, value, task_id) if (table, column) in REF_COLUMNS else value
+    return out
+
+
+def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> bool:
+    if _tombstoned(conn, "tasks", ch.uid):
+        return False
+    old = conn.execute("SELECT * FROM tasks WHERE id = ?", (ch.uid,)).fetchone()
+    if old is not None and old["sync_version"] is not None and ch.version <= old["sync_version"]:
+        return False
+    cols = _local_fields(conn, "tasks", ch.fields, ch.uid)
+    if old is None:
+        names = ["id", *cols, "sync_version"]
+        conn.execute(f"INSERT INTO tasks ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
+                     (ch.uid, *cols.values(), ch.version))
+        changed = set(cols)
+    else:
+        changed = {c for c, v in cols.items() if old[c] != v}
+        assignments = ", ".join(f"{c} = ?" for c in cols)
+        conn.execute(f"UPDATE tasks SET {assignments}{', ' if cols else ''}sync_version = ? WHERE id = ?",
+                     (*cols.values(), ch.version, ch.uid))
+    _collect_task_observers(ch, cols.get("status"), changed, result)
+    return True
+
+
+def _collect_task_observers(ch: RemoteChange, new_status: Optional[str], changed: set[str],
+                            result: ApplyResult) -> None:
+    kwargs = {"remote": True, "origin_gateway": ch.origin_gateway}
+    if "status" in changed and new_status in _STATUS_HOOKS:
+        result.hooks.append((_STATUS_HOOKS[new_status], ch.uid, kwargs))
+    if "status" in changed and new_status in _CLAIMABLE:
+        result.wake_dispatcher = True
+    other = changed - {"status"}
+    if other:
+        result.changed_fields.setdefault(ch.uid, set()).update(other)
+
+
+def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> bool:
+    table = ch.table
+    task_id = ch.fields.get("task_id") or ch.fields.get("parent_id")
+    if _tombstoned(conn, "tasks", task_id) or (table != "task_links" and _tombstoned(conn, table, ch.uid)):
+        return False
+    cols = _local_fields(conn, table, ch.fields, task_id)
+    if table == "task_links":
+        return conn.execute("INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                            (cols["parent_id"], cols["child_id"])).rowcount == 1
+    existing = conn.execute(f"SELECT id FROM {table} WHERE uid = ?", (ch.uid,)).fetchone()
+    if existing is not None:
+        assignments = ", ".join(f"{c} = ?" for c in cols)
+        if cols:
+            conn.execute(f"UPDATE {table} SET {assignments} WHERE id = ?", (*cols.values(), existing[0]))
+        return True
+    if table == "task_attachments":
+        cols["stored_path"] = ""
+        result.blobs_to_fetch.append(ch.uid)
+    names = ["uid", *cols]
+    conn.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
+                 (ch.uid, *cols.values()))
+    return True
+
+
+def _delete_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> bool:
+    from hermes_cli import kanban_db as _kb
+    _tombstone(conn, "tasks", ch.uid)
+    if conn.execute("DELETE FROM tasks WHERE id = ?", (ch.uid,)).rowcount != 1:
+        return False
+    _kb._delete_task_relations(conn, ch.uid)
+    result.wake_dispatcher = True  # a deleted parent satisfies its children
+    return True
+
+
+def _delete_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> bool:
+    _tombstone(conn, ch.table, ch.uid)
+    if ch.table == "task_links":
+        parent, _, child = ch.uid.partition(">")
+        return conn.execute("DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
+                            (parent, child)).rowcount == 1
+    return conn.execute(f"DELETE FROM {ch.table} WHERE uid = ?", (ch.uid,)).rowcount == 1
+
+
+def _tombstone(conn: sqlite3.Connection, table: str, uid: str) -> None:
+    conn.execute("INSERT OR REPLACE INTO kanban_sync_tombstones (table_name, row_uid, deleted_at) VALUES (?, ?, ?)",
+                 (table, uid, time.time_ns() // 1_000_000))
+
+
+def _lease_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> bool:
+    """Mirror a lease change. A lease that moved away from this gateway while a
+    local worker holds the claim makes the claim stale now, so the dispatcher's
+    stale-claim path stops the worker (run outcome ``lease_lost``)."""
+    row = conn.execute("SELECT status, claim_lock, sync_version FROM tasks WHERE id = ?", (ch.uid,)).fetchone()
+    if row is None or (row["sync_version"] is not None and ch.version <= row["sync_version"]):
+        return False
+    holder, expires = ch.fields.get("lease_holder"), ch.fields.get("lease_expires")
+    conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ?, sync_version = ? WHERE id = ?",
+                 (holder, expires, ch.version, ch.uid))
+    if holder != own and row["claim_lock"] is not None:
+        conn.execute("UPDATE tasks SET claim_expires = ? WHERE id = ? AND claim_lock IS NOT NULL",
+                     (int(time.time()) - 1, ch.uid))
+    if holder is None and row["status"] in _CLAIMABLE:
+        result.wake_dispatcher = True
+    return True
+
+
+_APPLY_HANDLERS = {
+    (True, "upsert"): _upsert_task,
+    (False, "upsert"): _upsert_row,
+    (True, "delete"): _delete_task,
+    (False, "delete"): _delete_row,
+    (True, "lease"): _lease_task,
+}
+
+
+def _after_commit(conn: sqlite3.Connection, result: ApplyResult, board: Optional[str]) -> None:
+    from hermes_cli import kanban_db as _kb
+    board = board or _kb.get_current_board()
+    for event, task_id, kwargs in result.hooks:
+        row = conn.execute("SELECT assignee, current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        _kb._fire_kanban_lifecycle_hook(
+            event, task_id, board=board, assignee=row["assignee"] if row else None,
+            run_id=row["current_run_id"] if row else None, **kwargs,
+        )
+    if result.changed_fields and _kb._kanban_observer_consumed("on_kanban_task_updated"):
+        for task_id, fields in result.changed_fields.items():
+            _kb._fire_kanban_lifecycle_hook(
+                "on_kanban_task_updated", task_id, board=board, changed_fields=sorted(fields), remote=True,
+            )
+    if result.wake_dispatcher:
+        wake_dispatcher()
+
+
+def outbox(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Pending outbox rows in FIFO order, ``fields`` decoded (drain + inspection)."""
+    rows = conn.execute("SELECT * FROM kanban_sync_outbox ORDER BY created_at, rowid").fetchall()
+    return [{**dict(r), "fields": json.loads(r["fields"])} for r in rows]

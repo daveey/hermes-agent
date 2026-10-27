@@ -60,6 +60,24 @@ class GatewayKanbanWatchersMixin:
             await asyncio.sleep(min(1.0, interval - slept))
             slept += 1.0
 
+    async def _sleep_until_tick_or_sync_wake(self, interval: float) -> None:
+        """``_sleep_between_ticks``, cut short (within ~1s) when an applied remote
+        sync change made work claimable (``kanban_db_sync.wake_dispatcher``)."""
+        from hermes_cli.kanban_db_sync import consume_dispatcher_wake
+        sleeper = asyncio.ensure_future(self._sleep_between_ticks(interval))
+        woke = False
+        try:
+            while not sleeper.done():
+                if consume_dispatcher_wake():
+                    woke = True
+                    break
+                await asyncio.wait({sleeper}, timeout=1.0)
+        finally:
+            if not sleeper.done():
+                sleeper.cancel()
+        if not woke:
+            await sleeper  # its result, or what it raised (stop/cancel semantics unchanged)
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
 
@@ -337,7 +355,7 @@ class GatewayKanbanWatchersMixin:
                     health.invalidate()
                     logger.exception("kanban dispatcher: unexpected watcher error")
 
-                await self._sleep_between_ticks(interval)
+                await self._sleep_until_tick_or_sync_wake(interval)
 
         finally:
             self._release_kanban_dispatcher_lock()
