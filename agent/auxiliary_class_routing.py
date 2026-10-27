@@ -56,8 +56,7 @@ def _class_request(task, options):
                  task_config.get("key_env"), task_config.get("api_key_env"))
     if provider not in (None, "", "auto") or any(overrides):
         raise ModelRoutingError("Auxiliary class requests require provider auto and no transport overrides")
-    extra = aux._get_task_extra_body(task)
-    extra.update(options.get("extra_body") or {})
+    extra = _task_extra_body(task, options)
     if set(extra) & {"model", "messages", "tools", "stream", "max_tokens", "max_completion_tokens"}:
         raise ModelRoutingError("Auxiliary class extra_body cannot override request identity or capabilities")
     headers = options.get("extra_headers") or {}
@@ -71,17 +70,33 @@ def _class_request(task, options):
     return model, identity, requirements, config, declared_model
 
 
+# Tasks whose structured output is only a hint: the caller also parses prose
+# (title_generator._extract_title_text), so under class routing they are served
+# without response_format instead of failing closed on routes without attested JSON.
+_BEST_EFFORT_JSON_TASKS = frozenset({"title_generation"})
+
+
+def _task_extra_body(task, options):
+    from agent import auxiliary_client as aux
+    extra = aux._get_task_extra_body(task)
+    extra.update(options.get("extra_body") or {})
+    if task in _BEST_EFFORT_JSON_TASKS:
+        extra.pop("response_format", None)
+    return extra
+
+
 def _requirements(task, options, extra):
     from agent import auxiliary_client as aux
     messages = options.get("messages") or []
     vision = task == "vision" or any(
         isinstance(block, dict) and block.get("type") in {"image", "image_url", "input_image"}
         for msg in messages for block in (msg.get("content") if isinstance(msg.get("content"), list) else []))
-    # Conservative byte bound avoids selecting a route too small before a
-    # provider-specific tokenizer is known. Include output reservation and tools.
-    import json
-    context = len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
-    context += len(json.dumps(options.get("tools") or []).encode("utf-8"))
+    # Same rough token estimator as compression/preflight: route caps are in
+    # tokens and UTF-8 bytes overstate them ~3-4x. Includes tools and the
+    # output reservation.
+    from agent.model_metadata import estimate_request_tokens_rough
+    context = estimate_request_tokens_rough(
+        [m for m in messages if isinstance(m, dict)], tools=options.get("tools") or None)
     context += options.get("max_tokens") or 4096
     return {"tools": bool(options.get("tools")), "vision": vision,
             "streaming": True, "json": bool(extra.get("response_format")),
@@ -121,8 +136,7 @@ def _prepare(task, options, request, failed):
     client._managed_subscription_runtime = runtime
     if hasattr(client, "_real_client"):
         client._real_client._managed_subscription_runtime = runtime
-    extra = aux._get_task_extra_body(task)
-    extra.update(options.get("extra_body") or {})
+    extra = _task_extra_body(task, options)
     kwargs = aux._build_call_kwargs(
         runtime["provider"], runtime["model"], options["messages"],
         temperature=options.get("temperature"), max_tokens=options.get("max_tokens"),
