@@ -14,6 +14,7 @@ seconds because the sidebar polls.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -22,7 +23,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 _log = logging.getLogger(__name__)
 
@@ -286,17 +287,67 @@ def _hub_db_path() -> Path | None:
     return path if path.is_file() else None
 
 
-def _open_ro(path: Path) -> sqlite3.Connection:
+def _open_ro(path: Path, check_same_thread: bool = True) -> sqlite3.Connection:
     """Read-only open that survives a WAL db whose -wal/-shm were just removed (plain ``mode=ro`` then fails);
     never creates the file."""
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5, check_same_thread=check_same_thread)
         conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
         return conn
     except sqlite3.OperationalError:
-        conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=0.5)
+        conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=0.5, check_same_thread=check_same_thread)
         conn.execute("PRAGMA query_only = ON")
         return conn
+
+
+# Linked-card reads run on every sidebar refresh across ~16 boards and replicas; a fresh connection pays schema
+# parse + WAL-index setup + close each time (~2.5 ms a board, the whole latency budget). The dashboard is long-lived,
+# so keep one read-only connection per file, shared across the threadpool (one per thread would hold ~3 fds per
+# board per worker). An idle autocommit reader holds no snapshot, so it never blocks writers or checkpoints.
+_RO_CACHE: dict[str, tuple[sqlite3.Connection, tuple[int, int], threading.Lock]] = {}
+_RO_CACHE_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
+    """A shared read-only connection to ``path``, held exclusively for the ``with`` body. Reopened when the file is
+    replaced (new inode: a rebuilt replica) or after any sqlite error. Raises ``sqlite3.OperationalError`` when
+    the file is missing, like ``_open_ro``."""
+    key = str(path)
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        raise sqlite3.OperationalError(f"unable to open database file {path}: {exc}") from exc
+    ident = (st.st_dev, st.st_ino)
+    stale = None
+    with _RO_CACHE_LOCK:
+        entry = _RO_CACHE.get(key)
+        if entry is not None and entry[1] != ident:
+            stale = _RO_CACHE.pop(key)[0]
+            entry = None
+        if entry is None:
+            entry = (_open_ro(path, check_same_thread=False), ident, threading.Lock())
+            _RO_CACHE[key] = entry
+    if stale is not None:
+        _close_quietly(stale)
+    conn, _ident, lock = entry
+    with lock:  # bodies read every result they start: an unfinished cursor would pin a WAL snapshot
+        conn.row_factory = None
+        try:
+            yield conn
+        except sqlite3.Error:
+            with _RO_CACHE_LOCK:
+                if _RO_CACHE.get(key) is entry:
+                    del _RO_CACHE[key]
+            _close_quietly(conn)
+            raise
+
+
+def _close_quietly(conn: sqlite3.Connection) -> None:
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
 
 
 def _self_gateway(conn: sqlite3.Connection) -> str:
@@ -970,9 +1021,8 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
     of, in ``statuses`` — the same pairs ``_read_counts`` counts."""
     sid_ph = ",".join("?" for _ in ids)
     st_ph = ",".join("?" for _ in statuses)
-    conn = _open_ro(path)
-    conn.row_factory = sqlite3.Row
-    try:
+    with cached_ro(path) as conn:
+        conn.row_factory = sqlite3.Row
         cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
         if "session_id" not in cols:
             return []  # explicitly supported pre-session schema
@@ -995,8 +1045,6 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         except sqlite3.Error:  # board predates notify subscriptions
             pass
         _add_card_details(conn, found)
-    finally:
-        conn.close()
     board = _board_slug(path)
     return [{**t, "board": board} for t in found.values()]
 
@@ -1292,3 +1340,8 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
             _snapshot_saved = None
         _waiting_cache[0] = {}
         _parked_cache[0] = ({}, {})
+    with _RO_CACHE_LOCK:
+        held = [entry[0] for entry in _RO_CACHE.values()]
+        _RO_CACHE.clear()
+    for conn in held:
+        _close_quietly(conn)

@@ -117,6 +117,7 @@ def replica_cards(session_ids: Iterable[str], gateway: str, statuses: tuple[str,
     if replicas is None:
         from hermes_cli import kanban_sync_client as ksc
         replicas = [(slug, ksc.shadow_path(slug)) for slug, _path in ksc.board_paths()]
+    from hermes_cli.kanban_session_activity import cached_ro  # lazy: that module imports this one
     ph = ",".join("?" for _ in ids)
     st = ",".join("?" for _ in statuses)
     now = time.time()
@@ -125,17 +126,14 @@ def replica_cards(session_ids: Iterable[str], gateway: str, statuses: tuple[str,
         if not path.exists():
             continue
         try:
-            conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
-            conn.row_factory = sqlite3.Row
-            try:
+            with cached_ro(path) as conn:
+                conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT t.id, t.title, t.status, t.assignee, t.created_at, t.started_at, t.priority, t.block_kind, "
                     "t.human_request, t.created_on, l.chat_session, l.chat_profile, l.kind FROM task_chat_links l "
                     f"JOIN tasks t ON t.id = l.task_id WHERE l.chat_gateway = ? AND l.released = 0 AND l.chat_session IN ({ph}) "
                     f"AND t.status IN ({st}) AND t.created_on IS NOT NULL AND t.created_on != ?",
                     (gateway, *ids, *statuses, gateway)).fetchall()
-            finally:
-                conn.close()
         except sqlite3.Error as exc:
             _log.info("kanban chat links: replica %s unreadable (%s)", path, exc)
             continue

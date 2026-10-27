@@ -178,3 +178,18 @@ def test_a_board_only_another_gateway_has_gets_a_link_only_file(live, kanban_hom
         conn.close()
     from hermes_cli import kanban_db
     assert "runners" not in {b.get("slug") for b in kanban_db.list_boards()}  # never a board in the UI
+
+
+def test_replica_reads_stay_fresh_through_the_shared_connection(tmp_path):
+    ksa._reset_cache_for_tests()
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_a", "a", "running", OTHER), ("t_b", "b", "ready", OTHER)], [("t_a", ME, "s1", "shepherd", 0)])
+    assert [c["id"] for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)])] == ["t_a"]
+    conn = sqlite3.connect(rep)
+    conn.execute("INSERT INTO task_chat_links VALUES (?, 't_b', ?, 'default', 's1', 'shepherd', 0, 2)",
+                 (links.link_uid("t_b", ME, "default", "s1", "shepherd"), ME))
+    conn.execute("UPDATE task_chat_links SET released = 1 WHERE task_id = 't_a'")
+    conn.commit()
+    conn.close()
+    assert [c["id"] for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)])] == ["t_b"]
+    ksa._reset_cache_for_tests()
