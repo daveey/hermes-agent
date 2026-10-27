@@ -257,6 +257,8 @@ def maybe_refresh_async(*, now: Optional[float] = None) -> bool:
     never raises: the dispatcher tick calls this."""
     global _thread
     try:
+        if os.environ.get("HERMES_TEST_ISOLATION"):
+            return False  # never run real probes (gh, sudo, ssh) from the test suite
         cfg = _config()
         if cfg.get("enabled") is False:
             return False

@@ -425,8 +425,8 @@ def test_rejected_owner_request_may_be_rerouted_once(env):
         kb.unblock_task(conn, tid)
         assert kb.claim_task(conn, tid, claimer="worker") is not None
         res = kcr.route(conn, tid, [NEED], reason="x")
-        assert res["routes"][0]["request_id"] == kcr.request_id(tid, NEED, 2) == f"{rid}:g2"
-        env["hub"].execute("UPDATE sent SET state='rejected', result='{}' WHERE id=?", (f"{rid}:g2",))
+        assert res["routes"][0]["request_id"] == kcr.request_id(tid, NEED, 2) == f"{rid}::g2"
+        env["hub"].execute("UPDATE sent SET state='rejected', result='{}' WHERE id=?", (f"{rid}::g2",))
         env["hub"].commit()
         kb.unblock_task(conn, tid)
         assert kb.claim_task(conn, tid, claimer="worker") is not None
@@ -457,3 +457,32 @@ def test_hub_collector_output_is_what_routing_reads(env, tmp_path, monkeypatch):
                        (mod.canon(rec),))
     env["hub"].commit()
     assert reg.locate(NEED)["holders"][0][0] == "macbook"
+
+
+def test_retry_after_partial_failure_keeps_queued_owner_even_if_holder_went_stale(env, monkeypatch):
+    now = time.time()
+    publish(env["hub"], "macbook", {f"aws:{ACCOUNT}:admin": now})
+    publish(env["hub"], "mini", {"ssh:mini-lan": now})
+    real = kcr.hub_runner
+    fail = {"on": "mini"}
+
+    def flaky(argv):
+        if argv[2] == fail["on"]:
+            return 2, "boom"
+        return real(argv)
+
+    monkeypatch.setattr(kcr, "hub_runner", flaky)
+    with kbc.connect_closing() as conn:
+        tid = running(conn)
+        with pytest.raises(kcr.CapabilityRouteError):
+            kcr.route(conn, tid, [NEED, "ssh:mini-lan"], reason=REASON_2239)
+        publish(env["hub"], "macbook", {f"aws:{ACCOUNT}:admin": now - 3 * 3600})  # stale now
+        fail["on"] = None
+        res = kcr.route(conn, tid, [NEED, "ssh:mini-lan"], reason=REASON_2239)
+        assert kb.get_task(conn, tid).status == "scheduled"
+    assert [r["gateway"] for r in res["routes"]] == ["macbook", "mini"]
+
+
+def test_background_refresh_never_runs_real_probes_under_tests(monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_ISOLATION", "1")
+    assert reg.maybe_refresh_async() is False

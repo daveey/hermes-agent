@@ -40,6 +40,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Callable, Optional
 
+from agent.redact import redact_sensitive_text
 from hermes_cli import kanban_capability_registry as reg
 
 OWNER_PREFIX = "capability-owner:"
@@ -64,7 +65,7 @@ def request_id(task_id: str, need: str, generation: int = 1) -> str:
     Readable ``capability-owner:<card>:<need>`` when the need fits the id alphabet and length;
     otherwise a digest suffix keeps distinct needs distinct (no truncation/substitution merges).
     """
-    gen = f":g{generation}" if generation > 1 else ""
+    gen = f"::g{generation}" if generation > 1 else ""  # needs never contain '::' 
     plain = f"{OWNER_PREFIX}{task_id}:{need}{gen}"
     if re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", plain):
         return plain
@@ -161,23 +162,6 @@ def _sent(rid: str) -> Optional[dict]:
         db.close()
 
 
-def _sent(rid: str) -> Optional[dict]:
-    """The stored hermes-hub envelope + state for ``rid`` on this gateway (None if never queued)."""
-    try:
-        db = reg._ro(reg.hub_db_path())
-    except Exception:
-        return None
-    try:
-        row = db.execute("SELECT body, state FROM sent WHERE id = ?", (rid,)).fetchone()
-        if row is None:
-            return None
-        return {"body": json.loads(row[0] or "{}"), "state": row[1]}
-    except Exception:
-        return None
-    finally:
-        db.close()
-
-
 def _previous_routes(conn, task_id: str) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for (payload,) in conn.execute(
@@ -193,13 +177,13 @@ def _previous_routes(conn, task_id: str) -> dict[str, dict]:
 
 def owner_body(task, need: str, *, self_gw: str, board: str, reason: str) -> str:
     """Deterministic for (card, need, reason): retries resend an identical envelope."""
-    from agent.redact import redact_sensitive_text
     ref = f"{self_gw}/default/{board}/{task.id}"
     excerpt = redact_sensitive_text((reason or "").strip(), force=True)
+    title = redact_sensitive_text((task.title or "")[:160], force=True)
     if len(excerpt) > 3000:
         excerpt = excerpt[:3000] + "…"
     return (
-        f"Capability owner card for waiting card {ref} (\"{(task.title or '')[:160]}\").\n"
+        f"Capability owner card for waiting card {ref} (\"{title}\").\n"
         f"It needs `{need}`. This gateway holds it (live-checked in the hermes-hub capability registry); "
         f"{self_gw} does not.\n\n"
         "## Action (from the waiting card, inside its approved plan)\n"
@@ -268,7 +252,27 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
     if not self_gw:
         raise CapabilityRouteError("capability_hub_unavailable",
                                    "this gateway has no hermes-hub identity (~/.config/hermes-mail/config.json)")
-    decided = plan(needs, now=now, self_gw=self_gw, **lookup)
+    # A need whose request for this generation is already queued (an earlier attempt failed after
+    # sending it) routes from the stored envelope, whatever the registry says now: the owner card
+    # exists or will, and it must not be orphaned by a refusal on retry.
+    queued: list[dict] = []
+    fresh_needs: list[str] = []
+    for need in needs:
+        stored = _sent(request_id(task_id, need, generations.get(need, 1)))
+        if stored is not None and stored["state"] not in ("rejected", "expired"):
+            queued.append({"need": need, "gateway": stored["body"].get("to_gw"), "checked_at": None})
+        else:
+            fresh_needs.append(need)
+    if fresh_needs:
+        try:
+            decided = plan(fresh_needs, now=now, self_gw=self_gw, **lookup)
+        except CapabilityRouteError as exc:
+            if not (queued and exc.code == "capability_held_locally"):
+                raise
+            decided = {"routes": [], "local": exc.details.get("local", [])}
+    else:
+        decided = {"routes": [], "local": []}
+    decided["routes"] = queued + decided["routes"]
     board_slug = board or kb.get_current_board() or "default"
     hub = _hub_cli()
     routes: list[dict] = []
@@ -284,7 +288,8 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
             assignee = args.get("assignee") or _owner_assignee()
         else:
             gw = r["gateway"]
-            title = f"Capability owner: {r['need']} for {self_gw}/{task_id} ({(task.title or '')[:80]})"
+            title = redact_sensitive_text(
+                f"Capability owner: {r['need']} for {self_gw}/{task_id} ({(task.title or '')[:80]})", force=True)
             body = owner_body(task, r["need"], self_gw=self_gw, board=board_slug, reason=reason)
             assignee = _owner_assignee()
         argv = [hub, "create-task", gw, title, "--body", body, "--assignee", assignee,
