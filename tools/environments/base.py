@@ -85,11 +85,11 @@ def _leave_foreground_spawn(env: "BaseEnvironment", spawned) -> bool:
         return _exit_fenced
 
 
-def _quiet_kill(kill: Callable, proc) -> None:
+def _quiet_kill(kill: Callable, proc, log: Callable = logger.debug) -> None:
     try:
         kill(proc)
     except Exception:
-        logger.debug("exit-time kill of a foreground command failed", exc_info=True)
+        log("exit-time kill of a foreground command failed", exc_info=True)
 
 
 def kill_live_foreground_processes(*, now: bool = False) -> int:
@@ -105,7 +105,9 @@ def kill_live_foreground_processes(*, now: bool = False) -> int:
         with _live_foreground_cond:
             live = list(_live_foreground.values())
         for env, proc in live:
-            _quiet_kill(env._kill_process, proc)
+            # A failed kill here orphans the command's tree to init, so it must leave a trace. The
+            # hard-exit path below stays at debug: it may run in a signal handler (logging locks).
+            _quiet_kill(env._kill_process, proc, logger.warning)
         return len(live)
     deadline = time.monotonic() + _HARD_KILL_BUDGET_S
     _exit_fenced = True

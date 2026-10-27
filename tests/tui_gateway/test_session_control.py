@@ -18,7 +18,6 @@ def hermes_home(tmp_path, monkeypatch):
     """Give the persisted control managers an isolated database for every test."""
     home = tmp_path / ".hermes"
     home.mkdir()
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(home))
     from hermes_cli import goals
 

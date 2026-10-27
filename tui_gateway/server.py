@@ -2445,8 +2445,9 @@ def _session_info(agent, session: dict | None = None) -> dict:
     if live_agent and (warn := _probe_credentials(agent)):
         from tui_gateway.credential_failure import credential_failure_fields
         with _session_profile_runtime_scope(sess):
-            info.update(credential_failure_fields(
-                provider, pool=getattr(agent, "_credential_pool", None)))
+            failure = credential_failure_fields(provider, pool=getattr(agent, "_credential_pool", None))
+        # Its "provider" is the live one; a queued switch must keep showing as the session's provider.
+        info.update({k: v for k, v in failure.items() if k != "provider"})
         info["credential_warning"] = (
             f"All configured credentials for '{provider}' are rate limited or out of quota."
             if info["failure_kind"] == "exhausted" else warn)

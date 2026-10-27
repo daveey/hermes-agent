@@ -214,7 +214,7 @@ def _descendant_running(marker: str):
     return None
 
 
-def test_exit_cleanup_kills_foreground_command_still_running(monkeypatch):
+def test_exit_cleanup_kills_foreground_command_still_running(monkeypatch, caplog):
     """The host-exit funnel (CLI, one-shot, messaging gateway, serve atexit) must take an
     in-flight foreground command's process group with it: it runs in its own session, so
     the host exiting mid-command would otherwise orphan it to init."""
@@ -235,7 +235,8 @@ def test_exit_cleanup_kills_foreground_command_still_running(monkeypatch):
         terminal_tool_lifecycle.cleanup_all_environments()
 
         assert _wait_for_pgid_exit(pgid, timeout=15.0), (
-            f"foreground command survived exit cleanup:\n{_process_group_snapshot(pgid)}")
+            f"foreground command survived exit cleanup:\n{_process_group_snapshot(pgid)}\n"
+            f"logs:\n{caplog.text}")
         t.join(timeout=15.0)
         assert not t.is_alive() and result.get("returncode") not in (None, 0), result
     finally:
@@ -314,3 +315,20 @@ def test_hard_exit_kill_never_blocks_on_a_slow_remote_cancel(monkeypatch):
     base.kill_live_foreground_processes(now=True)
     elapsed = time.monotonic() - t0
     assert cancelled.is_set() and elapsed < 1.0, f"blocked {elapsed:.2f}s"
+
+
+def test_failed_exit_cleanup_kill_is_logged_as_a_warning(monkeypatch, caplog):
+    """A graceful exit-time kill that raises orphans the command's tree, so it must be visible
+    at the default log level, not only under debug."""
+    from tools.environments import base
+
+    class _BrokenEnv:
+        def _kill_process(self, proc):
+            raise RuntimeError("kill exploded")
+
+    handle = object()
+    monkeypatch.setitem(base._live_foreground, id(handle), (_BrokenEnv(), handle))
+    with caplog.at_level("WARNING", logger=base.logger.name):
+        assert base.kill_live_foreground_processes() == 1
+    assert any(r.levelname == "WARNING" and "exit-time kill" in r.getMessage() and r.exc_info
+               for r in caplog.records), caplog.text

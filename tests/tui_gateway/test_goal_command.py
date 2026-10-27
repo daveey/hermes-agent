@@ -13,7 +13,6 @@ from __future__ import annotations
 import importlib
 import threading
 import types
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,7 +22,6 @@ import pytest
 def hermes_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     # Bust the goal-module DB cache so it re-resolves HERMES_HOME.
