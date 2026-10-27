@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -177,7 +178,10 @@ def test_create_requires_and_default_creator_parity(restricted_creator, surface)
     if surface == "registry":
         from tools.registry import registry
         schema = registry.get_schema("kanban_create")
-        assert "kanban" in schema["parameters"]["properties"]["requires"]["items"]["enum"]
+        items = schema["parameters"]["properties"]["requires"]["items"]
+        # Profile tool names plus namespaced gateway capability needs (cross-gateway routing).
+        assert re.fullmatch(items["pattern"], "kanban") and re.fullmatch(items["pattern"], "ssh:mini")
+        assert not re.fullmatch(items["pattern"], "bogus")
         good = json.loads(registry.dispatch("kanban_create", {"title": "Allowed", "requires": []}))
         assert good.get("task_id"), good
         bad = json.loads(registry.dispatch("kanban_create", {"title": "Denied", "requires": ["terminal"]}))
