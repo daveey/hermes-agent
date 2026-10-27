@@ -419,6 +419,7 @@ export const zhHantChrome = {
       switchModel: '切換模型',
       openModelPicker: '開啟模型選擇器',
       modelPinned: '已由你固定；新對話將使用此模型而非「設定」中的預設模型',
+      modelLoading: model => `${model} · 正在載入此對話的模型…`,
       modelTitle: (provider, model) => `模型 · ${provider}：${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }

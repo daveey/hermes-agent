@@ -484,6 +484,7 @@ export const arChrome = {
       switchModel: 'تبديل النموذج',
       openModelPicker: 'فتح اختيار النموذج',
       modelPinned: 'النموذج مثبت',
+      modelLoading: model => `${model} · جارٍ تحميل نموذج هذه المحادثة…`,
       modelTitle: (provider, model) => `${provider}: ${model}`,
       providerModelTitle: (provider, model) => `${provider}: ${model}`
     }

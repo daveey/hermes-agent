@@ -4752,6 +4752,7 @@ export const deOverrides = {
       openModelPicker: 'Modell-Auswahl öffnen',
       modelPinned:
         'Von Ihnen angeheftet; neue Chats verwenden dieses Modell statt der Voreinstellung aus den Einstellungen',
+      modelLoading: model => `${model} · Modell dieses Chats wird geladen…`,
       modelTitle: (provider, model) => `Modell · ${provider}: ${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }

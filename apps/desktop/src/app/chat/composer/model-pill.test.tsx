@@ -8,7 +8,8 @@ import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import { ModelMenuCloseContext } from '@/app/shell/model-menu-panel'
 import { registry } from '@/contrib/registry'
 import { formatModelPillLabel } from '@/lib/model-status-label'
-import { $activeSessionId, $currentModel, setCurrentModel, setCurrentModelSource } from '@/store/session'
+import { $activeSessionId, $currentModel, $sessions, setCurrentModel, setCurrentModelSource } from '@/store/session'
+import type { SessionInfo } from '@/types/hermes'
 
 import { COMPOSER_AREAS, type ComposerModelPillContext, type ComposerModelPillProvider } from './contrib'
 import { requestModelMenuToggle } from './focus'
@@ -265,5 +266,72 @@ describe('ModelPill label providers', () => {
 
     expect(screen.getByText('first wins')).toBeTruthy()
     expect(second).not.toHaveBeenCalled()
+  })
+})
+
+// t_b319a52a: a resumed chat whose agent is not loaded has no live model. The
+// pill used to render only the braille spinner (read as a grip icon, and never
+// said which model the chat was on); it must show the chat's STORED model.
+describe('ModelPill with a stored model and no live agent', () => {
+  const unloadedView = (): SessionView => ({
+    kind: 'tile',
+    $awaitingResponse: atom(false),
+    $busy: atom(false),
+    $cwd: atom(''),
+    $fast: atom(false),
+    $lastVisibleIsUser: atom(false),
+    $messages: atom([]),
+    $messagesEmpty: atom(false),
+    $model: atom(''),
+    $provider: atom(''),
+    $reasoningEffort: atom(''),
+    $reasoningEffortPending: atom(true),
+    $reasoningEffortWire: atom(''),
+    $runtimeId: atom('rt-unloaded'),
+    $storedId: atom('stored-opus'),
+    $turnStartedAt: atom<number | null>(null)
+  })
+
+  afterEach(() => {
+    $sessions.set([])
+  })
+
+  it('renders the stored model label (not the spinner) with a loading tooltip', () => {
+    $sessions.set([
+      {
+        ended_at: null,
+        id: 'stored-opus',
+        input_tokens: 0,
+        is_active: false,
+        last_active: 0,
+        message_count: 4,
+        model: 'claude-opus-5-5',
+        model_provider: 'anthropic',
+        output_tokens: 0
+      } as unknown as SessionInfo
+    ])
+
+    for (const modelMenuContent of [undefined, <div key="menu" />]) {
+      const { container, unmount } = render(
+        <SessionViewProvider value={unloadedView()}>
+          <ModelPill disabled={false} model={modelState({ model: '', provider: '', modelMenuContent })} />
+        </SessionViewProvider>
+      )
+
+      expect(screen.getByTestId('model-pill-loading').textContent).toBe(formatModelPillLabel('claude-opus-5-5'))
+      expect(container.querySelector('.glyph-spinner')).toBeNull()
+      unmount()
+    }
+  })
+
+  it('never spins for a stored chat whose row is not loaded; names itself as the picker', () => {
+    const { container } = render(
+      <SessionViewProvider value={unloadedView()}>
+        <ModelPill disabled={false} model={modelState({ model: '', provider: '', modelMenuContent: <div /> })} />
+      </SessionViewProvider>
+    )
+
+    expect(container.querySelector('.glyph-spinner')).toBeNull()
+    expect(container.textContent).toContain('Switch model')
   })
 })

@@ -3121,8 +3121,19 @@ def _fallback_session_info(session: dict) -> dict:
     cwd = _session_cwd(session)
     return {
         "cwd": cwd, "branch": git_probe.branch(cwd), "project": _project_info_for_cwd(cwd), "lazy": True,
-        **_lazy_info_route(session, {}), "skills": {}, "tools": {}, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
+        # The session's own restored route (resume's model_override), not the profile default: an unbuilt
+        # resumed chat reported the default's model, so the desktop painted another model's options.
+        **_lazy_info_route(session, _stored_route_override(session)), "skills": {}, "tools": {},
+        "desktop_contract": DESKTOP_BACKEND_CONTRACT,
     }
+
+
+def _stored_route_override(session: dict) -> dict:
+    """``{model, provider}`` from an unbuilt session's restored ``model_override`` (empty when none)."""
+    override = session.get("model_override")
+    if not isinstance(override, dict) or not override.get("model"):
+        return {}
+    return {"model": override.get("model"), "provider": override.get("provider") or ""}
 
 
 def _reconcile_display_with_live(db_display: list[dict], in_memory: list[dict]) -> list[dict]:

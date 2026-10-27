@@ -21738,6 +21738,42 @@ def test_fallback_session_info_always_emits_branch(monkeypatch):
     assert info["branch"] == ""
 
 
+
+def test_fallback_session_info_reports_the_restored_route_not_the_profile_default(monkeypatch):
+    """An unbuilt resumed session reports ITS stored model/provider (resume's ``model_override``).
+
+    It reported the profile default's model, so the desktop composer offered the default model's
+    effort options (GPT's Ultrafast) for a chat that was on Claude (t_b319a52a).
+    """
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "")
+    monkeypatch.setattr(server, "_project_info_for_cwd", lambda cwd: None)
+
+    info = server._fallback_session_info({
+        "cwd": "/repo", "model_override": {"model": "claude-opus-5-5", "provider": "anthropic", "base_url": None}})
+
+    assert info["model"] == "claude-opus-5-5"
+    assert info["provider"] == "anthropic"
+    assert info["lazy"] is True
+
+
+def test_session_list_rows_project_the_stored_provider_before_stripping_model_config():
+    """List rows drop the heavy ``model_config`` but keep its provider as ``model_provider``."""
+    import json
+
+    from hermes_cli.web_server_gateway import _strip_session_list_rows
+
+    rows = _strip_session_list_rows([
+        {"id": "a", "model": "claude-opus-5-5", "billing_provider": "openai-codex", "system_prompt": "x" * 100,
+         "model_config": json.dumps({"model": "claude-opus-5-5", "provider": "anthropic"})},
+        {"id": "b", "model": "gpt-6", "billing_provider": "openai-codex", "model_config": None},
+        {"id": "c", "model": None},
+    ])
+
+    assert rows[0]["model_provider"] == "anthropic"
+    assert "model_config" not in rows[0] and "system_prompt" not in rows[0]
+    assert rows[1]["model_provider"] == "openai-codex"
+    assert "model_provider" not in rows[2]
+
 BRANCH_REASONING = "the parent's chain of thought"
 BRANCH_REASONING_CONTENT = "the parent's reasoning content"
 BRANCH_REASONING_DETAILS = [

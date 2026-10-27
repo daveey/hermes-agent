@@ -3739,6 +3739,8 @@ export interface Translations extends NoticeTranslations {
       switchModel: string
       openModelPicker: string
       modelPinned: string
+      /** Pill tooltip while a resumed chat's agent is still loading its stored model. */
+      modelLoading: (model: string) => string
       modelTitle: (provider: string, model: string) => string
       providerModelTitle: (provider: string, model: string) => string
     }

@@ -4762,6 +4762,7 @@ export const frOverrides = {
       openModelPicker: 'Ouvrir le sélecteur de modèles',
       modelPinned:
         "épinglé par vous ; les nouvelles conversations l'utilisent au lieu de la valeur par défaut des paramètres",
+      modelLoading: model => `${model} · chargement du modèle de ce chat…`,
       modelTitle: (provider, model) => `Modèle · ${provider} : ${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }
