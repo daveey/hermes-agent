@@ -78,5 +78,6 @@ export const jaOnboarding: TranslationOverrides['onboarding'] = {
   price: (input, output) => `${input} 入力 / ${output} 出力 per Mtok`,
   change: '変更',
   startChatting: '始める',
+  defaultChangeNote: model => `「始める」を押すと、${model} が新しいチャットの既定モデルになります。`,
   docs: provider => `${provider} ドキュメント`
 }

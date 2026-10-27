@@ -331,6 +331,7 @@ export const zhHantBoot = {
     price: (input, output) => `${input} 輸入 / ${output} 輸出 每 Mtok`,
     change: '變更',
     startChatting: '開始',
+    defaultChangeNote: model => `按下「開始」會將 ${model} 設為新聊天的預設模型。`,
     docs: provider => `${provider} 文件`,
     setupSlowTitle: '設定花費的時間比平常久。',
     setupSlowBody: 'Hermes 仍在背景中啟動。',

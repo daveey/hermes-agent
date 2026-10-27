@@ -72,5 +72,6 @@ export const zhOnboarding: TranslationOverrides['onboarding'] = {
   price: (input, output) => `${input} 输入 / ${output} 输出每 Mtok`,
   change: '更改',
   startChatting: '开始',
+  defaultChangeNote: model => `点击“开始”会将 ${model} 设为新聊天的默认模型。`,
   docs: provider => `${provider} 文档`
 }

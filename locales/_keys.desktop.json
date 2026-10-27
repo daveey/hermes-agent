@@ -2141,6 +2141,7 @@
     "onboarding.copy",
     "onboarding.copyAuthCode",
     "onboarding.couldNotSave",
+    "onboarding.defaultChangeNote",
     "onboarding.defaultModel",
     "onboarding.deviceCodeOpened",
     "onboarding.docs",

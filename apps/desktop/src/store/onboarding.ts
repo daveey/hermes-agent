@@ -46,7 +46,15 @@ export type OnboardingFlow =
       // ModelPickerDialog, which fetches its own model list from
       // /api/model/options — no need to cache the list here.
       currentModel: string
+      // True when the app already has a main model configured: nothing has
+      // been written to config.yaml yet, and the confirm card is the ONLY
+      // thing that changes the default for new chats (Begin writes it,
+      // dismiss writes nothing). Absent on a genuine first run.
+      deferPersist?: boolean
       label: string
+      // Local / custom endpoint connected on a configured install: the
+      // endpoint details to write together with the model on Begin.
+      pendingEndpoint?: { apiKey: string; baseUrl: string }
       providerSlug: string
       saving: boolean
       status: 'confirming_model'
@@ -345,7 +353,7 @@ function notifyGatewayTools(tools: string[] | undefined) {
 async function fetchProviderDefaultModel(
   preferredSlugs: string[],
   profile?: ProfileScope
-): Promise<null | { providerSlug: string; defaultModel: string }> {
+): Promise<null | { defaultModel: string; mainModelConfigured: boolean; providerSlug: string }> {
   let options
 
   try {
@@ -359,6 +367,10 @@ async function fetchProviderDefaultModel(
   if (providers.length === 0) {
     return null
   }
+
+  // The backend reports the model.default/provider currently in config.yaml.
+  // Both set means a default already exists that a silent write would clobber.
+  const mainModelConfigured = Boolean(String(options?.model ?? '').trim() && String(options?.provider ?? '').trim())
 
   // Try each preferred slug (lowercased), fall back to the first provider
   // returned (model.options orders by recency / authenticated state, so
@@ -384,7 +396,7 @@ async function fetchProviderDefaultModel(
     String(options?.provider ?? '').toLowerCase() === String(matched.slug).toLowerCase() &&
     models.map(String).includes(currentModel)
   ) {
-    return { providerSlug: String(matched.slug), defaultModel: currentModel }
+    return { providerSlug: String(matched.slug), defaultModel: currentModel, mainModelConfigured }
   }
 
   // Prefer the backend's recommended default — it mirrors the curation
@@ -410,8 +422,20 @@ async function fetchProviderDefaultModel(
 
   return {
     providerSlug: String(matched.slug),
-    defaultModel
+    defaultModel,
+    mainModelConfigured
   }
+}
+
+// True when the global default must NOT be written until the user confirms on
+// the card: the user opened the picker from a working app (manual), or the
+// install already has a configured main model (credential-failure overlay,
+// runtime-not-ready with a model set). Only a genuine first run — no main model
+// anywhere — may pre-persist.
+function shouldDeferGlobalDefault(mainModelConfigured: boolean) {
+  const state = $desktopOnboarding.get()
+
+  return state.manual || state.configured === true || mainModelConfigured
 }
 
 // After OAuth/API-key success: reload the backend env, verify runtime,
@@ -449,19 +473,21 @@ async function completeWithModelConfirm(
     return
   }
 
-  // Manual connect (Settings / model picker "Add provider" on an already-
-  // configured install): the global default must NOT change until the user
-  // explicitly confirms a model on the confirm card. checkRuntime below
-  // already passes preferredSlugs[0] as requestedProvider, so the runtime
-  // gate can validate the just-connected provider without persisting first.
-  // confirmOnboardingModel persists on Begin instead.
-  const manual = $desktopOnboarding.get().manual
+  // Any overlay on an already-configured install (manual Settings / "Add
+  // provider", or the credential-failure overlay that opens on its own): the
+  // global default must NOT change until the user explicitly confirms a model
+  // on the confirm card. checkRuntime below already passes preferredSlugs[0]
+  // as requestedProvider, so the runtime gate can validate the just-connected
+  // provider without persisting first. confirmOnboardingModel persists on
+  // Begin instead; dismissing leaves the configured default untouched.
+  const defer = shouldDeferGlobalDefault(defaults?.mainModelConfigured ?? false)
 
-  if (defaults && !manual) {
-    // First-run only: persist the chosen provider/model before the runtime
-    // gate so a stale config provider (e.g. anthropic from a prior failed
-    // setup) cannot make setup.runtime_check validate the wrong backend
-    // after a fresh OAuth login. There's no prior default to protect here.
+  if (defaults && !defer) {
+    // Genuine first run only (no main model configured anywhere): persist the
+    // chosen provider/model before the runtime gate so a stale config provider
+    // (e.g. anthropic from a prior failed setup) cannot make
+    // setup.runtime_check validate the wrong backend after a fresh OAuth
+    // login. There's no prior default to protect here.
     try {
       const res = await setMainModelAssignment(
         {
@@ -516,7 +542,8 @@ async function completeWithModelConfirm(
     providerSlug: defaults.providerSlug,
     currentModel: defaults.defaultModel,
     label: providerLabel,
-    saving: false
+    saving: false,
+    ...(defer ? { deferPersist: true } : {})
   })
 }
 
@@ -1279,6 +1306,28 @@ export async function saveOnboardingLocalEndpoint(
   }
 
   try {
+    // On a configured install the endpoint is only written once the user
+    // confirms it on the card (it changes the default for new chats). The
+    // probe above already proved the endpoint answers; the runtime gate can't
+    // validate a custom provider that isn't in config yet, so it is skipped.
+    if (await localEndpointNeedsConfirm(ctx.scope)) {
+      if (generation !== flowGeneration) {
+        return { ok: false }
+      }
+
+      setFlow({
+        status: 'confirming_model',
+        providerSlug: 'custom',
+        currentModel: model,
+        label: 'Local / custom endpoint',
+        saving: false,
+        deferPersist: true,
+        pendingEndpoint: { apiKey: key, baseUrl: resolvedUrl }
+      })
+
+      return { ok: true }
+    }
+
     await setMainModelAssignment({ provider: 'custom', model, base_url: resolvedUrl, api_key: key }, ctx.scope)
 
     if (generation !== flowGeneration) {
@@ -1317,6 +1366,20 @@ export async function saveOnboardingLocalEndpoint(
   }
 }
 
+async function localEndpointNeedsConfirm(profile?: ProfileScope) {
+  let configured = false
+
+  try {
+    const options = await getGlobalModelOptions({ includeUnconfigured: true, explicitOnly: false }, profile)
+
+    configured = Boolean(String(options?.model ?? '').trim() && String(options?.provider ?? '').trim())
+  } catch {
+    // Unknown: fall back to the onboarding state alone.
+  }
+
+  return shouldDeferGlobalDefault(configured)
+}
+
 // User picked a different model from the dropdown on the confirm card.
 // Persists immediately so the displayed value is always what's on disk.
 //
@@ -1338,6 +1401,23 @@ export async function setOnboardingModel(model: string, providerSlug: string, la
   // The picker may not know the provider's display name yet (catalog still
   // loading); keep the current label rather than blanking the card.
   const displayLabel = label || flow.label
+
+  // Deferred (configured install): the pick only changes what the card shows;
+  // Begin writes it. Nothing reaches config.yaml before the user confirms.
+  if (flow.deferPersist) {
+    const { pendingEndpoint } = flow
+
+    setFlow({
+      ...flow,
+      currentModel: model,
+      providerSlug,
+      label: displayLabel,
+      saving: false,
+      pendingEndpoint: providerSlug === 'custom' ? pendingEndpoint : undefined
+    })
+
+    return
+  }
 
   // Optimistic update so the dropdown feels instant; revert on failure.
   const previous = { currentModel: flow.currentModel, label: flow.label, providerSlug: flow.providerSlug }
@@ -1388,16 +1468,24 @@ export async function confirmOnboardingModel(ctx: OnboardingContext) {
     return
   }
 
-  if (manual) {
+  if (manual || flow.deferPersist) {
     // Best-effort: the overlay is already on its way out (cinematic exit
     // choreography in the caller isn't gated on this), so a failure here is
     // reported and swallowed rather than left blocking — same as the rest of
     // this file's non-blocking gateway calls. The alternative (silently
     // keeping the previous default) is still safer than the bug this fixes.
     try {
-      const res = await setMainModelAssignment({ provider: flow.providerSlug, model: flow.currentModel }, undefined, {
-        skipConfirmPrompt: true
-      })
+      const endpoint = flow.pendingEndpoint
+
+      const res = await setMainModelAssignment(
+        {
+          provider: flow.providerSlug,
+          model: flow.currentModel,
+          ...(endpoint ? { base_url: endpoint.baseUrl, api_key: endpoint.apiKey } : {})
+        },
+        flowScope ?? $desktopOnboarding.get().targetScope,
+        { skipConfirmPrompt: true }
+      )
 
       notifyGatewayTools(res.gateway_tools)
     } catch (error) {

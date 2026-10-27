@@ -75,5 +75,6 @@ export const ruOnboarding: TranslationOverrides['onboarding'] = {
   price: (input, output) => `${input} вход / ${output} выход за Mtok`,
   change: 'Изменить',
   startChatting: 'Начать',
+  defaultChangeNote: model => `«Начать» сделает ${model} моделью по умолчанию для новых чатов.`,
   docs: provider => `Документация ${provider}`
 }

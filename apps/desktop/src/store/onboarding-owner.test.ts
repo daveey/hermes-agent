@@ -8,6 +8,7 @@ import { makeOAuthProvider } from '@/test/oauth-provider'
 import {
   $desktopOnboarding,
   closeManualOnboarding,
+  confirmOnboardingModel,
   type OnboardingContext,
   saveOnboardingLocalEndpoint,
   setOnboardingCode,
@@ -135,11 +136,12 @@ it.each(['device_code', 'pkce'] as const)(
     expect(ctx.requestGateway).not.toHaveBeenCalledWith('reload.env')
     expect(ctx.requestGateway).toHaveBeenCalledWith('setup.runtime_check', { provider: 'openai-codex' })
     await setOnboardingModel('other-fixture-model', 'openai-codex')
-    // Manual flows defer the global-default flip to the confirm card (#102829):
-    // completeWithModelConfirm skips its early persist, so the only /api/model/set
-    // is the explicit Change pick (persisted on Begin via confirmOnboardingModel
-    // when nothing changes). Owner pinning is what this test guards: every write
+    // Manual flows defer every global-default write to the confirm card: the
+    // Change pick only updates the card, so nothing is written until Begin.
+    // Owner pinning is what this test guards: the single write Begin makes
     // still carries the flow's initiating owner below.
+    expect(requests.filter(request => request.path === '/api/model/set')).toHaveLength(0)
+    await confirmOnboardingModel(ctx)
     expect(requests.filter(request => request.path === '/api/model/set')).toHaveLength(1)
     expect(requests.some(request => request.path.includes(flow === 'pkce' ? '/submit' : '/poll/'))).toBe(true)
     expectOwnerRequests()
@@ -179,6 +181,10 @@ it('pins local-endpoint validation and persistence to the setup owner', async ()
   switchForeground()
   await saveOnboardingLocalEndpoint('http://127.0.0.1:11434/v1', '', ctx)
   expect(requests.some(request => request.path === '/api/providers/validate')).toBe(true)
+  // Manual (configured install): the endpoint is written only on Begin.
+  expect(requests.some(request => request.path === '/api/model/set')).toBe(false)
+  expect($desktopOnboarding.get().flow.status).toBe('confirming_model')
+  await confirmOnboardingModel(ctx)
   expect(requests.some(request => request.path === '/api/model/set')).toBe(true)
   expectOwnerRequests()
 })

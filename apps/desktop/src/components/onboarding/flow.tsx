@@ -301,6 +301,11 @@ function ConfirmingModelPanel({
             {price.free ? t.onboarding.free : t.onboarding.price(price.input || '?', price.output || '?')}
           </p>
         )}
+        {flow.deferPersist && (
+          <p className="max-w-xs text-xs text-muted-foreground" data-testid="onboarding-default-change-note">
+            {t.onboarding.defaultChangeNote(flow.currentModel)}
+          </p>
+        )}
         <Button
           className="mt-0.5 text-xs"
           disabled={flow.saving}

@@ -7,10 +7,12 @@ import type { OAuthProvider } from '@/types/hermes'
 
 import {
   $desktopOnboarding,
+  closeManualOnboarding,
   completeDesktopOnboarding,
   confirmOnboardingModel,
   type DesktopOnboardingState,
   type OnboardingContext,
+  recheckExternalSignin,
   refreshOnboarding,
   requestDesktopOnboarding,
   resetBootRaceWindowForTests,
@@ -1216,5 +1218,169 @@ describe('setOnboardingModel', () => {
       expect(flow.label).toBe('OpenAI OAuth (ChatGPT)')
       expect(flow.saving).toBe(false)
     }
+  })
+})
+
+describe('credential-failure overlay on a configured install never overwrites the default', () => {
+  const model = 'claude-sonnet-5'
+  let calls: { body?: unknown; path: string }[] = []
+
+  function installBackend(mainModel: { model: string; provider: string }) {
+    calls = []
+
+    installApiMock(async ({ body, path }: { body?: unknown; path: string }) => {
+      calls.push({ body, path })
+
+      if (path.startsWith('/api/model/options')) {
+        return {
+          ...mainModel,
+          providers: [{ name: 'Anthropic', slug: 'anthropic', models: [model] }]
+        }
+      }
+
+      if (path.startsWith('/api/model/recommended-default?')) {
+        return { provider: 'anthropic', model, free_tier: false }
+      }
+
+      if (path === '/api/model/set') {
+        return { ok: true, provider: 'anthropic', model, gateway_tools: [] }
+      }
+
+      throw new Error(`unexpected api path: ${path}`)
+    })
+  }
+
+  const gateway: OnboardingContext['requestGateway'] = async (method, params) => {
+    if (method === 'reload.env') {
+      return {} as never
+    }
+
+    if (method === 'setup.runtime_check') {
+      // The runtime gate validates the just-connected provider directly.
+      expect(params).toEqual({ provider: 'anthropic' })
+
+      return { ok: true } as never
+    }
+
+    if (method === 'setup.status') {
+      return { provider_configured: true } as never
+    }
+
+    throw new Error(`unexpected gateway method: ${method}`)
+  }
+
+  const setCalls = () => calls.filter(c => c.path === '/api/model/set')
+
+  async function signInExternally(configured: boolean) {
+    $desktopOnboarding.set(
+      baseState({
+        configured,
+        // requestDesktopOnboarding(): credential failure, manual: false.
+        requested: true,
+        reason: 'ChatGPT usage limit reached',
+        flow: {
+          status: 'external_pending',
+          copied: false,
+          provider: { ...makeOAuthProvider('anthropic', 'Anthropic'), flow: 'external' }
+        }
+      })
+    )
+
+    await recheckExternalSignin(onboardingContext(gateway))
+  }
+
+  beforeEach(() => {
+    window.localStorage.clear()
+    $desktopOnboarding.set(baseState())
+  })
+
+  afterEach(() => {
+    window.localStorage.clear()
+    $desktopOnboarding.set(baseState())
+    resetBootRaceWindowForTests()
+    vi.restoreAllMocks()
+  })
+
+  it('writes nothing before the confirm card, and Begin writes exactly once', async () => {
+    installBackend({ model: 'gpt-6-astra', provider: 'openai-codex' })
+    await signInExternally(true)
+
+    const flow = $desktopOnboarding.get().flow
+    expect(flow.status).toBe('confirming_model')
+    expect(setCalls()).toHaveLength(0)
+
+    if (flow.status === 'confirming_model') {
+      expect(flow.deferPersist).toBe(true)
+      expect(flow.currentModel).toBe(model)
+    }
+
+    const onCompleted = vi.fn()
+    await confirmOnboardingModel({ requestGateway: gateway, onCompleted })
+
+    expect(setCalls()).toHaveLength(1)
+    expect(setCalls()[0]?.body).toMatchObject({ scope: 'main', provider: 'anthropic', model })
+    expect(onCompleted).toHaveBeenCalledTimes(1)
+  })
+
+  it('treats a configured main model as configured even when the cached flag is unknown', async () => {
+    installBackend({ model: 'gpt-6-astra', provider: 'openai-codex' })
+    await signInExternally(false)
+
+    expect($desktopOnboarding.get().flow.status).toBe('confirming_model')
+    expect(setCalls()).toHaveLength(0)
+  })
+
+  it('dismissing the confirm card leaves the default untouched', async () => {
+    installBackend({ model: 'gpt-6-astra', provider: 'openai-codex' })
+    await signInExternally(true)
+
+    closeManualOnboarding()
+
+    expect($desktopOnboarding.get().flow.status).toBe('idle')
+    expect(setCalls()).toHaveLength(0)
+  })
+
+  it('picking another model on the card only writes on Begin', async () => {
+    installBackend({ model: 'gpt-6-astra', provider: 'openai-codex' })
+    await signInExternally(true)
+
+    await setOnboardingModel('claude-opus-5', 'anthropic', 'Anthropic')
+    expect(setCalls()).toHaveLength(0)
+
+    await confirmOnboardingModel({ requestGateway: gateway })
+    expect(setCalls()).toHaveLength(1)
+    expect(setCalls()[0]?.body).toMatchObject({ provider: 'anthropic', model: 'claude-opus-5' })
+  })
+
+  it('a true first run (nothing configured) still pre-persists before the card', async () => {
+    installBackend({ model: '', provider: '' })
+    await signInExternally(false)
+
+    expect($desktopOnboarding.get().flow.status).toBe('confirming_model')
+    expect(setCalls()).toHaveLength(1)
+    expect(setCalls()[0]?.body).toMatchObject({ scope: 'main', provider: 'anthropic', model })
+
+    const flow = $desktopOnboarding.get().flow
+    expect(flow.status === 'confirming_model' && flow.deferPersist).toBeFalsy()
+  })
+
+  it('defers a local/custom endpoint on a configured install until Begin', async () => {
+    installBackend({ model: 'gpt-6-astra', provider: 'openai-codex' })
+
+    const probeApi = window.hermesDesktop.api
+    installApiMock(async (req: { path: string }) => {
+      if (req.path.startsWith('/api/providers/validate')) {
+        return { ok: true, reachable: true, models: ['local-m'], resolved_base_url: 'http://localhost:1234/v1' }
+      }
+
+      return probeApi(req as never)
+    })
+
+    $desktopOnboarding.set(baseState({ configured: true, requested: true }))
+    const result = await saveOnboardingLocalEndpoint('http://localhost:1234', 'k', onboardingContext(gateway))
+
+    expect(result.ok).toBe(true)
+    expect($desktopOnboarding.get().flow.status).toBe('confirming_model')
+    expect(setCalls()).toHaveLength(0)
   })
 })

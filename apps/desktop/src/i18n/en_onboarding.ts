@@ -84,5 +84,6 @@ export const enOnboarding: Translations['onboarding'] = {
   price: (input, output) => `${input} in / ${output} out per Mtok`,
   change: 'Change',
   startChatting: 'Begin',
+  defaultChangeNote: model => `Begin sets ${model} as the default model for new chats.`,
   docs: provider => `${provider} docs`
 }

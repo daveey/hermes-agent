@@ -59,5 +59,6 @@ export interface OnboardingTranslations {
   price: (input: string, output: string) => string
   change: string
   startChatting: string
+  defaultChangeNote: (model: string) => string
   docs: (provider: string) => string
 }

@@ -125,3 +125,32 @@ describe('ConfirmingModelPanel model pick', () => {
     }
   })
 })
+
+describe('ConfirmingModelPanel default-change note', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: { api: async () => ({ providers: [] }) }
+    })
+  })
+
+  it('says plainly that Begin changes the default for new chats on a configured install', () => {
+    const state = confirmingModelState()
+
+    if (state.flow.status === 'confirming_model') {
+      state.flow.deferPersist = true
+    }
+
+    $desktopOnboarding.set(state)
+    render(<Harness />)
+
+    expect(screen.getByTestId('onboarding-default-change-note').textContent).toContain('gpt-5.6-terra')
+    expect(screen.getByTestId('onboarding-default-change-note').textContent).toMatch(/default model for new chats/i)
+  })
+
+  it('shows no note on a genuine first run', () => {
+    render(<Harness />)
+
+    expect(screen.queryByTestId('onboarding-default-change-note')).toBeNull()
+  })
+})

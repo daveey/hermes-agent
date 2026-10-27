@@ -329,6 +329,7 @@ export const arBoot = {
     price: (input, output) => `${input} إدخال / ${output} إخراج لكل مليون رمز`,
     change: 'تغيير',
     startChatting: 'ابدأ',
+    defaultChangeNote: model => `سيعيّن "ابدأ" النموذج ${model} كنموذج افتراضي للمحادثات الجديدة.`,
     docs: provider => `وثائق ${provider}`
   }
 } satisfies Pick<

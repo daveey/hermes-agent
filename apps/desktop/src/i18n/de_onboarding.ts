@@ -96,5 +96,6 @@ export const deOnboarding: TranslationOverrides['onboarding'] = {
   price: (input, output) => `${input} rein / ${output} raus pro Mtok`,
   change: 'Ändern',
   startChatting: 'Loslegen',
+  defaultChangeNote: model => `„Loslegen“ setzt ${model} als Standardmodell für neue Chats.`,
   docs: provider => `${provider}-Doku`
 }
