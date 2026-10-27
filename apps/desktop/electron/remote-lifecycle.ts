@@ -678,16 +678,40 @@ async function pidIsOurDashboard(
     `expected_token=os.path.expanduser(${shq(ownershipId ? spawnTokenPath(ownershipId, spawnNonce) : '')})\n` +
     `expected_profile=${shq(profile)}\n` +
     `nonce=${shq(spawnNonce)}\n` +
-    'try:\n' +
-    ' raw=open(f"/proc/{pid}/cmdline","rb").read()\n' +
-    ' args=[x.decode("utf-8","surrogateescape") for x in raw.split(b"\\0") if x]\n' +
-    'except OSError:\n' +
+    // Exact argv: /proc on Linux; KERN_PROCARGS2 on macOS, where `ps -o command=` joins argv with spaces and a
+    // launcher's `-c` script or a path like "Hermes Python.app" cannot be split back (every Mac backend read as
+    // FOREIGN, so it was never reused or reaped). `ps` stays the last resort. A dead pid is FOREIGN.
+    'def argv_of(pid):\n' +
     ' try:\n' +
-    '  line=subprocess.check_output(["ps","-ww","-o","command=","-p",str(pid)],text=True).strip()\n' +
-    ' except subprocess.CalledProcessError:\n' +
-    '  # pid already gone — a dead process is FOREIGN, not a transport error\n' +
-    '  print("FOREIGN");sys.exit(0)\n' +
-    ' args=shlex.split(line)\n' +
+    '  raw=open(f"/proc/{pid}/cmdline","rb").read()\n' +
+    '  return [x.decode("utf-8","surrogateescape") for x in raw.split(b"\\0") if x]\n' +
+    ' except OSError:pass\n' +
+    ' if sys.platform=="darwin":\n' +
+    '  import ctypes,struct\n' +
+    '  libc=ctypes.CDLL(None);mib=(ctypes.c_int*3)(1,49,pid);size=ctypes.c_size_t(0)\n' +
+    '  if libc.sysctl(mib,3,None,ctypes.byref(size),None,0)!=0:return None\n' +
+    '  buf=ctypes.create_string_buffer(size.value)\n' +
+    '  if libc.sysctl(mib,3,buf,ctypes.byref(size),None,0)!=0:return None\n' +
+    '  data=buf.raw[:size.value];argc=struct.unpack("i",data[:4])[0];rest=data[4:]\n' +
+    '  rest=rest[rest.index(b"\\0"):].lstrip(b"\\0")\n' +
+    '  return [x.decode("utf-8","surrogateescape") for x in rest.split(b"\\0")[:argc]]\n' +
+    ' try:line=subprocess.check_output(["ps","-ww","-o","command=","-p",str(pid)],text=True).strip()\n' +
+    ' except subprocess.CalledProcessError:return None\n' +
+    ' return shlex.split(line)\n' +
+    // A launcher (`python -I -c "...; sys.argv = [...]; ..."`) carries the real argv only inside its script. Use
+    // that list when the OS argv has no `serve`: exactly one literal, parsed with literal_eval (never executed).
+    'def unwrap(args):\n' +
+    ' if "serve" in args or "-c" not in args or args.index("-c")+1>=len(args):return args\n' +
+    ' import ast,re\n' +
+    ' found=re.findall(r"sys\\.argv = (\\[[^\\]]*\\])",args[args.index("-c")+1])\n' +
+    ' if len(found)!=1:return args\n' +
+    ' try:inner=ast.literal_eval(found[0])\n' +
+    ' except (ValueError,SyntaxError):return args\n' +
+    ' return inner if isinstance(inner,list) and all(isinstance(x,str) for x in inner) else args\n' +
+    'args=argv_of(pid)\n' +
+    'if args is None:\n' +
+    ' print("FOREIGN");sys.exit(0)\n' +
+    'args=unwrap(args)\n' +
     'ok=False\n' +
     'try:\n' +
     // A profile literally named "serve" puts the value token before the
