@@ -97,24 +97,34 @@ def _gc_retention_days() -> int:
         return 30
 
 
-def _kanban_dispatch_allowed() -> bool:
-    """False while the global emergency stop (`hermes pause`) is engaged.
+def _kanban_dispatch_gate() -> Optional[str]:
+    """Why this tick may not spawn: ``"estop"``, ``"drain"`` or ``None`` (free to dispatch).
 
-    Checked every tick before spawning, so a pause applies on the next tick;
-    in-flight workers are never touched. Fails open if estop is unimportable.
+    ``"estop"`` (`hermes pause`) skips the whole tick. ``"drain"`` (hermes-sync core-update drain
+    hold) only suppresses NEW claims: wake probes, promotion, stale-claim reclaim and health keep
+    running, so parked chains don't stall for the length of the hold. [daveey]
+    Fails open when either module is unimportable.
     """
     try:
         from agent.estop import check_paused
     except ImportError:
-        return True
+        return None
     if check_paused("kanban", logger):
-        return False
-    # hermes-sync core-update drain: no new claims while running work drains (never touches it).
+        return "estop"
     try:
         from agent.core_update_drain import check_drain_hold
     except ImportError:
-        return True
-    return not check_drain_hold("kanban", logger)
+        return None
+    return "drain" if check_drain_hold("kanban", logger) else None
+
+
+def _kanban_dispatch_allowed() -> bool:
+    """False while the emergency stop or a core-update drain hold forbids NEW claims.
+
+    Checked every tick before spawning, so a pause applies on the next tick;
+    in-flight workers are never touched.
+    """
+    return _kanban_dispatch_gate() is None
 
 
 def _acquire_singleton_lock(lock_path) -> tuple[Optional[object], str]:

@@ -10,6 +10,7 @@ in ``kanban_watchers_common``.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import time
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any, Optional
 from gateway.kanban_watchers_common import (
     _acquire_singleton_lock,
     _kanban_dispatch_allowed,
+    _kanban_dispatch_gate,
     _release_singleton_lock,
     _resolve_auto_decompose_settings,
     _gc_retention_days,
@@ -322,8 +324,16 @@ class GatewayKanbanWatchersMixin:
                 try:
                     # Emergency stop (`hermes pause`): no auto-decompose or
                     # dispatch while paused; running workers finish naturally.
-                    if not _kanban_dispatch_allowed():
+                    # Core-update drain hold: spawns only are suppressed; wake probes,
+                    # promotion and reclaim keep running. [daveey]
+                    gate = _kanban_dispatch_gate()
+                    if gate == "estop":
                         bad_ticks = 0
+                    elif gate == "drain":
+                        results = await _to_thread_process_service(
+                            functools.partial(dispatcher.tick_once, suppress_spawn=True))
+                        _log_spawn_results(results)
+                        bad_ticks = 0  # a held ready queue is expected, not "stuck"
                     else:
                         # Re-read the auto-decompose toggle live so disabling it
                         # takes effect on the next tick, not on restart.
