@@ -2977,6 +2977,42 @@
       }
     },
     {
+      "name": "prompt.admission.get",
+      "summary": "Verify the exact accepted user row; acceptance does not assert execution.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PromptAdmissionGetParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/PromptAdmissionResult"
+        }
+      }
+    },
+    {
+      "name": "prompt.admit",
+      "summary": "Durably accept once into an idle exact live owner. Never cold-resume or replay execution.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PromptAdmitParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/PromptAdmissionResult"
+        }
+      }
+    },
+    {
       "name": "prompt.background",
       "summary": "Run a task on a fresh agent in the background; the answer arrives as background.complete.",
       "params": [
@@ -27025,6 +27061,153 @@
           "id"
         ],
         "title": "ProjectsUpdateParams",
+        "type": "object"
+      },
+      "PromptAdmissionGetParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Profile",
+            "type": "string"
+          },
+          "stored_session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "payload_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Payload Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile",
+          "stored_session_id",
+          "operation_id",
+          "payload_digest"
+        ],
+        "title": "PromptAdmissionGetParams",
+        "type": "object"
+      },
+      "PromptAdmissionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stored_session_id": {
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "payload_digest": {
+            "title": "Payload Digest",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "user_row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Row Id"
+          },
+          "message_uid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Message Uid"
+          },
+          "execution_status": {
+            "default": "unknown",
+            "title": "Execution Status",
+            "type": "string"
+          },
+          "dispatch": {
+            "default": "unknown",
+            "title": "Dispatch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "stored_session_id",
+          "operation_id",
+          "payload_digest",
+          "profile"
+        ],
+        "title": "PromptAdmissionResult",
+        "type": "object"
+      },
+      "PromptAdmitParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Profile",
+            "type": "string"
+          },
+          "stored_session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Stored Session Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "payload_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Payload Digest",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 1000000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile",
+          "stored_session_id",
+          "operation_id",
+          "payload_digest",
+          "text"
+        ],
+        "title": "PromptAdmitParams",
         "type": "object"
       },
       "PromptSubmitParams": {

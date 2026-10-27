@@ -658,7 +658,8 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
 
 
 def _run_after_agent_ready(
-    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None
+    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None,
+    *, auto_continue=True
 ):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
@@ -689,7 +690,7 @@ def _run_after_agent_ready(
             return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
-        terminal_callback=hosted_terminal_callback, turn_author=turn_author)
+        terminal_callback=hosted_terminal_callback, turn_author=turn_author, auto_continue=auto_continue)
 
 
 _TRUNCATION_PARAMS = (
@@ -704,6 +705,8 @@ def _lock_in_submit_turn(
     with _session_turn_admission(session) as admitted:
         if not admitted:
             return _err(rid, 5035, "backend is retiring; reconnect to continue"), fields
+        if session.get("running"):
+            return _err(rid, 4009, "session busy", {"reason": "turn_claim_busy"}), fields
         # A watch session's run lives in the PARENT turn (own running flag False); typing
         # mid-run would build a second agent racing the child on the same stored session.
         if session.get("lazy") and _child_run_active(
@@ -732,6 +735,23 @@ def _lock_in_submit_turn(
 _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
 
 
+def _reopen_before_isolated_submit(sid, session):
+    try:
+        with _session_db(session) as db:
+            if db is not None:
+                _reopen_if_finalized(db, str(session.get('session_key') or ''))
+    except Exception:
+        logger.debug('finalized-session reopen before isolated dispatch failed for %s',
+                     sid, exc_info=True)
+
+
+def _submit_display_metadata(params):
+    title_preview = params.get('title_preview')
+    if isinstance(title_preview, str) and title_preview.strip():
+        return {'title_preview': title_preview[:1000]}
+    return None
+
+
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
@@ -741,12 +761,7 @@ def _(rid, params: dict) -> dict:
     # Off-screen sends (widget intents) type the row so no client renders a bubble;
     # whitelisted to "hidden" — this RPC must not mint kinds.
     display_kind = "hidden" if params.get("display_kind") == "hidden" else None
-    title_preview = params.get("title_preview")
-    display_metadata = (
-        {"title_preview": title_preview[:1000]}
-        if isinstance(title_preview, str) and title_preview.strip()
-        else None
-    )
+    display_metadata = _submit_display_metadata(params)
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
     if params.get("interrupted"):
@@ -805,13 +820,24 @@ def _(rid, params: dict) -> dict:
     # history_lock is released (a non-interruptible tool may hold it); if the old turn
     # finished between the two acquisitions, retry the claim rather than strand this
     # prompt in a queue whose drain already ran.
+    raw_rebind_ids = params.get("rebind_survivor_row_ids")
+    requested_rebind_ids = (
+        {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
+        if isinstance(raw_rebind_ids, list) else None)
     while True:
         with session["history_lock"]:
-            if not session.get("running"):
-                break
-            if internal_hosted_submit:
-                return _err(rid, 4091, "hosted room member session is busy")
+            busy = bool(session.get("running"))
             busy_transport = t or session.get("transport")
+        if not busy:
+            err, survivor_fields = _lock_in_submit_turn(
+                rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
+            if err is None:
+                break
+            if (err.get("error", {}).get("data") or {}).get("reason") == "turn_claim_busy":
+                continue
+            return err
+        if internal_hosted_submit:
+            return _err(rid, 4091, "hosted room member session is busy")
         if has_truncation:
             # A rewind/edit/restore/regenerate must land as a truncation, never as a
             # steered correction or a plain follow-up queued to run after the live
@@ -825,14 +851,6 @@ def _(rid, params: dict) -> dict:
             display_kind=display_kind)
         if busy_response is not None:
             return busy_response
-    raw_rebind_ids = params.get("rebind_survivor_row_ids")
-    requested_rebind_ids = (
-        {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
-        if isinstance(raw_rebind_ids, list) else None)
-    err, survivor_fields = _lock_in_submit_turn(
-        rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
-    if err is not None:
-        return err
     if turn_isolation:
         if turn_author:
             logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",
@@ -843,13 +861,7 @@ def _(rid, params: dict) -> dict:
         # applied inline), and the child's transcript writes must land in a live row
         # (#85303 review: the early return made _reopen_if_finalized unreachable on
         # this path). Best-effort like the helper: a failed read never blocks the send.
-        try:
-            with _session_db(session) as db:
-                if db is not None:
-                    _reopen_if_finalized(db, str(session.get("session_key") or ""))
-        except Exception:
-            logger.debug("finalized-session reopen before isolated dispatch failed for %s",
-                         sid, exc_info=True)
+        _reopen_before_isolated_submit(sid, session)
         isolated_response = _submit_prompt_to_compute_host(
             rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata)
         if not isolated_response.get("error"):
