@@ -49,11 +49,12 @@ def test_inherited_alias_receipt_and_projection_preserve_obligation(world, depth
     nodes = graph(world, depth)
     from hermes_cli.kanban_session_activity import _read_remote_links
     before = _read_remote_links(world['replica'], now=100)
-    leaf = next(c for c in before if c.get('legacy_record', {}).get('key') == 'build/t_one')
+    # Observation is scoped to the linked root card; descendants are never walked (d121f4c6).
+    assert not any(c.get('legacy_record', {}).get('key') == 'build/t_one' for c in before)
     ack = ledger.accept_binding(**world)
     assert ack['legacy_alias']['path'] == nodes
     rows = ledger.project(world['path'], replica=world['replica'], gateway='origin', profile='default', now=100)
-    assert rows[0]['unfinished'] and legacy.supersedes(leaf, rows[0])
+    assert rows[0]['unfinished']
     root = next(c for c in before if c.get('legacy_record', {}).get('key') == nodes[0]['key'])
     assert not legacy.supersedes(root, rows[0])
     world['replica'].unlink()
