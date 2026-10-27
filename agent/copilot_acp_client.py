@@ -398,7 +398,9 @@ class CopilotACPClient:
             for line in stream or ():
                 sink(line)
 
-        threading.Thread(target=_pump, args=(proc.stdout, lambda line: inbox.put(_decode(line))), daemon=True).start()
+        stdout_pump = threading.Thread(
+            target=_pump, args=(proc.stdout, lambda line: inbox.put(_decode(line))), daemon=True)
+        stdout_pump.start()
         stderr_pump = threading.Thread(
             target=_pump, args=(proc.stderr, lambda line: stderr_tail.append(line.rstrip("\n"))), daemon=True)
         stderr_pump.start()
@@ -413,10 +415,15 @@ class CopilotACPClient:
             proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
             proc.stdin.flush()
             deadline = session_deadline
-            while time.monotonic() < deadline and proc.poll() is None:
+            while time.monotonic() < deadline:
                 try:
                     msg = inbox.get(timeout=0.1)
                 except queue.Empty:
+                    # Exit can precede delivery of the final response. Only declare
+                    # a crash after the stdout producer has finished AND its queue
+                    # is empty (it may have enqueued after get() timed out).
+                    if proc.poll() is not None and not stdout_pump.is_alive() and inbox.empty():
+                        break
                     continue
                 if self._handle_server_message(
                     msg, process=proc, cwd=self._acp_cwd, text_parts=text_parts,

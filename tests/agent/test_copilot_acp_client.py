@@ -452,7 +452,8 @@ for line in sys.stdin:
     assert client.is_closed is True
 
 
-def test_model_discovery_does_not_allow_file_requests(tmp_path):
+@pytest.mark.parametrize("exit_before_response_consumed", [False, True])
+def test_model_discovery_does_not_allow_file_requests(tmp_path, monkeypatch, exit_before_response_consumed):
     target = tmp_path / "should-not-be-read.txt"
     target.write_text("private", encoding="utf-8")
     server = tmp_path / "fake_copilot_acp_fs_request.py"
@@ -475,6 +476,19 @@ print(json.dumps({{"jsonrpc": "2.0", "id": session["id"], "result": {{"sessionId
         args=[str(server)],
         acp_cwd=str(tmp_path),
     )
+
+    if exit_before_response_consumed:
+        handle_message = client._handle_server_message
+
+        def handle_after_exit(msg, **kwargs):
+            handled = handle_message(msg, **kwargs)
+            if msg.get("method") == "fs/read_text_file":
+                # The child writes its final response and exits after our denial.
+                # Force the consumer to lag behind it, without a scheduling sleep.
+                assert kwargs["process"].wait(timeout=30) == 0
+            return handled
+
+        monkeypatch.setattr(client, "_handle_server_message", handle_after_exit)
 
     assert client.list_models(timeout_seconds=30) == ["gpt-5.6-sol"]
 
