@@ -4191,6 +4191,7 @@
     "shell.statusbar.hideTerminal",
     "shell.statusbar.messagingDegraded",
     "shell.statusbar.messagingStopped",
+    "shell.statusbar.modelLoading",
     "shell.statusbar.modelNone",
     "shell.statusbar.modelPinned",
     "shell.statusbar.modelTitle",
