@@ -64,7 +64,7 @@ def test_routes_real_mismatch_to_durable_supervisor(board, kind):
 
 
 @pytest.mark.parametrize('parked', [False, True], ids=['ready', 'breaker-parked'])
-@pytest.mark.parametrize('kind', ['capability', 'assignment'])
+@pytest.mark.parametrize('kind', ['capability'])
 @pytest.mark.parametrize('reason', ['Need credentials', 'Please sign in to GitHub', 'Need API key',
                                   'Need user approval', 'Payment method expired', 'Policy decision required'])
 def test_real_human_access_request_not_rekinded(board, reason, kind, parked):
@@ -82,9 +82,6 @@ def test_real_human_access_request_not_rekinded(board, reason, kind, parked):
     audit = payload(conn, tid)
     assert audit['kind'] == 'capability'
     assert 'supervisor_task_id' not in audit
-    if kind == 'assignment':
-        assert audit['requested_kind'] == 'assignment'
-        assert audit['rekind_reason'] == 'human_access_request'
     if parked:
         assert audit['classified_in_place'] is True
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
@@ -102,6 +99,69 @@ def test_unrelated_human_or_ambiguous_reason_not_rekinded(board, reason):
     tid = task_with_drift(board)
     assert kb.block_task(conn, tid, kind='capability', reason=reason)
     assert kb.get_task(conn, tid).block_kind == 'capability'
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
+
+
+@pytest.mark.parametrize('parked', [False, True])
+@pytest.mark.parametrize('reason', [
+    'Worker lacks terminal tools. Do not request a Slack approval; supervisor must act.',
+    'Need credentials',
+    'Please sign in to GitHub',
+    'Need API key',
+    'Need user approval',
+    'Payment method expired',
+    'Policy decision required',
+    ('Not verified by me. worker has no hub shell or cross_session tool. '
+     'The only host route here is tailnet_exec, which opens a Slack approval request '
+     'for the owner. The card and supervisor say not to request those, so I ran nothing. '
+     'Supervisor action needed: have the host operators run the supported live-hook '
+     'readback with no restart. That needs the owner\'s Slack approval for each command, '
+     'which this card says not to request.'),
+])
+def test_explicit_assignment_is_not_reclassified_from_prose(board, reason, parked):
+    # Sanitized recurrence: auth vocabulary describes a forbidden alternative,
+    # not a new human action. Routing itself grants no execution authorization.
+    conn, _ = board
+    tid = kb.create_task(conn, title='Verify runtime', assignee='worker', created_by='creator')
+    if parked:
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+        conn.commit()
+    assert kb.block_task(conn, tid, kind='assignment', reason=reason)
+    original = kb.get_task(conn, tid)
+    assert original.status == 'todo'
+    assert original.block_kind == 'assignment'
+    assert original.human_request is None
+    assert original.assignee == 'supervisor'
+    repair = payload(conn, tid)['supervisor_task_id']
+    assert kb.get_task(conn, repair).status == 'ready'
+    assert kb.claim_task(conn, tid) is None
+    assert not kb._parents_satisfied(conn, tid)
+
+
+@pytest.mark.parametrize('blocker_id', [None, 'owner-access'])
+@pytest.mark.parametrize('parked', [False, True])
+@pytest.mark.parametrize('kind', ['assignment', 'capability'])
+@pytest.mark.parametrize('interaction', ['approval', 'user_terminal', 'physical'])
+def test_explicit_human_evidence_preserves_access_boundary(board, blocker_id, parked, kind, interaction):
+    conn, _ = board
+    tid = task_with_drift(board)
+    request = dict(action='Confirm the bounded action on the supported surface',
+                   why_human='The access policy requires owner interaction',
+                   interaction=interaction, scope='The test deployment only',
+                   evidence='The authenticated service requires this interaction')
+    if parked:
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+        conn.commit()
+    assert kb.block_task(conn, tid, kind=kind, reason='Worker lacks terminal tools',
+                         human_request=request, blocker_id=blocker_id)
+    task = kb.get_task(conn, tid)
+    assert task is not None
+    assert task.status == 'blocked'
+    assert task.block_kind == 'capability'
+    assert task.assignee == 'worker'
+    assert task.human_request == request
+    assert 'supervisor_task_id' not in payload(conn, tid)
+    assert kb.claim_task(conn, tid) is None
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
 
 

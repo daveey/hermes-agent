@@ -3230,7 +3230,7 @@ def block_task(
                                 check_every=check_every, clock_only=clock_only)
             requested_kind, rekind_reason = kind, None
             if kind == "assignment":
-                kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason)
+                kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason, human_request=human_request)
 
             classified = conn.execute(
                 "UPDATE tasks SET block_kind = ?, block_recurrences = 1, human_request = ? "
@@ -3251,7 +3251,7 @@ def block_task(
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else cur_row["status"]
         requested_kind, rekind_reason = kind, None
         from hermes_cli.kanban_block_routing import classify_stop
-        kind, rekind_reason, exhausted_budget = classify_stop(conn, task_id, kind, reason, blocker_id)
+        kind, rekind_reason, exhausted_budget = classify_stop(conn, task_id, kind, reason, blocker_id, human_request=human_request)
         no_open_parent = _parents_satisfied(conn, task_id)
         from hermes_cli import kanban_timed_park as ktp
         if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent):

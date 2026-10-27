@@ -795,6 +795,7 @@ def test_tree_rows_carry_session_activity_stamps(monkeypatch, tmp_path):
         assert rows["s_goal"].get("goal_active") is True
         assert rows["s_cards"]["kanban_active"] == 2 and rows["s_cards"]["kanban_blocked"] == 1
         assert rows["s_cards"]["kanban_remote_stale"] == 1
+        assert rows["s_cards"]["kanban_waiting_on"] == ["t_open"]
         assert all("kanban_unknown" not in row for row in rows.values())
         # Control: an idle session carries none of them.
         assert not {"goal_active", "kanban_active", "kanban_remote_stale", "background_active", "cron_active"} & rows["s_quiet"].keys()

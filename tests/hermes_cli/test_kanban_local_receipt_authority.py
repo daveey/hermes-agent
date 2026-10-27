@@ -3,17 +3,20 @@ import pytest
 
 from hermes_cli import kanban_session_activity as activity
 from hermes_cli import kanban_origin_adapter as adapter, kanban_origin_ledger as ledger, profiles
-from tests.hermes_cli.test_kanban_session_activity import _make_board
+from tests.hermes_cli.test_kanban_session_activity import _add_human_requests, _make_board
 import hermes_constants
 
 
 @pytest.mark.parametrize('status', ['running', 'blocked', 'scheduled'])
-def test_local_open_association_dominates_stale_receipt(tmp_path, monkeypatch, status):
+@pytest.mark.parametrize('actionable', [False, True])
+def test_local_open_association_dominates_stale_receipt(tmp_path, monkeypatch, status, actionable):
     home = tmp_path
     (home / 'kanban').mkdir()
     (home / 'kanban/origin-ledger.db').touch()
     board = home / 'kanban.db'
     _make_board(board, [('t_one', status, 's_one')])
+    if actionable:
+        _add_human_requests(board, 't_one')
     monkeypatch.setattr(hermes_constants, 'get_hermes_home', lambda: home)
     monkeypatch.setattr(adapter, '_gateway', lambda _: 'origin')
     monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: 'default')
@@ -29,8 +32,9 @@ def test_local_open_association_dominates_stale_receipt(tmp_path, monkeypatch, s
     cards = activity.session_tasks(['s_one'])
     assert len(cards) == 1
     assert cards[0]['status'] == status
-    assert activity.blocked_task_counts() == ({'s_one': 1} if status == 'blocked' else {})
-    assert activity.active_task_counts() == ({} if status == 'blocked' else {'s_one': 1})
+    human_blocked = status == 'blocked' and actionable
+    assert activity.blocked_task_counts() == ({'s_one': 1} if human_blocked else {})
+    assert activity.active_task_counts() == ({} if human_blocked else {'s_one': 1})
     # A different owner profile, board, unknown owner, or receipt-only origin
     # association is not covered by the local association above.
     for changed in ({'profile': 'other'}, {'board': 'other'}, {'profile': None},
