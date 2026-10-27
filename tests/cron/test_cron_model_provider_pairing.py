@@ -1,0 +1,64 @@
+"""cron.model_provider pairs only with cron.model [daveey].
+
+A job pinned to its own model without a provider used to inherit cron.model_provider (the fleet's
+openai-codex), so ``hermes cron edit --model claude-...`` without ``--provider`` failed. Entry path: run_job
+with a temp config.yaml (same harness as test_cron_provider_pin), checking the provider handed to
+resolve_runtime_provider.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from tests.cron.test_cron_provider_pin import _base_job, _run  # noqa: E402
+
+
+def test_pinned_job_without_provider_uses_its_models_provider_not_cron_model_provider(tmp_path):
+    job = _base_job(model="claude-opus-5-5")
+    ok, err, agent_kwargs, resolve_kwargs = _run(
+        job, tmp_path, current_provider="openai-codex", current_model="gpt-6-astra",
+        cron_model="gpt-6-astra", cron_model_provider="openai-codex")
+    assert ok is True, err
+    assert agent_kwargs["model"] == "claude-opus-5-5"
+    assert resolve_kwargs["requested"] == "anthropic"
+
+
+def test_pinned_job_on_unknown_model_falls_back_to_global_config(tmp_path):
+    job = _base_job(model="some-house-model")
+    ok, err, _a, resolve_kwargs = _run(
+        job, tmp_path, current_provider="openrouter", current_model="main-model",
+        cron_model="fleet-model", cron_model_provider="fleet-provider")
+    assert ok is True, err
+    assert resolve_kwargs["requested"] is None  # resolve_runtime_provider reads model.provider
+
+
+def test_pinned_job_on_main_model_uses_global_config(tmp_path):
+    job = _base_job(model="claude-opus-5-5")
+    ok, err, _a, resolve_kwargs = _run(
+        job, tmp_path, current_provider="my-anthropic-proxy", current_model="claude-opus-5-5",
+        cron_model="fleet-model", cron_model_provider="fleet-provider")
+    assert ok is True, err
+    assert resolve_kwargs["requested"] is None
+
+
+def test_unpinned_job_gets_cron_model_provider(tmp_path):
+    ok, err, agent_kwargs, resolve_kwargs = _run(
+        _base_job(), tmp_path, current_provider="anthropic", current_model="claude-opus-5-5",
+        cron_model="gpt-6-astra", cron_model_provider="openai-codex")
+    assert ok is True, err
+    assert (agent_kwargs["model"], resolve_kwargs["requested"]) == ("gpt-6-astra", "openai-codex")
+
+
+def test_main_model_job_does_not_get_cron_model_provider(tmp_path):
+    """cron.model_provider without cron.model: the job runs the main model on its own provider."""
+    ok, err, agent_kwargs, resolve_kwargs = _run(
+        _base_job(), tmp_path, current_provider="anthropic", current_model="claude-opus-5-5",
+        cron_model_provider="openai-codex")
+    assert ok is True, err
+    assert (agent_kwargs["model"], resolve_kwargs["requested"]) == ("claude-opus-5-5", None)
+
+
+def test_model_source_default_keeps_old_callers_on_cron_provider():
+    from cron.scheduler import _CronJobConfig, _default_provider_for
+    jc = _CronJobConfig(cfg={}, model="m", model_cfg={}, cron_default_provider="fleet")
+    assert jc.model_source == "cron" and _default_provider_for(jc) == "fleet"
