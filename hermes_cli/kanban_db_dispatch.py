@@ -1350,6 +1350,12 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
+                try:
+                    from hermes_cli import kanban_provider_walls as _walls
+                    _walls.record_wall_for_run(conn, row["id"], row["current_run_id"],
+                                               _kb.worker_log_path(row["id"], board=board))
+                except Exception:
+                    _kb._log.warning("kanban: recording provider wall failed", exc_info=True)
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
@@ -2359,6 +2365,11 @@ def _run_reclaim_phase(
         result.shared_blocker_released = release_cleared_blockers(conn)
     except Exception:
         _kb._log.warning("kanban: releasing cleared shared blockers failed", exc_info=True)
+    try:
+        from hermes_cli import kanban_provider_walls as _walls
+        _walls.alert_on_storm(conn, board=board)
+    except Exception:
+        _kb._log.warning("kanban: rate-limit storm alert failed", exc_info=True)
     try:
         result.quota_block_released = _kbq.release_recovered_quota_blocks(conn)
     except Exception:
