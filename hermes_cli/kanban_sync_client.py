@@ -140,7 +140,30 @@ def board_paths() -> list[tuple[str, Path]]:
         # Only real board slugs (the service's board-id rule): ``_archived/`` holds archived boards, not a board.
         found += [(p.parent.name, p) for p in sorted(boards.glob("*/kanban.db"))
                   if p.is_file() and BOARD_ID_RE.match(p.parent.name)]
+    local = {slug for slug, _ in found}
+    links_dir = root / "kanban" / sync.LINKS_DIR
+    if links_dir.is_dir():  # boards only another gateway has, where this gateway's chats have cards
+        found += [(p.stem, p) for p in sorted(links_dir.glob("*.db")) if BOARD_ID_RE.match(p.stem) and p.stem not in local]
     return [(slug, path) for slug, path in found if sync.board_selected(str(path))]
+
+
+def ensure_link_boards(slugs: Iterable[str], gateway: str) -> list[str]:
+    """Create a link-only board file for each slug this host has no board for (kanban_db_sync.LINKS_DIR)."""
+    from hermes_cli import kanban_db
+    local = {slug for slug, _ in board_paths()}
+    created = []
+    for slug in sorted(set(slugs) - local):
+        if not BOARD_ID_RE.match(slug):
+            continue
+        path = kanban_db.kanban_home() / "kanban" / sync.LINKS_DIR / f"{slug}.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = _connect(path)
+        try:
+            ensure_identity(conn, slug, gateway)
+        finally:
+            conn.close()
+        created.append(slug)
+    return created
 
 
 def shadow_path(slug: str) -> Path:
@@ -598,8 +621,16 @@ LINKS_EVERY_S = 60.0
 
 
 def reconcile_links(boards: list[tuple[str, Path]], gateway: str) -> None:
-    """Bring this gateway's chat links up to date in every synced board (kanban_chat_links.reconcile)."""
+    """Bring this gateway's chat links up to date in every synced board (kanban_chat_links.reconcile), creating a
+    link-only board for each board this gateway's chats have cards on but this host does not have."""
     from hermes_cli import kanban_chat_links
+    try:
+        created = ensure_link_boards(kanban_chat_links.ledger_boards(gateway), gateway)
+        if created:
+            _log.info("kanban sync: link-only boards %s", created)
+            boards = board_paths()
+    except Exception as exc:  # health: allow BLE001 -- link-only boards are best effort; local links still reconcile
+        _log.warning("kanban sync: link-only boards failed (%s: %s)", type(exc).__name__, exc)
     for slug, path in boards:
         try:
             conn = _connect(path)

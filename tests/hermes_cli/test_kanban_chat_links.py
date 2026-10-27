@@ -154,3 +154,27 @@ def test_cli_links_and_links_diff(live, kanban_home, monkeypatch, capsys, tmp_pa
     capsys.readouterr()
     assert cli("sync", "links-diff", "--json") == 0  # no remote links on either side
     assert json.loads(capsys.readouterr().out)["clean"] is True
+
+
+def test_replica_keeps_every_chat_of_a_card_shared_by_several(tmp_path):
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_shared", "shared", "running", OTHER)],
+             [("t_shared", ME, "s1", "shepherd", 0), ("t_shared", ME, "s2", "shepherd", 0)])
+    got = links.replica_cards(["s1", "s2"], ME, replicas=[("default", rep)])
+    assert sorted(c["session"] for c in got) == ["s1", "s2"]
+
+
+def test_a_board_only_another_gateway_has_gets_a_link_only_file(live, kanban_home, monkeypatch):
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [_ledger_row("t_run", "s_chat", board="runners")])
+    ksc.reconcile_links(ksc.board_paths(), ME)
+    boards = dict(ksc.board_paths())
+    assert boards["runners"] == kanban_home / "kanban" / sync.LINKS_DIR / "runners.db"
+    conn = kbc.connect(boards["runners"])
+    try:
+        assert _links(conn) == {("t_run", "s_chat", "shepherd", 0)}
+        assert sync.sync_state(conn)["board_id"] == "runners" and sync.board_mode(conn) == "shadow"
+        assert conn.execute("SELECT COUNT(*) FROM kanban_sync_outbox WHERE table_name = 'task_chat_links'").fetchone()[0] == 1
+    finally:
+        conn.close()
+    from hermes_cli import kanban_db
+    assert "runners" not in {b.get("slug") for b in kanban_db.list_boards()}  # never a board in the UI

@@ -207,6 +207,10 @@ def sync_enabled() -> bool:
 
 
 SHADOW_DIR = "sync-shadow"
+# Link-only boards: a board another gateway owns that this gateway's chats have cards on. The file holds no cards,
+# only this gateway's chat links (pushed); its replica holds the whole board. Outside ``boards/``, so the dispatcher
+# and the board list never see it.
+LINKS_DIR = "sync-links"
 
 
 def board_slug_for_path(db_path: str) -> str:
@@ -214,7 +218,7 @@ def board_slug_for_path(db_path: str) -> str:
     a shadow copy ``.../sync-shadow/<slug>.db`` -> ``<slug>``."""
     from pathlib import Path
     p = Path(db_path)
-    if p.parent.name == SHADOW_DIR:
+    if p.parent.name in (SHADOW_DIR, LINKS_DIR):
         return p.stem
     if p.name == "kanban.db" and p.parent.parent.name == "boards":
         return p.parent.name
@@ -222,9 +226,10 @@ def board_slug_for_path(db_path: str) -> str:
 
 
 def board_selected(db_path: str) -> bool:
-    """``kanban.sync.boards`` lists the boards that sync (absent = every board). A shadow copy always does."""
+    """``kanban.sync.boards`` lists the boards that sync (absent = every board). A shadow copy and a link-only board
+    always do."""
     from pathlib import Path
-    if Path(db_path).parent.name == SHADOW_DIR:
+    if Path(db_path).parent.name in (SHADOW_DIR, LINKS_DIR):
         return True
     boards = sync_config().get("boards")
     if not isinstance(boards, (list, tuple)):

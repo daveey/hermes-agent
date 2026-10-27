@@ -73,6 +73,12 @@ def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+def ledger_boards(gateway: str) -> set[str]:
+    """Boards on which this gateway's chats have cards, per the origin-ledger projection."""
+    from hermes_cli.kanban_session_activity import _remote_links
+    return {c["board"] for c in _remote_links() if c.get("board") and c.get("origin_gateway") in (None, gateway)}
+
+
 def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: bool = True) -> dict[str, int]:
     """Bring this gateway's links in ``conn`` (one board file) up to date. Writes go through the capture triggers,
     so every new or changed link is pushed to the service. Returns counts of added/changed/released links."""
@@ -114,7 +120,7 @@ def replica_cards(session_ids: Iterable[str], gateway: str, statuses: tuple[str,
     ph = ",".join("?" for _ in ids)
     st = ",".join("?" for _ in statuses)
     now = time.time()
-    out: dict[str, dict[str, Any]] = {}
+    out: dict[tuple[str, str], dict[str, Any]] = {}
     for board, path in replicas:
         if not path.exists():
             continue
@@ -136,9 +142,10 @@ def replica_cards(session_ids: Iterable[str], gateway: str, statuses: tuple[str,
         for r in rows:
             owner = r["created_on"]
             key = f"{owner}/default/{board}/{r['id']}"
-            if key in out:
+            pair = (r["chat_session"], key)  # one row per chat and card: a card often has several chats
+            if pair in out:
                 continue
-            out[key] = {
+            out[pair] = {
                 "title": r["title"], "status": r["status"], "assignee": r["assignee"], "created_at": r["created_at"],
                 "started_at": r["started_at"], "priority": r["priority"], "block_kind": r["block_kind"],
                 "human_request": r["human_request"], "id": r["id"], "board": board, "gateway": owner, "key": key,
