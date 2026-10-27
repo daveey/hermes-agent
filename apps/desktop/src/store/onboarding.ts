@@ -1310,11 +1310,14 @@ export async function saveOnboardingLocalEndpoint(
     // confirms it on the card (it changes the default for new chats). The
     // probe above already proved the endpoint answers; the runtime gate can't
     // validate a custom provider that isn't in config yet, so it is skipped.
-    if (await localEndpointNeedsConfirm(ctx.scope)) {
-      if (generation !== flowGeneration) {
-        return { ok: false }
-      }
+    const needsConfirm = await localEndpointNeedsConfirm(ctx.scope)
 
+    // The options read may outlive dismissal, regardless of which branch it selects.
+    if (generation !== flowGeneration) {
+      return { ok: false }
+    }
+
+    if (needsConfirm) {
       setFlow({
         status: 'confirming_model',
         providerSlug: 'custom',
@@ -1367,17 +1370,18 @@ export async function saveOnboardingLocalEndpoint(
 }
 
 async function localEndpointNeedsConfirm(profile?: ProfileScope) {
-  let configured = false
-
   try {
     const options = await getGlobalModelOptions({ includeUnconfigured: true, explicitOnly: false }, profile)
 
-    configured = Boolean(String(options?.model ?? '').trim() && String(options?.provider ?? '').trim())
-  } catch {
-    // Unknown: fall back to the onboarding state alone.
-  }
+    // Only an explicitly empty authoritative response proves first run. Missing
+    // fields, partial configuration and failed reads must never authorize a write.
+    const empty = typeof options?.model === 'string' && options.model.trim() === '' &&
+      typeof options?.provider === 'string' && options.provider.trim() === ''
 
-  return shouldDeferGlobalDefault(configured)
+    return shouldDeferGlobalDefault(!empty)
+  } catch {
+    return true
+  }
 }
 
 // User picked a different model from the dropdown on the confirm card.

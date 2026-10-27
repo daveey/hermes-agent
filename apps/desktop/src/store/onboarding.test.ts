@@ -849,6 +849,11 @@ describe('saveOnboardingLocalEndpoint', () => {
         return { ok: true, reachable: true, message: '', models: [] }
       }
 
+      // These setup tests represent a positively empty first-run config.
+      if (path.startsWith('/api/model/options')) {
+        return { model: '', provider: '', providers: [] }
+      }
+
       if (path === '/api/model/set') {
         return {
           ok: true,
@@ -896,6 +901,11 @@ describe('saveOnboardingLocalEndpoint', () => {
         return { ok: true, reachable: true, message: '', models: ['llama-3.1-8b'] }
       }
 
+      // These setup tests represent a positively empty first-run config.
+      if (path.startsWith('/api/model/options')) {
+        return { model: '', provider: '', providers: [] }
+      }
+
       if (path === '/api/model/set') {
         return { ok: true, provider: 'custom', model: 'llama-3.1-8b', base_url: 'http://127.0.0.1:8000/v1' }
       }
@@ -924,6 +934,11 @@ describe('saveOnboardingLocalEndpoint', () => {
 
       if (path === '/api/providers/validate') {
         return { ok: true, reachable: true, message: '', models: ['llama-3.1-8b', 'qwen2.5-7b'] }
+      }
+
+      // These setup tests represent a positively empty first-run config.
+      if (path.startsWith('/api/model/options')) {
+        return { model: '', provider: '', providers: [] }
       }
 
       if (path === '/api/model/set') {
@@ -963,6 +978,11 @@ describe('saveOnboardingLocalEndpoint', () => {
 
       if (path === '/api/providers/validate') {
         return { ok: true, reachable: true, message: '', models: ['gpt-oss-120b'] }
+      }
+
+      // These setup tests represent a positively empty first-run config.
+      if (path.startsWith('/api/model/options')) {
+        return { model: '', provider: '', providers: [] }
       }
 
       if (path === '/api/model/set') {
@@ -1016,6 +1036,11 @@ describe('saveOnboardingLocalEndpoint', () => {
         }
       }
 
+      // These setup tests represent a positively empty first-run config.
+      if (path.startsWith('/api/model/options')) {
+        return { model: '', provider: '', providers: [] }
+      }
+
       if (path === '/api/model/set') {
         return { ok: true, provider: 'custom', model: 'llama-3.1-8b', base_url: 'http://127.0.0.1:1234/v1' }
       }
@@ -1046,6 +1071,11 @@ describe('saveOnboardingLocalEndpoint', () => {
     installApiMock(async ({ path }: { path: string }) => {
       if (path === '/api/providers/validate') {
         return { ok: true, reachable: true, message: '', models: ['llama-3.1-8b'] }
+      }
+
+      // These setup tests represent a positively empty first-run config.
+      if (path.startsWith('/api/model/options')) {
+        return { model: '', provider: '', providers: [] }
       }
 
       if (path === '/api/model/set') {
