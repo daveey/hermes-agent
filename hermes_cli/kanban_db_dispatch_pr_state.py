@@ -148,6 +148,20 @@ def _immediate_checkpoint_after(
     )
 
 
+def _pr_comments_predate_first_run(conn: sqlite3.Connection, task_id: str, newest_pr_at: int) -> bool:
+    """True when the card never ran a worker, or every PR comment predates its first run.
+
+    A worker that never ran cannot have opened a duplicate PR: the PR named in a review
+    card's handoff is the one it exists to review/finish.
+    """
+    from hermes_cli import kanban_db as _kb
+
+    first_run = conn.execute(
+        "SELECT MIN(started_at) AS t FROM task_runs WHERE task_id = ?", (task_id,)
+    ).fetchone()["t"]
+    return first_run is None or newest_pr_at < _kb._to_epoch(first_run)
+
+
 def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Optional[str]:
     """Respawn-guard step 4: ``"active_pr"`` when a comment in the last 24 h names a PR, else None.
 
@@ -183,6 +197,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             pr_times.append(t)
             pr_urls.extend(urls)
     if not pr_times:
+        return None
+    if _pr_comments_predate_first_run(conn, task_id, max(pr_times)):
         return None
     if _immediate_checkpoint_after(conn, task_id, max(pr_times), latest_pr_comment_id):
         return None

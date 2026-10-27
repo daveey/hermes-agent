@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
+from tests.hermes_cli.kanban_guard_helpers import worker_ran
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -544,3 +545,8 @@ def test_pr_state_lookup_uses_broker_prefix_and_resolved_gh(kanban_home, monkeyp
     monkeypatch.setattr(prs.subprocess, "run", lambda cmd, *a, **k: calls.append(cmd) or _Proc(1))
     assert prs.pr_state(PR_A) is None
     assert calls[0][:4] == ["gh", "pr", "view", PR_A]
+
+
+@pytest.fixture(autouse=True)
+def _worker_ran(worker_ran):
+    """These guard tests model cards whose worker already ran."""
