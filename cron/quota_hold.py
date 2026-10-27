@@ -42,16 +42,28 @@ def hold_seconds_from_failure(exc: BaseException) -> Optional[float]:
     output cannot park a job."""
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
 
+    from hermes_cli.fallback_errors import ProviderFallbackError
+
+    def route_hold(error: BaseException) -> Optional[float]:
+        if isinstance(error, ProviderFallbackError):
+            waits = [route_hold(failure) for _, _, failure in error.failures]
+            return min(waits) if waits and all(wait is not None for wait in waits) else None
+        if isinstance(error, AuthError) and is_rate_limited_auth_error(error):
+            hint = getattr(error, "retry_after", None)
+            if hint is None:
+                m = _RETRY_AFTER_RE.search(str(error))
+                hint = float(m.group(1)) if m else None
+            return float(hint) if hint is not None and float(hint) > 0 else None
+        # A fallback's implicit context may be the primary quota exception.
+        # Never mistake that for a quota refusal by this route.
+        return None
+
     seen: set[int] = set()
     cur: Optional[BaseException] = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
-        if isinstance(cur, AuthError) and is_rate_limited_auth_error(cur):
-            hint = getattr(cur, "retry_after", None)
-            if hint is None:
-                m = _RETRY_AFTER_RE.search(str(cur))
-                hint = float(m.group(1)) if m else None
-            return float(hint) if hint is not None and float(hint) > 0 else None
+        if isinstance(cur, (ProviderFallbackError, AuthError)):
+            return route_hold(cur)
         cur = cur.__cause__ or cur.__context__
     return None
 
