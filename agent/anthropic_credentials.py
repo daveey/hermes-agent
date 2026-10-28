@@ -648,10 +648,14 @@ def _prefer_refreshable_claude_code_token(env_token: str, creds: Optional[dict[s
     return None
 
 
-def _resolve_anthropic_pool_token(*, skip_borrowed: bool = False) -> Optional[str]:
+def _resolve_anthropic_pool_token(*, skip_borrowed: bool = False, model: Optional[str] = None) -> Optional[str]:
     """First available Anthropic OAuth token from credential_pool, read-only: enumerates with ``clear_expired=False,
     refresh=False`` (never ``select()``) so diagnostic call sites (account_usage, ``hermes models``) never mutate
-    auth.json or hit the network; refresh-on-expiry belongs to the API call path's pool recovery."""
+    auth.json or hit the network; refresh-on-expiry belongs to the API call path's pool recovery.
+
+    With *model* (an API-call path) an entry whose access token is past its stamped expiry is skipped: sending
+    it can only 401, and recovery would then refresh whichever account the session is on, not this one."""
+    now_ms = int(time.time() * 1000)
     try:
         from agent.credential_pool import AUTH_TYPE_OAUTH, load_pool
         entries, _pending = load_pool("anthropic")._available_entries(clear_expired=False, refresh=False)
@@ -664,6 +668,10 @@ def _resolve_anthropic_pool_token(*, skip_borrowed: bool = False) -> Optional[st
         # access_token may be an explicit null on a persisted entry; None.strip() would crash the resolver.
         token = (getattr(entry, "access_token", None) or "").strip()
         if getattr(entry, "auth_type", None) != AUTH_TYPE_OAUTH or not token:
+            continue
+        expires_at_ms = getattr(entry, "expires_at_ms", None) or 0
+        if model and expires_at_ms and expires_at_ms <= now_ms:
+            logger.debug("Skipping Anthropic pool entry %s: access token expired", getattr(entry, "id", "?"))
             continue
         # load_pool() re-seeds rows from the singleton files, so a spent-but-uncommitted rotation
         # (possibly from another process) looks healthy here.
@@ -713,7 +721,7 @@ def resolve_anthropic_token(*, model: Optional[str] = None) -> Optional[str]:
         return _available_anthropic_token(api_key, model)
     # The pool's claude_code row mirrors the same externally owned refresh grant.
     return _available_anthropic_token(
-        _resolve_anthropic_pool_token(skip_borrowed=True) or _resolve_claude_code_token_from_credentials(_read_creds()),
+        _resolve_anthropic_pool_token(skip_borrowed=True, model=model) or _resolve_claude_code_token_from_credentials(_read_creds()),
         model,
     )
 

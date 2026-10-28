@@ -902,23 +902,52 @@ class ClientLifecycleMixin:
         if not official_host and not (current_key.startswith("sk-ant-") or getattr(self, "_is_anthropic_oauth", False)):
             return False
         try:
-            from agent.anthropic_credentials import resolve_anthropic_token
-            from agent.model_routing_runtime import refresh_class_anthropic_token
-            new_token = (refresh_class_anthropic_token(self) if getattr(self, "model_routing", None)
-                         else resolve_anthropic_token(model=self.model))
+            new_token, rebind = self._resolve_anthropic_refresh_token()
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
             return False
         new_token = new_token.strip() if isinstance(new_token, str) else ""
         if not new_token or new_token == self._anthropic_api_key:
             return False
+        if not self._adopt_anthropic_token(new_token):
+            return False
+        if rebind:
+            # Keep the pool entry id attributed to the adopted key, or the next 401/429 recovers the wrong account.
+            from agent.agent_runtime_helpers import sync_credential_pool_entry_id
+            prior_id = getattr(self, "_credential_pool_entry_id", None)
+            sync_credential_pool_entry_id(self)
+            if prior_id and self._credential_pool_entry_id != prior_id:
+                logger.warning(
+                    "Anthropic pre-request credential check moved the session off pool entry %s (now %s)",
+                    prior_id, self._credential_pool_entry_id or "unattributed")
+        return True
+
+    def _resolve_anthropic_refresh_token(self) -> tuple:
+        """``(token, rebind)`` for the pre-request check. A session pinned to a pool entry only ever gets that
+        entry's latest token (never "the first pool entry", which may be another, expired account);
+        ``rebind`` says the token came from an unpinned resolver and the entry id must follow it."""
+        pool = getattr(self, "_credential_pool", None)
+        pinned_id = getattr(self, "_credential_pool_entry_id", None)
+        if pool is not None and pinned_id and getattr(pool, "provider", None) == "anthropic":
+            from agent.credential_pool_pin import pinned_anthropic_pool_token
+            found, token = pinned_anthropic_pool_token(pool, pinned_id)
+            if found:
+                return token, False
+            logger.warning("Anthropic pool entry %s left the pool; re-resolving the session's credential", pinned_id)
+        from agent.anthropic_credentials import resolve_anthropic_token
+        from agent.model_routing_runtime import refresh_class_anthropic_token
+        token = (refresh_class_anthropic_token(self) if getattr(self, "model_routing", None)
+                 else resolve_anthropic_token(model=self.model))
+        return token, pool is not None or getattr(self, "_credential_pool", None) is not None
+
+    def _adopt_anthropic_token(self, new_token: str) -> bool:
         with suppress(Exception):
             self._anthropic_client.close()
         try:
             base_url = getattr(self, "_anthropic_base_url", None)
             self._anthropic_client = self._build_direct_anthropic_client(new_token, base_url)
         except Exception as exc:
-            logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
+            logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc, exc_info=True)
             return False
         old_token = self._anthropic_api_key
         self._anthropic_api_key, self._is_anthropic_oauth = new_token, self._anthropic_oauth_flag(new_token)

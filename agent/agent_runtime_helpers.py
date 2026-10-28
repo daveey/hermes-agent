@@ -943,9 +943,9 @@ def _recover_auth_failure(agent, pool, *, status_code, has_retried_429, error_co
         return False, has_retried_429
     # Refresh the entry that supplied the failing key, not current(): refreshing a healthy entry
     # burns its single-use refresh token for a failure it never had.
-    refresh_kwargs = {"api_key_hint": api_key_hint}
-    if credential_id:
-        refresh_kwargs["credential_id"] = credential_id
+    refresh_kwargs = {"api_key_hint": api_key_hint, **({"credential_id": credential_id} if credential_id else {})}
+    from agent.credential_pool_pin import warn_foreign_failing_key
+    warn_foreign_failing_key(pool, api_key_hint, credential_id)
     refreshed = pool.try_refresh_matching(**refresh_kwargs)
     if refreshed is None:
         # Refresh failed; rotate (the failed entry is already marked exhausted).
