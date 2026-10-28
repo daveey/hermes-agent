@@ -76,7 +76,8 @@ export function selectPrefetchTargets(
   const byGateway = new Map<string, HubSessionRecord[]>()
 
   for (const record of records) {
-    if (!record?.id || !record.gateway || record.archived || record.hidden) {
+    // An open Inbox card's session is prefetched even when hidden or archived (cards usually own such sessions).
+    if (!record?.id || !record.gateway || ((record.archived || record.hidden) && !record.inbox)) {
       continue
     }
 

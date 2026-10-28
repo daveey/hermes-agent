@@ -1711,3 +1711,90 @@ def test_sweep_escalates_old_agent_owned_block_once(worker_env):
         assert sweep_agent_owned_blocks(conn, now=later) == []  # only one respawn per block
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# kanban_unlink
+# ---------------------------------------------------------------------------
+
+def test_worker_blocks_on_dependency_then_unlinks_and_completes(worker_env):
+    """link own card under a parent -> block(dependency) -> unlink -> complete own card."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="upstream")
+    assert json.loads(kt._handle_link({"parent_id": parent, "child_id": worker_env}))["ok"] is True
+    blocked = json.loads(kt._handle_block({"reason": "waiting on upstream", "kind": "dependency"}))
+    assert blocked["ok"] is True
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == "todo"
+
+    out = json.loads(kt._handle_unlink({"parent_id": parent, "child_id": worker_env}))
+    assert out["ok"] is True and out["unlinked"] is True
+    with kbc.connect() as conn:
+        assert kb.parent_ids(conn, worker_env) == []
+
+    done = json.loads(kt._handle_complete({"summary": "no longer needs the parent"}))
+    assert "error" not in done, done
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == "done"
+
+
+def test_unlink_rejects_foreign_edge_and_missing_link(worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        a = kb.create_task(conn, title="a")
+        b = kb.create_task(conn, title="b")
+        kb.link_tasks(conn, a, b)
+    foreign = json.loads(kt._handle_unlink({"parent_id": a, "child_id": b}))
+    assert "only unlink edges of its own card" in foreign["error"]
+    with kbc.connect() as conn:
+        assert kb.parent_ids(conn, b) == [a]
+    missing = json.loads(kt._handle_unlink({"parent_id": a, "child_id": worker_env}))
+    assert "no such link" in missing["error"]
+    assert "required" in json.loads(kt._handle_unlink({"parent_id": a}))["error"]
+
+
+def test_unlink_orchestrator_may_unlink_any_edge(worker_env, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    with kbc.connect() as conn:
+        a = kb.create_task(conn, title="a")
+        b = kb.create_task(conn, title="b")
+        kb.link_tasks(conn, a, b)
+    assert json.loads(kt._handle_unlink({"parent_id": a, "child_id": b}))["ok"] is True
+    with kbc.connect() as conn:
+        assert kb.parent_ids(conn, b) == []
+
+
+def test_unlink_tool_registered_for_workers():
+    from tools import kanban_tools as kt
+    assert any(t[0] == "kanban_unlink" for t in kt._TOOLS)
+    assert "kanban_unlink" not in kt._ORCHESTRATOR_TOOLS
+
+
+def test_old_run_cannot_complete_once_the_card_was_reclaimed(worker_env):
+    """The late-completion path ends at the next claim: a stale run must not close the new run's card."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="upstream")
+    kt._handle_link({"parent_id": parent, "child_id": worker_env})
+    assert json.loads(kt._handle_block({"reason": "waiting", "kind": "dependency"}))["ok"] is True
+    kt._handle_unlink({"parent_id": parent, "child_id": worker_env})
+    with kbc.connect() as conn:
+        assert kb.claim_task(conn, worker_env) is not None  # dispatcher respawns the card
+    out = json.loads(kt._handle_complete({"summary": "late"}))
+    assert out.get("rejection") == "stale_run"
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == "running"

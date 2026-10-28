@@ -38,6 +38,10 @@ def source_launch(tmp_path, monkeypatch, isolated_python):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "store"))
     monkeypatch.delenv("HERMES_DISABLE_LAZY_INSTALLS", raising=False)
+    # A launcher-marked child leaves the completion tail to `hermes update`; these
+    # tests launch as a user's shell does, even when pytest runs under a supervisor.
+    for marker in ("HERMES_SUPERVISED_CHILD", "HERMES_S6_SUPERVISED_CHILD"):
+        monkeypatch.delenv(marker, raising=False)
     monkeypatch.setattr(paths, "lockfile_path", lambda: tmp_path / "tool-lock.json")
 
     uv = shutil.which("uv")
@@ -369,7 +373,15 @@ def test_real_bootstrap_reexecs_before_app_imports(source_launch, tmp_path, isol
     repository = Path(__file__).resolve().parents[2]
     # Copy the real bootstrap so it owns this disposable source install. The
     # other modules remain real checkout imports; only acquisition is injected.
-    shutil.copy2(repository / "hermes_bootstrap.py", root / "hermes_bootstrap.py")
+    # A relaunch loads the bootstrap before the entry (relaunch_command), and this
+    # root has no pm/ of its own, so the copy imports the test tools itself.
+    bootstrap = (repository / "hermes_bootstrap.py").read_text(encoding="utf-8")
+    future = "from __future__ import annotations\n"
+    assert future in bootstrap
+    (root / "hermes_bootstrap.py").write_text(
+        bootstrap.replace(future, future + "import launch_test_tools  # noqa: E402,F401\n", 1),
+        encoding="utf-8",
+    )
     (root / "launch_test_tools.py").write_text(
         "import sys\n"
         "from pathlib import Path\n"

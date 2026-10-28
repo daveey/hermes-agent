@@ -10,7 +10,13 @@ for it, and it runs (and burns CPU) on the target.
 A card stays local when any of these holds:
 
 * the caller pinned it: ``placement="local"``;
-* it cannot be expressed remotely: parents (dependencies are local links), a project, a ``dir`` or
+* it has parents and ``defer_parents`` is off. With it on (the default) a card with parents and no
+  other local-only need is created here as a local dependency and returns ``{"where": "local",
+  "defer": <target>}``: ``kanban_create`` records a ``placement_deferred`` event, and when its parents
+  finish the dispatcher runs :mod:`hermes_cli.kanban_placement_forward` instead of a worker, which
+  creates the card on the target (parent handoffs in the body, same origin chat) and parks the local
+  card until the target's card is done, so local grandchildren still wait for the real work;
+* it cannot be expressed remotely: a project, a ``dir`` or
   ``worktree`` workspace, a non-default board or assignee, courier (origin) creation, or creation
   options ``hermes-hub create-task`` cannot carry (an initial status, a human request, a tenant). A
   hermes-hub client with ``create-task --option`` (1.8.0+) carries skills, the runtime budget, priority,
@@ -316,7 +322,7 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
         out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
                       locate=locate, carries=carries)
         pin = explicit_foreign_pin(args, sg)
-        if pin and origin_intent is None and out.get("where") == "local":
+        if pin and origin_intent is None and out.get("where") == "local" and not out.get("defer"):
             return {"where": "refuse", "why": out.get("why", ""), "pin": pin}
         return out
     except Exception as exc:
@@ -350,7 +356,11 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             return {"where": "local", "why": f"placement {pin!r} is not a routed gateway (only {target!r})"}
         if origin_intent is not None:
             return {"where": "local", "why": "courier creation for another gateway"}
-        if args.get("parents"):
+        # Parents are local links, so the card is created here; with ``defer_parents`` (default on) it
+        # still runs on the target: the dispatcher forwards it there once its parents finish
+        # (:mod:`hermes_cli.kanban_placement_forward`). Every other rule still applies first.
+        has_parents = bool(args.get("parents"))
+        if has_parents and not _bool(c.raw.get("defer_parents", True)):
             return {"where": "local", "why": "has parents (dependencies are local links)"}
         if (args.get("workspace_kind") or "scratch") != "scratch":
             return {"where": "local", "why": f"{args.get('workspace_kind')} workspace"}
@@ -377,6 +387,10 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
                                 args.get("skills"), c)
             if hit:
                 return {"where": "local", "why": f"local marker: {hit}"}
+        if has_parents:
+            # Liveness is checked when the card is forwarded, not now: its parents may run for hours.
+            return {"where": "local", "defer": target,
+                    "why": f"has parents: created here and forwarded to {target} once they finish"}
         dead = (live or (lambda t: target_live(t, now=now, live_seconds=c.live_seconds())))(target)
         if dead:
             return {"where": "local", "why": f"{target} not live: {dead}"}

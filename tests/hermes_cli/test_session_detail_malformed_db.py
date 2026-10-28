@@ -14,7 +14,7 @@ A corrupt store is an unavailable store, not an empty one.
 import sqlite3
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from hermes_cli import web_server
 import hermes_cli.web_server_sessions as _web_server_sessions
@@ -86,7 +86,9 @@ async def test_db_is_closed_even_when_corruption_raises(malformed_db):
 async def test_messages_endpoint_reports_corruption(malformed_db):
     with pytest.raises(HTTPException) as excinfo:
         await sessions_router.get_session_messages(
-            "20260830_180820_744f05", None, None, 0, None, False
+            request=Request({"type": "http", "headers": []}),
+            session_id="20260830_180820_744f05", profile=None,
+            limit=None, offset=0, order=None, include_compacted=False,
         )
     assert excinfo.value.status_code == 503
 

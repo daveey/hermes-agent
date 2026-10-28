@@ -1041,6 +1041,18 @@ def _status_403(c: _Ctx) -> Verdict:
     return _V_AUTH_FALLBACK
 
 
+def _is_anthropic_model_not_found(body: Any) -> bool:
+    """Anthropic's unknown-model 404 names the field instead of saying "model not found":
+    ``{"type": "error", "error": {"type": "not_found_error", "message": "model: <id>"}}`` [daveey].
+    Only the ``model:`` field counts; a 404 on a file or batch id is not a missing model."""
+    if not isinstance(body, dict):
+        return False
+    err = _error_obj(body)
+    if not isinstance(err, dict) or str(err.get("type") or "").lower() != "not_found_error":
+        return False
+    return str(err.get("message") or "").strip().lower().startswith("model:")
+
+
 def _status_404(c: _Ctx) -> Verdict:
     # Structured billing code first, as in _status_429: this handler always returns,
     # so _by_error_code never sees it; a bare "Not Found" message has nothing to match.
@@ -1049,6 +1061,8 @@ def _status_404(c: _Ctx) -> Verdict:
     verdict = _first_match(c.msg, _404_RULES)
     if verdict is not None:
         return verdict
+    if _is_anthropic_model_not_found(c.body):
+        return _V_MODEL_NOT_FOUND
     # Bare id the catalogue only knows prefixed → malformed id (NVIDIA NIM "404
     # page not found", #78796). A generic 404 (wrong path, proxy glitch) stays
     # unknown so the real error surfaces instead of a silent misreported fallback.

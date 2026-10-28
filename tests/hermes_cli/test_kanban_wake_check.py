@@ -451,3 +451,55 @@ def test_wait_check_remote_is_argv_safe(monkeypatch):
     assert "'t_x; rm -rf /'" in seen["argv"][-1]
     P.returncode, P.stdout = 255, ""
     assert w.check_remote("hub", "task", "t_x")[0] == 2
+
+
+def _scheduled_probe(conn, monkeypatch, cmd):
+    from tools import kanban_tools as kt
+
+    tid = _running(conn)
+    _worker_env(monkeypatch, conn, tid)
+    out = json.loads(kt._handle_schedule({
+        "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting", "wake_check": cmd,
+        "check_every": 300, "awaiting": BUILD}))
+    assert out.get("status") == "scheduled", out
+    return tid
+
+
+def test_stray_exit0_does_not_wake_when_confirmation_run_fails(kanban_home, tmp_path, monkeypatch) -> None:
+    """A probe that exits 0 once then 1 (a stolen/garbled status) must not wake the card."""
+    counter = tmp_path / "runs"
+    cmd = f"echo x >> {counter}; test $(wc -l < {counter}) -le 1"  # run 1 -> 0, run 2+ -> 1
+    with kbc.connect_closing() as conn:
+        monkeypatch.setattr(kwc, "dry_run_error", lambda *a, **k: None)
+        tid = _scheduled_probe(conn, monkeypatch, cmd)
+        counter.unlink(missing_ok=True)
+        kwc.run_due_wake_checks(conn, now=int(time.time()), wait=True)
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert not _events(conn, tid, "condition_met")
+        assert len(counter.read_text().splitlines()) == 2  # probed, then confirmed
+
+
+def test_condition_met_payload_carries_diagnostics(kanban_home, tmp_path, monkeypatch) -> None:
+    flag = _flag(tmp_path)
+    flag.write_text("ok\n")
+    with kbc.connect_closing() as conn:
+        monkeypatch.setattr(kwc, "dry_run_error", lambda *a, **k: None)
+        tid = _scheduled_probe(conn, monkeypatch, _probe(flag))
+        kwc.run_due_wake_checks(conn, now=int(time.time()), wait=True)
+        ev = _events(conn, tid, "condition_met")
+        assert len(ev) == 1
+        d = ev[0].payload["diagnostics"]
+        assert d["pid"] and d["host"] and d["cwd"] and "home" in d
+        assert isinstance(d["path_head"], list) and d["first_rc"] == 0 and d["confirm_rc"] == 0
+
+
+def test_reaper_does_not_steal_wake_probe_status(kanban_home, monkeypatch) -> None:
+    """reap_worker_zombies used waitpid(-1): it reaped a probe child and Popen then read exit 1 as 0."""
+    import subprocess
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    monkeypatch.setattr(kbd, "_live_worker_procs", {})
+    proc = subprocess.Popen(["bash", "-c", "exit 1"], start_new_session=True)
+    time.sleep(0.5)
+    assert proc.pid not in kbd.reap_worker_zombies()
+    assert proc.wait() == 1

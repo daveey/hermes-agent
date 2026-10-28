@@ -170,6 +170,23 @@ def test_path_metadata_exemption_tracks_path_changes(protected_home, monkeypatch
         guard.check(target, metadata=True)
 
 
+def test_path_entry_itself_is_lookup_metadata_but_not_readable(protected_home, monkeypatch):
+    """A dev shell with the live venv's bin on PATH: ``isdir(dirname(which("hermes")))`` stats
+    the PATH entry itself. That is command lookup; listing or writing inside it is not."""
+    from tests.home_io_guard import HomeIOGuard
+
+    bin_dir = protected_home / "empty"
+    guard = HomeIOGuard(lambda: [protected_home])
+    monkeypatch.setenv("PATH", str(bin_dir))
+    guard.check(bin_dir, metadata=True)
+    for value, kwargs in ((bin_dir, {}), (bin_dir / "state.db", {"destructive": True})):
+        with pytest.raises(AssertionError, match="REAL hermes home"):
+            guard.check(value, **kwargs)
+    monkeypatch.setenv("PATH", str(protected_home.parent))
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(bin_dir, metadata=True)
+
+
 def test_relative_path_metadata_exemption_tracks_working_directory(protected_home, tmp_path, monkeypatch):
     from tests.home_io_guard import HomeIOGuard
 

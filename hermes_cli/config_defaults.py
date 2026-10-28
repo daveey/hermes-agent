@@ -77,6 +77,9 @@ DEFAULT_CONFIG = {
         # elapsed; implicit provider stale timeouts capped to remaining budget. CLI equivalent:
         # `hermes chat --run-budget N`.
         "run_budget_seconds": None,
+        # [daveey] Refuse a bare vendor id (claude-*) routed to OpenRouter / Nous Portal at agent init,
+        # naming provider, base URL and route, instead of sending a request that can only 400.
+        "model_provider_guard": True,
         # Gateway inactivity timeout (seconds). Only fires when the agent is completely idle — not
         # while calling tools or receiving API responses. 0 = unlimited.
         "gateway_timeout": 1800,

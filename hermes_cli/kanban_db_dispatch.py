@@ -95,7 +95,7 @@ _COMPLETION_GATE_ERROR_PREFIXES = ("PR acceptance ",)
 DEFAULT_GUARD_HOLD_CAP_SECONDS = 30 * 60
 DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS = 6 * 3600
 _GUARD_HOLD_SHORT_CAP_REASONS = frozenset({"blocker_auth"})
-_GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch"})
+_GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch", "model_pin_not_in_routing_registry"})
 
 
 def _env_seconds(name: str, default: int) -> int:
@@ -279,9 +279,9 @@ _RECENT_WORKER_EXIT_TTL_SECONDS = 600
 _RECENT_WORKER_EXITS_MAX = 4096
 _recent_worker_exits: dict[int, tuple[int, float]] = {}
 
-# Windows has no ``waitpid(-1)``: a child's exit code is only recoverable
-# through a live handle, so ``_default_spawn`` parks each worker's ``Popen``
-# here (Windows only) and ``reap_worker_zombies`` polls it. Entry: ``pid -> Popen``.
+# A child's exit code is only recoverable through a live handle (Windows has no
+# ``waitpid(-1)``; on POSIX ``waitpid(-1)`` would steal other children's status), so
+# ``_default_spawn`` parks each worker's ``Popen`` here and ``reap_worker_zombies`` polls it. Entry: ``pid -> Popen``.
 _live_worker_procs: dict[int, subprocess.Popen] = {}
 
 
@@ -368,27 +368,16 @@ def reap_worker_zombies() -> list[int]:
     parked by ``_default_spawn`` (the only way to learn a child's exit code
     there), so the rate-limit sentinel exit is classified on both hosts."""
     reaped: list[int] = []
-    if _kb._IS_WINDOWS:
-        for pid, proc in list(_live_worker_procs.items()):
-            returncode = proc.poll()
-            if returncode is None:
-                continue
-            _record_worker_exit(pid, _wait_status_from_returncode(returncode))
-            _live_worker_procs.pop(pid, None)
-            reaped.append(pid)
-        return reaped
-    try:
-        while True:
-            try:
-                pid, status = os.waitpid(-1, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if pid == 0:
-                break
-            _record_worker_exit(pid, status)
-            reaped.append(pid)
-    except Exception:
-        pass
+    # Only our own workers: waitpid(-1) also stole wake-check probe children, and Python 3.14's
+    # Popen then reported their exit as 0 (a false condition_met).
+    for pid, proc in list(_live_worker_procs.items()):
+        returncode = proc.poll()
+        if returncode is None:
+            continue
+        _record_worker_exit(
+            pid, _wait_status_from_returncode(returncode) if returncode >= 0 else -returncode)
+        _live_worker_procs.pop(pid, None)
+        reaped.append(pid)
     return reaped
 
 
@@ -920,7 +909,7 @@ def detect_stale_running(
         "       COALESCE(r.started_at, t.started_at) AS active_started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running'"
+        "WHERE t.status = 'running'" + _kb._sync.held_elsewhere_sql(conn, "t")
     ).fetchall()
 
     for row in rows:
@@ -1005,7 +994,7 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute(
         "SELECT id, claim_lock, claim_expires, worker_pid, worker_started_at FROM tasks "
         "WHERE status = 'running' "
-        "  AND (claim_lock IS NULL OR claim_expires IS NULL)"
+        "  AND (claim_lock IS NULL OR claim_expires IS NULL)" + _kb._sync.held_elsewhere_sql(conn)
     ).fetchall()
     for row in rows:
         tid = row["id"]
@@ -1215,8 +1204,8 @@ class _DeadWorker:
     protocol_violation: bool = False
     rate_limited: bool = False
     terminal_provider: bool = False
-    """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
-    credential/model — trips the breaker on this first occurrence."""
+    """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's credential/model — trips at once."""
+    unknown_skill: bool = False  # died of ``Unknown skill(s)``: blocked as ``assignment`` at once [daveey]
 
     @property
     def run_outcome(self) -> str:
@@ -1252,6 +1241,7 @@ def _classify_dead_worker(
         if worker_output:
             dead.error_text += f" Worker's last output: {worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
+            dead.unknown_skill = dead.kind == "nonzero_exit" and "Unknown skill(s):" in worker_output
     return dead
 
 
@@ -1459,11 +1449,8 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                     "protocol_violation_limit": violation_limit,
                 },
             )
-        elif dead.terminal_provider:
-            # A retry cannot heal a revoked credential or a missing model, so
-            # the whole ``failure_limit`` budget would be spent on identical
-            # failures. ``force_trip`` blocks now, sticky: ``recompute_ready``
-            # must not auto-resume it before the operator fixes the provider.
+        elif dead.terminal_provider or dead.unknown_skill:
+            # No retry heals a revoked credential, a gone model or a missing pinned skill: block now, sticky.
             tripped = _record_task_failure(
                 conn, tid,
                 error=error_text,
@@ -1471,7 +1458,9 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 force_trip=True,
                 release_claim=False,
                 end_run=False,
-                event_payload_extra={"pid": pid, "claimer": claimer, "terminal_provider": True},
+                event_payload_extra={"pid": pid, "claimer": claimer,
+                                     "unknown_skill" if dead.unknown_skill else "terminal_provider": True},
+                block_kind="assignment" if dead.unknown_skill else "transient",
             )
         else:
             is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
@@ -1540,7 +1529,7 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
-    infrastructure: bool = False,
+    infrastructure: bool = False, block_kind: str = "transient",
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
@@ -1614,15 +1603,15 @@ def _record_task_failure(
         # Spawn path (release_claim) is still running and also clears claim
         # state; the timeout/crash path already did.
         conn.execute(
-            "UPDATE tasks SET status = 'triage', block_kind = 'transient', human_request = NULL, "
+            "UPDATE tasks SET status = 'triage', block_kind = ?, human_request = NULL, "
             + ("claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
                if release_claim else "")
             + "consecutive_failures = ?, last_failure_error = ? "
             "WHERE id = ? AND status IN ('running', 'ready', 'review')",
-            (failures, error, task_id),
+            (block_kind, failures, error, task_id),
         )
         payload = {
-            "kind": "transient",
+            "kind": block_kind,
             "reason_code": "worker_failures_exhausted",
             "failures": failures,
             "effective_limit": effective_limit,
@@ -2094,7 +2083,7 @@ def count_running_tasks(conn: sqlite3.Connection) -> int:
     try:
         return int(
             conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+                "SELECT COUNT(*) FROM tasks WHERE status = 'running'" + _kb._sync.held_elsewhere_sql(conn)
             ).fetchone()[0]
         )
     except Exception:
@@ -2628,6 +2617,7 @@ def _dispatch_once_locked(
             sweep_stale_triage(conn, default_assignee=_resolve_default_assignee(default_assignee))
         except Exception:
             _kb._log.debug("kanban dispatch: triage sweep failed", exc_info=True)
+    _kb._sync.worker_pickup(conn, spawn_budget, dry_run, _profile_exists_fn)  # worker node (RFC "Placement")
     ready_rows = lane_rows(conn, "ready")
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
@@ -2647,9 +2637,8 @@ def _dispatch_once_locked(
     per_profile_running: dict[str, int] = {}
     if per_profile_cap is not None:
         for prow in conn.execute(
-            "SELECT assignee, COUNT(*) AS n FROM tasks "
-            "WHERE status = 'running' AND assignee IS NOT NULL "
-            "GROUP BY assignee"
+            "SELECT assignee, COUNT(*) AS n FROM tasks WHERE status = 'running' AND assignee IS NOT NULL"
+            + _kb._sync.held_elsewhere_sql(conn) + " GROUP BY assignee"
         ):
             per_profile_running[prow["assignee"]] = int(prow["n"])
     # Review-lane reservation: the ready loop runs first and would otherwise
@@ -3212,6 +3201,14 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # The module argv must carry the import context that made it resolvable:
     # the shim's in-process path injection is invisible to the bare child.
     _propagate_module_import_root(cmd, env)
+    # [daveey] Deferred placement: a card with parents that nothing pins here runs on the routed gateway.
+    # Its forwarder (seconds, no LLM) replaces the worker; on any failure it execs ``cmd`` itself.
+    from hermes_cli.kanban_placement_forward import forward_argv
+    forward = forward_argv(task, board, cmd)
+    if forward:
+        from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
+        pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parents[1])
+        cmd = forward
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
@@ -3239,8 +3236,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         )
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
-    if _kb._IS_WINDOWS:
-        _live_worker_procs[proc.pid] = proc
+    _live_worker_procs[proc.pid] = proc
     return proc.pid
 
 

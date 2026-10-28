@@ -133,11 +133,14 @@ class HomeIOGuard:
                 return
             # ``shutil.which`` stats/accesses ``<PATH entry>/<name>``. A developer shell puts
             # PM's tool store (~/.hermes/tools/...) on PATH; probing an executable there is
-            # command lookup, not reading Hermes state. CI has no such entries.
+            # command lookup, not reading Hermes state. CI has no such entries. Stat-ing the
+            # PATH entry itself (``os.path.isdir(dirname(which("hermes")))`` when a dev shell
+            # has the live venv's bin on PATH) is the same lookup, one level up.
             if metadata:
                 path = os.environ.get("PATH", "")
                 cwd = os.getcwd() if self._relative_path_entries(path) else None
-                if os.path.dirname(absolute) in self._path_entries(path, cwd):
+                entries = self._path_entries(path, cwd)
+                if absolute in entries or os.path.dirname(absolute) in entries:
                     return
             # The interpreter's own installation (a PM-managed python under ~/.hermes/tools):
             # stdlib source reads (linecache, traceback) are not Hermes state either, nor is

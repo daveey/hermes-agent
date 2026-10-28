@@ -24,7 +24,8 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_ORIGIN_ADOPT_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
-    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_ARCHIVE_SCHEMA)
+    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_ARCHIVE_SCHEMA,
+    KANBAN_UNLINK_SCHEMA)
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,10 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                     return tool_error(str(e), code=e.code)
                 if isinstance(e, CapabilityMismatchError):
                     return tool_error(str(e), code=e.code, assignee=e.assignee, missing=e.missing)
+                from hermes_cli.kanban_skill_check import UnknownSkillError
+                if isinstance(e, UnknownSkillError):  # the worker could never load it: refuse, don't create [daveey]
+                    return tool_error(str(e), code=e.code, rejection="invalid_args", assignee=e.assignee,
+                                      unknown_skills=e.missing, suggestions=e.suggestions)
 
                 if not isinstance(e, ValueError):
                     logger.exception(f"{tool_name} failed")
@@ -860,6 +865,18 @@ def _handle_list(args: dict, **kw) -> str:
             "promoted": promoted})
 
 
+def _parked_by_own_run(conn, tid: str, run_id: int) -> bool:
+    """True when ``run_id`` is the card's latest run, ended by ``kanban_block``, and nothing has
+    claimed the card since (no current run, no claim lock, status ready/blocked)."""
+    row = conn.execute("SELECT status, current_run_id, claim_lock FROM tasks WHERE id = ?", (tid,)).fetchone()
+    if row is None or row["current_run_id"] is not None or row["claim_lock"] \
+            or row["status"] not in ("ready", "blocked"):
+        return False
+    last = conn.execute("SELECT id, outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                        (tid,)).fetchone()
+    return bool(last and last["id"] == run_id and last["outcome"] == "blocked")
+
+
 @_kanban_handler("kanban_complete", classify_rejections=True)
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff. Every refusal
@@ -889,9 +906,14 @@ def _handle_complete(args: dict, **kw) -> str:
         task = kb.get_task(conn, tid)
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
+            run_id = _worker_run_id(tid)
+            if run_id is not None and _parked_by_own_run(conn, tid, run_id):
+                # This worker parked its card with kanban_block, then edited its own edges (kanban_unlink):
+                # its run is over but nothing has claimed the card since, so it may still close its own card.
+                run_id = None
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
-                created_cards=created_cards, expected_run_id=_worker_run_id(tid), goal_verification=goal_verification)
+                created_cards=created_cards, expected_run_id=run_id, goal_verification=goal_verification)
         except kb.ArtifactPreservationError as artifact_err:
             # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
             # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
@@ -1056,6 +1078,42 @@ def _route_needs(op: str, args: dict, tid: str, reason: Optional[str]) -> Option
                                 "the approved scope. End your turn."))
 
 
+STANDING_WAIT_EVENT = "standing_wait_hold"
+
+
+def _standing_wait_guard(kb, conn, tid: str, kind: Optional[str], human_request: Any, reason: str) -> None:
+    """Hold a block on the user ONCE when the card carries a standing "don't wait". [daveey]
+
+    A needs_input block (or one with a human_request) under such a standing line is refused with the
+    words quoted back and a ``standing_wait_hold`` event (coach/self-heal read it). Calling again with
+    the block lands it: a genuine human-only need (a credential, a physical step) is never trapped.
+    """
+    if kind != "needs_input" and not human_request:
+        return
+    from agent import standing_instructions as si
+    task = kb.get_task(conn, tid)
+    found = si.explicit_lines(getattr(task, "body", "") or "")
+    for c in kb.list_comments(conn, tid):
+        found += si.explicit_lines(c.body or "")
+    dont_wait = si.says_dont_wait(si.dedupe(found))
+    if not dont_wait:
+        return
+    run_id = _worker_run_id(tid)
+    if any(e.kind == STANDING_WAIT_EVENT and (run_id is None or e.run_id in (None, run_id))
+           for e in kb.list_events(conn, tid)):
+        return  # already held once this run: the agent re-confirmed a human-only need
+    with kb.write_txn(conn, allow_nested=True):
+        kb._append_event(conn, tid, STANDING_WAIT_EVENT,
+                         {"kind": kind, "standing": dont_wait[:3], "reason": (reason or "")[:300]}, run_id=run_id)
+    quoted = "; ".join(f'"{w}"' for w in dont_wait[:3])
+    raise _Reject(
+        f"Not blocked: this card carries the user's standing instruction {quoted}. Decide it yourself and keep "
+        "going (pick the option the user's goal implies, record the choice in a kanban_comment). A timing or "
+        "consent question is not a reason to wait. Only if this truly needs a human (a credential, a physical "
+        "step, money beyond the approved budget) call kanban_block again with the same reason; that lands it.",
+        "standing_dont_wait")
+
+
 @_kanban_handler("kanban_block")
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
@@ -1092,6 +1150,7 @@ def _handle_block(args: dict, **kw) -> str:
         _policy = block_policy_error(kind, human_request=args.get("human_request"), wake_check=wake[0],
                                      clock_only=wake[2], blocker_id=blocker_id, reason=reason)
         _check(_policy is None, _policy or "", ERROR_CODE)
+        _standing_wait_guard(kb, conn, tid, kind, args.get("human_request"), reason)
         _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id)
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
@@ -1449,6 +1508,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             return _placement_refused(decision["pin"], decision.get("why", "")), None
         if target == "local":
             why = decision.get("why") or ""
+            if decision.get("defer"):
+                # Parents are local links: created here, forwarded to the target once they finish.
+                return None, {"where": "local", "defer": decision["defer"], "why": why}
             if why.startswith("local marker"):
                 logger.info("kanban placement: local (%s)", why)
                 return None, {"where": "local", "why": why, "remedy": kp.LOCAL_MARKER_REMEDY}
@@ -1574,6 +1636,17 @@ def _handle_create(args: dict, **kw) -> str:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
         marker_placement = None
+        # Placement on a synced board: ``runs_on`` labels, and a pin to an enrolled machine becomes
+        # ``runs_on=[machine:<name>]`` (created here, run there through the Board lease). [daveey]
+        from hermes_cli import kanban_worker_node as _wn
+        try:
+            runs_on = _wn.normalize_runs_on(args.get("runs_on"))
+        except ValueError as exc:
+            return tool_error(str(exc))
+        if runs_on is None and origin_intent is None:
+            runs_on = _wn.placement_runs_on(conn, args.get("placement"))
+            if runs_on is not None:
+                args = {**args, "placement": "local"}
         if origin_intent is None and origin is None:
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
             remote, marker_placement = _place_remote(
@@ -1601,7 +1674,7 @@ def _handle_create(args: dict, **kw) -> str:
             creator_task_id=self_tid,
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-            requires=args.get("requires"),
+            requires=args.get("requires"), runs_on=runs_on,
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             completion_contract=args.get("completion_contract"),
@@ -1611,7 +1684,7 @@ def _handle_create(args: dict, **kw) -> str:
             origin_intent=origin_intent,
             # Reject a worktree path the dispatcher could never resolve now, to the
             # creator, instead of burning spawn retries on it later. [daveey]
-            validate_workspace=True)
+            validate_workspace=True, validate_skills=True)
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
         wait = [e for e in kb.list_events(conn, new_tid) if e.kind == "dependency_wait"]
         gate = {"gated": True, "gated_by": wait[-1].payload["parent"]} if wait else {"gated": False}
@@ -1628,7 +1701,18 @@ def _handle_create(args: dict, **kw) -> str:
             }}
         if origin is not None:
             extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
-        if marker_placement:
+        if marker_placement and marker_placement.get("defer"):
+            # [daveey] Run on the routed gateway once the parents finish (kanban_placement_forward).
+            from hermes_cli import kanban_placement_forward as _kpf
+            from hermes_cli.profiles import current_profile_name as _cpn
+            _kpf.record_deferral(conn, new_tid, target=marker_placement["defer"], origin_session=session_id,
+                                 origin_profile=_cpn("default") or "default")
+            extra["placement"] = {"where": "local", "defer": marker_placement["defer"],
+                                  "why": marker_placement["why"]}
+            extra["note"] = (f"Created here as {new_tid} so it can wait on its parents; it runs on "
+                             f"{marker_placement['defer']}, not here: when the parents finish the dispatcher "
+                             f"forwards it there and this card completes when that one does.")
+        elif marker_placement:
             extra["placement"] = {"where": marker_placement["where"], "why": marker_placement["why"]}
             extra["remedy"] = marker_placement["remedy"]
         if origin_intent is None and args.get("requires"):
@@ -1819,6 +1903,24 @@ def _handle_link(args: dict, **kw) -> str:
                    **({"gated_by": parent_id} if gated else {}))
 
 
+@_kanban_handler("kanban_unlink")
+def _handle_unlink(args: dict, **kw) -> str:
+    """Remove a dependency edge. Same ownership rule as kanban_link: a dispatcher worker
+    edits only its OWN card's edges (it is the child or the parent); orchestrators any."""
+    _reject_delegated_child_mutation("kanban_unlink")
+    parent_id = args.get("parent_id")
+    child_id = args.get("child_id")
+    _check(parent_id and child_id, "both parent_id and child_id are required")
+    parent_id, child_id = str(parent_id), str(child_id)
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    if env_tid and env_tid not in (parent_id, child_id):
+        raise _Reject(f"kanban_unlink refused: this worker owns {env_tid}, not the edge "
+                      f"{parent_id} -> {child_id}; it may only unlink edges of its own card")
+    with _board(args.get("board")) as (kb, conn):
+        _check(kb.unlink_tasks(conn, parent_id, child_id), f"no such link: {parent_id} -> {child_id}")
+        return _ok(parent_id=parent_id, child_id=child_id, unlinked=True)
+
+
 @_kanban_handler("kanban_origin_adopt")
 def _handle_origin_adopt(args: dict, **kw) -> str:
     _reject_delegated_child_mutation("kanban_origin_adopt")
@@ -1865,6 +1967,7 @@ _TOOLS = (
     ("kanban_origin_adopt", KANBAN_ORIGIN_ADOPT_SCHEMA, _handle_origin_adopt, "🔗"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"),
+    ("kanban_unlink", KANBAN_UNLINK_SCHEMA, _handle_unlink, "✂"),
     ("kanban_archive", KANBAN_ARCHIVE_SCHEMA, _handle_archive, "🗄"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:

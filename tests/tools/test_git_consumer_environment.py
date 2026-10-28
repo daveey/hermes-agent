@@ -1,5 +1,6 @@
 """Git consumers use the selected package environment without owning its layout."""
 import importlib
+import json
 import shutil
 import subprocess
 
@@ -58,36 +59,39 @@ def test_checkpoint_and_diff_follow_selected_git_environment(tmp_path, monkeypat
     assert manager.ensure_checkpoint(str(repo)) is False
 
 
+@pytest.mark.parametrize("runtime_state", ["checkout", "missing-packaged-runtime"])
 @pytest.mark.parametrize("consumer", ["checkpoint", "diff"])
 @pytest.mark.parametrize("failure", ["unsupported-target", "acquisition"])
-def test_git_consumers_fall_back_to_system_git(tmp_path, monkeypatch, consumer, failure):
+def test_git_consumers_fall_back_to_system_git(tmp_path, monkeypatch, consumer, failure, runtime_state):
+    if runtime_state == "missing-packaged-runtime":
+        stamp = tmp_path / "install.json"
+        stamp.write_text(json.dumps({
+            "distribution": "docker", "pmRuntime": str(tmp_path / "missing-runtime"),
+        }), encoding="utf-8")
+        monkeypatch.setattr(importlib.import_module("pm.paths"), "install_stamp_path", lambda project: stamp)
+        # This preflight refusal precedes both old private injection points.
+        with pytest.raises(pm.InstallError, match="packaged PM runtime is missing or invalid"):
+            pm.ensure("git")
+
     git = shutil.which("git")
     assert git is not None
     repo = tmp_path / "repo"
     subprocess.run([git, "init", str(repo)], check=True, capture_output=True)
     (repo / "new.txt").write_text("system git content\n", encoding="utf-8")
 
-    # Fail at the PM boundary reached by both ensure and env_for, without
-    # pretending this interpreter is running on a different host OS/CPU.
-    resolver = importlib.import_module("pm.install")
+    # These are consumer contracts: inject where selected_git_env reads PM,
+    # not behind runtime discovery, target-gap checks, or lazy-install policy.
     calls = []
 
-    def unavailable(*args, **kwargs):
-        calls.append(True)
+    def unavailable(name, *, base_env):
+        assert name == "git"
+        assert "PATH" in base_env
+        calls.append(name)
         if failure == "unsupported-target":
             raise RuntimeError("unsupported architecture")
         raise pm.InstallError("git", "managed Git unavailable")
 
-    if failure == "unsupported-target":
-        # pm.client's in-process target-gap check reads pm.store.current_target
-        # before any pm.install boundary, so the target probe fails there too.
-        monkeypatch.setattr(resolver, "current_target", unavailable)
-        monkeypatch.setattr(importlib.import_module("pm.store"), "current_target", unavailable)
-    else:
-        # Model a target with no deliberate git gap (POSIX's gap would refuse
-        # before acquisition is ever attempted), so acquisition itself fails.
-        monkeypatch.setattr(importlib.import_module("pm.client"), "_raise_target_gap", lambda package: None)
-        monkeypatch.setattr(resolver, "_installed_location", unavailable)
+    monkeypatch.setattr(pm, "ensure", unavailable)
     monkeypatch.setattr(checkpoint_manager, "CHECKPOINT_BASE", tmp_path / "checkpoints")
     if consumer == "checkpoint":
         manager = checkpoint_manager.CheckpointManager(enabled=True)

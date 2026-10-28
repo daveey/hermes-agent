@@ -90,6 +90,57 @@ def test_ssh_runtime_marker_detects_recreated_venv_even_with_reused_inode(
         web_server._apply_ssh_owner_nonce(None)
 
 
+def _pkg(purelib, name, record):
+    info = purelib / f"{name}.dist-info"
+    info.mkdir()
+    (info / "RECORD").write_text(record, encoding="utf-8")
+
+
+def test_ssh_runtime_reattaches_only_when_the_rerealized_tree_holds_the_same_bytes(tmp_path, monkeypatch):
+    """[daveey] A PM repair re-realizes an identical tree: the marker dies with the old tree, but the
+    backend's runtime did not change, so it writes the marker back and stays reusable instead of
+    retiring. A tree whose packages changed is a real swap: no reattach, the watchdog retires."""
+    import shutil
+
+    purelib = tmp_path / "py" / "lib" / "site-packages"
+    purelib.mkdir(parents=True)
+    _pkg(purelib, "pip-26.2.1", "pip/__init__.py,sha256=aaa,10\n")
+    monkeypatch.setattr(
+        web_server,
+        "sysconfig",
+        types.SimpleNamespace(get_paths=lambda *a, **k: {"purelib": str(purelib)}),
+    )
+    web_server._apply_ssh_owner_nonce("0123456789abcdef")
+    marker = purelib / ".hermes-ssh-runtime-0123456789abcdef"
+    try:
+        assert web_server._ssh_runtime_reattach() is False  # nothing lost: nothing to do
+
+        shutil.rmtree(tmp_path / "py")
+        purelib.mkdir(parents=True)
+        _pkg(purelib, "pip-26.2.1", "pip/__init__.py,sha256=aaa,10\n")
+        assert web_server._ssh_runtime_intact() is False
+        assert web_server._ssh_runtime_reattach() is True
+        assert marker.is_file()
+        assert web_server._ssh_runtime_intact() is True
+
+        shutil.rmtree(tmp_path / "py")
+        purelib.mkdir(parents=True)
+        _pkg(purelib, "pip-26.3.0", "pip/__init__.py,sha256=bbb,10\n")
+        assert web_server._ssh_runtime_reattach() is False
+        assert not marker.exists()
+        assert web_server._ssh_runtime_intact() is False
+    finally:
+        web_server._apply_ssh_owner_nonce(None)
+
+
+def test_ssh_runtime_marker_name_is_the_shape_pm_digests_skip():
+    """The marker lives in a PM-published tree; PM must treat exactly this name as process state."""
+    from pm.store import is_runtime_state_file
+
+    assert is_runtime_state_file(".hermes-ssh-runtime-0123456789abcdef")
+    assert not is_runtime_state_file(".hermes-ssh-runtime-0123456789abcdef.py")
+
+
 def test_ssh_runtime_marker_survives_in_place_installs(tmp_path, monkeypatch):
     """pip/uv installs INTO the live venv must not read as a replacement."""
     purelib = tmp_path / "venv" / "lib" / "site-packages"
@@ -159,3 +210,86 @@ def test_ssh_ownership_endpoint_is_absent_without_owner_nonce(monkeypatch):
         headers={"X-Hermes-Session-Token": token},
     )
     assert response.status_code == 404
+
+
+def _purelib_at(tmp_path, monkeypatch):
+    purelib = tmp_path / "venv" / "lib" / "site-packages"
+    purelib.mkdir(parents=True)
+    monkeypatch.setattr(
+        web_server,
+        "sysconfig",
+        types.SimpleNamespace(get_paths=lambda *a, **k: {"purelib": str(purelib)}),
+    )
+    return purelib
+
+
+def test_serve_that_exits_cleanly_leaves_no_runtime_marker(tmp_path):
+    """A real interpreter that boots as an SSH-isolated serve and exits normally (atexit path)."""
+    import subprocess
+    import sys
+    import textwrap
+
+    purelib = tmp_path / "site-packages"
+    purelib.mkdir()
+    script = textwrap.dedent(
+        f"""
+        import types
+        from hermes_cli import web_server
+        web_server.sysconfig = types.SimpleNamespace(
+            get_paths=lambda *a, **k: {{"purelib": {str(purelib)!r}}})
+        web_server._apply_ssh_owner_nonce("0123456789abcdef")
+        import os
+        assert os.path.exists({str(purelib / ".hermes-ssh-runtime-0123456789abcdef")!r})
+        """
+    )
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    subprocess.run([sys.executable, "-c", script], cwd=repo, check=True, timeout=120)
+    assert list(purelib.iterdir()) == []
+
+
+def test_release_removes_own_marker_but_not_one_rewritten_by_another_process(tmp_path, monkeypatch):
+    purelib = _purelib_at(tmp_path, monkeypatch)
+    marker = purelib / ".hermes-ssh-runtime-0123456789abcdef"
+    web_server._apply_ssh_owner_nonce("0123456789abcdef")
+    try:
+        assert marker.exists()
+        marker.write_text(f"pid={os.getpid() + 1}\n")  # a successor serve reused the nonce
+        web_server._release_ssh_runtime_marker()
+        assert marker.exists()
+        marker.write_text(f"pid={os.getpid()}\n")
+        web_server._release_ssh_runtime_marker()
+        assert not marker.exists()
+    finally:
+        web_server._apply_ssh_owner_nonce(None)
+
+
+def test_prune_removes_dead_serve_markers_and_leaves_live_ones(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    purelib = _purelib_at(tmp_path, monkeypatch)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        stale = purelib / ".hermes-ssh-runtime-aaaaaaaaaaaaaaaa"
+        held = purelib / ".hermes-ssh-runtime-bbbbbbbbbbbbbbbb"
+        odd = purelib / ".hermes-ssh-runtime-cccccccccccccccc"
+        unrelated = purelib / ".hermes-ssh-runtime-notanonce"
+        stale.write_text(f"pid={dead.pid}\n")
+        held.write_text(f"pid={live.pid}\n")
+        odd.write_text("garbage")
+        unrelated.write_text(f"pid={dead.pid}\n")
+
+        web_server._apply_ssh_owner_nonce("0123456789abcdef")
+        try:
+            assert not stale.exists()
+            assert held.exists()
+            assert odd.exists()
+            assert unrelated.exists()
+            assert (purelib / ".hermes-ssh-runtime-0123456789abcdef").exists()
+        finally:
+            web_server._apply_ssh_owner_nonce(None)
+    finally:
+        live.kill()
+        live.wait()

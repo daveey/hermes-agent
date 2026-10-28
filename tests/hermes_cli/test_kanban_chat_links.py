@@ -198,3 +198,56 @@ def test_replica_reads_stay_fresh_through_the_shared_connection(tmp_path):
     conn.close()
     assert [c["id"] for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)])] == ["t_b"]
     ksa._reset_cache_for_tests()
+
+
+_ASK = {"action": "Reply with the runner host", "why_human": "approval-gated", "interaction": "reply",
+        "scope": "one runner", "evidence": "runners API shows none"}
+
+
+def _switch_to_replica(kanban_home, monkeypatch, rep):
+    monkeypatch.setattr(ksc, "load_identity", lambda cfg=None: ksc.Identity("https://hub.test", "k", ME))
+    monkeypatch.setattr(ksc, "board_paths", lambda: [("default", kanban_home / "kanban.db")])
+    monkeypatch.setattr(ksc, "shadow_path", lambda slug: rep)
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [])
+    (kanban_home / "config.yaml").write_text("kanban:\n  sync:\n    enabled: true\n    links_reader: replica\n")
+    ksa._reset_cache_for_tests()
+
+
+def test_replica_human_ask_paints_the_chat_blocked(live, kanban_home, monkeypatch, tmp_path):
+    """[daveey] The replica stores ``human_request`` as JSON text. Passed through undecoded, ``needs_human`` saw a
+    string, so a remote card blocked on David counted as open work: the chat painted waiting, not red, and two
+    runner approvals sat unanswered ~18 h. Decoded, it counts blocked; a non-human block stays open work."""
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_ask", "ask", "blocked", OTHER), ("t_ops", "ops", "blocked", OTHER),
+                   ("t_kind", "time wait", "blocked", OTHER), ("t_junk", "junk", "blocked", OTHER)],
+             [("t_ask", ME, "s1", "shepherd", 0), ("t_ops", ME, "s2", "shepherd", 0),
+              ("t_kind", ME, "s3", "shepherd", 0), ("t_junk", ME, "s4", "shepherd", 0)])
+    conn = sqlite3.connect(rep)
+    conn.execute("UPDATE tasks SET human_request = ? WHERE id IN ('t_ask', 't_kind')", (json.dumps(_ASK),))
+    conn.execute("UPDATE tasks SET block_kind = 'time' WHERE id = 't_kind'")
+    conn.execute("UPDATE tasks SET human_request = '{not json' WHERE id = 't_junk'")
+    conn.commit()
+    conn.close()
+    got = {c["id"]: c for c in links.replica_cards(None, ME, ksa.LISTED_STATUSES, replicas=[("default", rep)])}
+    assert got["t_ask"]["human_request"] == _ASK  # same shape as the ledger rows
+    assert got["t_ops"]["human_request"] is None and got["t_junk"]["human_request"] is None
+    _switch_to_replica(kanban_home, monkeypatch, rep)
+    assert ksa.blocked_task_counts() == {"s1": 1}
+    active = ksa.active_task_counts()
+    assert active.get("s1") is None and active["s2"] == 1 and active["s3"] == 1 and active["s4"] == 1
+    # ``_replica_bucket`` itself tolerates JSON text from any other reader.
+    assert ksa._replica_bucket({"status": "blocked", "human_request": json.dumps(_ASK)}) == "blocked"
+
+
+def test_unknown_replica_card_waits_like_a_parked_one(live, kanban_home, monkeypatch, tmp_path):
+    """[daveey] A done card whose link was never released is ``unknown``: nobody works it, so it is parked (the chat
+    paints waiting), not live (which left the row with no stripe at all)."""
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_done", "done", "done", OTHER), ("t_sched", "later", "scheduled", OTHER),
+                   ("t_run", "running", "running", OTHER)],
+             [("t_done", ME, "s1", "shepherd", 0), ("t_sched", ME, "s1", "shepherd", 0),
+              ("t_run", ME, "s2", "shepherd", 0)])
+    _switch_to_replica(kanban_home, monkeypatch, rep)
+    assert ksa.active_task_counts() == {"s1": 2, "s2": 1}
+    parked, held = ksa.parked_task_counts()
+    assert parked == {"s1": 2} and held == {}

@@ -245,6 +245,35 @@ def test_activation_trusts_a_recorded_entry_a_deliberate_install_repairs(pm_env,
     assert binary.read_text(encoding="utf-8-sig") == "good"
 
 
+def test_a_deliberate_install_leaves_an_intact_entry_holding_ssh_runtime_markers_alone(pm_env):
+    """[daveey] An SSH-isolated ``serve`` drops ``.hermes-ssh-runtime-<nonce>`` into its interpreter's
+    site-packages as a liveness marker. A deliberate install re-hashes that tree; counting the marker
+    as drift re-realized the store Python on every run_tests.sh, deleting the marker and retiring
+    every SSH backend on the host (always-on dashboard restart loop). Markers are process state."""
+    from pm.cli import _install_names
+
+    lockfile_path, runtime, docroot, _ = pm_env
+    _, digest = make_tar(docroot, "faketool-1.0.tar.gz", {"bin/faketool": "good", "lib/site-packages/README": "x"})
+    _pin(lockfile_path, "faketool", "1.0", digest)
+    assert _install_names(["faketool"]) == 0
+
+    entry = runtime / Facts(runtime / "facts.json").get("faketool")["entry"]
+    marker = entry / "lib/site-packages/.hermes-ssh-runtime-8d94c4a7dd14f7b1"
+    marker.write_text("pid=1\n", encoding="utf-8")
+    before = os.stat(entry)
+
+    assert _install_names(["faketool"]) == 0  # verify=True: the full re-hash path
+    after = os.stat(entry)
+    assert marker.read_text(encoding="utf-8") == "pid=1\n"
+    assert (after.st_ino, after.st_ctime_ns) == (before.st_ino, before.st_ctime_ns)
+
+    # Control: only the exact marker shape is exempt. Any other foreign file is still drift and repaired.
+    stray = entry / "lib/site-packages/.hermes-ssh-runtime-not-a-nonce"
+    stray.write_text("x", encoding="utf-8")
+    assert _install_names(["faketool"]) == 0
+    assert not stray.exists()
+
+
 def test_warm_install_verifies_shared_dependencies_once_under_lock(pm_env, monkeypatch):
     import importlib
     import os

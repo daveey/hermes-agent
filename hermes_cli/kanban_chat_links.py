@@ -17,6 +17,7 @@ with one local query.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import time
@@ -270,7 +271,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             out[pair] = {
                 "title": r["title"], "status": UNKNOWN if unknown else status, "assignee": r["assignee"],
                 "created_at": r["created_at"], "started_at": r["started_at"], "priority": r["priority"],
-                "block_kind": r["block_kind"], "human_request": r["human_request"], "id": tid, "board": board,
+                "block_kind": r["block_kind"], "human_request": _decoded_request(r["human_request"]), "id": tid,
+                "board": board,
                 "gateway": owner, "key": key, "session": r["chat_session"], "session_id": r["chat_session"],
                 "via": "origin" if r["kind"] == "created" else "shepherd", "remote": True,
                 "profile": owner_profile, "owner_profile": owner_profile, "origin_gateway": gateway,
@@ -280,6 +282,18 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 "source": "replica",
             }
     return list(out.values())
+
+
+def _decoded_request(value: Any) -> Any:
+    """[daveey] The replica stores ``human_request`` as JSON text; the ledger rows (and ``needs_human``) carry the dict.
+    Undecoded, a card blocked on the user read as open work and its chat painted waiting instead of red. Malformed
+    text is no evidence (None), the same verdict ``needs_human`` gives it."""
+    if isinstance(value, (bytes, str)):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return value if isinstance(value, dict) else None
 
 
 def _ledger_obligation(card: dict[str, Any], statuses: tuple[str, ...]) -> bool:

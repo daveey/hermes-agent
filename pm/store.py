@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import stat
 import sys
@@ -302,6 +303,19 @@ def merge_tree(src: Path, dst: Path) -> None:
         retry_held(lambda: item.replace(target))
 
 
+# [daveey] Liveness markers an SSH-isolated ``hermes serve`` writes into its interpreter's
+# site-packages (``hermes_cli.web_server._apply_ssh_owner_nonce``): ``.hermes-ssh-runtime-<16 hex>``.
+# They are process state, never package bytes. Hashing them made every deliberate install see the
+# store Python as drifted and re-realize it, which deleted the markers and retired every such backend
+# (always-on dashboard restart loop, every ~70 s on a busy host).
+RUNTIME_STATE_FILE_RE = re.compile(r"\.hermes-ssh-runtime-[0-9a-f]{16}")
+
+
+def is_runtime_state_file(name: str) -> bool:
+    """True for a file name a running Hermes writes into a published tree as process state."""
+    return RUNTIME_STATE_FILE_RE.fullmatch(name) is not None
+
+
 def tree_digest(root: Path) -> str:
     """Deterministic sha256 over a directory tree: walk every file, sort
     by posix relpath, hash `relpath\\0<content>` per entry. No mtimes, no
@@ -312,7 +326,9 @@ def tree_digest(root: Path) -> str:
     ``__pycache__`` directories are skipped: CPython writes .pyc caches
     into them the first time the staged interpreter runs (uv venv/uv sync
     in a bundle build; first boot of a shipped app), so they are runtime
-    state, not package bytes — the digest is over what pm published."""
+    state, not package bytes — the digest is over what pm published.
+    SSH-backend runtime markers (``is_runtime_state_file``) are skipped for
+    the same reason."""
     import hashlib
 
     files: list[tuple[str, Path]] = []
@@ -326,6 +342,8 @@ def tree_digest(root: Path) -> str:
                 descend.append(name)
         dirnames[:] = descend
         for fname in filenames:
+            if is_runtime_state_file(fname):
+                continue
             path = Path(dirpath) / fname
             files.append((path.relative_to(root).as_posix(), path))
     files.sort(key=lambda item: item[0])

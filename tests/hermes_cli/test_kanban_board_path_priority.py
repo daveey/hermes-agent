@@ -205,19 +205,26 @@ def test_dispatched_worker_board_arg_stays_pinned(monkeypatch, tmp_path):
 
 
 def test_delegated_child_board_arg_stays_pinned(monkeypatch, tmp_path):
-    """A delegated child / spawned descendant (HERMES_DELEGATED_CHILD_CONTEXT
-    marker) passing an explicit board= resolves through the pin, so
-    kanban_path_is_fenced still catches the resolved path."""
+    """A spawned descendant (HERMES_DELEGATED_CHILD_CONTEXT marker) passing an
+    explicit board= never escapes the fence: kanban_path_is_fenced catches the
+    resolved path. [daveey] Since the worker-shell --board fix, a board whose
+    own DB lies inside the fenced root resolves to that DB (reads follow the
+    flag, writes stay fenced); a board outside the root still resolves through
+    the pin. Coverage for the in-root case: test_kanban_worker_shell_board_flag.py."""
     from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER, kanban_path_is_fenced
 
     pinned = tmp_path / "worker-pinned.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(pinned))
     monkeypatch.setenv(DELEGATED_CHILD_ENV_MARKER, str(tmp_path))  # fenced root
     path = kb.kanban_db_path(board="other-board")
-    assert path == pinned
     assert kanban_path_is_fenced(path), (
         "the explicit board escaped the dispatcher's pin-based fence"
     )
+    # A fenced root that does not contain the board: the pin wins, as before.
+    monkeypatch.setenv(DELEGATED_CHILD_ENV_MARKER, str(tmp_path / "elsewhere"))
+    path = kb.kanban_db_path(board="other-board")
+    assert path == pinned
+    assert kanban_path_is_fenced(path)
 
 
 def test_pin_first_board_resolution_maps_every_slug_to_the_pin(monkeypatch, tmp_path):

@@ -12,6 +12,7 @@ import asyncio
 from collections import deque
 import hmac
 import logging
+import atexit
 import os
 import re
 import secrets
@@ -357,6 +358,7 @@ async def _lifespan(app: FastAPI):
             shutdown_local_runtime()
         except Exception:
             pass
+        _release_ssh_runtime_marker()
         if desktop_owned:
             _terminate_desktop_managed_gateway()
         eager_reconcile_thread.join()
@@ -409,6 +411,7 @@ _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 _SSH_OWNER_NONCE: Optional[str] = None
 _SSH_RUNTIME_PURELIB: Optional[tuple[str, int, int]] = None
 _SSH_RUNTIME_MARKER: Optional[str] = None
+_SSH_RUNTIME_FINGERPRINT: Optional[str] = None
 
 
 def _apply_ssh_session_token(token: str) -> None:
@@ -447,11 +450,110 @@ def _ssh_bootstrap_session():
                    access_token="", refresh_token="")
 
 
+def _ssh_runtime_fingerprint(purelib: str) -> Optional[str]:
+    """[daveey] Content identity of the runtime a backend booted on: interpreter version and path,
+    the site-packages listing (markers and caches excluded), each ``*.dist-info/RECORD`` (per-file
+    sha256 of every installed package) and each small top-level file (``.pth``). Equal values mean
+    a swap re-realized the same bytes (PM repairing a tree), not a new runtime. None when unreadable."""
+    import hashlib
+
+    try:
+        names = sorted(n for n in os.listdir(purelib)
+                       if n != "__pycache__" and not n.startswith(".hermes-ssh-runtime-"))
+    except OSError:
+        return None
+    digest = hashlib.sha256()
+    digest.update(f"{sys.version}\0{os.path.realpath(sys.executable)}\0".encode("utf-8", "replace"))
+    try:  # a venv rebuilt on another interpreter keeps its purelib path but rewrites pyvenv.cfg
+        with open(os.path.join(sys.prefix, "pyvenv.cfg"), "rb") as fh:
+            digest.update(fh.read())
+    except OSError:
+        pass
+    digest.update(b"\0")
+    for name in names:
+        digest.update(name.encode("utf-8", "replace") + b"\0")
+        path = os.path.join(purelib, name)
+        target = os.path.join(path, "RECORD") if name.endswith(".dist-info") else path
+        try:
+            if os.path.isfile(target) and os.path.getsize(target) <= 4 * 1024 * 1024:
+                with open(target, "rb") as fh:
+                    digest.update(fh.read())
+        except OSError:
+            return None
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _write_ssh_runtime_marker(marker: str) -> bool:
+    try:
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(f"pid={os.getpid()}\n")
+        return True
+    except OSError:
+        return False
+
+
+_SSH_RUNTIME_MARKER_NAME_RE = re.compile(r"\.hermes-ssh-runtime-[0-9a-f]{16}")
+_SSH_RUNTIME_ATEXIT_ARMED = False
+
+
+def _ssh_marker_pid(marker: str) -> Optional[int]:
+    """[daveey] The pid a marker file records (``pid=<n>``), None when unreadable or malformed."""
+    try:
+        with open(marker, "r", encoding="utf-8-sig") as fh:
+            text = fh.read(64)
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.fullmatch(r"pid=(\d+)\n?", text)
+    return int(m.group(1)) if m else None
+
+
+def _release_ssh_runtime_marker() -> None:
+    """[daveey] Unlink this process's marker on exit, only while it still records this pid, so a
+    marker rewritten by another serve (same nonce, new process) is never removed from under it."""
+    marker = _SSH_RUNTIME_MARKER
+    if marker is None or _ssh_marker_pid(marker) != os.getpid():
+        return
+    try:
+        os.unlink(marker)
+    except OSError:
+        pass
+
+
+def _prune_stale_ssh_runtime_markers(purelib: str) -> None:
+    """[daveey] Remove markers whose recorded pid is gone (a serve that died without cleanup, e.g.
+    SIGKILL). Conservative: a marker is kept unless its pid is parseable and provably dead, so a
+    live serve's marker, an unreadable one, and a permission-denied probe are all left alone."""
+    try:
+        names = os.listdir(purelib)
+    except OSError:
+        return
+    for name in names:
+        if not _SSH_RUNTIME_MARKER_NAME_RE.fullmatch(name):
+            continue
+        marker = os.path.join(purelib, name)
+        pid = _ssh_marker_pid(marker)
+        if pid is None or pid == os.getpid():
+            continue
+        # [daveey] gateway.status._pid_exists, not os.kill(pid, 0): on Windows that sends CTRL_C_EVENT to the
+        # target's console group (bpo-14484). It reports a permission-denied pid as alive, so it is kept.
+        from gateway.status import _pid_exists
+
+        if _pid_exists(pid):
+            continue
+        if _ssh_marker_pid(marker) == pid:
+            try:
+                os.unlink(marker)
+            except OSError:
+                pass
+
+
 def _apply_ssh_owner_nonce(nonce: Optional[str]) -> None:
-    global _SSH_OWNER_NONCE, _SSH_RUNTIME_PURELIB, _SSH_RUNTIME_MARKER
+    global _SSH_OWNER_NONCE, _SSH_RUNTIME_PURELIB, _SSH_RUNTIME_MARKER, _SSH_RUNTIME_FINGERPRINT
     _SSH_OWNER_NONCE = nonce
     _SSH_RUNTIME_PURELIB = None
     _SSH_RUNTIME_MARKER = None
+    _SSH_RUNTIME_FINGERPRINT = None
     if nonce:
         try:
             purelib = sysconfig.get_paths()["purelib"]
@@ -461,18 +563,42 @@ def _apply_ssh_owner_nonce(nonce: Optional[str]) -> None:
         # loses it deterministically; pip installs leave it. A bare (dev, ino)
         # snapshot alone is NOT enough: ext4 reuses directory inodes at once,
         # so `rm -rf venv && uv venv` can land on the same inode undetected.
-        try:
-            marker = os.path.join(purelib, f".hermes-ssh-runtime-{nonce}")
-            with open(marker, "w", encoding="utf-8") as fh:
-                fh.write(f"pid={os.getpid()}\n")
+        # The marker name must stay in step with pm.store.RUNTIME_STATE_FILE_RE: PM digests skip
+        # exactly that shape, so an intact runtime holding markers is never "repaired" away.
+        marker = os.path.join(purelib, f".hermes-ssh-runtime-{nonce}")
+        _prune_stale_ssh_runtime_markers(purelib)
+        if _write_ssh_runtime_marker(marker):
+            global _SSH_RUNTIME_ATEXIT_ARMED
+            if not _SSH_RUNTIME_ATEXIT_ARMED:
+                _SSH_RUNTIME_ATEXIT_ARMED = True
+                atexit.register(_release_ssh_runtime_marker)
             _SSH_RUNTIME_MARKER = marker
-        except OSError:
-            pass  # read-only site-packages — fall back to the stat snapshot
+            _SSH_RUNTIME_FINGERPRINT = _ssh_runtime_fingerprint(purelib)
+        # else: read-only site-packages — fall back to the stat snapshot
         try:
             st = os.stat(purelib)
             _SSH_RUNTIME_PURELIB = (purelib, st.st_dev, st.st_ino)
         except OSError:
             pass
+
+
+def _ssh_runtime_reattach() -> bool:
+    """[daveey] The marker is gone but the runtime under it holds the bytes this backend booted on
+    (a PM repair re-realized an identical tree): write the marker back and report True, so the
+    backend stays reusable instead of retiring. False (retire as before) for any real change."""
+    global _SSH_RUNTIME_PURELIB
+    marker, fingerprint = _SSH_RUNTIME_MARKER, _SSH_RUNTIME_FINGERPRINT
+    if marker is None or fingerprint is None or os.path.isfile(marker):
+        return False
+    purelib = os.path.dirname(marker)
+    if _ssh_runtime_fingerprint(purelib) != fingerprint or not _write_ssh_runtime_marker(marker):
+        return False
+    try:
+        st = os.stat(purelib)
+        _SSH_RUNTIME_PURELIB = (purelib, st.st_dev, st.st_ino)
+    except OSError:
+        pass
+    return True
 
 
 def _ssh_runtime_intact() -> bool:

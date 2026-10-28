@@ -4,10 +4,17 @@ The size cap (``checkpoints.max_file_size_mb``) has to act BEFORE staging. ``git
 compresses every file it stages, so a cap applied afterwards (``_drop_oversize_from_index``) still
 paid for a multi-GB file in full: the add ran past its timeout, the snapshot was lost, and the killed
 git left a partial pack and its index lock in the store.
+
+The cap alone does not bound the add: a tree of many files under the cap (a fresh source checkout)
+still costs one hash, and on a first snapshot one compressed object write, per file. ``estimate``
+prices the add before it runs, and a folder over the budget is skipped without waiting out the
+timeout. Skipped and timed-out folders back off in a file inside the store, so a new process (the
+next ``hermes chat``, a respawned backend) does not pay for the same folder again.
 """
 from __future__ import annotations
 
 import heapq
+import json
 import logging
 import os
 import re
@@ -19,11 +26,26 @@ from typing import Optional
 
 logger = logging.getLogger("tools.checkpoint_manager")
 
-# A folder whose staging timed out is not snapshotted again for this long (per process): every new
-# turn would otherwise wait out the full timeout again for a snapshot that cannot finish.
+# A folder whose staging timed out (or was priced over budget) is not snapshotted again for this long:
+# every new turn would otherwise wait out the full timeout again for a snapshot that cannot finish.
+# Persisted in the store (wall clock, so it means the same in every process); a sleep only shortens it.
 _SLOW_DIR_BACKOFF_S = 3600
+_SLOW_DIRS_FILE = "slow-dirs.json"
 _slow_dirs: dict[tuple[str, str], float] = {}
-_now = time.monotonic
+_now = time.time
+
+# Cost model for ``git add -A`` into the checkpoint store, measured on hermes-hub (16 cores, load
+# average 11-14, git 2.55) with a bare store and a separate index, as _stage_all runs it:
+#   first add, 20,000 x 4 KB files (78 MB)      25.2 s  -> ~1.1 ms per file (hash + loose-object write)
+#   first add, 120 x 8 MB files (960 MB)        34.1 s  -> ~28 MB/s (hash + zlib)
+#   first add, a hermes-agent checkout (19,021 files, 209 MB) 37.1 s; the same tree after a
+#   stat-less read-tree 18.8 s; with a stat-carrying index 0.03 s.
+# Every file git has to (re)hash is priced at first-add rates; that pessimism covers rehash-only
+# adds of objects already in the store. The estimate is scaled by load average / cores (the MacBook
+# hit ran at load ~56) and must fit in half the add timeout.
+ADD_SECONDS_PER_FILE = 0.0011
+ADD_BYTES_PER_SECOND = 28 * 1024 * 1024
+BUDGET_FRACTION = 0.5
 
 # Temp files a killed git writes into the store: pack-objects/index-pack output in objects/pack,
 # loose-object temps in objects/??/.
@@ -36,11 +58,13 @@ _MTIME_SLACK_S = 2.0
 
 @dataclass
 class TreeScan:
-    """One walk of a working tree: entry count (capped), oversize files, biggest files."""
+    """One walk of a working tree: entry count (capped), oversize files, biggest files, and the
+    size and mtime of every regular file under the cap (what ``git add -A`` may have to hash)."""
 
     count: int = 0
     oversize: list[str] = field(default_factory=list)
     biggest: list[tuple[int, str]] = field(default_factory=list)
+    files: dict[str, tuple[int, float]] = field(default_factory=dict)
 
     def biggest_text(self) -> str:
         return ", ".join(f"{rel} ({size / 1048576:.1f} MB)" for size, rel in self.biggest) or "none"
@@ -72,6 +96,8 @@ def scan_tree(path: str, cap_bytes: int, max_entries: int) -> TreeScan:
                 rel = full.relative_to(root).as_posix()
                 if cap_bytes > 0 and st.st_size > cap_bytes:
                     scan.oversize.append(rel)
+                else:
+                    scan.files[rel] = (st.st_size, st.st_mtime)
                 if len(heap) < 3:
                     heapq.heappush(heap, (st.st_size, rel))
                 elif st.st_size > heap[0][0]:
@@ -142,17 +168,100 @@ def clear_timeout_debris(store: Path, since: float, index_file: Optional[Path]) 
     return removed
 
 
-def mark_slow(base: Path, working_dir: str) -> None:
-    _slow_dirs[(str(base), working_dir)] = _now() + _SLOW_DIR_BACKOFF_S
+@dataclass
+class AddEstimate:
+    """What ``git add -A`` is expected to hash, and how long that takes on this host now."""
+
+    files: int
+    bytes: int
+    seconds: float
+
+    def text(self) -> str:
+        return f"{self.files} files / {self.bytes / 1048576:.0f} MB to hash, ~{self.seconds:.0f}s"
 
 
-def slow_remaining_s(base: Path, working_dir: str) -> float:
-    """Seconds left in ``working_dir``'s back-off window, 0 when it may be snapshotted."""
-    key = (str(base), working_dir)
+def load_factor() -> float:
+    """How much slower than the measured rates this host runs right now (>= 1)."""
+    try:
+        return max(1.0, os.getloadavg()[0] / (os.cpu_count() or 1))
+    except (AttributeError, OSError):  # no getloadavg (Windows)
+        return 1.0
+
+
+def estimate(scan: TreeScan, fresh_since: Optional[float], only: Optional[set[str]] = None) -> AddEstimate:
+    """Price the add.
+
+    ``fresh_since`` is the mtime of an index that carries stat data from the last snapshot: git
+    skips files unchanged since then, so only files modified at or after it count (None = a cold
+    index, every file is hashed). ``only`` narrows to the paths git itself reports as new or
+    modified (``ls-files -o -m``), which also drops gitignored files the walk counted."""
+    files = nbytes = 0
+    cutoff = None if fresh_since is None else fresh_since - _MTIME_SLACK_S
+    for rel, (size, mtime) in scan.files.items():
+        if only is not None:
+            if rel not in only:
+                continue
+        elif cutoff is not None and mtime < cutoff:
+            continue
+        files += 1
+        nbytes += size
+    seconds = (files * ADD_SECONDS_PER_FILE + nbytes / ADD_BYTES_PER_SECOND) * load_factor()
+    return AddEstimate(files, nbytes, seconds)
+
+
+def budget_s(add_timeout_s: float) -> float:
+    return add_timeout_s * BUDGET_FRACTION
+
+
+def _slow_file(store: Path) -> Path:
+    return store / "info" / _SLOW_DIRS_FILE
+
+
+def _read_slow(store: Path) -> dict[str, float]:
+    try:
+        data = json.loads(_slow_file(store).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: float(v) for k, v in data.items() if isinstance(k, str) and isinstance(v, (int, float))}
+
+
+def mark_slow(store: Path, working_dir: str) -> None:
+    """Back ``working_dir`` off for ``_SLOW_DIR_BACKOFF_S``, in this process and in the store.
+
+    Callers hold the checkpoint store lock, so the read-modify-write does not race."""
+    now = _now()
+    until = now + _SLOW_DIR_BACKOFF_S
+    _slow_dirs[(str(store), working_dir)] = until
+    entries = {k: v for k, v in _read_slow(store).items() if v > now}
+    entries[working_dir] = until
+    path = _slow_file(store)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(entries, indent=0, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("Checkpoint: could not persist the back-off for %s: %s", working_dir, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def slow_remaining_s(store: Path, working_dir: str) -> float:
+    """Seconds left in ``working_dir``'s back-off window, 0 when it may be snapshotted.
+
+    Reads this process's registry first, then the store's file (another process's back-off)."""
+    key = (str(store), working_dir)
     until = _slow_dirs.get(key)
     if until is None:
+        until = _read_slow(store).get(working_dir)
+    if until is None:
         return 0.0
-    left = until - _now()
+    # Clamp: a wall clock set back must not stretch the window past one back-off period.
+    left = min(until - _now(), float(_SLOW_DIR_BACKOFF_S))
     if left <= 0:
         _slow_dirs.pop(key, None)
         return 0.0

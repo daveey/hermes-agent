@@ -128,6 +128,10 @@ class Hub:
     def leases(self, board: str, body: dict) -> dict:
         return self._call("POST", f"/v2/boards/{board}/leases", body)
 
+    def machines(self) -> dict:
+        """The machine registry (RFC "One machine registry"): ``{me, machines: [{name, labels, pinned_only, ...}]}``."""
+        return self._call("GET", "/v2/machines")
+
 
 # --- boards ---------------------------------------------------------------------------------------
 

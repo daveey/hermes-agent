@@ -230,6 +230,14 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
     # instead of assuming the restart phase worked.
     # Phase 1 (#91277): post-update fleet version verification.
     _fleet_snapshot: list = []
+    # [daveey] Inside hermes-sync's core-update fence the launchers park until this process exits,
+    # so no successor can publish a row yet: probe once (no settle window) and leave verification
+    # to the fence owner instead of owing a restart that is already scheduled (update_gateway_fence).
+    _fence_owner = None
+    with _best_effort('Core-update fence check failed: %s'):
+        from hermes_cli.update_gateway_fence import ancestor_fence_owner
+        _fence_owner = ancestor_fence_owner()
+    _fence_deferred = False
     with _best_effort('Fleet version verification failed: %s'):
         from hermes_cli.update_receipt import print_fleet_version_matrix
         # Cross-platform "rows expected" signal: (restarted_services or killed_pids)
@@ -243,13 +251,25 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
         _fleet_rows_expected = _m()._fleet_probe_expected_runtimes(
             _pre_update_plan, _pre_restart, _windows_gateway_resume, restart.restarted_services, _killed,
         )
-        _fleet_snapshot = _collect_fleet_snapshot(restart, _fleet_rows_expected)
+        _fleet_snapshot = _collect_fleet_snapshot(restart, _fleet_rows_expected and _fence_owner is None)
         if print_fleet_version_matrix(_fleet_snapshot):
             restart.incomplete = True
             # A proven-stale survivor must not keep running (its ticker yields every tick and
             # nothing else restarts it, #117275): hand it to the drain-first restart path.
             from hermes_cli.update_cmd_stale_survivors import signal_stale_fleet_survivors
             signal_stale_fleet_survivors(_fleet_snapshot, restart, fleet._gateway_drain_budget())
+        elif not _fleet_snapshot and _fleet_rows_expected and _fence_owner is not None:
+            # Not verified, not failed: the gateways start when the fence owner releases its intent
+            # (after this process exits). The fleet obligation stays armed below, so a gateway that
+            # never comes back still warns at the next CLI start and is retried by the next update.
+            _fence_deferred = True
+            print(
+                f"\n  ↻ Gateway restart held by the core-update fence (pid {_fence_owner}): launcher-supervised"
+                " gateways start when it releases, after this update exits; the fence owner verifies them."
+            )
+            with suppress(Exception):
+                from hermes_cli.update_receipt import record_skip
+                record_skip("gateway_verification", f"held by the core-update fence of pid {_fence_owner}")
         elif not _fleet_snapshot and _fleet_rows_expected:
             # collect_fleet_versions() swallows every failure, so zero rows with
             # expected runtimes is indistinguishable from health — keep the restart owed.
@@ -313,7 +333,7 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
                 if _active is not None:
                     _active.data["runtime_outcomes"] = _runtime_outcomes
 
-    if not restart.incomplete:
+    if not restart.incomplete and not _fence_deferred:
         with _best_effort('Owed-gateway check failed: %s'):
             if _named_gateways_still_owed():
                 # A gateway a previous run could not restart is still not serving HEAD (nothing
@@ -347,6 +367,12 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
             logger.info("Update receipt written: %s", _receipt_path)
 
     if restart.incomplete:
+        return
+    if _fence_deferred:
+        # Unverified, so the armed obligation is neither cleared nor used to migrate the topology:
+        # the next CLI start discharges it once the fence's successors serve this checkout.
+        with _best_effort('Fleet restart inventory not recorded: %s'):
+            _record_owed_gateway_inventory(_pre_update_plan)
         return
     fleet._clear_fleet_restart_pending_marker()
     if not update_complete:

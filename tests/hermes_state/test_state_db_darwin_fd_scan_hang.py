@@ -192,3 +192,43 @@ def test_timed_out_scan_is_not_cached(monkeypatch, tmp_path):
     monkeypatch.setattr(dbfile, "_DARWIN_FD_SCAN_TIMEOUT_SECONDS", 0.3)
     assert _iter_darwin_sidecar_holders(tmp_path / "state.db") == []
     assert not dbfile._darwin_clean_until
+
+
+@pytest.mark.parametrize("stub_start", ["inline", "never"])
+def test_thread_stubs_never_capture_the_scan_pass(monkeypatch, tmp_path, stub_start):
+    """Tests replace threading.Thread with stubs whose start() runs the target inline or never (93 call
+    sites). The pass must stay on its own real thread under both. Run inline, it re-took _DARWIN_SCAN_LOCK
+    on the thread already holding it and deadlocked: all of test_tui_gateway_server.py hung on macOS from
+    10-27. Never started, the SessionDB open waited out the scan timeout and the stub recorded the pass as
+    the code under test's thread (test_interrupt_before_agent_ready_prevents_late_turn_start saw 2)."""
+    watched = os.path.realpath(os.path.join(os.fspath(tmp_path), "state.db-wal"))
+    lib = _HealthyLibproc(watched, (0xDEAD, 0xBEEF))
+    monkeypatch.setattr(dbfile, "_darwin_libproc", lambda: lib)
+    monkeypatch.setattr(dbfile, "_darwin_all_pids", lambda _lib: [4242])
+    # Private copies, restored at teardown: a regression then wedges only this test's lock and slot.
+    monkeypatch.setattr(dbfile, "_DARWIN_SCAN_LOCK", type(dbfile._DARWIN_SCAN_LOCK)())
+    monkeypatch.setattr(dbfile, "_DARWIN_SCAN_IN_FLIGHT", None)
+    real_thread = threading.Thread
+    captured = []
+
+    class _StubThread:
+        def __init__(self, target=None, **_kwargs):
+            self._target = target
+            captured.append(getattr(target, "__qualname__", repr(target)))
+
+        def start(self):
+            if stub_start == "inline":
+                self._target()
+
+    monkeypatch.setattr(threading, "Thread", _StubThread)
+    # This module is often first imported while such a stub is installed: what it would bind then.
+    assert dbfile._interpreter_thread_class() is real_thread
+    outcome = []
+    worker = real_thread(
+        target=lambda: outcome.append(_iter_darwin_sidecar_holders(tmp_path / "state.db")), daemon=True)
+    worker.start()
+    worker.join(10.0)
+    assert not worker.is_alive(), "the pass deadlocked on _DARWIN_SCAN_LOCK"
+    assert captured == [], "a threading.Thread stub captured the scan pass"
+    assert outcome == [[(4242, watched)]]
+    assert dbfile._DARWIN_SCAN_IN_FLIGHT is None

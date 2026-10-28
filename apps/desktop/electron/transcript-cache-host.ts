@@ -36,15 +36,56 @@ const HUB_LIST_LIMIT = 2000
 const inboxKey = (gateway: unknown, profile: unknown, sessionId: unknown) =>
   `${String(gateway ?? '')}\u0000${String(profile ?? '').trim() || 'default'}\u0000${String(sessionId ?? '')}`
 
-/** [daveey] Flag the hub session records an open Inbox card points at (the prefetcher fetches those first). */
-export function markInboxSessions(records: HubSessionRecord[], inbox: ReadonlySet<string>): HubSessionRecord[] {
-  if (!inbox.size) {
+/** An open Inbox card, as the hub-sync `/inbox` route serves it. */
+export interface OpenInboxItem {
+  created_at?: null | number
+  gateway: string
+  profile?: null | string
+  session_id: string
+  updated_at?: null | number
+}
+
+/**
+ * [daveey] Flag the hub session records an open Inbox card points at (the prefetcher fetches those first, even
+ * hidden or archived ones: a card's session usually is). A card whose session the list left out (archived rows
+ * are not listed) gets a minimal record of its own, so it is prefetched too.
+ */
+export function markInboxSessions(records: HubSessionRecord[], inbox: readonly OpenInboxItem[]): HubSessionRecord[] {
+  if (!inbox.length) {
     return records
   }
 
-  return records.map(record =>
-    inbox.has(inboxKey(record.gateway, record.profile, record.id)) ? { ...record, inbox: true } : record
-  )
+  const keys = new Set(inbox.map(item => inboxKey(item.gateway, item.profile, item.session_id)))
+  const listed = new Set<string>()
+
+  const marked = records.map(record => {
+    const key = inboxKey(record.gateway, record.profile, record.id)
+
+    if (!keys.has(key)) {
+      return record
+    }
+
+    listed.add(key)
+
+    return { ...record, inbox: true }
+  })
+
+  for (const item of inbox) {
+    const key = inboxKey(item.gateway, item.profile, item.session_id)
+
+    if (!listed.has(key)) {
+      listed.add(key)
+      marked.push({
+        activity: item.updated_at ?? item.created_at ?? null,
+        gateway: item.gateway,
+        id: item.session_id,
+        inbox: true,
+        profile: item.profile ?? 'default'
+      })
+    }
+  }
+
+  return marked
 }
 
 export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
@@ -173,18 +214,16 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
   }
 
   // Open Inbox items of every gateway, from this Mac's replica; an unreadable Inbox only drops the priority.
-  const openInboxSessions = async (descriptor: unknown): Promise<Set<string>> => {
+  const openInboxSessions = async (descriptor: unknown): Promise<OpenInboxItem[]> => {
     try {
       const body = await deps.getJson(descriptor, '/api/plugins/hub-sync/inbox', { timeoutMs: 8_000 })
       const items = Array.isArray(body?.items) ? body.items : []
 
-      return new Set(
-        items
-          .filter((item: any) => item?.session_id && item?.gateway)
-          .map((item: any) => inboxKey(item.gateway, item.profile, item.session_id))
+      return items.filter(
+        (item: any) => typeof item?.session_id === 'string' && item.session_id && typeof item?.gateway === 'string'
       )
     } catch {
-      return new Set()
+      return []
     }
   }
 

@@ -233,7 +233,7 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
 
 # Cache-root entries at least this big that no pruner covers get a doctor warning.
 _UNPRUNED_CACHE_WARN_BYTES = 1 << 30
-_PRUNED_CACHE_DIRS = frozenset({"scratch", "terminal"})
+_PRUNED_CACHE_DIRS = frozenset({"scratch", "scratch.noindex", "terminal"})
 
 
 def unpruned_cache_hogs(hermes_home: Path, min_bytes: int = _UNPRUNED_CACHE_WARN_BYTES) -> list[tuple[str, int]]:

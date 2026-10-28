@@ -461,6 +461,39 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     return _ok(rid, {"status": "queued"})
 
 
+def _queue_submit_behind_update_hold(rid, sid: str, session: dict, text: Any, transport: Any,
+                                     turn_author: dict | None = None, display_kind: str | None = None) -> dict | None:
+    """An idle ``prompt.submit`` refused ONLY by the core-update admission hold is queued, not bounced.
+
+    The update drainer holds admission for a bounded drain window while the turns in flight finish
+    (hermes-sync ``drain_window``, t_01a181e61e88e5d4). Desktop has no 5035 handling, so a refusal there
+    showed the user an error for a message they had just sent. Instead the message joins the durable
+    queue exactly like a mid-turn send (persisted at accept, so a backend restart for the update cannot
+    lose it), and ``retry_queued_prompt`` re-enters admission until the hold lifts. Returns the
+    ``{"status": "queued"}`` reply, or None when the refusal was not the hold (a retiring backend keeps its
+    5035: the client is replacing this process) or the session is no longer idle (caller retries)."""
+    from hermes_cli.backend_retirement import retirement
+    if not retirement.acquire():
+        return None
+    retirement.release()
+    from tui_gateway.admission_retry import retry_queued_prompt
+    with session["history_lock"]:
+        if session.get("running") or session.get("_closing") or session.get("_finalized"):
+            return None
+        image_paths = list(session.get("attached_images", []))
+        if image_paths:
+            session["attached_images"] = []
+        envelope = _enqueue_prompt(session, text, transport, image_paths=image_paths, turn_author=turn_author)
+        if envelope is not None:
+            _persist_queued_user_row(session, envelope, display_kind)
+        session["last_active"] = time.time()
+        if not retry_queued_prompt(rid, sid, session) and session.get("queued_prompt"):
+            # Retirement raced in between: the queue is the client's to replay; keep the 5035.
+            logger.info("update-hold queue for session %s: retry unavailable, kept queued", sid)
+    logger.info("prompt.submit for session %s queued behind the core-update admission hold", sid)
+    return _ok(rid, {"status": "queued", "reason": "update_hold"})
+
+
 def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     """Fire a queued next-turn prompt if one is waiting and the session is idle. True when dispatched: the caller
     skips lower-priority follow-ups this cycle (the user's message wins)."""

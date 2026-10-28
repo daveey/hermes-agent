@@ -1187,6 +1187,29 @@ def _has_any_provider_configured(*, strict_profile_scope: bool = False) -> bool:
     return False
 
 
+def _reject_startup_spaced_model(explicit_model: str, explicit_provider: str, model_cfg: dict) -> None:
+    """``-m`` gets the ``/model`` whitespace rule before any API call [daveey].
+
+    A shell loop that fails to split a list passes every id as one ``-m`` value; a cloud provider
+    then 404s it (or a fallback chain answers on a different model and the probe "passes").
+    The configured base_url only counts when it belongs to the provider being used.
+    """
+    if not explicit_model or not any(ch.isspace() for ch in explicit_model):
+        return
+    cfg_provider = str(model_cfg.get("provider") or "").strip()
+    provider = explicit_provider or cfg_provider
+    base_url = str(model_cfg.get("base_url") or "").strip()
+    if explicit_provider and explicit_provider != cfg_provider:
+        base_url = ""
+    from hermes_cli.models_validate import model_whitespace_error
+
+    if model_whitespace_error(explicit_model, provider, base_url or None):
+        sys.stderr.write(
+            f"Model names cannot contain spaces. Pass one model per run.\n  got: -m {explicit_model!r}\n"
+        )
+        raise SystemExit(2)
+
+
 def _confirm_startup_expensive_model_override(args) -> None:
     """Guard startup -m/--provider overrides before the first API call."""
     explicit_model = (getattr(args, "model", None) or "").strip()
@@ -1213,6 +1236,7 @@ def _confirm_startup_expensive_model_override(args) -> None:
     config = _dict(config)
     model_cfg = _dict(config.get("model"))
     security_cfg = _dict(config.get("security"))
+    _reject_startup_spaced_model(explicit_model, explicit_provider, model_cfg)
 
     model = explicit_model or (model_cfg.get("default") or "").strip()
     if not model:
@@ -2770,6 +2794,14 @@ def cmd_dashboard(args):
     from hermes_cli.resource_limits import apply_nofile_soft_limit
 
     apply_nofile_soft_limit()
+
+    if _headless_backend:
+        # [daveey] Never boot a backend on a tree a core update is about to swap: wait out a live
+        # update or hermes-sync's admission hold (bounded, logged) before the one-shot SSH token is
+        # consumed and before the agent stack is imported (hermes_cli/serve_update_wait.py).
+        from hermes_cli.serve_update_wait import wait_for_update_clear
+
+        wait_for_update_clear()
 
     _ssh_session_token = _read_ssh_session_token_file(_token_file) if _token_file else None
     _mcp_discovery_after_bind = _dashboard_prepare_runtime(args, _headless_backend)

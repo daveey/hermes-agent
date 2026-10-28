@@ -185,8 +185,9 @@ def test_direct_pytest_run_holds_a_slot_for_its_session(slot_env, monkeypatch, t
                 p.kill()
 
 
-def test_xdist_worker_budget_is_cores_over_slots(monkeypatch):
+def test_xdist_worker_budget_is_cores_over_slots(monkeypatch, tmp_path):
     monkeypatch.delenv("HERMES_TEST_XDIST_MAX", raising=False)
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(tmp_path / "absent.yaml"))
     monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "4")
     monkeypatch.setattr(slots.os, "cpu_count", lambda: 16)
     assert slots.xdist_worker_budget() == 4
@@ -194,6 +195,32 @@ def test_xdist_worker_budget_is_cores_over_slots(monkeypatch):
     assert slots.xdist_worker_budget() == 1, "never below one worker"
     monkeypatch.setenv("HERMES_TEST_XDIST_MAX", "3")
     assert slots.xdist_worker_budget() == 3, "the env override wins"
+
+
+def test_host_config_sets_the_xdist_worker_budget(tmp_path, monkeypatch):
+    """A laptop caps each holder's workers below cores // slots: tests/hermes_cli spawns ~15 processes/s per worker."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("tests:\n  host_slots: 4\n  xdist_workers: 2\n")
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(cfg))
+    monkeypatch.delenv("HERMES_TEST_HOST_SLOTS", raising=False)
+    monkeypatch.delenv("HERMES_TEST_XDIST_MAX", raising=False)
+    monkeypatch.setattr(slots.os, "cpu_count", lambda: 16)
+    assert slots.xdist_worker_budget() == 2, "config caps below cores // slots (4)"
+    monkeypatch.setenv("HERMES_TEST_XDIST_MAX", "3")
+    assert slots.xdist_worker_budget() == 3, "env still wins"
+    monkeypatch.delenv("HERMES_TEST_XDIST_MAX")
+    cfg.write_text("tests:\n  host_slots: 4\n")
+    assert slots.xdist_worker_budget() == 4, "unset keeps cores // slots"
+    cfg.write_text("tests:\n  host_slots: 4\n  xdist_workers: 9\n")
+    assert slots.xdist_worker_budget() == 4, "config never raises above cores // slots"
+
+
+def test_host_config_xdist_workers_parses_without_pyyaml(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("tests:\n  host_slots: 4\n  xdist_workers: 2\n")
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(cfg))
+    monkeypatch.setitem(sys.modules, "yaml", None)  # import yaml -> ImportError
+    assert slots._config_int("xdist_workers") == 2
 
 
 def test_direct_pytest_n8_is_capped_to_the_slot_budget(tmp_path):

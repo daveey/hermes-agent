@@ -1,5 +1,7 @@
 """Public Codex commentary is a display projection, never a replay mutation."""
 
+from starlette.requests import Request
+
 from hermes_cli.web_routers.sessions import _project_for_display
 from tui_gateway.server import _history_to_messages
 from agent.history_commentary import visible_commentary
@@ -7,6 +9,10 @@ from hermes_constants import get_hermes_home_override
 
 import asyncio
 import pytest
+
+
+def _messages_request():
+    return Request({"type": "http", "method": "GET", "path": "/", "headers": []})
 
 
 def _row(text="I will inspect the files."):
@@ -175,6 +181,7 @@ def test_rest_pages_bind_the_history_owner_for_messages_and_around(
             ("hidden", []),
         ):
             page = await sessions.get_session_messages(
+                _messages_request(),
                 "sid",
                 profile=profile,
                 limit=120,
@@ -182,6 +189,7 @@ def test_rest_pages_bind_the_history_owner_for_messages_and_around(
                 order="latest",
                 include_compacted=True,
             )
+            assert isinstance(page, dict)
             around = await sessions.get_session_messages_around(
                 "sid", row_id=1, profile=profile, limit=120
             )
@@ -235,6 +243,7 @@ def test_unscoped_rest_history_uses_custom_home_of_its_database(monkeypatch, tmp
 
     async def exercise():
         page = await sessions.get_session_messages(
+            _messages_request(),
             "sid",
             profile=None,
             limit=120,
@@ -242,6 +251,7 @@ def test_unscoped_rest_history_uses_custom_home_of_its_database(monkeypatch, tmp
             order="latest",
             include_compacted=True,
         )
+        assert isinstance(page, dict)
         around = await sessions.get_session_messages_around(
             "sid",
             row_id=1,

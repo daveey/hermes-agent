@@ -893,6 +893,45 @@ def apply_secure_dir_policy(path, *, home: str | Path | None = None) -> None:
     _chown_to_hermes_uid(path)
 
 
+# [daveey] Spotlight indexes the whole home folder, and a home-rooted TMPDIR turned every pytest
+# tmp dir, uv build and review worktree into indexing work (340K items, about a core of mds_stores
+# + mdworker_shared around the clock). macOS skips any directory whose name ends in ``.noindex``,
+# so on darwin the real dir lives at ``<name>.noindex`` and ``<name>`` is a relative symlink to
+# it: every existing path (TMPDIR, docs, prompts, running processes) keeps working unchanged.
+# ``HERMES_SPOTLIGHT_INDEX_CACHE=1`` keeps the plain directory.
+SPOTLIGHT_NOINDEX_SUFFIX = ".noindex"
+SPOTLIGHT_INDEX_CACHE_ENV = "HERMES_SPOTLIGHT_INDEX_CACHE"
+
+
+def ensure_spotlight_noindex_dir(path: Path, *, platform: str | None = None) -> Path:
+    """On macOS make *path* a symlink to a sibling ``<name>.noindex`` directory; return *path*.
+
+    A missing *path* gets both created. An existing real directory is renamed (one atomic
+    ``rename``: open files and cwds inside it keep working) and the symlink is laid down right
+    after it. A dangling link gets its target recreated. When both a real *path* and its
+    ``.noindex`` sibling exist, nothing is merged or moved. Never raises; a no-op elsewhere."""
+    if (platform or sys.platform) != "darwin" or os.environ.get(SPOTLIGHT_INDEX_CACHE_ENV, "").strip() in (
+            "1", "true", "yes"):
+        return path
+    target = path.with_name(path.name + SPOTLIGHT_NOINDEX_SUFFIX)
+    try:
+        if path.is_symlink():
+            if os.readlink(path) in (target.name, str(target)):
+                target.mkdir(parents=True, exist_ok=True)
+            return path
+        if path.exists():
+            if not path.is_dir() or target.exists() or target.is_symlink():
+                return path
+            os.rename(path, target)
+        else:
+            target.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileExistsError):  # a racing caller laid the same link down
+            os.symlink(target.name, path)
+    except OSError:
+        pass
+    return path
+
+
 def get_scratch_dir(home: str | Path | None = None, *, prune: bool = True) -> Path:
     """``<home>/cache/scratch`` (created, owner-only); *home* defaults to the active Hermes home.
 
@@ -906,6 +945,7 @@ def get_scratch_dir(home: str | Path | None = None, *, prune: bool = True) -> Pa
     """
     base = Path(home) if home is not None else get_hermes_home()
     scratch = base / "cache" / "scratch"
+    ensure_spotlight_noindex_dir(scratch)
     try:
         scratch.mkdir(parents=True, exist_ok=True)
         if sys.platform != "win32":

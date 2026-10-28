@@ -25,12 +25,20 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         "provider_override": provider_override,
     })
     if status == "blocked":
-        conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
-                     (json.dumps(human_request) if human_request else None, task_id))
-        kb._append_event(conn, task_id, "blocked", {
+        # A creation-time human ask is a decision wait: validate_human_request
+        # already refuses dependency/transient/time alongside one, and create
+        # has no kind argument. Without an ask (lint_blocked=False trackers)
+        # leave block_kind NULL rather than invent one.
+        block_kind = "needs_input" if human_request else None
+        conn.execute("UPDATE tasks SET human_request = ?, block_kind = ? WHERE id = ?",
+                     (json.dumps(human_request) if human_request else None, block_kind, task_id))
+        payload = {
             "reason": "initial_status", "status": "blocked", "actor": created_by or "user",
             "human_request": human_request,
-        })
+        }
+        if block_kind:
+            payload["kind"] = block_kind
+        kb._append_event(conn, task_id, "blocked", payload)
     if status == "todo":
         # Match link_tasks: a card parked behind a parent needs a reason.
         gating = [p for p in parents if kb._task_status(conn, p) not in ("done", "archived")]

@@ -1135,6 +1135,8 @@ class LocalEnvironment(BaseEnvironment):
         import glob
         try:
             stale = glob.glob(f"{self._snapshot_path}.tmp.*")
+            # delegate_task child overlays (and their atomic-write temps). [daveey]
+            stale += glob.glob(f"{self._child_snapshot_path('*')}*")
         except Exception:
             stale = []
         for f in (self._snapshot_path, self._cwd_file, *stale):

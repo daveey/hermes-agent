@@ -58,6 +58,9 @@ def stored_session_route(session_meta, *, current_model, current_provider):
     runtime = _SessionDB.session_gateway_runtime(session_meta)
     base_url = runtime.get("base_url") or None
     provider = _heal_bare_custom_provider(runtime.get("provider") or None, base_url=base_url, model=stored_model)
+    from agent.model_routing_restore import stale_managed_pin
+    if stale_managed_pin(stored_model, provider):
+        return None  # history the managed policy no longer approves: keep the launch default
     provider_changed = bool(provider) and provider != current_provider
     if stored_model == current_model and not provider_changed:
         return None

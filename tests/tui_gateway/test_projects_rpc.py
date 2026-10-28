@@ -777,9 +777,14 @@ def test_tree_rows_carry_session_activity_stamps(monkeypatch, tmp_path):
 
     monkeypatch.setattr(goal_session_activity, "active_goal_sessions", lambda: frozenset({"s_goal"}))
     # Match the atomic counts + waiting IDs snapshot used by row annotation.
-    def counts(*, include_waiting=False):
+    # Row annotation asks for the full snapshot: (active, blocked, unseen, remote_stale, waiting,
+    # parked, held, stalled, remote_keys).
+    def counts(*, include_waiting=False, include_snapshot=False):
         snapshot = ({"s_cards": 2}, {"s_cards": 1}, {}, {"s_cards": 1})
-        return (*snapshot, {"s_cards": frozenset({"t_open"})}) if include_waiting else snapshot
+        waiting = {"s_cards": frozenset({"t_open"})}
+        if include_snapshot:
+            return (*snapshot, waiting, {}, {}, {}, {})
+        return (*snapshot, waiting) if include_waiting else snapshot
 
     monkeypatch.setattr(kanban_session_activity, "_all_counts", counts)
     monkeypatch.setattr(cron_session_activity, "cron_owner_sessions", lambda: frozenset())

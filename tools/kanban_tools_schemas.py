@@ -664,6 +664,11 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "it unfinished; the result's origin_binding says how to "
                 "read the binding back on the origin gateway."
         )),
+        "runs_on": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9:._-]{0,63}$"},
+                    "description": "Machine labels the card needs (all of them), on a board that syncs to the "
+                    "Board service: e.g. ['linux'], ['macos', 'xcode'], ['machine:<name>'] for one machine, "
+                    "[] for any machine. Omit for the default: it runs here, or on a machine like this one "
+                    "if it waits too long."},
         "placement": _prop("string", (
                 "Where the card runs. 'auto' (default): on a gateway with a "
                 "kanban.placement route (e.g. the MacBook -> hermes-hub), a "
@@ -676,7 +681,9 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "non-scratch workspace, a non-default board, an origin-bound "
                 "card, target not live, ...) the call fails with code "
                 "placement_unavailable and creates nothing (never a silent "
-                "local card). Your own gateway's name means local."
+                "local card). Your own gateway's name means local. On a board that syncs to the "
+                "Board service, the name of an enrolled machine (e.g. a worker node) creates the card "
+                "here with runs_on=['machine:<name>'], so only that machine runs it."
         )),
         "max_runtime_seconds": _prop("integer", (
                 "Per-task runtime cap. When exceeded, the "
@@ -739,8 +746,9 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "model": _prop("string", (
                 "Pin the dispatched worker to this model instead of "
-                "the assignee profile's configured model. Use the "
-                "exact model name the target provider expects. Omit "
+                "the assignee profile's configured model. Leave this out "
+                "unless you need another tier; the name must be in this "
+                "host's model routing registry when one is enforced. Omit "
                 "to use the profile default."
         )),
         "provider": _prop("string", (
@@ -778,6 +786,22 @@ KANBAN_LINK_SCHEMA = _schema(
         "are 'done'. Cycles and self-links are rejected. A running child "
         "is rejected unless the active owning worker is linking its own "
         "card for a dependency handoff."
+    ),
+    {
+        "parent_id": {"type": "string", "description": "Parent task id."},
+        "child_id":  {"type": "string", "description": "Child task id."},
+    },
+    ["parent_id", "child_id"],
+)
+
+KANBAN_UNLINK_SCHEMA = _schema(
+    "kanban_unlink",
+    (
+        "Remove a parent→child dependency edge. A dispatcher worker may "
+        "only remove edges of its own card (its dependencies or its "
+        "children), e.g. to undo a kanban_link it made before a "
+        "kanban_block(kind='dependency'); an orchestrator may unlink any "
+        "edge. A child that no longer waits on anything is promoted at once."
     ),
     {
         "parent_id": {"type": "string", "description": "Parent task id."},

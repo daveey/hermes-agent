@@ -558,13 +558,34 @@ def _board_path(
     board, else ``board_dir(slug)/leaf``."""
     pin = os.environ.get(env_var, "").strip() if env_var else ""
     slug = _explicit_board_slug(board)
-    if pin and (slug is None or _explicit_board_intent_pinned()):
+    if pin and (slug is None or (_explicit_board_intent_pinned()
+                                 and not _descendant_may_follow_explicit_board(slug))):
         return Path(pin).expanduser()
     if slug is None:
         slug = get_current_board()
     if slug == DEFAULT_BOARD:
         return kanban_home().joinpath(*default_parts)
     return board_dir(slug) / leaf
+
+
+def _descendant_may_follow_explicit_board(slug: str) -> bool:
+    """A worker-terminal descendant's explicit board wins over the pin when the board's own DB
+    stays inside the write fence (:func:`agent.delegation_context.explicit_board_resolves_inside_fence`).
+    Machine flows (:func:`pin_first_board_resolution`) never follow it. [daveey]"""
+    if _PIN_FIRST_BOARD_RESOLUTION.get():
+        return False
+    from agent.delegation_context import explicit_board_resolves_inside_fence
+    return explicit_board_resolves_inside_fence(board_own_db_path(slug))
+
+
+def board_own_db_path(slug: Optional[str]) -> Path:
+    """The board's own ``kanban.db``, ignoring every env pin: ``<root>/kanban.db`` for
+    ``default``, else ``board_dir(slug)/kanban.db``. For read-only listings that must describe
+    each board (``boards list`` counts), never for routing a write. [daveey]"""
+    s = _slug_or_default(slug)
+    if s == DEFAULT_BOARD:
+        return kanban_home() / "kanban.db"
+    return board_dir(s) / "kanban.db"
 
 
 def kanban_db_path(board: Optional[str] = None) -> Path:
@@ -1039,7 +1060,20 @@ def _validate_model_override(model: Optional[str], provider: Optional[str]) -> t
     provider = (provider or "").strip() or None
     if provider and not model:
         raise ValueError("provider_override requires a model_override")
+    _reject_spaced_pin(model, provider)
     return model, provider
+
+
+def _reject_spaced_pin(model: Optional[str], provider: Optional[str]) -> None:
+    """The ``/model`` whitespace rule for Kanban pins [daveey]. A provider-less pin is checked again
+    once ``resolve_pin_provider`` binds its provider (a ``custom`` profile keeps spaced ids)."""
+    if not model or not provider:
+        return
+    from hermes_cli.models_validate import model_whitespace_error
+
+    message = model_whitespace_error(model, provider)
+    if message:
+        raise ValueError(f"{message} Pin one model per card (got {model!r} on provider {provider!r}).")
 
 
 def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
@@ -1199,24 +1233,22 @@ def create_task(
     provider_override: Optional[str] = None, reasoning_effort: Optional[str] = None,
     goal_mode: bool = False, goal_max_turns: Optional[int] = None, initial_status: str = "running",
     session_id: Optional[str] = None, board: Optional[str] = None, project_id: Optional[str] = None,
-    project_source_task_id: Optional[str] = None,
-    creator_task_id: Optional[str] = None,
+    project_source_task_id: Optional[str] = None, creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
-    validate_workspace: bool = False,
+    validate_workspace: bool = False, validate_skills: bool = False,
     human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None,
     requires: Optional[list[str]] = None,
-    lint_blocked: bool = True,
+    lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
     ``lint_blocked=False`` is for internal trackers parked blocked without a human ask
     (swarm root); everything else must pass ``human_request`` with ``initial_status='blocked'``.
     ``origin_intent`` atomically persists the task and receipt intent, not origin readback.
-    ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project
-    ``worktree`` workspace that could never resolve at spawn with
-    ``WorktreeWorkspaceConfigError`` naming the fix, instead of letting the
-    dispatcher discover it later. [daveey]
+    ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project ``worktree`` workspace
+    that could never resolve at spawn (``WorktreeWorkspaceConfigError``); ``validate_skills=True`` rejects
+    a pinned skill the assignee cannot load (``UnknownSkillError``). [daveey] ``runs_on``: placement labels.
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
     forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
@@ -1299,9 +1331,10 @@ def create_task(
         from hermes_cli.kanban_db_workspace import (
             WorktreeWorkspaceConfigError, worktree_workspace_problem,
         )
-        problem = worktree_workspace_problem(workspace_path, board=board)
-        if problem:
+        if problem := worktree_workspace_problem(workspace_path, board=board):
             raise WorktreeWorkspaceConfigError(problem)
+    from hermes_cli.kanban_skill_check import check_task_skills
+    check_task_skills(skills_list, assignee, enabled=validate_skills)
 
     now = int(time.time())
 
@@ -1320,6 +1353,7 @@ def create_task(
     # [daveey] Bind a provider-less concrete pin now (or refuse), never late-bind it to config at spawn.
     from hermes_cli.kanban_pin_provider import resolve_pin_provider
     model_override, provider_override = resolve_pin_provider(model_override, provider_override, assignee=assignee)
+    _reject_spaced_pin(model_override, provider_override)
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -1360,6 +1394,7 @@ def create_task(
                         json.dumps(required),
                     ),
                 )
+                _sync.set_runs_on(conn, task_id, runs_on)  # placement labels (RFC "Placement"), synced boards only
                 for pid in parents:
                     _link(conn, pid, task_id)
                 from hermes_cli.kanban_db_creation import record_created
@@ -1508,11 +1543,9 @@ def set_model_override(
     Allowed while ``running``: it applies on the NEXT dispatch, which is the
     rate-limit-recovery flow (set, then reclaim/retry)."""
     model, provider = _validate_model_override(model, provider)
-    if model and not provider:
-        # [daveey] Same pin-time binding as create_task: resolve against the card's assignee, or refuse.
-        from hermes_cli.kanban_pin_provider import resolve_pin_provider
-        row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        model, provider = resolve_pin_provider(model, None, assignee=row[0] if row else None)
+    if model:
+        from hermes_cli.kanban_model_assignment import validate_task_pin
+        model, provider = validate_task_pin(conn, task_id, model, provider)
     return _set_task_override(
         conn, task_id,
         "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),
@@ -4017,6 +4050,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    _ctx_standing(lines, task, list_comments(conn, task_id))  # [daveey]
     from hermes_cli.kanban_continuation import render_checkpoint_context
     checkpoint = render_checkpoint_context(conn, task_id)
     if checkpoint:
@@ -4170,6 +4204,25 @@ def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, no
         lines.append(
             f"- {row['id']} — {row['title']} ({_ctx_stamp(_to_epoch(row['ended_at']) or 0, now)}): {first}"
         )
+    lines.append("")
+
+
+def _ctx_standing(lines: list[str], task: Task, comments: list[Comment]) -> None:
+    """Every ``standing:`` line in the body or ANY comment, word for word, ahead of everything else. [daveey]
+
+    The comment thread is tail-capped (``_CTX_MAX_COMMENTS``), so a standing "don't wait" written early on a
+    busy card would otherwise drop out of the worker's prompt."""
+    from agent import standing_instructions as si
+    found = si.explicit_lines(task.body or "")
+    for c in comments:
+        found += si.explicit_lines(c.body or "")
+    found = si.dedupe(found)
+    if not found:
+        return
+    lines.append("## Standing instructions (from the user; in force for this card)")
+    lines += [f"standing: {line}" for line in found]
+    lines.append("(These still govern this run: e.g. a standing \"don't wait\" means decide it yourself instead "
+                 "of blocking on the user, unless only a human can act — a credential, a physical step.)")
     lines.append("")
 
 

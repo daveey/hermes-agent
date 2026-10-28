@@ -8,6 +8,7 @@ reads them (``annotate_kanban_activity`` and ``session_tasks``).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 
@@ -290,3 +291,48 @@ def test_links_diff_compares_unknown_unfinished_rows(env):
     report = links.links_diff(ME)
     assert not report["clean"]
     assert report["only_in_ledger"] == {"s1": [(HUB, "default", "t_done")]}
+
+
+_ASK = {"action": "Name the build host or say wait", "why_human": "new runner registrations are approval-gated",
+        "interaction": "reply", "scope": "one runner registration", "evidence": "runners API lists no canary"}
+
+
+def _ask_on(path, *task_ids):
+    conn = sqlite3.connect(path)
+    conn.executemany("UPDATE tasks SET human_request = ? WHERE id = ?",
+                     [(json.dumps(_ASK), tid) for tid in task_ids])
+    conn.commit()
+    conn.close()
+    ksa._reset_cache_for_tests()
+
+
+def test_remote_human_ask_with_null_block_kind_counts_blocked_not_open(env):
+    """[daveey] Shape of hub runners/t_54aa263b and t_699fdca7: ``blocked``, ``block_kind`` NULL, a valid
+    ``human_request`` stored as JSON text in the replica. The badge read them as open work (10 open / 0 blocked
+    instead of 8 / 2), so the chat painted waiting instead of red."""
+    path = replica(env, [("t_ask1", "blocked", HUB), ("t_ask2", "blocked", HUB), ("t_ops", "blocked", HUB),
+                         ("t_run", "running", HUB)],
+                   [(t, "s1", "shepherd", 0) for t in ("t_ask1", "t_ask2", "t_ops", "t_run")])
+    _ask_on(path, "t_ask1", "t_ask2")
+    row, rows = assert_parity("s1", expect=4)
+    assert (row.get("kanban_active"), row.get("kanban_blocked")) == (2, 2), row
+    assert {r["id"]: r["human_request"] for r in rows}["t_ask1"] == _ASK  # listed with the decoded ask
+
+
+def test_local_card_and_remote_replica_cards_in_one_lineage(env):
+    """[daveey] The live Upkeep shape: one local tracker card plus hub cards, linked across a compression lineage.
+    Counts cover both stores once each; the strip lists the same set, and a remote human ask counts blocked."""
+    from hermes_cli import kanban_db as kb
+
+    conn = kbc.connect(env["home"] / "kanban.db")
+    local = kb.create_task(conn, title="local tracker", assignee="default", session_id="s_root")
+    conn.close()
+    tasks = [("t_ask", "blocked", HUB)] + [(f"t_hub{i:02d}", "todo" if i else "running", HUB) for i in range(12)]
+    path = replica(env, tasks, [(t[0], "s_tip" if t[0] == "t_ask" else "s_root", "shepherd", 0) for t in tasks])
+    _ask_on(path, "t_ask")
+    n, row = counted("s_root", "s_tip")
+    every = ksa.session_tasks(["s_root", "s_tip"])
+    assert n == len(every) == 14, (row, [(t.get("key") or t["id"], t["status"]) for t in every])
+    assert (row.get("kanban_active"), row.get("kanban_blocked")) == (13, 1), row
+    assert [t["id"] for t in every if not t.get("remote")] == [local]
+    assert len(listed("s_root", "s_tip")) == 13

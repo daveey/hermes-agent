@@ -38,7 +38,7 @@ import subprocess
 import time
 import hashlib
 from datetime import UTC, datetime
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli import kanban_capability_registry as reg
@@ -367,6 +367,36 @@ def preflight(conn, task_id: str, *, board: Optional[str] = None, **lookup) -> O
 
 # --- wait-check ----------------------------------------------------------------------------
 
+_OUTPUT_ID_RE = re.compile(r'"id"\s*:\s*"(t_[0-9a-f]+)"')
+
+
+def owner_task_id(result: Any) -> Optional[str]:
+    """The owner card id in an applied create's result, whichever applier wrote it: ``task`` (current
+    hermes-hub), ``task_id`` (placement creates), ``id``, or the ``hermes kanban create --json`` text an
+    older applier stored in ``output``, clipped to 2000 chars and so often not valid JSON (hub card
+    t_01a181a33c586660). None when no shape holds an id."""
+    if not isinstance(result, dict):
+        return None
+    for key in ("task", "task_id", "id"):
+        val = result.get(key)
+        if isinstance(val, str) and val:
+            return val
+    out = result.get("output")
+    if not isinstance(out, str) or not out:
+        return None
+    try:
+        parsed = json.loads(out)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        for key in ("id", "task_id"):
+            val = parsed.get(key)
+            if isinstance(val, str) and val:
+                return val
+    m = _OUTPUT_ID_RE.search(out)
+    return m.group(1) if m else None
+
+
 def owner_status(rid: str) -> tuple[int, str]:
     """(rc, message) for one owner request: 0 done, 1 pending, 2 cannot tell / rejected."""
     try:
@@ -384,7 +414,7 @@ def owner_status(rid: str) -> tuple[int, str]:
         if state != "done":
             return 1, f"{rid} request {state}"
         result = json.loads(row[2] or "{}") or {}
-        tid = result.get("task") if isinstance(result, dict) else None
+        tid = owner_task_id(result)
         if not tid:
             return 2, f"error: request {rid} done without a task id: {str(row[2])[:300]}"
         gw = body.get("to_gw")

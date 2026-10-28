@@ -15,6 +15,7 @@ seconds because the sidebar polls.
 from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
+from hermes_cli import kanban_activity_identity as _identity
 import contextlib
 import json
 import logging
@@ -49,10 +50,24 @@ _stalled_cache: list[dict[str, int]] = [{}]
 # [daveey] Per session, the remote cards counted (key, bucket, parked) from the same snapshot as ``_cache``: a
 # lineage whose sessions share a card (created in one, shepherded from another) counts it once, as the list shows it.
 _remote_keys_cache: list[dict[str, frozenset[tuple[str, str, bool]]]] = [{}]
+_local_keys_cache: list[dict[str, frozenset[tuple[str, str, bool]]]] = [{}]
+_local_keys_sink = threading.local()
 _pairs_lock = threading.Lock()
 # _all_counts single flight: held for a whole recompute; the generation bumps when one publishes.
 _counts_flight = threading.Lock()
 _counts_generation = 0
+# Cross-thread annotation flight. ``one_annotation_snapshot`` only shares a read
+# inside one thread. Session-list polls arrive on many AnyIO workers at once; each
+# used to wait on ``_counts_flight`` and then run waiting sources and attention
+# itself, so the pool filled and inventory/hub-sync timed out while the event loop
+# sat in select (2026-10-28). One refresher runs; overlapping polls take the last
+# good snapshot instead of waiting. A poll that arrives after the refresher
+# finishes still reads again.
+_annotate_refresh_lock = threading.Lock()
+_annotate_flight_scope: tuple[str, ...] | None = None
+_annotate_flight_result: tuple | None = None
+_last_annotation: dict[tuple[str, ...], tuple] = {}
+_annotate_waiters = 0
 WAITING_ON_CAP = 50
 
 
@@ -334,6 +349,9 @@ def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]
         else:
             continue
         into[sid] = into.get(sid, 0) + 1
+        captured = getattr(_parked_sink, "pairs", None)
+        if captured is not None:
+            captured[0 if into is parked else 1].add((sid, tid))
     return parked, held
 
 
@@ -379,7 +397,7 @@ def _stall_rows_on(conn: sqlite3.Connection) -> tuple[set[tuple[str, str]], dict
 
 
 def _stalled_counts(pairs: set[tuple[str, str]], parked: dict[str, tuple], events: dict[str, tuple],
-                    now: float | None = None) -> dict[str, int]:
+                    now: float | None = None, *, keys: set[tuple[str, str]] | None = None) -> dict[str, int]:
     if not pairs:
         return {}
     info = _describe_waits(parked, events, now=now)
@@ -387,6 +405,8 @@ def _stalled_counts(pairs: set[tuple[str, str]], parked: dict[str, tuple], event
     for sid, tid in pairs:
         if (info.get(tid) or {}).get("wait_state") == "stalled":
             out[sid] = out.get(sid, 0) + 1
+            if keys is not None:
+                keys.add((sid, tid))
     return out
 
 
@@ -544,14 +564,13 @@ def _self_gateway(conn: sqlite3.Connection) -> str:
 
 
 def _replica_bucket(task: dict[str, Any]) -> str | None:
-    """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards."""
-    from hermes_cli.kanban_human_request import needs_human
-
+    """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards. ``human_request`` may be
+    the decoded dict or the stored JSON text (``_stored_needs_human`` reads both). [daveey]"""
     status = task.get("status")
     if status == "unknown" and task.get("unfinished"):
         return "active"
     if status in BLOCKED_STATUSES:
-        return "blocked" if needs_human(task.get("human_request"), kind=task.get("block_kind")) else "active"
+        return "blocked" if _stored_needs_human(task.get("human_request"), task.get("block_kind")) else "active"
     return "active" if status in ACTIVE_STATUSES else None
 
 
@@ -1292,7 +1311,18 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     return cards
 
 
-def _all_counts(*, include_waiting: bool = False) -> tuple:
+def _cached_count_result(include_waiting: bool, include_snapshot: bool) -> tuple:
+    """Called under _cache_lock: annotation identities must travel with their count generation."""
+    assert _cache is not None
+    counts = _cache[1:5]
+    if include_snapshot:
+        parked, held = _parked_cache[0]
+        return (*counts, dict(_waiting_cache[0]), parked, held, _stalled_cache[0],
+                _identity.merge_keys(_remote_keys_cache[0], _local_keys_cache[0]))
+    return (*counts, dict(_waiting_cache[0])) if include_waiting else counts
+
+
+def _all_counts(*, include_waiting: bool = False, include_snapshot: bool = False) -> tuple:
     """Cached counts, optionally with waiting IDs from the same scoped snapshot.
 
     Single flight: one caller recomputes, and every caller that queued behind it takes that result. The
@@ -1304,18 +1334,18 @@ def _all_counts(*, include_waiting: bool = False) -> tuple:
     fingerprint = _activity_fingerprint()
     with _cache_lock:
         if _cache is not None and _cache_scope == scope and now < _cache[0] and fingerprint == _cache_fingerprint:
-            counts = _cache[1:5]
-            return (*counts, dict(_waiting_cache[0])) if include_waiting else counts
+            return _cached_count_result(include_waiting, include_snapshot)
         seen = _counts_generation
     with _counts_flight:
         with _cache_lock:
             if _counts_generation != seen and _cache is not None and _cache_scope == scope:
-                counts = _cache[1:5]
-                return (*counts, dict(_waiting_cache[0])) if include_waiting else counts
-        return _recompute_all_counts(scope, now, fingerprint, include_waiting=include_waiting)
+                return _cached_count_result(include_waiting, include_snapshot)
+        return _recompute_all_counts(scope, now, fingerprint, include_waiting=include_waiting,
+                                     include_snapshot=include_snapshot)
 
 
-def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bool) -> tuple:
+def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bool,
+                          include_snapshot: bool = False) -> tuple:
     """Read every local board and the remote links into fresh counts and publish them to the cache."""
     global _cache, _cache_scope, _cache_fingerprint, _counts_generation
     active: dict[str, int] = {}
@@ -1327,11 +1357,14 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
     stalled: dict[str, int] = {}
     _parked_sink.maps = (parked, held)
     _parked_sink.stalled = stalled
+    local_keys: dict[str, set[tuple[str, str, bool]]] = {}
+    _local_keys_sink.keys = local_keys
     try:
         pairs = _read_local_pairs_into(active, blocked, unseen)
     finally:
         _parked_sink.maps = None
         _parked_sink.stalled = None
+        _local_keys_sink.keys = None
     waiting: dict[str, set[str]] = {}
     for sid, tid in pairs:
         waiting.setdefault(sid, set()).add(tid)
@@ -1345,7 +1378,9 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         into[sid] = into.get(sid, 0) + 1
         # A replica row has no parent links; its owner promotes a todo whose parents finished on the next tick, so a
         # replicated todo waits on a parent (parked). Held needs those links, so remote cards are never held.
-        is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo")
+        # [daveey] An ``unknown`` card (done, release unverified) has no worker either: it waits like a parked one,
+        # or a chat whose other cards are all parked painted no stripe at all instead of waiting.
+        is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo", "unknown")
         if is_parked:
             parked[sid] = parked.get(sid, 0) + 1
         remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))
@@ -1353,6 +1388,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         # only its last report) is never counted stalled, so stalled can't exceed what the row shows parked.
         if card.get("status") != "unknown" and (_remote_wait(card) or {}).get("wait_state") == "stalled":
             stalled[sid] = stalled.get(sid, 0) + 1
+            remote_keys.setdefault(sid, set()).add((str(card.get("key")), "stalled", False))
         if card.get("stale"):
             stale[sid] = stale.get(sid, 0) + 1
     with _cache_lock:
@@ -1364,8 +1400,8 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         _parked_cache[0] = (parked, held)
         _stalled_cache[0] = stalled
         _remote_keys_cache[0] = {sid: frozenset(keys) for sid, keys in remote_keys.items()}
-    counts = (active, blocked, unseen, stale)
-    return (*counts, {sid: frozenset(ids) for sid, ids in waiting.items()}) if include_waiting else counts
+        _local_keys_cache[0] = {sid: frozenset(keys) for sid, keys in local_keys.items()}
+        return _cached_count_result(include_waiting, include_snapshot)
 
 
 def _read_local_pairs_into(active: dict[str, int], blocked: dict[str, int],
@@ -1418,12 +1454,19 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
             outer, _pairs_sink = _pairs_sink, set()
             try:
                 reads["active"] = _counts_on(conn, ACTIVE_STATUSES)
+                reads["active_pairs"], _pairs_sink = _pairs_sink, set()
                 reads["blocked"] = _counts_on(conn, BLOCKED_STATUSES)
-                reads["pairs"] = _pairs_sink
+                reads["blocked_pairs"] = _pairs_sink
+                reads["pairs"] = reads["active_pairs"] | reads["blocked_pairs"]
             finally:
                 _pairs_sink = outer
             if parked:
-                reads["parked"] = _parked_on(conn)
+                _parked_sink.pairs = (set(), set())
+                try:
+                    reads["parked"] = _parked_on(conn)
+                    reads["parked_pairs"], reads["held_pairs"] = _parked_sink.pairs
+                finally:
+                    _parked_sink.pairs = None
             if stalled:
                 try:
                     reads["stall_rows"] = _stall_rows_on(conn)
@@ -1460,16 +1503,21 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
                 into[sid] = into.get(sid, 0) + n
         if _pairs_sink is not None:
             _pairs_sink.update(reads["pairs"])
+        stalled_pairs: set[tuple[str, str]] = set()
         if sink is not None:
             for src, into in zip(reads["parked"], sink):
                 for sid, n in src.items():
                     into[sid] = into.get(sid, 0) + n
         if stalled is not None:
             try:
-                for sid, n in _stalled_counts(*reads["stall_rows"], now=now).items():
+                for sid, n in _stalled_counts(*reads["stall_rows"], now=now, keys=stalled_pairs).items():
                     stalled[sid] = stalled.get(sid, 0) + n
             except Exception as exc:  # display-only: a failed read never fails the counts
                 _log.debug("kanban stalled read failed for %s: %s", path, exc)
+        keys = getattr(_local_keys_sink, "keys", None)
+        if keys is not None:
+            for sid, cards in _identity.local_keys(path, {**reads, "stalled_pairs": stalled_pairs}).items():
+                keys.setdefault(sid, set()).update(cards)
 
 
 # [daveey] Extra "this chat still waits" sources (plugins): name -> fn() -> {session_id: iterable of task ids}. A
@@ -1845,31 +1893,50 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     return counts
 
 
-def _row_ids(row: dict[str, Any]) -> Iterable[str]:
-    seen: set[str] = set()
-    for sid in (row.get("id"), row.get("_lineage_root_id"), *(row.get("_lineage_ids") or ())):
-        if sid and sid not in seen:
-            seen.add(sid)
-            yield sid
+def _read_annotation_parts() -> tuple:
+    (active, blocked, unseen, remote_stale, waiting, parked, held, stalled,
+     remote_keys) = _all_counts(include_snapshot=True)
+    extra = _extra_waiting()
+    try:
+        attention = attention_task_counts()
+    except Exception:
+        _log.debug("kanban attention unavailable", exc_info=True)
+        attention = {}
+    return _identity.freeze_annotation((
+        active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention))
 
 
-def _lineage_remote_duplicates(remote_keys: dict[str, frozenset[tuple[str, str, bool]]],
-                               ids: list[str]) -> dict[str, int]:
-    """How many remote cards the per-session counts add more than once across one lineage (a card created in one
-    session and shepherded from another), per row field, so the row counts each card once like ``session_tasks``
-    lists it. [daveey]"""
-    seen = [remote_keys.get(sid, frozenset()) for sid in ids]
-    if sum(1 for s in seen if s) < 2:
-        return {}
-    union = frozenset().union(*seen)
-    out: dict[str, int] = {}
-    for field, test in (("kanban_active", lambda k: k[1] == "active"), ("kanban_blocked", lambda k: k[1] == "blocked"),
-                        ("kanban_parked", lambda k: k[2])):
-        rows = sum(1 for s in seen for k in s if test(k))
-        cards = len({k[0] for k in union if test(k)})
-        if rows > cards:
-            out[field] = rows - cards
-    return out
+def _annotation_snapshot() -> tuple | None:
+    """One in-flight annotation read, shared by overlapping polls.
+
+    Returns the last good parts when a refresh is already running, so those polls
+    do not occupy an AnyIO worker for the whole waiting-source and attention pass.
+    A cold start (nothing served yet) waits for that pass. None means the read
+    failed and the caller stamps ``kanban_unknown``.
+    """
+    global _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
+    scope = _origin_scope()
+    if not _annotate_refresh_lock.acquire(blocking=False):
+        _annotate_waiters += 1
+        try:
+            stale = _last_annotation.get(scope)
+            if stale is not None:
+                return stale
+            with _annotate_refresh_lock:
+                if _annotate_flight_scope == scope and _annotate_flight_result is not None:
+                    return _annotate_flight_result
+                return _last_annotation.get(scope)
+        finally:
+            _annotate_waiters -= 1
+    try:
+        _annotate_flight_scope = scope
+        _annotate_flight_result = None
+        parts = _read_annotation_parts()
+        _last_annotation[scope] = parts
+        _annotate_flight_result = parts
+        return parts
+    finally:
+        _annotate_refresh_lock.release()
 
 
 # [daveey] Set by ``one_annotation_snapshot``: the reads the first annotation in the scope made, for the others.
@@ -1903,19 +1970,20 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     # Never re-date a cached zero as a new owner observation.
     observed_at = time.time() - _CACHE_TTL_S
     shared = getattr(_annotation_scope, "reads", None)
+    attention = None
     try:
         if shared:
             active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = shared[0]
         else:
-            active, blocked, unseen, remote_stale, waiting = _all_counts(include_waiting=True)
-            with _cache_lock:  # the snapshot that call just read or wrote: never a second projection
-                parked, held = _parked_cache[0]
-                stalled = _stalled_cache[0]
-                remote_keys = _remote_keys_cache[0]
-            extra = _extra_waiting()
+            parts = _annotation_snapshot()
+            if parts is None:
+                raise RuntimeError("kanban annotation unavailable")
+            (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra,
+             attention) = parts
             if shared is not None:
                 shared.append((active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys,
                                extra))
+                _annotation_scope.attention = attention
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
         # row off done) and drop the counts rather than present them as fresh.
@@ -1928,7 +1996,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row.pop("kanban_waiting_on", None)
             row["kanban_unknown"] = True
         return rows
-    attention = getattr(_annotation_scope, "attention", None)
+    if attention is None:
+        attention = getattr(_annotation_scope, "attention", None)
     if attention is None:
         try:
             attention = attention_task_counts()
@@ -1940,8 +2009,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     for row in rows:
         row["kanban_observed_at"] = observed_at
         row.pop("kanban_unknown", None)
-        ids = list(_row_ids(row))
-        dup = _lineage_remote_duplicates(remote_keys, ids)
+        ids = list(_identity.row_ids(row))
+        dup = _identity.lineage_duplicates(remote_keys, ids)
         for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen),
                             ("kanban_attention", attention), ("kanban_remote_stale", remote_stale)):
             n = sum(counts.get(sid, 0) for sid in ids) - dup.get(key, 0)
@@ -1958,7 +2027,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         # [daveey] Parked/held are subsets of kanban_active. kanban_parked is stamped (even 0) whenever there is open
         # work, so the desktop can tell "none parked" from a backend that predates the field.
         n_parked = sum(parked.get(sid, 0) for sid in ids) - dup.get("kanban_parked", 0)
-        n_held = sum(held.get(sid, 0) for sid in ids)
+        n_held = sum(held.get(sid, 0) for sid in ids) - dup.get("kanban_held", 0)
         if row.get("kanban_active"):
             row["kanban_parked"] = n_parked
         else:
@@ -1968,7 +2037,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         else:
             row.pop("kanban_held", None)
         # [daveey] Stalled: parked cards whose agent-owned wait passed 2 h (amber, not grey waiting or red needs-you).
-        n_stalled = sum(stalled.get(sid, 0) for sid in ids)
+        n_stalled = sum(stalled.get(sid, 0) for sid in ids) - dup.get("kanban_stalled", 0)
         if n_stalled and row.get("kanban_active"):
             row["kanban_stalled"] = n_stalled
         else:
@@ -1983,9 +2052,13 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     global _cache, _attention_cache, _remote_last, _links_cache, _snapshot_saved, _remote_read_memo
-    global _hub_signature_memo
+    global _hub_signature_memo, _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
     _remote_read_memo = None
     _hub_signature_memo = None
+    _annotate_flight_scope = None
+    _annotate_flight_result = None
+    _annotate_waiters = 0
+    _last_annotation.clear()
     with _pairs_lock:
         _board_memo.clear()
     with _links_lock:
@@ -1999,6 +2072,8 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
         _waiting_cache[0] = {}
         _parked_cache[0] = ({}, {})
         _stalled_cache[0] = {}
+        _local_keys_cache[0] = {}
+        _remote_keys_cache[0] = {}
     with _RO_CACHE_LOCK:
         held = [entry[0] for entry in _RO_CACHE.values()]
         _RO_CACHE.clear()

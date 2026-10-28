@@ -35,13 +35,17 @@ def probe_class_runtime(model, provider, config):
 
 
 def restore_class_overrides(model, config, overrides):
-    from agent.model_routing_restore import restore_route
+    from agent.model_routing_restore import restore_route, stale_managed_pin
     restored = restore_route(model, config)
-    if restored is None:
-        return overrides
-    model, provider = restored
-    overrides["model_override"] = {"model": model, "provider": provider}
-    overrides["provider_override"] = provider
+    if restored is not None:
+        model, provider = restored
+        overrides["model_override"] = {"model": model, "provider": provider}
+        overrides["provider_override"] = provider
+    target = overrides.get("model_override") or {}
+    if stale_managed_pin(target.get("model"), overrides.get("provider_override") or target.get("provider")):
+        # History, not a request: resume on the profile default instead of failing closed at agent build.
+        overrides.pop("model_override", None)
+        overrides.pop("provider_override", None)
     return overrides
 
 

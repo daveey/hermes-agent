@@ -30,8 +30,8 @@ HELD_ENV = "HERMES_TEST_SLOT_HELD"
 POLL_S = 0.1
 
 
-def _config_slots() -> int | None:
-    """Per-host ``tests.host_slots`` from the Hermes config (``HERMES_TEST_SLOT_CONFIG`` overrides the path).
+def _config_int(key: str) -> int | None:
+    """Per-host ``tests.<key>`` integer from the Hermes config (``HERMES_TEST_SLOT_CONFIG`` overrides the path).
 
     A laptop the user works on caps the tests every agent runs on it without restarting anything that
     would have to inherit an env var. [daveey]
@@ -45,14 +45,18 @@ def _config_slots() -> int | None:
     try:
         import yaml
 
-        value = ((yaml.safe_load(text) or {}).get("tests") or {}).get("host_slots")
+        value = ((yaml.safe_load(text) or {}).get("tests") or {}).get(key)
     except Exception:  # no PyYAML in this interpreter, or a config it cannot parse: read the one key
-        m = re.search(r"^tests:[ \t]*\n(?:[ \t]+.*\n|[ \t]*\n)*?[ \t]+host_slots:[ \t]*(\d+)", text, re.MULTILINE)
+        m = re.search(r"^tests:[ \t]*\n(?:[ \t]+.*\n|[ \t]*\n)*?[ \t]+" + re.escape(key) + r":[ \t]*(\d+)", text, re.MULTILINE)
         value = m.group(1) if m else None
     try:
         return max(0, int(value)) if value is not None and not isinstance(value, bool) else None
     except (TypeError, ValueError):
         return None
+
+
+def _config_slots() -> int | None:
+    return _config_int("host_slots")
 
 
 def host_slot_count() -> int:
@@ -70,7 +74,8 @@ def host_slot_count() -> int:
 
 
 def xdist_worker_budget() -> int:
-    """Max xdist workers one slot holder may start: ``HERMES_TEST_XDIST_MAX``, else cpu_count // host slots.
+    """Max xdist workers one slot holder may start: ``HERMES_TEST_XDIST_MAX``, else cpu_count // host slots,
+    lowered by the host's ``tests.xdist_workers`` config when set.
 
     A direct ``pytest -n 8`` session holds ONE host slot but runs 8 workers, so four slot holders on a
     16-core Mac ran 32+ workers and the load average passed 100 (ready Kanban cards then sat unclaimed).
@@ -83,7 +88,9 @@ def xdist_worker_budget() -> int:
         except ValueError:
             pass
     cores = os.cpu_count() or 4
-    return max(1, cores // max(1, host_slot_count()))
+    share = max(1, cores // max(1, host_slot_count()))
+    configured = _config_int("xdist_workers")  # per-host: a laptop caps workers below its share, never above
+    return max(1, min(share, configured)) if configured is not None else share
 
 
 def host_slot_dir() -> str:

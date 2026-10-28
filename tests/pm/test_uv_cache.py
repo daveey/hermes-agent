@@ -4,6 +4,8 @@ from __future__ import annotations
 
 
 
+import pytest
+
 import pm.packages as pkgs
 
 
@@ -66,3 +68,23 @@ def test_bundle_uses_shipped_environment_until_an_extension_is_committed(monkeyp
 
     assert pkgs.Venv().venv_dir() == shipped
     assert not home.exists(), "selecting shipped dependencies must not copy or mutate them"
+
+
+@pytest.mark.platforms("macos")
+def test_uv_cache_dir_lives_in_a_spotlight_noindex_dir_on_macos(monkeypatch, tmp_path):
+    """[daveey] cache/uv is a symlink to cache/uv.noindex on macOS; an existing cache moves intact."""
+
+    home = tmp_path / "home"
+    (home / "cache" / "uv" / "wheels-v5").mkdir(parents=True)
+    (home / "cache" / "uv" / "wheels-v5" / "a.whl").write_text("w", encoding="utf-8")
+    import hermes_constants
+
+    monkeypatch.delenv("HERMES_SPOTLIGHT_INDEX_CACHE", raising=False)
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    import pm.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "store_root", lambda: tmp_path / "nowhere" / "tools")
+    machine = pkgs.uv_cache_dir()
+    assert machine == home / "cache" / "uv" and machine.is_symlink()
+    assert (home / "cache" / "uv.noindex" / "wheels-v5" / "a.whl").read_text(encoding="utf-8") == "w"
+    assert (machine / ".seeded").is_file()

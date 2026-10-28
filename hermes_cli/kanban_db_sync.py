@@ -52,7 +52,7 @@ SYNCED_COLUMNS: dict[str, frozenset[str]] = {
         "consecutive_failures", "last_failure_error", "max_runtime_seconds", "current_run_id",
         "workflow_template_id", "current_step_key", "skills", "requires", "model_override",
         "provider_override", "reasoning_effort", "max_retries", "goal_mode", "goal_max_turns",
-        "block_kind", "human_request", "block_recurrences", "completion_contract",
+        "block_kind", "human_request", "block_recurrences", "completion_contract", "runs_on",
     }),
     "task_links": frozenset({"parent_id", "child_id"}),
     "task_comments": frozenset({"task_id", "author", "body", "created_at"}),
@@ -88,7 +88,8 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     "task_chat_links": frozenset(),
 }
 # Set by the service, never by a gateway: applied from the feed, never captured.
-SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"created_on"})}
+# ``ready_since``: when the card last became ready (ms), for the Board's ``home_grace`` placement rule.
+SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"created_on", "ready_since"})}
 KEY_COLUMNS: dict[str, frozenset[str]] = {
     "tasks": frozenset({"id"}),
     "task_links": frozenset(),
@@ -209,6 +210,9 @@ _SYNC_COLUMN_DDL = (
     ("tasks", "lease_expires", "lease_expires INTEGER"),
     ("tasks", "lease_version", "lease_version INTEGER"),
     ("tasks", "created_on", "created_on TEXT"),
+    ("tasks", "ready_since", "ready_since INTEGER"),
+    # Placement (RFC "Placement"): JSON list of labels the claiming machine must all carry; NULL = default.
+    ("tasks", "runs_on", "runs_on TEXT"),
     ("kanban_sync_outbox", "retry_after", "retry_after INTEGER"),
     # 1 once repair_ms_timestamps ran on this file (the one-time repair of rows applied before the guard).
     ("kanban_sync_state", "seconds_repaired", "seconds_repaired INTEGER NOT NULL DEFAULT 0"),
@@ -747,6 +751,40 @@ def release_lease(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str]
                           gateway_id=state["gateway_id"])
     except _CLIENT_ERRORS as exc:
         _log.info("kanban sync: lease release for %s failed (%s); it expires on the server", task_id, exc)
+
+
+def held_elsewhere_sql(conn: sqlite3.Connection, alias: str = "") -> str:
+    """SQL condition (``AND NOT ...``) that leaves out cards whose Board lease another gateway holds.
+
+    On a primary board a card this gateway created can run on another machine (Placement): its status is
+    ``running`` here with no local claim. The dispatcher's sweeps (orphans, stale heartbeats) and its concurrency
+    counts must not see it, or they would requeue a card that is running elsewhere, or spend a local slot on it.
+    Empty on a board that is not primary."""
+    if board_mode(conn) != "primary":
+        return ""
+    own = str(_state(conn)["gateway_id"]).replace("'", "''")
+    a = f"{alias}." if alias else ""
+    return f" AND NOT ({a}lease_holder IS NOT NULL AND {a}lease_holder != '{own}' AND {a}claim_lock IS NULL)"
+
+
+def set_runs_on(conn: sqlite3.Connection, task_id: str, runs_on: Any) -> None:
+    """``create_task(runs_on=...)``: validate the labels and write them (captured and pushed like any field).
+    None is the default placement and writes nothing; a board that does not sync cannot carry them."""
+    if runs_on is None:
+        return
+    from hermes_cli import kanban_worker_node as wn
+    wn.set_runs_on(conn, task_id, wn.normalize_runs_on(runs_on if isinstance(runs_on, str) else list(runs_on)))
+
+
+def worker_pickup(conn: sqlite3.Connection, budget: Optional[int], dry_run: bool, profile_exists_fn: Any) -> None:
+    """Dispatcher seam: a worker node copies eligible cards other gateways created (``kanban_worker_node``)."""
+    if dry_run or board_mode(conn) != "primary":
+        return
+    from hermes_cli import kanban_worker_node as wn
+    try:
+        wn.pickup(conn, budget=budget, profile_exists=profile_exists_fn())
+    except Exception:  # health: allow BLE001 -- a failed pickup must not stop the tick dispatching local work
+        _log.warning("kanban: worker-node pickup failed", exc_info=True)
 
 
 def run_uid(conn: sqlite3.Connection, run_id: Optional[int]) -> Optional[str]:
