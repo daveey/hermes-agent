@@ -210,6 +210,9 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                        f"{tool_name}: unknown parameter(s): {', '.join(unknown)}. "
                        f"Valid parameters: {', '.join(sorted(properties))}. Nothing changed.",
                        "invalid_args")
+                refused = _remote_lease_refusal(tool_name, args)
+                if refused is not None:
+                    return refused
                 out = fn(args, **kw)
                 if classify_rejections and isinstance(out, str) and out.startswith('{"error"'):
                     out = _tag_rejection(out, "invalid_args")
@@ -248,6 +251,40 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                 return tool_error(f"{tool_name}: {e}")
         return wrapper
     return deco
+
+
+# Tools whose write moves a card's lifecycle columns, which the Board fences to the lease holder (``live_claim``).
+# kanban_archive is not here: it sends the holder a stop request instead (kanban_remote_stop). [daveey]
+_LEASE_FENCED_TOOLS = frozenset({
+    "kanban_complete", "kanban_block", "kanban_unblock", "kanban_schedule", "kanban_continue",
+    "kanban_request_review", "kanban_request_changes",
+})
+
+
+def _remote_lease_refusal(tool_name: str, args: dict) -> Optional[str]:
+    """A typed refusal when the target card runs under another machine's live Board lease, else None.
+
+    Such a write would be committed here and then rejected by the Board (``live_claim``) after the tool had
+    reported success: the card reads back as before and the caller never learns. Refusing up front says so."""
+    if tool_name not in _LEASE_FENCED_TOOLS:
+        return None
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return None
+    try:
+        from hermes_cli.kanban_remote_stop import remote_holder
+        with _board(args.get("board"), quiet_close=True) as (_kb, conn):
+            holder = remote_holder(conn, str(tid))
+    except Exception:
+        logger.debug("%s: remote lease check for %s failed", tool_name, tid, exc_info=True)
+        return None  # the handler reports its own board errors
+    if holder is None:
+        return None
+    return tool_error(
+        f"{tool_name} refused: {tid} is running under {holder}'s live lease on the Board, which accepts "
+        f"lifecycle writes only from the lease holder. Nothing changed. Act on {holder}, use kanban_archive "
+        f"(it sends {holder} a stop request), or wait for the run to end.",
+        rejection="live_claim", code="remote_live_lease", holder=holder)
 
 
 def _reject_delegated_child_mutation(tool_name: str) -> None:
@@ -2037,13 +2074,17 @@ def _handle_archive(args: dict, **kw) -> str:
     tid = args.get("task_id")
     _check(tid, "task_id is required")
     tid = str(tid)
-    with _board(args.get("board")) as (kb, conn):
+    with _board(args.get("board")) as (_kb, conn):
         from hermes_cli.kanban import worker_archive_scope
         refusal, via = worker_archive_scope(conn, tid)
         if refusal:
             raise _Reject(refusal)
-        _check(kb.archive_task(conn, tid, via=via), f"cannot archive {tid}")
-        return _ok(task_id=tid, status="archived")
+        # A card another machine runs under its live Board lease is not archived here: the Board would reject the
+        # status write (live_claim) and the remote worker would keep running. Send it a stop request instead. [daveey]
+        from hermes_cli.kanban_remote_stop import archive as _archive
+        out = _archive(conn, tid, via=via)
+        _check(out, f"cannot archive {tid}")
+        return _ok(task_id=tid, **out)
 
 
 @_kanban_handler("kanban_link")

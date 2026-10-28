@@ -813,19 +813,32 @@ _OVERRIDE_OPS = (
 )
 
 
-def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_deferred: bool) -> None:
+def _archive(conn, task_id: str) -> tuple[bool, Optional[str]]:
+    """Archive, or send a stop request when another machine runs the card under its live Board lease
+    (``kanban_remote_stop``): ``(ok, holder)``, holder set when the archive is pending there. [daveey]"""
+    from hermes_cli.kanban_remote_stop import RemoteArchiveRefused, archive
+    try:
+        out = archive(conn, task_id)
+    except RemoteArchiveRefused as exc:
+        raise _conflict(str(exc)) from exc
+    return bool(out), (out or {}).get("holder") if (out or {}).get("status") == "archive_pending" else None
+
+
+def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_deferred: bool) -> Optional[str]:
     """PATCH status phase: 400 on a rejected verb, 409 when the transition is refused
-    (naming the blocking parent(s) for ``ready``/``done``/``review`` so the UI renders an actionable toast)."""
+    (naming the blocking parent(s) for ``ready``/``done``/``review`` so the UI renders an actionable toast).
+    Returns the lease holder when an archive is pending on another machine."""
     s = payload.status
+    pending: Optional[str] = None
     if s == "archived":
-        ok = kanban_db.archive_task(conn, task_id)
+        ok, pending = _archive(conn, task_id)
     else:
         with _map_errors(400, _StatusRejected, ValueError):
             ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
         if s == "review" and ok and review_assignee_deferred and not payload.assignee:
             ok = kanban_db.assign_task(conn, task_id, None)
     if ok:
-        return
+        return pending
     blockers = _parents_blocking_ready(conn, task_id) if s == "ready" else []
     if blockers:
         names = ", ".join(f"{p['title']!r} ({p['id']}, status={p['status']})" for p in blockers)
@@ -885,8 +898,9 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if payload.assignee is not None and not review_assignee_deferred:
             with _map_errors(409, RuntimeError), _value_error_400():
                 _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
+        pending = None
         if payload.status is not None:
-            _patch_status(conn, task_id, payload, review_assignee_deferred)
+            pending = _patch_status(conn, task_id, payload, review_assignee_deferred)
         for wanted, apply, _refused in _OVERRIDE_OPS:
             if wanted(payload):
                 with _map_errors(400, ValueError, RuntimeError):
@@ -899,7 +913,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         updated = kanban_db.get_task(conn, task_id)
         return {"task": _task_dict(
             updated, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)
-        ) if updated else None}
+        ) if updated else None, **({"archive_pending": pending} if pending else {})}
 
 
 @router.delete("/tasks/{task_id}")
@@ -1020,8 +1034,17 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
         if not _classify_request(conn, tid, payload, actor):
             entry.update(ok=False, error="classification requires parked card without a current run")
         return
-    if payload.archive and not kanban_db.archive_task(conn, tid):
-        entry.update(ok=False, error="archive refused")
+    if payload.archive:
+        try:
+            ok, pending = _archive(conn, tid)
+        except HTTPException as exc:
+            ok, pending = False, None
+            entry.update(ok=False, error=str(exc.detail))
+        else:
+            if not ok:
+                entry.update(ok=False, error="archive refused")
+            elif pending:
+                entry.update(archive_pending=pending)
     if payload.status is not None and not payload.archive:
         s = payload.status
         if not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):

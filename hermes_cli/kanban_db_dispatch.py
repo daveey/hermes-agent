@@ -185,6 +185,8 @@ class DispatchResult:
     tick; separate bucket so dashboards show "profile busy" vs "stuck"."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
+    remote_archived: list[str] = field(default_factory=list)
+    """Task ids archived on a stop request from another gateway (``kanban_remote_stop``)."""
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     agent_block_escalated: list[str] = field(default_factory=list)
@@ -2443,6 +2445,13 @@ def _run_reclaim_phase(
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
     reap_worker_zombies()
     result.reaped_terminal_workers = reap_terminal_workers(conn)
+    # Stop requests another gateway sent for cards this gateway runs under its own Board lease (kanban_archive of a
+    # card running on this machine). Before the reclaim sweeps, so they see the archived card. [daveey]
+    from hermes_cli.kanban_remote_stop import apply_stop_requests
+    try:
+        result.remote_archived = apply_stop_requests(conn)
+    except Exception:
+        _kb._log.warning("kanban: applying remote stop requests failed", exc_info=True)
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)

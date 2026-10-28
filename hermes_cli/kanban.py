@@ -1570,8 +1570,30 @@ def _cmd_archive(args: argparse.Namespace) -> int:
             refusal, vias[tid] = worker_archive_scope(conn, tid)
             if refusal:
                 return _err(refusal)
-        return _bulk_apply(ids, lambda tid: kb.archive_task(conn, tid, via=vias.get(tid)),
-                           lambda tid: f"Archived {tid}", lambda tid: f"cannot archive {tid}")
+        # A card another machine runs under its live Board lease gets a stop request, not a local status write
+        # the Board would reject (kanban_remote_stop). [daveey]
+        from hermes_cli.kanban_remote_stop import RemoteArchiveRefused, archive as _archive
+        outcomes: dict[str, dict] = {}
+        refusals: dict[str, str] = {}
+
+        def _one(tid: str) -> bool:
+            try:
+                out = _archive(conn, tid, via=vias.get(tid))
+            except RemoteArchiveRefused as exc:
+                refusals[tid] = str(exc)
+                return False
+            if out:
+                outcomes[tid] = out
+            return bool(out)
+
+        def _ok_line(tid: str) -> str:
+            out = outcomes[tid]
+            if out.get("status") == "archive_pending":
+                return (f"Archive pending {tid}: running on {out['holder']} under its live lease; a stop request "
+                        f"was sent and {out['holder']} archives it at its next dispatcher tick")
+            return f"Archived {tid}"
+
+        return _bulk_apply(ids, _one, _ok_line, lambda tid: refusals.get(tid) or f"cannot archive {tid}")
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:

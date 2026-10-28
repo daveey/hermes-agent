@@ -1017,6 +1017,8 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     names = ["uid", *cols]
     conn.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                  (ch.uid, *cols.values()))
+    if table == "task_events" and ch.fields.get("kind") == "archive_requested":
+        result.wake_dispatcher = True  # a stop request for a card this gateway may hold (kanban_remote_stop)
     return True
 
 

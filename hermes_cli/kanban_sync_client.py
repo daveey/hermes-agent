@@ -295,6 +295,18 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
     return out
 
 
+def _record_live_claim_rejection(conn: sqlite3.Connection, row: dict, reason: str) -> None:
+    """A card write the Board refused because another gateway holds the card's live lease leaves a
+    ``sync_rejected`` event on the card (inside the push txn), so ``kanban show`` says the write never happened
+    instead of the card silently reverting to the service's row. [daveey]"""
+    from hermes_cli import kanban_db as kb
+    fields = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"] or "{}")
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (row["row_uid"],)).fetchone() is None:
+        return
+    kb._append_event(conn, row["row_uid"], "sync_rejected",
+                     {"reason": reason[:300], "fields": sorted(fields), "op_id": row["op_id"]})
+
+
 @dataclass
 class PushResult:
     sent: int = 0
@@ -369,6 +381,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                                  "WHERE op_id = ?", (reason[:500], op_id))
                     out.rejected += 1
                     _log.warning("kanban sync: %s %s %s rejected (%s)", board, row["table_name"], row["row_uid"], reason)
+                    if row["table_name"] == "tasks" and res.get("reason") == "live_claim":
+                        _record_live_claim_rejection(conn, row, reason)
                     if primary and res.get("row"):
                         authoritative.append(_row_change(row["table_name"], res["row"]))
         if authoritative:
