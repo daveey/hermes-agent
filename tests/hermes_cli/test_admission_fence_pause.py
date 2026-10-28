@@ -27,6 +27,14 @@ def test_request_under_the_hold_is_active(tmp_path):
     assert body["version"] == 1 and body["expires_at"] > time.time()
 
 
+def test_bom_prefixed_request_under_hold_is_active(tmp_path):
+    _hold(tmp_path)
+    request = tmp_path / "core-update" / "pause-request"
+    body = json.dumps({"version": 1, "expires_at": time.time() + 60})
+    request.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+    assert af.pause_requested(tmp_path) is True
+
+
 def test_request_without_the_hold_is_ignored(tmp_path):
     """A stale file a crashed drainer left behind must not pause turns once its window is over."""
     af.request_pause(tmp_path, expires_at=time.time() + 60)

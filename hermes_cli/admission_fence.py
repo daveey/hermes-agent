@@ -163,7 +163,7 @@ def pause_requested(home):
     except OSError:
         return False
     try:
-        body = json.loads((root / PAUSE_REQUEST).read_text(encoding="utf-8"))
+        body = json.loads((root / PAUSE_REQUEST).read_text(encoding="utf-8-sig"))
         expires_at = float(body["expires_at"])
     except (OSError, ValueError, TypeError, KeyError):
         return False

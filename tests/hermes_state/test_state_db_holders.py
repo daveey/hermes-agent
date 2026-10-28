@@ -113,7 +113,7 @@ def test_windows_restart_manager_scan_sizes_then_excludes_self(monkeypatch, tmp_
         hermes_state_holders._windows_restart_manager_holders(db_path)
 
 
-# ── macOS leg, faked so it runs (and regresses) on Linux CI too ────────────────────────────────
+# ── macOS leg, exercised on the macOS host lane ──────────────────────────────────────────────
 #
 # The darwin leg used psutil.Process.open_files(), which stats every file of every process, and
 # then realpath'd each path. Under the test real-home I/O guard the first foreign Hermes log file
@@ -141,10 +141,6 @@ def darwin_scan(tmp_path, monkeypatch):
             raise state["raise"]
         yield from state["targets"]
 
-    platform_view = SimpleNamespace(**{k: getattr(hermes_state_holders.sys, k) for k in ("argv", "executable")})
-    platform_view.platform = "darwin"
-    monkeypatch.setattr(hermes_state_holders, "sys", platform_view)
-    monkeypatch.setattr(hermes_state_holders, "_IS_WINDOWS", False)
     monkeypatch.setattr(hermes_state_dbfile, "_iter_darwin_fd_targets", fake_targets)
     projected_os = SimpleNamespace(**vars(os))
     projected_os.getpid = lambda: 111
@@ -165,6 +161,7 @@ def darwin_scan(tmp_path, monkeypatch):
     return state
 
 
+@pytest.mark.platforms("macos")
 def test_darwin_scan_never_touches_foreign_files_and_finds_holder_by_identity(darwin_scan):
     db = darwin_scan["db"]
     darwin_scan["targets"] = [
@@ -176,6 +173,7 @@ def test_darwin_scan_never_touches_foreign_files_and_finds_holder_by_identity(da
     assert hermes_state_holders.foreign_state_db_holders(db) == [(222, "/alias-home/state.db")]
 
 
+@pytest.mark.platforms("macos")
 def test_darwin_scan_quiet_store_is_clean_despite_foreign_files(darwin_scan):
     darwin_scan["targets"] = [
         (222, 4, f"{FOREIGN_HOME}/logs/hermes-tunnel.log", (1, 1)),
@@ -184,6 +182,7 @@ def test_darwin_scan_quiet_store_is_clean_despite_foreign_files(darwin_scan):
     assert hermes_state_holders.foreign_state_db_holders(darwin_scan["db"]) == []
 
 
+@pytest.mark.platforms("macos")
 def test_darwin_scan_counts_a_retired_generation_and_case_folded_path(darwin_scan):
     db = darwin_scan["db"]
     darwin_scan["targets"] = [
@@ -194,6 +193,7 @@ def test_darwin_scan_counts_a_retired_generation_and_case_folded_path(darwin_sca
     assert [pid for pid, _ in hermes_state_holders.foreign_state_db_holders(db)] == [222, 333]
 
 
+@pytest.mark.platforms("macos")
 def test_darwin_scan_failure_fails_closed(darwin_scan):
     darwin_scan["raise"] = OSError("proc_listpids failed")
     holders = hermes_state_holders.foreign_state_db_holders(darwin_scan["db"])
