@@ -564,14 +564,13 @@ def _self_gateway(conn: sqlite3.Connection) -> str:
 
 
 def _replica_bucket(task: dict[str, Any]) -> str | None:
-    """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards."""
-    from hermes_cli.kanban_human_request import needs_human
-
+    """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards. ``human_request`` may be
+    the decoded dict or the stored JSON text (``_stored_needs_human`` reads both). [daveey]"""
     status = task.get("status")
     if status == "unknown" and task.get("unfinished"):
         return "active"
     if status in BLOCKED_STATUSES:
-        return "blocked" if needs_human(task.get("human_request"), kind=task.get("block_kind")) else "active"
+        return "blocked" if _stored_needs_human(task.get("human_request"), task.get("block_kind")) else "active"
     return "active" if status in ACTIVE_STATUSES else None
 
 
@@ -1379,7 +1378,9 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         into[sid] = into.get(sid, 0) + 1
         # A replica row has no parent links; its owner promotes a todo whose parents finished on the next tick, so a
         # replicated todo waits on a parent (parked). Held needs those links, so remote cards are never held.
-        is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo")
+        # [daveey] An ``unknown`` card (done, release unverified) has no worker either: it waits like a parked one,
+        # or a chat whose other cards are all parked painted no stripe at all instead of waiting.
+        is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo", "unknown")
         if is_parked:
             parked[sid] = parked.get(sid, 0) + 1
         remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))

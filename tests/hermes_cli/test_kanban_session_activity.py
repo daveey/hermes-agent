@@ -600,7 +600,8 @@ def test_unverified_completion_keeps_origin_and_other_sessions_finish_normally(k
     ann = [{"id": "s_origin"}, {"id": "s_other"}]
     ksa.annotate_kanban_activity(ann)
     assert [{k: v for k, v in row.items() if k != 'kanban_observed_at'} for row in ann] == [
-        {"id": "s_origin", "kanban_active": 13, "kanban_parked": 0}, {"id": "s_other"}]  # unverified = live, not parked
+        # [daveey] Unverified = still the chat's (counted active) but nobody works it: parked, so it paints waiting.
+        {"id": "s_origin", "kanban_active": 13, "kanban_parked": 13}, {"id": "s_other"}]
     cards = ksa.session_tasks(["s_origin"])
     assert len(cards) == 13
     assert all(c['status'] == 'unknown' and c['reported_status'] == terminal_status for c in cards)
