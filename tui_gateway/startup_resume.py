@@ -87,7 +87,8 @@ def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, 
     for row in pending_resumes(home, cfg):
         if paused_only and (read_turn_marker(row["home"], row["session_key"]) or {}).get("reason") != "core_update_pause":
             continue
-        params: dict[str, Any] = {"session_id": row["session_key"], "omit_messages": True}
+        # [daveey] No client is attached: run as the session's stored source, not this process's env default.
+        params: dict[str, Any] = {"session_id": row["session_key"], "omit_messages": True, "source_from_store": True}
         if row["profile"]:
             params["profile"] = row["profile"]
         try:

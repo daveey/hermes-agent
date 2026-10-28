@@ -16,9 +16,9 @@ CFG = {"desktop": {"auto_continue": {"enabled": True, "resume_on_startup": True,
 
 
 @pytest.fixture
-def recovery(tmp_path, monkeypatch):
+def recovery(tmp_path, monkeypatch, request):
     db = SessionDB(tmp_path / "state.db")
-    db.create_session("paused", source="desktop")
+    db.create_session("paused", source=getattr(request, "param", "desktop"))
     db.append_message("paused", "user", "finish the request")
     db.append_message("paused", "assistant", "completed step one")
     record_turn_start(tmp_path, "paused", "finish the request")
@@ -41,14 +41,15 @@ def recovery(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_wait_agent", lambda *a, **kw: None)
     monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a: None)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
-    calls, done = [], threading.Event()
+    calls, done, platforms = [], threading.Event(), []
     def submit(rid, sid, session, text, **kw):
         calls.append((text, kw))
+        platforms.append(server._deferred_build_agent_kwargs(session, None)["platform_override"])
         record_turn_start(tmp_path, "paused", "finish the request", pauses=1)
         done.set()
     monkeypatch.setattr(server, "_run_prompt_submit", submit)
     before = set(server._sessions)
-    yield types.SimpleNamespace(home=tmp_path, calls=calls, done=done)
+    yield types.SimpleNamespace(home=tmp_path, calls=calls, done=done, platforms=platforms)
     for sid in set(server._sessions) - before:
         server._sessions.pop(sid, None)
     db.close()
@@ -275,3 +276,84 @@ def test_requested_replacement_hands_off_and_the_successor_continues_once(recove
     resumed = sr.resume_interrupted_sessions(server._methods["session.resume"], recovery.home, CFG)
     assert resumed[0]["scheduled"] is True
     assert_continued(recovery)
+
+
+# ── A continuation runs on the session's STORED source, never the absent client's (t_01a183149a00c941) ──
+
+
+@pytest.fixture
+def tui_env(monkeypatch):
+    """A backend whose environment resolves the TUI surface: the fallback a client-less resume used to take."""
+    monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
+    assert server._resolve_session_platform() == "tui"
+
+
+def test_startup_resume_of_a_desktop_session_continues_as_desktop(recovery, tui_env):
+    resumed = sr.resume_interrupted_sessions(server._methods["session.resume"], recovery.home, CFG)
+    assert resumed[0]["scheduled"] is True
+    assert_continued(recovery)
+    assert recovery.platforms == ["desktop"]
+    # The record keeps the stored surface for the turns the user sends after opening it, too.
+    (session,) = [s for s in server._sessions.values() if s.get("session_key") == "paused"]
+    assert session["source"] == "desktop"
+
+
+@pytest.mark.parametrize("recovery", ["tui"], indirect=True)
+def test_startup_resume_of_a_tui_session_stays_tui(recovery, monkeypatch):
+    monkeypatch.setenv("HERMES_DESKTOP", "1")  # a Desktop backend: the env default would say desktop
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
+    resumed = sr.resume_interrupted_sessions(server._methods["session.resume"], recovery.home, CFG)
+    assert resumed[0]["scheduled"] is True
+    assert_continued(recovery)
+    assert recovery.platforms == ["tui"]
+
+
+@pytest.mark.parametrize("recovery", ["telegram"], indirect=True)
+def test_startup_resume_of_an_unknown_source_keeps_the_default(recovery, tui_env):
+    sr.resume_interrupted_sessions(server._methods["session.resume"], recovery.home, CFG)
+    assert_continued(recovery)
+    assert recovery.platforms == ["tui"]
+
+
+def _in_place_with_built_agent(recovery, monkeypatch, agent_platform):
+    """A live record whose agent was already built (it ran the paused turn) on ``agent_platform``, mounted by a
+    client that named no source (e.g. a bot-plugin resume), then continued by the in-place watcher."""
+    af.set_hold(recovery.home)
+    response = server.handle_request({"id": "resume", "method": "session.resume", "params": {
+        "session_id": "paused", "omit_messages": True}})
+    af.clear_hold(recovery.home)
+    sid = response["result"]["session_id"]
+    session = server._sessions[sid]
+    session["agent"] = types.SimpleNamespace(platform=agent_platform, _session_db=None)
+    session["agent_ready"].set()
+    rebuilds = []
+
+    def rebuild(rsid, rsession, **kw):
+        rebuilds.append(kw.get("platform_override"))
+        rsession["agent"] = types.SimpleNamespace(platform=kw.get("platform_override"), _session_db=None)
+        return rsession["agent"]
+    monkeypatch.setattr(server, "_rebuild_session_agent", rebuild)
+    monkeypatch.setattr(up, "_detect_skew", lambda: None)
+    clock = _VirtualClock()
+    monkeypatch.setattr(up, "time", types.SimpleNamespace(sleep=clock.sleep, monotonic=clock.monotonic,
+                                                          time=time.time))
+    watcher = up.start_in_place_watcher(sid, session, "paused")
+    watcher.join(10)
+    assert not watcher.is_alive()
+    assert_continued(recovery)
+    return session, rebuilds
+
+
+def test_in_place_continuation_of_a_desktop_session_runs_as_desktop(recovery, tui_env, monkeypatch):
+    session, rebuilds = _in_place_with_built_agent(recovery, monkeypatch, "tui")
+    assert recovery.platforms == ["desktop"]
+    assert rebuilds == ["desktop"]  # the tui-built agent is replaced before the continuation runs
+    assert session["agent"].platform == "desktop"
+
+
+@pytest.mark.parametrize("recovery", ["tui"], indirect=True)
+def test_in_place_continuation_of_a_tui_session_stays_tui(recovery, tui_env, monkeypatch):
+    _session, rebuilds = _in_place_with_built_agent(recovery, monkeypatch, "tui")
+    assert recovery.platforms == ["tui"]
+    assert rebuilds == []  # already right: no rebuild

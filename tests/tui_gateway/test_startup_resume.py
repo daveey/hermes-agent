@@ -54,8 +54,9 @@ def test_profiles_are_swept_with_profile_param(tmp_path):
         return {"result": {"auto_continue": {"attempt": 1}}}
 
     out = sr.resume_interrupted_sessions(resume, tmp_path, CFG)
-    assert calls == [{"session_id": "b", "omit_messages": True, "profile": "work"},
-                     {"session_id": "a", "omit_messages": True}]
+    # source_from_store: no client is attached, so the resume runs as the stored session source.
+    assert calls == [{"session_id": "b", "omit_messages": True, "source_from_store": True, "profile": "work"},
+                     {"session_id": "a", "omit_messages": True, "source_from_store": True}]
     assert all(r["ok"] and r["scheduled"] for r in out)
 
 
