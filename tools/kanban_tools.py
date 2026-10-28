@@ -19,6 +19,8 @@ from agent.redact import redact_sensitive_text
 from hermes_cli.goals import handoff_judge_goal, judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
+from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
+from tools.kanban_tools_placement import _placement_refused
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
@@ -232,6 +234,8 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                     return tool_error(str(e), code=e.code)
                 if isinstance(e, CapabilityMismatchError):
                     return tool_error(str(e), code=e.code, assignee=e.assignee, missing=e.missing)
+                if isinstance(getattr(e, "tool_error_fields", None), dict):  # e.g. RequiresDeclarationMissing [daveey]
+                    return tool_error(str(e), code=e.code, **e.tool_error_fields)
                 from hermes_cli.kanban_skill_check import UnknownSkillError
                 if isinstance(e, UnknownSkillError):  # the worker could never load it: refuse, don't create [daveey]
                     return tool_error(str(e), code=e.code, rejection="invalid_args", assignee=e.assignee,
@@ -1542,15 +1546,6 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
         state.close()
 
 
-def _placement_refused(pin: str, why: str) -> str:
-    """[daveey] A caller-pinned gateway cannot be honoured: say so instead of creating the card here."""
-    return tool_error(
-        f"placement={pin!r} was not honoured and no card was created: {why}. A pinned gateway is never "
-        "silently replaced by a local card. Use placement='local' (or omit it) to create the card on this "
-        "gateway, or create it on the target with `hermes-hub create-task <gateway> ...`.",
-        code="placement_unavailable", placement=pin, created=False)
-
-
 def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id
                   ) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
@@ -1733,6 +1728,8 @@ def _handle_create(args: dict, **kw) -> str:
                 pinned_machine = str(args.get("placement")).strip()
                 args = {**args, "placement": "local"}
         if origin_intent is None and origin is None:
+            check_tool_create(args.get("requires"), workspace_kind=workspace_kind, project_id=project_id,
+                              skills=skills, assignee=str(assignee))  # before placement routes it away [daveey]
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
             remote, marker_placement = _place_remote(
                 args, assignee=str(assignee), skills=skills, parents=parents,
@@ -1760,6 +1757,7 @@ def _handle_create(args: dict, **kw) -> str:
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
             requires=args.get("requires"), runs_on=runs_on,
+            require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             completion_contract=args.get("completion_contract"),

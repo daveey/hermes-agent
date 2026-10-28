@@ -614,8 +614,13 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "requires": {"type": "array", "items": {"type": "string",
                      "pattern": "^(terminal|file|git|host_repo|kanban|[a-z][a-z0-9-]*(:[A-Za-z0-9._@/+-]+)+)$"},
-                     "description": "Required configured capabilities, including skill prerequisites. "
-                     "Worktree/dir workspaces infer host repo access; git means terminal access, not an executable probe. "
+                     "description": "Required configured capabilities: terminal (shell), file (read/edit "
+                     "files), git, host_repo (a checkout on the dispatcher host), kanban. Declare what the "
+                     "work needs, or [] when it needs none: an omitted list with no dir/worktree/project "
+                     "workspace or capability-bearing skill behind it may be refused "
+                     "(requires_declaration_missing; nothing is created). "
+                     "Worktree/dir workspaces and pinned skills' declared toolsets add their needs even to []; "
+                     "git means terminal access, not an executable probe. "
                      "Gateway capabilities the plan needs (namespaced, e.g. 'aws:767406518141:ec2-describe', "
                      "'ssh:mini', 'github:daveey:admin', 'sudo:nopasswd') are placement needs: if this "
                      "gateway lacks one and another holds it, an owner card is opened there first and "

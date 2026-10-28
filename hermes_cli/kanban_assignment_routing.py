@@ -51,7 +51,7 @@ def classify(task, kind, reason, *, human_request=None):
     try:
         validate_assignment(task.assignee, requires=task.requires,
                             workspace_kind=task.workspace_kind,
-                            workspace_path=task.workspace_path)
+                            workspace_path=task.workspace_path, skills=task.skills)
     except CapabilityMismatchError as exc:
         # Unreadable policy is not evidence that the worker lacks tools.
         if exc.__cause__ is None:
@@ -75,7 +75,7 @@ def _supervisor(task):
                 continue
             required = validate_assignment(name, requires=[*(task.requires or []), 'kanban'],
                                            workspace_kind=task.workspace_kind,
-                                           workspace_path=task.workspace_path)
+                                           workspace_path=task.workspace_path, skills=task.skills)
         except (ValueError, OSError):
             continue
         return name, required
@@ -95,7 +95,7 @@ def validate_repair_completion(conn, task_id):
         raise AssignmentRoutingError('Assignment repair has no assigned original task')
     validate_assignment(original.assignee, requires=original.requires,
                         workspace_kind=original.workspace_kind,
-                        workspace_path=original.workspace_path)
+                        workspace_path=original.workspace_path, skills=original.skills)
     from hermes_cli.kanban_model_assignment import validate_model_assignment
     validate_model_assignment(original.assignee, original.model_override, original.provider_override)
 

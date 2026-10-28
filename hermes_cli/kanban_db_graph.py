@@ -89,7 +89,7 @@ def _validate_children_graph(children: list) -> None:
 
 def decompose_triage_task(
     conn: sqlite3.Connection, task_id: str, *, root_assignee: Optional[str], children: list[dict],
-    author: Optional[str] = None, auto_promote: bool = True,
+    author: Optional[str] = None, auto_promote: bool = True, require_declaration: bool = False,
 ) -> Optional[list[str]]:
     """Fan a triage task out into children and move the root to ``todo``; the root
     waits on every child and wakes (``ready``) when all are done.
@@ -98,6 +98,8 @@ def decompose_triage_task(
     ``parents`` (indices into this list), optional workspace overrides.
     Returns child ids in input order, or None when the root is missing / not
     in triage, or has already decomposed. Atomic: malformed entries abort fan-out.
+    ``require_declaration``: a child without a ``requires`` entry that no workspace backs raises
+    ``RequiresDeclarationMissing`` (the whole fan-out is refused; nothing is written). [daveey]
     """
     from hermes_cli.kanban_db import (
         _canonical_assignee, _link, _append_event, _insert_comment,
@@ -135,8 +137,9 @@ def decompose_triage_task(
             workspace_kind=root_row["workspace_kind"], workspace_path=root_row["workspace_path"],
         )
         child_ids = [
-            _insert_decomposed_child(conn, task_id, root_row, child, author, now)
-            for child in children
+            _insert_decomposed_child(conn, task_id, root_row, child, author, now,
+                                     require_declaration=require_declaration, index=idx)
+            for idx, child in enumerate(children)
         ]
         # Sibling edges within the decomposed graph.
         for idx, child in enumerate(children):
@@ -175,7 +178,7 @@ def decompose_triage_task(
 
 def _insert_decomposed_child(
     conn: sqlite3.Connection, root_id: str, root_row: sqlite3.Row, child: dict,
-    author: Optional[str], now: int,
+    author: Optional[str], now: int, *, require_declaration: bool = False, index: int = 0,
 ) -> str:
     """Insert one decomposed child as ``todo`` (linked under the root later so
     the dispatcher only ever sees a coherent graph); returns its id.
@@ -202,8 +205,11 @@ def _insert_decomposed_child(
         child_ws_path = None
     new_id = new_task_id(conn)
     import json
-    from hermes_cli.kanban_capabilities import validate_assignment
+    from hermes_cli.kanban_capabilities import check_declaration, validate_assignment
     assignee = _canonical_assignee(child.get("assignee"))
+    if require_declaration:
+        check_declaration(child.get("requires"), child_ws_kind, assignee=assignee,
+                          where=f"tasks[{index}].requires")
     required = validate_assignment(assignee, requires=child.get("requires"),
                                    workspace_kind=child_ws_kind, workspace_path=child_ws_path)
     body = child.get("body")

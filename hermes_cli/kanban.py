@@ -435,12 +435,15 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_pin_provider import PinProviderUnresolvedError
         from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
         from hermes_cli.kanban_skill_check import UnknownSkillError
+        from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
         try:
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
                 assignee=args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
                 or _cli_default_assignee(args),
                 session_id=session_id, requires=getattr(args, "requires", None),
+                # [daveey] Same declaration gate as the kanban_create tool, for agent/worker shells only.
+                require_declaration=(in_worker or _agent_invoked()) and declaration_required(),
                 created_by=args.created_by or _profile_author(),
                 workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
                 project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
@@ -461,7 +464,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             )
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)
-        except (CapabilityMismatchError, UnknownSkillError) as exc:
+        except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
         except (PinProviderUnresolvedError, ModelProviderMismatchError) as exc:
             return _err(f"kanban: {exc}", 2)

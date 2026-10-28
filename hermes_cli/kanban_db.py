@@ -1242,7 +1242,7 @@ def create_task(
     human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None,
     requires: Optional[list[str]] = None,
-    lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None,
+    lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1350,7 +1350,7 @@ def create_task(
 
     from hermes_cli.kanban_capabilities import validate_assignment
     required = validate_assignment(assignee, requires=requires, workspace_kind=workspace_kind,
-                                   workspace_path=workspace_path)
+                                   workspace_path=workspace_path, skills=skills_list, require_declaration=require_declaration)
     from hermes_cli.kanban_model_assignment import validate_model_assignment
     validate_model_assignment(assignee, model_override, provider_override)
     # [daveey] Bind a provider-less concrete pin now (or refuse), never late-bind it to config at spawn.
@@ -1558,7 +1558,7 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
         from hermes_cli.kanban_capabilities import validate_assignment
         task = get_task(conn, task_id)
         validate_assignment(profile, requires=task.requires, workspace_kind=task.workspace_kind,
-                            workspace_path=task.workspace_path)
+                            workspace_path=task.workspace_path, skills=task.skills)
         if row["assignee"] != profile:
             # The failure streak is per task/profile; a new profile starts fresh.
             conn.execute(
@@ -3587,7 +3587,7 @@ def request_review(
 
                 task = get_task(conn, task_id)
                 validate_assignment(reviewer, requires=task.requires,
-                                    workspace_kind=task.workspace_kind, workspace_path=task.workspace_path)
+                                    workspace_kind=task.workspace_kind, workspace_path=task.workspace_path, skills=task.skills)
             # The actor is the run that did the work. ``assignee`` is the actor
             # only while a worker holds the card; on a never-claimed card it is
             # whoever the operator assigned -- possibly the reviewer itself,
@@ -3712,7 +3712,7 @@ def request_changes(
 
         task = get_task(conn, task_id)
         validate_assignment(implementer, requires=task.requires,
-                            workspace_kind=task.workspace_kind, workspace_path=task.workspace_path)
+                            workspace_kind=task.workspace_kind, workspace_path=task.workspace_path, skills=task.skills)
 
         new_status = _landing_status_after_parents(conn, task_id)
         # consecutive_failures deliberately PRESERVED: a review transition is
@@ -3900,7 +3900,7 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
             from hermes_cli.kanban_capabilities import validate_assignment
 
             validate_assignment(implementer, requires=task.requires,
-                                workspace_kind=task.workspace_kind, workspace_path=task.workspace_path)
+                                workspace_kind=task.workspace_kind, workspace_path=task.workspace_path, skills=task.skills)
         _reclaim_dangling_run(
             conn, task_id, statuses=("review",), now=now,
             note="invariant recovery on review reopen",
@@ -4099,7 +4099,7 @@ def specify_triage_task(
         task = get_task(conn, task_id)
         validate_assignment(assignee or task.assignee, requires=task.requires,
                             workspace_kind=task.workspace_kind,
-                            workspace_path=task.workspace_path)
+                            workspace_path=task.workspace_path, skills=task.skills)
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
         changed_fields: list[str] = []

@@ -287,6 +287,7 @@ def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) ->
     children, reason = _clean_children(task_id, raw_tasks, routing)
     if reason:
         return DecomposeOutcome(task_id, False, reason)
+    from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
     try:
         with kbc.connect_closing() as conn:
             child_ids = decompose_triage_task(
@@ -296,7 +297,10 @@ def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) ->
                 children=children,
                 author=author,
                 auto_promote=routing.auto_promote,
+                require_declaration=declaration_required(),
             )
+    except RequiresDeclarationMissing as exc:
+        return DecomposeOutcome(task_id, False, f"{exc.code}: {exc}")
     except ValueError as exc:
         return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
     except Exception as exc:
@@ -330,26 +334,36 @@ def decompose_task(
             return DecomposeOutcome(task_id, False, refusal)
 
     routing = _load_routing(root_assignee=task.assignee)
-    raw, reason = _call_aux(
-        "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,
-        user=_USER_TEMPLATE.format(
-            **_task_prompt_fields(task),
-            roster=_format_roster(routing.roster),
-            default_assignee=routing.default_assignee,
-        ),
-        max_tokens=4000, timeout=timeout or 180, log=logger,
+    user_prompt = _USER_TEMPLATE.format(
+        **_task_prompt_fields(task),
+        roster=_format_roster(routing.roster),
+        default_assignee=routing.default_assignee,
     )
-    if raw is None:
-        return DecomposeOutcome(task_id, False, reason)
-
-    parsed = _extract_json_blob(raw, _FENCE_RE)
-    if parsed is None:
-        return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
-
     audit_author = author or _profile_author()
-    if not parsed.get("fanout"):
-        return _apply_single(task, parsed, routing, audit_author)
-    return _apply_fanout(task_id, parsed, routing, audit_author)
+    outcome = DecomposeOutcome(task_id, False, "decomposer made no attempt")
+    # One corrective re-ask when the graph was refused for an omitted ``requires``: the decomposer
+    # is the agent that can correct it, so the error goes back to it, never to a human. [daveey]
+    for attempt in range(2):
+        raw, reason = _call_aux(
+            "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,
+            user=user_prompt, max_tokens=4000, timeout=timeout or 180, log=logger,
+        )
+        if raw is None:
+            return DecomposeOutcome(task_id, False, reason)
+
+        parsed = _extract_json_blob(raw, _FENCE_RE)
+        if parsed is None:
+            return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
+
+        if not parsed.get("fanout"):
+            return _apply_single(task, parsed, routing, audit_author)
+        outcome = _apply_fanout(task_id, parsed, routing, audit_author)
+        if outcome.ok or attempt or not str(outcome.reason).startswith("requires_declaration_missing"):
+            return outcome
+        user_prompt = (f"{user_prompt}\n\nYour previous answer was refused and nothing was created: "
+                       f"{outcome.reason}\nReturn the complete JSON object again, with an explicit "
+                       "\"requires\" list on EVERY child ([] only when none apply).")
+    return outcome
 
 
 def list_triage_ids(*, tenant: Optional[str] = None, skip_awaiting_human: bool = False) -> list[str]:

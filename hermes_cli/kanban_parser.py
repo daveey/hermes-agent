@@ -20,6 +20,20 @@ def _arg(*flags: str, **kw):
     return (flags, kw)
 
 
+class _RequiresAction(argparse.Action):
+    """[daveey] ``--requires X`` (repeatable) and ``--no-requires`` (an explicit ``[]``) share the
+    ``requires`` dest, so omitted stays ``None``; giving both is a usage error (exit 2)."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        current = getattr(namespace, "requires", None)
+        if (option_string == "--no-requires" and current) or getattr(namespace, "no_requires", False):
+            parser.error("--no-requires and --requires are mutually exclusive")
+        if option_string == "--no-requires":
+            namespace.requires, namespace.no_requires = [], True
+        else:
+            namespace.requires = [*(current or []), values]
+
+
 def _cmd(name: str, args=(), *, children=None, **parser_kw):
     """``children`` = ``(dest, [specs])`` for a nested subparser group."""
     return (name, parser_kw, tuple(args), children)
@@ -212,10 +226,14 @@ _SPECS = [
                   "newlines or flag-like lines survive shell quoting. "
                   "Mutually exclusive with --body."),
         _arg("--assignee", help="Profile name to assign"),
-        _arg("--requires", action="append",
+        _arg("--requires", action=_RequiresAction,
              help="Required configured capability (repeatable): terminal, file, git, host_repo, or a "
                   "namespaced gateway capability such as aws:<acct>:<action> or ssh:<host> "
                   "(placed/pre-routed where it is held); repo work also infers requirements"),
+        _arg("--no-requires", dest="requires", action=_RequiresAction, nargs=0,
+             help="Declare that the card needs no configured capability (an explicit empty list); "
+                  "an agent-run create that omits both --requires and --no-requires may be refused "
+                  "with requires_declaration_missing. Workspace/skill-implied needs still apply."),
         _arg("--runs-on", dest="runs_on", default=None, metavar="LABELS",
              help="Machine labels the card needs, comma-separated (synced boards only): linux, "
                   "macos,xcode, machine:<name>; '' or '[]' = any machine; omit for the default placement"),

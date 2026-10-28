@@ -32,6 +32,153 @@ class CapabilityMismatchError(ValueError):
         super().__init__(message)
 
 
+class RequiresDeclarationMissing(ValueError):
+    """An agent-created card omitted ``requires`` and nothing structured implies its needs. [daveey]
+
+    Agent-correctable: the caller re-issues the same create with an explicit list. Nothing was
+    written, and this is never a human decision.
+    """
+
+    code = "requires_declaration_missing"
+
+    @property
+    def tool_error_fields(self) -> dict:
+        """Extra ``tool_error`` fields: agent-correctable, nothing created."""
+        return {"rejection": "invalid_args", "created": False, "field": self.where}
+
+    def __init__(self, *, where: str = "requires"):
+        self.where = where
+        super().__init__(
+            f"{where} was omitted, and nothing structured (a dir/worktree workspace, a project, or a "
+            "pinned skill's metadata.hermes.requires_toolsets) implies what the worker needs. No card "
+            "was created. Re-issue the same create with an explicit list of the configured capabilities "
+            "the work needs: terminal (shell commands), file (reading/editing files), git (git "
+            "operations), host_repo (a checkout on this dispatcher host), kanban (board tools). Use "
+            "[] only when the work needs none of them (e.g. pure reasoning or writing). Namespaced "
+            "gateway needs such as ssh:<host> may be added too."
+        )
+
+
+# Toolsets of the capability model, as named in ``toolsets.TOOLSETS`` and in skill frontmatter.
+_SKILL_TOOLSET_CAPABILITIES = ("terminal", "file", "kanban")
+
+
+def declaration_required() -> bool:
+    """``kanban.require_capability_declaration`` (default False = upstream). Never raises.
+
+    A board-wide policy: on when the active profile's config OR the board home's config
+    (``kanban_home()/config.yaml``, the default profile shared config writes) sets it, so
+    workers of other profiles creating children are gated like the default profile. [daveey]
+    """
+    def _flag(cfg) -> bool:
+        return bool(((cfg or {}).get("kanban") or {}).get("require_capability_declaration"))
+
+    try:
+        from hermes_cli.config import load_config_readonly
+        if _flag(load_config_readonly()):
+            return True
+    except Exception:  # health: allow BLE001 S110 -- a policy flag read never breaks create; default is off
+        pass
+    try:
+        from hermes_cli.kanban_db import kanban_home
+        from utils import load_yaml_file_readonly
+        path = kanban_home() / "config.yaml"
+        if path.is_file():
+            return _flag(load_yaml_file_readonly(path))
+    except Exception:  # health: allow BLE001 S110 -- an unreadable board config means the default (off)
+        pass
+    return False
+
+
+def _skill_frontmatter(name: str) -> dict | None:
+    """Frontmatter of skill *name* resolved the way ``skill_view`` resolves it in this home, or None."""
+    from agent.skill_utils import normalize_skill_lookup_name
+    from tools.skills_tool import _locate_skill, _read_skill_text, _safe_frontmatter, _skill_search_dirs
+
+    lookup = normalize_skill_lookup_name(name)
+    roots, _active = _skill_search_dirs()
+    error, _skill_dir, skill_md = _locate_skill(lookup, None, roots)
+    if error is not None or skill_md is None:
+        return None
+    frontmatter = _safe_frontmatter(content=_read_skill_text(skill_md))
+    return frontmatter if isinstance(frontmatter, dict) else None
+
+
+def skill_requirements(skills, assignee: str | None) -> list[str]:
+    """Capabilities pinned *skills* declare through their structured activation contract. [daveey]
+
+    Reads ``metadata.hermes.requires_toolsets`` / ``requires_tools`` (the fields that already gate
+    a skill's visibility, :func:`agent.skill_utils.extract_skill_conditions`) of each skill as the
+    assignee's worker would resolve it. Only toolsets of the capability model count (terminal,
+    file, kanban; a tool counts through the toolset that owns it in ``toolsets.TOOLSETS``).
+    Skill names and prose are never read as requirements. Plugin-qualified skills resolve in the
+    worker's own plugin registry and are skipped, as are skills this home cannot resolve (that
+    is :func:`hermes_cli.kanban_skill_check.check_task_skills`' refusal). Never raises.
+    """
+    names = [s for s in (skills or ()) if isinstance(s, str) and s.strip() and ":" not in s]
+    if not names:
+        return []
+    try:
+        from agent.skill_utils import extract_skill_conditions
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from hermes_cli.kanban_skill_check import _assignee_home
+        from toolsets import TOOLSETS
+
+        if not assignee:
+            from hermes_cli.kanban_db import _default_ready_assignee
+            assignee = _default_ready_assignee()
+        home = _assignee_home(assignee)
+        if home is None:
+            return []
+        owner = {tool: ts for ts in _SKILL_TOOLSET_CAPABILITIES
+                 for tool in (TOOLSETS.get(ts) or {}).get("tools", ())}
+        found: set[str] = set()
+        token = set_hermes_home_override(home)
+        try:
+            for name in names:
+                try:
+                    frontmatter = _skill_frontmatter(name)
+                except Exception:  # health: allow BLE001 -- an unparseable skill adds no needs
+                    frontmatter = None
+                if not frontmatter:
+                    continue
+                cond = extract_skill_conditions(frontmatter)
+                toolsets = cond.get("requires_toolsets") or []
+                tools = cond.get("requires_tools") or []
+                for ts in (toolsets if isinstance(toolsets, list) else [toolsets]):
+                    if ts in _SKILL_TOOLSET_CAPABILITIES:
+                        found.add(ts)
+                for tool in (tools if isinstance(tools, list) else [tools]):
+                    if isinstance(tool, str) and tool in owner:
+                        found.add(owner[tool])
+        finally:
+            reset_hermes_home_override(token)
+        return [c for c in _CAPABILITIES if c in found]
+    except Exception:  # health: allow BLE001 -- documented never-raises: skill needs only augment
+        return []
+
+
+def check_declaration(requires, workspace_kind: str, *, skills=None, assignee=None,
+                      where: str = "requires") -> None:
+    """Raise :class:`RequiresDeclarationMissing` when *requires* is omitted (None) and neither
+    the workspace nor pinned skills imply a profile capability. An explicit ``[]`` passes."""
+    if requires is not None:
+        return
+    if any(n in _CAPABILITIES for n in _required_capabilities(None, workspace_kind)):
+        return
+    if skill_requirements(skills, assignee):
+        return
+    raise RequiresDeclarationMissing(where=where)
+
+
+def check_tool_create(requires, *, workspace_kind, project_id, skills, assignee) -> None:
+    """kanban_create's gate, run BEFORE cross-gateway placement: an omitted ``requires`` is what
+    routes a card to another gateway, where it lands as an exempt courier create. [daveey]"""
+    if project_id or (workspace_kind or "scratch") != "scratch" or not declaration_required():
+        return
+    check_declaration(requires, "scratch", skills=skills, assignee=assignee)
+
+
 def _required_capabilities(requires, workspace_kind: str) -> list[str]:
     if workspace_kind not in _WORKSPACE_REQUIRES:
         raise ValueError(f"Unknown workspace kind: {workspace_kind!r}")
@@ -108,7 +255,7 @@ def _profile_capabilities(assignee: str) -> set[str]:
 
 def validate_assignment(
     assignee: str | None, *, requires=None, workspace_kind: str = "scratch",
-    workspace_path=None, skills=None,
+    workspace_path=None, skills=None, require_declaration: bool = False,
 ) -> list[str]:
     """Return canonical, deduplicated requirements or raise CapabilityMismatchError.
 
@@ -117,11 +264,22 @@ def validate_assignment(
     without reading a profile config. ``workspace_path`` is not probed: locality is
     established solely by backend policy, not a path existing on the dispatch host.
 
-    Skill-derived requirements are not implemented: there is no established skill
-    capability metadata contract. ``skills`` is reserved, and names/prose are never
-    guessed into requirements. Callers must supply explicit ``requires`` instead.
+    Skill-derived requirements come only from a pinned skill's structured activation metadata
+    (:func:`skill_requirements`); names/prose are never guessed into requirements. They augment
+    ``requires`` like workspace inference does, so ``requires=[]`` cannot disable them. [daveey]
+
+    ``require_declaration=True`` (agent create surfaces, when ``kanban.require_capability_declaration``
+    is on) first refuses an omitted ``requires`` (None) that nothing structured backs, with
+    :class:`RequiresDeclarationMissing`; an explicit ``[]`` passes. [daveey]
     """
+    if require_declaration:
+        check_declaration(requires, workspace_kind, skills=skills, assignee=assignee)
     required = _required_capabilities(requires, workspace_kind)
+    if skills:
+        extra = skill_requirements(skills, assignee)
+        if extra:
+            merged = set(required) | set(extra)
+            required = [n for n in _CAPABILITIES if n in merged] + [n for n in required if n not in _CAPABILITIES]
     if not any(name in _CAPABILITIES for name in required) or assignee is None:
         # Unassigned drafts cannot dispatch; assign_task validates before binding.
         return required

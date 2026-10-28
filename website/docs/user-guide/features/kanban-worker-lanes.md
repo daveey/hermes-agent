@@ -42,8 +42,27 @@ implies `git`. Explicit requirements augment these checks, never disable them.
 `git` means configured terminal access, not a successful binary or credential probe.
 `host_repo` means a local backend; remote/container mounts are not inferred from paths.
 Unknown or unreadable profiles fail closed for constrained tasks. Unconstrained scratch
-cards keep legacy behavior. Skills have no standard capability metadata contract:
-put their prerequisites in `requires`, rather than relying on skill-name heuristics.
+cards keep legacy behavior. Skills have no name-based capability contract: put their
+prerequisites in `requires`, rather than relying on skill-name heuristics. A pinned skill's
+structured `metadata.hermes.requires_toolsets` / `requires_tools` (the fields that already gate
+its visibility) do count: `terminal`, `file` and `kanban` toolsets, or a tool those toolsets own,
+are added to the card's requirements, even to an explicit `[]`.
+
+#### Declaring requirements (`kanban.require_capability_declaration`)
+
+With `kanban.require_capability_declaration: true` (fork setting; default `false`; read from the
+active profile or the board home's `config.yaml`, so other profiles' workers follow the board), an
+agent-created card must say what it needs. That covers the `kanban_create` tool (in a chat or a
+worker), `hermes kanban create` run from an agent's terminal/execute_code or a worker, and the
+decomposer's children. If `requires` is omitted and nothing structured implies a profile
+capability (no `dir`/`worktree` workspace or project with a repo path, no capability-bearing pinned skill), the
+create is refused before anything is written. The tool returns `code: requires_declaration_missing`
+and `created: false`; the CLI exits 2 with the same code. Re-issue the call with an explicit list,
+or `requires: []` (CLI `--no-requires`) for capability-free work. The decomposer is re-asked once with
+the error, and its fan-out stays atomic. A missing declaration is never a human block. Interactive
+human CLI use, the dashboard, courier (cross-gateway) envelopes and kernel-made cards keep the
+legacy behavior. Cards stored before the setting are not migrated or redispatched. Reassigning
+one re-runs the preflight against its stored requirements and pinned skills.
 
 A mismatched create or reassignment fails before mutation; the create tool returns
 `code: assignee_capability_mismatch` with the missing capabilities. Fix the target
