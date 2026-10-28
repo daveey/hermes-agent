@@ -38,7 +38,7 @@ def _config_slots() -> int | None:
     """
     path = os.environ.get("HERMES_TEST_SLOT_CONFIG") or os.path.join(os.path.expanduser("~"), ".hermes", "config.yaml")
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8-sig") as fh:
             text = fh.read()
     except OSError:
         return None
@@ -47,7 +47,7 @@ def _config_slots() -> int | None:
 
         value = ((yaml.safe_load(text) or {}).get("tests") or {}).get("host_slots")
     except Exception:  # no PyYAML in this interpreter, or a config it cannot parse: read the one key
-        m = re.search(r"^tests:[ \t]*\n(?:[ \t]+.*\n|[ \t]*\n)*?[ \t]+host_slots:[ \t]*(\d+)", text, re.M)
+        m = re.search(r"^tests:[ \t]*\n(?:[ \t]+.*\n|[ \t]*\n)*?[ \t]+host_slots:[ \t]*(\d+)", text, re.MULTILINE)
         value = m.group(1) if m else None
     try:
         return max(0, int(value)) if value is not None and not isinstance(value, bool) else None

@@ -18,8 +18,8 @@ from hermes_cli import kanban_capability_registry as reg
 from hermes_cli import kanban_placement as kp
 
 ROUTE = {"route": {"macbook": "hub"}, "creator_session": {"hub": "20261023_052109_5b3dee"}}
-ALIVE = lambda target: None  # noqa: E731
-NOWHERE = lambda need: {"need": need, "local": "absent", "holders": [], "stale": []}  # noqa: E731
+ALIVE = lambda target: None
+NOWHERE = lambda need: {"need": need, "local": "absent", "holders": [], "stale": []}
 
 
 def decide(args, **kw):
@@ -27,6 +27,7 @@ def decide(args, **kw):
     kw.setdefault("self_gw", "macbook")
     kw.setdefault("live", ALIVE)
     kw.setdefault("locate", NOWHERE)
+    kw.setdefault("carries", False)  # a hermes-hub client without create-task --option (< 1.8.0)
     return kp.decide(args, **kw)
 
 
@@ -61,6 +62,68 @@ def test_no_route_is_upstream_behaviour():
 def test_cards_hub_create_cannot_express_stay_local(extra, why):
     d = decide({"title": "Fix the flaky test", **extra})
     assert d["where"] == "local" and why in d["why"], d
+
+
+@pytest.mark.parametrize("extra", [
+    {"model": "claude-opus-5-5", "provider": "anthropic"},
+    {"goal_mode": True, "goal_max_turns": 5},
+    {"triage": True},
+    {"completion_contract": "daveey/hermes"},
+    {"skills": ["x"], "max_runtime_seconds": 3600, "priority": 2},
+])
+def test_options_a_new_client_carries_go_to_the_target(extra):
+    assert decide({"title": "Fix the flaky test", **extra}, carries=True)["where"] == "hub"
+
+
+@pytest.mark.parametrize("extra,why", [
+    ({"initial_status": "blocked"}, "initial_status"),
+    ({"human_request": {"action": "x"}}, "human_request"),
+    ({"tenant": "acme"}, "tenant"),
+    ({"goal_mode": True, "tenant": "acme"}, "tenant"),
+])
+def test_options_no_client_carries_stay_local(extra, why):
+    d = decide({"title": "Fix the flaky test", **extra}, carries=True)
+    assert d["where"] == "local" and why in d["why"], d
+
+
+def test_decide_probes_the_client_only_when_a_legacy_option_is_used(monkeypatch):
+    seen = []
+    monkeypatch.setattr(kp, "hub_carries_options", lambda cli: seen.append(cli) or True)
+    assert decide({"title": "Fix the flaky test"}, carries=None)["where"] == "hub"
+    assert seen == []
+    assert decide({"title": "Fix the flaky test", "goal_mode": True}, carries=None)["where"] == "hub"
+    assert len(seen) == 1
+
+
+def test_carried_options_are_json_typed_and_skip_defaults():
+    got = kp.carried_options({
+        "title": "t", "skills": ["x", ""], "goal_mode": "true", "triage": False, "priority": 0,
+        "max_runtime_seconds": "900", "goal_max_turns": 3, "model": "m", "provider": "p",
+        "completion_contract": "local-only", "idempotency_key": "k", "requires": "ssh:mini",
+        "initial_status": "blocked"})
+    assert got == {"skills": ["x"], "goal_mode": True, "max_runtime_seconds": 900, "goal_max_turns": 3,
+                   "model": "m", "provider": "p", "requires": ["ssh:mini"]}
+    assert kp.carried_options({"title": "t"}) == {}
+    with pytest.raises(ValueError):
+        kp.carried_options({"max_runtime_seconds": "2h"})
+
+
+def test_hub_carries_options_reads_create_task_help_and_caches(monkeypatch):
+    calls = []
+    out = {"text": "usage: ... [--id ID] [--option KEY=JSON]"}
+
+    def runner(argv):
+        calls.append(argv)
+        return 0, out["text"], ""
+    monkeypatch.setattr(kp, "hub_runner", runner)
+    monkeypatch.setattr(kp, "_help_cache", {})
+    assert kp.hub_carries_options("/x/hermes-hub") is True
+    assert calls == [["/x/hermes-hub", "create-task", "--help"]]
+    out["text"] = "usage: ... [--id ID]"
+    assert kp.hub_carries_options("/x/hermes-hub") is True and len(calls) == 1  # cached
+    assert kp.hub_carries_options("/y/hermes-hub") is False
+    monkeypatch.setattr(kp, "hub_runner", lambda argv: (127, "", "not found"))
+    assert kp.hub_carries_options("/z/hermes-hub") is False
 
 
 @pytest.mark.parametrize("text", [
@@ -182,9 +245,11 @@ def mac(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sdb.create_session("20261027_183000_abc123", source="desktop")
     sdb.close()
     calls: list[list[str]] = []
-    result = {"rc": 0}
+    result = {"rc": 0, "help": "usage: hermes-hub create-task [--id ID]"}  # pre-1.8.0 client by default
 
     def fake_hub(argv):
+        if argv[1:] == ["create-task", "--help"]:
+            return 0, result["help"], ""
         calls.append(argv)
         rid = argv[argv.index("--id") + 1]
         if result["rc"] in (0, 3):
@@ -197,6 +262,7 @@ def mac(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         return result["rc"], rid, "" if result["rc"] == 0 else "boom"
 
     monkeypatch.setattr(kp, "hub_runner", fake_hub)
+    monkeypatch.setattr(kp, "_help_cache", {})
     monkeypatch.setattr(kp, "config", lambda: {**ROUTE, "wait_seconds": 0})
     kb.init_db()
     yield {"hub": hub, "calls": calls, "result": result}
@@ -226,6 +292,61 @@ def test_chat_card_is_created_on_the_hub_bound_to_its_chat(mac):
     body = argv[argv.index("--body") + 1]
     assert body.startswith("Fix it and push.")
     assert "Skills to load first: github-pr-workflow." in body and "needs=[" in body
+
+
+NEW_HELP = "usage: hermes-hub create-task [--id ID] [--option KEY=JSON]"
+
+
+def _options(argv) -> dict:
+    out = {}
+    for i, a in enumerate(argv):
+        if a == "--option":
+            k, _, v = argv[i + 1].partition("=")
+            out[k] = json.loads(v)
+    return out
+
+
+def test_new_client_carries_skills_goal_mode_and_pins_as_fields(mac):
+    """MacBook drill shape: skills=['x'] + goal_mode=true lands on the hub with both fields set."""
+    from tools import kanban_tools as kt
+    mac["result"]["help"] = NEW_HELP
+    out = json.loads(kt._handle_create({
+        "title": "Regenerate the plugin index", "body": "Do it.", "skills": ["x"], "goal_mode": True,
+        "goal_max_turns": 6, "model": "claude-opus-5-5", "provider": "anthropic", "max_runtime_seconds": 1800,
+        "priority": 3, "session_id": "20261027_183000_abc123"}))
+    assert out["ok"] and out["placed"]["gateway"] == "hub", out
+    assert _local_count() == 0
+    argv = mac["calls"][0]
+    assert _options(argv) == {"skills": ["x"], "goal_mode": True, "goal_max_turns": 6, "model": "claude-opus-5-5",
+                              "provider": "anthropic", "max_runtime_seconds": 1800, "priority": 3}
+    body = argv[argv.index("--body") + 1]
+    assert "Skills to load first" not in body and "Runtime budget" not in body and "needs=[" in body
+
+
+def test_old_client_keeps_a_goal_card_local_and_skills_in_the_body(mac):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "goal_mode": True}))
+    assert out["ok"] and "placed" not in out and mac["calls"] == [] and _local_count() == 1
+    out = json.loads(kt._handle_create({"title": "Regenerate the docs index", "skills": ["x"],
+                                        "max_runtime_seconds": 600}))
+    argv = mac["calls"][0]
+    assert out["placed"]["gateway"] == "hub" and "--option" not in argv
+    body = argv[argv.index("--body") + 1]
+    assert "Skills to load first: x." in body and "Runtime budget asked by the creator: 600 s." in body
+
+
+def test_kanban_cli_create_takes_reasoning_effort(mac):
+    """hermes-hub maps a plain create's reasoning_effort onto `hermes kanban create --reasoning-effort`."""
+    import argparse
+    from hermes_cli import kanban as kcli
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    root = argparse.ArgumentParser()
+    kcli.build_parser(root.add_subparsers())
+    args = root.parse_args(["kanban", "create", "plain card", "--reasoning-effort", "high", "--json"])
+    assert kcli._cmd_create(args) == 0
+    with kbc.connect_closing() as conn:
+        assert [t.reasoning_effort for t in kb.list_tasks(conn)] == ["high"]
 
 
 def test_hub_task_id_is_returned_once_the_hub_applies_it(mac, monkeypatch):
@@ -273,6 +394,9 @@ def test_retry_reuses_the_request_id():
     assert kp.request_id("macbook", {"title": "t", "idempotency_key": "k"}, "s1") == \
         kp.request_id("macbook", {"title": "other", "idempotency_key": "k"}, "s1")
     assert len(a) <= 128 and reg.is_gateway_need("x:y")  # ids fit hermes-hub's alphabet/length
+    # Options join the key only when present, so a card without them keeps its pre-1.8.0 id.
+    assert kp.request_id("macbook", {"title": "t", "body": "b"}, "s1", {}) == a
+    assert kp.request_id("macbook", {"title": "t", "body": "b"}, "s1", {"goal_mode": True}) != a
 
 
 def test_hub_cli_resolves_without_the_login_shell_path(tmp_path, monkeypatch):
@@ -287,7 +411,7 @@ def test_hub_cli_resolves_without_the_login_shell_path(tmp_path, monkeypatch):
     assert reg.hub_cli_path() == str(exe)
     assert reg.hub_cli_path(str(tmp_path / "custom")) == str(tmp_path / "custom")  # configured wins
     from hermes_cli import kanban_capability_routing as kcr
-    monkeypatch.setattr(reg, "_config", lambda: {})
+    monkeypatch.setattr(reg, "_config", dict)
     assert kcr._hub_cli() == str(exe)
 
 

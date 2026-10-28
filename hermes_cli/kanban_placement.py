@@ -12,8 +12,11 @@ A card stays local when any of these holds:
 * the caller pinned it: ``placement="local"``;
 * it cannot be expressed remotely: parents (dependencies are local links), a project, a ``dir`` or
   ``worktree`` workspace, a non-default board or assignee, courier (origin) creation, or creation
-  options ``hermes-hub create-task`` cannot carry (model/provider pin, goal mode, triage, a non-local
-  completion contract, an initial status, a human request);
+  options ``hermes-hub create-task`` cannot carry (an initial status, a human request, a tenant). A
+  hermes-hub client with ``create-task --option`` (1.8.0+) carries skills, the runtime budget, priority,
+  model/provider pins, goal mode, triage, the completion contract and the rest of
+  :data:`CARRIED_OPTIONS`; with an older client a model/provider pin, goal mode, triage or a non-local
+  completion contract keeps the card local, and skills and the runtime budget ride in the body text;
 * it declares a ``requires`` capability this gateway holds and the target does not;
 * its title, body or skills match a local marker (``kanban.placement.local_markers`` replaces the
   built-in list, ``extra_local_markers`` extends it): Chrome, Keychain, TCC, Apple apps, launchd,
@@ -58,8 +61,15 @@ DEFAULT_LOCAL_SKILL_MARKERS = (
     r"^local-chrome-remote-debugging$", r"^computer-use$", r"^babybear", r"^bb-", r"^ios-",
 )
 # kanban_create options hermes-hub create-task cannot carry: a card using them stays local.
-UNCARRIED_OPTIONS = ("model", "provider", "goal_mode", "triage", "initial_status", "human_request",
-                     "workspace_path", "project", "project_id", "tenant")
+UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "project", "project_id", "tenant")
+# kanban_create options a hermes-hub client with `create-task --option KEY=JSON` carries to the card.
+# (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
+CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
+                   "goal_max_turns", "completion_contract", "idempotency_key", "requires", "triage")
+# Of those, the ones an older client (no --option) cannot express at all: the card stays local.
+LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage")
+HELP_CACHE_SECONDS = 600
+_help_cache: dict = {}
 
 
 class _Cfg:
@@ -82,7 +92,7 @@ class _Cfg:
         out = []
         for p in pats:
             try:
-                out.append(re.compile(str(p), re.I))
+                out.append(re.compile(str(p), re.IGNORECASE))
             except re.error:
                 continue
         return out
@@ -90,7 +100,7 @@ class _Cfg:
     def skill_markers(self) -> list[re.Pattern]:
         base = self.raw.get("local_skill_markers")
         pats = list(base) if isinstance(base, list) else list(DEFAULT_LOCAL_SKILL_MARKERS)
-        return [re.compile(str(p), re.I) for p in pats]
+        return [re.compile(str(p), re.IGNORECASE) for p in pats]
 
     def creator_session(self, target: str) -> str:
         v = self.raw.get("creator_session")
@@ -166,9 +176,74 @@ def _hub_meta() -> dict:
         db.close()
 
 
+def hub_carries_options(hub_cli: str) -> bool:
+    """True when ``hermes-hub create-task --help`` lists ``--option`` (client 1.8.0+). Cached briefly:
+    the client self-updates hourly."""
+    hit = _help_cache.get(hub_cli)
+    if hit and time.monotonic() - hit[0] < HELP_CACHE_SECONDS:
+        return hit[1]
+    rc, out, _ = hub_runner([hub_cli, "create-task", "--help"])
+    ok = rc == 0 and "--option" in out
+    _help_cache[hub_cli] = (time.monotonic(), ok)
+    return ok
+
+
+def _hub_cli(c: _Cfg) -> str:
+    return reg.hub_cli_path(c.raw.get("hub_cli"))
+
+
+def _bool(v) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
+def carried_options(args: dict) -> dict:
+    """The set :data:`CARRIED_OPTIONS` of a kanban_create call, as JSON types hermes-hub accepts.
+    Defaults (False, 0, local-only, empty) are left out. Raises on a value kanban_create would refuse.
+    ``idempotency_key`` is not sent: it already fixes the request id, which the hub dedupes on."""
+    out: dict = {}
+    for k in CARRIED_OPTIONS:
+        v = args.get(k)
+        if k == "idempotency_key":
+            continue
+        if v in (None, "", [], False):
+            continue
+        if k in ("goal_mode", "triage"):
+            if _bool(v):
+                out[k] = True
+        elif k in ("max_runtime_seconds", "priority", "goal_max_turns"):
+            n = int(v)
+            if n or k != "priority":
+                out[k] = n
+        elif k in ("skills", "requires"):
+            vals = [str(x) for x in ([v] if isinstance(v, str) else v) if str(x).strip()]
+            if vals:
+                out[k] = vals
+        elif k == "completion_contract" and str(v).strip() == "local-only":
+            continue
+        else:
+            out[k] = str(v)
+    return out
+
+
+def _uncarried(args: dict, c: _Cfg, carries: Optional[bool]) -> list[str]:
+    """The options of ``args`` hermes-hub cannot carry. ``carries`` None probes the client, only
+    when an option an older client lacks is actually used."""
+    used = [k for k in UNCARRIED_OPTIONS if args.get(k) not in (None, "", False, [])]
+    legacy = [k for k in LEGACY_UNCARRIED if args.get(k) not in (None, "", False, [])]
+    if (args.get("completion_contract") or "local-only") != "local-only":
+        legacy.append("completion_contract")
+    if used or not legacy:
+        return used
+    if carries is None:
+        carries = hub_carries_options(_hub_cli(c))
+    return [] if carries else legacy
+
+
 def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
            self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
-           locate: Optional[Callable[[str], dict]] = None) -> dict:
+           locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None) -> dict:
     """``{"where": "local"|<gateway>, "why": str}`` for a ``kanban_create`` call. Never raises."""
     try:
         c = _Cfg(config() if cfg is None else cfg)
@@ -196,9 +271,7 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
         assignee = args.get("assignee") or "default"
         if assignee not in c.assignees():
             return {"where": "local", "why": f"assignee {assignee!r} is not placed remotely"}
-        used = [k for k in UNCARRIED_OPTIONS if args.get(k) not in (None, "", False, [])]
-        if (args.get("completion_contract") or "local-only") != "local-only":
-            used.append("completion_contract")
+        used = _uncarried(args, c, carries)
         if used:
             return {"where": "local", "why": f"uses {', '.join(used)} (not carried by hermes-hub create-task)"}
         needs = [r for r in (args.get("requires") or []) if reg.is_gateway_need(r)]
@@ -236,21 +309,25 @@ def _default_runner(argv: list[str]) -> tuple[int, str, str]:
 hub_runner: Callable[[list[str]], tuple[int, str, str]] = _default_runner
 
 
-def request_id(self_gw: str, args: dict, origin_session: str) -> str:
-    """Stable per (gateway, idempotency key | title+body+origin): exact retries reuse it."""
-    key = args.get("idempotency_key") or json.dumps(
-        [args.get("title"), args.get("body"), args.get("assignee"), origin_session, args.get("skills")],
-        sort_keys=True)
+def request_id(self_gw: str, args: dict, origin_session: str, options: Optional[dict] = None) -> str:
+    """Stable per (gateway, idempotency key | title+body+origin+options): exact retries reuse it."""
+    fields = [args.get("title"), args.get("body"), args.get("assignee"), origin_session, args.get("skills")]
+    extra = {k: v for k, v in (options or {}).items() if k not in ("skills", "idempotency_key")}
+    if extra:  # only then, so a card without options keeps the id older clients computed
+        fields.append(extra)
+    key = args.get("idempotency_key") or json.dumps(fields, sort_keys=True)
     return f"placement:{self_gw}:{hashlib.sha256(str(key).encode()).hexdigest()[:24]}"
 
 
-def remote_body(args: dict, *, self_gw: str, target: str) -> str:
+def remote_body(args: dict, *, self_gw: str, target: str, carried: bool = False) -> str:
+    """The body sent to ``target``. ``carried`` (the client passes options as fields) drops the
+    body-text fallback for skills and the runtime budget."""
     body = (args.get("body") or "").rstrip()
     extra = []
-    skills = args.get("skills") or []
+    skills = [] if carried else args.get("skills") or []
     if skills:
         extra.append(f"Skills to load first: {', '.join(str(s) for s in skills)}.")
-    if args.get("max_runtime_seconds"):
+    if args.get("max_runtime_seconds") and not carried:
         extra.append(f"Runtime budget asked by the creator: {int(args['max_runtime_seconds'])} s.")
     extra.append(
         f"Placed on {target} by {self_gw}'s default placement rule (kanban.placement): nothing in the card "
@@ -266,10 +343,14 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
                   self_gw: str, cfg: Optional[dict] = None, hub_cli: str = "hermes-hub") -> dict:
     """Queue the card on ``target``. Returns ``{ok, request_id, rc, ...}``; ok False means create locally."""
     c = _Cfg(config() if cfg is None else cfg)
-    rid = request_id(self_gw, args, origin_session or "")
+    carried = hub_carries_options(hub_cli)
+    options = carried_options(args) if carried else {}
+    rid = request_id(self_gw, args, origin_session or "", options)
     argv = [hub_cli, "create-task", target, str(args.get("title") or "untitled").strip()[:300],
-            "--body", remote_body(args, self_gw=self_gw, target=target),
+            "--body", remote_body(args, self_gw=self_gw, target=target, carried=carried),
             "--assignee", str(args.get("assignee") or "default"), "--id", rid]
+    for k, v in options.items():
+        argv += ["--option", f"{k}={json.dumps(v)}"]
     if origin_session:
         argv += ["--origin-session", origin_session, "--origin-profile", origin_profile,
                  "--creator-session", c.creator_session(target)]

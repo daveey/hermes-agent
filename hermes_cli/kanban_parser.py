@@ -267,6 +267,8 @@ _SPECS = [
                   "review). Best for open-ended cards one shot rarely finishes."),
         _arg("--goal-max-turns", type=int, metavar="N", dest="goal_max_turns",
              help="Turn budget for --goal workers (default 20). Ignored without --goal."),
+        _arg("--reasoning-effort", metavar="EFFORT", dest="reasoning_effort",
+             help="Worker reasoning effort (e.g. low, medium, high, none); default: the profile's."),
         _arg("--initial-status", choices=sorted(kb.VALID_INITIAL_STATUSES), default="running",
              help="Initial card status. Use 'blocked' for cards "
                   "that must stay parked. Human asks additionally require explicit --human-request evidence."),

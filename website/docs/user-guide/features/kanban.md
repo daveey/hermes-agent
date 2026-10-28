@@ -1107,6 +1107,7 @@ hermes kanban create "<title>" [--body ...] [--assignee <profile>]
                                 [--max-runtime 30m|2h|1d|<seconds>]
                                 [--max-retries N]
                                 [--goal] [--goal-max-turns N]
+                                [--reasoning-effort low|medium|high|none]
                                 [--skill <name>]...
                                 [--json]
 hermes kanban list [--mine] [--assignee P] [--status S] [--tenant T] [--archived]
