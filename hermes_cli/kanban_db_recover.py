@@ -13,8 +13,9 @@ those connections and corrupted the next copy. This module is the supported path
    opened nothing has nothing to lose. The child also re-checks the file from a clean process:
    a caller stranded on deleted ``-wal``/``-shm`` files sees "corruption" that is not on disk,
    and the child then reports ``healthy`` instead of rebuilding a good board.
-2. **One recovery at a time.** ``<db>.recover.lock`` (non-blocking flock). A second recovery,
-   automatic or ``hermes kanban recover``, exits ``busy`` instead of racing the first.
+2. **One recovery at a time.** ``<db>.recovery.lock`` (non-blocking flock; the same lock the
+   sqlite-live-guard mod's swap_db.py takes). A second recovery, automatic or ``hermes kanban
+   recover``, or a manual swap, exits ``busy`` instead of racing the first.
 3. **Snapshot through SQLite.** The damaged board is copied with the backup API (consistent with
    its WAL), kept as ``<db>.recover-<ts>.damaged.bak``, and salvaged from that copy: every table
    is read forward and backward by rowid and through each of its indexes, so only rows on pages
@@ -113,7 +114,7 @@ class RecoveryResult:
 # --- locking ----------------------------------------------------------------------------------
 
 def _lock_path(db_path: Path) -> Path:
-    return db_path.with_name(db_path.name + ".recover.lock")
+    return db_path.with_name(db_path.name + ".recovery.lock")  # shared with sqlite-live-guard swap_db.py
 
 
 @contextlib.contextmanager

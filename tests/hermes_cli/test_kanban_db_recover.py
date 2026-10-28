@@ -254,6 +254,20 @@ def test_a_second_recovery_of_the_same_board_is_refused_busy(home):
     assert path.read_bytes() == digest, "a refused recovery writes nothing"
 
 
+def test_a_manual_swap_holding_the_shared_lock_makes_recovery_busy(home):
+    """sqlite-live-guard's swap_db.py flocks ``<db>.recovery.lock``: recovery must not run under it."""
+    import fcntl
+    path = home / "kanban.db"
+    _make_board(path)
+    _damage_table(path, "task_events")
+    digest = path.read_bytes()
+    with open(path.with_name(path.name + ".recovery.lock"), "a+") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = rec.recover(path, file_card=False, reconcile_sync=False)
+    assert result.status == "busy"
+    assert path.read_bytes() == digest
+
+
 def test_a_board_a_clean_process_reads_fine_is_left_untouched(home):
     """A caller stranded on deleted -wal/-shm files sees "corruption" that is not on disk: the child re-checks."""
     path = home / "kanban.db"
