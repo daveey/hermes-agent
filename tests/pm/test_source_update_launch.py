@@ -369,7 +369,15 @@ def test_real_bootstrap_reexecs_before_app_imports(source_launch, tmp_path, isol
     repository = Path(__file__).resolve().parents[2]
     # Copy the real bootstrap so it owns this disposable source install. The
     # other modules remain real checkout imports; only acquisition is injected.
-    shutil.copy2(repository / "hermes_bootstrap.py", root / "hermes_bootstrap.py")
+    # A relaunch loads the bootstrap before the entry (relaunch_command), and this
+    # root has no pm/ of its own, so the copy imports the test tools itself.
+    bootstrap = (repository / "hermes_bootstrap.py").read_text(encoding="utf-8")
+    future = "from __future__ import annotations\n"
+    assert future in bootstrap
+    (root / "hermes_bootstrap.py").write_text(
+        bootstrap.replace(future, future + "import launch_test_tools  # noqa: E402,F401\n", 1),
+        encoding="utf-8",
+    )
     (root / "launch_test_tools.py").write_text(
         "import sys\n"
         "from pathlib import Path\n"
