@@ -28,7 +28,10 @@ refused too
 (``kanban_wait_info``) already reports as a stall; on 10-27 a card waited 9 h on a KeepAlive browser
 nobody would stop. Short continues (<= 2 h, pacing a job) are exempt. Anything else is recorded
 as an inferred ``clock`` / ``external`` wait so the checker can tell legacy guesses from declared
-producers. The third park in a row on one premise is not parked again: it becomes one
+producers. Inference never names the card's own children or descendants: a parent parked on its
+child cycles (the child stays todo until the parent finishes, and the checker walks that edge
+back). A declared producer or wake probe that would cycle the same way is refused at schedule
+time. The third park in a row on one premise is not parked again: it becomes one
 agent-owned owner card for a supervisor and the card waits on it (``repark_escalated``). A park
 on the same opaque probe counts as the same premise however its reason is worded.
 """
@@ -201,6 +204,96 @@ def _latest_park(conn: sqlite3.Connection, task_id: str) -> tuple[Optional[dict]
     return payload.get("awaiting"), str(payload.get("reason") or "")
 
 
+def _descendant_ids(conn: sqlite3.Connection, task_id: str) -> set[str]:
+    """Child ids reachable from ``task_id`` (the card cannot wait on these)."""
+    seen: set[str] = set()
+    stack = [task_id]
+    while stack:
+        node = stack.pop()
+        for (cid,) in conn.execute(
+                "SELECT child_id FROM task_links WHERE parent_id = ?", (node,)):
+            if cid and cid not in seen:
+                seen.add(cid)
+                stack.append(cid)
+    return seen
+
+
+def _scheduled_probe_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    """Task ids named by the latest park's wake probe, if that park is still the wait."""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued') "
+        "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    if not row:
+        return []
+    try:
+        payload = json.loads(row[0] or "{}")
+    except ValueError:
+        return []
+    probe = payload.get("wake_check")
+    if isinstance(probe, dict):
+        probe = probe.get("cmd") or ""
+    return _TASK_ID.findall(probe or "")
+
+
+def dependency_cycle_reason(conn: sqlite3.Connection, task_id: str, ref: str) -> Optional[str]:
+    """Why parking ``task_id`` on ``ref`` would cycle, or None.
+
+    Own children and deeper descendants always cycle: they stay gated until this card
+    finishes, and the idle checker walks that parent edge back. A card that is not a
+    descendant still cycles when the edges the checker walks (todo parents, a scheduled
+    card-await, a wake probe's task ids) lead back here.
+    """
+    if not ref or not _TASK_ID.fullmatch(str(ref)):
+        return None
+    if ref == task_id:
+        return f"{task_id} cannot wait on itself"
+    if ref in _descendant_ids(conn, task_id):
+        return (f"{ref} is a descendant of {task_id}; a card must not wait on its own child "
+                "(the child cannot finish until this card does, so the wait never ends)")
+    seen: set[str] = set()
+    stack = [ref]
+    while stack and len(seen) < 32:
+        node = stack.pop()
+        if node == task_id:
+            return f"waiting on {ref} cycles back to {task_id}"
+        if not node or node in seen:
+            continue
+        seen.add(node)
+        row = conn.execute("SELECT status FROM tasks WHERE id = ?", (node,)).fetchone()
+        if row is None:
+            continue
+        status = row[0]
+        if status == "todo":
+            stack.extend(parent for (parent,) in conn.execute(
+                "SELECT parent_id FROM task_links WHERE child_id = ?", (node,)))
+        elif status == "scheduled":
+            awaiting, _reason = _latest_park(conn, node)
+            if isinstance(awaiting, dict) and awaiting.get("kind") == "card" and not awaiting.get("gateway"):
+                pref = awaiting.get("ref") or ""
+                if _TASK_ID.fullmatch(pref):
+                    stack.append(pref)
+            stack.extend(_scheduled_probe_ids(conn, node))
+    return None
+
+
+def park_cycle_error(conn: sqlite3.Connection, task_id: str, record: Optional[dict],
+                     wake_check: Optional[str]) -> Optional[str]:
+    """Refusal text when this park's producer or wake probe would cycle, else None."""
+    refs: list[str] = []
+    if isinstance(record, dict) and record.get("kind") == "card" and not record.get("gateway"):
+        ref = record.get("ref") or ""
+        if _TASK_ID.fullmatch(ref):
+            refs.append(ref)
+    refs.extend(_TASK_ID.findall(wake_check or ""))
+    for ref in dict.fromkeys(refs):
+        if ref == task_id:
+            continue
+        why = dependency_cycle_reason(conn, task_id, ref)
+        if why:
+            return why
+    return None
+
+
 def card_orphan_reason(conn: sqlite3.Connection, task_id: str, *, _depth: int = 0) -> Optional[str]:
     """Why a local card cannot produce anything (None when it is a live producer)."""
     row = conn.execute("SELECT status, human_request, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -261,6 +354,10 @@ def _check_card(conn: sqlite3.Connection, task_id: str, awaiting: dict, text: st
     if ref == task_id:
         raise AwaitingError(INVALID_AWAITING, "a card cannot wait on itself")
     gateway = awaiting.get("gateway")
+    if not gateway:
+        why = dependency_cycle_reason(conn, task_id, ref)
+        if why:
+            raise AwaitingError(INVALID_AWAITING, why)
     if gateway:
         seen = _REMOTE_CONFIRMED.get((gateway, ref))
         if not seen or time.monotonic() - seen[0] > REMOTE_CONFIRM_TTL:
@@ -373,7 +470,9 @@ def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Op
 
 def _live_card_ref(conn: sqlite3.Connection, task_id: str, text: str) -> Optional[str]:
     for ref in dict.fromkeys(_TASK_ID.findall(text or "")):
-        if ref != task_id and card_orphan_reason(conn, ref) is None:
+        if ref == task_id or dependency_cycle_reason(conn, task_id, ref):
+            continue  # self, own child/descendant, or a card that already waits back
+        if card_orphan_reason(conn, ref) is None:
             return ref
     return None
 

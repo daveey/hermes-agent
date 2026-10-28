@@ -559,3 +559,92 @@ def test_worker_cli_park_on_its_own_card_is_refused_but_an_operator_park_is_not(
         assert kb.schedule_task(conn, other, reason=CHROME_PROBE_REASON, wake_check=CHROME_PROBE)
         rec = _park_payload(conn, other)["awaiting"]
         assert rec["kind"] == "external" and rec["inferred"] is True
+
+
+# -- own children are not producers (t_01a180e1189d7ec3) ------------------------------------
+
+def _linked_child(conn, parent: str) -> str:
+    return kb.create_task(conn, title="child", assignee="worker", parents=[parent])
+
+
+def test_continue_does_not_infer_awaiting_from_own_child(kanban_home, monkeypatch) -> None:
+    """10-27: a continue whose checkpoint named its own child inferred awaiting=card on that
+    child. The child stays todo until the parent finishes, so the wait cycles."""
+    with kbc.connect_closing() as conn:
+        parent = _running(conn)
+        child = _linked_child(conn, parent)
+        grand = _linked_child(conn, child)
+        _as_worker(monkeypatch, conn, parent)
+        out = _tool("continue", {"checkpoint": f"child {child} still building; grandchild {grand} queued",
+                                 "resume_after_seconds": 300})
+        assert out.get("status") == "scheduled", out
+        awaiting = _park_payload(conn, parent)["awaiting"]
+        assert awaiting == {"kind": "clock", "inferred": True}, awaiting
+        assert kb.get_task(conn, child).status == "todo"
+
+
+def test_long_continue_on_a_descendant_does_not_install_a_child_probe(kanban_home, monkeypatch) -> None:
+    """A long continue used to infer the child and install `wait-check task <child>` as the probe,
+    which is the edge session-idle walks into a cycle. clock_only parks as a clock instead."""
+    with kbc.connect_closing() as conn:
+        parent = _running(conn)
+        child = _linked_child(conn, parent)
+        _as_worker(monkeypatch, conn, parent)
+        out = _tool("continue", {"checkpoint": f"waiting on child {child} to finish the build",
+                                 "resume_after_seconds": 20000, "clock_only": True})
+        assert out.get("status") == "scheduled", out
+        payload = _park_payload(conn, parent)
+        assert payload["awaiting"]["kind"] == "clock"
+        assert child not in json.dumps(payload.get("wake_check") or "")
+
+
+def test_continue_still_infers_an_unrelated_live_card(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        parent = _running(conn)
+        child = _linked_child(conn, parent)
+        other = _running(conn)
+        _as_worker(monkeypatch, conn, parent)
+        out = _tool("continue", {"checkpoint": f"child {child} is todo; producer is {other}",
+                                 "resume_after_seconds": 300})
+        assert out.get("status") == "scheduled", out
+        awaiting = _park_payload(conn, parent)["awaiting"]
+        assert awaiting == {"kind": "card", "ref": other, "inferred": True}, awaiting
+
+
+def test_declared_wait_on_a_descendant_is_refused(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        parent = _running(conn)
+        child = _linked_child(conn, parent)
+        _as_worker(monkeypatch, conn, parent)
+        out = _tool("continue", {"checkpoint": "park on the child", "resume_after_seconds": 300,
+                                 "awaiting": {"kind": "card", "ref": child}})
+        assert out.get("rejection") == kaw.INVALID_AWAITING or out.get("code") == kaw.INVALID_AWAITING, out
+        assert "descendant" in (out.get("error") or "")
+        assert kb.get_task(conn, parent).status == "running"
+
+
+def test_wake_probe_naming_a_descendant_is_refused(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        parent = _running(conn)
+        child = _linked_child(conn, parent)
+        _as_worker(monkeypatch, conn, parent)
+        out = _tool("schedule", {"reason": "soak", "clock_only": True,
+                                 "wake_check": f"hermes kanban wait-check task {child}",
+                                 "awaiting": {"kind": "clock", "why": "24h soak"}})
+        assert out.get("rejection") == kaw.INVALID_AWAITING or out.get("code") == kaw.INVALID_AWAITING, out
+        assert "descendant" in (out.get("error") or "")
+        assert kb.get_task(conn, parent).status == "running"
+
+
+def test_mutual_card_wait_is_refused(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        a, b = _running(conn), _running(conn)
+        _as_worker(monkeypatch, conn, b)
+        out = _tool("schedule", {"reason": f"waiting on {a}", "awaiting": {"kind": "card", "ref": a}})
+        assert out.get("status") == "scheduled", out
+        _as_worker(monkeypatch, conn, a)
+        out = _tool("schedule", {"reason": f"waiting on {b}", "awaiting": {"kind": "card", "ref": b}})
+        assert (out.get("rejection") == kaw.INVALID_AWAITING or out.get("code") == kaw.INVALID_AWAITING), out
+        assert "cycles" in (out.get("error") or "")
+        assert kb.get_task(conn, a).status == "running"
+

@@ -36,6 +36,9 @@ def schedule_task(
             return kaw.escalate(conn, task_id, record=rp.record, reason=reason,
                                 expected_run_id=expected_run_id) is not None
         wake_check = wake_check or kaw.card_probe(record)
+        why = kaw.park_cycle_error(conn, task_id, record, wake_check)
+        if why:
+            raise kaw.AwaitingError(kaw.INVALID_AWAITING, why)
         payload = scheduled_payload(reason)
         wake_check, check_every = kwc.validate_park(
             wake_at=payload["wake_at"], wake_check=wake_check,
