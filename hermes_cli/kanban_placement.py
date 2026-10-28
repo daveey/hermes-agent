@@ -17,13 +17,20 @@ A card stays local when any of these holds:
   creates the card on the target (parent handoffs in the body, same origin chat) and parks the local
   card until the target's card is done, so local grandchildren still wait for the real work;
 * it cannot be expressed remotely: a project, a ``dir`` or
-  ``worktree`` workspace, a non-default board or assignee, courier (origin) creation, or creation
+  ``worktree`` workspace, a non-default board, an assignee the target has no profile of (its
+  hermes-hub ``gateway`` record lists them; ``assignees`` names extra always-placed ones), courier
+  (origin) creation, or creation
   options ``hermes-hub create-task`` cannot carry (an initial status, a human request, a tenant). A
   hermes-hub client with ``create-task --option`` (1.8.0+) carries skills, the runtime budget, priority,
   model/provider pins, goal mode, triage, the completion contract and the rest of
   :data:`CARRIED_OPTIONS`; with an older client a model/provider pin, goal mode, triage or a non-local
   completion contract keeps the card local, and skills and the runtime budget ride in the body text;
 * it declares a ``requires`` capability this gateway holds and the target does not;
+* it ``requires`` a profile tool the target cannot satisfy: anything outside
+  ``carried_requires`` (default terminal, file, git, kanban; so host_repo and unknown names), a
+  tool the target's profile lacks when the target publishes ``profile-tools:<profile>:<tool>``
+  in its capability record, or any profile tool with a hermes-hub client that cannot carry
+  ``requires`` as a field;
 * its title, body or skills match a local marker (``kanban.placement.local_markers`` replaces the
   built-in list, ``extra_local_markers`` extends it): Chrome, Keychain, TCC, Apple apps, launchd,
   the Desktop app, a Desktop DOM/CDP readback, this Mac's Keychain... A bare host name (MacBook,
@@ -68,6 +75,14 @@ HUB_TIMEOUT = 60
 DEFAULT_HUB_LIVE_SECONDS = 600
 DEFAULT_CREATOR_SESSION = "kanban-placement"
 
+# "macOS" as a word, not a CI runner label or file/skill name (macos-latest, macos-release,
+# hermes-state-macos.yml): a GitHub-hosted macOS job runs on GitHub, not on this Mac.
+MACOS_MARKER = r"(?<![\w/.-])mac ?os(?![\w/-]|\.\w)"
+# Baby Bear the product, named in the TITLE (see TITLE_ONLY_LOCAL_MARKERS) and not as part of a skill,
+# repo or path name (babybear-ship-and-ops, daveey/babybear, ~/code/babybear-h4): the BB repo is
+# checked out on the hub and its devices are reached over ssh:mini, so a body that loads a BB skill
+# (e.g. a metta disk check) is not Mac work. Mac-only BB work still hits xcode/simulator/codesign.
+BABYBEAR_MARKER = r"(?<![\w/.~-])baby ?bear(?![\w/-]|\.\w)"
 # Phrases that mean the work needs this machine (a Mac the user works on). Case-insensitive.
 DEFAULT_LOCAL_MARKERS = (
     r"\bchrome\b", r"\bcdp\b", r"\bkeychain\b", r"\bcodesign", r"\bnotari[sz]", r"\btcc\b",
@@ -76,8 +91,8 @@ DEFAULT_LOCAL_MARKERS = (
     r"\blaunchd\b", r"\blaunchctl\b", r"launchagents", r"~/library/", r"\bhermes\.app\b",
     r"\bhermes desktop\b", r"\bdesktop (app|backend|backends|renderer|window|chat|chats|sidebar|ui)\b",
     r"\bdesktop\s+dom\b",
-    r"\bmacbook\b", r"\bmac ?os\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
-    r"\bbaby ?bear\b", r"\bxcode\b", r"\bsimulator\b", r"\bwhatsapp\b", r"\bscreen ?shot",
+    r"\bmacbook\b", MACOS_MARKER, r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
+    BABYBEAR_MARKER, r"\bxcode\b", r"\bsimulator\b", r"\bwhatsapp\b", r"\bscreen ?shot",
     r"\bsoftmax-org\b", r"\bdavid-bloomin-sso\b", r"--profile softmax",
 )
 # Host names that mean "the work is on that machine" only when they are the subject of the
@@ -85,7 +100,7 @@ DEFAULT_LOCAL_MARKERS = (
 # MacBook"), which is not a reason to keep a core-code card on the laptop. A caller who replaces
 # ``local_markers`` owns the list and every pattern scans the whole text.
 TITLE_ONLY_LOCAL_MARKERS = frozenset({
-    r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
+    r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b", BABYBEAR_MARKER,
 })
 LOCAL_MARKER_REMEDY = (
     "if the work doesn't need this machine, archive and re-create with placement='hub'")
@@ -112,6 +127,9 @@ CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provid
 # Of those, the ones an older client (no --option) cannot express at all: the card stays local.
 LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage")
 HELP_CACHE_SECONDS = 600
+# Profile tools (``requires`` entries) a target can satisfy when it does not publish its profiles'
+# tools: what the hub's default profile has. host_repo never travels: it means a checkout on THIS host.
+DEFAULT_CARRIED_REQUIRES = ("terminal", "file", "git", "kanban")
 _help_cache: dict = {}
 
 
@@ -179,6 +197,32 @@ class _Cfg:
     def assignees(self) -> set[str]:
         v = self.raw.get("assignees")
         return {str(x) for x in v} if isinstance(v, list) and v else {"default"}
+
+    def carried_requires(self) -> set[str]:
+        v = self.raw.get("carried_requires")
+        return {str(x) for x in v} if isinstance(v, list) else set(DEFAULT_CARRIED_REQUIRES)
+
+
+def target_info(target: str, *, now: float, remote: Optional[dict] = None) -> dict:
+    """What ``target`` advertises through hermes-hub: ``{"profiles": [names] | None, "tools":
+    {profile: {tool}} | None}``. ``tools`` is None when its capability record publishes no
+    ``profile-tools:`` entry (an older core); only entries checked within the stale window count."""
+    profiles = reg.remote_gateway_profiles(target)
+    remote = reg.remote_records() if remote is None else remote
+    tools: Optional[dict] = None
+    limit = reg.stale_after()
+    prefix = reg.PROFILE_TOOLS_NS + ":"
+    for c in reg._entries(remote.get(target) or {}):
+        name = c["name"]
+        if not name.startswith(prefix):
+            continue
+        tools = {} if tools is None else tools
+        raw = c.get("checked_at")
+        if not c.get("ok") or isinstance(raw, bool) or not isinstance(raw, (int, float)) or now - raw > limit:
+            continue
+        _, prof, tool = name.split(":", 2)
+        tools.setdefault(prof, set()).add(tool)
+    return {"profiles": profiles, "tools": tools}
 
 
 def config() -> dict:
@@ -400,7 +444,8 @@ def _raw_explicit_pin(args: dict) -> str:
 def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
            self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
            locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None,
-           machine_ok: Optional[Callable[[str], bool]] = None) -> dict:
+           machine_ok: Optional[Callable[[str], bool]] = None,
+           info: Optional[Callable[[str], dict]] = None) -> dict:
     """``_decide`` plus one rule: a caller who pinned another gateway never gets a silent local card.
 
     Any local outcome for such a pin (no route to that gateway, a structural limit, target not live)
@@ -414,7 +459,7 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
         sg = reg.self_gateway() if self_gw is None else self_gw
         known = sg.strip().lower() if isinstance(sg, str) else ""
         out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
-                      locate=locate, carries=carries, machine_ok=machine_ok)
+                      locate=locate, carries=carries, machine_ok=machine_ok, info=info)
         pin = explicit_foreign_pin(args, sg, cfg)
         if pin and origin_intent is None and out.get("where") == "local" and not out.get("defer"):
             return {"where": "refuse", "why": out.get("why", ""), "pin": pin}
@@ -433,7 +478,8 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
 def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
             self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
             locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None,
-            machine_ok: Optional[Callable[[str], bool]] = None) -> dict:
+            machine_ok: Optional[Callable[[str], bool]] = None,
+            info: Optional[Callable[[str], dict]] = None) -> dict:
     """``{"where": "local"|<gateway>, "why": str}`` for a ``kanban_create`` call; heavy work bound for a
     worker is ``{"where": "local", "runs_on": [machine:<worker>], "why": ...}``. Never raises."""
     try:
@@ -463,16 +509,46 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
         board = args.get("board")
         if board and board != "default":
             return {"where": "local", "why": f"board {board!r}"}
+        now = time.time() if now is None else now
+        seen: dict = {}
+
+        def tgt() -> dict:  # read the target's advertisement once, only when a rule needs it
+            if "v" not in seen:
+                try:
+                    seen["v"] = (info or (lambda t: target_info(t, now=now)))(target) or {}
+                except Exception:
+                    seen["v"] = {}
+            return seen["v"]
+
         assignee = args.get("assignee") or "default"
         if assignee not in c.assignees():
-            return {"where": "local", "why": f"assignee {assignee!r} is not placed remotely"}
+            profiles = tgt().get("profiles")
+            if profiles is None:
+                return {"where": "local", "why": f"assignee {assignee!r} is not placed remotely "
+                                                 f"({target} advertises no profile list)"}
+            if assignee not in profiles:
+                return {"where": "local", "why": f"assignee {assignee!r} has no profile on {target}"}
         used = _uncarried(args, c, carries)
         if used:
             return {"where": "local", "why": f"uses {', '.join(used)} (not carried by hermes-hub create-task)"}
-        needs = [r for r in (args.get("requires") or []) if reg.is_gateway_need(r)]
-        if [r for r in (args.get("requires") or []) if not reg.is_gateway_need(r)]:
-            return {"where": "local", "why": "requires profile tools validated on this gateway"}
-        now = time.time() if now is None else now
+        reqs = args.get("requires") or []
+        reqs = [reqs] if isinstance(reqs, str) else list(reqs)
+        needs = [r for r in reqs if reg.is_gateway_need(r)]
+        tools = [str(r) for r in reqs if not reg.is_gateway_need(r)]
+        if tools:
+            pinned = [r for r in tools if r not in c.carried_requires()]
+            if pinned:
+                return {"where": "local", "why": f"requires {', '.join(pinned)}, which {target} cannot "
+                                                 "satisfy for this gateway (not in carried_requires)"}
+            if not (carries if carries is not None else hub_carries_options(_hub_cli(c))):
+                return {"where": "local", "why": f"requires {', '.join(tools)} (not carried by this "
+                                                 "hermes-hub client's create-task)"}
+            held = tgt().get("tools")
+            if held is not None:
+                lacking = [r for r in tools if r not in (held.get(assignee) or set())]
+                if lacking:
+                    return {"where": "local", "why": f"requires {', '.join(lacking)}, which {target}'s "
+                                                     f"profile {assignee!r} lacks"}
         for need in needs:
             found = (locate or (lambda n: reg.locate(n, now=now)))(need)
             on_target = any(gw == target for gw, _ in found.get("holders") or [])
