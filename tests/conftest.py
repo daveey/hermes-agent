@@ -296,6 +296,15 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     monkeypatch.setattr(
         hermes_constants, "_get_platform_default_hermes_home", isolated_platform_default
     )
+    # 3a. The profile-alias wrapper dir is ``Path.home()/.local/bin`` and HOME is deliberately
+    #     not redirected, so ``profiles.list`` (build_alias_map) would open every entry of the
+    #     developer's real ~/.local/bin. On a host where those are symlinks into the real
+    #     ~/.hermes (hub: bb-land -> ~/.hermes/bin/bb-land) the real-home tripwire fires and
+    #     the RPC returns an error envelope. Point the wrapper dir at the sandbox; tests that
+    #     exercise wrappers patch ``_get_wrapper_dir`` themselves (later, so they win).
+    import hermes_cli.profiles as _profiles_mod
+
+    monkeypatch.setattr(_profiles_mod, "_get_wrapper_dir", lambda: tmp_path / "wrapper_bin")
     fake_hermes_home = tmp_path / "hermes_test"
     fake_hermes_home.mkdir()
     (fake_hermes_home / "sessions").mkdir()
