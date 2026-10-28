@@ -662,6 +662,15 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "it unfinished; the result's origin_binding says how to "
                 "read the binding back on the origin gateway."
         )),
+        "placement": _prop("string", (
+                "Where the card runs. 'auto' (default): on a gateway with a "
+                "kanban.placement route (e.g. the MacBook -> hermes-hub), a "
+                "card with no local-only need is created on the target "
+                "gateway, still linked to this chat. 'local' pins it here "
+                "(use it when the work needs this machine: its Chrome, "
+                "Keychain, Apple apps, launchd/Desktop state, local "
+                "checkouts). A gateway name pins it there."
+        )),
         "max_runtime_seconds": _prop("integer", (
                 "Per-task runtime cap. When exceeded, the "
                 "dispatcher SIGTERMs the worker and re-queues the "

@@ -1945,6 +1945,13 @@ DEFAULT_CONFIG = {
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
         # when fan-out would saturate one profile's model/API quota/browser pool. See #21582.
         "max_in_progress_per_profile": None,
+        # [daveey] Default placement (hermes_cli/kanban_placement.py): ``route`` maps this gateway's
+        # hermes-hub name to a target gateway (e.g. {"macbook": "hub"}); kanban_create then creates a
+        # card with no local-only need on the target, bound to the creating chat. Other keys:
+        # creator_session ({target: session id}), local_markers / extra_local_markers /
+        # local_skill_markers (regex lists), assignees, hub_live_seconds, wait_seconds, hub_cli.
+        # Empty = upstream behaviour (every card is created here).
+        "placement": {},
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing
         # profile is claimable. Set = fail-closed (an empty list claims nothing). Every home has a

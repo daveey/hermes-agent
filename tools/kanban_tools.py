@@ -1416,6 +1416,55 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
         state.close()
 
 
+def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id) -> Optional[str]:
+    """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
+
+    Returns the tool result when the card was queued there, None to create it locally (no route,
+    a local-only need, the target not live, or hermes-hub refused). Never raises.
+    """
+    try:
+        from hermes_cli import kanban_placement as kp
+        from hermes_cli import kanban_capability_registry as reg
+        from hermes_cli.profiles import current_profile_name
+
+        view = {**args, "assignee": assignee, "skills": skills, "parents": parents,
+                "project_id": project_id}
+        decision = kp.decide(view)
+        target = decision["where"]
+        if target == "local":
+            if decision.get("why", "").startswith(("local marker", "placement pinned", "needs ")):
+                logger.debug("kanban placement: local (%s)", decision["why"])
+            return None
+        self_gw = reg.self_gateway() or "local"
+        cfg = kp.config()
+        placed = kp.create_remote(view, target=target, origin_session=session_id,
+                                  origin_profile=current_profile_name("default") or "default",
+                                  self_gw=self_gw, cfg=cfg, hub_cli=cfg.get("hub_cli") or "hermes-hub")
+        if not placed.get("ok"):
+            logger.warning("kanban placement: %s refused the card (%s); creating it locally",
+                           target, placed.get("error"))
+            return None
+        tid = None
+        deadline = time.monotonic() + float(cfg.get("wait_seconds", 8) or 0)
+        while not placed.get("queued_only"):
+            tid = kp.remote_task_id(placed["request_id"])
+            if tid or time.monotonic() >= deadline:
+                break
+            time.sleep(1.0)
+        note = (f"Created on {target}, not here: {decision['why']} (kanban.placement). It runs there and "
+                + ("shows in this chat's tasks once the hub applies it. " if session_id else "")
+                + (f"Read it with cross_task @task:default@{target}/{tid} or `hermes-hub tasks --gw {target}`."
+                   if tid else f"The task id appears once {target} applies request {placed['request_id']} "
+                   "(`hermes-hub requests`)."))
+        return _ok(task_id=tid, placed={"gateway": target, "request_id": placed["request_id"],
+                                        "task_id": tid, "origin_session": session_id,
+                                        "queued_only": bool(placed.get("queued_only"))},
+                   note=note)
+    except Exception:
+        logger.warning("kanban placement failed; creating the card locally", exc_info=True)
+        return None
+
+
 @_kanban_handler("kanban_create")
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
@@ -1486,6 +1535,12 @@ def _handle_create(args: dict, **kw) -> str:
         if project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
+        if origin_intent is None and origin is None:
+            # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
+            remote = _place_remote(args, assignee=str(assignee), skills=skills, parents=parents,
+                                   project_id=project_id, session_id=session_id)
+            if remote is not None:
+                return remote
         new_tid = kb.create_task(
             conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
             parents=tuple(parents), tenant=(args.get("tenant") if origin_intent is not None
