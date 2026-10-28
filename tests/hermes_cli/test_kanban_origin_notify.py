@@ -17,7 +17,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kn
 from hermes_state import SessionDB
-from tools import kanban_tools  # noqa: F401  (registers kanban_create)
+from tools import kanban_tools
 from tools.registry import registry
 
 CHAT = "20261027_134353_5ab65c"
