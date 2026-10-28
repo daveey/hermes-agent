@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
@@ -25,7 +26,7 @@ from typing import Any, Callable, Iterator, Optional
 
 from fastapi import (
     APIRouter, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
@@ -304,6 +305,27 @@ def _managing_sessions(conn: sqlite3.Connection) -> dict[str, str]:
     return {str(r[0]): str(r[1]) for r in rows}
 
 
+# Desktop polls GET /board continuously; on a busy board one read is ~1.3 s CPU (diagnostics over every task's
+# events and runs, init_db's health guard, a 6.5 MB payload) and kept the Desktop backend near a core on 2026-10-27.
+# Reuse the last result while the board's kanban.db and -wal are unchanged (every commit moves their mtime_ns, size
+# or inode), at most _BOARD_CACHE_TTL_S old: diagnostics also depend on the clock and config.
+_BOARD_CACHE_TTL_S = 15.0
+_board_cache: dict[tuple, tuple] = {}
+_board_cache_lock = threading.Lock()
+
+
+def _board_file_sig(path: str) -> Optional[tuple]:
+    out = []
+    for candidate in (path, f"{path}-wal"):
+        try:
+            st = Path(candidate).stat()
+        except OSError:
+            out.append(None)
+            continue
+        out.append((st.st_mtime_ns, st.st_size, st.st_ino))
+    return tuple(out) if out[0] is not None else None
+
+
 def get_board(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
@@ -312,6 +334,28 @@ def get_board(
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key")):
     """Full board grouped by status column; omitting ``board`` uses the active board
     (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``)."""
+    resolved = _resolve_board(board)
+    sig = key = None
+    try:
+        path = str(kanban_db.kanban_db_path(board=resolved))
+        key = (path, tenant, include_archived, workflow_template_id, current_step_key)
+        sig = _board_file_sig(path)  # before the read: a commit during it is read again next time
+    except Exception:
+        pass
+    now = time.monotonic()
+    if sig is not None:
+        with _board_cache_lock:
+            hit = _board_cache.get(key)
+        if hit is not None and hit[0] == sig and now - hit[1] < _BOARD_CACHE_TTL_S:
+            return dict(hit[2], now=int(time.time()))
+    result = _get_board_uncached(tenant, include_archived, resolved, workflow_template_id, current_step_key)
+    if sig is not None:
+        with _board_cache_lock:
+            _board_cache[key] = (sig, now, result)
+    return result
+
+
+def _get_board_uncached(tenant, include_archived, board, workflow_template_id, current_step_key):
     with _board_conn(board) as (board, conn):
         tasks = kanban_db.list_tasks(
             conn, tenant=tenant, include_archived=include_archived,
@@ -421,13 +465,16 @@ async def get_board_endpoint(
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key"),
 ):
     # Resolve selection before keying so a board switch cannot join an older read.
-    return await _read_board(
+    result = await _read_board(
         tenant=tenant,
         include_archived=include_archived,
         board=board or kanban_db.get_current_board(),
         workflow_template_id=workflow_template_id,
         current_step_key=current_step_key,
     )
+    # The board is plain JSON data (multi-MB on a busy board): json.dumps it directly. FastAPI's jsonable_encoder
+    # walked ~190k objects per poll (~275 ms) for byte-identical output.
+    return Response(content=json.dumps(result), media_type="application/json")
 
 
 # --- GET /tasks/:id ---------------------------------------------------------
