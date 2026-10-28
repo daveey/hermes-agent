@@ -38,6 +38,10 @@ def source_launch(tmp_path, monkeypatch, isolated_python):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "store"))
     monkeypatch.delenv("HERMES_DISABLE_LAZY_INSTALLS", raising=False)
+    # A launcher-marked child leaves the completion tail to `hermes update`; these
+    # tests launch as a user's shell does, even when pytest runs under a supervisor.
+    for marker in ("HERMES_SUPERVISED_CHILD", "HERMES_S6_SUPERVISED_CHILD"):
+        monkeypatch.delenv(marker, raising=False)
     monkeypatch.setattr(paths, "lockfile_path", lambda: tmp_path / "tool-lock.json")
 
     uv = shutil.which("uv")
