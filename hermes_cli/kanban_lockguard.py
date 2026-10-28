@@ -66,6 +66,8 @@ class _GuardMixin:
         _release(self)
         try:
             super().close()  # type: ignore[misc]
+            from hermes_cli.kanban_generation import forget
+            forget(self)
         except sqlite3.ProgrammingError:
             # Cross-thread close refused: the connection stays open, so put the guard back.
             if held is not None:
@@ -127,6 +129,8 @@ def _apply(conn: Any, held_path: Optional[str] = None) -> bool:
     conn._hermes_lockguard_path = path
     if getattr(conn, "_hermes_lockguard_finalizer", None) is None:
         conn._hermes_lockguard_finalizer = weakref.finalize(conn, _lockguard.release, held)
+    if hasattr(conn, "_hermes_generation_shm") and conn._hermes_generation_shm is None:
+        conn._hermes_generation_shm = shm_identity(path)
     return True
 
 
@@ -145,9 +149,13 @@ def guard(conn: sqlite3.Connection) -> bool:
 
 def connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
     """Drop-in ``sqlite3.connect`` for Kanban board files: same arguments, guarded result."""
+    from hermes_cli.kanban_generation import recover, remember
+    recover(database)
     kwargs["factory"] = guarded_factory(kwargs.get("factory", sqlite3.Connection))
     conn = sqlite3.connect(database, *args, **kwargs)
     guard(conn)
+    if isinstance(conn, _GuardMixin):
+        remember(conn)
     return conn
 
 

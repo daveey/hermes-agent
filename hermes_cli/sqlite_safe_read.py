@@ -235,6 +235,10 @@ def read_header_bytes_preopen(path: Path | str, *, length: int = 100, force: boo
                 path)
             return None
         try:
+            # Untracked read-only caches may still hold SQLite locks. On POSIX use a
+            # never-closed descriptor even when this registry is empty (or force=True).
+            if hasattr(os, "pread"):
+                return read_header_lock_safe(path, length=length)
             with open(path, "rb") as handle:
                 return handle.read(length)
         except OSError:

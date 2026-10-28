@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from hermes_cli import kanban_db_workspace as ws
+from hermes_cli import kanban_lockguard
 
 log = logging.getLogger(__name__)
 
@@ -70,9 +71,9 @@ def gc_task_worktrees(conn: sqlite3.Connection, *, older_than_days: int = 7,
 def _read_board(path: Path):
     """No creation, with WAL read-only fallback; an unreadable board aborts GC."""
     try:
-        conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+        conn = kanban_lockguard.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
     except sqlite3.OperationalError:
-        conn = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=1)
+        conn = kanban_lockguard.connect(path.as_uri() + "?mode=rw", uri=True, timeout=1)
     try:
         conn.execute("PRAGMA query_only=ON")
         conn.row_factory = sqlite3.Row
@@ -114,7 +115,7 @@ def _sweep_repo(repo_root: str) -> None:
     if not days:
         return
     # Use the shared enumerator without opening/creating the selected board.
-    with contextlib.closing(sqlite3.connect(":memory:")) as empty:
+    with contextlib.closing(kanban_lockguard.connect(":memory:")) as empty:
         boards = ws._sibling_board_db_files(empty)
     selected = kb.kanban_db_path().resolve()
     if selected.is_file() and selected not in boards:
@@ -150,7 +151,7 @@ def _sweep_repo(repo_root: str) -> None:
         log.warning("Orphan task worktree preserved and tombstoned: %s", path)
     for board in boards:
         # mode=rw refuses to fabricate a missing board after discovery.
-        with contextlib.closing(sqlite3.connect(board.as_uri() + "?mode=rw", uri=True, timeout=1,
+        with contextlib.closing(kanban_lockguard.connect(board.as_uri() + "?mode=rw", uri=True, timeout=1,
                                                isolation_level=None)) as conn:
             conn.row_factory = sqlite3.Row
             gc_task_worktrees(conn, older_than_days=days, repo_root=repo_root)

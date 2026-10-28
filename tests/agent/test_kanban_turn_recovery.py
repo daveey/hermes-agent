@@ -242,6 +242,27 @@ def test_claim_ownership_matrix(clear_kanban_env, tmp_path, overrides):
     assert worker_claim_is_live() is (overrides == {})
 
 
+def test_claim_check_uses_guarded_wal_reader(clear_kanban_env, tmp_path):
+    from hermes_cli import kanban_lockguard
+    from contextlib import closing
+    db = _make_board(tmp_path)
+    with closing(sqlite3.connect(db)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+    _pin_carrier(clear_kanban_env, db)
+    real = kanban_lockguard.connect
+    calls = []
+
+    def checked(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        assert kanban_lockguard.is_guarded(conn)
+        calls.append(True)
+        return conn
+
+    clear_kanban_env.setattr(kanban_lockguard, "connect", checked)
+    assert worker_claim_is_live()
+    assert calls == [True]
+
+
 def test_claim_check_fails_closed_without_a_board(clear_kanban_env, tmp_path):
     """No proof, no retry: a missing board must not authorise model re-entry."""
     clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_live")

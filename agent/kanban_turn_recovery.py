@@ -220,7 +220,8 @@ def worker_claim_is_live() -> bool:
         return False
     now = _now()
     try:
-        conn = sqlite3.connect(f"{Path(db_path).absolute().as_uri()}?mode=ro", uri=True)
+        from hermes_cli import kanban_lockguard
+        conn = kanban_lockguard.connect(f"{Path(db_path).absolute().as_uri()}?mode=ro", uri=True)
         try:
             conn.row_factory = sqlite3.Row
             row = conn.execute(

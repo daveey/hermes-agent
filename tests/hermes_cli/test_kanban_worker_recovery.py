@@ -67,6 +67,23 @@ def test_crash_and_budget_continuation_survives_reopen(worker, outcome):
     assert "does not increase" in result
 
 
+def test_registration_uses_guarded_wal_board(worker, monkeypatch):
+    from hermes_cli import kanban_lockguard
+    worker.conn.execute("PRAGMA journal_mode=WAL")
+    real = kanban_lockguard.connect
+    calls = []
+
+    def checked(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        assert kanban_lockguard.is_guarded(conn)
+        calls.append(True)
+        return conn
+
+    monkeypatch.setattr(kanban_lockguard, "connect", checked)
+    assert recovery.register_worker_session(worker, "worker")
+    assert calls == [True]
+
+
 def test_open_run_is_not_its_own_recovery(worker):
     assert recovery.register_worker_session(worker, "worker")
     assert recovery.build_recovery_context(worker.conn, "t_one") == ""

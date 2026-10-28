@@ -478,17 +478,7 @@ def replica_task_resolution(ids: list[str], now: float | None = None) -> tuple[s
     return found, fresh
 
 
-def _open_ro(path: Path, check_same_thread: bool = True) -> sqlite3.Connection:
-    """Read-only open that survives a WAL db whose -wal/-shm were just removed (plain ``mode=ro`` then fails);
-    never creates the file."""
-    try:
-        conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5, check_same_thread=check_same_thread)
-        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
-        return conn
-    except sqlite3.OperationalError:
-        conn = _kanban_lockguard.connect(f"file:{path}?mode=rw", uri=True, timeout=0.5, check_same_thread=check_same_thread)
-        conn.execute("PRAGMA query_only = ON")
-        return conn
+from hermes_cli.kanban_generation import open_ro as _open_ro
 
 
 # Linked-card reads run on every sidebar refresh across ~16 boards and replicas; a fresh connection pays schema
@@ -496,7 +486,11 @@ def _open_ro(path: Path, check_same_thread: bool = True) -> sqlite3.Connection:
 # so keep one read-only connection per file, shared across the threadpool (one per thread would hold ~3 fds per
 # board per worker). An idle autocommit reader holds no snapshot, so it never blocks writers or checkpoints.
 _RO_CACHE: dict[str, tuple[sqlite3.Connection, tuple[int, int], threading.Lock, tuple[int, int] | None]] = {}
-_RO_CACHE_LOCK = threading.Lock()
+_RO_CACHE_LOCK = threading.RLock()
+
+
+from hermes_cli.kanban_generation import recover as _recover_generation, evict_readers, register_reader_cache
+register_reader_cache(evict_readers)
 
 
 @contextlib.contextmanager
@@ -505,6 +499,7 @@ def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
     replaced (new inode: a rebuilt replica), after any sqlite error, or when its ``-shm`` generation is gone (the
     connection is stranded on a deleted WAL index and would fail with ``disk I/O error`` or read stale rows until
     restart; kanban-759104eb56). Raises ``sqlite3.OperationalError`` when the file is missing, like ``_open_ro``."""
+    _recover_generation(path)
     key = str(path)
     try:
         st = os.stat(path)
@@ -515,10 +510,6 @@ def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
     with _RO_CACHE_LOCK:
         entry = _RO_CACHE.get(key)
         if entry is not None and entry[1] != ident:
-            stale = _RO_CACHE.pop(key)[0]
-            entry = None
-        elif entry is not None and entry[3] is not None and _kanban_lockguard.shm_identity(path) != entry[3]:
-            _log.warning("kanban board %s: cached reader was on a deleted WAL/SHM generation; reopening", path)
             stale = _RO_CACHE.pop(key)[0]
             entry = None
         if stale is not None:
@@ -532,6 +523,10 @@ def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
             _RO_CACHE[key] = entry
     conn, _ident, lock, _shm = entry
     with lock:  # bodies read every result they start: an unfinished cursor would pin a WAL snapshot
+        with _RO_CACHE_LOCK:
+            if _RO_CACHE.get(key) is not entry:
+                from hermes_cli.kanban_generation import DeletedWalGenerationError
+                raise DeletedWalGenerationError(f"kanban DB {path}: reader was evicted while waiting; retry")
         conn.row_factory = None
         try:
             yield conn
