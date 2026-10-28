@@ -59,3 +59,24 @@ def test_rename_and_archive(tmp_path):
 
 
 
+
+
+def test_update_name_icon_color_and_clear(tmp_path, capsys):
+    """[daveey] The hub applies a shared project name/icon/color through ``project update``."""
+    _run(["create", "App", str(tmp_path)])
+    assert _run(["update", "app", "--name", "App 2", "--icon", "rocket", "--color", "#ff8800"]) == 0
+    with pdb.connect_closing() as conn:
+        p = pdb.get_project(conn, "app")
+        assert (p.name, p.icon, p.color) == ("App 2", "rocket", "#ff8800")
+    assert _run(["update", "app", "--icon", "", "--color", ""]) == 0
+    with pdb.connect_closing() as conn:
+        p = pdb.get_project(conn, "app")
+        assert (p.name, p.icon, p.color) == ("App 2", None, None)
+
+
+def test_update_needs_a_field_and_a_non_empty_name(tmp_path, capsys):
+    _run(["create", "App", str(tmp_path)])
+    assert _run(["update", "app"]) == 1
+    assert _run(["update", "app", "--name", "  "]) == 2
+    assert "must not be empty" in capsys.readouterr().err
+    assert _run(["update", "nope", "--name", "x"]) == 1

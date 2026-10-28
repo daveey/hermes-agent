@@ -727,6 +727,29 @@ def _merge_profile_tree(
         existing["previewSessions"] = previews[:preview_limit]
 
 
+def profile_project_trees(
+    preview_limit: int = 3, session_limit: int = 2000, errors: Optional[list[dict[str, str]]] = None, *,
+    log_label: str = "profile project trees") -> list[tuple[str, Optional[dict[str, Any]]]]:
+    """``(profile, tree)`` for every profile: each profile's own, unmerged ``build_tree`` result
+    (``hydrate=False``, discovery off, so read-only). ``tree`` is None when the profile's state.db
+    could not be read; a profile with no state.db yet has an empty tree. [daveey]"""
+    from tui_gateway import server as gateway_server
+    out: list[tuple[str, Optional[dict[str, Any]]]] = []
+    for name, home in _profile_targets(log_label):
+        def _read(db, home=home):
+            with _hermes_home_scope(home):
+                tree, _active_id = gateway_server._build_project_tree(
+                    db, preview_limit=preview_limit, hydrate=False,
+                    session_limit=session_limit, include_discovered=False)
+                return tree
+        failed: list[dict[str, str]] = []
+        tree = _read_profile_db(name, home, failed, _read)
+        if errors is not None:
+            errors.extend(failed)
+        out.append((name, None if failed else (tree or {"projects": [], "scoped_session_ids": []})))
+    return out
+
+
 @sessions_router.get("/api/profiles/projects/tree")
 @_sidebar_singleflight_cache
 def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000):
@@ -739,20 +762,15 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
     multiply empty lanes by the profile count), and discovery is the one part of the builder
     that writes (policy reconciliation), which a read-only fan-out must not do.
     """
-    from tui_gateway import server as gateway_server
     merged: dict[str, dict[str, Any]] = {}
     scoped_session_ids: list[str] = []
     errors: list[dict[str, str]] = []
 
-    for name, home in _profile_targets("GET /api/profiles/projects/tree"):
-        def _read(db, name=name, home=home):
-            with _hermes_home_scope(home):
-                tree, _active_id = gateway_server._build_project_tree(
-                    db, preview_limit=preview_limit, hydrate=False,
-                    session_limit=session_limit, include_discovered=False)
-                _merge_profile_tree(merged, tree["projects"], name, preview_limit)
-                scoped_session_ids.extend(tree["scoped_session_ids"])
-        _read_profile_db(name, home, errors, _read)
+    for name, tree in profile_project_trees(
+            preview_limit, session_limit, errors, log_label="GET /api/profiles/projects/tree"):
+        if tree is not None:
+            _merge_profile_tree(merged, tree["projects"], name, preview_limit)
+            scoped_session_ids.extend(tree["scoped_session_ids"])
 
     # active_id is None: ownership is per profile, so no project is "the active one" here.
     projects = sorted(merged.values(), key=lambda p: p.get("lastActive") or 0, reverse=True)

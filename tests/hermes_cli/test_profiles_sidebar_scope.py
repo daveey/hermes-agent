@@ -403,3 +403,56 @@ class TestSidebarShowSubagents:
         assert _slice_ids(payload, "recents") == {"default-parent", "worker-parent", "worker-sub"}
         # The messaging slice keeps its shape: a subagent run is not a platform thread.
         assert _slice_ids(payload, "messaging") == set()
+
+
+class TestProjectTreeCli:
+    """[daveey] ``hermes project tree``: each profile's own tree, unmerged, for the hub collector."""
+
+    def _tree(self, capsys):
+        import argparse
+        import json
+
+        from hermes_cli import projects_cmd
+
+        parser = argparse.ArgumentParser()
+        projects_cmd.build_parser(parser.add_subparsers(dest="command"))
+        assert projects_cmd.projects_command(parser.parse_args(["project", "tree"])) == 0
+        return {p["profile"]: p for p in json.loads(capsys.readouterr().out)["profiles"]}
+
+    def test_each_profile_reports_its_own_nodes_without_merging(self, client, profiles_on_disk, tmp_path, capsys):
+        shared = tmp_path / "repos" / "shared"
+        shared.mkdir(parents=True)
+        ids = {}
+        for name, home in profiles_on_disk.items():
+            _seed_session(home, f"{name}-chat", source="cli", cwd=shared)
+            ids[name] = _seed_project(home, "Shared", shared)
+
+        tree = self._tree(capsys)
+        merged = client.get("/api/profiles/projects/tree").json()
+
+        assert set(tree) == {"default", "worker"}
+        for name in ("default", "worker"):
+            assert tree[name]["ok"] is True
+            node = next(n for n in tree[name]["nodes"] if n["id"].startswith("p_"))
+            assert node["id"] == ids[name] and node["label"] == "Shared"
+            assert node["sessionIds"] == [f"{name}-chat"] and node["previewIds"] == [f"{name}-chat"]
+            assert "previewSessions" not in node
+        # The route merges the same two per-profile nodes into one group.
+        declared = [p for p in merged["projects"] if not p["isNoProject"]]
+        assert len(declared) == 1 and declared[0]["sessionCount"] == 2
+
+    def test_tree_is_read_only(self, profiles_on_disk, tmp_path, capsys):
+        folder = tmp_path / "repo"
+        folder.mkdir()
+        home = profiles_on_disk["default"]
+        _seed_session(home, "chat", source="cli", cwd=folder)
+        _seed_project(home, "Repo", folder)
+        before = {f: (home / f).read_bytes() for f in ("state.db", "projects.db")}
+        self._tree(capsys)
+        assert {f: (home / f).read_bytes() for f in before} == before
+
+    def test_unreadable_profile_is_not_ok(self, profiles_on_disk, capsys):
+        (profiles_on_disk["worker"] / "state.db").write_bytes(b"not a database" * 100)
+        tree = self._tree(capsys)
+        assert tree["worker"]["ok"] is False and tree["worker"]["nodes"] == []
+        assert tree["default"]["ok"] is True

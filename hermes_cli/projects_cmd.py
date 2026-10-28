@@ -46,6 +46,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_add.add_argument("--primary", action="store_true", help="Mark as primary repo")
     project_sub("remove-folder", "Remove a folder from a project").add_argument("path", help="Folder path")
     project_sub("rename", "Rename a project").add_argument("name", help="New name")
+    p_update = project_sub("update", "Change a project's name, icon or color")
+    for opt in ("--name", "--icon", "--color"):
+        p_update.add_argument(opt, default=None, help="'' clears icon/color" if opt != "--name" else None)
+    sub.add_parser(
+        "tree", help="Every profile's project tree as JSON (read-only; the hub sync collector reads it)")
     project_sub("set-primary", "Set the primary folder").add_argument("path", help="Folder path (must already be in project)")
     p_use = sub.add_parser("use", help="Set the active project")
     p_use.add_argument("project", nargs="?", default=None, help="Project id or slug (omit to clear)")
@@ -185,6 +190,39 @@ def _cmd_rename(args, conn, proj) -> str:
 
 
 @_with_project
+def _cmd_update(args, conn, proj):
+    if args.name is None and args.icon is None and args.color is None:
+        return _err("give at least one of --name, --icon, --color")
+    pdb.update_project(conn, proj.id, name=args.name, icon=args.icon, color=args.color)
+    return f"Updated {proj.slug}"
+
+
+def _cmd_tree(args) -> int:
+    """``{"profiles": [{"profile", "ok", "nodes"}]}``: each profile's own sidebar tree, lanes
+    without session rows and previews as ids (``previewIds``), plus every claimed ``sessionIds``.
+    ``ok`` False means that profile's state.db could not be read (its nodes are unknown). [daveey]"""
+    import json
+
+    # tui_gateway.server (the tree builder) points sys.stdout at stderr on import to keep its
+    # JSON-RPC channel clean, so keep the real stdout for the answer.
+    out = sys.stdout
+    from hermes_cli.web_routers.profiles import profile_project_trees
+
+    profiles = []
+    for name, tree in profile_project_trees(log_label="hermes project tree"):
+        nodes = []
+        for node in (tree or {}).get("projects") or []:
+            previews = node.get("previewSessions") or []
+            node = {k: v for k, v in node.items() if k != "previewSessions"}
+            node["previewIds"] = [s["id"] for s in previews if s.get("id")]
+            nodes.append(node)
+        profiles.append({"profile": name, "ok": tree is not None, "nodes": nodes})
+    out.write(json.dumps({"profiles": profiles}, default=str) + "\n")
+    out.flush()
+    return 0
+
+
+@_with_project
 def _cmd_set_primary(args, conn, proj):
     if not pdb.set_primary(conn, proj.id, args.path):
         return _err(f"'{args.path}' is not a folder of {proj.slug}; add it first with `hermes project add-folder`.")
@@ -233,6 +271,8 @@ _HANDLERS = {
     "add-folder": _cmd_add_folder,
     "remove-folder": _cmd_remove_folder,
     "rename": _cmd_rename,
+    "update": _cmd_update,
+    "tree": _cmd_tree,
     "set-primary": _cmd_set_primary,
     "use": _cmd_use,
     "archive": _flag_command("archive_project", "Archived"),
