@@ -7,6 +7,10 @@ named on the child's result as orphaned before teardown kills it.
 """
 
 import json
+import os
+import shlex
+import shutil
+import tempfile
 import time
 import weakref
 
@@ -57,24 +61,33 @@ def test_handed_off_process_completion_reaches_parent_and_leftover_is_reported(c
     parent = _Parent()
     child = _Child(parent)
     _register(sid, child)
+    ready_dir = None
     try:
-        handed = process_registry.spawn_local("sleep 0.4; echo ci-green", task_id=sid, owner_task_id=sid)
+        # Hold the child until this test releases it. A short sleep exits on wall clock
+        # while a throttled runner is still spawning the sibling, so handoff returns an
+        # error dict (no status) — the first-attempt KeyError this test used to flake on.
+        ready_dir = tempfile.mkdtemp(prefix="handoff-go-")
+        flag = os.path.join(ready_dir, "go")
+        handed = process_registry.spawn_local(
+            f"while [ ! -f {shlex.quote(flag)} ]; do sleep 0.2; done; echo ci-green",
+            task_id=sid, owner_task_id=sid)
         handed.notify_on_complete = True
         leftover = process_registry.spawn_local("sleep 30", task_id=sid, owner_task_id=sid)
 
         out = json.loads(_handle_process(
             {"action": "handoff", "session_id": handed.id, "data": "CI watcher for PR 1"}, task_id=sid))
-        assert out["status"] == "handed_off"
+        assert out["status"] == "handed_off", out
         assert handed.owner_task_id == "parent-turn-1" and handed.session_key == "sess-handoff"
         assert child._handed_off_processes[0]["session_id"] == handed.id
 
         # Only the un-handed sibling is left in the child's name — this is what the result entry reports as orphaned.
         assert [s.id for s in process_registry.running_owned_by(sid)] == [leftover.id]
 
-        # Let it exit on its own — a registry wait() would mark the completion consumed (that is the parent-observed path).
-        deadline = time.time() + 10
-        while process_registry.completion_queue.empty() and time.time() < deadline:
-            time.sleep(0.05)
+        # Release it to exit on its own. registry.wait() would consume the completion the parent
+        # drain below must still see; the completion event is set when that notice is published
+        # and returns as soon as the reader finishes. 120s is the starvation budget, not a sleep.
+        os.close(os.open(flag, os.O_CREAT | os.O_WRONLY, 0o644))
+        assert handed._completion_event.wait(timeout=120), "handed-off process did not publish a completion"
         assert handed.exited
         # The parent drains with the default suppression of sa- owners: the handed-off completion passes it.
         events = process_registry.drain_notifications(owns_event=lambda e: True)
@@ -86,6 +99,8 @@ def test_handed_off_process_completion_reaches_parent_and_leftover_is_reported(c
     finally:
         process_registry.kill_all(source="test")
         _unregister_subagent(sid)
+        if ready_dir:
+            shutil.rmtree(ready_dir, ignore_errors=True)
 
 
 def test_handoff_refuses_exited_foreign_or_non_child_callers(clean_queue):
@@ -96,17 +111,18 @@ def test_handoff_refuses_exited_foreign_or_non_child_callers(clean_queue):
     _register(sid, _Child(parent))
     try:
         done = process_registry.spawn_local("true", task_id=sid, owner_task_id=sid)
-        process_registry.wait(done.id, timeout=10)
+        # Returns as soon as the process exits; 120s is the starvation budget, not a sleep.
+        process_registry.wait(done.id, timeout=120)
         assert "error" in json.loads(_handle_process(
             {"action": "handoff", "session_id": done.id, "data": "x"}, task_id=sid))
 
         # A notify process that exited while the child was alive and was never read is reported to the parent;
-        # the one the child waited on (read) is not.
+        # the one the child waited on (read) is not. Wait on the completion event, not a wall-clock poll:
+        # registry.wait() would mark it read, and time.time() deadlines expire while a throttled runner is frozen.
         unread = process_registry.spawn_local("echo UNREAD_RESULT", task_id=sid, owner_task_id=sid)
         unread.notify_on_complete = True
-        deadline = time.time() + 10
-        while not unread.exited and time.time() < deadline:
-            time.sleep(0.05)
+        assert unread._completion_event.wait(timeout=120), "unread process did not exit"
+        assert unread.exited
         ids = [s.id for s in process_registry.unread_completions_owned_by(sid)]
         assert ids == [unread.id]
         assert "UNREAD_RESULT" in _process_accounting_lines(
