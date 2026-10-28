@@ -534,12 +534,19 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
             subs = _kbn.list_notify_subs(conn, platform="tui", chat_id=session_key)
         except Exception:
             return []
+        if subs:
+            # A claim whose holder process died (serve replaced mid-turn) goes back to the cursor. [daveey]
+            with contextlib.suppress(Exception):
+                _kbn.recover_orphaned_notify_claims(conn, platform="tui", chat_id=session_key)
         for sub in subs:
             if (sub.get("platform") or "").lower() != "tui" or sub.get("chat_id") != session_key:
                 continue
             sub_ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                              thread_id=sub.get("thread_id") or "")
-            _old, _new, events = _kbn.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS, **sub_ident)
+            # durable: the claim stays IN FLIGHT (owned by this process) until the notice is in the transcript
+            # (_kb_ack_durable acks it); a process that dies first hands it back. [daveey]
+            _old, _new, events = _kbn.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS,
+                                                                   durable=claims is not None, **sub_ident)
             if not events:
                 continue
             claim = None
@@ -549,18 +556,25 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
             task = _kb.get_task(conn, sub["task_id"])
             from gateway.kanban_watchers_notifier import diagnostic_event
             from gateway.warning_notifications import DiagnosticText
+            sub_texts = []
             for ev in events:
                 text = _format_kanban_event_text(sub, task, ev, slug)
                 if text:
                     text = DiagnosticText(text) if diagnostic_event(ev) else _KanbanText(text)
+                    text._kb_keys = (f"{slug}:{int(ev.id)}",)  # type: ignore[attr-defined]  # event-id identity
                     texts.append(text)
+                    sub_texts.append(text)
                     if claim is not None:
                         claim["texts"].append(text)
             if claim is not None and not claim["texts"]:
                 claims.remove(claim)  # silent kinds only (archived/unblocked): nothing to deliver or hand back
+            if not sub_texts:
+                with contextlib.suppress(Exception):  # nothing to deliver: the claim is complete as is
+                    _kbn.ack_notify_claim(conn, upto=_new, from_cursor=_old, **sub_ident)
             # Unsubscribe only on archive: ``done`` is reversible in review/controller flows, so keeping the sub lets a
-            # later reopen notify the same session. The claimed cursor prevents replay.
-            if task and getattr(task, "status", "") == "archived":
+            # later reopen notify the same session. The claimed cursor prevents replay. A sub with notices still in
+            # flight is removed by their ack instead, so the claim it records survives until delivery. [daveey]
+            if task and getattr(task, "status", "") == "archived" and (not sub_texts or claim is None):
                 with contextlib.suppress(Exception):
                     _kbn.remove_notify_sub(conn, **sub_ident)
     from hermes_constants import get_hermes_home
@@ -688,6 +702,8 @@ def _kb_rewind_refused(session: dict, batch: list) -> None:
     remaining = []
     for claim in reversed(claims):
         texts = claim.get("texts") or []
+        if claim.get("durable"):
+            continue  # already in the transcript (written before the turn): nothing to hand back [daveey]
         if texts and all(id(t) in refused for t in texts):
             if claim.get("remote"):
                 from tui_gateway import kanban_remote_notices as _krn
@@ -735,6 +751,117 @@ def _kb_mark_delivered(session: dict, batch: list) -> None:
     session.pop("_kanban_refused_until", None)
 
 
+def _kb_text_keys(texts) -> list:
+    return [k for t in texts for k in (getattr(t, "_kb_keys", None) or ())]
+
+
+def _kb_ack_durable(session: dict, durable_ids: set) -> None:
+    """Mark claims whose every text is now in the transcript (``durable_ids``) and ack them on the board: per
+    subscription, the contiguous run of durable claims from the earliest outstanding one (an earlier claim still
+    pending keeps the in-flight marker, so a crash still redelivers it). Never raises. [daveey]"""
+    from hermes_cli import kanban_db_connect as _kbc
+    from hermes_cli import kanban_db_notify as _kbn
+    by_sub: dict = {}
+    for claim in session.get("_kanban_claims") or []:
+        if claim.get("remote"):
+            continue
+        texts = claim.get("texts") or []
+        if texts and all(id(t) in durable_ids for t in texts):
+            claim["durable"] = True
+        key = (claim["board"], claim["task_id"], claim["platform"], claim["chat_id"], claim.get("thread_id") or "")
+        by_sub.setdefault(key, []).append(claim)
+    for (board, task_id, platform, chat_id, thread_id), group in by_sub.items():
+        group.sort(key=lambda c: int(c["old"]))
+        run = []
+        for claim in group:
+            if not claim.get("durable") or claim.get("acked"):
+                break
+            run.append(claim)
+        if not run:
+            continue
+        try:
+            with contextlib.closing(_kbc.connect(board=board)) as conn:
+                _kbn.ack_notify_claim(conn, task_id=task_id, platform=platform, chat_id=chat_id, thread_id=thread_id,
+                                      upto=int(run[-1]["new"]), from_cursor=int(run[0]["old"]))
+            for claim in run:
+                claim["acked"] = True
+        except Exception as exc:
+            _notif_log_failure("kanban notice ack failed (a restart redelivers; the row dedups)", exc)
+
+
+def _kb_persist_batch(session: dict, batch: list, diagnostic: bool) -> tuple:
+    """Write this batch's kanban notices into the chat's transcript BEFORE its turn runs, so the claim can be
+    acknowledged: at-least-once delivery (t_01a1835174955959). Returns ``(verdict, batch, kwargs)``:
+
+    - ``"written"``: one ``kanban_notice`` row holds the (remaining) batch and is staged for the turn to adopt
+      (no second row); ``kwargs`` carry its display kind/metadata for the submit.
+    - ``"delivered"``: every notice is already in the transcript (a redelivery after a crash): no turn.
+    - ``"busy"``: a turn lease / compaction holds the transcript now: retry on a later poll.
+    - ``"unkeyed"``: nothing to persist here (remote-only notices, no session store/row): the turn runs as
+      before and its own user row is the record.
+
+    Notices whose event keys are already in the transcript are dropped from ``batch`` (dedup by event id)."""
+    keys = _kb_text_keys(batch)
+    if not keys:
+        return "unkeyed", batch, {}
+    from hermes_state_errors import CompressionSessionClosedError, SessionTurnLeaseLostError
+    try:
+        with _session_db(session) as db:
+            if db is None or not hasattr(db, "record_kanban_notice"):
+                return "unkeyed", batch, {}
+            target = _submit_row_target_key(session)
+            if not target or db.get_session(target) is None:
+                return "unkeyed", batch, {}
+            done = db.kanban_notice_keys_delivered(target, keys)
+            fresh = [t for t in batch if not (getattr(t, "_kb_keys", None) and set(t._kb_keys) <= done)]
+            if not fresh:
+                return "delivered", [], {}
+            text = "\n".join(fresh)
+            fresh_keys = _kb_text_keys(fresh)
+            import hashlib
+            metadata = {"notice_id": "live:" + hashlib.sha1(",".join(sorted(fresh_keys)).encode()).hexdigest()[:20],
+                        "display_text": text, "kanban_event_keys": fresh_keys}
+            if diagnostic:
+                metadata["notification_category"] = "diagnostic"
+            from agent.context_compressor import _DB_PERSISTED_MARKER
+            from agent.message_metadata import stamp_message_timestamp, stamp_message_uid
+            staged = stamp_message_timestamp({"role": "user", "content": text, "display_kind": "kanban_notice",
+                                              "display_metadata": metadata})
+            stamp_message_uid(staged)
+            row_id, inserted = db.record_kanban_notice(target, text, metadata, message=staged)
+            if not inserted:
+                return "busy", batch, {}  # raced another consumer for some of these keys: re-filter next poll
+    except (SessionTurnLeaseLostError, CompressionSessionClosedError):
+        return "busy", batch, {}
+    except Exception as exc:
+        _notif_log_failure("kanban notice row write failed; the turn records it instead", exc)
+        return "unkeyed", batch, {}
+    staged["_row_id"] = row_id
+    staged[_DB_PERSISTED_MARKER] = True
+    staged[_SUBMIT_ROW_SESSION_KEY] = target
+    session["_submit_user_row"] = staged
+    return "written", fresh, {"display_kind": "kanban_notice", "display_metadata": metadata}
+
+
+def _kb_release_claims(session: dict) -> None:
+    """The poller is stopping with notices still buffered: hand their claimed ranges back (newest first, CAS) so
+    the chat's next consumer delivers them now instead of after this process exits. Never raises. [daveey]"""
+    from hermes_cli import kanban_db_connect as _kbc
+    from hermes_cli import kanban_db_notify as _kbn
+    for claim in reversed(session.get("_kanban_claims") or []):
+        if claim.get("remote") or claim.get("durable") or not claim.get("texts"):
+            continue
+        try:
+            with contextlib.closing(_kbc.connect(board=claim["board"])) as conn:
+                _kbn.rewind_notify_cursor(
+                    conn, task_id=claim["task_id"], platform=claim["platform"], chat_id=claim["chat_id"],
+                    thread_id=claim.get("thread_id") or "", claimed_cursor=claim["new"], old_cursor=claim["old"])
+        except Exception as exc:
+            _notif_log_failure("kanban notice release on poller stop failed", exc)
+    session["_kanban_claims"] = []
+    session["_kanban_pending"] = []
+
+
 def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
     """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle. Events are
     cursor-claimed, so they wait in the buffer instead of dropping the agent turn; a turn the admission gate
@@ -764,15 +891,32 @@ def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
         diagnostic = split and isinstance(pending[0], DiagnosticText)
         batch = [text for text in pending if not split or isinstance(text, DiagnosticText) == diagnostic]
         session["_kanban_pending"] = [text for text in pending if split and isinstance(text, DiagnosticText) != diagnostic]
+    # At-least-once (t_01a1835174955959): the notices land in the transcript and the board claim is acked
+    # BEFORE the turn runs; until then the claim is in flight and a process that dies first hands it back.
+    verdict, fresh, submit_kwargs = _kb_persist_batch(session, batch, diagnostic)
+    if verdict == "busy":
+        with session["history_lock"]:
+            session["_kanban_pending"] = batch + (session.get("_kanban_pending") or [])
+        _notif_release_turn(session)
+        return
+    if verdict in ("written", "delivered"):
+        _kb_ack_durable(session, {id(t) for t in batch})
+    if verdict == "delivered":
+        _kb_mark_delivered(session, batch)
+        _notif_release_turn(session)
+        return
+    if verdict == "unkeyed" and diagnostic:
+        submit_kwargs = {"display_metadata": {"notification_category": "diagnostic"}}
     try:
-        accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(batch),
-                                 "kanban notification dispatch failed",
-                                 **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
+        accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(fresh),
+                                 "kanban notification dispatch failed", **submit_kwargs)
     except Exception:
         accepted = False
     if accepted is False:
         _kb_rewind_refused(session, batch)
     else:
+        if verdict == "unkeyed":  # the accepted turn's own user row is the record
+            _kb_ack_durable(session, {id(t) for t in batch})
         _kb_mark_delivered(session, batch)
 
 
