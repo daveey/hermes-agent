@@ -38,6 +38,7 @@ real git failure, and then judges the next real launch from the files the update
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -70,13 +71,21 @@ def provider():
 
 @pytest.fixture()
 def world(tmp_path_factory, provider):
+    """A fresh HEAD install per test, removed when the test ends: pytest keeps every ``mktemp`` root
+    until the process exits, and ~11 full installs (checkout, venv, node_modules) filled a 35 GB
+    CI slot (run 40658892506: ``No space left on device``). Set ``HERMES_E2E_KEEP_ROOT=1`` to keep
+    them for a post-mortem."""
     root = tmp_path_factory.mktemp("hostile-commit")
-    sb, origin = P.install_head(root)
-    P.configure(sb, provider.base_url)
-    shim = sb.root / "wrap" / "git"
-    world = {"sb": sb, "origin": origin, "root": root, "shim": shim, "shim_text": shim.read_text(encoding="utf-8-sig"), "n": 0}
-    yield world
-    shim.write_text(world["shim_text"], encoding="utf-8")
+    try:
+        sb, origin = P.install_head(root)
+        P.configure(sb, provider.base_url)
+        shim = sb.root / "wrap" / "git"
+        world = {"sb": sb, "origin": origin, "root": root, "shim": shim, "shim_text": shim.read_text(encoding="utf-8-sig"), "n": 0}
+        yield world
+        shim.write_text(world["shim_text"], encoding="utf-8")
+    finally:
+        if not os.environ.get("HERMES_E2E_KEEP_ROOT"):
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def _hostile_git(world, body: str) -> None:
