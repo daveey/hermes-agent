@@ -1017,6 +1017,14 @@ def _blocker_id_arg(args: dict) -> Optional[str]:
     return bid
 
 
+def _clear_blocker_arg(args: dict, blocker_id: Optional[str] = None) -> bool:
+    """Validated ``clear_blocker``: the caller saw the card's shared blocker gone. [daveey]"""
+    raw = args.get("clear_blocker", False)
+    _check(isinstance(raw, bool), "clear_blocker must be true or false")
+    _check(not (raw and blocker_id), "clear_blocker says the wall is gone; blocker_id says it still stands. Pass one")
+    return raw
+
+
 def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
     """``(wake_check, check_every, clock_only)`` from a park call, validated. [daveey]"""
     from hermes_cli import kanban_wake_check as kwc
@@ -1071,7 +1079,8 @@ def _park_guard(conn, tid: str, op: str, wake: tuple, **plan: Any) -> None:
     """Refuse a park that wakes > 2 h away with no wake_check and no clock_only. [daveey]"""
     from hermes_cli import kanban_wake_check as kwc
 
-    wake_at = kwc.planned_wake(conn, tid, op=op, **plan)
+    wake_at = kwc.planned_wake(conn, tid, op=op, **plan, **({"wake_check": wake[0], "clock_only": wake[2]}
+                                                            if op == "block" else {}))
     err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
     _check(err is None, f"kanban_{op} {err}", "invalid_args")
 
@@ -1174,6 +1183,7 @@ def _handle_block(args: dict, **kw) -> str:
                f"finished or cannot proceed for another reason, call kanban_complete instead — "
                f"the completion judge will evaluate it.")
         blocker_id = _blocker_id_arg(args)
+        clear_blocker = _clear_blocker_arg(args, blocker_id)
         wake = _wake_check_args(args)
         awaiting, wake = _awaiting_arg(args, wake)
         from hermes_cli.kanban_block_policy import ERROR_CODE, block_policy_error
@@ -1181,10 +1191,12 @@ def _handle_block(args: dict, **kw) -> str:
                                      clock_only=wake[2], blocker_id=blocker_id, reason=reason)
         _check(_policy is None, _policy or "", ERROR_CODE)
         _standing_wait_guard(kb, conn, tid, kind, args.get("human_request"), reason)
-        _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id)
+        _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id,
+                    human_request=args.get("human_request"))
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
-                           clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")))
+                           clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")),
+                           clear_blocker=clear_blocker)
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
         escalated = _escalated(kb, conn, tid)
         if escalated:
@@ -1198,10 +1210,14 @@ def _handle_block(args: dict, **kw) -> str:
             # A wait on time, not on a human: parked with a wake time (kanban_timed_park). [daveey]
             from hermes_cli.kanban_continuation import pending_wake
             parked = pending_wake(conn, tid) or {}
+            note = ("Parked as a timed wait (scheduled), not a human block: it wakes when "
+                    "wake_check exits 0, at wake_at, or earlier on `hermes kanban unblock`.")
+            if parked.get("blocker_wake"):
+                note = (f"Parked behind shared blocker `{blocker_id}` (scheduled): it wakes at wake_at "
+                        "(the shared probe interval) to probe the wall, or as soon as the blocker clears.")
             return _ok_landed(kb, conn, tid, "scheduled", requested_kind=kind, wake_at=parked.get("wake_at"),
-                              **_wake_check_echo(wake),
-                              note=("Parked as a timed wait (scheduled), not a human block: it wakes when "
-                                    "wake_check exits 0, at wake_at, or earlier on `hermes kanban unblock`."))
+                              **_wake_check_echo(wake), **({"blocker_id": blocker_id} if blocker_id else {}),
+                              note=note)
         if kind == "dependency" and landed_kind != kind:
             # block_task re-kinds a dependency wait that no open parent can satisfy.
             extra["requested_kind"] = kind
@@ -1233,10 +1249,12 @@ def _handle_schedule(args: dict, **kw) -> str:
                "the wake), or kanban_complete so the completion judge can evaluate it.")
         wake = _wake_check_args(args)
         awaiting, wake = _awaiting_arg(args, wake)
+        clear_blocker = _clear_blocker_arg(args)
         _park_guard(conn, tid, "schedule", wake, reason=reason)
         ok = kb.schedule_task(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid),
-            wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting)
+            wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting,
+            clear_blocker=clear_blocker)
         _check(ok, f"could not schedule {tid} (unknown id, not in todo/ready/running/blocked, or it "
                    "waits on a human answer: needs_input/capability asks stay blocked, never scheduled)")
         escalated = _escalated(kb, conn, tid)
@@ -1264,6 +1282,9 @@ def _handle_continue(args: dict, **kw) -> str:
     blocker_id = _blocker_id_arg(args)
     if blocker_id:
         metadata = {**(metadata or {}), "blocker_id": blocker_id}
+    if _clear_blocker_arg(args, blocker_id):
+        from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
+        metadata = {**(metadata or {}), CLEAR_FLAG: True}
     from hermes_cli.kanban_continuation import continue_task
     with _board(args.get("board")) as (kb, conn):
         wake = _wake_check_args(args)

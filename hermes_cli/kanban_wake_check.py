@@ -161,6 +161,7 @@ def validate_park(*, wake_at: Optional[int], wake_check: Optional[str],
 
 def planned_wake(conn: sqlite3.Connection, task_id: str, *, op: str, reason: Optional[str] = None,
                  kind: Optional[str] = None, blocker_id: Optional[str] = None,
+                 human_request: Any = None, wake_check: Optional[str] = None, clock_only: bool = False,
                  resume_after: int = 0, now: Optional[int] = None) -> Optional[int]:
     """The wake time a park call would set, or None when the call is not a timed park
     (``op`` is ``schedule``, ``block`` or ``continue``)."""
@@ -171,10 +172,17 @@ def planned_wake(conn: sqlite3.Connection, task_id: str, *, op: str, reason: Opt
     if op == "schedule":
         return ktp.scheduled_payload(reason, now=now)["wake_at"]
     if op == "block":
-        if not ktp.is_timed_park(
-                kind, reason, parents_satisfied=kb._parents_satisfied(conn, task_id), blocker_id=blocker_id):
-            return None
-        return ktp.scheduled_until(reason, now=now) or now + ktp.DEFAULT_WAKE_SECONDS
+        from hermes_cli.kanban_shared_blockers import normalize_blocker_id
+        mode = ktp.park_mode(kind, reason, parents_satisfied=kb._parents_satisfied(conn, task_id),
+                             blocker_id=normalize_blocker_id(blocker_id), human_request=human_request,
+                             wake_check=wake_check, clock_only=clock_only)
+        if mode == "timed":
+            return ktp.scheduled_until(reason, now=now) or now + ktp.DEFAULT_WAKE_SECONDS
+        if mode == "blocker":
+            return now + ktp.blocker_wake_seconds()
+        if kb._probe_parks(kind, wake_check, clock_only, human_request):
+            return ktp.scheduled_until(reason, now=now) or now + ktp.DEFAULT_WAKE_SECONDS
+        return None
     if op == "continue":
         return now + int(resume_after) if resume_after and int(resume_after) > 0 else None
     raise ValueError(f"unknown park op {op!r}")

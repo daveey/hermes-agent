@@ -3296,12 +3296,18 @@ def _refuse_untimed_probe(kind: Optional[str], wake_check: Optional[str], clock_
         "would run it. Use kind='time' to wait on it, or drop it for a human ask.")
 
 
+def _clear_meta(clear_blocker: bool) -> dict:
+    """Run metadata for an explicit "the shared blocker is gone" park (``kanban_shared_blockers``)."""
+    from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
+    return {CLEAR_FLAG: True} if clear_blocker else {}
+
+
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
     blocker_id: Optional[str] = None, wake_check: Optional[str] = None,
     check_every: Optional[int] = None, clock_only: bool = False,
-    human_request: Optional[dict] = None, awaiting: Any = None,
+    human_request: Optional[dict] = None, awaiting: Any = None, clear_blocker: bool = False,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`kanban_block_routing.route_block`). A wait on time -- ``kind='time'``, a ``dependency``
@@ -3309,7 +3315,11 @@ def block_task(
     with a wake time instead (``kanban_timed_park``). ``transient`` still counts
     toward the loop breaker. True on any transition. ``blocker_id`` names a
     shared external blocker (``kanban_shared_blockers``), stored on the closed
-    run's metadata and the event payload. [daveey]
+    run's metadata and the event payload. A blocker never cancels the timed park,
+    and a blocker park with no human ask and no open parent is given a wake
+    (``kanban_timed_park.needs_blocker_wake``): every parked card keeps a way back.
+    ``clear_blocker`` records on the run that the caller saw the card's shared
+    blocker gone (the only way a park without the id clears it). [daveey]
 
     An already-``blocked`` card that the failure breaker parked UNTYPED
     (``block_kind IS NULL``, no live run) is classified in place when *kind*
@@ -3347,14 +3357,19 @@ def block_task(
             # otherwise Desktop lists them under "For you" with an unblock button.
             from hermes_cli import kanban_timed_park as ktp
             from hermes_cli.kanban_shared_blockers import normalize_blocker_id
-            if (ktp.is_timed_park(kind, reason, parents_satisfied=_parents_satisfied(conn, task_id),
-                                  blocker_id=blocker_id)
-                    or _probe_parks(kind, wake_check, clock_only, human_request)):
+            blocker_id = normalize_blocker_id(blocker_id)
+            satisfied = _parents_satisfied(conn, task_id)
+            mode = ktp.park_mode(kind, reason, parents_satisfied=satisfied, blocker_id=blocker_id,
+                                 human_request=human_request, wake_check=wake_check, clock_only=clock_only)
+            if mode is None and _probe_parks(kind, wake_check, clock_only, human_request):
+                mode = "timed"
+            if mode is not None:
                 reject_timed_request(human_request)
                 return ktp.park(conn, task_id, reason=reason, requested_kind=kind, source_status="ready",
                                 from_untyped_block=True, wake_check=wake_check,
                                 check_every=check_every, clock_only=clock_only, awaiting=awaiting,
-                                blocker_id=normalize_blocker_id(blocker_id))
+                                blocker_id=blocker_id, blocker_wake=mode == "blocker",
+                                run_metadata=_clear_meta(clear_blocker))
             _refuse_untimed_probe(kind, wake_check, clock_only)
             requested_kind, rekind_reason = kind, None
             if kind == "assignment":
@@ -3383,17 +3398,25 @@ def block_task(
         no_open_parent = _parents_satisfied(conn, task_id)
         from hermes_cli import kanban_timed_park as ktp
         from hermes_cli.kanban_shared_blockers import normalize_blocker_id
-        # A timed park keeps its wake time and wake check behind a shared blocker too; the
-        # blocker id rides on the closed run, so the card still counts as behind it. [daveey]
-        if (ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent, blocker_id=blocker_id)
-                or _probe_parks(requested_kind, wake_check, clock_only, human_request)):
+        blocker_id = normalize_blocker_id(blocker_id)
+        # A blocker never cancels the timed park, and a blocker park with no wake of its own
+        # wakes on the probe cadence (``kanban_timed_park.park_mode``). An agent-owned block
+        # that brings a wake_check / clock_only parks on that probe. [daveey]
+        mode = None if exhausted_budget else ktp.park_mode(
+            kind, reason, parents_satisfied=no_open_parent, blocker_id=blocker_id,
+            human_request=human_request, wake_check=wake_check, clock_only=clock_only)
+        if (mode is None and not exhausted_budget
+                and _probe_parks(requested_kind, wake_check, clock_only, human_request)):
+            mode = "timed"
+        if mode is not None:
             reject_timed_request(human_request)
             return ktp.park(conn, task_id, reason=reason, requested_kind=kind,
                             source_status=source_status, expected_run_id=expected_run_id,
                             wake_check=wake_check, check_every=check_every, clock_only=clock_only, awaiting=awaiting,
-                            blocker_id=normalize_blocker_id(blocker_id))
+                            blocker_id=blocker_id, blocker_wake=mode == "blocker",
+                            run_metadata=_clear_meta(clear_blocker))
         _refuse_untimed_probe(kind, wake_check, clock_only)
-        # Parent-less ``dependency`` behind a shared blocker: sticky ``needs_input`` (todo would respawn it).
+        # Parent-less ``dependency`` behind a shared blocker with a human ask: sticky ``needs_input``.
         if kind == "dependency" and no_open_parent:
             kind = "needs_input"
             rekind_reason = "no_open_parent"
@@ -3435,10 +3458,14 @@ def block_task(
         conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
                      (json.dumps(human_request) if human_request else None, task_id))
         payload["human_request"] = human_request
+        from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
+        run_meta = {**({"blocker_id": blocker_id} if blocker_id else {}), **_clear_meta(clear_blocker)}
+        if clear_blocker:
+            payload[CLEAR_FLAG] = True
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="blocked", status="blocked", summary=reason,
-            metadata={"blocker_id": blocker_id} if blocker_id else None,
-            synthesize=bool(reason or blocker_id),
+            metadata=run_meta or None,
+            synthesize=bool(reason or run_meta),
         )
         if kind == "assignment":
             payload["requested_kind"] = requested_kind

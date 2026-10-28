@@ -73,12 +73,60 @@ def implied_wake(payload: dict, event_at: int) -> int:
     return scheduled_until(reason if isinstance(reason, str) else None, now=event_at) or event_at + DEFAULT_WAKE_SECONDS
 
 
+def blocker_wake_seconds(cfg: Optional[dict] = None) -> int:
+    """Wake delay for a shared-blocker park that named no wake: the shared probe interval,
+    clamped to ``[MIN_WAKE_SECONDS, kanban_wake_check.GUARD_SECONDS]``. The woken card goes
+    ``ready`` and ``shared_blocker_guard`` lets one card per interval probe, so a board whose
+    every card is parked behind the blocker still probes it. [daveey]"""
+    from hermes_cli.kanban_shared_blockers import probe_interval_seconds
+    from hermes_cli.kanban_wake_check import GUARD_SECONDS
+
+    return max(MIN_WAKE_SECONDS, min(probe_interval_seconds(cfg), GUARD_SECONDS))
+
+
+def needs_blocker_wake(kind: Optional[str], *, blocker_id: Optional[str], human_request,
+                       open_parent: bool) -> bool:
+    """A blocker park with no other way back: no human ask, no open parent to wait on, and not
+    an ``assignment`` (routed to a supervisor's repair card). Such a park used to land plain
+    ``blocked`` and wait for the blocker to clear, which nothing probed. [daveey]"""
+    return bool(blocker_id) and not human_request and not open_parent and kind != "assignment"
+
+
+def park_mode(kind: Optional[str], reason: Optional[str], *, parents_satisfied: bool,
+              blocker_id: Optional[str] = None, human_request=None, wake_check: Optional[str] = None,
+              clock_only: bool = False) -> Optional[str]:
+    """How ``block_task`` parks: ``"timed"`` (:func:`park` with the caller's wake), ``"blocker"``
+    (:func:`park` with ``blocker_wake``) or None (a block / todo / triage via ``route_block``).
+
+    A blocker never cancels a timed park: the 2026-10-28 cards passed SCHEDULED_UNTIL, a
+    wake_check and a blocker_id, and the blocker made ``block_task`` drop the other two. A
+    visible human ask behind a blocker stays a block. A blocker park that brought no timing of
+    its own (no SCHEDULED_UNTIL, wake_check or clock_only) wakes on the probe cadence. [daveey]"""
+    if blocker_id and human_request:
+        return None
+    has_timing = bool(_MARKER.search(reason or "") or wake_check or clock_only)
+    if blocker_id and not has_timing:
+        if needs_blocker_wake(kind, blocker_id=blocker_id, human_request=human_request,
+                              open_parent=not parents_satisfied):
+            return "blocker"
+        return None
+    if is_timed_park(kind, reason, parents_satisfied=parents_satisfied):
+        return "timed"
+    if blocker_id and not parents_satisfied:
+        return None
+    if blocker_id and kind != "assignment":
+        # A blocker park that brought a wake_check / clock_only but no SCHEDULED_UNTIL: keep
+        # that probe (a plain block would drop it) on the default wake.
+        return "timed"
+    return None
+
+
 def is_timed_park(kind: Optional[str], reason: Optional[str], *, parents_satisfied: bool,
                   blocker_id: Optional[str] = None) -> bool:
     """Whether a ``block_task`` call is really a wait on time, not on a human.
     Behind a shared blocker (``blocker_id``) a parent-less ``dependency`` is a wait on that
-    blocker (its probe wakes it), not on time; ``kind='time'`` and a ``SCHEDULED_UNTIL=``
-    marker still park with their wake. [daveey]"""
+    blocker, not on time (:func:`park_mode` gives it the blocker wake instead); ``kind='time'``
+    and a ``SCHEDULED_UNTIL=`` marker still park with their wake. [daveey]"""
     if kind == TIME_KIND or (kind == "dependency" and parents_satisfied and not blocker_id):
         return True
     return _MARKER.search(reason or "") is not None
@@ -88,28 +136,38 @@ def park(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str], requested_kind: Optional[str],
     source_status: str = "ready", expected_run_id: Optional[int] = None, from_untyped_block: bool = False,
     wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
-    awaiting=None, blocker_id: Optional[str] = None,
+    awaiting=None, blocker_id: Optional[str] = None, run_metadata: Optional[dict] = None,
+    blocker_wake: bool = False,
 ) -> bool:
     """``running``/``ready`` -> ``scheduled`` with a wake time. Caller holds the write txn.
     ``from_untyped_block``: an untyped ``blocked`` card with no live run (classify-in-place) instead.
     ``awaiting`` names the producer (``kanban_awaiting.gate``: refused or escalated otherwise).
-    ``blocker_id`` (a shared external blocker, ``kanban_shared_blockers``) is stamped on the closed
-    run's metadata and the event, so the card still counts as behind that blocker while it keeps
-    its own wake time and wake check. [daveey]"""
+
+    ``blocker_id`` (``kanban_shared_blockers``) lands on the closed run's metadata and on the
+    event, as on a plain block, so the card stays behind the blocker while it waits on its own
+    wake. ``blocker_wake``: the caller named a blocker and no wake at all. The card then wakes
+    after :func:`blocker_wake_seconds`; its producer is the shared probe cadence, so the awaiting
+    gate is not consulted. [daveey]"""
     from hermes_cli import kanban_awaiting as kaw
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
 
     now = int(time.time())
-    wake_at = scheduled_until(reason, now=now) or now + DEFAULT_WAKE_SECONDS
+    if blocker_wake:
+        wake_at = now + blocker_wake_seconds()
+    else:
+        wake_at = scheduled_until(reason, now=now) or now + DEFAULT_WAKE_SECONDS
     guard = ("status = 'blocked' AND block_kind IS NULL AND current_run_id IS NULL" if from_untyped_block
              else "status IN ('running', 'ready')")
-    try:
-        record = kaw.gate(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
-                          clock_only=clock_only, op="block")
-    except kaw.RepeatedPark as rp:
-        return kaw.escalate(conn, task_id, record=rp.record, reason=reason,
-                            expected_run_id=expected_run_id) is not None
+    if blocker_wake:
+        record = {"kind": "clock", "inferred": True, "shared_blocker": blocker_id}
+    else:
+        try:
+            record = kaw.gate(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
+                              clock_only=clock_only, op="block")
+        except kaw.RepeatedPark as rp:
+            return kaw.escalate(conn, task_id, record=rp.record, reason=reason,
+                                expected_run_id=expected_run_id) is not None
     wake_check = wake_check or kaw.card_probe(record)
     wake_check, check_every = kwc.validate_park(
         wake_at=wake_at, wake_check=wake_check, check_every=check_every, clock_only=clock_only)
@@ -121,16 +179,20 @@ def park(
         params = (task_id, int(expected_run_id))
     if conn.execute(sql, params).rowcount != 1:
         return False
+    meta = dict(run_metadata or {})
+    if blocker_id:
+        meta["blocker_id"] = blocker_id
     run_id = kb._end_or_synthesize_run(
-        conn, task_id, outcome="scheduled", status="scheduled", summary=reason,
-        metadata={"blocker_id": blocker_id} if blocker_id else None,
-        synthesize=bool(reason or blocker_id),
+        conn, task_id, outcome="scheduled", status="scheduled", summary=reason, metadata=meta or None,
+        synthesize=bool(reason or meta),
     )
     kb._append_event(conn, task_id, "scheduled", {
         "reason": reason, "timed_park": True, "requested_kind": requested_kind,
         "wake_at": wake_at, "resume_status": source_status,
         **kwc.park_fields(wake_check, check_every, clock_only), "awaiting": record,
         **({"blocker_id": blocker_id} if blocker_id else {}),
+        **({"blocker_wake": True} if blocker_wake else {}),
+        **({"clear_blocker": True} if meta.get("clear_blocker") else {}),
     }, run_id=run_id)
     kwc.set_check(conn, task_id, wake_check, check_every, now=now)
     return True

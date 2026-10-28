@@ -58,6 +58,19 @@ def _blocked_behind(conn, title: str, blocker_id=BID) -> str:
     return tid
 
 
+def _legacy_blocked_behind(conn, title: str, blocker_id=BID) -> str:
+    """A card parked behind the blocker before blocker parks got their own wake: plain
+    ``blocked`` with no wake (the shape of cards parked before the fix, which only
+    ``probe_stranded_blockers`` can bring back)."""
+    from unittest import mock
+
+    from hermes_cli import kanban_timed_park as ktp
+    with mock.patch.object(ktp, "park_mode", lambda *a, **k: None):   # the pre-fix kernel
+        tid = _blocked_behind(conn, title, blocker_id=blocker_id)
+    assert kb.get_task(conn, tid).status == "blocked"
+    return tid
+
+
 def _age_runs(conn, seconds: int) -> None:
     """Shift every run and event into the past (as if ``seconds`` had elapsed)."""
     with kb.write_txn(conn):
@@ -75,7 +88,7 @@ def test_block_records_blocker_on_run_and_event(kanban_home):
         tid = _blocked_behind(conn, "a", blocker_id="  GitHub Actions Billing! ")
         run = conn.execute("SELECT metadata FROM task_runs WHERE task_id = ?", (tid,)).fetchone()
         assert json.loads(run["metadata"]) == {"blocker_id": BID}
-        ev = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked'",
+        ev = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind IN ('blocked', 'scheduled')",
                           (tid,)).fetchone()
         assert json.loads(ev["payload"])["blocker_id"] == BID
         # Control: a plain block stores no blocker metadata.
@@ -103,7 +116,7 @@ def test_unblocked_cards_behind_open_blocker_get_one_probe(kanban_home, spawns):
         # Probe hits the wall again and re-asserts: the rest stay held within the interval.
         assert kb.block_task(conn, probe, reason="still refused", kind="capability", blocker_id=BID)
         # Probe re-assertion is not an unblock loop: no triage escalation.
-        assert kb.get_task(conn, probe).status == "blocked"
+        assert kb.get_task(conn, probe).status == "scheduled"
         res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
         assert _spawned_ids(res) == []
         assert {t for t, r in res.respawn_guarded if r == ksb.GUARD_REASON} == set(cards) - {probe}
@@ -134,7 +147,7 @@ def test_cleared_blocker_releases_blocked_cards_without_human_unblock(kanban_hom
         kb.unblock_task(conn, a)                     # human retries just one card
         res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
         assert _spawned_ids(res) == [a]
-        assert kb.get_task(conn, b).status == "blocked"
+        assert kb.get_task(conn, b).status == "scheduled"
         kb.complete_task(conn, a, result="CI ran")
         res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
         assert res.shared_blocker_released == [b]
@@ -276,7 +289,7 @@ def test_wake_check_on_human_ask_block_is_refused_not_dropped(kanban_home):
 def test_lone_blocked_card_behind_open_blocker_is_probed_after_interval(kanban_home, spawns):
     _spawned, fake_spawn = spawns
     with kbc.connect_closing() as conn:
-        tid = _blocked_behind(conn, "alone")
+        tid = _legacy_blocked_behind(conn, "alone")
         res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
         assert _spawned_ids(res) == []                 # within the interval: stays blocked
         assert kb.get_task(conn, tid).status == "blocked"
@@ -290,7 +303,7 @@ def test_lone_blocked_card_behind_open_blocker_is_probed_after_interval(kanban_h
 def test_all_blocked_behind_blocker_get_exactly_one_probe(kanban_home, spawns):
     _spawned, fake_spawn = spawns
     with kbc.connect_closing() as conn:
-        cards = [_blocked_behind(conn, f"c{i}") for i in range(3)]
+        cards = [_legacy_blocked_behind(conn, f"c{i}") for i in range(3)]
         _age_runs(conn, 1900)
         res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
         assert len(_spawned_ids(res)) == 1
@@ -317,3 +330,21 @@ def test_human_ask_behind_blocker_is_not_auto_probed(kanban_home, spawns):
         res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
         assert _spawned_ids(res) == []
         assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_blocker_wake_and_stranded_probe_together_yield_one_probe(kanban_home, spawns):
+    """A legacy ``blocked`` card and a blocker-wake ``scheduled`` card behind the same blocker:
+    once the scheduled card's wake is due, the two wake paths still start ONE probe. [daveey]"""
+    from hermes_cli.kanban_continuation import wake_due_continuations
+    _spawned, fake_spawn = spawns
+    with kbc.connect_closing() as conn:
+        legacy = _legacy_blocked_behind(conn, "legacy")
+        parked = _blocked_behind(conn, "parked")
+        assert kb.get_task(conn, parked).status == "scheduled"
+        _age_runs(conn, 1900)
+        assert parked in wake_due_continuations(conn, now=int(time.time()) + 1900)
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert len(_spawned_ids(res)) == 1
+        assert kb.get_task(conn, legacy).status == "blocked" or _spawned_ids(res) == [legacy]
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert _spawned_ids(res) == []

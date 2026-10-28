@@ -67,11 +67,18 @@ def test_repeated_agent_block_stays_agent_but_approval_stays_human(board):
 
 
 def test_impossible_dependency_loop_is_not_a_human_question(board):
+    """A parent-less dependency behind a shared blocker parks ``scheduled`` on the probe cadence
+    (kanban_timed_park.park_mode), so a repeat is the probe re-asserting the wall, not a loop
+    for the breaker; it never lands in the human inbox either way. [daveey]"""
     conn, path = board
     tid = kb.create_task(conn, title="Missing dependency", assignee="default", session_id="owner")
     for _ in range(kb.BLOCK_RECURRENCE_LIMIT):
         assert kb.block_task(conn, tid, kind="dependency", reason="Waiting on missing prerequisite",
                              blocker_id="test-shared-wall")
-        if kb.get_task(conn, tid).status != "triage":
-            assert kb.unblock_task(conn, tid)
-    assert_agent(conn, path, tid)
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert kb.unblock_task(conn, tid)
+    assert kb.block_task(conn, tid, kind="dependency", reason="Waiting on missing prerequisite",
+                         blocker_id="test-shared-wall")
+    task = kb.get_task(conn, tid)
+    assert (task.status, task.block_kind) == ("scheduled", None)
+    assert activity._read_counts(path, activity.BLOCKED_STATUSES) == {}

@@ -5,17 +5,17 @@ import sqlite3
 
 
 def latest_run_blocker(conn: sqlite3.Connection, task_id: str) -> str | None:
-    """Shared blocker of the latest non-neutral closed run."""
-    from hermes_cli.kanban_db import _json_dict
-    from hermes_cli.kanban_shared_blockers import NEUTRAL_OUTCOMES, normalize_blocker_id
+    """Shared blocker the card is still behind: the newest closed run that said anything about
+    it (``kanban_shared_blockers.run_effect``; neutral outcomes and re-parks without the id pass)."""
+    from hermes_cli.kanban_shared_blockers import run_effect
     for row in conn.execute(
         "SELECT outcome, metadata FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
         "ORDER BY id DESC LIMIT 20", (task_id,),
     ):
-        bid = normalize_blocker_id(_json_dict(row["metadata"]).get("blocker_id"))
-        if bid is not None:
+        effect, bid = run_effect(row["outcome"], row["metadata"])
+        if effect == "assert":
             return bid
-        if (row["outcome"] or "") not in NEUTRAL_OUTCOMES:
+        if effect == "clear":
             return None
     return None
 
