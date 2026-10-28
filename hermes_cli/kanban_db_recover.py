@@ -36,7 +36,7 @@ from __future__ import annotations
 # An entry point (``python -m hermes_cli.kanban_db_recover``): the bootstrap activates the
 # dependency environment first. A no-op when imported by an already-bootstrapped process.
 try:
-    import hermes_bootstrap  # noqa: F401
+    import hermes_bootstrap
 except ModuleNotFoundError as exc:  # a partial ``hermes update`` can leave the bootstrap unregistered
     if exc.name != "hermes_bootstrap":
         raise
@@ -205,7 +205,7 @@ def _schema(conn: sqlite3.Connection) -> list[tuple[str, str, str, Optional[str]
 
 
 def _is_without_rowid(sql: Optional[str]) -> bool:
-    return bool(sql and re.search(r"\)\s*WITHOUT\s+ROWID\s*;?\s*$", sql, re.I))
+    return bool(sql and re.search(r"\)\s*WITHOUT\s+ROWID\s*;?\s*$", sql, re.IGNORECASE))
 
 
 def _read_rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> tuple[list[tuple], bool]:
@@ -814,8 +814,8 @@ def spawn_recovery(db_path: Path, *, wait: bool = False, timeout: float = RECOVE
         _log.error("kanban board %s has table b-tree damage; started automatic recovery (log %s)", key, log)
         return None
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, cwd=repo_root,
-                              stdin=subprocess.DEVNULL)
+        done = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+                              timeout=timeout, env=env, cwd=repo_root, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired as exc:
         # The child's own alarm normally ends it first; either way an unfinished backup is one
         # uncommitted transaction, so the live board keeps its old content.
