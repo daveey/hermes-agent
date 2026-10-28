@@ -252,6 +252,8 @@ _RAW_INLINE_TOOL_EXECUTORS: dict[str, InlineToolExecutor] = {
     "clarify": _tool(
         "tools.clarify_tool", "clarify_tool", ("questions", "questions"),
         callback=lambda agent, ctx: agent.clarify_callback,
+        session_id=lambda agent, ctx: getattr(agent, "session_id", None) or "",
+        tool_call_id=lambda agent, ctx: ctx.tool_call_id or "",
     ),
     "read_terminal": _callback_tool(
         "tools.read_terminal_tool", "read_terminal_tool", "read_terminal_callback",

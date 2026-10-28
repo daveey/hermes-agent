@@ -2107,3 +2107,21 @@ def test_session_branch_stored_accepts_idempotency_key(server, monkeypatch):
     assert "error" not in second, second.get("error")
     assert second["result"]["session_id"] == first_sid
     assert len(server._sessions) == 1
+
+
+def test_clarify_callback_cancel_early_ends_only_the_clarify_request(capture):
+    """The Desktop clarify bridge exposes ``cancel_early`` so a decision recorded in the For-you queue can end the wait
+    (tools/clarify_early.py). It withdraws that session's open clarify, leaves other methods alone, and the tool gets
+    ``outcome: cancelled``."""
+    server, buf = capture
+    from tui_gateway import server_requests
+    thread, box, _req = _start_batch_clarify(server, buf, ["q0"])
+    callback = server._agent_cbs("s1")["clarify_callback"]
+    assert callable(callback.cancel_early)
+    assert server_requests.cancel("s1", "answered_elsewhere", method="sudo") == 0
+    assert callback.cancel_early("answered_elsewhere") is True
+    thread.join(2)
+    assert not thread.is_alive()
+    assert box["answer"]["outcome"] == "cancelled"
+    assert server._open_requests("s1") == []
+    assert callback.cancel_early("answered_elsewhere") is False  # nothing left to cancel

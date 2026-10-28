@@ -108,7 +108,7 @@ def _result(normalized: list[dict], reply: dict) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
+def clarify_tool(questions, callback: Optional[Callable] = None, *, session_id: str = "", tool_call_id: str = "") -> str:
     """Ask 1-5 questions in one call. ``callback(questions) -> {"answers", "outcome", "notice"?}``
     is platform injected (cli.py / gateway / tui_gateway) and receives the normalized list."""
     normalized, error = _normalize_questions(questions)
@@ -120,7 +120,11 @@ def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
     # Observers see the questions only; the answers stay in the tool result.
     with human_input_request("clarify", prompt="\n".join(q["question"] for q in normalized)) as human:
         try:
-            reply = callback(normalized)
+            from tools import clarify_early
+            reply, early = clarify_early.ask(callback, normalized, session_id or "", tool_call_id or "")
+            if early is not None:
+                human.outcome = clarify_early.STATUS
+                return early
             human.outcome = str(reply.get("outcome") or "")
             return _result(normalized, reply)
         except Exception as exc:
@@ -152,7 +156,10 @@ CLARIFY_SCHEMA = {
         "Each response has status answered, skipped or unanswered "
         "(user_response is null unless answered); outcome is submitted, "
         "cancelled, timed_out or undelivered, with a notice saying why "
-        "when the wait ended without a submit. Prefer deciding "
+        "when the wait ended without a submit. If David already answered the "
+        "same ask in the For-you queue, the result is instead "
+        "{status: answered_elsewhere, decisions: [...]}: treat those "
+        "decisions as his answer. Prefer deciding "
         "low-stakes questions yourself; don't use this for dangerous-command "
         "confirmation (the terminal tool handles that)."
     ),
@@ -195,7 +202,9 @@ registry.register(
     name="clarify",
     toolset="clarify",
     schema=CLARIFY_SCHEMA,
-    handler=lambda args, **kw: clarify_tool(args.get("questions"), callback=kw.get("callback")),
+    handler=lambda args, **kw: clarify_tool(args.get("questions"), callback=kw.get("callback"),
+                                            session_id=kw.get("session_id") or "",
+                                            tool_call_id=kw.get("tool_call_id") or ""),
     check_fn=check_clarify_requirements,
     emoji="❓",
 )

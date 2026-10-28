@@ -143,6 +143,21 @@ def _setup_choose_request(sid: str, payload: dict) -> dict | None:
     return server_requests.send("setup_choose", sid, dict(payload), timeout=_clarify_timeout_seconds())
 
 
+class _ClarifyCallback:
+    """The clarify tool's callback for this UI session. ``cancel_early`` lets tools/clarify_early.py end the wait when
+    the same decision was recorded elsewhere (user-steps For-you queue); True when a clarify was withdrawn."""
+
+    def __init__(self, sid: str) -> None:
+        self.sid = sid
+
+    def __call__(self, questions):
+        return _clarify_block(self.sid, questions)
+
+    def cancel_early(self, reason: str = "answered_elsewhere") -> bool:
+        from tui_gateway import server_requests
+        return server_requests.cancel(self.sid, reason, method="clarify") > 0
+
+
 def _agent_cbs(sid: str) -> dict:
     def _read_block(method: str, timeout: int):
         # read_terminal / read_preview (desktop GUI): server request like clarify; the preview
@@ -167,7 +182,7 @@ def _agent_cbs(sid: str) -> dict:
         # Credits/notice spine: AgentNotice → notification.show; recovery → notification.clear.
         "notice_callback": lambda n: _agent_notice_update(sid, n),
         "notice_clear_callback": lambda key: _emit("notification.clear", sid, {"key": key}),
-        "clarify_callback": lambda questions: _clarify_block(sid, questions),
+        "clarify_callback": _ClarifyCallback(sid),
         "read_terminal_callback": _read_block("terminal.read", 30),
         "read_preview_callback": _read_block("preview.read", 45),
         # drive_preview / annotate_preview (desktop GUI): same budget as the preview read it ends with.
