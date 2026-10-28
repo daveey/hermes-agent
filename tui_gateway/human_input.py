@@ -9,7 +9,8 @@ desktop-ssh clients alike, in ``<HERMES_HOME>/desktop/last_human_input.json`` (a
 Only client-sent submits count. Injected turns never reach the ``prompt.submit`` RPC handler (Kanban
 notices and wakes, auto-continue resumes and queued drains call ``_run_prompt_submit`` directly), and the
 handler skips the in-process ones that do: bot-relay / hosted-room submits (``_turn_author`` /
-``_hosted_*``), ``start_chat`` (no request id), hidden widget intents, and cross-session sends (the
+``_hosted_*``), ``start_chat`` (no request id), hidden widget intents, submits over an agent-declared
+``/api/ws?client=agent`` transport (agent scripts such as ``gateway_rpc.py``), and cross-session sends (the
 session-mentions courier submits over the websocket, with its fixed header first).
 """
 
@@ -32,6 +33,10 @@ _INTERNAL_PARAMS = ("_turn_author", "_hosted_task", "_hosted_terminal_callback")
 def is_human_typed_submit(rid, params: dict, text) -> bool:
     """True for a ``prompt.submit`` a person typed in a client (not an injected or relayed turn)."""
     if rid is None or not isinstance(params, dict):
+        return False
+    from tui_gateway.transport import is_agent_client
+
+    if is_agent_client():  # an agent script over /api/ws?client=agent, not a person at a keyboard
         return False
     if any(params.get(k) is not None for k in _INTERNAL_PARAMS):
         return False

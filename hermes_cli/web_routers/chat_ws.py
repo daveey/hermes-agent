@@ -698,6 +698,16 @@ async def pty_ws(ws: WebSocket) -> None:
 # session id, so agent emits fan out to both sinks.
 
 
+def _ws_client_kind(ws: WebSocket) -> Optional[str]:
+    """[daveey] ``"agent"`` when the client connected with ``?client=agent`` (agent scripts driving the backend),
+    else None (the renderer; today's behaviour). Client-declared: it only makes ``session.create`` default to
+    hidden and keeps ``prompt.submit`` out of last_human_input.json; it grants nothing."""
+    from tui_gateway.transport import AGENT_CLIENT_KIND
+
+    query = getattr(ws, "query_params", None) or {}
+    return AGENT_CLIENT_KIND if query.get("client", "") == AGENT_CLIENT_KIND else None
+
+
 @router.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
     if not await _close_unless_sidecar_allowed(ws):
@@ -716,6 +726,7 @@ async def gateway_ws(ws: WebSocket) -> None:
         ws,
         auth_identity=getattr(ws, "_hermes_auth_identity", None),
         subprotocol=getattr(ws, "_hermes_ws_subprotocol", None),
+        client_kind=_ws_client_kind(ws),
     )
 
 
