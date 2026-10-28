@@ -35,8 +35,17 @@ def _looks_like_hermes_invocation() -> bool:
     pytest's separate ``-p <plugin>`` and any other entry point's argv must
     not select a profile. ``python -m hermes_cli.main`` sets ``argv[0]`` to
     this package's ``main.py``; the console script's basename is ``hermes``.
+    The POSIX source launcher is ``python -c`` (``argv[0]`` is ``-c``) and
+    sets ``sys._hermes_pin_default_home`` before this import
+    (``hermes_cli._launchers.PIN_DEFAULT_HOME_FLAG``). Both are required:
+    a bare ``python -c`` has no mark, and ``hermes --run-module pytest``
+    keeps the mark but runpy replaces ``argv[0]``, so that ``-p`` stays foreign.
     """
+    # Launcher mark, not argv[0] alone: the wrapper rewrites argv[0] only
+    # after this module has already scanned for ``-p``.
     argv0 = sys.argv[0] if sys.argv else ""
+    if argv0 == "-c" and getattr(sys, "_hermes_pin_default_home", False):
+        return True
     base = os.path.basename(argv0).lower()
     for suffix in (".exe", "-script.pyw", "-script.py"):
         if base.endswith(suffix):

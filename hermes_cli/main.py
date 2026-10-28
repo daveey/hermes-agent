@@ -520,10 +520,12 @@ def explicit_cli_profile() -> str | None:
 def _apply_profile_override() -> None:
     """Pre-parse --profile/-p and set HERMES_HOME before imports.
 
-    Only a Hermes CLI process owns ``-p``/``--profile``. Importing this module
-    from pytest (or any other entry point) must ignore that argv: a separate
-    ``-p usage_guard_probe`` is a plugin flag, not a profile, and resolving it
-    ``sys.exit``s the importer. Sticky ``active_profile`` is unchanged.
+    Only a Hermes CLI process owns ``-p``/``--profile``. That includes the
+    POSIX source launcher (``python -c``, argv[0] ``-c``, pin flag set).
+    Importing this module from pytest (or any other entry point) must ignore
+    that argv: a separate ``-p usage_guard_probe`` is a plugin flag, not a
+    profile, and resolving it ``sys.exit``s the importer. Sticky
+    ``active_profile`` is unchanged.
     """
     global _explicit_cli_profile
     _explicit_cli_profile = None
