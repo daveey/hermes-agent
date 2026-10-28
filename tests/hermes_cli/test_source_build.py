@@ -579,6 +579,51 @@ def test_update_swaps_in_a_prebuilt_from_an_ancestor_with_unchanged_desktop_inpu
 
 
 @pytest.mark.platforms("macos")
+def test_defer_desktop_swap_leaves_a_running_desktop_alone(tmp_path, monkeypatch, capsys):
+    """[daveey] HERMES_UPDATE_DEFER_DESKTOP_SWAP=1 (hermes-sync, while Desktop is open): the core update
+    lands but the bundle is neither built nor swapped, so the running Desktop is never stopped
+    (t_01a1825a82e472f6). hermes-sync swaps it on the next quit or while the user is away."""
+    from hermes_cli import main_desktop
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, desktop_dir, built = _prebuilt_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_UPDATE_DEFER_DESKTOP_SWAP", "1")
+    monkeypatch.setattr(main_desktop, "_desktop_main_launches", lambda _d: {4242: []})
+    stopped = []
+    monkeypatch.setattr(main_desktop, "_stop_desktop_processes_locking_build",
+                        lambda *a, **k: stopped.append(a) or [4242])
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert built == [] and stopped == []
+    assert (desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes").read_text() == "previous app"
+    assert "desktop app swap deferred" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.platforms("macos")
+def test_defer_desktop_swap_still_installs_when_desktop_is_not_running(tmp_path, monkeypatch):
+    """With the flag but no Desktop main process (it quit), the swap runs as usual."""
+    from hermes_cli import main_desktop
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, desktop_dir, _built = _prebuilt_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_UPDATE_DEFER_DESKTOP_SWAP", "1")
+    monkeypatch.setattr(main_desktop, "_desktop_main_launches", lambda _d: {})
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert (desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes").read_text() == "prebuilt app"
+
+
+@pytest.mark.platforms("macos")
+def test_without_the_defer_flag_a_running_desktop_is_swapped_as_upstream(tmp_path, monkeypatch):
+    from hermes_cli import main_desktop
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, desktop_dir, _built = _prebuilt_fixture(tmp_path, monkeypatch)
+    monkeypatch.delenv("HERMES_UPDATE_DEFER_DESKTOP_SWAP", raising=False)
+    monkeypatch.setattr(main_desktop, "_desktop_main_launches", lambda _d: {4242: []})
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert (desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes").read_text() == "prebuilt app"
+
+
+@pytest.mark.platforms("macos")
 @pytest.mark.parametrize("change", ["apps/desktop/src/a.ts", "apps/shared/src/x.ts", "package-lock.json"])
 def test_update_builds_when_a_desktop_input_changed_since_the_prebuilt_commit(tmp_path, monkeypatch, capsys, change):
     from hermes_cli.source_build import _build_desktop_product
