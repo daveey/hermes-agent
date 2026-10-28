@@ -269,6 +269,19 @@ def explicit_foreign_pin(args: dict, self_gw: Optional[str]) -> str:
     return pin
 
 
+def _raw_explicit_pin(args: dict) -> str:
+    """Explicit pin when identity is unknown: not auto/local/here, else ''.
+
+    Same fallback ``tools.kanban_tools._place_remote`` uses when ``self_gateway()`` itself
+    fails. A name is not treated as this gateway — that needs a successful identity lookup.
+    """
+    try:
+        pin = str(args.get("placement") or "").strip().lower()
+    except Exception:
+        return ""
+    return "" if pin in ("", "auto", "local", "here") else pin
+
+
 def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
            self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
            locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None) -> dict:
@@ -276,10 +289,14 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
 
     Any local outcome for such a pin (no route to that gateway, a structural limit, target not live)
     becomes ``{"where": "refuse", "why": ..., "pin": <gateway>}``, which ``kanban_create`` returns as a
-    typed error. Never raises.
+    typed error. If identity lookup (or the pin check) raises before that rule runs, an explicit name
+    other than auto/local/here is refused the same way; local/here and a pin already known to be this
+    gateway stay local. Never raises.
     """
+    known = ""
     try:
         sg = reg.self_gateway() if self_gw is None else self_gw
+        known = sg.strip().lower() if isinstance(sg, str) else ""
         out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
                       locate=locate, carries=carries)
         pin = explicit_foreign_pin(args, sg)
@@ -287,7 +304,14 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
             return {"where": "refuse", "why": out.get("why", ""), "pin": pin}
         return out
     except Exception as exc:
-        return {"where": "local", "why": f"placement check failed: {exc}"}
+        why = f"placement check failed: {exc}"
+        # Do not accept a foreign pin in this catch-all. Identity may have failed before we
+        # could tell own-gateway from a name; only a pin we already resolved as ours stays local.
+        if origin_intent is None:
+            raw = _raw_explicit_pin(args)
+            if raw and raw != known:
+                return {"where": "refuse", "why": why, "pin": raw}
+        return {"where": "local", "why": why}
 
 
 def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,

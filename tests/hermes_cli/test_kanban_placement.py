@@ -602,3 +602,62 @@ def test_exception_while_placing_a_pinned_card_is_refused(mac, monkeypatch):
     out = json.loads(kt._handle_create({"title": "x", "placement": "hub"}))
     assert not out.get("ok") and out["code"] == "placement_unavailable", out
     assert _local_count() == 0
+
+
+def _identity_raises():
+    raise RuntimeError("identity lookup failed")
+
+
+def test_decide_refuses_explicit_pin_when_identity_lookup_raises(monkeypatch):
+    """A raise before pin checking must not turn an explicit pin into a local card."""
+    monkeypatch.setattr(reg, "self_gateway", _identity_raises)
+    refused = kp.decide({"title": "x", "placement": "mini"}, cfg={})
+    assert refused["where"] == "refuse" and refused["pin"] == "mini" and "failed" in refused["why"], refused
+    # The fixture's own name is not "known" when the lookup itself raised.
+    assert kp.decide({"title": "x", "placement": "MacBook"}, cfg={})["where"] == "refuse"
+    for pin in (None, "local", "here", "auto", "LOCAL", " Here "):
+        args = {"title": "x"} if pin is None else {"title": "x", "placement": pin}
+        assert kp.decide(args, cfg={})["where"] == "local", pin
+    # Courier creation is local by contract; the tool layer refuses an origin-bound pin itself.
+    courier = kp.decide({"title": "x", "placement": "mini"}, cfg={}, origin_intent={"request_id": "r"})
+    assert courier["where"] == "local", courier
+
+
+def test_decide_keeps_a_known_own_gateway_local_when_a_later_step_raises(monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("pin check failed")
+    monkeypatch.setattr(kp, "explicit_foreign_pin", boom)
+    own = kp.decide({"title": "x", "placement": "Hub"}, self_gw="hub", cfg={})
+    assert own["where"] == "local", own
+    foreign = kp.decide({"title": "x", "placement": "mini"}, self_gw="hub", cfg={})
+    assert foreign["where"] == "refuse" and foreign["pin"] == "mini", foreign
+
+
+@pytest.mark.parametrize("pin", ["mini", "macbook", "MacBook"])
+def test_identity_lookup_failure_refuses_explicit_pin_and_creates_no_row(mac, monkeypatch, pin):
+    """Tool-level: self_gateway raising must not write a local row for an explicit pin."""
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(reg, "self_gateway", _identity_raises)
+    out = json.loads(kt._handle_create({"title": "MacBook-only drill", "placement": pin}))
+    assert not out.get("ok"), out
+    assert out["code"] == "placement_unavailable" and out["created"] is False
+    assert out["placement"] == pin.strip().lower()
+    assert "placement='local'" in out["error"]
+    assert mac["calls"] == [] and _local_count() == 0
+
+
+@pytest.mark.parametrize("pin", ["local", "here", "LOCAL", " Here "])
+def test_identity_lookup_failure_still_creates_local_and_here(mac, monkeypatch, pin):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(reg, "self_gateway", _identity_raises)
+    out = json.loads(kt._handle_create({"title": "stay here", "placement": pin}))
+    assert out["ok"] and out["task_id"] and "placed" not in out, out
+    assert mac["calls"] == [] and _local_count() == 1
+
+
+def test_identity_lookup_failure_without_a_pin_still_creates_locally(mac, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(reg, "self_gateway", _identity_raises)
+    out = json.loads(kt._handle_create({"title": "unpinned card"}))
+    assert out["ok"] and out["task_id"] and "placed" not in out, out
+    assert _local_count() == 1
