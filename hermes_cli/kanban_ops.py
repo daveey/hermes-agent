@@ -224,7 +224,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
     def _on_tick(res):
         ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
-        if ready_pending and not res.spawned:
+        if ready_pending and not res.spawned and not res.at_capacity:  # a full cap is idle, not stuck [daveey]
             health_state["bad_ticks"] += 1
         else:
             health_state["bad_ticks"] = 0

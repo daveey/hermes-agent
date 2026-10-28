@@ -360,3 +360,74 @@ def test_review_budget_still_bounded_by_shared_cap(
 
     # Budget 2 total across both lanes, reservation notwithstanding.
     assert len(res.spawned) == 2
+
+
+# ---------------------------------------------------------------------------
+# 4. A ready queue held only by a full cap is idle, not "stuck" [daveey]
+# ---------------------------------------------------------------------------
+
+
+def test_full_max_in_progress_is_recorded_and_named(kanban_home, all_assignees_spawnable):
+    """Ready cards waiting behind max_in_progress running workers: the tick says why (at_capacity)."""
+    with kbc.connect() as conn:
+        for title in ("busy-1", "busy-2"):
+            assert kb.claim_task(conn, kb.create_task(conn, title=title, assignee="alice")) is not None
+        kb.create_task(conn, title="waits", assignee="alice")
+        spawns: list = []
+        res = kbd.dispatch_once(conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=2)
+    assert not spawns
+    assert res.at_capacity == "max_in_progress=2/2"
+    assert "at_capacity(max_in_progress=2/2)" in kbd.describe_suppression([res])
+    assert kbd.all_at_capacity([res])
+
+
+def test_full_max_spawn_is_recorded(kanban_home, all_assignees_spawnable):
+    with kbc.connect() as conn:
+        assert kb.claim_task(conn, kb.create_task(conn, title="busy", assignee="alice")) is not None
+        kb.create_task(conn, title="waits", assignee="alice")
+        res = kbd.dispatch_once(conn, spawn_fn=_fake_spawn_factory([]), max_spawn=1)
+    assert res.at_capacity == "max_spawn=1/1"
+
+
+def test_under_cap_tick_is_not_at_capacity(kanban_home, all_assignees_spawnable):
+    with kbc.connect() as conn:
+        kb.create_task(conn, title="runs", assignee="alice")
+        res = kbd.dispatch_once(conn, spawn_fn=_fake_spawn_factory([]), max_in_progress=2)
+    assert res.at_capacity is None
+    assert not kbd.all_at_capacity([res])
+
+
+def test_all_at_capacity_needs_every_ticked_board_capped():
+    capped, free = kb.DispatchResult(), kb.DispatchResult()
+    capped.at_capacity = "max_in_progress=6/6"
+    locked = kb.DispatchResult()
+    locked.skipped_locked = True
+    assert kbd.all_at_capacity([capped, None, locked])
+    assert not kbd.all_at_capacity([capped, free])
+    assert not kbd.all_at_capacity([])
+    assert not kbd.all_at_capacity([locked]), "no board actually ticked"
+
+
+def _daemon_stderr(monkeypatch, capsys, res, ticks=8):
+    import argparse
+    from hermes_cli import kanban_ops
+
+    monkeypatch.setattr(kbd, "has_spawnable_ready", lambda conn: True)
+
+    def fake_run_daemon(*, on_tick, **_kw):
+        for _ in range(ticks):
+            on_tick(res)
+
+    monkeypatch.setattr(kbd, "run_daemon", fake_run_daemon)
+    assert kanban_ops._cmd_daemon(argparse.Namespace(force=True, interval=1, max=None, pidfile=None)) == 0
+    return capsys.readouterr().err
+
+
+def test_cli_daemon_does_not_warn_stuck_when_cap_is_full(kanban_home, monkeypatch, capsys):
+    res = kb.DispatchResult()
+    res.at_capacity = "max_in_progress=6/6"
+    assert "dispatcher stuck" not in _daemon_stderr(monkeypatch, capsys, res)
+
+
+def test_cli_daemon_still_warns_stuck_when_nothing_holds_spawns(kanban_home, monkeypatch, capsys):
+    assert "dispatcher stuck" in _daemon_stderr(monkeypatch, capsys, kb.DispatchResult())

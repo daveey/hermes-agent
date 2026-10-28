@@ -69,6 +69,23 @@ def host_slot_count() -> int:
     return os.cpu_count() or 4
 
 
+def xdist_worker_budget() -> int:
+    """Max xdist workers one slot holder may start: ``HERMES_TEST_XDIST_MAX``, else cpu_count // host slots.
+
+    A direct ``pytest -n 8`` session holds ONE host slot but runs 8 workers, so four slot holders on a
+    16-core Mac ran 32+ workers and the load average passed 100 (ready Kanban cards then sat unclaimed).
+    Capping each holder's workers at its share of the cores keeps slots x workers <= cores. [daveey]
+    """
+    raw = os.environ.get("HERMES_TEST_XDIST_MAX", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    cores = os.cpu_count() or 4
+    return max(1, cores // max(1, host_slot_count()))
+
+
 def host_slot_dir() -> str:
     return os.environ.get("HERMES_TEST_SLOT_DIR") or f"/tmp/hermes-test-slots-{os.getuid()}"  # windows-footgun: ok — POSIX test host slots  # no-tmp: ok — host-wide shared slot dir must be outside per-run scratch
 

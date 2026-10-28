@@ -1255,10 +1255,27 @@ def _take_host_test_slot(config) -> None:
                              f"in {slots.host_slot_dir()})\n")
             sys.stderr.flush()
 
+        _cap_xdist_workers(config, slots.xdist_worker_budget())
         config._hermes_host_slot_fd = slots.acquire_host_slot(on_wait=note)
         os.environ[slots.HELD_ENV] = "1"
     except Exception as exc:  # the cap is advisory; never fail a run on it
         sys.stderr.write(f"(host test slot unavailable: {exc})\n")
+
+
+def _cap_xdist_workers(config, budget: int) -> None:
+    """[daveey] One slot holder runs at most ``budget`` xdist workers (``-n 8`` / ``-n auto`` included).
+
+    xdist turns ``-n`` into ``config.option.tx`` in its tryfirst ``pytest_cmdline_main`` and only reads
+    ``tx`` when ``DSession`` starts its nodes at session start, so trimming it here (pytest_configure)
+    caps the worker count."""
+    option = getattr(config, "option", None)
+    tx = getattr(option, "tx", None)
+    if not tx or len(tx) <= budget or any(spec != "popen" for spec in tx):
+        return
+    sys.stderr.write(f"(host test slots: capping xdist workers {len(tx)} -> {budget}; "
+                     f"HERMES_TEST_XDIST_MAX overrides)\n")
+    option.tx = list(tx[:budget])
+    option.numprocesses = budget
 
 
 def _release_host_test_slot(config) -> None:

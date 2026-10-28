@@ -212,6 +212,10 @@ class DispatchResult:
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; the lock holder is making progress on the same board."""
+    at_capacity: Optional[str] = None
+    """``"max_in_progress=6/6"`` / ``"max_spawn=3/3"`` when the host or board concurrency cap was full this
+    tick, so no worker could start. A ready queue held only by a full cap is correctly idle, not stuck:
+    the "dispatcher stuck" warning names it instead of blaming profile health. [daveey]"""
     memory_pressure: Optional[str] = None
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
@@ -230,6 +234,7 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
     """
     counts: dict[str, int] = {}
     pressure: Optional[str] = None
+    capacity: Optional[str] = None
     for res in results:
         if res is None:
             continue
@@ -243,10 +248,23 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             counts["skipped_owned"] = counts.get("skipped_owned", 0) + 1
         if res.memory_pressure:
             pressure = res.memory_pressure
+        if res.at_capacity:
+            capacity = res.at_capacity
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
+    if capacity:
+        parts.append(f"at_capacity({capacity})")
     if pressure:
         parts.append(f"memory_pressure={pressure}")
     return ", ".join(parts)
+
+
+def all_at_capacity(results: Iterable[Optional[DispatchResult]]) -> bool:
+    """True when every board's tick that ran was held only by a full concurrency cap (nothing could spawn).
+
+    The "dispatcher stuck" detectors skip such ticks: ready work waiting behind ``kanban.max_in_progress``
+    running workers is the cap doing its job (stale/timeout reclaim frees hung workers). [daveey]"""
+    ran = [res for res in results if res is not None and not res.skipped_locked]
+    return bool(ran) and all(res.at_capacity for res in ran)
 
 
 # Bounded registry of recently-reaped worker exits, filled by the reap loop in
@@ -2437,12 +2455,14 @@ def _tick_spawn_budget(
     # Both ready and review loops consume from the same budget.
     if max_spawn is not None:
         if running_count >= max_spawn:
+            result.at_capacity = f"max_spawn={running_count}/{max_spawn}"
             return False, None
         spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
         if total_running >= max_in_progress:
+            result.at_capacity = f"max_in_progress={total_running}/{max_in_progress}"
             return False, None
         remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:

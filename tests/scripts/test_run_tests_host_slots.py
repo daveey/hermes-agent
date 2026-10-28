@@ -183,3 +183,30 @@ def test_direct_pytest_run_holds_a_slot_for_its_session(slot_env, monkeypatch, t
         for p in (first,):
             if p.poll() is None:
                 p.kill()
+
+
+def test_xdist_worker_budget_is_cores_over_slots(monkeypatch):
+    monkeypatch.delenv("HERMES_TEST_XDIST_MAX", raising=False)
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "4")
+    monkeypatch.setattr(slots.os, "cpu_count", lambda: 16)
+    assert slots.xdist_worker_budget() == 4
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "32")
+    assert slots.xdist_worker_budget() == 1, "never below one worker"
+    monkeypatch.setenv("HERMES_TEST_XDIST_MAX", "3")
+    assert slots.xdist_worker_budget() == 3, "the env override wins"
+
+
+def test_direct_pytest_n8_is_capped_to_the_slot_budget(tmp_path):
+    """A direct `pytest -n 8` session holds one slot, so it may start only its share of the cores."""
+    pytest.importorskip("xdist")
+    env = {k: v for k, v in os.environ.items() if k not in (slots.HELD_ENV, "PYTEST_XDIST_WORKER")}
+    env.update(HERMES_TEST_SLOT_DIR=str(tmp_path / "slots"), HERMES_TEST_HOST_SLOTS="4", HERMES_TEST_XDIST_MAX="2")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n", "8",
+         f"{Path(__file__).relative_to(REPO_ROOT)}::test_xdist_worker_budget_is_cores_over_slots"],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=240, check=False,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "capping xdist workers 8 -> 2" in out, out
+    assert "created: 2/2 workers" in out, out
