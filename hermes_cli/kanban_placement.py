@@ -241,9 +241,38 @@ def _uncarried(args: dict, c: _Cfg, carries: Optional[bool]) -> list[str]:
     return [] if carries else legacy
 
 
+def explicit_foreign_pin(args: dict, self_gw: Optional[str]) -> str:
+    """The gateway the caller pinned that is neither this gateway nor 'local'/'auto', else ''."""
+    pin = str(args.get("placement") or "auto").strip().lower()
+    if pin in ("", "auto", "local", "here", (self_gw or "").lower()):
+        return ""
+    return pin
+
+
 def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
            self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
            locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None) -> dict:
+    """``_decide`` plus one rule: a caller who pinned another gateway never gets a silent local card.
+
+    Any local outcome for such a pin (no route to that gateway, a structural limit, target not live)
+    becomes ``{"where": "refuse", "why": ..., "pin": <gateway>}``, which ``kanban_create`` returns as a
+    typed error. Never raises.
+    """
+    try:
+        sg = reg.self_gateway() if self_gw is None else self_gw
+        out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
+                      locate=locate, carries=carries)
+        pin = explicit_foreign_pin(args, sg)
+        if pin and origin_intent is None and out.get("where") == "local":
+            return {"where": "refuse", "why": out.get("why", ""), "pin": pin}
+        return out
+    except Exception as exc:
+        return {"where": "local", "why": f"placement check failed: {exc}"}
+
+
+def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
+            self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
+            locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None) -> dict:
     """``{"where": "local"|<gateway>, "why": str}`` for a ``kanban_create`` call. Never raises."""
     try:
         c = _Cfg(config() if cfg is None else cfg)

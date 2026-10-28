@@ -159,10 +159,15 @@ def test_caller_pin_wins_both_ways():
     assert decide({"title": "CI fix", "placement": "local"})["where"] == "local"
     # An explicit pin to the target skips the marker heuristic (the caller knows).
     assert decide({"title": "Chrome-free MacBook docs", "placement": "hub"})["where"] == "hub"
-    # ...but never the structural limits.
-    assert decide({"title": "x", "placement": "hub", "parents": ["t_1"]})["where"] == "local"
-    # A gateway with no route is not a destination.
-    assert decide({"title": "x", "placement": "mini"})["where"] == "local"
+    # ...but never the structural limits: a pinned gateway that cannot be honoured is refused, not local.
+    assert decide({"title": "x", "placement": "hub", "parents": ["t_1"]})["where"] == "refuse"
+    # A gateway with no route is not a destination, and never silently becomes a local card.
+    assert decide({"title": "x", "placement": "mini"})["where"] == "refuse"
+    assert decide({"title": "x", "placement": "mini"}, cfg={})["where"] == "refuse"
+    # Own gateway name and 'here' still mean local, with or without a route.
+    assert decide({"title": "x", "placement": "macbook"})["where"] == "local"
+    assert decide({"title": "x", "placement": "macbook"}, cfg={})["where"] == "local"
+    assert decide({"title": "x", "placement": "local"}, cfg={})["where"] == "local"
 
 
 def test_courier_creation_is_never_re_placed():
@@ -370,6 +375,50 @@ def test_mac_card_stays_local_and_never_calls_the_hub(mac):
     out = json.loads(kt._handle_create({"title": "Fix the Hermes Desktop sidebar stripe"}))
     assert out["ok"] and out["task_id"] and "placed" not in out
     assert mac["calls"] == [] and _local_count() == 1
+
+
+@pytest.mark.parametrize("pin", ["mini", "macbook-typo", "hub-typo"])
+def test_pin_to_an_unrouted_gateway_is_refused_not_created_locally(mac, pin):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "Run the MacBook-only drill", "placement": pin}))
+    assert not out.get("ok"), out
+    assert out["code"] == "placement_unavailable" and out["created"] is False and out["placement"] == pin
+    assert "placement='local'" in out["error"]
+    assert mac["calls"] == [] and _local_count() == 0
+
+
+def test_pin_to_a_gateway_when_no_route_is_configured_is_refused(mac, monkeypatch):
+    # The reported case: a hub worker (no route on the hub) pinned placement='macbook'.
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {})
+    monkeypatch.setattr(reg, "self_gateway", lambda: "hub")
+    out = json.loads(kt._handle_create({"title": "MacBook-only drill", "placement": "macbook"}))
+    assert not out.get("ok") and out["code"] == "placement_unavailable", out
+    assert _local_count() == 0
+
+
+def test_pin_to_the_routed_target_that_the_hub_refuses_is_an_error_not_local(mac):
+    from tools import kanban_tools as kt
+    mac["result"]["rc"] = 2
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hub"}))
+    assert not out.get("ok") and out["code"] == "placement_unavailable", out
+    assert _local_count() == 0
+
+
+@pytest.mark.parametrize("pin", ["local", "here", "macbook"])
+def test_pin_local_or_own_gateway_still_creates_locally(mac, pin):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": pin}))
+    assert out["ok"] and out["task_id"] and "placed" not in out
+    assert mac["calls"] == [] and _local_count() == 1
+
+
+def test_own_gateway_pin_creates_locally_with_no_route_configured(mac, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {})
+    monkeypatch.setattr(reg, "self_gateway", lambda: "hub")
+    out = json.loads(kt._handle_create({"title": "Hub drill", "placement": "hub"}))
+    assert out["ok"] and out["task_id"] and _local_count() == 1
 
 
 def test_hub_refusal_falls_back_to_a_local_card(mac):

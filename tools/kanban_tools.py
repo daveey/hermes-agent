@@ -1416,6 +1416,15 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
         state.close()
 
 
+def _placement_refused(pin: str, why: str) -> str:
+    """[daveey] A caller-pinned gateway cannot be honoured: say so instead of creating the card here."""
+    return tool_error(
+        f"placement={pin!r} was not honoured and no card was created: {why}. A pinned gateway is never "
+        "silently replaced by a local card. Use placement='local' (or omit it) to create the card on this "
+        "gateway, or create it on the target with `hermes-hub create-task <gateway> ...`.",
+        code="placement_unavailable", placement=pin, created=False)
+
+
 def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id) -> Optional[str]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
 
@@ -1431,6 +1440,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                 "project_id": project_id}
         decision = kp.decide(view)
         target = decision["where"]
+        if target == "refuse":
+            return _placement_refused(decision["pin"], decision.get("why", ""))
         if target == "local":
             if decision.get("why", "").startswith(("local marker", "placement pinned", "needs ")):
                 logger.debug("kanban placement: local (%s)", decision["why"])
@@ -1443,6 +1454,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         if not placed.get("ok"):
             logger.warning("kanban placement: %s refused the card (%s); creating it locally",
                            target, placed.get("error"))
+            if kp.explicit_foreign_pin(view, reg.self_gateway()):
+                return _placement_refused(target, f"{target} refused the card: {placed.get('error')}")
             return None
         tid = None
         deadline = time.monotonic() + float(cfg.get("wait_seconds", 8) or 0)
@@ -1460,8 +1473,17 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                                         "task_id": tid, "origin_session": session_id,
                                         "queued_only": bool(placed.get("queued_only"))},
                    note=note)
-    except Exception:
+    except Exception as exc:
         logger.warning("kanban placement failed; creating the card locally", exc_info=True)
+        try:
+            from hermes_cli import kanban_placement as kp2
+            from hermes_cli import kanban_capability_registry as reg2
+            pin = kp2.explicit_foreign_pin(args, reg2.self_gateway())
+        except Exception:
+            pin = str(args.get("placement") or "").strip().lower()
+            pin = "" if pin in ("", "auto", "local", "here") else pin
+        if pin:
+            return _placement_refused(pin, f"placement failed: {exc}")
         return None
 
 
