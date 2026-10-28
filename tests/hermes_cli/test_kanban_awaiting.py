@@ -648,3 +648,73 @@ def test_mutual_card_wait_is_refused(kanban_home, monkeypatch) -> None:
         assert "cycles" in (out.get("error") or "")
         assert kb.get_task(conn, a).status == "running"
 
+
+
+# -- 10-28: a wait on David must not pass as kind='external' because its ref carries a number ---------
+
+P4B_AWAITING = {"kind": "external", "ref": "PR 1777 approval",
+                "why": "merge policy red tier needs David's approval on head 46754d080"}
+MERGE_QUEUE_WHY = ("needs daveey's approving review (or his OK on Discord, Slack or the Inbox) "
+                   "before the red tier merges")
+
+
+@pytest.mark.parametrize("awaiting", [
+    P4B_AWAITING,
+    {"kind": "external", "ref": "https://github.com/o/r/pull/1777", "why": MERGE_QUEUE_WHY},
+])
+def test_external_park_naming_a_human_wait_is_refused_whatever_the_ref(kanban_home, monkeypatch,
+                                                                        awaiting) -> None:
+    """Hub t_b1fdca0b parked on 10-28 04:55 with the first awaiting; the ticket-number exemption let it pass."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "Upkeep P4b: waiting for the PR to merge.",
+                                 "wake_check": "gh pr view 1777 --json state | grep -q MERGED",
+                                 "awaiting": awaiting})
+        assert kaw.HUMAN_WAIT in out.get("error", ""), out
+        assert "needs_input" in out["error"] and "approval_reconciliation" in out["error"], out
+        assert kb.get_task(conn, tid).status == "running"
+
+
+@pytest.mark.parametrize("awaiting", [
+    {"kind": "external", "ref": "AWS support case 4711", "why": "AWS support to grant the quota increase"},
+    {"kind": "external", "ref": "https://status.example.com/incidents/123",
+     "why": "upstream API returns 403 Forbidden while their maintenance runs"},
+])
+def test_external_park_on_a_vendor_ticket_still_parks(kanban_home, monkeypatch, awaiting) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "Waiting on the vendor.", "clock_only": True, "awaiting": awaiting})
+        assert out.get("status") == "scheduled", out
+
+
+def test_vendor_ticket_ref_still_excuses_an_agent_wall_why(kanban_home, monkeypatch) -> None:
+    """The ticket exemption keeps covering agent walls: a vendor holds the grant, not an agent."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "Waiting on the vendor.", "clock_only": True, "awaiting": {
+            "kind": "external", "ref": "Vendor ticket 55821",
+            "why": "their tenant lacks the role our integration needs; they apply it"}})
+        assert out.get("status") == "scheduled", out
+
+
+@pytest.mark.parametrize("text", [
+    MERGE_QUEUE_WHY,
+    "PR 1777 needs daveey's approving review",
+    "parked until his OK on Discord",
+    "waiting on daveey to merge",
+])
+def test_merge_queue_wording_is_a_human_wait(text) -> None:
+    assert kaw.text_wall(text)[0] == kaw.HUMAN_WAIT
+
+
+def test_inferred_wait_on_a_running_card_does_not_excuse_a_human_wait(kanban_home, monkeypatch) -> None:
+    """Only a producer card that carries the visible ask excuses a human wait named in prose."""
+    with kbc.connect_closing() as conn:
+        other, tid = _running(conn), _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": f"Waiting on David's approval; {other} merges after.",
+                                 "wake_check": f"hermes kanban wait-check task {other}"})
+        assert kaw.HUMAN_WAIT in out.get("error", ""), out

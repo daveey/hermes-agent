@@ -69,10 +69,12 @@ _REMOTE_CONFIRMED: dict[tuple[str, str], tuple[float, str]] = {}
 
 # Shapes from the 10-26/27 replays (session-idle-check HIDDEN_ASK / AGENT_WALL), narrowed so ordinary
 # vendor/HTTP prose ("403 Forbidden", "AWS support to grant the quota") is not an agent wall.
+# 10-28: also the merge queue's own wording ("needs daveey's approving review (or his OK on Discord...)").
 HIDDEN_ASK = re.compile(
-    r"\b(?:david|the user|a human)\b(?:['\u2019]s)?\W+(?:\w+\W+){0,6}?(?:decision|approval|answer|reply|confirmation|"
-    r"go-ahead|sign-?off)\b|\bdon['\u2019]?t re-?ask\b|\balready asked (?:him|david|in chat)\b|"
-    r"\bwaiting (?:on|for) (?:david|the user|a human)\b", re.IGNORECASE)
+    r"\b(?:david|daveey|the user|a human)\b(?:['\u2019]s)?\W+(?:\w+\W+){0,6}?(?:decision|approval|approving review|"
+    r"answer|reply|confirmation|go-ahead|sign-?off)\b|\bhis ok\b|\bdon['\u2019]?t re-?ask\b|"
+    r"\balready asked (?:him|david|daveey|in chat)\b|"
+    r"\bwaiting (?:on|for) (?:david|daveey|the user|a human)\b", re.IGNORECASE)
 AGENT_WALL = re.compile(
     r"\bdenied\b|\bunauthorizedoperation\b|\baccess ?denied|\bnot authori[sz]ed to perform\b|"
     r"\b(?:missing|needs?|lacks?|without|insufficient)\s+(?:the\s+|a\s+)?(?:[\w:.*/-]+\s+){0,2}permissions?\b|"
@@ -382,7 +384,10 @@ def _check_external(conn, task_id, awaiting, text) -> None:
     if not awaiting.get("ref") or not awaiting.get("why"):
         raise AwaitingError(INVALID_AWAITING, "awaiting kind='external' needs ref=<vendor or ticket> and why=<evidence>")
     wall = text_wall(text)
-    if wall and not _TICKET.search(awaiting["ref"]):
+    # A vendor ticket/URL in the ref names who clears an agent-looking wall (AWS support grants the
+    # quota). It never excuses a wait on David: "PR 1777 approval" has a number, and the board then
+    # showed a generic scheduled wait instead of a wait on him (hub t_b1fdca0b, 10-28).
+    if wall and (wall[0] == HUMAN_WAIT or not _TICKET.search(awaiting["ref"])):
         raise wall_error(task_id, wall, text)
 
 
@@ -442,7 +447,14 @@ def human_error(task_id: str, text: str) -> AwaitingError:
     return AwaitingError(HUMAN_WAIT, (
         "a wait on a human is not a park: nobody sees a scheduled card. Make it a visible ask with "
         "kanban_block(kind='needs_input', human_request={action, why_human, interaction, scope, evidence}), "
-        "or drop the dependency on David if the agent can proceed."))
+        "or drop the dependency on David if the agent can proceed. If the ask already exists elsewhere (a "
+        "pending approval already delivered to Discord, Slack or an inbox, a PR review request), still block "
+        "this card that way so the board shows the wait on David: name that approval/PR in action and put a "
+        "`Checked: <command> - <its pending state>` line in evidence. ask-gate's "
+        "approval_reconciliation.preflight reads the approval store through the adapter registered for it (if "
+        "any): pending lets the block through as the visible wait (the block files no new approval request), "
+        "approved means reuse the "
+        "recorded approval, denied means stop. Never file a second approval request for the same scope."))
 
 
 def wall_error(task_id: str, wall: tuple[str, str], text: str, *, named: Optional[str] = None) -> AwaitingError:
@@ -476,6 +488,12 @@ def _live_card_ref(conn: sqlite3.Connection, task_id: str, text: str) -> Optiona
         if card_orphan_reason(conn, ref) is None:
             return ref
     return None
+
+
+def _carries_visible_ask(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when the card is itself blocked on a human with a visible ask (human_request or needs_input)."""
+    row = conn.execute("SELECT status, human_request, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return bool(row) and row[0] in ("blocked", "triage") and (bool(row[1]) or row[2] == "needs_input")
 
 
 def _short_continue(op: str, wake_in: Optional[int]) -> bool:
@@ -515,7 +533,8 @@ def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dic
     if not short:
         wall = text_wall(text)
         # A visible ask on the card waited on is not hidden; an agent wall needs a DECLARED owner card.
-        if wall and not (wall[0] == HUMAN_WAIT and producer):
+        # A merely live card (running, scheduled) does not carry David's ask, so it excuses nothing.
+        if wall and not (wall[0] == HUMAN_WAIT and producer and _carries_visible_ask(conn, producer)):
             raise wall_error(task_id, wall, text, named=producer)
     if producer:
         return {"kind": "card", "ref": producer, "inferred": True}
