@@ -66,7 +66,19 @@ def test_local_unverified_terminal_or_binding_never_releases(world, board, monke
     if fault == 'missing_board':
         kb.kanban_db_path('default').rename(board / 'unavailable.db')
     row = projection(world)
-    assert row['status'] == 'unknown' and row['unfinished']
+    if fault == 'archive':
+        # A live local archive is owner-observed, so it closes the obligation as
+        # closed_uncompleted. It is not verified completion: the ledger stays
+        # unreleased, and the row is never done. Binding faults and a raw done
+        # status still project unknown.
+        assert row['status'] == 'archived' and row['unfinished'] is False and not row['stale']
+        assert row['closed_uncompleted'] is True and row['reported_status'] == 'archived'
+        with sqlite3.connect(world[0]) as conn:
+            assert conn.execute('SELECT released FROM origin_obligations').fetchone() == (0,)
+        assert ledger.obligations(
+            world[0], gateway='owner', profile='default', sessions=['s_current'])[0]['unfinished']
+    else:
+        assert row['status'] == 'unknown' and row['unfinished']
 
 
 def test_unreadable_local_owner_does_not_trust_fresh_terminal_replica(world, board, monkeypatch):
