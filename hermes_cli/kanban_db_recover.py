@@ -174,15 +174,9 @@ HOLDER_TASK_ENV = "HERMES_RECOVERY_HOLDER_TASK"
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except (OSError, OverflowError):
-        return False
-    return True
+    from gateway.status import _pid_exists
+
+    return _pid_exists(pid)
 
 
 def recovery_lock_holder_info(db_path: Path) -> Optional[dict]:
@@ -213,7 +207,7 @@ def recovery_lock_holder_info(db_path: Path) -> Optional[dict]:
 def _proc_start(pid: int) -> Optional[str]:
     """Linux process start time in clock ticks (``/proc/<pid>/stat`` field 22); None elsewhere."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8-sig").rsplit(")", 1)[1].split()[19]
     except (OSError, IndexError):
         return None
 

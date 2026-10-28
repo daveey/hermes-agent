@@ -1649,6 +1649,7 @@ def test_profile_alias_status_follows_the_wrapper_the_profile_really_has(monkeyp
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None)
     monkeypatch.setattr(gm, "duplicate_credential_findings", list)
+    monkeypatch.setattr(profiles, "_get_wrapper_dir", lambda: tmp_path / ".local" / "bin")
     for name in ("dev", "ops", "work", "old"):
         (tmp_path / ".hermes" / "profiles" / name).mkdir(parents=True)
         (tmp_path / ".hermes" / "profiles" / name / "config.yaml").write_text("model: m\n", encoding="utf-8")

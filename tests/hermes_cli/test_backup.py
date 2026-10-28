@@ -1385,7 +1385,6 @@ class TestProfileRestoration:
             for name, content in files.items():
                 zf.writestr(name, content)
 
-
     def test_import_skips_profile_dirs_without_config(self, tmp_path, monkeypatch):
         """Import doesn't create wrappers for profile dirs without config."""
         hermes_home = tmp_path / ".hermes"
@@ -1395,6 +1394,7 @@ class TestProfileRestoration:
 
         wrapper_dir = tmp_path / ".local" / "bin"
         wrapper_dir.mkdir(parents=True)
+        monkeypatch.setattr("hermes_cli.profiles._get_wrapper_dir", lambda: wrapper_dir)
 
         zip_path = tmp_path / "backup.zip"
         self._make_backup_zip(zip_path, {
