@@ -8,8 +8,6 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Optional
 
-from hermes_cli import kanban_db as _kb
-
 
 def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
@@ -72,3 +70,8 @@ def schedule_task(
         }, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check, check_every)
         return True
+
+
+# Late-bound origin namespace (see module docstring); imported LAST so this
+# module is fully populated before ``kanban_db`` imports from it.
+from hermes_cli import kanban_db as _kb
