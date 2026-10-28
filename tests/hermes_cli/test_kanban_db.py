@@ -1141,6 +1141,9 @@ class TestSharedBoardPaths:
                 self.pid = 4242
 
         monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        # Host-independent: on a systemd host the real wrapper refuses this run-less fake task
+        # (production refusal, covered elsewhere). This test's subject is env injection.
+        monkeypatch.setattr(kbd, "_restart_safe_worker_argv", lambda task, command, board=None: command)
 
         task = kb.Task(
             id="t_dispatch_env",
@@ -1657,6 +1660,9 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
             self.pid = 4242
 
     monkeypatch.setattr("subprocess.Popen", _FakePopen)
+    # Host-independent: pin the restart-safe scope wrapper to the in-process (no systemd) outcome;
+    # this test's subject is PYTHONPATH, and the production refusal is tested separately.
+    monkeypatch.setattr(kbd, "_restart_safe_worker_argv", lambda task, command, board=None: command)
 
     task = kb.Task(
         id="t_import_root", title="x", body=None, assignee="coder", status="ready",
