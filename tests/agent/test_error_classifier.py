@@ -230,6 +230,30 @@ class TestClassifyApiError:
         assert result.retryable is False
         assert result.should_fallback is True
 
+    def test_404_anthropic_not_found_error_on_model_is_model_not_found(self):
+        # Anthropic's 404 for an unknown id names the field, not "model not found":
+        # {"type":"error","error":{"type":"not_found_error","message":"model: <id>"}}.
+        # It must not read as a generic unknown 404 [daveey].
+        bad = "claude-opus-5-5 openai-codex/gpt-6-astra xai-oauth/grok-4.7"
+        e = MockAPIError(
+            f"Error code: 404 - {{'type': 'error', 'error': {{'type': 'not_found_error', 'message': 'model: {bad}'}}}}",
+            status_code=404,
+            body={"type": "error", "error": {"type": "not_found_error", "message": f"model: {bad}"}},
+        )
+        result = classify_api_error(e, provider="anthropic", model=bad)
+        assert result.reason == FailoverReason.model_not_found
+        assert result.retryable is False
+
+    def test_404_anthropic_not_found_error_on_other_resource_stays_unknown(self):
+        # Only the model field: a 404 on a file/batch id is not a missing model.
+        e = MockAPIError(
+            "Error code: 404",
+            status_code=404,
+            body={"type": "error", "error": {"type": "not_found_error", "message": "File not found: file_abc"}},
+        )
+        result = classify_api_error(e, provider="anthropic", model="claude-opus-5-5")
+        assert result.reason != FailoverReason.model_not_found
+
     def test_404_retired_free_route_is_model_not_found(self):
         # The provider retired the :free route — the slug is dead for every
         # credential, so fall back instead of burning retries (#123180). Not

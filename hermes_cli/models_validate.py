@@ -229,6 +229,33 @@ def _whitespace_allowed(req: _Request) -> bool:
     return provider_allows_model_whitespace(req.provider or req.normalized, req.base_url)
 
 
+def _normalized_provider(provider: Optional[str], base_url: Optional[str]) -> str:
+    """``validate_requested_model``'s provider normalization (OpenRouter on a foreign URL is custom)."""
+    from hermes_cli import models as _m
+
+    normalized = _m.normalize_provider(provider)
+    if normalized == "openrouter" and base_url and not base_url_host_matches(base_url, "openrouter.ai"):
+        normalized = "custom"
+    return normalized
+
+
+def model_whitespace_error(
+    model: Optional[str], provider: Optional[str], base_url: Optional[str] = None,
+) -> Optional[str]:
+    """The ``/model`` whitespace rule for any other entry point (startup ``-m``, Kanban pins) [daveey].
+
+    Returns the refusal message, or None when the id is fine for this provider/base_url. Same
+    exemptions as ``/model``: self-hosted providers and a user-configured base_url keep spaced ids.
+    """
+    requested = (model or "").strip()
+    if not requested or not any(ch.isspace() for ch in requested):
+        return None
+    req = _Request(requested, requested, provider, _normalized_provider(provider, base_url),
+                   None, base_url, None, None)
+    verdict = _reject_whitespace(req)
+    return verdict["message"] if verdict else None
+
+
 def offered_model_ids(models, provider: Optional[str], base_url: Optional[str] = None) -> list:
     """Ids a picker may show. Drops whitespace the validator will refuse; keeps the rest."""
     ids = list(models or [])
@@ -793,9 +820,7 @@ def validate_requested_model(
     from hermes_cli import models as _m
 
     requested = (model_name or "").strip()
-    normalized = _m.normalize_provider(provider)
-    if normalized == "openrouter" and base_url and not base_url_host_matches(base_url, "openrouter.ai"):
-        normalized = "custom"
+    normalized = _normalized_provider(provider, base_url)
     lookup = requested
     if normalized == "copilot":
         lookup = _m.normalize_copilot_model_id(requested, api_key=api_key) or requested

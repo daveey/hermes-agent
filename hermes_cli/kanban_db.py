@@ -1039,7 +1039,20 @@ def _validate_model_override(model: Optional[str], provider: Optional[str]) -> t
     provider = (provider or "").strip() or None
     if provider and not model:
         raise ValueError("provider_override requires a model_override")
+    _reject_spaced_pin(model, provider)
     return model, provider
+
+
+def _reject_spaced_pin(model: Optional[str], provider: Optional[str]) -> None:
+    """The ``/model`` whitespace rule for Kanban pins [daveey]. A provider-less pin is checked again
+    once ``resolve_pin_provider`` binds its provider (a ``custom`` profile keeps spaced ids)."""
+    if not model or not provider:
+        return
+    from hermes_cli.models_validate import model_whitespace_error
+
+    message = model_whitespace_error(model, provider)
+    if message:
+        raise ValueError(f"{message} Pin one model per card (got {model!r} on provider {provider!r}).")
 
 
 def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
@@ -1320,6 +1333,7 @@ def create_task(
     # [daveey] Bind a provider-less concrete pin now (or refuse), never late-bind it to config at spawn.
     from hermes_cli.kanban_pin_provider import resolve_pin_provider
     model_override, provider_override = resolve_pin_provider(model_override, provider_override, assignee=assignee)
+    _reject_spaced_pin(model_override, provider_override)
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -1551,6 +1565,7 @@ def set_model_override(
         from hermes_cli.kanban_pin_provider import resolve_pin_provider
         row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
         model, provider = resolve_pin_provider(model, None, assignee=row[0] if row else None)
+        _reject_spaced_pin(model, provider)
     return _set_task_override(
         conn, task_id,
         "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),
