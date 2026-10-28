@@ -240,6 +240,24 @@ describe('mergeOfflineFallback', () => {
     expect(merged.find(r => r.id === 'c1')?.offline_stale_list).toBeUndefined()
   })
 
+  it("a failed local list keeps this Mac's own rows stale-list, one row each, over their asleep boot copies", () => {
+    recordSessionListResult([], [], undefined, 'all', [], true)
+
+    const boot = offlineSessionsFromReplica(
+      [rec('bare', { gateway: 'macbook', local: true }), rec('named', { gateway: 'macbook', local: true })],
+      gateway => (gateway === 'macbook' ? 'local' : undefined),
+      1_000_000,
+      { includeLocal: true }
+    )
+
+    const merged = mergeOfflineFallback([live('bare'), live('named', { connection_id: 'local' })], boot)
+
+    expect(merged.map(r => [r.id, r.offline_stale_list])).toEqual([
+      ['bare', true],
+      ['named', true]
+    ])
+  })
+
   it('keeps reference identity when nothing is added', () => {
     const rows = [live('l1')]
 

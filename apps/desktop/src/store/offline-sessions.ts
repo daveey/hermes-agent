@@ -19,6 +19,8 @@ import type { SessionInfo } from '@/hermes'
 import { normalizeSessionSource, SIDEBAR_EXCLUDED_SOURCES } from '@/lib/session-source'
 import { syncedAgoLabel } from '@/lib/synced-ago'
 
+import { $connectionsRegistry } from './connection-registry-state'
+
 /** One hub replica session record, as the `hub-sync` plugin serves it. */
 export interface OfflineReplicaRecord {
   gateway: string
@@ -273,13 +275,20 @@ function rowFromRecord(record: OfflineReplicaRecord, connectionId: string, linea
 }
 
 /** Fresh owner lists win; retained rows from a failed list are cached, not live. A retained row with no replica
- * copy is stamped `offline_stale_list`: its owner failed one list, which does not prove it is unreachable. */
+ * copy is stamped `offline_stale_list`: its owner failed one list, which does not prove it is unreachable. Nor does
+ * a replica copy of this Mac's own backend (the boot snapshot's, judged asleep at boot): its row is stamped too. */
 export function mergeOfflineFallback(
   live: SessionInfo[],
   offline: readonly SessionInfo[],
   freshness = $sessionListFreshness.get()
 ): SessionInfo[] {
-  const cachedById = new Map(offline.map(row => [offlineIdentity(row), row]))
+  // [daveey] Primary-backend rows carry no connection_id while replica rows name the primary: one identity for both.
+  const primary = $connectionsRegistry.get()?.primary?.trim() || 'local'
+
+  const ownedIdentity = (row: Pick<SessionInfo, 'connection_id' | 'profile'>, id: string) =>
+    identity(row.connection_id?.trim() || primary, profileOf(row.profile), id)
+
+  const cachedById = new Map(offline.map(row => [ownedIdentity(row, row.id), row]))
   const freshOwners = new Set<string>()
   const seen = new Set<string>()
   let changed = false
@@ -289,7 +298,8 @@ export function mergeOfflineFallback(
     let effective = row
 
     if (!fresh) {
-      const cached = cachedById.get(offlineIdentity(row))
+      const ownBackend = (row.connection_id?.trim() || primary) === primary
+      const cached = ownBackend ? undefined : cachedById.get(ownedIdentity(row, row.id))
       effective = cached ?? { ...row, is_active: false, offline_cached: true, offline_stale_list: true }
       changed = true
     } else if (!row.offline_cached) {
@@ -298,7 +308,7 @@ export function mergeOfflineFallback(
 
     for (const id of [effective.id, effective._lineage_root_id, ...(effective._lineage_ids ?? [])]) {
       if (id) {
-        seen.add(identity(effective.connection_id?.trim() ?? '', profileOf(effective.profile), id))
+        seen.add(ownedIdentity(effective, id))
       }
     }
 
@@ -309,7 +319,7 @@ export function mergeOfflineFallback(
     row =>
       !freshOwners.has(ownerKey(row.connection_id, row.profile)) &&
       freshness[ownerKey(row.connection_id, row.profile)] !== true &&
-      !seen.has(offlineIdentity(row))
+      !seen.has(ownedIdentity(row, row.id))
   )
 
   const merged = added.length ? [...rows, ...added] : changed ? rows : live
