@@ -936,7 +936,11 @@ def _cmd_comment(args: argparse.Namespace) -> int:
     author = args.author or _profile_author()
     with kbc.connect_closing() as conn:
         kb.add_comment(conn, args.task_id, author, body)
+        live = kb.live_run_id(conn, args.task_id)
     print(f"Comment added to {args.task_id}")
+    own_run = os.environ.get("HERMES_KANBAN_TASK") == args.task_id
+    if live is not None and not own_run:
+        print("The card has a live worker run: it gets this note at its next model call.")
     return 0
 
 

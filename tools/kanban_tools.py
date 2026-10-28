@@ -704,9 +704,23 @@ _comment_poll_last_attempt: float = 0.0
 _comment_watermark: dict[str, int] = {}
 
 
+def _comment_stamp(c: Any, own_identity: str) -> str:
+    """``default (another session) at 04:50 PDT``: who wrote the note and when, so a worker
+    can tell an operator note from its own even when both run as the same profile."""
+    author = (c.author or "").strip() or "operator"
+    who = f"{author} (another session)" if author == own_identity else author
+    try:
+        when = time.strftime("%H:%M %Z", time.localtime(int(c.created_at)))
+    except (TypeError, ValueError, OverflowError):
+        return who
+    return f"{who} at {when}"
+
+
 def inject_new_comments_from_env(agent: Any) -> bool:
     """Steer new operator comments on the worker's task into ``agent``; True iff a
-    steer was injected; never raises. Own comments (``_persisted_identity``) are skipped."""
+    steer was injected; never raises. Skipped as own: the comments THIS run wrote, by id
+    (``commented`` events carrying ``writer_run_id``; tool and CLI alike). A same-profile
+    chat's note is an operator note. Without a run id, falls back to the author filter."""
     global _comment_poll_last_attempt
     # Operator notes address the dispatcher-owned worker; a delegate_task child sharing
     # this process must neither receive them nor advance the shared watermark (#112817).
@@ -717,9 +731,13 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         return False
     _comment_poll_last_attempt = now
     seen = _comment_watermark.get(tid)
+    run_id = _worker_run_id(tid)
+    own_ids: set[int] = set()
     try:
         with _board(None, quiet_close=True) as (kb, conn):
             rows = kb.list_comments_after(conn, tid, after_id=seen or 0)
+            if seen is not None and rows and run_id is not None:
+                own_ids = kb.own_comment_ids(conn, tid, run_id)
     except Exception:
         logger.debug("comment-inject: bridge failed", exc_info=True)
         return False
@@ -729,22 +747,32 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         return False
     # Advance past everything read (including our own notes) so nothing is re-injected.
     _comment_watermark[tid] = max(c.id for c in rows)
-    # Same resolution the write side used, so a worker skips its OWN comments even
-    # when the dispatcher did not pin HERMES_PROFILE (echoed notes would otherwise
-    # re-enter the live turn as fake operator steering).
+    # Same resolution the write side used, for the stamp and the run-less fallback.
     own = _persisted_identity()
-    fresh = [c for c in rows if (c.author or "").strip() != own and (c.body or "").strip()]
+    if run_id is not None:
+        # [daveey] Own = written by this run (by id). Every actor usually shares one
+        # profile, so an author filter dropped every operator note from a same-profile chat.
+        fresh = [c for c in rows if c.id not in own_ids and (c.body or "").strip()]
+    else:
+        fresh = [c for c in rows if (c.author or "").strip() != own and (c.body or "").strip()]
     if not fresh:
         return False
-    lines = [f"- {c.author or 'operator'}: {c.body.strip()}" for c in fresh]
+    lines = [f"- {_comment_stamp(c, own)}: {c.body.strip()}" for c in fresh]
     note = ("New note" + ("s" if len(fresh) > 1 else "")
             + " on your kanban task from the operator (delivered mid-run). "
             + "Take it into account for the work you're doing right now:\n" + "\n".join(lines))
     try:
-        return bool(agent.steer(note))
+        delivered = bool(agent.steer(note))
     except Exception:
         logger.debug("comment-inject: steer failed", exc_info=True)
         return False
+    if delivered and run_id is not None:
+        try:
+            with _board(None, quiet_close=True) as (kb, conn):
+                kb.record_comment_delivery(conn, tid, run_id, [c.id for c in fresh])
+        except Exception:
+            logger.debug("comment-inject: delivery receipt failed", exc_info=True)
+    return delivered
 
 
 # Soft deadline: near ``max_runtime_seconds`` steer the running turn to checkpoint with
@@ -828,6 +856,8 @@ def _handle_show(args: dict, **kw) -> str:
                 {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
             "children": kb.child_ids(conn, tid),
             "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
+            # Posted during the live run, not written by it, not yet steered into it.
+            "undelivered_comments": [c.id for c in kb.undelivered_live_comments(conn, tid)],
             # Capped; full log via CLI.
             "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
             "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
@@ -1356,7 +1386,14 @@ def _handle_comment(args: dict, **kw) -> str:
     with _board(args.get("board")) as (kb, conn):
         cid = kb.add_comment(conn, tid, author=author, body=str(body))
         subscribed = _maybe_subscribe_on_touch(conn, str(tid))
-        return _ok(task_id=tid, comment_id=cid, **({"subscribed": True} if subscribed else {}))
+        live = kb.live_run_id(conn, str(tid))
+        extra: dict = {"live_run": live is not None}
+        if live is not None and _worker_run_id(str(tid)) != live:
+            extra["delivery"] = (
+                "the card has a live worker run: it gets this note at its next model call "
+                "(often a few minutes); a comment_delivered event on the card confirms it")
+        return _ok(task_id=tid, comment_id=cid, **extra,
+                   **({"subscribed": True} if subscribed else {}))
 
 
 def _store_attachment(board, tid, filename, data, content_type) -> str:

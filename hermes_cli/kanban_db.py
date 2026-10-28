@@ -1762,12 +1762,29 @@ def task_graph_context(conn: sqlite3.Connection, task_id: str) -> dict:
 
 # --- Comments & events ---
 
+def _writer_run_id(task_id: str) -> Optional[int]:
+    """The dispatcher run id of THIS process when it is the worker of ``task_id``
+    (``HERMES_KANBAN_TASK`` matches and ``HERMES_KANBAN_RUN_ID`` is an int), else None.
+    Every writer inside a worker run (the kanban_comment tool, ``hermes kanban comment``
+    from its terminal, delegate children) inherits both, so the run is known in any process."""
+    if os.environ.get("HERMES_KANBAN_TASK") != task_id:
+        return None
+    try:
+        return int((os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip())
+    except ValueError:
+        return None
+
+
 def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str) -> int:
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
         raise ValueError("comment author is required")
     now = int(time.time())
+    # [daveey] A comment written from inside a worker run records that run on its
+    # ``commented`` event, so the live comment bridge can skip exactly the run's own notes
+    # by id. Authorship cannot: workers and the chats steering them share a profile.
+    writer_run = _writer_run_id(task_id)
     # ``allow_nested=True``: graph builders (kanban_swarm blackboard seeding)
     # compose comment writes under one outer commit.
     with write_txn(conn, allow_nested=True):
@@ -1776,8 +1793,67 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str) 
             "INSERT INTO task_comments (task_id, author, body, created_at) "
             "VALUES (?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now),
         )
-        _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
-        return int(cur.lastrowid or 0)
+        cid = int(cur.lastrowid or 0)
+        payload: dict = {"author": author, "len": len(body), "comment_id": cid}
+        if writer_run is not None:
+            payload["writer_run_id"] = writer_run
+        _append_event(conn, task_id, "commented", payload)
+        return cid
+
+
+def own_comment_ids(conn: sqlite3.Connection, task_id: str, run_id: int) -> set[int]:
+    """Ids of the comments on ``task_id`` written from inside run ``run_id`` (any process)."""
+    rows = conn.execute(
+        "SELECT json_extract(payload, '$.comment_id') FROM task_events "
+        "WHERE task_id = ? AND kind = 'commented' "
+        "AND json_extract(payload, '$.writer_run_id') = ?", (task_id, int(run_id)),
+    ).fetchall()
+    return {int(r[0]) for r in rows if r[0] is not None}
+
+
+def delivered_comment_ids(conn: sqlite3.Connection, task_id: str, run_id: int) -> set[int]:
+    """Ids the live bridge already steered into run ``run_id`` (``comment_delivered`` events)."""
+    out: set[int] = set()
+    for (raw,) in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'comment_delivered' "
+            "AND run_id = ?", (task_id, int(run_id))).fetchall():
+        try:
+            out.update(int(i) for i in (json.loads(raw or "{}").get("comment_ids") or []))
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return out
+
+
+def record_comment_delivery(conn: sqlite3.Connection, task_id: str, run_id: int,
+                            comment_ids: list[int]) -> None:
+    """Receipt that the live bridge steered ``comment_ids`` into the running worker of ``run_id``."""
+    with write_txn(conn, allow_nested=True):
+        _append_event(conn, task_id, "comment_delivered",
+                      {"comment_ids": [int(i) for i in comment_ids], "run_id": int(run_id)},
+                      run_id=int(run_id))
+
+
+def live_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    """The active run id when the task is ``running``, else None."""
+    row = conn.execute("SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if not row or row[0] != "running" or row[1] is None:
+        return None
+    return int(row[1])
+
+
+def undelivered_live_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
+    """Comments posted since the live run started that the run neither wrote nor received."""
+    run_id = live_run_id(conn, task_id)
+    if run_id is None:
+        return []
+    started = conn.execute("SELECT started_at FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+    since = int(started[0]) if started and started[0] is not None else 0
+    skip = own_comment_ids(conn, task_id, run_id) | delivered_comment_ids(conn, task_id, run_id)
+    rows = conn.execute(
+        "SELECT id, task_id, author, body, created_at FROM task_comments "
+        "WHERE task_id = ? AND created_at >= ? ORDER BY id ASC", (task_id, since),
+    ).fetchall()
+    return [Comment.from_row(r) for r in rows if int(r[0]) not in skip]
 
 
 def _require_task(conn: sqlite3.Connection, task_id: str) -> None:

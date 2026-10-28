@@ -191,3 +191,181 @@ def test_skips_own_authored_comments_without_env_profile(worker_home, monkeypatc
     _unthrottle()
     assert kt.inject_new_comments_from_env(agent) is False
     assert agent.steers == []
+
+
+# --- Same-profile operator notes vs this run's own notes (echo filter keyed on comment ids) ---
+#
+# Every actor on a board usually runs as the same profile (``default``): Desktop chats,
+# the chats overseeing workers, and the workers themselves. Filtering by author therefore
+# dropped every operator note from a same-profile chat. Own notes are now the comments
+# this RUN wrote (tool or CLI), recorded by id; everything else is delivered.
+
+import json
+import os
+import subprocess
+
+
+def _running_worker(monkeypatch, title="live task", profile="default"):
+    """A claimed (running) task with this process set up as its dispatcher worker."""
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title=title)
+        task = kb.claim_task(conn, tid)
+        assert task is not None and task.current_run_id is not None
+        run_id = task.current_run_id
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    monkeypatch.setenv("HERMES_PROFILE", profile)
+    return tid, run_id
+
+
+def _as_other_session(fn):
+    """Run ``fn`` as a different session on the SAME profile (an operator chat): no worker env."""
+    saved = {k: os.environ.pop(k) for k in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID") if k in os.environ}
+    try:
+        return fn()
+    finally:
+        os.environ.update(saved)
+
+
+def test_same_profile_operator_comment_is_injected(worker_home, monkeypatch):
+    tid, _run = _running_worker(monkeypatch)
+    agent = FakeAgent()
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is False  # seed
+
+    def post():
+        conn = kbc.connect()
+        try:
+            return kb.add_comment(conn, tid, author="default", body="STOP the CPU burners now")
+        finally:
+            conn.close()
+    _as_other_session(post)
+
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is True
+    assert "STOP the CPU burners" in agent.steers[0]
+    # The steer names the author as another session and carries a time.
+    assert "default (another session) at " in agent.steers[0]
+
+
+def test_own_kanban_comment_tool_note_is_not_injected(worker_home, monkeypatch):
+    tid, _run = _running_worker(monkeypatch)
+    agent = FakeAgent()
+    _unthrottle()
+    kt.inject_new_comments_from_env(agent)  # seed
+    out = json.loads(kt._handle_comment({"task_id": tid, "body": "progress: step 2 done"}))
+    assert out["ok"]
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is False
+    assert agent.steers == []
+
+
+def test_own_cli_comment_from_separate_process_is_not_injected(worker_home, monkeypatch):
+    tid, _run = _running_worker(monkeypatch)
+    agent = FakeAgent()
+    _unthrottle()
+    kt.inject_new_comments_from_env(agent)  # seed
+    # ``hermes kanban comment`` run by the worker's terminal: a separate process with the worker env.
+    slash = f"comment {tid} note from my own shell"
+    code = (f"import sys; sys.path.insert(0, {str(_WORKTREE)!r}); from hermes_cli import kanban; "
+            f"print(kanban.run_slash({slash!r}))")
+    proc = subprocess.run([sys.executable, "-c", code], env=dict(os.environ), capture_output=True,
+                          text=True, timeout=120, check=False)
+    assert "Comment added" in proc.stdout, proc.stdout + proc.stderr
+    conn = kbc.connect()
+    try:
+        assert any("own shell" in c.body for c in kb.list_comments(conn, tid))
+    finally:
+        conn.close()
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is False
+    assert agent.steers == []
+
+
+def test_mixed_batch_injects_only_the_operator_note(worker_home, monkeypatch):
+    tid, _run = _running_worker(monkeypatch)
+    agent = FakeAgent()
+    _unthrottle()
+    kt.inject_new_comments_from_env(agent)  # seed
+    kt._handle_comment({"task_id": tid, "body": "my own progress note"})
+
+    def post():
+        conn = kbc.connect()
+        try:
+            kb.add_comment(conn, tid, author="default", body="operator: pause and re-read the card")
+        finally:
+            conn.close()
+    _as_other_session(post)
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is True
+    assert "re-read the card" in agent.steers[0]
+    assert "my own progress note" not in agent.steers[0]
+
+
+def test_comment_delivered_event_records_ids_and_run(worker_home, monkeypatch):
+    tid, run_id = _running_worker(monkeypatch)
+    agent = FakeAgent()
+    _unthrottle()
+    kt.inject_new_comments_from_env(agent)  # seed
+
+    def post():
+        conn = kbc.connect()
+        try:
+            return kb.add_comment(conn, tid, author="default", body="operator note")
+        finally:
+            conn.close()
+    cid = _as_other_session(post)
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is True
+    conn = kbc.connect()
+    try:
+        delivered = [e for e in kb.list_events(conn, tid) if e.kind == "comment_delivered"]
+    finally:
+        conn.close()
+    assert len(delivered) == 1
+    assert delivered[0].payload == {"comment_ids": [cid], "run_id": run_id}
+    assert delivered[0].run_id == run_id
+
+
+def test_kanban_comment_reports_live_run_for_running_and_ready(worker_home, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+    conn = kbc.connect()
+    try:
+        running = kb.create_task(conn, title="running card")
+        assert kb.claim_task(conn, running) is not None
+        ready = kb.create_task(conn, title="ready card")
+    finally:
+        conn.close()
+    out_running = json.loads(kt._handle_comment({"task_id": running, "body": "hello worker"}))
+    out_ready = json.loads(kt._handle_comment({"task_id": ready, "body": "hello later"}))
+    assert out_running["live_run"] is True
+    assert "next model call" in out_running["delivery"]
+    assert out_ready["live_run"] is False
+    assert "delivery" not in out_ready
+
+
+def test_kanban_show_lists_undelivered_live_run_comments(worker_home, monkeypatch):
+    tid, _run = _running_worker(monkeypatch)
+    kt._handle_comment({"task_id": tid, "body": "own note, never pending"})
+
+    def post():
+        conn = kbc.connect()
+        try:
+            return kb.add_comment(conn, tid, author="default", body="pending operator note")
+        finally:
+            conn.close()
+    cid = _as_other_session(post)
+    shown = json.loads(kt._handle_show({"task_id": tid}))
+    assert shown["undelivered_comments"] == [cid]
+
+    agent = FakeAgent()
+    kt._comment_watermark[tid] = cid - 1  # watermark just below the operator note
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is True
+    shown = json.loads(kt._handle_show({"task_id": tid}))
+    assert shown["undelivered_comments"] == []
