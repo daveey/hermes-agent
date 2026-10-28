@@ -1740,24 +1740,30 @@ def _build_switch_result(st: _Switch) -> ModelSwitchResult:
 def switch_model(
     raw_input: str, current_provider: str, current_model: str, current_base_url: str = "",
     current_api_key: str = "", is_global: bool = False, explicit_provider: str = "",
-    user_providers: dict | None = None, custom_providers: list | None = None) -> ModelSwitchResult:
+    user_providers: dict | None = None, custom_providers: list | None = None,
+    *, allow_network: bool = True) -> ModelSwitchResult:
     """Core model-switching pipeline shared between CLI and gateway.
 
     Route (PATH A with ``--provider``, else PATH B) -> credentials -> validation -> result; each
     step returns a failure :class:`ModelSwitchResult` to stop the chain, or ``None`` to continue.
     ``user_providers`` / ``custom_providers`` are the config.yaml ``providers:`` dict and
-    ``custom_providers:`` list."""
+    ``custom_providers:`` list. ``allow_network=False`` makes all models.dev lookups
+    cache-only, including indirect provider and alias resolution. Provider endpoint
+    validation is unchanged; this flag only controls the metadata registry."""
+    from agent.models_dev import models_dev_network_scope
+
     st = _Switch(
         raw_input=raw_input, current_provider=current_provider, current_model=current_model,
         current_base_url=current_base_url, current_api_key=current_api_key, is_global=is_global,
         explicit_provider=explicit_provider, user_providers=user_providers, custom_providers=custom_providers,
         new_model=raw_input.strip(), target_provider=current_provider)
     route = _route_explicit_provider if explicit_provider else _route_from_model_input
-    for step in (route, _resolve_switch_credentials, _validate_switch):
-        fail = step(st)
-        if fail is not None:
-            return fail
-    return _build_switch_result(st)
+    with models_dev_network_scope(allow_network=allow_network):
+        for step in (route, _resolve_switch_credentials, _validate_switch):
+            fail = step(st)
+            if fail is not None:
+                return fail
+        return _build_switch_result(st)
 
 
 def model_selection_config_updates(result: ModelSwitchResult, current_model_cfg: Any) -> dict[str, Any]:

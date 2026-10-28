@@ -13,6 +13,7 @@ import logging
 import re
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,6 +35,22 @@ _models_dev_retry_after: float = 0
 _models_dev_fetch_lock = threading.Lock()
 _models_dev_refresh_lock = threading.Lock()
 _models_dev_refresh_in_flight = False
+_models_dev_cache_only: ContextVar[bool] = ContextVar("models_dev_cache_only", default=False)
+
+
+@contextlib.contextmanager
+def models_dev_network_scope(*, allow_network: bool):
+    """Bound an operation's indirect catalog lookups without changing other requests.
+
+    Nested callers cannot re-enable network inside a cache-only operation. In
+    particular, dashboard config writers must not wait for the singleflight fetch
+    lock while holding their config lock, even through provider/alias helpers.
+    """
+    token = _models_dev_cache_only.set(_models_dev_cache_only.get() or not allow_network)
+    try:
+        yield
+    finally:
+        _models_dev_cache_only.reset(token)
 
 
 @dataclass
@@ -443,7 +460,7 @@ def fetch_models_dev(force_refresh: bool = False, *, allow_network: bool = True)
     ``force_refresh=True`` bypasses the cache fast paths and the backoff, falling back to cached data
     only if the call fails. ``allow_network=False`` returns any memory/disk cache and never makes a request."""
     global _models_dev_cache, _models_dev_cache_time, _models_dev_retry_after
-    if not allow_network:
+    if not allow_network or _models_dev_cache_only.get():
         if not _models_dev_cache and (disk_data := _load_disk_cache()):
             _models_dev_cache = disk_data
             disk_age = _disk_cache_age_seconds()
