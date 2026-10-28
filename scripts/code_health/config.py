@@ -148,6 +148,11 @@ RULES: tuple[Rule, ...] = (
          " blocks on an Event the test sets at teardown."
          " `sleep(0)` to yield is fine. A delay that IS the behaviour under test takes"
          " `# health: allow HX013 -- <why>`", "ast", include=TESTS, exclude=()),
+    # Error handling: the caller's exception is thrown in at a contextmanager's yield.
+    Rule("HX014", "@contextmanager swallows the caller's error at a yield it can reach again", "a broad `except`"
+         " around `yield` eats the `with` block's own error and, on a second yield, becomes \"generator"
+         " didn't stop after throw()\". Find the resource inside the `try`, then yield it outside any"
+         " handler (keep what it opened alive with `contextlib.ExitStack`), or re-raise", "ast"),
 )
 
 RULES_BY_ID = {rule.id: rule for rule in RULES}

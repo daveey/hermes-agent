@@ -23,6 +23,9 @@ A chat another live backend holds reaching the sweeper means that backend's poll
 holder ("poller miss"). Claimed events always end as a turn or a row: any error after the claim falls back to the row,
 and a failed row rewinds the claim. Once woken, the chat is live in that process, so later notices go through its live
 poller like any open chat's. Residual: if submit raises after the turn thread already started, the row is written too.
+A chat mid-turn refuses the row (``SessionTurnLeaseLostError``): that is "busy, try later", so the claim is rewound
+with one INFO line and the next pass retries; a notice still stalled after ``OVERDUE_S`` logs one WARNING per card
+and chat with the reason (kanban-e5babca565).
 [daveey]
 """
 
@@ -51,10 +54,52 @@ _wake_lock = threading.Lock()
 _wake_times: dict[str, list[float]] = {}  # chat -> recent started wakes (this process)
 _wake_slots = threading.BoundedSemaphore(MAX_PARALLEL_WAKES)
 
+# A chat mid-turn refuses notice rows (SessionTurnLeaseLostError): a normal "busy, try later", not a failure.
+# Each claim that had to be rewound records why; a notice still waiting OVERDUE_S after its event logs ONE warning
+# per (board, card, chat) with that reason, instead of a traceback every pass (kanban-e5babca565: 277 in 2h20m).
+OVERDUE_S = 900.0
+_stall_lock = threading.Lock()
+_stalls: dict[tuple[str, str, str], str] = {}  # (board, task, chat) -> why the last claim was rewound
+_overdue_warned: set[tuple[str, str, str]] = set()
+
 
 def _reset_wake_budget_for_tests() -> None:
     with _wake_lock:
         _wake_times.clear()
+
+
+def _reset_overdue_for_tests() -> None:
+    with _stall_lock:
+        _stalls.clear()
+        _overdue_warned.clear()
+
+
+def _stall_key(slug: str, ident: dict) -> tuple[str, str, str]:
+    return (slug, ident["task_id"], ident["chat_id"])
+
+
+def _note_stall(key: tuple[str, str, str], reason: str) -> bool:
+    """Record why a claim was rewound; True the first time this notice stalls (log it at INFO once)."""
+    with _stall_lock:
+        first = key not in _stalls
+        _stalls[key] = reason
+        return first
+
+
+def _clear_stall(key: tuple[str, str, str]) -> None:
+    with _stall_lock:
+        _stalls.pop(key, None)
+        _overdue_warned.discard(key)
+
+
+def _warn_if_overdue(key: tuple[str, str, str], age_s: float) -> None:
+    with _stall_lock:
+        reason = _stalls.get(key)
+        if reason is None or age_s < OVERDUE_S or key in _overdue_warned:
+            return
+        _overdue_warned.add(key)
+    slug, task_id, chat_id = key
+    logger.warning("kanban notice for %s/%s to chat %s overdue %dm: %s", slug, task_id, chat_id, age_s // 60, reason)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -101,18 +146,26 @@ def live_session_ids() -> set[str]:
 @contextlib.contextmanager
 def find_session_db(chat_id: str) -> Iterator[tuple[Any, Optional[str]]]:
     """Yield ``(writable SessionDB, lineage tip id)`` for the store holding ``chat_id``, or ``(None, None)``.
-    Launch store first, then each named profile that has a state.db."""
+    Launch store first, then each named profile that has a state.db. An unopenable store is skipped; an error
+    raised by the caller's block propagates unchanged (it is never caught here: catching at the ``yield`` and
+    yielding again turns it into "generator didn't stop after throw()", kanban-e5babca565)."""
     from tui_gateway import server
     from tui_gateway.session_notifications import _readopt_wake_profiles
-    for profile in _readopt_wake_profiles():
-        try:
-            with server._profile_db({"profile": profile} if profile else None, writer=True) as db:
+    with contextlib.ExitStack() as stack:
+        found: tuple[Any, Optional[str]] = (None, None)
+        for profile in _readopt_wake_profiles():
+            scope = contextlib.ExitStack()
+            try:
+                db = scope.enter_context(server._profile_db({"profile": profile} if profile else None, writer=True))
                 if db is not None and db.get_session(chat_id) is not None:
-                    yield db, (db.get_compression_tip(chat_id) or chat_id)
-                    return
-        except Exception:
-            logger.debug("kanban unloaded sweep: profile %s store unavailable", profile, exc_info=True)
-    yield None, None
+                    found = (db, db.get_compression_tip(chat_id) or chat_id)
+                    stack.push(scope.pop_all())  # held open until the caller's block ends
+                    break
+            except Exception:
+                logger.debug("kanban unloaded sweep: profile %s store unavailable", profile, exc_info=True)
+            with contextlib.suppress(Exception):
+                scope.close()
+        yield found
 
 
 def wake_turn(session_id: str, text: str, metadata: dict) -> str:
@@ -205,7 +258,8 @@ def _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now)
             from hermes_cli import kanban_db_connect as _kbc
             from hermes_cli import kanban_db_notify as _kbn
             with contextlib.closing(_kbc.connect(board=slug)) as conn:
-                _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new)
+                if not _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new):
+                    return "deferred"
         logger.info("kanban sweep wake of %s for %s/%s: %s", tip, slug, ident["task_id"],
                     "turn started" if verdict == "started" else f"{verdict}, notice row written")
         return verdict
@@ -264,9 +318,26 @@ def sweep_once(
 def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt, wake, holders, spawn) -> Optional[dict]:
     ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                  thread_id=sub.get("thread_id") or "")
+    key = _stall_key(slug, ident)
     _cursor, events = _kbn.unseen_events_for_sub(conn, kinds=kinds, **ident)
-    if not events or min(float(getattr(e, "created_at", 0) or 0) for e in events) > now - grace_s:
-        return None  # nothing waiting, or a live poller still has time to take it
+    if not events:
+        _clear_stall(key)  # delivered (by us or a live poller): a later stall starts its own clock
+        return None
+    oldest = min(float(getattr(e, "created_at", 0) or 0) for e in events)
+    if oldest > now - grace_s:
+        return None  # a live poller still has time to take it
+    done = None
+    try:
+        done = _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, kinds, fmt, wake, holders,
+                            spawn)
+        return done
+    finally:
+        if done is None:
+            _warn_if_overdue(key, now - oldest)
+
+
+def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, kinds, fmt, wake, holders,
+                 spawn) -> Optional[dict]:
     task = _kb.get_task(conn, sub["task_id"])
     with session_db(sub["chat_id"]) as (db, tip):
         if db is None or tip is None:
@@ -284,6 +355,7 @@ def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt,
     metadata = {"notice_id": f"{slug}:{ident['task_id']}:{old}-{new}", "board": slug, "display_text": text,
                 "task_id": ident["task_id"], "event_ids": [int(e.id) for e in claimed]}
     held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s)
+    persisted = True
     if verdict is None:  # a worker slot is ours: the job wakes, or writes the row itself
         try:
             verdict = spawn(lambda: _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now))
@@ -291,9 +363,11 @@ def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt,
             _wake_slots.release()
             logger.warning("kanban sweep could not start a wake for %s", tip, exc_info=True)
             verdict = "error"
-            _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new)
+            persisted = _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new)
     else:
-        _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new)
+        persisted = _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new)
+    if not persisted:
+        return None  # chat busy: the claim is rewound and the next pass retries
     logger.info("kanban notice for unloaded session %s (board=%s task=%s events=%d wake=%s)",
                 tip, slug, ident["task_id"], len(texts), verdict)
     return {"board": slug, "task_id": ident["task_id"], "chat_id": ident["chat_id"], "session_id": tip,
@@ -318,16 +392,28 @@ def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s) -> tuple
     return (held_by, None) if _wake_slots.acquire(blocking=False) else (held_by, "skipped:slots")
 
 
-def _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new) -> None:
-    """The passive transcript row; a failure rewinds the claim so the notice is retried, not lost."""
+def _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new) -> bool:
+    """The passive transcript row; True once written. A chat mid-turn refuses it: rewind and return False (one INFO
+    line, retried next pass). Any other failure rewinds and raises, so the notice is retried, not lost."""
+    from hermes_state_errors import SessionTurnLeaseLostError
+    key = _stall_key(metadata["board"], ident)
     try:
         with session_db(ident["chat_id"]) as (db, _tip):
             if db is None:
                 raise RuntimeError(f"chat {ident['chat_id']} disappeared before its notice was written")
             db.append_kanban_notice(tip, text, metadata)
-    except Exception:
+        return True
+    except SessionTurnLeaseLostError:
         with contextlib.suppress(Exception):
             _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
+        first = _note_stall(key, "chat busy (a turn is running in it)")
+        logger.log(logging.INFO if first else logging.DEBUG, "kanban notice for %s/%s to chat %s deferred: chat busy "
+                   "(active turn); retrying next pass", key[0], key[1], tip)
+        return False
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
+        _note_stall(key, f"{type(exc).__name__}: {exc}")
         raise
 
 
