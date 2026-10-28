@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -110,7 +110,15 @@ def dl_server():
     RangeHandler.no_range = False
     RangeHandler.etags = True
     RangeHandler.chunk = 1 << 20
-    server = HTTPServer(("127.0.0.1", 0), RangeHandler)
+    # Threaded, like any real file host: the downloader opens up to 8 range
+    # connections at once. A single-threaded server (listen backlog 5)
+    # served them one by one, so a paused download had to wait for every
+    # queued connection to be drained in turn (plus SYN-retry backoff for
+    # the overflow one) — ~3.7 s idle, and past the pause tests' 15 s poll
+    # deadline on a loaded CI runner.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RangeHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
