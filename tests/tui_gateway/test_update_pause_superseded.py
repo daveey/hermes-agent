@@ -130,3 +130,55 @@ def test_notification_turn_without_a_pause_leaves_no_marker(env):
 
     assert read_turn_marker(env.home, "session-key") is None
     assert env.watchers == [("ui-sid", "session-key")]
+
+
+# --- After a backend restart (the live 5ab65c shape): the paused marker was written by the old process, and the
+# new backend's first turn on the session is a synthesized one. Whatever way that turn ends, the in-place watcher
+# must be re-armed exactly once so the paused turn continues once the session is idle.
+
+def _fresh_session_with_inherited_pause(home, run_conversation):
+    from tui_gateway.turn_marker import mark_turn_paused, record_turn_start
+    record_turn_start(home, "session-key", "the long task")
+    assert mark_turn_paused(home, "session-key", up.PAUSE_REASON)
+    session = {"session_key": "session-key", "history": [], "history_lock": threading.RLock(),
+               "history_version": 0, "running": True, "attached_images": [], "image_counter": 0, "cols": 80,
+               "slash_worker": None, "show_reasoning": False, "tool_progress_mode": "all", "inflight_turn": None,
+               "profile_home": str(home)}
+    session["agent"] = types.SimpleNamespace(session_id="session-key", run_conversation=run_conversation,
+                                             clear_interrupt=lambda: None)
+    return session
+
+
+def _assert_paused_turn_continues(env, session):
+    marker = read_turn_marker(env.home, "session-key")
+    assert marker is not None and marker["reason"] == up.PAUSE_REASON
+    assert marker["prompt"] == "the long task"
+    assert env.watchers == [("ui-sid", "session-key")], "the paused turn has no watcher to continue it"
+    assert not session.get("running")
+    assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "resume"
+
+
+def test_fresh_backend_notification_turn_success_rearms_the_watcher(env):
+    session = _fresh_session_with_inherited_pause(
+        env.home, lambda message, **kw: {"final_response": "noted", "messages": []})
+    assert server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
+    _assert_paused_turn_continues(env, session)
+
+
+def test_fresh_backend_notification_turn_that_raises_still_rearms_the_watcher(env):
+    def _boom(message, **kw):
+        raise RuntimeError("provider exploded")
+
+    session = _fresh_session_with_inherited_pause(env.home, _boom)
+    server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
+    _assert_paused_turn_continues(env, session)
+
+
+def test_fresh_backend_notification_turn_refused_at_prepare_still_rearms_the_watcher(env, monkeypatch):
+    def _never(message, **kw):
+        raise AssertionError("a refused turn must not reach the agent")
+
+    session = _fresh_session_with_inherited_pause(env.home, _never)
+    monkeypatch.setattr(server, "_prepare_turn_input", lambda *a, **k: None)
+    server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
+    _assert_paused_turn_continues(env, session)

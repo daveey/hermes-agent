@@ -222,6 +222,24 @@ def _carry_paused_marker(session: dict, home, marker_key: str) -> bool:
     return True
 
 
+def _rearm_carried_pause_watcher(sid: str, session: dict, st) -> None:
+    """[daveey] A synthesized turn that ran over a core-update-paused marker re-arms the in-place watcher however
+    it ended (complete, raised, refused at prepare): otherwise, on a backend that already restarted, nothing
+    continues the paused turn. ``_paused_marker_carried`` stays set until the next turn records its own marker,
+    so later retire paths (the backstop above, an idle Stop) keep the paused request too."""
+    if st.marker_key:  # this turn wrote a marker of its own, so it did not carry the pause
+        return
+    with session["history_lock"]:
+        carried = str(session.get("_paused_marker_carried") or "")
+    if not carried:
+        return
+    try:
+        from tui_gateway import update_pause
+        update_pause.start_in_place_watcher(sid, session, carried)
+    except Exception:  # health: allow BLE001 -- a failed re-arm must not mask the turn's own outcome; logged
+        logger.exception("core-update pause: could not re-arm the watcher for %s", carried)
+
+
 def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
                         notification_category: str | None = None) -> str:
     """Write the durable crash marker; returns the session key it was written under (compression
@@ -1316,12 +1334,10 @@ def _run_admitted_prompt(
                 from tui_gateway.free_tier_task_done import note_task_done
                 note_task_done(session, st.result, st.agent, display_kind)
             _emit("message.complete", sid, payload)
-            # Kept until the next turn records its marker, so the backstop retire below also leaves it.
-            carried = session.get("_paused_marker_carried")
-            if paused_for_update or carried:
+            if paused_for_update:
                 # The new backend continues it; if no update replaces this one, continue it here.
                 from tui_gateway import update_pause
-                update_pause.start_in_place_watcher(sid, session, str(st.marker_key or carried))
+                update_pause.start_in_place_watcher(sid, session, st.marker_key)
             goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)
             if status == "complete":
                 _after_complete_turn(sid, session, st, raw)
@@ -1366,7 +1382,10 @@ def _run_admitted_prompt(
                         session.pop("_auto_continue_scheduled", None)
                 _emit_settled_session_info(sid, session, st.agent)
             finally:
-                _post_turn_housekeeping(sid, session, st)
+                try:
+                    _post_turn_housekeeping(sid, session, st)
+                finally:
+                    _rearm_carried_pause_watcher(sid, session, st)
         return st.result, goal_followup
     def run():
         from agent.notification_presentation import notification_turn
