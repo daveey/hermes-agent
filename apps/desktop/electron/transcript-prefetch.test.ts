@@ -45,6 +45,19 @@ describe('prefetch selection', () => {
     ])
   })
 
+  it('[daveey] puts the sessions of open Inbox cards first, even automations past a full chat window', () => {
+    const records = [
+      ...Array.from({ length: 5 }, (_, index) => record('hub', `chat${index}`, 100 + index)),
+      record('hub', 'selfheal', 1, { automated: true, inbox: true }),
+      record('hub', 'cron', 50, { automated: true })
+    ]
+
+    const targets = selectPrefetchTargets(records, gateway => CONNECTIONS[gateway], 3)
+
+    expect(targets.map(target => target.key.sessionId)).toEqual(['selfheal', 'chat4', 'chat3'])
+    expect(targets[0].inbox).toBe(true)
+  })
+
   it('caps each gateway separately', () => {
     const records = [
       ...Array.from({ length: 250 }, (_, index) => record('mini', `m${index}`, index)),

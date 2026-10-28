@@ -210,6 +210,7 @@ import {
   chatMessageArraysEquivalent,
   dedupeInflightUserAgainstTranscript,
   dropListedSession,
+  fallbackSessionRow,
   findListedSession,
   goneSessionVerdict,
   isSessionGoneError,
@@ -1367,9 +1368,15 @@ export function useSessionActions({
       // (requestSessionResume with a row route, a plugin open) is authoritative as given.
       const rememberedOwner = capturedOwner ? undefined : rememberedOwnerForResume(storedSessionId)
 
+      // [daveey] A resume that names no owner (a route change, a tab restore) of another gateway's session takes the
+      // owner from its hub-replica row, so it paints from the local transcript cache and skips the owner lookup.
+      // An asleep owner's row (offline_cached) is not used: that open is the read-only asleep path, never a dial.
+      const replicaRow = capturedOwner || rememberedOwner ? undefined : fallbackSessionRow(storedSessionId)
+      const replicaOwner = replicaRow && !replicaRow.offline_cached ? sessionOwnerRouteFromRow(replicaRow) : undefined
+
       // An explicit capture outranks the remembered hint; the hint only
       // fills in when the caller had no route to give.
-      const ownerRoute = capturedOwner || rememberedOwner
+      const ownerRoute = capturedOwner || rememberedOwner || replicaOwner
 
       // A connection switch clears/reloads the session rows before this path
       // runs, so an untagged row belongs to the connection that supplied the

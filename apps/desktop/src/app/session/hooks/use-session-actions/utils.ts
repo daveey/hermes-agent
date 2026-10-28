@@ -16,6 +16,7 @@ import { parseErrorSurface } from '@/lib/error-surface'
 import { isMessagingSource, normalizeSessionSource } from '@/lib/session-source'
 import { isLiveTailReplyId } from '@/lib/spoken-reply'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
+import { $sidebarFallbackSessions } from '@/store/boot-snapshot'
 import { requestDesktopOnboardingForCredentialWarning } from '@/store/onboarding'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
@@ -2137,6 +2138,15 @@ export function cachedSessionRow(storedSessionId: string): SessionInfo | undefin
   )
 }
 
+/** [daveey] The sidebar's hub-replica row for a stored id (another gateway's session, or the cold-start boot
+ *  snapshot), with its owning connection. Opens of those sessions (Inbox cards, resumes, rows of an asleep
+ *  gateway) have no `$sessions` row, so without this the owner probe waited on a REST lookup over SSH (4-7 s). */
+export function fallbackSessionRow(storedSessionId: string): SessionInfo | undefined {
+  return $sidebarFallbackSessions
+    .get()
+    .find(session => session.connection_id?.trim() && sessionMatchesStoredId(session, storedSessionId))
+}
+
 export type StoredSessionProbe = { status: 'found'; session: SessionInfo } | { status: 'gone' | 'inconclusive' }
 
 export async function resolveStoredSession(
@@ -2171,6 +2181,18 @@ export async function probeStoredSession(
   const cached = cachedSessionRow(storedSessionId)
 
   if (ownerRoute) {
+    const replicaRow = fallbackSessionRow(storedSessionId)
+
+    // [daveey] The hub replica already vouches for this owner: answer now instead of a REST lookup over SSH.
+    if (
+      !cached?.connection_id &&
+      replicaRow &&
+      replicaRow.connection_id === ownerRoute.connectionId &&
+      normalizeProfileKey(replicaRow.profile) === normalizeProfileKey(ownerRoute.profile)
+    ) {
+      return { status: 'found', session: replicaRow }
+    }
+
     const scope = {
       connectionId: ownerRoute.connectionId,
       profile: ownerRoute.targetProfile || ownerRoute.profile

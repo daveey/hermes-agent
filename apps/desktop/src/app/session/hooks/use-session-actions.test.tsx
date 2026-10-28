@@ -37,6 +37,7 @@ import {
 import { $goalsBySession, type SessionGoal } from '@/store/goals'
 import { $pinnedSessionIds } from '@/store/layout'
 import { $notifications, dismissNotification } from '@/store/notifications'
+import { $offlineSessions } from '@/store/offline-sessions'
 import {
   $activeGatewayProfile,
   $newChatConnectionId,
@@ -7450,6 +7451,43 @@ describe('[daveey] instant opens from the durable transcript cache', () => {
     // The fresh page is now the cached copy for the next open, and it was read once.
     expect(JSON.stringify(loadTranscriptTail('stored-mini', owner))).toContain('fresh reply')
     expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  })
+
+  it('a resume naming no owner of a hub-replica session paints from the cache and skips the owner lookup', async () => {
+    // An Inbox card / route resume of another gateway's session: no click route, no remembered owner, no $sessions
+    // row. The hub replica row carries the owner, so the cached rows paint at once and the owner needs no REST read.
+    saveTranscriptTail('stored-hub', [row(1, 'user', 'hub question'), row(2, 'assistant', 'hub answer')], owner)
+    $offlineSessions.set([
+      { connection_id: 'mac-mini', id: 'stored-hub', message_count: 2, profile: 'default', title: 'Hub chat' } as never
+    ])
+
+    const rest = deferred<unknown>()
+    vi.mocked(getLatestSessionMessages).mockReturnValue(rest.promise as never)
+    vi.mocked(requestGatewayForAgent).mockReturnValue(new Promise(() => {}) as never)
+
+    let resume!: Parameters<Parameters<typeof ResumeHarness>[0]['onReady']>[0]
+    render(<ResumeHarness onReady={ready => (resume = ready)} requestGateway={vi.fn(async () => ({}) as never)} />)
+    void resume('stored-hub', true)
+
+    expect(JSON.stringify($messages.get())).toContain('hub answer')
+    await waitFor(() => expect(lastTiming() ?? (globalThis as any).__hermesOpenTimings).toBeDefined())
+    expect(getSession).not.toHaveBeenCalled()
+    $offlineSessions.set([])
+  })
+
+  it('an asleep gateway\'s replica row does not become the owner of a resume', async () => {
+    saveTranscriptTail('stored-asleep', [row(1, 'user', 'asleep question')], owner)
+    $offlineSessions.set([
+      { connection_id: 'mac-mini', id: 'stored-asleep', offline_cached: true, profile: 'default', title: 'Asleep' } as never
+    ])
+    vi.mocked(getSession).mockReturnValue(new Promise(() => {}) as never)
+
+    let resume!: Parameters<Parameters<typeof ResumeHarness>[0]['onReady']>[0]
+    render(<ResumeHarness onReady={ready => (resume = ready)} requestGateway={vi.fn(async () => ({}) as never)} />)
+    void resume('stored-asleep', true)
+
+    expect(JSON.stringify($messages.get())).not.toContain('asleep question')
+    $offlineSessions.set([])
   })
 
   it('shows the fresh page while the owner lookup is still pending', async () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type * as HermesModule from '@/hermes'
 import { getSession } from '@/hermes'
+import { $offlineSessions } from '@/store/offline-sessions'
 import { $activeGatewayProfile, $profiles } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
 import { $cronSessions, $messagingSessions, $sessions, $unlistedSessionOwnerRows } from '@/store/session'
@@ -43,6 +44,26 @@ describe('resolveStoredSession profile ownership', () => {
     $profiles.set([])
     $activeGatewayProfile.set('default')
     $unlistedSessionOwnerRows.set([])
+  })
+
+  it('[daveey] an owner the hub replica vouches for resolves without a REST lookup', async () => {
+    $offlineSessions.set([session({ connection_id: 'hermes-hub', id: 'h1', profile: 'default', title: 'Hub chat' })])
+
+    const resolved = await resolveStoredSession('h1', { connectionId: 'hermes-hub', profile: 'default' })
+
+    expect(resolved?.connection_id).toBe('hermes-hub')
+    expect(mockGetSession).not.toHaveBeenCalled()
+    $offlineSessions.set([])
+  })
+
+  it('[daveey] a replica row of a different owner still asks the named owner', async () => {
+    $offlineSessions.set([session({ connection_id: 'mac-mini', id: 'h2', profile: 'default', title: 'Other' })])
+    mockGetSession.mockResolvedValue(session({ id: 'h2' }))
+
+    await resolveStoredSession('h2', { connectionId: 'hermes-hub', profile: 'default' })
+
+    expect(mockGetSession).toHaveBeenCalledTimes(1)
+    $offlineSessions.set([])
   })
 
   it('returns a cached row that carries an owning profile', async () => {

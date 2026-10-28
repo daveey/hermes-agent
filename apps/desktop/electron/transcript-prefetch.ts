@@ -24,6 +24,8 @@ export interface HubSessionRecord {
   gateway: string
   hidden?: boolean
   id: string
+  /** [daveey] An open Inbox card names this session: it is the one a click is about to open. */
+  inbox?: boolean
   message_count?: null | number
   parent_session_id?: null | string
   profile?: null | string
@@ -32,6 +34,7 @@ export interface HubSessionRecord {
 
 export interface PrefetchTarget {
   automated: boolean
+  inbox?: boolean
   key: TranscriptCacheKey
   meta: { activity: null | number; messageCount: null | number }
 }
@@ -55,8 +58,8 @@ export interface PrefetchDeps {
 const profileOf = (value: unknown) => String(value ?? '').trim() || 'default'
 
 /**
- * Per gateway, the PER_GATEWAY most recently active session tips, people's chats
- * before automations. A record that is another record's compression parent is
+ * Per gateway, the PER_GATEWAY most recently active session tips: open Inbox cards' sessions first, then people's
+ * chats before automations. A record that is another record's compression parent is
  * history of that tip, not its own session. Fetch order: chats first, newest first.
  */
 export function selectPrefetchTargets(
@@ -96,19 +99,32 @@ export function selectPrefetchTargets(
 
     // People's chats claim the slots first: a gateway running many automations
     // (Kanban, cron) would otherwise push the chats someone opens out of the window.
+    // [daveey] Sessions behind open Inbox cards come first: they are mostly automations (self-heal, Kanban), so a
+    // gateway with many chats otherwise never gave them a slot, and an Inbox click always waited on the network.
     const byActivity = [...list].sort((a, b) => activityOf(b) - activityOf(a))
-    const chosen = [...byActivity.filter(record => !record.automated), ...byActivity.filter(record => record.automated)]
+
+    const chosen = [
+      ...byActivity.filter(record => record.inbox),
+      ...byActivity.filter(record => !record.inbox && !record.automated),
+      ...byActivity.filter(record => !record.inbox && record.automated)
+    ]
 
     for (const record of chosen.slice(0, perGateway)) {
       targets.push({
         automated: Boolean(record.automated),
+        ...(record.inbox ? { inbox: true } : {}),
         key: { connectionId, profile: profileOf(record.profile), sessionId: record.id },
         meta: { activity: record.activity ?? null, messageCount: record.message_count ?? null }
       })
     }
   }
 
-  return targets.sort((a, b) => Number(a.automated) - Number(b.automated) || (b.meta.activity ?? 0) - (a.meta.activity ?? 0))
+  return targets.sort(
+    (a, b) =>
+      Number(Boolean(b.inbox)) - Number(Boolean(a.inbox)) ||
+      Number(a.automated) - Number(b.automated) ||
+      (b.meta.activity ?? 0) - (a.meta.activity ?? 0)
+  )
 }
 
 /** Whether a cached entry is behind the hub's view of the session. */

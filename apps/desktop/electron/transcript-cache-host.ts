@@ -33,6 +33,20 @@ export interface TranscriptCacheHostDeps {
 const GATEWAY_NAME_PREFIX = 'hub-gateway:'
 const HUB_LIST_LIMIT = 2000
 
+const inboxKey = (gateway: unknown, profile: unknown, sessionId: unknown) =>
+  `${String(gateway ?? '')}\u0000${String(profile ?? '').trim() || 'default'}\u0000${String(sessionId ?? '')}`
+
+/** [daveey] Flag the hub session records an open Inbox card points at (the prefetcher fetches those first). */
+export function markInboxSessions(records: HubSessionRecord[], inbox: ReadonlySet<string>): HubSessionRecord[] {
+  if (!inbox.size) {
+    return records
+  }
+
+  return records.map(record =>
+    inbox.has(inboxKey(record.gateway, record.profile, record.id)) ? { ...record, inbox: true } : record
+  )
+}
+
 export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
   const store = new TranscriptCacheStore(path.join(deps.userDataDir, 'transcript-cache.sqlite'))
 
@@ -158,6 +172,22 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
     return undefined
   }
 
+  // Open Inbox items of every gateway, from this Mac's replica; an unreadable Inbox only drops the priority.
+  const openInboxSessions = async (descriptor: unknown): Promise<Set<string>> => {
+    try {
+      const body = await deps.getJson(descriptor, '/api/plugins/hub-sync/inbox', { timeoutMs: 8_000 })
+      const items = Array.isArray(body?.items) ? body.items : []
+
+      return new Set(
+        items
+          .filter((item: any) => item?.session_id && item?.gateway)
+          .map((item: any) => inboxKey(item.gateway, item.profile, item.session_id))
+      )
+    } catch {
+      return new Set()
+    }
+  }
+
   const prefetcher = new TranscriptPrefetcher({
     connectionForGateway,
     fetchLatest: async (key, limit) => {
@@ -187,7 +217,11 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
           timeoutMs: 8_000
         })
 
-        return body?.available === false || !Array.isArray(body?.sessions) ? null : (body.sessions as HubSessionRecord[])
+        if (body?.available === false || !Array.isArray(body?.sessions)) {
+          return null
+        }
+
+        return markInboxSessions(body.sessions as HubSessionRecord[], await openInboxSessions(descriptor))
       } catch {
         return null
       }

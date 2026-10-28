@@ -4,7 +4,7 @@ import path from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { installTranscriptCache } from './transcript-cache-host'
+import { installTranscriptCache, markInboxSessions } from './transcript-cache-host'
 
 const dirs: string[] = []
 
@@ -75,5 +75,62 @@ describe('transcript cache host', () => {
     on.get('hermes:transcript-cache:read')!(event, { connectionId: '', profile: '', sessionId: 'l1' })
     expect(event.returnValue?.messages).toEqual([{ content: 'row of local', id: 1, role: 'user' }])
     host.stop()
+  })
+})
+
+describe('[daveey] open Inbox cards in prefetch', () => {
+  it('flags exactly the hub sessions an open card points at (gateway, profile, id)', () => {
+    const records = [
+      { gateway: 'hub', id: 's1', profile: 'default' },
+      { gateway: 'hub', id: 's2', profile: 'work' },
+      { gateway: 'mini', id: 's1', profile: 'default' }
+    ]
+
+    const marked = markInboxSessions(records, new Set(['hub\u0000default\u0000s1', 'hub\u0000default\u0000s2']))
+
+    expect(marked.map(record => Boolean(record.inbox))).toEqual([true, false, false])
+  })
+
+  it('reads the replica Inbox on the primary and fetches a card\'s session first', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'transcript-cache-host-inbox-'))
+    dirs.push(dir)
+    const fetched: string[] = []
+
+    const getJson = vi.fn(async (descriptor: any, requestPath: string) => {
+      if (requestPath.startsWith('/api/plugins/hub-sync/sessions')) {
+        return {
+          sessions: [
+            { activity: 9, gateway: 'mini', id: 'chat', message_count: 3, profile: 'default' },
+            { activity: 1, automated: true, gateway: 'mini', id: 'card', message_count: 3, profile: 'default' }
+          ]
+        }
+      }
+
+      if (requestPath === '/api/plugins/hub-sync/inbox') {
+        return { items: [{ gateway: 'mini', profile: 'default', session_id: 'card', state: 'open' }] }
+      }
+
+      if (requestPath === '/api/plugins/hub-sync/status') {
+        return { gateway: descriptor.connectionId === 'local' ? 'macbook' : 'mini' }
+      }
+
+      fetched.push(requestPath.split('/')[3])
+
+      return { messages: [{ content: 'row', id: 1, role: 'user' }] }
+    })
+
+    const host = installTranscriptCache({
+      backendFor: vi.fn(async (connectionId: string) => ({ connectionId })),
+      getJson,
+      ipcMain: { handle: vi.fn(), on: vi.fn() } as never,
+      log: () => undefined,
+      registry: () => ({ connectionIds: ['local', 'mac-mini'], primary: 'local' }),
+      userDataDir: dir
+    })
+
+    await host.prefetcher.tick()
+
+    expect(getJson).toHaveBeenCalledWith(expect.anything(), '/api/plugins/hub-sync/inbox', expect.anything())
+    expect(fetched[0]).toBe('card')
   })
 })
