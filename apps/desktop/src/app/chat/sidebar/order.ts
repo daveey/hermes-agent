@@ -115,12 +115,21 @@ export function orderByIds<T>(items: T[], getId: (item: T) => string, orderIds: 
 }
 
 /**
- * Apply the active sort key (as an id order) to a set of session rows, leaving
- * them in the order they came in when nothing is ranked. Grouped views call
- * this on their own lane so a sort key reaches rows the flat list never renders.
+ * Apply the active sort key to a set of session rows, leaving them in the
+ * order they came in when nothing is ranked. Grouped views call this on their
+ * own lane so a sort key reaches rows the flat list never renders. The key
+ * reads each row, so rows outside the loaded sessions page rank too; ties keep
+ * arrival order.
  */
-export function rankSessions<T extends { id: string }>(sessions: T[], rankIds?: string[]): T[] {
-  return rankIds?.length ? orderByIds(sessions, session => session.id, rankIds) : sessions
+export function rankSessions<T>(sessions: T[], rank?: null | ((session: T) => number)): T[] {
+  if (!rank) {
+    return sessions
+  }
+
+  return sessions
+    .map((session, index) => ({ index, key: rank(session), session }))
+    .sort((a, b) => a.key - b.key || a.index - b.index)
+    .map(entry => entry.session)
 }
 
 /** Reconcile a persisted order against the live id set. */

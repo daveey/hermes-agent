@@ -28,7 +28,7 @@ import { cn } from '@/lib/utils'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { newSessionInAgent, newSessionInProfile } from '@/store/profile'
 import { $sessionProfilesUsage } from '@/store/session'
-import { $sidebarSessionRankIds } from '@/store/sidebar-sort'
+import { $sidebarSessionRank } from '@/store/sidebar-sort'
 
 import { SidebarGroupRow, SidebarRowGrab, SidebarRowLink, SidebarRowStack } from './chrome'
 import {
@@ -161,7 +161,7 @@ function GatewayProfileGroup({
   const copy = s.gatewayGroups
   const aliases = useStore($gatewayGroupAliases)
   const collapsed = useStore($gatewayGroupCollapsed)
-  const rankIds = useStore($sidebarSessionRankIds)
+  const rank = useStore($sidebarSessionRank)
 
   // Legacy totals are keyed only by profile. Never attribute those figures to
   // a registry gateway that happens to expose the same profile name, or to
@@ -176,7 +176,7 @@ function GatewayProfileGroup({
   const sortable = useSortableBindings(group.id)
   const label = aliases[group.id] || group.label
   const open = !collapsed.includes(group.id)
-  const sessions = rankSessions(group.sessions, rankIds)
+  const sessions = rankSessions(group.sessions, rank)
   const hiddenCount = embedded ? 0 : Math.max(0, sessions.length - visibleCount)
   const route = group.connectionId ? { connectionId: group.connectionId, profile: group.profile! } : undefined
 

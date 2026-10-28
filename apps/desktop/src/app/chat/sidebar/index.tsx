@@ -141,7 +141,7 @@ import { markSessionUnread } from '@/store/session-unread-remote'
 import { $archivedSessions, loadArchivedSessions } from '@/store/sidebar-archive'
 import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
 import { applySidebarNavPrefs, SIDEBAR_NAV_PREFS_AREA } from '@/store/sidebar-nav'
-import { $sidebarSessionRankIds } from '@/store/sidebar-sort'
+import { $sidebarSessionRank, $sidebarSessionRankIds } from '@/store/sidebar-sort'
 
 import {
   type AppView,
@@ -481,6 +481,7 @@ export function ChatSidebar({
   // The active sort key as an id order. The flat list applies it within its
   // dividers; groups apply it to their own lanes.
   const sortOrderIds = useStore($sidebarSessionRankIds)
+  const sessionRank = useStore($sidebarSessionRank)
   const agentsGrouped = grouping === 'project'
   const showAllSessions = useStore($sidebarShowAllSessions)
   const pinnedSessionIds = useStore($pinnedSessionIds)
@@ -1307,10 +1308,10 @@ export function ChatSidebar({
           known: knownProjects,
           // Rank before the trim, so "3 priciest in this project" isn't "3 most
           // recent, priciest first".
-          rankIds: sortOrderIds
+          rank: sessionRank
         }
       ),
-    [projectOverview, agentSessions, projects, removedSessionIds, sortOrderIds, showAllSessions, projectOwners, knownProjects]
+    [projectOverview, agentSessions, projects, removedSessionIds, sessionRank, showAllSessions, projectOwners, knownProjects]
   )
 
   // A row's "Show all" hydrates raw backend lanes, which — like the drill-in —

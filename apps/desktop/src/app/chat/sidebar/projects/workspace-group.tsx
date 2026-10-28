@@ -13,7 +13,7 @@ import { notifyError } from '@/store/notifications'
 import { newSessionInProfile, pinNewChatProfile, selectProfile } from '@/store/profile'
 import { listRepoBranches, switchBranchInRepo } from '@/store/projects'
 import { $sessionProfilesUsage } from '@/store/session'
-import { $sidebarSessionRankIds } from '@/store/sidebar-sort'
+import { $sidebarSessionRank } from '@/store/sidebar-sort'
 
 import { SidebarGroupRow, SidebarRowLead, SidebarRowLink, SidebarRowStack } from '../chrome'
 import { rankSessions } from '../order'
@@ -51,7 +51,7 @@ export function SidebarWorkspaceGroup({
   // Totals for the whole profile, not the loaded page — a selector so a refresh
   // that leaves this profile's spend unchanged doesn't repaint its header.
   const usage = useStoreSelector($sessionProfilesUsage, all => all[group.id])
-  const rankIds = useStore($sidebarSessionRankIds)
+  const rank = useStore($sidebarSessionRank)
   // The sidebar's "Show all sessions" preference lifts the lane's page too —
   // the same switch that widens the project overview, read at the leaf like
   // overview-row does.
@@ -64,7 +64,7 @@ export function SidebarWorkspaceGroup({
 
   // A lane ranks by whatever the sort key says before it trims itself, so the
   // rows it hides are the ones the sort ranked last.
-  const sessions = rankSessions(group.sessions, rankIds)
+  const sessions = rankSessions(group.sessions, rank)
   // A lane opens on its first few rows and pages the rest in on demand.
   const lane = useRevealedRows(sessions, SIDEBAR_GROUP_PAGE)
 

@@ -4,7 +4,7 @@ import type { SessionInfo } from '@/hermes'
 
 import { resetSidebarView, setSidebarOrdering } from './layout'
 import { $sessions } from './session'
-import { $sidebarSessionRankIds } from './sidebar-sort'
+import { $sidebarSessionRank, $sidebarSessionRankIds } from './sidebar-sort'
 
 const session = (id: string, fields: Partial<SessionInfo>) =>
   ({ id, input_tokens: 0, output_tokens: 0, started_at: 0, ...fields }) as SessionInfo
@@ -61,5 +61,20 @@ describe('$sidebarSessionRankIds', () => {
     setSidebarOrdering('manual')
 
     expect($sidebarSessionRankIds.get()).toEqual([])
+  })
+})
+
+describe('$sidebarSessionRank', () => {
+  it('is null on the default sort', () => {
+    expect($sidebarSessionRank.get()).toBeNull()
+  })
+
+  it('ranks any row by creation, loaded or not', () => {
+    setSidebarOrdering('created')
+
+    const rank = $sidebarSessionRank.get()!
+
+    // Neither row is in $sessions: the key reads the row itself.
+    expect(rank(session('newer', { started_at: 9 }))).toBeLessThan(rank(session('older', { started_at: 1 })))
   })
 })

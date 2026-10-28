@@ -1,6 +1,7 @@
 import type { HermesGitBranch, HermesGitWorktree } from '@/global'
 import type { ProjectInfo, SessionInfo } from '@/hermes'
 import { normalize } from '@/lib/text'
+import type { SessionRank } from '@/store/sidebar-sort'
 
 import { rankSessions } from '../order'
 
@@ -1126,8 +1127,8 @@ interface PreviewOverlayOptions {
   owners?: ReadonlyMap<string, string>
   known?: KnownProjects
   removed?: ReadonlySet<string>
-  /** The active sort key as an id order; recency when empty. */
-  rankIds?: string[]
+  /** The active sort key; recency when absent. */
+  rank?: null | SessionRank
 }
 
 /** Merge live sessions into per-project overview previews, keyed by project id. */
@@ -1138,7 +1139,7 @@ export function overlayLivePreviews(
   limit: number,
   {
     removed = NO_REMOVED,
-    rankIds,
+    rank,
     owners = projectOwnerBySessionId(projects),
     known = knownProjectsOf(projects)
   }: PreviewOverlayOptions = {}
@@ -1182,7 +1183,7 @@ export function overlayLivePreviews(
     // compressed chat's live tip stands in for the snapshot's older segment.
     const pool = uniqueConversations([...liveRows, ...base]).sort((a, b) => sessionRecency(b) - sessionRecency(a))
 
-    out[node.id] = rankSessions(pool, rankIds).slice(0, limit)
+    out[node.id] = rankSessions(pool, rank).slice(0, limit)
   }
 
   return out

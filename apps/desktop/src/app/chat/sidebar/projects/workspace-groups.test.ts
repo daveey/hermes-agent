@@ -1473,9 +1473,36 @@ describe('overlayLivePreviews', () => {
       ]
     })
 
-    const previews = overlayLivePreviews([project], [], [], 2, { rankIds: ['priciest', 'newest', 'cheap'] })
+    const rank = (session: SessionInfo) => (session.id === 'priciest' ? 0 : session.id === 'newest' ? 1 : 2)
+    const previews = overlayLivePreviews([project], [], [], 2, { rank })
 
     expect(previews['/www/app'].map(s => s.id)).toEqual(['priciest', 'newest'])
+  })
+
+  it('keeps created order when activity lands on a preview row the sessions page never loaded', () => {
+    const byCreated = (session: SessionInfo) => -session.started_at
+
+    const preview = (lastActiveOfOldest: number) =>
+      overlayLivePreviews(
+        [
+          projectNode({
+            id: '/www/app',
+            previewSessions: [
+              makeCwdSession('/www/app', { id: 'newest', started_at: 9, last_active: 9 }),
+              makeCwdSession('/www/app', { id: 'middle', started_at: 5, last_active: 5 }),
+              makeCwdSession('/www/app', { id: 'oldest', started_at: 1, last_active: lastActiveOfOldest })
+            ]
+          })
+        ],
+        [],
+        [],
+        3,
+        { rank: byCreated }
+      )['/www/app'].map(s => s.id)
+
+    expect(preview(1)).toEqual(['newest', 'middle', 'oldest'])
+    // A reply in the oldest chat: it must not move.
+    expect(preview(99)).toEqual(['newest', 'middle', 'oldest'])
   })
 
   it('previews a detached session under Home, which no cwd could place', () => {

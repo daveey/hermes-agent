@@ -72,19 +72,40 @@ describe('orderByIds', () => {
 })
 
 describe('rankSessions', () => {
-  const sessions = [{ id: 'newest' }, { id: 'middle' }, { id: 'oldest' }]
+  const sessions = [
+    { id: 'newest', started_at: 5 },
+    { id: 'middle', started_at: 9 },
+    { id: 'oldest', started_at: 1 }
+  ]
+
+  const byCreated = (session: { started_at: number }) => -session.started_at
 
   it('leaves the lane alone when the sidebar is on its default sort', () => {
     expect(rankSessions(sessions)).toBe(sessions)
-    expect(rankSessions(sessions, [])).toBe(sessions)
+    expect(rankSessions(sessions, null)).toBe(sessions)
   })
 
   it('applies the active sort key to a lane the flat list never renders', () => {
-    expect(rankSessions(sessions, ['oldest', 'newest', 'middle']).map(s => s.id)).toEqual([
-      'oldest',
-      'newest',
-      'middle'
-    ])
+    expect(rankSessions(sessions, byCreated).map(s => s.id)).toEqual(['middle', 'newest', 'oldest'])
+  })
+
+  it('ranks every row by its own key, whatever order the lane arrives in', () => {
+    // The regression: ranking used an id list built from the loaded sessions
+    // page only. Lane rows outside that page (backend previews, other
+    // gateways) fell back to their recency slot, so the "created" sort
+    // reshuffled whenever activity reordered the lane.
+    const byActivity = [sessions[2], sessions[0], sessions[1]]
+
+    expect(rankSessions(byActivity, byCreated).map(s => s.id)).toEqual(['middle', 'newest', 'oldest'])
+  })
+
+  it('keeps arrival order between ties', () => {
+    const tied = [
+      { id: 'b', started_at: 3 },
+      { id: 'a', started_at: 3 }
+    ]
+
+    expect(rankSessions(tied, byCreated).map(s => s.id)).toEqual(['b', 'a'])
   })
 })
 

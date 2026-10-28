@@ -33,6 +33,21 @@ function rankBy(
   }
 }
 
+/** A row's rank under the active sort key: lower sorts first. */
+export type SessionRank = (session: SessionInfo) => number
+
+/**
+ * The active sort key as a function of the row itself, or null when nothing is
+ * ranked. Lanes and previews hold rows the loaded `$sessions` page doesn't
+ * (backend previews, other gateways), so they rank with this rather than with
+ * {@link $sidebarSessionRankIds}: an id order only knows the rows it was built
+ * from, and the rest fell back to their recency slot and moved on activity.
+ */
+export const $sidebarSessionRank: ReadableAtom<null | SessionRank> = computed(
+  [$sidebarOrdering, $sessionDotStateById],
+  rankBy
+)
+
 /**
  * The active sort key as a plain id order — the one ranking every sidebar
  * surface reads.
@@ -49,10 +64,8 @@ function rankBy(
  * arrive in, and a hand-dragged sequence is the flat list's own business.
  */
 export const $sidebarSessionRankIds: ReadableAtom<string[]> = computed(
-  [$sidebarOrdering, $sessions, $sessionDotStateById],
-  (ordering, sessions, dotStates) => {
-    const rank = rankBy(ordering, dotStates)
-
+  [$sidebarSessionRank, $sessions],
+  (rank, sessions) => {
     if (!rank) {
       return UNRANKED
     }
