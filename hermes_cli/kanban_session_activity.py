@@ -53,6 +53,18 @@ _pairs_lock = threading.Lock()
 # _all_counts single flight: held for a whole recompute; the generation bumps when one publishes.
 _counts_flight = threading.Lock()
 _counts_generation = 0
+# Cross-thread annotation flight. ``one_annotation_snapshot`` only shares a read
+# inside one thread. Session-list polls arrive on many AnyIO workers at once; each
+# used to wait on ``_counts_flight`` and then run waiting sources and attention
+# itself, so the pool filled and inventory/hub-sync timed out while the event loop
+# sat in select (2026-10-28). One refresher runs; overlapping polls take the last
+# good snapshot instead of waiting. A poll that arrives after the refresher
+# finishes still reads again.
+_annotate_refresh_lock = threading.Lock()
+_annotate_flight_scope: tuple[str, ...] | None = None
+_annotate_flight_result: tuple | None = None
+_last_annotation: dict[tuple[str, ...], tuple] = {}
+_annotate_waiters = 0
 WAITING_ON_CAP = 50
 
 
@@ -1872,6 +1884,69 @@ def _lineage_remote_duplicates(remote_keys: dict[str, frozenset[tuple[str, str, 
     return out
 
 
+def _freeze_annotation(parts: tuple) -> tuple:
+    """Copy an annotation read so a later recompute cannot mutate a poll still using it."""
+    (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra,
+     attention) = parts
+    return (
+        dict(active), dict(blocked), dict(unseen), dict(remote_stale),
+        {sid: frozenset(ids) for sid, ids in waiting.items()},
+        dict(parked), dict(held), dict(stalled),
+        {sid: frozenset(keys) for sid, keys in remote_keys.items()},
+        {sid: frozenset(ids) for sid, ids in extra.items()},
+        dict(attention),
+    )
+
+
+def _read_annotation_parts() -> tuple:
+    active, blocked, unseen, remote_stale, waiting = _all_counts(include_waiting=True)
+    with _cache_lock:
+        parked, held = _parked_cache[0]
+        stalled = _stalled_cache[0]
+        remote_keys = _remote_keys_cache[0]
+    extra = _extra_waiting()
+    try:
+        attention = attention_task_counts()
+    except Exception:
+        _log.debug("kanban attention unavailable", exc_info=True)
+        attention = {}
+    return _freeze_annotation((
+        active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention))
+
+
+def _annotation_snapshot() -> tuple | None:
+    """One in-flight annotation read, shared by overlapping polls.
+
+    Returns the last good parts when a refresh is already running, so those polls
+    do not occupy an AnyIO worker for the whole waiting-source and attention pass.
+    A cold start (nothing served yet) waits for that pass. None means the read
+    failed and the caller stamps ``kanban_unknown``.
+    """
+    global _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
+    scope = _origin_scope()
+    if not _annotate_refresh_lock.acquire(blocking=False):
+        _annotate_waiters += 1
+        try:
+            stale = _last_annotation.get(scope)
+            if stale is not None:
+                return stale
+            with _annotate_refresh_lock:
+                if _annotate_flight_scope == scope and _annotate_flight_result is not None:
+                    return _annotate_flight_result
+                return _last_annotation.get(scope)
+        finally:
+            _annotate_waiters -= 1
+    try:
+        _annotate_flight_scope = scope
+        _annotate_flight_result = None
+        parts = _read_annotation_parts()
+        _last_annotation[scope] = parts
+        _annotate_flight_result = parts
+        return parts
+    finally:
+        _annotate_refresh_lock.release()
+
+
 # [daveey] Set by ``one_annotation_snapshot``: the reads the first annotation in the scope made, for the others.
 _annotation_scope = threading.local()
 
@@ -1903,19 +1978,20 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     # Never re-date a cached zero as a new owner observation.
     observed_at = time.time() - _CACHE_TTL_S
     shared = getattr(_annotation_scope, "reads", None)
+    attention = None
     try:
         if shared:
             active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = shared[0]
         else:
-            active, blocked, unseen, remote_stale, waiting = _all_counts(include_waiting=True)
-            with _cache_lock:  # the snapshot that call just read or wrote: never a second projection
-                parked, held = _parked_cache[0]
-                stalled = _stalled_cache[0]
-                remote_keys = _remote_keys_cache[0]
-            extra = _extra_waiting()
+            parts = _annotation_snapshot()
+            if parts is None:
+                raise RuntimeError("kanban annotation unavailable")
+            (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra,
+             attention) = parts
             if shared is not None:
                 shared.append((active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys,
                                extra))
+                _annotation_scope.attention = attention
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
         # row off done) and drop the counts rather than present them as fresh.
@@ -1928,7 +2004,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row.pop("kanban_waiting_on", None)
             row["kanban_unknown"] = True
         return rows
-    attention = getattr(_annotation_scope, "attention", None)
+    if attention is None:
+        attention = getattr(_annotation_scope, "attention", None)
     if attention is None:
         try:
             attention = attention_task_counts()
@@ -1983,9 +2060,13 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     global _cache, _attention_cache, _remote_last, _links_cache, _snapshot_saved, _remote_read_memo
-    global _hub_signature_memo
+    global _hub_signature_memo, _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
     _remote_read_memo = None
     _hub_signature_memo = None
+    _annotate_flight_scope = None
+    _annotate_flight_result = None
+    _annotate_waiters = 0
+    _last_annotation.clear()
     with _pairs_lock:
         _board_memo.clear()
     with _links_lock:

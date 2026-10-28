@@ -890,3 +890,92 @@ def test_hub_signature_is_reused_until_the_file_changes_and_falls_back_on_old_re
         conn.execute("INSERT INTO replica VALUES ('mini', 'sessions', 's', '{}', 0)")
     assert ksa._hub_content_signature(old) != sig
 
+
+def test_overlapping_annotates_share_one_waiting_and_attention_pass(kanban_root, monkeypatch):
+    """Concurrent session-list polls must not each re-run waiting sources and attention.
+
+    Each poll used to finish ``_all_counts`` and then run ``_extra_waiting`` plus
+    ``attention_task_counts`` on its own AnyIO worker. Under load those workers
+    filled the pool (chat-closeout ``waiting_source`` and the attention lock guard)
+    and inventory/hub-sync requests timed out even though the handlers themselves
+    are fast.
+    """
+    import threading
+    import time
+
+    monkeypatch.setattr(ksa, "_all_counts", lambda **_k: ({}, {}, {}, {}, {}))
+    calls = {"extra": 0, "attention": 0}
+
+    def slow_extra():
+        calls["extra"] += 1
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and ksa._annotate_waiters < 5:
+            time.sleep(0.01)
+        assert ksa._annotate_waiters >= 5
+        assert calls["extra"] == 1
+        return {}
+
+    def slow_attention(now=None):
+        calls["attention"] += 1
+        return {}
+
+    monkeypatch.setattr(ksa, "_extra_waiting", slow_extra)
+    monkeypatch.setattr(ksa, "attention_task_counts", slow_attention)
+
+    errors: list[BaseException] = []
+
+    def run():
+        try:
+            ksa.annotate_kanban_activity([{"id": "s1"}])
+        except BaseException as exc:  # surface worker failures in the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(3)
+        assert not thread.is_alive()
+    assert not errors
+    assert calls["extra"] == 1
+    assert calls["attention"] == 1
+
+
+def test_poll_during_annotation_refresh_returns_previous_counts(kanban_root, monkeypatch):
+    """A poll that arrives while the refresh holds the flight lock must not wait on it."""
+    import threading
+    import time
+
+    monkeypatch.setattr(ksa, "_all_counts", lambda **_k: ({"s1": 2}, {}, {}, {}, {}))
+    monkeypatch.setattr(ksa, "_extra_waiting", dict)
+    monkeypatch.setattr(ksa, "attention_task_counts", lambda now=None: {})
+    first = [{"id": "s1"}]
+    ksa.annotate_kanban_activity(first)
+    assert first[0]["kanban_active"] == 2
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_extra():
+        entered.set()
+        assert release.wait(3)
+        return {}
+
+    monkeypatch.setattr(ksa, "_extra_waiting", slow_extra)
+    monkeypatch.setattr(ksa, "_all_counts", lambda **_k: ({"s1": 9}, {}, {}, {}, {}))
+    holder = threading.Thread(target=lambda: ksa.annotate_kanban_activity([{"id": "s1"}]))
+    holder.start()
+    assert entered.wait(2)
+    started = time.monotonic()
+    other = [{"id": "s1"}]
+    try:
+        ksa.annotate_kanban_activity(other)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    holder.join(3)
+    assert not holder.is_alive()
+    assert elapsed < 0.2
+    assert other[0].get("kanban_active") == 2
+    assert "kanban_unknown" not in other[0]
+
