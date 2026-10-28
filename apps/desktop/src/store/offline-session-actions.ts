@@ -2,7 +2,8 @@
  * [daveey] Owner actions on a cached (offline) sidebar row. The owning gateway
  * is unreachable, so archive / rename go to the window gateway's hub-sync as an
  * owner request (queued, applied when the owner is back); the row says so. Open
- * is refused honestly instead of dialing a dead gateway.
+ * is refused honestly instead of dialing a dead gateway, unless the row is only
+ * a stale list of a gateway that may be running (`offline_stale_list`).
  */
 import type { SessionInfo } from '@/hermes'
 import { syncedAgoLabel } from '@/lib/synced-ago'
@@ -14,8 +15,18 @@ import { $offlineSessions, hideOfflineSession, offlineIdentity } from './offline
 
 export type OfflineSessionAction = 'archive' | 'rename'
 
-/** Plain-language reason a cached row cannot be opened. */
-export function offlineOpenNotice(session: Pick<SessionInfo, 'offline_gateway' | 'offline_synced_at'>): string {
+/**
+ * Plain-language notice for opening a cached row. A replica row's gateway is unreachable, so open is refused; a
+ * stale-list row's connection (`connectionLabel`) only failed its last list, so the open is still tried.
+ */
+export function offlineOpenNotice(
+  session: Pick<SessionInfo, 'offline_gateway' | 'offline_stale_list' | 'offline_synced_at'>,
+  connectionLabel?: string
+): string {
+  if (session.offline_stale_list) {
+    return `${connectionLabel || 'This gateway'} is not responding (its last session list failed). Trying to open this chat anyway.`
+  }
+
   const gateway = session.offline_gateway || 'its gateway'
 
   return `${gateway} is offline, so this chat can't be opened right now (cached, ${syncedAgoLabel(session.offline_synced_at)}). Archive and rename are queued and sent when it is back.`

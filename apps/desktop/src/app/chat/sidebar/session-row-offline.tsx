@@ -30,7 +30,9 @@ export function gatewayMarks(
     return gatewayIcon
   }
 
-  const label = `Offline · cached from ${session.offline_gateway ?? 'its gateway'}, ${syncedAgoLabel(session.offline_synced_at)}`
+  const label = session.offline_stale_list
+    ? `Not responding · ${registry?.connections.find(c => c.id === gatewayId)?.label ?? gatewayId}, showing its last list`
+    : `Offline · cached from ${session.offline_gateway ?? 'its gateway'}, ${syncedAgoLabel(session.offline_synced_at)}`
 
   return (
     <>

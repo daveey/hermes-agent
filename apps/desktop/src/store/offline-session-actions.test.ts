@@ -59,6 +59,15 @@ describe('offline owner actions', () => {
   it('says plainly why an open is refused', () => {
     expect(offlineOpenNotice(row)).toMatch(/mini is offline.*can't be opened/)
   })
+
+  it('names the connection of a stale-list row as not responding, never offline or never synced', () => {
+    const stale = { ...row, offline_gateway: undefined, offline_stale_list: true, offline_synced_at: undefined }
+    const notice = offlineOpenNotice(stale, 'This computer')
+
+    expect(notice).toMatch(/^This computer is not responding/)
+    expect(notice).toMatch(/Trying to open/)
+    expect(notice).not.toMatch(/offline|never synced|its gateway/)
+  })
 })
 
 describe('offline request prerequisites', () => {

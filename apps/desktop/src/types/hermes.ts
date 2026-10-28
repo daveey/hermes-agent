@@ -743,6 +743,9 @@ export interface SessionInfo {
    *  owner's last-known state: `is_active` is always false, `last_active` is the
    *  session's own last activity, not the sync time. */
   offline_cached?: boolean
+  /** [daveey] Cached only because the owner's own last session list failed (busy or timed out), not taken from
+   *  the replica: the gateway may be running, so open still tries it. Never set on replica rows. */
+  offline_stale_list?: boolean
   /** Hub gateway name that owns this cached row. */
   offline_gateway?: string
   /** Epoch seconds: when the replica last heard from the owner. */
