@@ -972,11 +972,23 @@ def _teardown_tui_server_sessions(mod) -> None:
         mod._close_session_by_id(sid, end_reason="test_cleanup")
 
 
+def _tui_server_importing(mod) -> bool:
+    """True while another thread is still executing ``tui_gateway.server``'s import.
+
+    A prior test's leaked worker thread (e.g. one starved past its join timeout) can import the
+    server lazily; ``sys.modules`` then holds a partially initialized module whose globals
+    (``_methods``, ``_sessions``, ...) do not exist yet. Touching them raises AttributeError and
+    cascades into every later test in the file as a setup/teardown ERROR.
+    """
+    spec = getattr(mod, "__spec__", None)
+    return bool(getattr(spec, "_initializing", False))
+
+
 @pytest.fixture(autouse=True)
 def _reset_tui_gateway_server_state():
     mod = sys.modules.get(_TUI_SERVER_MODULE)
     snapshot = None
-    if mod is not None:
+    if mod is not None and not _tui_server_importing(mod):
         snapshot = {
             "methods": dict(mod._methods),
             "cfg": (mod._cfg_cache, mod._cfg_sig, mod._cfg_path),
@@ -987,7 +999,7 @@ def _reset_tui_gateway_server_state():
     yield
 
     mod = sys.modules.get(_TUI_SERVER_MODULE)
-    if mod is None:
+    if mod is None or _tui_server_importing(mod):
         return
 
     # This finalizer can run before the test's own monkeypatch undo, so a
