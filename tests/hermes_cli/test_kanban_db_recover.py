@@ -517,3 +517,80 @@ def test_the_child_timeout_cleans_up_its_work_dir(home):
     assert done.returncode == 1 and payload["status"] == "failed" and "TimeoutError" in payload["reason"]
     assert not list(home.glob("kanban-recover-*")), "the rebuild work dir leaked"
     assert rec.classify(path)[0] == "corrupt"
+
+
+# --- single owner: the lock names its holder (t_01a180cfd048ffcc) -----------------------------------
+
+_HOLD_LOCK = """
+import sys, time
+from pathlib import Path
+from hermes_cli import kanban_db_recover as rec
+path, ready = Path(sys.argv[1]), Path(sys.argv[2])
+with rec.recovery_lock(path) as held:
+    ready.write_text("held" if held else "busy")
+    time.sleep(60)
+"""
+
+
+def _hold_lock_in_child(path: Path, tmp: Path, **env: str):
+    import subprocess
+    import sys
+    import time
+    ready = tmp / "lock-ready"
+    child_env = {**os.environ, **env, "PYTHONPATH": str(Path(rec.__file__).resolve().parents[1])}
+    proc = subprocess.Popen([sys.executable, "-c", _HOLD_LOCK, str(path), str(ready)], env=child_env)
+    deadline = time.monotonic() + 30
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ready.read_text() == "held"
+    return proc
+
+
+def test_a_second_cli_recover_exits_nonzero_and_names_the_holder_pid_session_and_card(home, capsys, tmp_path):
+    path = kb.kanban_db_path()
+    _make_board(path)
+    _damage_table(path, "task_events")
+    proc = _hold_lock_in_child(path, tmp_path, HERMES_KANBAN_TASK="t_holdercard01", HERMES_SESSION_ID="sess_holder01")
+    try:
+        rc = _run_kanban_cli(["recover"])
+        out = capsys.readouterr().out
+    finally:
+        proc.kill()
+        proc.wait()
+    assert rc == 1 and "busy" in out
+    assert f"pid {proc.pid}" in out and "sess_holder01" in out and "t_holdercard01" in out
+
+
+def test_holder_info_is_recorded_while_held_and_cleared_on_release(home, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_holdercard02")
+    monkeypatch.setenv("HERMES_SESSION_ID", "sess_holder02")
+    path = home / "kanban.db"
+    path.write_bytes(b"")
+    with rec.recovery_lock(path) as held:
+        assert held
+        info = rec.recovery_lock_holder_info(path)
+        assert info and info["pid"] == os.getpid()
+        assert info["task_id"] == "t_holdercard02" and info["session_id"] == "sess_holder02"
+    assert rec.recovery_lock_holder_info(path) is None, "a released lock leaves no holder behind"
+
+
+def test_holder_info_ignores_a_record_whose_process_is_gone(home):
+    path = home / "kanban.db"
+    path.with_name("kanban.db.recover.pid").write_text(json.dumps({"pid": 2 ** 22 + 12345, "task_id": "t_x"}))
+    assert rec.recovery_lock_holder_info(path) is None
+
+
+def test_spawned_recovery_records_the_callers_card_as_holder(home, monkeypatch):
+    """spawn_recovery strips HERMES_KANBAN_TASK from the child's env; the holder card still reaches it."""
+    import subprocess
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["env"] = kw["env"]
+        return subprocess.CompletedProcess(cmd, 1, stdout=json.dumps({"status": "busy"}), stderr="")
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_holdercard03")
+    monkeypatch.setattr(rec.subprocess, "run", fake_run)
+    rec.spawn_recovery(home / "kanban.db", wait=True)
+    assert "HERMES_KANBAN_TASK" not in seen["env"]
+    assert seen["env"]["HERMES_RECOVERY_HOLDER_TASK"] == "t_holdercard03"

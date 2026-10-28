@@ -129,7 +129,9 @@ def _lock_path(db_path: Path) -> Path:
 def recovery_lock(db_path: Path) -> Iterator[bool]:
     """Non-blocking exclusive lock for one board's recovery. Yields False when another process
     holds it. The lock file itself is never written (a Windows byte lock must stay on byte 0); the
-    holder's pid goes to ``<db>.recover.pid`` for the ``busy`` message."""
+    holder (pid, session, card, start time) goes to ``<db>.recover.pid`` as JSON for the ``busy``
+    message, the sqlite-live-guard refusal and the self-heal incident dedupe, and is removed on
+    release."""
     lock_path = _lock_path(db_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+")
@@ -148,9 +150,16 @@ def recovery_lock(db_path: Path) -> Iterator[bool]:
         except OSError:
             yield False
             return
+        record = {"pid": os.getpid(), "started_at": time.time(),
+                  "session_id": os.environ.get("HERMES_SESSION_ID") or None,
+                  "task_id": os.environ.get(HOLDER_TASK_ENV) or os.environ.get("HERMES_KANBAN_TASK") or None}
         with contextlib.suppress(OSError):
-            _pid_path(db_path).write_text(f"{os.getpid()}\n", encoding="utf-8")
-        yield True
+            _pid_path(db_path).write_text(json.dumps(record) + "\n", encoding="utf-8")
+        try:
+            yield True
+        finally:
+            with contextlib.suppress(OSError):
+                _pid_path(db_path).unlink()
     finally:
         handle.close()
 
@@ -159,11 +168,58 @@ def _pid_path(db_path: Path) -> Path:
     return db_path.with_name(db_path.name + ".recover.pid")
 
 
-def recovery_lock_holder(db_path: Path) -> Optional[str]:
+# The card a recovery runs for. spawn_recovery strips HERMES_KANBAN_TASK from its child (the child
+# is not that card's worker), so the caller's card travels in this variable instead.
+HOLDER_TASK_ENV = "HERMES_RECOVERY_HOLDER_TASK"
+
+
+def _pid_alive(pid: int) -> bool:
     try:
-        return _pid_path(db_path).read_text(encoding="utf-8-sig").strip() or None
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return True
+
+
+def recovery_lock_holder_info(db_path: Path) -> Optional[dict]:
+    """``{pid, session_id, task_id, started_at}`` of the live process holding this board's
+    recovery lock, or None (no record, or its process is gone). An old plain-pid record reads as
+    ``{pid}``."""
+    try:
+        raw = _pid_path(db_path).read_text(encoding="utf-8-sig").strip()
     except OSError:
         return None
+    try:
+        info = json.loads(raw)
+    except ValueError:
+        info = {"pid": raw}
+    if not isinstance(info, dict):
+        info = {"pid": info}
+    try:
+        info["pid"] = int(info.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    return info if _pid_alive(info["pid"]) else None
+
+
+def describe_holder(info: Optional[dict]) -> str:
+    if not info:
+        return "holder unknown"
+    parts = [f"pid {info['pid']}"]
+    if info.get("session_id"):
+        parts.append(f"session {info['session_id']}")
+    if info.get("task_id"):
+        parts.append(f"card {info['task_id']}")
+    return ", ".join(parts)
+
+
+def recovery_lock_holder(db_path: Path) -> Optional[str]:
+    info = recovery_lock_holder_info(db_path)
+    return describe_holder(info) if info else None
 
 
 # --- probing ----------------------------------------------------------------------------------
@@ -612,7 +668,8 @@ def recover(db_path: Path, *, fill: bool = True, file_card: bool = True, reconci
         with recovery_lock(path) as held:
             if not held:
                 result.status = "busy"
-                result.reason = f"another recovery of this board is running (pid {recovery_lock_holder(path)})"
+                result.reason = ("another recovery of this board is running "
+                                 f"({describe_holder(recovery_lock_holder_info(path))})")
                 return result
             state, messages = classify(path)
             result.messages = messages[:20]
@@ -803,6 +860,9 @@ def spawn_recovery(db_path: Path, *, wait: bool = False, timeout: float = RECOVE
         return None
     _SPAWNED[key] = now
     env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_KANBAN_TASK")}
+    holder_task = os.environ.get(HOLDER_TASK_ENV) or os.environ.get("HERMES_KANBAN_TASK")
+    if holder_task:
+        env[HOLDER_TASK_ENV] = holder_task
     cmd = [sys.executable, "-m", "hermes_cli.kanban_db_recover", "--db", key, "--json", *(extra_args or [])]
     repo_root = str(Path(__file__).resolve().parents[1])
     env["PYTHONPATH"] = repo_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
