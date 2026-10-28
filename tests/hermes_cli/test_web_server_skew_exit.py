@@ -95,3 +95,31 @@ def test_default_probe_retires_once_the_checkout_moves_past_the_boot_revision(tm
     start_code_skew_watchdog(moved, update_probe=lambda: False, fence=fence,
                              poll_s=0.01, max_polls=4).join(timeout=5)
     assert moved.should_exit is True
+
+
+def _run_runtime(fence, intact, *, update=False):
+    server = _Server()
+    seq = iter(intact)
+    thread = start_code_skew_watchdog(
+        server, skew_fn=lambda: None, update_probe=lambda: update,
+        runtime_probe=lambda: next(seq, intact[-1]), fence=fence, poll_s=0.01, max_polls=len(intact) + 2)
+    thread.join(timeout=5)
+    return server
+
+
+def test_a_replaced_runtime_retires_even_when_the_revision_did_not_move():
+    # A runtime rebuild swapped site-packages but left the checkout revision alone: clients see
+    # runtimeIntact false and refuse reuse, so the backend must retire instead of sitting stale.
+    fence = _Fence(idle=True)
+    assert _run_runtime(fence, [False, False]).should_exit is True
+    assert fence.committed is True
+
+
+def test_an_intact_runtime_or_a_single_blip_stays_up():
+    assert _run_runtime(_Fence(idle=True), [True, True]).should_exit is False
+    assert _run_runtime(_Fence(idle=True), [False, True, False, True]).should_exit is False
+
+
+def test_a_replaced_runtime_waits_for_idle_and_for_the_update_to_finish():
+    assert _run_runtime(_Fence(idle=False), [False, False]).should_exit is False
+    assert _run_runtime(_Fence(idle=True), [False, False], update=True).should_exit is False

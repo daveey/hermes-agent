@@ -11,6 +11,12 @@ with the checkout on disk) and, once no update is in flight and the retirement f
 backend idle (and closes admission so no turn can start mid-teardown), exits cleanly. The client's
 reconnect path respawns it from the new code. Every uncertain read (unknown revision, busy or
 indeterminate ledgers, a live update) keeps the process up.
+
+The checkout revision is not the only thing an update replaces: a runtime rebuild can swap the
+venv/site-packages under the backend while the revision stays put. ``/api/ssh/ownership`` then
+reports ``runtimeIntact: false`` and every client refuses to reuse the backend, so the watchdog
+also retires on a lost runtime marker; otherwise a long-lived backend (the always-on dashboard)
+would sit stale and unreusable until the next checkout change.
 """
 
 from __future__ import annotations
@@ -45,6 +51,15 @@ def _update_in_progress() -> bool:
         return True  # cannot prove the swap is over: wait
 
 
+def _runtime_intact() -> bool:
+    try:
+        from hermes_cli.web_server import _ssh_runtime_intact
+
+        return _ssh_runtime_intact()
+    except Exception:
+        return True  # cannot prove the runtime moved: stay up
+
+
 def _run_retirement_watchdog(server, *, observe: Callable[[], Optional[str]], fence, poll_s: float,
                              max_polls: Optional[int], thread_name: str) -> threading.Thread:
     """Daemon thread shared by the SSH-isolated retirement watchdogs: ``observe`` returns the log
@@ -76,6 +91,7 @@ def _run_retirement_watchdog(server, *, observe: Callable[[], Optional[str]], fe
 
 def start_code_skew_watchdog(server, *, skew_fn: Optional[Callable[[], Skew]] = None,
                              update_probe: Callable[[], bool] = _update_in_progress,
+                             runtime_probe: Callable[[], bool] = _runtime_intact,
                              fence=None, poll_s: float = DEFAULT_SKEW_POLL_S,
                              max_polls: Optional[int] = None) -> threading.Thread:
     """Daemon thread that sets ``server.should_exit`` once the loaded code is provably stale and
@@ -88,10 +104,13 @@ def start_code_skew_watchdog(server, *, skew_fn: Optional[Callable[[], Skew]] = 
 
     def _observe() -> Optional[str]:
         skew = read_skew()
-        if not (skew and should_retire_for_skew(skew=skew, update_in_progress=update_probe())):
-            return None
-        return ("SSH-isolated backend loaded {} but the install is now at {}; "
-                "retiring so its client respawns it on the new code.".format(*skew))
+        if skew and should_retire_for_skew(skew=skew, update_in_progress=update_probe()):
+            return ("SSH-isolated backend loaded {} but the install is now at {}; "
+                    "retiring so its client respawns it on the new code.".format(*skew))
+        if not runtime_probe() and not update_probe():
+            return ("SSH-isolated backend's runtime was replaced under it (runtimeIntact false); "
+                    "retiring so its client respawns it on the new runtime.")
+        return None
 
     return _run_retirement_watchdog(server, observe=_observe, fence=fence, poll_s=poll_s,
                                     max_polls=max_polls, thread_name="ssh-isolated-skew-watchdog")
