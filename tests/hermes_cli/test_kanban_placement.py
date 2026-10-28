@@ -1081,3 +1081,19 @@ def test_configured_heavy_markers_replace_the_builtin_list():
     cfg = {**HEAVY, "heavy_markers": [r"\bcrunch\b"]}
     assert decide({"title": "Run the benchmark"}, cfg=cfg, machine_ok=PICKS_UP)["where"] == "hub"
     assert decide({"title": "crunch the logs"}, cfg=cfg, machine_ok=PICKS_UP)["runs_on"] == ["machine:worker-1"]
+
+
+@pytest.mark.parametrize("entry,ok", [
+    ({"state": "active", "labels": ["linux"]}, True),           # the Board publishes no pickup field (10-28)
+    ({"state": "active", "pickup": "explicit"}, True),
+    ({"state": "active", "pickup": "off"}, False),
+    ({"state": "active", "pickup": False}, False),
+    ({"state": "active", "hold": True}, False),
+    ({"state": "revoked"}, False),
+    (None, False),
+])
+def test_heavy_route_machine_check_reads_the_board_registry(monkeypatch, entry, ok):
+    from hermes_cli import kanban_worker_node as wn
+    machines = {"worker-1": entry} if entry else {}
+    monkeypatch.setattr(wn, "registry", lambda: {"me": "macbook", "machines": machines})
+    assert kp._machine_picks_up("worker-1") is ok

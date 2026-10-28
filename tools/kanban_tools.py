@@ -1564,7 +1564,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         view = {**args, "assignee": assignee, "skills": skills, "parents": parents,
                 "project_id": project_id}
         from hermes_cli import kanban_worker_node as _wn
-        machine_ok = (lambda m: _wn.placement_runs_on(conn, m) is not None) if conn is not None else None
+        # runs_on only works on a board that syncs as primary; the machine check is kp._machine_picks_up.
+        machine_ok = ((lambda m: _wn.sync.board_mode(conn) == "primary" and kp._machine_picks_up(m))
+                      if conn is not None else None)
         decision = kp.decide(view, machine_ok=machine_ok)
         target = decision["where"]
         if target == "refuse":

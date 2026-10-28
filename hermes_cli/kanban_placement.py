@@ -220,10 +220,15 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 
 
 def _machine_picks_up(name: str) -> bool:
-    """``name`` is an active machine in the Board registry that picks up other gateways' cards."""
+    """``name`` is an active machine in the Board registry that is not held (draining) and has not turned
+    pickup off. The Board registry does not publish ``pickup`` today (10-28: every entry lacked it, the hub
+    and worker-1 included, though both claim ``runs_on`` cards), so a missing field counts as on:
+    ``heavy_route`` naming the worker is the operator saying it picks up."""
     from hermes_cli import kanban_worker_node as wn
     entry = ((wn.registry() or {}).get("machines") or {}).get(name)
-    return bool(entry) and entry.get("state", "active") == "active" and wn.advertises_pickup(entry)
+    if not entry or entry.get("state", "active") != "active" or entry.get("hold"):
+        return False
+    return "pickup" not in entry or wn.advertises_pickup(entry)
 
 
 def target_live(target: str, *, now: float, live_seconds: int,
