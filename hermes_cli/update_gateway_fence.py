@@ -39,7 +39,7 @@ def _ancestor_pids() -> set[int]:
             break
         pids.add(pid)
         try:
-            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True,
+            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, encoding="utf-8",
                                  timeout=5, check=False).stdout.strip()
             pid = int(out)
         except (OSError, ValueError, subprocess.SubprocessError):
@@ -49,7 +49,7 @@ def _ancestor_pids() -> set[int]:
 
 def _intent_pid(home: Path) -> Optional[int]:
     try:
-        data = json.loads((Path(home) / "core-update" / "intent").read_text(encoding="utf-8"))
+        data = json.loads((Path(home) / "core-update" / "intent").read_text(encoding="utf-8-sig"))
         pid = int(data["pid"])
     except (OSError, ValueError, KeyError, TypeError):
         return None

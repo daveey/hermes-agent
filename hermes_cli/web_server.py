@@ -500,7 +500,7 @@ _SSH_RUNTIME_ATEXIT_ARMED = False
 def _ssh_marker_pid(marker: str) -> Optional[int]:
     """[daveey] The pid a marker file records (``pid=<n>``), None when unreadable or malformed."""
     try:
-        with open(marker, "r", encoding="utf-8") as fh:
+        with open(marker, "r", encoding="utf-8-sig") as fh:
             text = fh.read(64)
     except (OSError, UnicodeDecodeError):
         return None
@@ -535,13 +535,11 @@ def _prune_stale_ssh_runtime_markers(purelib: str) -> None:
         pid = _ssh_marker_pid(marker)
         if pid is None or pid == os.getpid():
             continue
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            continue
-        else:
+        # [daveey] gateway.status._pid_exists, not os.kill(pid, 0): on Windows that sends CTRL_C_EVENT to the
+        # target's console group (bpo-14484). It reports a permission-denied pid as alive, so it is kept.
+        from gateway.status import _pid_exists
+
+        if _pid_exists(pid):
             continue
         if _ssh_marker_pid(marker) == pid:
             try:
