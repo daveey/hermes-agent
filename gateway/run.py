@@ -5188,6 +5188,12 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
             # Mirrored onto the runner so _stop_impl suppresses the gateway_state=stopped persist for
             # unexpected signals; operator stops take the `planned_stop` branch and leave it False (DO persist).
             _signal_initiated_shutdown[0] = runner._signal_initiated_shutdown = True
+            # Carried to the exit-diag record so a supervisor bounce isn't logged as a bare failure.
+            runner._unplanned_signal = {
+                "signal": sig_name or getattr(received_signal, "name", None) or "UNKNOWN",
+                "ppid": (_shutdown_ctx or {}).get("ppid", os.getppid()),
+                "parent": (_shutdown_ctx or {}).get("parent"),
+            }
             logger.info("Received %s — initiating shutdown", sig_name or "SIGTERM/SIGINT")
 
         if _shutdown_ctx is not None:

@@ -42,6 +42,7 @@ def test_failing_system_exit_is_error(code):
         ("gateway.exit_clean", "info"),
         ("atexit.hook", "info"),
         ("gateway.exit_nonzero", "warning"),
+        ("gateway.exit_signal", "info"),
         ("asyncio.run.exception", "error"),
     ],
 )

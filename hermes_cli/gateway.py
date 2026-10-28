@@ -4695,7 +4695,13 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         _exit_diag("asyncio.run.exception", exc_type=type(e).__name__, exc_repr=repr(e), traceback=_traceback.format_exc())
         raise
     if not success:
-        _exit_diag("gateway.exit_nonzero")
+        # An unplanned stop signal (bootout, kickstart -k, systemctl stop) exits 1 on purpose so the
+        # service manager revives us: record which signal and parent, not a bare failure.
+        from gateway.run_shutdown import last_signal_exit
+        if (sig := last_signal_exit()) is not None:
+            _exit_diag("gateway.exit_signal", **sig)
+        else:
+            _exit_diag("gateway.exit_nonzero")
         _hard_exit_after_gateway_teardown(1)
     _exit_diag("gateway.exit_clean")
     _hard_exit_after_gateway_teardown(0)

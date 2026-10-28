@@ -13,8 +13,9 @@ import os
 import sys
 from datetime import UTC, datetime
 
-# start_gateway() also returns False for a SIGTERM stop (launchctl bootout, systemctl stop), so a
-# non-zero return is a warning; only an escaped exception or a failing SystemExit is an error.
+# An unplanned stop signal (launchctl bootout, kickstart -k, systemctl stop) is logged as
+# ``gateway.exit_signal`` (info, with signal + parent); a bare non-zero return is a warning; only an
+# escaped exception or a failing SystemExit is an error.
 _TAG_LEVELS = {"asyncio.run.exception": "error", "gateway.exit_nonzero": "warning"}
 
 

@@ -44,8 +44,21 @@ def _exit_with_failure_verdict(runner) -> bool:
     return True
 
 
+# Set when the last verdict was "exit 1 because an unplanned stop signal arrived" (not a refused
+# start): ``hermes gateway run`` logs that as ``gateway.exit_signal`` with the signal and parent,
+# instead of a bare ``gateway.exit_nonzero`` that reads like a crash.
+_last_signal_exit: Optional[dict] = None
+
+
+def last_signal_exit() -> Optional[dict]:
+    """``{"signal", "ppid", "parent"}`` when the last verdict was an unplanned-signal exit, else None."""
+    return _last_signal_exit
+
+
 def _resolve_gateway_exit_verdict(runner, signal_initiated_shutdown: bool) -> bool:
     """Resolve the process verdict after either startup abort or normal shutdown."""
+    global _last_signal_exit
+    _last_signal_exit = None
     if _exit_with_failure_verdict(runner):
         return False
     if runner.exit_code is not None:
@@ -55,6 +68,7 @@ def _resolve_gateway_exit_verdict(runner, signal_initiated_shutdown: bool) -> bo
             "Exiting with code 1 (signal-initiated shutdown without restart "
             "request) so the service manager can revive the gateway."
         )
+        _last_signal_exit = dict(getattr(runner, "_unplanned_signal", None) or {"signal": "UNKNOWN"})
         return False
     # Older restart paths may not set ``runner.exit_code``; retain the service-restart fallback.
     if runner._restart_via_service:
