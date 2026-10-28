@@ -1,0 +1,89 @@
+"""Read owner task snapshots when SSH is unavailable. Never confuse unknown with pending."""
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+
+from hermes_cli import kanban_capability_registry as registry
+
+# Gateway task_scopes are refreshed each sync; task updated_at only changes on edits.
+MAX_AGE_SECONDS = 600
+STATUSES = frozenset(("todo", "ready", "running", "scheduled", "review", "blocked", "triage", "done", "archived"))
+
+
+def read_task(gateway, target, board=None):
+    """Exact owner-qualified match, including completed/archived records, with fresh scope proof."""
+    board = board or "default"
+    db = registry._ro(registry.hub_db_path())
+    try:
+        db.execute("BEGIN")
+        rows = db.execute("SELECT data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
+                          (gateway, f"default/{board}/{target}")).fetchall()
+        if not rows:
+            raise ValueError(f"{target} not found in {gateway} replica")
+        tasks = [json.loads(r[0]) for r in rows]
+        if any(t != tasks[0] for t in tasks[1:]):
+            raise ValueError(f"ambiguous replica records for {target}")
+        task = tasks[0]
+        if (task.get("id") != target or task.get("board") != board or task.get("status") not in STATUSES
+                or task.get("gateway") != gateway or task.get("profile") != "default"
+                or task.get("owner_profile") != "default"):
+            raise ValueError(f"invalid replica task {target}")
+        scopes = []
+        for (raw,) in db.execute("SELECT data FROM replica WHERE gw=? AND coll='gateway'", (gateway,)):
+            scopes.extend(json.loads(raw).get("task_scopes", []))
+        matched = [s for s in scopes if s.get("profile") == "default" and s.get("board") == board]
+        if len(matched) != 1 or matched[0].get("state") != "ok":
+            raise ValueError(f"missing successful task-scope observation for {gateway}/{board}")
+        age = time.time() - float(matched[0].get("observed_at") or 0)
+        if not -60 <= age <= MAX_AGE_SECONDS:
+            raise ValueError(f"stale replica for {gateway}/{board} (age={age:.0f}s, limit={MAX_AGE_SECONDS}s)")
+        return task
+    finally:
+        db.close()
+
+
+def orphan_reason(task):
+    """Facts preserved by the replica that make a producer non-live."""
+    status = task["status"]
+    evidence = task.get("wait_observation")
+    if isinstance(evidence, dict) and evidence.get("orphan_reason"):
+        return evidence["orphan_reason"]
+    if status in ("archived", "triage"):
+        return status
+    if status == "blocked" and not task.get("human_request") and task.get("block_kind") not in ("assignment", "dependency"):
+        return "blocked with no human ask or routed owner"
+    return None
+
+
+def observe_wait(conn, target, *, now):
+    """Owner-only evidence collected in the same snapshot as the task row."""
+    from hermes_cli.kanban_awaiting import card_orphan_reason
+    from hermes_cli.kanban_session_activity import _local_wait_info
+    info = _local_wait_info(conn, [target], now=now).get(target) or {}
+    orphan = card_orphan_reason(conn, target)
+    return {"orphan_reason": orphan,
+            "parked_agent": bool(orphan or (info.get("agent_owned") and
+                                 (info.get("agent_owned_certain") or info.get("wait_state") == "stalled")))}
+
+
+def check(gateway, target, *, board=None, until=(), since=()):
+    try:
+        task = read_task(gateway, target, board)
+        status = task["status"]
+        orphan = orphan_reason(task)
+        suffix = " (replica; orphan producer)" if orphan else " (replica)"
+        if status in since:
+            return 1, f"{target} {status} (unchanged since park){suffix}"
+        if status in until:
+            return 0, f"{target} {status}{suffix}"
+        if status in ("scheduled", "blocked") and "parked-agent" in until:
+            evidence = task.get("wait_observation")
+            if not isinstance(evidence, dict) or type(evidence.get("parked_agent")) is not bool:
+                raise ValueError(f"{target} scheduled producer evidence unavailable; update owner core")
+            if evidence["parked_agent"]:
+                return 0, f"{target} {status} (replica; orphan producer)"
+        return 1, f"{target} {status}{suffix}"
+    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError) as exc:
+        return 2, f"error: replica {gateway}: {exc}"

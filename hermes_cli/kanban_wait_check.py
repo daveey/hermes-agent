@@ -66,17 +66,28 @@ def check_local(kind: str, target: str, *, board: Optional[str] = None, until=DE
             status = rows[0][0]
             if status in set(since or ()):
                 return 1, f"{target} {status} (unchanged since park)"
+            suffix = _producer_suffix(board, target) if status in ("scheduled", "blocked") else ""
             if status in set(until):
-                return 0, f"{target} {status}"
+                return 0, f"{target} {status}{suffix}"
             if PARKED_AGENT in set(until) and status in ("scheduled", "blocked") and _agent_owned_park(board, target):
                 return 0, f"{target} {status} (agent-owned park: nothing else will produce what it waits for)"
-            return 1, f"{target} {status}"
+            return 1, f"{target} {status}{suffix}"
         if kind == "board-empty":
             n = _query(_db(target), "select count(*) from tasks where status not in ('done','archived')")[0][0]
             return (0 if n == 0 else 1), f"{target} open={n}"
     except Exception as exc:  # any failure is "cannot tell", never "not yet"
         return 2, f"error: {exc}"
     return 2, f"error: unknown check {kind!r}"
+
+
+def _producer_suffix(board, target):
+    from hermes_cli.kanban_session_activity import _open_ro
+    from hermes_cli.kanban_awaiting import card_orphan_reason
+    conn = _open_ro(_db(board))
+    try:
+        return " (orphan producer)" if card_orphan_reason(conn, target) else ""
+    finally:
+        conn.close()
 
 
 def _agent_owned_park(board: Optional[str], target: str) -> bool:
@@ -104,7 +115,13 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=SSH_TIMEOUT + 15, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
+        if kind == "task":
+            from hermes_cli.kanban_wait_replica import check
+            return check(gateway, target, board=board, until=until, since=since)
         return 2, f"error: ssh {host}: {exc}"
+    if p.returncode == 255 and kind == "task":
+        from hermes_cli.kanban_wait_replica import check
+        return check(gateway, target, board=board, until=until, since=since)
     out = (p.stdout + p.stderr).strip()
     if p.returncode == 0 and since and kind == "task":
         words = (p.stdout or "").split()

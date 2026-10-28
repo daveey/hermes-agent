@@ -182,6 +182,9 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
                     and event and run and event[1] == run[0] and run[1] in ('done', 'completed') and run[2] == 'completed'
                     and row[1] is not None and event[2] >= row[1] and run[3] is not None and run[3] >= row[1])
     payload = {k: v for k, v in task.items() if k != 'origin_observation'}
+    if row[0] in ('scheduled', 'blocked'):
+        from hermes_cli.kanban_wait_replica import observe_wait
+        payload['wait_observation'] = observe_wait(conn, task['id'], now=now)
     # No per-task timestamp: an unchanged task must publish an identical record, or every sync republishes
     # every task. Owner liveness is the collector's per-scope heartbeat (``task_scopes[].observed_at``).
     return {**payload, 'origin_observation': {
