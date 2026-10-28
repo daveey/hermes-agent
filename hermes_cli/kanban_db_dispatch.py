@@ -3201,6 +3201,14 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # The module argv must carry the import context that made it resolvable:
     # the shim's in-process path injection is invisible to the bare child.
     _propagate_module_import_root(cmd, env)
+    # [daveey] Deferred placement: a card with parents that nothing pins here runs on the routed gateway.
+    # Its forwarder (seconds, no LLM) replaces the worker; on any failure it execs ``cmd`` itself.
+    from hermes_cli.kanban_placement_forward import forward_argv
+    forward = forward_argv(task, board, cmd)
+    if forward:
+        from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
+        pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parents[1])
+        cmd = forward
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.

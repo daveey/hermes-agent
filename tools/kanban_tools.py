@@ -1508,6 +1508,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             return _placement_refused(decision["pin"], decision.get("why", "")), None
         if target == "local":
             why = decision.get("why") or ""
+            if decision.get("defer"):
+                # Parents are local links: created here, forwarded to the target once they finish.
+                return None, {"where": "local", "defer": decision["defer"], "why": why}
             if why.startswith("local marker"):
                 logger.info("kanban placement: local (%s)", why)
                 return None, {"where": "local", "why": why, "remedy": kp.LOCAL_MARKER_REMEDY}
@@ -1698,7 +1701,18 @@ def _handle_create(args: dict, **kw) -> str:
             }}
         if origin is not None:
             extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
-        if marker_placement:
+        if marker_placement and marker_placement.get("defer"):
+            # [daveey] Run on the routed gateway once the parents finish (kanban_placement_forward).
+            from hermes_cli import kanban_placement_forward as _kpf
+            from hermes_cli.profiles import current_profile_name as _cpn
+            _kpf.record_deferral(conn, new_tid, target=marker_placement["defer"], origin_session=session_id,
+                                 origin_profile=_cpn("default") or "default")
+            extra["placement"] = {"where": "local", "defer": marker_placement["defer"],
+                                  "why": marker_placement["why"]}
+            extra["note"] = (f"Created here as {new_tid} so it can wait on its parents; it runs on "
+                             f"{marker_placement['defer']}, not here: when the parents finish the dispatcher "
+                             f"forwards it there and this card completes when that one does.")
+        elif marker_placement:
             extra["placement"] = {"where": marker_placement["where"], "why": marker_placement["why"]}
             extra["remedy"] = marker_placement["remedy"]
         if origin_intent is None and args.get("requires"):
