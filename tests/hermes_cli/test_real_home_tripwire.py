@@ -285,6 +285,47 @@ def test_hermes_exported_scratch_tmp_is_not_the_test_temp_root(tmp_path):
     assert "1 passed" in result.stdout
 
 
+def test_hermes_home_nested_in_the_real_root_is_sandboxed(tmp_path):
+    """``HERMES_HOME=$(mktemp -d)`` from a Hermes worker shell (TMPDIR=<real root>/cache/scratch)
+    hands pytest a "custom" home INSIDE the real root. Honoring it froze import-time homes
+    (``tui_gateway.server._hermes_home``) there, so resolving or writing them tripped the
+    real-home guard on ``<root>/cache``. The conftest must sandbox it like the root itself."""
+    fake_user = tmp_path / "user"
+    scratch = fake_user / ".hermes" / "cache" / "scratch"
+    nested_home = scratch / "tmp.abc123"
+    nested_home.mkdir(parents=True)
+    probe = tmp_path / "test_probe.py"
+    probe.write_text(textwrap.dedent(f"""
+        import os
+        from pathlib import Path
+
+        # Collection-time, like any test module importing tui_gateway.server at the top.
+        from tui_gateway import server
+        COLLECTION_HOME = os.environ["HERMES_HOME"]
+
+        def test_session_home_is_outside_the_real_root():
+            real_root = Path({str(fake_user / ".hermes")!r}).resolve()
+            home = Path(COLLECTION_HOME).resolve()
+            assert not home.is_relative_to(real_root), home
+            (home / "probe.txt").write_text("ok")
+
+        def test_import_time_home_resolves_under_the_guard():
+            # process_consumer_health.register() does exactly this for the session home.
+            Path(server._hermes_home).resolve()
+        """), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("TMPDIR", "TMP", "TEMP", "HERMES_SCRATCH_DIR", "HERMES_TEST_SANDBOX_HOME")}
+    env.update(HOME=str(fake_user), HERMES_HOME=str(nested_home), TMPDIR=str(scratch))
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "tests.conftest", "-p", "no:cacheprovider", "-q", str(probe)],
+        cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed" in result.stdout
+    assert not (nested_home / "probe.txt").exists()
+
+
 def test_linked_worktree_git_dir_is_the_checkouts_own_metadata(tmp_path):
     """A linked worktree's ``.git`` file names its git dir (under the home's checkout for
     hermes-core-wt trees); that dir counts as the checkout's, a plain clone contributes nothing,

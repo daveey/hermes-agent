@@ -101,10 +101,11 @@ def _hermes_home_points_at_production(value: str) -> bool:
         real_root = _real_platform_state_root() or (Path.home() / ".hermes").resolve()
     except Exception:
         return True
-    if resolved == real_root:
-        return True
-    # Profile home directly under the production root: <root>/profiles/<name>
-    return resolved.parent.name == "profiles" and resolved.parent.parent == real_root
+    # The root itself, a profile home (<root>/profiles/<name>), or any other dir nested in it. A
+    # nested "custom" home is never usable: the real-home guard refuses everything under the root,
+    # and ``HERMES_HOME=$(mktemp -d)`` from a Hermes shell (TMPDIR=<root>/cache/scratch) lands
+    # there, freezing import-time homes (``tui_gateway.server._hermes_home``) inside the root.
+    return resolved.is_relative_to(real_root)
 
 
 # ``import hermes_bootstrap`` (transitively: any entry-point module) runs
