@@ -1,6 +1,6 @@
 """Block is never a terminal parking state for agent-owned reasons.
 
-``capability`` / ``transient`` / untyped blocks with no human ask, no wake
+``capability`` / ``transient`` / ``needs_input`` (without a human_request) / untyped blocks with no human ask, no wake
 probe and no routed assignee have no owner: nothing wakes them. Worker-facing
 entry points (tool + CLI) refuse them with a typed error naming the fix; the
 dispatcher re-spawns any that already exist (``sweep_agent_owned_blocks``);

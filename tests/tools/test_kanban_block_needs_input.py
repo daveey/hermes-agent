@@ -68,7 +68,7 @@ def test_needs_input_with_human_request_blocks_and_sidebar_shows_blocked(worker_
     assert _replica_bucket({"status": "blocked", "block_kind": "needs_input", "human_request": None}) == "active"
 
 
-def test_cli_refuses_needs_input_without_human_request():
+def test_policy_function_refuses_needs_input_unless_owned():
     from hermes_cli.kanban_block_policy import block_policy_error
     assert "agent_owned_block" in block_policy_error("needs_input", reason=CUTOVER_REASON)
     assert block_policy_error("needs_input", human_request=ASK) is None
