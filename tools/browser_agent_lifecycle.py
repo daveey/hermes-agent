@@ -38,10 +38,17 @@ class _Lease:
 
 _leases: dict[tuple[str, str, str, str], _Lease] = {}
 _vault_owners: dict[tuple[str, str], str] = {}
+# (home, task, supervisor key, lease endpoint) pinned by renew_selected for one vault operation.
+_selected_scope: contextvars.ContextVar = contextvars.ContextVar("hermes_managed_browser_selected", default=None)
 
 
 def supervisor_task(task_id: str) -> str:
-    """Vault's existing no-session API addresses the last selected scope, never a union."""
+    """Vault's existing no-session API addresses the last selected scope, never a union. Inside
+    :func:`renew_selected` the scope captured (and leased) at the start of the operation wins, so a
+    concurrent call that selects another scope cannot redirect a fill mid-operation."""
+    held = _selected_scope.get()
+    if held and held[:2] == (str(get_hermes_home()), task_id):
+        return held[2]
     with _lock:
         return _vault_owners.get((str(get_hermes_home()), task_id), task_id)
 
@@ -218,7 +225,11 @@ def renew_selected(tool: str, task_id: str | None, timeout: float):
             if previous and not endpoint.endswith("/lease/" + previous):
                 raise ManagedBrowserError(f"{tool}: the managed browser lease for this task expired, so its tabs "
                                           "are gone; open the page again (browser_navigate) and retry")
-            yield endpoint
+            token = _selected_scope.set((home, task_id, task_id, endpoint))
+            try:
+                yield endpoint
+            finally:
+                _selected_scope.reset(token)
         return
     key, record = found
     previous = record.capability
@@ -229,10 +240,29 @@ def renew_selected(tool: str, task_id: str | None, timeout: float):
                 raise ManagedBrowserError(f"{tool}: the managed browser lease for the selected browser_exec "
                                           "session expired, so its tabs are gone; run browser_exec in that "
                                           "session again and retry")
-            yield grant["endpoint"]
+            token = _selected_scope.set((home, task_id, selected, grant["endpoint"]))
+            try:
+                yield grant["endpoint"]
+            finally:
+                _selected_scope.reset(token)
     except ManagedBrowserError as exc:
         message = str(exc)
         raise ManagedBrowserError(message if message.startswith(tool + ":") else f"{tool}: {message}") from None
+
+
+def supervisor_in_scope(supervisor) -> bool:
+    """Whether a cached CDP supervisor belongs to the managed lease this call holds.
+
+    Inside a tool lease (or a vault operation's pinned scope) a supervisor attached through any other
+    endpoint (an older capability, or a pre-activation raw attach) must not be used. Outside any
+    managed lease the answer is always True, so unmanaged behavior is unchanged."""
+    held = _selected_scope.get()
+    lease = held[3] if held and held[0] == str(get_hermes_home()) else current_tool_lease()
+    if not lease:
+        return True
+    parts = urllib.parse.urlsplit(lease)
+    prefix = f"ws://{parts.netloc}{parts.path}/"
+    return str(getattr(supervisor, "cdp_url", "") or "").startswith(prefix)
 
 
 @contextlib.contextmanager

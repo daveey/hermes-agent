@@ -85,10 +85,13 @@ def browser_dialog(
                 "Call browser_navigate or /browser connect first."
             ),
         })
-    from tools.browser_agent_lifecycle import ManagedBrowserError, tool_lease
+    from tools.browser_agent_lifecycle import ManagedBrowserError, supervisor_in_scope, tool_lease
     try:
         # Managed Chrome: the supervisor's socket is lease-scoped; keep the owner lease live meanwhile.
-        with tool_lease("browser_dialog", task_id or "default", 30):
+        with tool_lease("browser_dialog", task_id, 30):
+            if not supervisor_in_scope(supervisor):
+                raise ManagedBrowserError("browser_dialog: the managed browser lease for this task expired, so "
+                                          "the page holding the dialog is gone; open it again (browser_navigate)")
             result = supervisor.respond_to_dialog(action=action, prompt_text=prompt_text, dialog_id=dialog_id)
     except ManagedBrowserError as exc:
         return json.dumps({"success": False, "error": str(exc)})

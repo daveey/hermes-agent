@@ -146,10 +146,11 @@ def env(request, tmp_path, monkeypatch):
 
 
 def _dispatch(name, args, task_id):
-    import tools.browser_cdp_tool  # noqa: F401 — registers browser_cdp
-    import tools.browser_dialog_tool  # noqa: F401
-    import tools.browser_tool  # noqa: F401
-    import tools.browser_vault_tool  # noqa: F401
+    # Imported for their registry.register() side effects.
+    import tools.browser_cdp_tool
+    import tools.browser_dialog_tool
+    import tools.browser_tool
+    import tools.browser_vault_tool
     from tools.registry import registry
     out = registry.dispatch(name, args, task_id=task_id)
     return json.loads(out) if isinstance(out, str) else out
@@ -370,3 +371,94 @@ def test_lightpanda_fallback_gating(env, monkeypatch):
         assert "fallback_warning" not in result
     else:
         assert len(fallbacks) == 1  # unchanged: the existing Lightpanda→Chrome retry
+
+
+class _Supervisor:
+    def __init__(self, cdp_url):
+        self.cdp_url, self.calls = cdp_url, []
+
+    def respond_to_dialog(self, **kw):
+        self.calls.append(("dialog", kw))
+        return {"ok": True, "dialog": {}}
+
+    def evaluate_runtime(self, expression):
+        self.calls.append(("eval", expression))
+        return {"ok": True, "result": 2}
+
+
+def test_stale_supervisor_is_never_used(env, monkeypatch):
+    """A supervisor attached before activation (raw) or on an older capability is refused or
+    bypassed under a managed lease; unmanaged, the cached supervisor is used as before."""
+    from tools import browser_agent_lifecycle as lifecycle
+    from tools import browser_tool as bt
+    from tools.browser_supervisor import SUPERVISOR_REGISTRY
+    stale = _Supervisor(env.fake.raw_ws())
+    monkeypatch.setattr(SUPERVISOR_REGISTRY, "get", lambda task_id: stale)
+    result = _dispatch("browser_dialog", {"action": "accept"}, "task-d")
+    if env.managed:
+        assert not result["success"] and result["error"].startswith("browser_dialog:")
+        assert stale.calls == []
+        with lifecycle.tool_lease("browser_console", "task-d", 30) as lease:
+            assert bt._eval_supervisor_fast_path("task-d", "1+1") is None  # falls through, re-attaches
+            fresh = _Supervisor(lease.replace("http://", "ws://") + "/devtools/browser/scoped")
+            monkeypatch.setattr(SUPERVISOR_REGISTRY, "get", lambda task_id: fresh)
+            assert bt._eval_supervisor_fast_path("task-d", "1+1") is not None
+        assert stale.calls == [] and fresh.calls == [("eval", "1+1")]
+    else:
+        assert result["success"] and stale.calls[0][0] == "dialog"
+        assert bt._eval_supervisor_fast_path("task-d", "1+1") is not None
+
+
+def test_retained_hybrid_sidecar_never_launches_local_chrome(env, monkeypatch):
+    if not env.managed:
+        pytest.skip("hybrid sidecars need a cloud provider; unmanaged behavior is covered by hybrid tests")
+    from tools import browser_tool as bt
+    from tools import browser_tool_session as bt_session
+    monkeypatch.setattr(bt_session, "_create_local_session",
+                        lambda *a, **k: pytest.fail("local Chrome launched under managed config"))
+    bt._active_sessions["task-s::local"] = {"session_name": "h_local", "features": {"local": True},
+                                             "session_key": "task-s::local", "owner_task_id": "task-s"}
+    bt._last_active_session_key["task-s"] = "task-s::local"
+    result = _dispatch("browser_snapshot", {}, "task-s")
+    assert not result.get("success") and "browser_navigate" in json.dumps(result)
+    assert "task-s" not in bt._last_active_session_key  # the next call targets the managed session
+    assert env.spawned == []
+    assert _dispatch("browser_snapshot", {}, "task-s")["success"]
+    assert "/lease/" in _cdp_arg(env.spawned[-1][1])
+
+
+def test_vault_operation_pins_its_scope_against_concurrent_selection(env):
+    if not env.managed:
+        pytest.skip("scope pinning only exists under managed leases")
+    from tools import browser_agent_lifecycle as lifecycle
+    assert _dispatch("browser_navigate", {"url": "https://example.com/"}, "task-p")["success"]
+    config = lifecycle._managed_config("test")
+    with lifecycle.renew_selected("browser_vault", "task-p", 30):
+        assert lifecycle.supervisor_task("task-p") == "task-p"
+        with lifecycle.request_lease(config, "task-p", "other", 30, {}):
+            pass  # a concurrent browser_exec selects another scope for this task
+        assert lifecycle._vault_owners[(str(env.home), "task-p")].startswith("managed-")
+        assert lifecycle.supervisor_task("task-p") == "task-p"  # the fill keeps its scope
+    assert lifecycle.supervisor_task("task-p").startswith("managed-")
+
+
+@pytest.mark.parametrize("name,args", [
+    ("browser_navigate", {"url": "https://example.com/"}),
+    ("browser_cdp", {"method": "Target.getTargets"}),
+    ("browser_vault", {"action": "fill", "handle": "h"}),
+])
+def test_missing_task_identity(env, monkeypatch, name, args):
+    from tools import browser_cdp_tool
+    from tools import browser_vault_tool as vault
+
+    async def fake_call(*a, **k):
+        return {"targetInfos": []}
+
+    monkeypatch.setattr(browser_cdp_tool, "_cdp_call", fake_call)
+    monkeypatch.setattr(vault, "browser_vault_fill", lambda handle, task_id=None: json.dumps({"success": True}))
+    result = _dispatch(name, args, None)
+    if env.managed:
+        assert "task identity" in json.dumps(result)  # never a shared "default" managed owner
+        assert env.fake.calls == [] and env.spawned == []
+    else:
+        assert result.get("success") is not False, result

@@ -219,7 +219,11 @@ def _browser_cdp_via_supervisor(task_id: str, frame_id: str, method: str, params
         return tool_error(f"CDP supervisor is not available: {exc}. frame_id routing requires a running "
                           "supervisor attached via /browser connect or an active Browserbase session.")
 
+    from tools.browser_agent_lifecycle import supervisor_in_scope
     supervisor = SUPERVISOR_REGISTRY.get(task_id)
+    if supervisor is not None and not supervisor_in_scope(supervisor):
+        return tool_error("browser_cdp: the managed browser lease for this task expired, so this frame's page is "
+                          "gone; open it again (browser_navigate), then browser_snapshot for fresh frame_ids.")
     if supervisor is None:
         return tool_error(f"No CDP supervisor is attached for task={task_id!r}. Call browser_navigate or "
                           "/browser connect first so the supervisor can attach. Once attached, browser_snapshot "
@@ -405,7 +409,7 @@ def _managed_browser_cdp(args: dict, task_id: Optional[str]) -> str:
     except (TypeError, ValueError):
         lease_timeout = 30.0
     try:
-        with tool_lease("browser_cdp", task_id or "default", min(max(lease_timeout, 1.0), 300.0)):
+        with tool_lease("browser_cdp", task_id, min(max(lease_timeout, 1.0), 300.0)):
             return browser_cdp(
                 method=args.get("method", ""), params=args.get("params"), target_id=args.get("target_id"),
                 frame_id=args.get("frame_id"), timeout=timeout, task_id=task_id,

@@ -63,10 +63,12 @@ def _eval_js(task_id: str, expression: str) -> dict[str, Any]:
     selected = task_id
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY
-        from tools.browser_agent_lifecycle import supervisor_task
+        from tools.browser_agent_lifecycle import supervisor_in_scope, supervisor_task
 
         selected = supervisor_task(task_id)
         supervisor = SUPERVISOR_REGISTRY.get(selected)
+        if supervisor is not None and not supervisor_in_scope(supervisor):
+            supervisor = None  # attached through another (stale) managed lease: never act through it
         if supervisor is not None:
             sup = supervisor.evaluate_runtime(expression)
             if sup.get("ok"):
@@ -101,11 +103,11 @@ def _ensure_supervisor(task_id: str):
     for the packaged Chromium's endpoint (``get cdp-url``: same daemon, same reaper) and attach.
     Returns None when no endpoint is reachable; the fill then refuses rather than touching argv."""
     from tools.browser_supervisor import SUPERVISOR_REGISTRY
-    from tools.browser_agent_lifecycle import supervisor_task
+    from tools.browser_agent_lifecycle import supervisor_in_scope, supervisor_task
 
     selected = supervisor_task(task_id)
     supervisor = SUPERVISOR_REGISTRY.get(selected)
-    if supervisor is not None:
+    if supervisor is not None and supervisor_in_scope(supervisor):
         return supervisor
     if selected != task_id:
         return None  # Never widen a managed vault lookup to an unscoped local browser.
@@ -642,7 +644,7 @@ def _fenced_page_op(task_id: Optional[str], fn) -> str:
     try:
         # Managed Chrome: keep the scope the vault addresses (last browser_exec / built-in tool scope)
         # leased for the whole page operation; a no-op otherwise.
-        with renew_selected("browser_vault", task_id or "default", 120):
+        with renew_selected("browser_vault", task_id, 120):
             res = run_fenced(session, lambda: {"raw": fn()})
     except ManagedBrowserError as exc:
         return json.dumps({"success": False, "error": str(exc)})

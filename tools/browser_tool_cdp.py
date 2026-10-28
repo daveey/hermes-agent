@@ -114,13 +114,16 @@ def _ensure_cdp_supervisor(task_id: str) -> None:
     """
     _bt = _origin()
     from tools.browser_agent_lifecycle import ManagedBrowserError
+    managed_outside_lease = False
     try:
         cdp_url = _get_cdp_override()
     except ManagedBrowserError:
-        cdp_url = ""  # outside a lease: only the session's own lease-scoped URL below, never the raw root
+        cdp_url, managed_outside_lease = "", True
     if not cdp_url:
         with _bt._cleanup_lock:
             session_info = _bt._active_sessions.get(task_id, {})
+        if managed_outside_lease and not (session_info.get("features") or {}).get("managed_agent"):
+            return  # managed Chrome outside a lease: only a session's own leased URL, never a raw/stale one
         maybe = str(session_info.get("cdp_url") or "")
         if maybe:
             cdp_url = _resolve_cdp_override(maybe)

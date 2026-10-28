@@ -359,10 +359,16 @@ def _managed_lease_rotated(session_info: dict[str, Any]) -> bool:
 def _create_session_for_key(task_id: str, force_local: bool) -> dict[str, Any]:
     """Fresh session for ``task_id`` (runs OUTSIDE the lock: cloud mode makes a network call).
     Precedence: CDP override > hybrid local sidecar (never real-profile) > cloud > local."""
+    from tools.browser_agent_lifecycle import ManagedBrowserError, current_tool_lease
+    if force_local and current_tool_lease():
+        # A hybrid sidecar binding left over from before activation: never launch a local Chrome
+        # beside the managed one. Navigating again rebinds the task to its managed session.
+        _bt._last_active_session_key.pop(_bt._bare_task_id_for_session_key(task_id), None)
+        raise ManagedBrowserError("browser: this task's page lives in a local sidecar browser, which managed "
+                                  "Chrome does not use; open the page again with browser_navigate")
     cdp_override = _cdp._get_cdp_override()
     if cdp_override and not force_local:
         info = _create_cdp_session(task_id, cdp_override)
-        from tools.browser_agent_lifecycle import current_tool_lease
         if lease := current_tool_lease():
             # Pin the session to its lease: a rotated capability must recreate the daemon's attach.
             info["features"] = {**(info.get("features") or {}), "managed_agent": True}

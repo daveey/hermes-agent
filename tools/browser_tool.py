@@ -843,8 +843,9 @@ def browser_snapshot(
     # attached. See website/docs/developer-guide/browser-supervisor.md.
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
+        from tools.browser_agent_lifecycle import supervisor_in_scope
         _supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
-        if _supervisor is not None:
+        if _supervisor is not None and supervisor_in_scope(_supervisor):
             _sv_snap = _supervisor.snapshot()
             if _sv_snap.active:
                 response.update(_snapshot._redact_browser_output(_sv_snap.to_dict()))
@@ -1053,9 +1054,10 @@ def _eval_supervisor_fast_path(effective_task_id: str, expression: str) -> Optio
     None to fall through to the subprocess path."""
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
+        from tools.browser_agent_lifecycle import supervisor_in_scope
         supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
-        if supervisor is None:
-            return None
+        if supervisor is None or not supervisor_in_scope(supervisor):
+            return None  # a stale managed attach: the subprocess path re-attaches on the current lease
         sup_result = supervisor.evaluate_runtime(expression)
         if sup_result.get("ok"):
             return _eval_result_or_blocked(
@@ -1361,7 +1363,7 @@ def _managed_tool_call(name: str, task_id, fn):
     no-op otherwise); a lease failure is a clear tool error naming the tool, never a raw-endpoint retry."""
     from tools.browser_agent_lifecycle import ManagedBrowserError, tool_lease
     try:
-        with tool_lease(name, task_id or "default", _safe_command_timeout()):
+        with tool_lease(name, task_id, _safe_command_timeout()):
             return fn()
     except ManagedBrowserError as exc:
         return json.dumps({"success": False, "error": str(exc)})
