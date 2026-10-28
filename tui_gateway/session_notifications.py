@@ -171,7 +171,10 @@ def _notif_release_turn(session: dict) -> None:
 def _notif_claim_turn(session: dict) -> bool:
     """Claim the idle session (running=True) under history_lock; False if a turn is live.
     After the user's Stop no automatic turn starts: the cancel latch holds notifications
-    (requeued by the callers) until the next user prompt clears it."""
+    (requeued by the callers) until the next user prompt clears it. While another backend owns
+    the chat (owner-refusal backoff) no automatic turn starts either."""
+    if _notif_owner_refused(session):
+        return False
     with _session_turn_admission(session) as admitted:
         if not admitted or session.get("running") or session.get("_turn_cancel_requested"):
             return False
@@ -183,19 +186,66 @@ def _notif_log_failure(what: str, exc: BaseException) -> None:
     print(f"[tui_gateway] {what}: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
+# [daveey] A synthesized turn (process completion, subagent result, /loop, /heartbeat, bot DM, kanban notice)
+# that the admission gate refuses because another live process holds the chat: SESSION_NOT_OWNED is
+# deterministic until that owner lets go, so the poller waits (doubling backoff) instead of re-running the turn
+# on its next pass. Before, a refused completion went straight back on the queue and the poller re-ran it every
+# ~0.8 s, painting a "Your message was not answered" card each time (139 in 110 s on 2026-10-28). The first
+# refusal of a streak shows its card; later probes in the streak are silent.
+_OWNER_REFUSAL_BACKOFF_S = 30.0
+_OWNER_REFUSAL_BACKOFF_MAX_S = 300.0
+_OWNER_REFUSAL_CODES = ("SESSION_NOT_OWNED", "SESSION_COORDINATION_UNAVAILABLE")
+
+
+def _notif_owner_refused(session: dict) -> bool:
+    """True while an owner-refusal backoff holds this session's automatic turns."""
+    return time.monotonic() < float(session.get("_notif_owner_refused_until") or 0)
+
+
+def _notif_note_owner_refusal(session: dict, reason: str) -> None:
+    delay = float(session.get("_notif_owner_refusal_delay") or _OWNER_REFUSAL_BACKOFF_S)
+    session["_notif_owner_refusal_delay"] = min(delay * 2, _OWNER_REFUSAL_BACKOFF_MAX_S)
+    session["_notif_owner_refused_until"] = time.monotonic() + delay
+    logger.info("automatic turn for session %s refused (%s): another owner holds the chat; next try in %.0fs",
+                session.get("session_key") or "", reason, delay)
+
+
+def _notif_owner_preflight(sid: str, session: dict) -> bool:
+    """False = refused silently. Only inside a refusal streak (its card already shown): probe ownership
+    before anything is emitted, so a later retry while the chat is still held elsewhere stays invisible."""
+    if not session.get("_notif_owner_refusal_delay"):
+        return True
+    refusal = _ensure_active_session_slot(sid, session)
+    if refusal is None:
+        return True
+    _notif_note_owner_refusal(session, str(getattr(refusal, "reason", None) or "refused"))
+    return False
+
+
 def _notif_run_submit(rid, sid, session, text, **kwargs):
     """Run a turn this caller just claimed via _notif_claim_turn.
 
     A plain stage() adopts the freshly claimed generation instead of inheriting a stale
     one from an enclosing worker context (which would refuse the new turn and leak it)."""
     from tui_gateway.turn_admission import stage
+    if not _notif_owner_preflight(sid, session):
+        _notif_release_turn(session)
+        return False
+    session.pop("_turn_owner_refusal", None)
     with stage(session):
-        return _run_prompt_submit(rid, sid, session, text, **kwargs)
+        accepted = _run_prompt_submit(rid, sid, session, text, **kwargs)
+    reason = session.pop("_turn_owner_refusal", None)
+    if not accepted and reason in _OWNER_REFUSAL_CODES:
+        _notif_note_owner_refusal(session, reason)
+    return accepted
 
 
 def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwargs) -> Any:
     """message.start + _run_prompt_submit for a claimed (running=True) turn; releases on failure.
     Returns the gate's verdict (False = refused, no turn runs)."""
+    if not _notif_owner_preflight(sid, session):
+        _notif_release_turn(session)
+        return False
     try:
         from gateway.warning_notifications import render_notification
         with _session_profile_runtime_scope(session):
@@ -351,6 +401,11 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
         if wakeup.lstrip().startswith("/"):
             _notif_slash_loop_tick(rid, sid, session, mgr, wakeup)
         else:
+            if not _notif_owner_preflight(sid, session):  # still held elsewhere: no dangling message.start
+                _notif_release_turn(session)
+                with contextlib.suppress(Exception):
+                    mgr.abandon_tick()
+                return
             _emit("message.start", sid)
             _notif_run_submit(rid, sid, session, wakeup)
     except Exception as exc:
@@ -687,9 +742,18 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
     if diagnostic_process_event(evt):
         kwargs.setdefault("display_metadata", {})["notification_category"] = "diagnostic"
     try:
-        _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text, "notification poller dispatch failed", **kwargs)
+        accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
+                                 "notification poller dispatch failed", **kwargs)
     except Exception:
         release_event_delivery(evt, claim)
+        return
+    if accepted is False and _notif_owner_refused(session):
+        # Another backend owns the chat: the event waits here for the backoff instead of being marked
+        # delivered while no turn ran (a subagent result used to be dropped this way). [daveey]
+        release_event_delivery(evt, claim)
+        from tools.process_registry import process_registry
+        if not _notif_hold_for(session, evt, process_registry.completion_queue):
+            process_registry.completion_queue.put(evt)
         return
     complete_event_delivery(evt, claim)
 

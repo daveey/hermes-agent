@@ -153,6 +153,9 @@ def _admit_prompt_turn(
             if _retain_unadmitted_submit_row(session["history"], staged):
                 session["history_version"] = int(session.get("history_version", 0)) + 1
         reason = getattr(ownership_refusal, "reason", None) or "SESSION_COORDINATION_UNAVAILABLE"
+        # [daveey] Read by the notification poller (_notif_after_submit): a synthesized turn refused for
+        # ownership backs off instead of re-running every poll (139 refusal cards in 110 s, 2026-10-28).
+        session["_turn_owner_refusal"] = reason
         _emit_terminal_turn_error(
             sid, session, str(ownership_refusal),
             error_surface={"layer": "gateway", "code": reason, "retryable": False})
@@ -160,6 +163,9 @@ def _admit_prompt_turn(
     with session["history_lock"]:
         if not owns(session):
             return None
+        # This process owns the chat again: any notification refusal backoff is over. [daveey]
+        for key in ("_turn_owner_refusal", "_notif_owner_refused_until", "_notif_owner_refusal_delay"):
+            session.pop(key, None)
         if session.get("_closing") or (
             queued_prompt_generation is not None
             and int(session.get("_queued_prompt_generation", 0)) != queued_prompt_generation):
