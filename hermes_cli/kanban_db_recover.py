@@ -150,7 +150,7 @@ def recovery_lock(db_path: Path) -> Iterator[bool]:
         except OSError:
             yield False
             return
-        record = {"pid": os.getpid(), "started_at": time.time(),
+        record = {"pid": os.getpid(), "proc_start": _proc_start(os.getpid()), "started_at": time.time(),
                   "session_id": os.environ.get("HERMES_SESSION_ID") or None,
                   "task_id": os.environ.get(HOLDER_TASK_ENV) or os.environ.get("HERMES_KANBAN_TASK") or None}
         with contextlib.suppress(OSError):
@@ -203,7 +203,19 @@ def recovery_lock_holder_info(db_path: Path) -> Optional[dict]:
         info["pid"] = int(info.get("pid"))
     except (TypeError, ValueError):
         return None
-    return info if _pid_alive(info["pid"]) else None
+    if not _pid_alive(info["pid"]):
+        return None
+    if info.get("proc_start") and _proc_start(info["pid"]) not in (None, str(info["proc_start"])):
+        return None  # the recorded process died (e.g. SIGKILL at the spawn timeout) and its pid was reused
+    return info
+
+
+def _proc_start(pid: int) -> Optional[str]:
+    """Linux process start time in clock ticks (``/proc/<pid>/stat`` field 22); None elsewhere."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
 
 
 def describe_holder(info: Optional[dict]) -> str:

@@ -594,3 +594,19 @@ def test_spawned_recovery_records_the_callers_card_as_holder(home, monkeypatch):
     rec.spawn_recovery(home / "kanban.db", wait=True)
     assert "HERMES_KANBAN_TASK" not in seen["env"]
     assert seen["env"]["HERMES_RECOVERY_HOLDER_TASK"] == "t_holdercard03"
+
+
+def test_holder_info_ignores_a_reused_pid(home):
+    """A SIGKILLed recovery leaves its record; if the pid is reused, the start time no longer matches."""
+    path = home / "kanban.db"
+    path.with_name("kanban.db.recover.pid").write_text(json.dumps({"pid": os.getpid(), "proc_start": "1",
+                                                                    "task_id": "t_reused"}))
+    assert rec.recovery_lock_holder_info(path) is None
+
+
+def test_holder_record_carries_this_process_start_time(home):
+    path = home / "kanban.db"
+    path.write_bytes(b"")
+    with rec.recovery_lock(path):
+        raw = json.loads(path.with_name("kanban.db.recover.pid").read_text())
+        assert raw["proc_start"] and rec.recovery_lock_holder_info(path)["pid"] == os.getpid()
