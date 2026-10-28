@@ -567,17 +567,20 @@ def _holder_is_me(row) -> bool:
 
 def _holder_alive(row) -> bool:
     """True unless the holder process is provably gone (dead pid, or a recycled pid with another start time)."""
-    import os
+    from gateway.status import _pid_exists
+
     pid = row["inflight_pid"]
     if pid is None:
         return False
     try:
-        os.kill(int(pid), 0)
+        pid = int(pid)
+        if pid <= 0 or not _pid_exists(pid):
+            return False
     except ProcessLookupError:
         return False
     except PermissionError:
         pass  # exists, owned by someone else
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, OverflowError):
         return False
     recorded = row["inflight_start"]
     if recorded is None:
