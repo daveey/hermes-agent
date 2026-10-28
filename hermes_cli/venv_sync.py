@@ -484,7 +484,10 @@ def _prepare_borrowed_launch(root: Path, owner: Path, *, current: bool) -> Path 
     if python is None:
         raise RuntimeError("source update has no managed Python; run `hermes pm install`")
     same = os.path.normcase(os.path.abspath(python)) == os.path.normcase(os.path.abspath(sys.executable))
-    return python if not current or not same else None
+    # The pre-sync flag used to force a re-exec even when this process already is the store
+    # interpreter. A script that mints a new HERMES_HOME on each start would then sync and
+    # re-exec forever. Activation runs in this process when prepare_launch returns None.
+    return None if same else python
 
 
 def _finish_source_update(root: Path, *, current: bool, pending: Path) -> None:
@@ -597,6 +600,14 @@ def relaunch_command(
 
     An old venv may use a different Python ABI. Do not add the new generation
     to that interpreter, and do not depend on its obsolete editable finder.
+
+    The re-entry is ``python -I``, so it does not inherit the launching venv's
+    site-packages. Load this checkout's ``hermes_bootstrap`` before user code
+    so the committed environment is selected first: a borrowed-home script
+    imports application modules (``hermes_state`` → ``ruamel``) before any
+    entry point would. A tree with no bootstrap file is unchanged. Gateway
+    identity matchers require the source to start with ``import sys, runpy;
+    sys.path.insert`` and end with the run_path/run_module/exec body.
     """
     # Preserve interpreter options, not application flags with the same names.
     options: list[str] = []
@@ -610,7 +621,18 @@ def relaunch_command(
         if option in ("-W", "-X") and index < len(original):
             options.append(original[index])
             index += 1
-    prefix = f"import sys, runpy; sys.path.insert(0, {str(root)!r}); sys.argv = {argv!r}; "
+    # Select deps before run_path. ``__setitem__`` returns None, so the ``or``
+    # still execs the module; registering it first keeps a later import from
+    # re-entering prepare_launch under a HERMES_HOME the script has not set yet.
+    prefix = (
+        f"import sys, runpy; sys.path.insert(0, {str(root)!r}); sys.argv = {argv!r}; "
+        "import importlib.util as _iu, pathlib as _pl; "
+        f"_bp = _pl.Path({str(root)!r}) / 'hermes_bootstrap.py'; "
+        "_spec = _iu.spec_from_file_location('hermes_bootstrap', _bp) if _bp.is_file() else None; "
+        "_mod = _iu.module_from_spec(_spec) if _spec is not None else None; "
+        "(sys.modules.__setitem__('hermes_bootstrap', _mod) or _spec.loader.exec_module(_mod)) "
+        "if _mod is not None else None; "
+    )
     if argv[0] == "-c":
         body = f"exec({original[index + 1]!r})"
     elif module and module != "__main__":
