@@ -9,7 +9,7 @@ import { RemoteUpdatePause, remoteUpdatePauseKey, UPDATE_PAUSE_BACKOFF_MS } from
 // 2026-10-27 20:58–21:00 PDT: the hub ran its own `hermes update`; every renderer request and prewarm tick dialed a
 // new SSH control master, hit the remote preflight's "SSH startup is paused" refusal and closed it again.
 
-const HUB = { user: 'ubuntu', host: '100.104.201.88', port: 22, remoteHermesPath: '' }
+const HUB = { user: 'ubuntu', host: '192.0.2.10', port: 22, remoteHermesPath: '' }
 const KEY = remoteUpdatePauseKey(HUB)
 
 function updateRefusal(): Error {
@@ -161,7 +161,7 @@ describe('renderer API requests during a remote update', () => {
 
     await expect(
       h.pause.run(KEY, async () => {
-        throw new Error('ssh: connect to host 100.104.201.88 port 22: Connection refused')
+        throw new Error('ssh: connect to host 192.0.2.10 port 22: Connection refused')
       })
     ).rejects.toThrow(/Connection refused/)
     expect(h.pause.paused(KEY)).toBe(false)
