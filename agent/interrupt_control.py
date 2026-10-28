@@ -66,17 +66,18 @@ def interrupt_reason(agent) -> str:
     return _USER_REASON_SLUGS.get(reason) or interrupt_issuer(agent) or "unknown"
 
 
-def record_api_interrupt(agent, waited_s: float, messages) -> dict:
-    """[daveey] Note an interrupt that landed while waiting for the model: ``{reason, waited_s, prompt_tokens}``
-    on ``agent._last_api_interrupt`` (the finalizer stamps it on the interrupted row and the turn result) and one
-    INFO line in agent.log. Before this every producer saved the same bare text (self-heal agent-38bad5aced)."""
+def record_api_interrupt(agent, waited_s: float, messages, *, phase: str = "model_wait") -> dict:
+    """[daveey] Note an interrupt that landed while waiting for the model (``phase="model_wait"``) or in a retry /
+    recovery backoff (``"retry_wait"``): ``{reason, phase, waited_s, prompt_tokens}`` on ``agent._last_api_interrupt``
+    (stamped on the interrupted row and the turn result) and one INFO line in agent.log. Before this every producer
+    saved the same bare text (self-heal agent-38bad5aced)."""
     from agent.model_metadata import estimate_messages_tokens_rough
     prompt_tokens = int(estimate_messages_tokens_rough(list(messages or [])))
-    info = {"reason": interrupt_reason(agent), "waited_s": round(max(0.0, float(waited_s)), 1),
+    info = {"reason": interrupt_reason(agent), "phase": phase, "waited_s": round(max(0.0, float(waited_s)), 1),
             "prompt_tokens": prompt_tokens}
     agent._last_api_interrupt = info
-    logger.info("turn interrupted: reason=%s waited=%.1fs prompt_tokens=%d model=%s session=%s",
-                info["reason"], info["waited_s"], prompt_tokens, getattr(agent, "model", None),
+    logger.info("turn interrupted: reason=%s phase=%s waited=%.1fs prompt_tokens=%d model=%s session=%s",
+                info["reason"], phase, info["waited_s"], prompt_tokens, getattr(agent, "model", None),
                 getattr(agent, "session_id", None) or "none")
     return info
 

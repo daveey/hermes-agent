@@ -72,5 +72,7 @@ def test_ordinary_partial_is_kept_as_the_interrupted_row():
     messages, verdict = _interrupt("Visible draft.")
 
     assert (messages[-1]["role"], messages[-1]["content"]) == ("assistant", "Visible draft.")
-    assert messages[-1]["display_metadata"] == {"interrupted": True}
+    assert messages[-1]["display_metadata"]["interrupted"] is True
+    # [daveey] The row also records why the wait was cut short (agent-38bad5aced).
+    assert set(messages[-1]["display_metadata"]["interrupt"]) == {"reason", "phase", "waited_s", "prompt_tokens"}
     assert verdict.final_response == "Visible draft."

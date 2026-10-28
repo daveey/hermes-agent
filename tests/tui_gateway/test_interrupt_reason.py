@@ -160,6 +160,7 @@ def test_backend_exit_records_backend_exit(agent, sid, monkeypatch, caplog):
     result = _run_with_slow_model(agent, monkeypatch, lambda: server._stop_turns_before_exit(budget_s=0))
     _assert_recorded(result, caplog, "backend_exit")
     assert result["interrupt_issuer"] == "backend_exit"
+    assert _interrupted_row(result)["phase"] == "model_wait"
 
 
 def test_ws_orphan_reaper_records_ws_orphan(agent, sid, monkeypatch, caplog):
@@ -181,6 +182,51 @@ def test_lease_takeover_records_lease_takeover(agent, sid, monkeypatch, caplog):
         lambda: server._interrupt_session_turn(sid, session, request_id="lease-taken-over",
                                                reason="lease_takeover"))
     _assert_recorded(result, caplog, "lease_takeover")
+
+
+def test_backend_exit_during_retry_backoff_records_backend_exit(agent, sid, monkeypatch, caplog):
+    """The retry/recovery exits (``abort_turn_on_interrupt``: error handling, retry backoff, empty-response retry,
+    provider autorecover) save their own "Operation interrupted: ..." text; they record the reason too."""
+    import importlib
+
+    import httpx
+    import openai
+
+    turn_api_error = importlib.import_module("agent.turn_api_error")  # `agent` is the fixture here
+
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(server, "_clear_pending", lambda *_a, **_k: None)
+    _session(sid, agent)
+    calls = []
+
+    def provider(*_a, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return _tool_call_response()
+        raise openai.APIConnectionError(request=httpx.Request("POST", "http://127.0.0.1/v1/chat/completions"))
+
+    def backoff(*_a, **_k):
+        server._stop_turns_before_exit(budget_s=0)  # the backend exits while the turn waits to retry
+        return 30.0
+
+    monkeypatch.setattr(turn_api_error, "compute_error_backoff", backoff)
+
+    rc = MagicMock()
+    rc.chat.completions.create.side_effect = provider
+    agent.client.chat.completions.create.side_effect = provider
+    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **kw: rc)
+    monkeypatch.setattr(agent, "_abort_request_openai_client", lambda *a, **kw: None)
+    monkeypatch.setattr(agent, "_close_request_openai_client", lambda *a, **kw: None)
+    with (
+        patch("model_tools.handle_function_call", return_value="search result"),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("look it up")
+    _assert_recorded(result, caplog, "backend_exit")
+    assert _interrupted_row(result)["phase"] == "retry_wait"
+    assert result["final_response"].startswith("Operation interrupted: retrying API call after error")
 
 
 def test_compute_host_interrupt_frame_carries_the_reason(monkeypatch):

@@ -1334,14 +1334,18 @@ def abort_turn_on_interrupt(
     # already-executed tool result. Strip only that request-local scaffold before
     # closing, so this exit owner can persist its specific interrupt reason.
     agent._drop_trailing_empty_response_scaffolding(messages)
-    close_interrupted_tool_sequence(messages, interrupt_text)
+    # [daveey] Record WHY (user_stop / backend_exit / ...) before clear_interrupt drops the reason.
+    from agent.interrupt_control import record_api_interrupt
+    interrupt_info = record_api_interrupt(agent, 0.0, messages, phase="retry_wait")
+    vars(agent).pop("_last_api_interrupt", None)
+    close_interrupted_tool_sequence(messages, interrupt_text, display_metadata={"interrupt": interrupt_info})
     agent._persist_session(messages, conversation_history)
     # The turn was stopped, not rebuilt: a pending steer was aimed at this turn's next
     # tool iteration, which will no longer happen — drop it (hard-cancel semantics).
     agent.clear_interrupt(hard_cancel=True)
     return {
         "final_response": interrupt_text, "messages": messages, "api_calls": api_call_count,
-        "completed": False, "interrupted": True,
+        "completed": False, "interrupted": True, "interrupt": interrupt_info,
     }
 
 
