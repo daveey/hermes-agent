@@ -1056,6 +1056,42 @@ def _route_needs(op: str, args: dict, tid: str, reason: Optional[str]) -> Option
                                 "the approved scope. End your turn."))
 
 
+STANDING_WAIT_EVENT = "standing_wait_hold"
+
+
+def _standing_wait_guard(kb, conn, tid: str, kind: Optional[str], human_request: Any, reason: str) -> None:
+    """Hold a block on the user ONCE when the card carries a standing "don't wait". [daveey]
+
+    A needs_input block (or one with a human_request) under such a standing line is refused with the
+    words quoted back and a ``standing_wait_hold`` event (coach/self-heal read it). Calling again with
+    the block lands it: a genuine human-only need (a credential, a physical step) is never trapped.
+    """
+    if kind != "needs_input" and not human_request:
+        return
+    from agent import standing_instructions as si
+    task = kb.get_task(conn, tid)
+    found = si.explicit_lines(getattr(task, "body", "") or "")
+    for c in kb.list_comments(conn, tid):
+        found += si.explicit_lines(c.body or "")
+    dont_wait = si.says_dont_wait(si.dedupe(found))
+    if not dont_wait:
+        return
+    run_id = _worker_run_id(tid)
+    if any(e.kind == STANDING_WAIT_EVENT and (run_id is None or e.run_id in (None, run_id))
+           for e in kb.list_events(conn, tid)):
+        return  # already held once this run: the agent re-confirmed a human-only need
+    with kb.write_txn(conn, allow_nested=True):
+        kb._append_event(conn, tid, STANDING_WAIT_EVENT,
+                         {"kind": kind, "standing": dont_wait[:3], "reason": (reason or "")[:300]}, run_id=run_id)
+    quoted = "; ".join(f'"{w}"' for w in dont_wait[:3])
+    raise _Reject(
+        f"Not blocked: this card carries the user's standing instruction {quoted}. Decide it yourself and keep "
+        "going (pick the option the user's goal implies, record the choice in a kanban_comment). A timing or "
+        "consent question is not a reason to wait. Only if this truly needs a human (a credential, a physical "
+        "step, money beyond the approved budget) call kanban_block again with the same reason; that lands it.",
+        "standing_dont_wait")
+
+
 @_kanban_handler("kanban_block")
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
@@ -1092,6 +1128,7 @@ def _handle_block(args: dict, **kw) -> str:
         _policy = block_policy_error(kind, human_request=args.get("human_request"), wake_check=wake[0],
                                      clock_only=wake[2], blocker_id=blocker_id, reason=reason)
         _check(_policy is None, _policy or "", ERROR_CODE)
+        _standing_wait_guard(kb, conn, tid, kind, args.get("human_request"), reason)
         _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id)
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,

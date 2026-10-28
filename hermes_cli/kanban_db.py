@@ -4070,6 +4070,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    _ctx_standing(lines, task, list_comments(conn, task_id))  # [daveey]
     from hermes_cli.kanban_continuation import render_checkpoint_context
     checkpoint = render_checkpoint_context(conn, task_id)
     if checkpoint:
@@ -4223,6 +4224,25 @@ def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, no
         lines.append(
             f"- {row['id']} — {row['title']} ({_ctx_stamp(_to_epoch(row['ended_at']) or 0, now)}): {first}"
         )
+    lines.append("")
+
+
+def _ctx_standing(lines: list[str], task: Task, comments: list[Comment]) -> None:
+    """Every ``standing:`` line in the body or ANY comment, word for word, ahead of everything else. [daveey]
+
+    The comment thread is tail-capped (``_CTX_MAX_COMMENTS``), so a standing "don't wait" written early on a
+    busy card would otherwise drop out of the worker's prompt."""
+    from agent import standing_instructions as si
+    found = si.explicit_lines(task.body or "")
+    for c in comments:
+        found += si.explicit_lines(c.body or "")
+    found = si.dedupe(found)
+    if not found:
+        return
+    lines.append("## Standing instructions (from the user; in force for this card)")
+    lines += [f"standing: {line}" for line in found]
+    lines.append("(These still govern this run: e.g. a standing \"don't wait\" means decide it yourself instead "
+                 "of blocking on the user, unless only a human can act — a credential, a physical step.)")
     lines.append("")
 
 

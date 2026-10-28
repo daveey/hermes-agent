@@ -983,6 +983,31 @@ def _build_verbatim_user_section(turns: list[dict[str, Any]]) -> str:
     )
 
 
+def _append_standing_section(summary: str, turns: list[dict[str, Any]]) -> str:
+    """Carry the user's standing instructions word for word into the summary. [daveey]
+
+    Sources: ``standing:`` lines in ANY compacted row (including an earlier summary, so they survive
+    repeated compaction) and "don't wait"-class directives in real or relayed user messages. The
+    verbatim-user section is newest-first under a budget and the summarizer paraphrases freely (a relayed
+    "dont block, dont wait" once became "urgency does not waive safeguards"), so neither keeps them.
+    """
+    from agent import standing_instructions as si
+
+    found: list[str] = si.explicit_lines(summary)
+    for msg in turns:
+        content = _content_text_for_contains(msg.get("content"))
+        if not content:
+            continue
+        user_authored = msg.get("role") == "user" and not _synthetic_user_row(content)
+        found += si.extract(content, user_authored=user_authored)
+    section = si.render_section(found)
+    if not section:
+        return summary
+    if si.STANDING_HEADING in summary:  # the summarizer copied an earlier section: replace it, never stack
+        summary = si.strip_section(summary)
+    return summary + _redact_compaction_text(section)
+
+
 def _build_recovery_footer(session_id: str, region_len: int) -> str:
     """Deterministic pointer to the compacted region in session history.
     state.db keeps every pre-compaction message; naming the session_search re-access path lets the model
@@ -3679,7 +3704,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         return result
 
     def _augment_summary_lean(self, summary: str, turns_to_summarize: list[dict[str, Any]]) -> str:
-        """Append deterministic lean-mode sections to a summary; no-op in legacy mode."""
+        """Append deterministic lean-mode sections to a summary; legacy mode gets only standing instructions."""
+        summary = _append_standing_section(summary, turns_to_summarize)  # every mode [daveey]
         if getattr(self, "tail_mode", "lean") != "lean":
             return summary
         for heading, build in (
