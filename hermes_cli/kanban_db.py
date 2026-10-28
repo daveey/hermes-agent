@@ -1453,19 +1453,15 @@ def _inherit_notify_subs(
     )
 
 
-# A legacy (unstamped) 'hub' sub written within this many seconds of its card's creation is the origin
-# binding (``kanban_origin.bind`` runs in the creating tool call); later ones are hermes-hub shepherds. [daveey]
-LEGACY_ORIGIN_BIND_WINDOW_S = 120
-
-
 def _owning_sub_clause() -> str:
     """SQL predicate (aliases ``s`` = sub, ``p`` = its task) for a subscription a child inherits.
 
     Stamped provenance (``delivery_metadata.reason``) decides: ``shepherd``/``touch`` are observers and never
-    inherit; ``create``/``origin`` (and any other value) do. Unstamped rows predate stamping: a 'hub' row is the
-    origin binding only when written at creation (``LEGACY_ORIGIN_BIND_WINDOW_S``), every other platform keeps
-    the old inherit-everything behaviour (gateway DM subs carry no reason)."""
-    from hermes_cli.kanban_db_notify import OBSERVER_SUB_REASONS
+    inherit; ``create``/``origin`` (and any other value) do. Legacy 'hub' rows are stamped once at board open
+    (``kanban_db_notify.stamp_legacy_hub_sub_provenance``); a 'hub' row still unstamped (written by an older
+    process since) counts as the origin binding only when written at creation (``LEGACY_ORIGIN_BIND_WINDOW_S``).
+    Every other unstamped row keeps the old inherit-everything behaviour (gateway DM subs carry no reason)."""
+    from hermes_cli.kanban_db_notify import LEGACY_ORIGIN_BIND_WINDOW_S, OBSERVER_SUB_REASONS
 
     observers = ", ".join(f"'{r}'" for r in OBSERVER_SUB_REASONS)
     reason = ("CASE WHEN json_valid(s.delivery_metadata) "

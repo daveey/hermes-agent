@@ -291,6 +291,97 @@ def remove_notify_sub(
     return cur.rowcount > 0
 
 
+# Origin bindings run in the creating call; a legacy (unstamped) 'hub' sub written later than this after its
+# card's creation is a hermes-hub shepherd. Also the fallback for rows still unstamped at inherit time. [daveey]
+LEGACY_ORIGIN_BIND_WINDOW_S = 120
+
+_UNSTAMPED_SQL = ("(CASE WHEN delivery_metadata IS NULL THEN 1 WHEN NOT json_valid(delivery_metadata) THEN 1 "
+                  "WHEN json_type(delivery_metadata) != 'object' THEN 1 "
+                  "WHEN json_extract(delivery_metadata, '$.reason') IS NULL THEN 1 ELSE 0 END) = 1")
+
+
+def stamp_legacy_hub_sub_provenance(conn: sqlite3.Connection) -> int:
+    """One-shot backfill: give every unstamped 'hub' sub a ``reason`` (``origin`` or ``shepherd``). [daveey]
+
+    Before provenance stamping, the origin binding and hermes-hub shepherd subs were both bare 'hub' rows, and
+    inheritance copied them to children with the CHILD's creation time, so a copied observer looked exactly
+    like a fresh origin binding and kept spreading down the program. Resolve each row through the card graph:
+    a row whose chat also sits on one of the card's parents or its creator task is an inherited copy and takes
+    that ancestor's resolved reason; any other row is the card's own, ``origin`` when written within
+    ``LEGACY_ORIGIN_BIND_WINDOW_S`` of the card's creation, else ``shepherd``. Idempotent and cheap once done
+    (no unstamped rows left). Returns the number of rows stamped."""
+    rows = conn.execute(
+        "SELECT s.task_id, s.chat_id, s.thread_id, s.created_at AS sub_at, t.created_at AS task_at "
+        "FROM kanban_notify_subs s LEFT JOIN tasks t ON t.id = s.task_id "
+        f"WHERE s.platform = 'hub' AND {_UNSTAMPED_SQL.replace('delivery_metadata', 's.delivery_metadata')}"
+    ).fetchall()
+    if not rows:
+        return 0
+    pending = {(r["task_id"], r["chat_id"]): r for r in rows}
+    task_ids = sorted({r["task_id"] for r in rows})
+    ancestors: dict[str, set[str]] = {}
+
+    def _ancestors(task_id: str) -> set[str]:
+        if task_id not in ancestors:
+            found = {r[0] for r in conn.execute("SELECT parent_id FROM task_links WHERE child_id = ?", (task_id,))}
+            for (payload,) in conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created' ORDER BY id LIMIT 1",
+                    (task_id,)):
+                try:
+                    creator = (json.loads(payload or "{}") or {}).get("creator_task_id")
+                except (TypeError, ValueError, AttributeError):
+                    creator = None
+                if creator:
+                    found.add(str(creator))
+            found.discard(task_id)
+            ancestors[task_id] = found
+        return ancestors[task_id]
+
+    resolved: dict[tuple[str, str], str] = {}
+
+    def _stamped(task_id: str, chat_id: str) -> Optional[str]:
+        row = conn.execute(
+            "SELECT delivery_metadata FROM kanban_notify_subs WHERE task_id = ? AND platform = 'hub' AND chat_id = ? "
+            "ORDER BY thread_id LIMIT 1", (task_id, chat_id)).fetchone()
+        if row is None:
+            return None
+        return _decode_notify_delivery_metadata(row["delivery_metadata"]).get("reason") or "origin"
+
+    def _resolve(task_id: str, chat_id: str, seen: frozenset) -> Optional[str]:
+        key = (task_id, chat_id)
+        if key in resolved:
+            return resolved[key]
+        if key not in pending:
+            return _stamped(task_id, chat_id)
+        inherited = [reason for anc in sorted(_ancestors(task_id)) if anc not in seen
+                     for reason in [_resolve(anc, chat_id, seen | {task_id})] if reason is not None]
+        if inherited:
+            reason = "origin" if any(r in OWNING_SUB_REASONS for r in inherited) else "shepherd"
+        else:
+            row = pending[key]
+            bound_at_creation = (row["task_at"] is not None and row["sub_at"] is not None
+                                 and int(row["sub_at"]) <= int(row["task_at"]) + LEGACY_ORIGIN_BIND_WINDOW_S)
+            reason = "origin" if bound_at_creation else "shepherd"
+        resolved[key] = reason
+        return reason
+
+    with _kb.write_txn(conn, allow_nested=True):
+        for task_id in task_ids:
+            for (tid, chat_id) in [k for k in pending if k[0] == task_id]:
+                _resolve(tid, chat_id, frozenset())
+        for (task_id, chat_id), reason in resolved.items():
+            conn.execute(
+                "UPDATE kanban_notify_subs SET delivery_metadata = CASE "
+                "WHEN delivery_metadata IS NULL THEN json_object('reason', ?) "
+                "WHEN NOT json_valid(delivery_metadata) THEN json_object('reason', ?) "
+                "WHEN json_type(delivery_metadata) = 'object' THEN json_set(delivery_metadata, '$.reason', ?) "
+                "ELSE json_object('reason', ?) END "
+                f"WHERE task_id = ? AND platform = 'hub' AND chat_id = ? AND {_UNSTAMPED_SQL}",
+                (reason, reason, reason, reason, task_id, chat_id),
+            )
+    return len(rows)
+
+
 def purge_stale_done_notify_subs(conn: sqlite3.Connection, *, max_age_days: int = 30) -> int:
     """Delete notify subs whose task sat in ``done``/``blocked`` untouched for
     longer than ``max_age_days`` (``<= 0`` disables); returns rows deleted.

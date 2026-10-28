@@ -156,3 +156,89 @@ def test_resubscribe_never_downgrades_an_owning_sub(kanban_home):
         assert _reasons(conn, parent) == {"creator": "create", "macbook/default/origin": "origin", "t": "shepherd"}
     finally:
         conn.close()
+
+
+def _legacy_hub(conn, task_id, chat, at):
+    conn.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, thread_id, created_at) "
+                 "VALUES (?, 'hub', ?, '', ?)", (task_id, chat, at))
+
+
+@pytest.mark.parametrize("edge", ["creator", "link"])
+def test_backfill_stops_legacy_observer_copies_spreading(kanban_home, edge):
+    """Old inheritance copied a grandparent's hub observer onto the parent with the PARENT's creation time, so
+    the copy looked like a fresh origin binding. The board-open backfill resolves copies through the graph."""
+    conn = kbc.connect()
+    try:
+        grand = kb.create_task(conn, title="program", assignee="default")
+        g_at = kb.get_task(conn, grand).created_at
+        _legacy_hub(conn, grand, "macbook/default/origin", g_at)
+        _legacy_hub(conn, grand, "macbook/default/observer", g_at + 3600)
+        if edge == "creator":
+            parent = kb.create_task(conn, title="worker fan-out", assignee="w", creator_task_id=grand)
+        else:
+            parent = kb.create_task(conn, title="linked", assignee="w")
+            kb.link_tasks(conn, grand, parent)
+        p_at = kb.get_task(conn, parent).created_at
+        conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (parent,))
+        for chat in ("macbook/default/origin", "macbook/default/observer"):  # what the old code wrote
+            _legacy_hub(conn, parent, chat, p_at)
+        _legacy_hub(conn, parent, "macbook/default/late", p_at + 600)  # a shepherd of the parent itself
+        conn.commit()
+    finally:
+        conn.close()
+    kb.init_db()  # board open re-runs the migration pass
+    conn = kbc.connect()
+    try:
+        assert _reasons(conn, grand) == {"macbook/default/origin": "origin", "macbook/default/observer": "shepherd"}
+        assert _reasons(conn, parent) == {"macbook/default/origin": "origin", "macbook/default/observer": "shepherd",
+                                          "macbook/default/late": "shepherd"}
+        child = kb.create_task(conn, title="next", assignee="w", creator_task_id=parent)
+        assert _sub_keys(conn, child) == [("hub", "macbook/default/origin")]
+        assert kbn.stamp_legacy_hub_sub_provenance(conn) == 0  # idempotent: nothing left unstamped
+    finally:
+        conn.close()
+
+
+def test_backfill_keeps_existing_metadata_and_skips_stamped_rows(kanban_home):
+    conn = kbc.connect()
+    try:
+        task = kb.create_task(conn, title="t", assignee="default")
+        at = kb.get_task(conn, task).created_at
+        conn.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, thread_id, created_at, "
+                     "delivery_metadata) VALUES (?, 'hub', 'gw/p/a', '', ?, '{\"guild_id\": \"g\"}')", (task, at))
+        conn.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, thread_id, created_at, "
+                     "delivery_metadata) VALUES (?, 'hub', 'gw/p/b', '', ?, 'not json')", (task, at + 999))
+        conn.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, thread_id, created_at, "
+                     "delivery_metadata) VALUES (?, 'hub', 'gw/p/c', '', ?, '{\"reason\": \"shepherd\"}')", (task, at))
+        conn.commit()
+        assert kbn.stamp_legacy_hub_sub_provenance(conn) == 2
+        subs = {s["chat_id"]: s["delivery_metadata"] for s in kbn.list_notify_subs(conn, task)}
+        assert subs == {"gw/p/a": {"guild_id": "g", "reason": "origin"}, "gw/p/b": {"reason": "shepherd"},
+                        "gw/p/c": {"reason": "shepherd"}}
+    finally:
+        conn.close()
+
+
+def test_board_open_survives_a_fenced_backfill(kanban_home, monkeypatch):
+    """A delegated-child opener may not write: the backfill's PermissionError must not fail board open, and
+    inheritance still drops a late unstamped hub row through its creation-window fallback."""
+    conn = kbc.connect()
+    try:
+        parent = kb.create_task(conn, title="p", assignee="default")
+        _legacy_hub(conn, parent, "gw/p/late", kb.get_task(conn, parent).created_at + 3600)
+        conn.commit()
+    finally:
+        conn.close()
+
+    def fenced(_conn):
+        raise PermissionError("delegate_task child contexts cannot mutate Kanban tasks or boards")
+
+    monkeypatch.setattr("hermes_cli.kanban_db_notify.stamp_legacy_hub_sub_provenance", fenced)
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        assert _reasons(conn, parent) == {"gw/p/late": None}
+        child = kb.create_task(conn, title="c", assignee="w", creator_task_id=parent)
+        assert _sub_keys(conn, child) == []
+    finally:
+        conn.close()
