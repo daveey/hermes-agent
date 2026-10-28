@@ -816,8 +816,10 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
         if mode == "off":
             return {"board": slug, "mode": "off"}
         ensure_identity(live, slug, ident.gateway)
-        # Rows the service deleted on purpose (its event GC of done cards, deletes) come back as tombstones in
-        # the replica: never re-send those.
+        # Send what is already pending first (a delete waiting in the outbox must reach the service before
+        # its snapshot is compared, or the row would be "restored" here), then refresh the replica: rows the
+        # service deleted on purpose (its event GC of done cards, deletes) come back as tombstones there.
+        push(live, hub, slug, ident.gateway, primary=mode == "primary")
         _pull_replica(slug, hub, ident.gateway)
         shadow = open_shadow(slug, ident.gateway)
         try:
@@ -826,6 +828,11 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
                 tombstoned.setdefault(str(table), set()).add(str(uid))
         finally:
             shadow.close()
+        # Never restore a row this file deleted itself (local tombstone) or still has an unanswered op for.
+        held_back: set[tuple[str, str]] = {(str(t), str(u)) for t, u in live.execute(
+            "SELECT table_name, row_uid FROM kanban_sync_tombstones")}
+        held_back |= {(str(t), str(u)) for t, u in live.execute(
+            "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state = 'pending'")}
         live_uids = {table: _live_uids(live, table) for table in IMPORT_ORDER}
         service_uids: dict[str, set[str]] = {table: set() for table in IMPORT_ORDER}
         restored: dict[str, int] = {}
@@ -840,7 +847,8 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
                     # Rows written locally since live_uids was read reached the service meanwhile: re-check.
                     now_live = _live_uids(live, table) if candidates else set()
                     lost = own_partition(live, [_row_change(table, r) for r in candidates
-                                                if str(r["uid"]) not in now_live], ident.gateway)
+                                                if str(r["uid"]) not in now_live
+                                                and (table, str(r["uid"])) not in held_back], ident.gateway)
                     if lost:
                         cursor = int((sync.sync_state(live) or {}).get("cursor") or 0)
                         sync.apply_remote_changes(live, lost, new_cursor=cursor, board=slug, observers=False)

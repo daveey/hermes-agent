@@ -183,6 +183,65 @@ def test_rows_the_damage_took_are_filled_from_the_newest_healthy_backup(home):
     assert _payloads(path) == before
 
 
+def test_fill_never_resurrects_rows_deleted_after_the_backup(home):
+    """A backup row no index of the damaged file lists was deleted since: filling it would bring it back."""
+    path = home / "kanban.db"
+    _make_board(path)
+    shutil.copy2(path, path.with_name(path.name + ".corrupt.0123456789abcdef.bak"))
+    conn = sqlite3.connect(path)
+    deleted = [r[0] for r in conn.execute("SELECT id FROM task_events ORDER BY id DESC LIMIT 40")]
+    conn.execute(f"DELETE FROM task_events WHERE id IN ({','.join('?' * len(deleted))})", deleted)
+    conn.commit()
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    conn.close()
+    before = _payloads(path)
+    lost = _damage_table(path, "task_events")
+    assert not set(lost) & set(deleted)
+
+    result = rec.recover(path, file_card=False, reconcile_sync=False)
+
+    assert result.status == "recovered", result.reason
+    assert result.tables["task_events"].filled_from_backup == len(lost)
+    after = _payloads(path)
+    assert not set(deleted) & set(after), "rows deleted after the backup came back"
+    assert after == before
+
+
+def test_a_write_during_the_rebuild_is_not_overwritten(home, monkeypatch):
+    """A commit between snapshot and install changes data_version on the watch connection: rebuild again."""
+    path = home / "kanban.db"
+    _make_board(path)
+    _damage_table(path, "task_events")
+    real_build, calls = rec._build, []
+
+    def build_then_write(*args, **kwargs):
+        calls.append(1)
+        real_build(*args, **kwargs)
+        if len(calls) == 1:
+            writer = sqlite3.connect(path)
+            writer.execute("UPDATE tasks SET title = 'written mid-rebuild' WHERE rowid = 1")
+            writer.commit()
+            writer.close()
+
+    monkeypatch.setattr(rec, "_build", build_then_write)
+    result = rec.recover(path, file_card=False, reconcile_sync=False)
+
+    assert result.status == "recovered", result.reason
+    assert len(calls) == 2 and not result.concurrent_writes
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT title FROM tasks WHERE rowid = 1").fetchone()[0] == "written mid-rebuild"
+    conn.close()
+
+
+def test_damaged_snapshots_are_rotated(tmp_path):
+    db = tmp_path / "kanban.db"
+    for i in range(rec._SNAPSHOT_RETENTION + 3):
+        (tmp_path / f"kanban.db.recover-20261028T0400{i:02d}Z.damaged.bak").write_bytes(b"x")
+    rec._rotate_snapshots(db)
+    kept = sorted(p.name for p in tmp_path.glob("kanban.db.recover-*.damaged.bak"))
+    assert len(kept) == rec._SNAPSHOT_RETENTION and kept[-1].endswith(f"{rec._SNAPSHOT_RETENTION + 2:02d}Z.damaged.bak")
+
+
 def test_a_second_recovery_of_the_same_board_is_refused_busy(home):
     path = home / "kanban.db"
     _make_board(path)

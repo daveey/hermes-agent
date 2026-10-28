@@ -95,6 +95,20 @@ def test_reconcile_never_resends_a_row_the_service_deleted(live, svc, kanban_hom
     assert svc.board(BOARD)["rows"]["task_comments"][uid].get("deleted_at")
 
 
+def test_reconcile_never_restores_a_row_whose_local_delete_is_still_unsent(live, svc, kanban_home, monkeypatch):
+    parent = kb.create_task(live, title="parent", assignee="worker")
+    child = kb.create_task(live, title="child", assignee="worker")
+    kb.link_tasks(live, parent, child)
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=True)
+    assert kb.unlink_tasks(live, parent, child)
+    assert live.execute("SELECT count(*) FROM kanban_sync_tombstones WHERE table_name = 'task_links'").fetchone()[0]
+    monkeypatch.setattr(ksc, "push", lambda *a, **k: ksc.PushResult())  # the service is unreachable for sends
+
+    ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=svc.hub(ME))
+
+    assert live.execute("SELECT count(*) FROM task_links").fetchone()[0] == 0
+
+
 def test_reconcile_is_a_no_op_on_a_board_in_step(live, svc, kanban_home):
     tid = kb.create_task(live, title="card", assignee="worker")
     kb.add_comment(live, tid, "me", "note")

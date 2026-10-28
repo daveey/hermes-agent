@@ -119,7 +119,8 @@ def _lock_path(db_path: Path) -> Path:
 @contextlib.contextmanager
 def recovery_lock(db_path: Path) -> Iterator[bool]:
     """Non-blocking exclusive lock for one board's recovery. Yields False when another process
-    holds it. The holder's pid is written into the lock file for the ``busy`` message."""
+    holds it. The lock file itself is never written (a Windows byte lock must stay on byte 0); the
+    holder's pid goes to ``<db>.recover.pid`` for the ``busy`` message."""
     lock_path = _lock_path(db_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+")
@@ -127,9 +128,10 @@ def recovery_lock(db_path: Path) -> Iterator[bool]:
         try:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except ImportError:  # pragma: no cover - Windows: msvcrt byte lock
+        except ImportError:  # pragma: no cover - Windows: msvcrt byte lock on byte 0
             import msvcrt
             try:
+                handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
             except OSError:
                 yield False
@@ -138,18 +140,19 @@ def recovery_lock(db_path: Path) -> Iterator[bool]:
             yield False
             return
         with contextlib.suppress(OSError):
-            handle.seek(0)
-            handle.truncate()
-            handle.write(f"{os.getpid()}\n")
-            handle.flush()
+            _pid_path(db_path).write_text(f"{os.getpid()}\n")
         yield True
     finally:
         handle.close()
 
 
+def _pid_path(db_path: Path) -> Path:
+    return db_path.with_name(db_path.name + ".recover.pid")
+
+
 def recovery_lock_holder(db_path: Path) -> Optional[str]:
     try:
-        return _lock_path(db_path).read_text().strip() or None
+        return _pid_path(db_path).read_text().strip() or None
     except OSError:
         return None
 
@@ -221,15 +224,21 @@ def _index_columns(conn: sqlite3.Connection, index: str) -> list[str]:
 
 
 def _table_indexes(conn: sqlite3.Connection, table: str) -> list[tuple[str, bool]]:
-    """``(index_name, unique)`` for every index on ``table`` (auto-indexes included)."""
+    """``(index_name, unique)`` for every full index on ``table`` (auto-indexes included). Partial
+    indexes are skipped: ``INDEXED BY`` can't scan them unconstrained, and they list only some rows."""
     try:
-        return [(str(r[1]), bool(r[2])) for r in conn.execute(f"PRAGMA index_list({_q(table)})")]
+        return [(str(r[1]), bool(r[2])) for r in conn.execute(f"PRAGMA index_list({_q(table)})")
+                if not (len(r) > 4 and r[4])]
     except sqlite3.DatabaseError:
         return []
 
 
+# index name -> (its key columns, {rowid it lists: key values})
+Listed = dict[str, tuple[list[str], dict[int, tuple]]]
+
+
 def _salvage_table(src: sqlite3.Connection, table: str, sql: Optional[str]
-                   ) -> tuple[dict[Any, tuple], list[str], int, dict[str, dict[int, tuple]]]:
+                   ) -> tuple[dict[Any, tuple], list[str], int, Listed]:
     """Every readable row of ``table``: ``(rows by key, column names, failed read paths, listed)``.
     The key is the rowid (or the whole row for WITHOUT ROWID tables). ``listed`` maps each index to
     the rowids it still lists (with the index's key columns, for the report): a covering scan reads
@@ -260,17 +269,17 @@ def _salvage_table(src: sqlite3.Connection, table: str, sql: Optional[str]
                 rows.setdefault(row[0], row[1:])
             else:
                 rows.setdefault(row, row)
-    listed: dict[str, dict[int, tuple]] = {}
+    listed: Listed = {}
     if rowid:
         for index, icols in indexes:
             if not icols:
                 continue
             order = ", ".join(_q(c) for c in icols)
             got, _ = _read_rows(src, f"SELECT rowid, {order} FROM {_q(table)} INDEXED BY {_q(index)} ORDER BY {order}")
-            listed[index] = {int(r[0]): tuple(r[1:]) for r in got if isinstance(r[0], int)}
+            listed[index] = (icols, {int(r[0]): tuple(r[1:]) for r in got if isinstance(r[0], int)})
         # Point lookups for every listed row no scan produced: a scan that stops on a damaged page
         # can also drop the row it was holding, while a lookup reaches any intact leaf directly.
-        for rid in sorted({rid for entries in listed.values() for rid in entries} - set(rows)):
+        for rid in sorted({rid for _cols, entries in listed.values() for rid in entries} - set(rows)):
             got, _ = _read_rows(src, f"{select} WHERE rowid = ?", (rid,))
             for row in got:
                 rows.setdefault(row[0], row[1:])
@@ -326,7 +335,7 @@ def _build(snapshot: Path, out: Path, fill: Optional[Path], result: RecoveryResu
         dst.execute("BEGIN")
         for name, sql in tables:
             dst.execute(str(sql))
-        listed_by_table: dict[str, dict[str, dict[int, tuple]]] = {}
+        listed_by_table: dict[str, Listed] = {}
         for name, sql in tables:
             rows, columns, failed, listed = _salvage_table(src, name, sql)
             listed_by_table[name] = listed
@@ -343,18 +352,18 @@ def _build(snapshot: Path, out: Path, fill: Optional[Path], result: RecoveryResu
                                 f"VALUES ({', '.join('?' * (len(columns) + 1))})", [(k, *v) for k, v in rows.items()])
             loss.recovered = len(rows)
         if fill is not None:
-            _fill_from_backup(dst, fill, tables, result)
+            _fill_from_backup(dst, fill, tables, listed_by_table, result)
         # Lost: rowids an index still lists that neither the salvage nor the fill produced.
         for name, _sql in tables:
             listed = listed_by_table.get(name) or {}
             if not listed:
                 continue
             have = {r[0] for r in dst.execute(f"SELECT rowid FROM {_q(name)}")}
-            per_index = [set(entries) - have for entries in listed.values()]
+            per_index = [set(entries) - have for _cols, entries in listed.values()]
             union = set().union(*per_index)
             both = set.intersection(*per_index) if per_index else set()
             keys: dict[int, tuple] = {}
-            for entries in listed.values():
+            for _cols, entries in listed.values():
                 for rid in union:
                     if rid in entries and rid not in keys:
                         keys[rid] = entries[rid]
@@ -362,8 +371,8 @@ def _build(snapshot: Path, out: Path, fill: Optional[Path], result: RecoveryResu
             loss.known_lost, loss.possibly_lost = len(both), len(union)
             loss.lost_keys = [[rid, *keys.get(rid, ())] for rid in sorted(both or union)[:_REPORT_KEY_CAP]]
         if has_seq:
-            floors = {name: max((rid for entries in (listed_by_table.get(name) or {}).values() for rid in entries),
-                                default=0) for name, _sql in tables}
+            floors = {name: max((rid for _cols, entries in (listed_by_table.get(name) or {}).values()
+                                 for rid in entries), default=0) for name, _sql in tables}
             _rebuild_sequence(src, dst, tables, fill, floors)
         dst.execute("COMMIT")
         for sql in later:
@@ -392,12 +401,21 @@ def _build(snapshot: Path, out: Path, fill: Optional[Path], result: RecoveryResu
 
 
 def _fill_from_backup(dst: sqlite3.Connection, fill: Path, tables: list[tuple[str, Optional[str]]],
-                      result: RecoveryResult) -> None:
+                      listed_by_table: dict[str, Listed], result: RecoveryResult) -> None:
+    """Fill only rows the damaged file's own indexes still list but no read produced: a row the
+    backup has and no index lists may have been deleted since the backup was taken, and filling it
+    would resurrect it. A backup row qualifies when its rowid is listed AND, for every index that
+    lists that rowid, its key columns equal the listed key (rowids alone can shift across a VACUUM)."""
     bak = sqlite3.connect(f"{fill.resolve().as_uri()}?immutable=1", uri=True)
     try:
         tomb = _tombstoned(dst)
         for name, sql in tables:
             if name in _NO_FILL_TABLES or _is_without_rowid(sql):
+                continue
+            listed = listed_by_table.get(name) or {}
+            have = {r[0] for r in dst.execute(f"SELECT rowid FROM {_q(name)}")}
+            wanted = {rid for _cols, entries in listed.values() for rid in entries} - have
+            if not wanted:
                 continue
             try:
                 bcols = [str(r[1]) for r in bak.execute(f"PRAGMA table_info({_q(name)})")]
@@ -407,17 +425,23 @@ def _fill_from_backup(dst: sqlite3.Connection, fill: Path, tables: list[tuple[st
             common = [c for c in dcols if c in bcols]
             if not common:
                 continue
-            have = {r[0] for r in dst.execute(f"SELECT rowid FROM {_q(name)}")}
-            got, _ = _read_rows(bak, f"SELECT rowid, {', '.join(_q(c) for c in common)} FROM {_q(name)}")
             uid_at = common.index("uid") if "uid" in common else None
             id_at = common.index("id") if "id" in common else None
             filled = 0
-            for row in got:
-                if row[0] in have:
+            for rid in sorted(wanted):
+                got, _ = _read_rows(bak, f"SELECT rowid, {', '.join(_q(c) for c in common)} FROM {_q(name)} "
+                                         "WHERE rowid = ?", (rid,))
+                if not got:
                     continue
-                values = row[1:]
-                if (uid_at is not None and (name, str(values[uid_at])) in tomb) or (
-                        name == "tasks" and id_at is not None and (name, str(values[id_at])) in tomb):
+                row = got[0]
+                values = dict(zip(common, row[1:]))
+                if any(rid in entries and any(c not in values for c in icols)
+                       or rid in entries and tuple(values[c] for c in icols) != entries[rid]
+                       for icols, entries in listed.values()):
+                    continue  # the backup's row with this rowid is not the row the index lists
+                if (uid_at is not None and (name, str(row[1 + uid_at])) in tomb) or (
+                        name == "tasks" and id_at is not None and (name, str(row[1 + id_at])) in tomb) or (
+                        name == "task_links" and (name, f"{values.get('parent_id')}>{values.get('child_id')}") in tomb):
                     continue
                 cur = dst.execute(f"INSERT OR IGNORE INTO {_q(name)} (rowid, {', '.join(_q(c) for c in common)}) "
                                   f"VALUES ({', '.join('?' * (len(common) + 1))})", row)
@@ -450,45 +474,50 @@ def _rebuild_sequence(src: sqlite3.Connection, dst: sqlite3.Connection, tables: 
 
 # --- install ----------------------------------------------------------------------------------
 
-def _snapshot(live: Path, dest: Path) -> int:
-    """Consistent copy of the live board (main file + WAL) through the backup API; returns the
-    live connection's ``data_version`` at copy time. Falls back to a page-for-page raw copy when
-    SQLite refuses to read the file (this process holds no other connection to it)."""
+def _data_version(watch: sqlite3.Connection) -> int:
+    """``PRAGMA data_version`` changes when ANOTHER connection commits; it is only comparable on the
+    same connection, so the recovery keeps one ``watch`` connection open from snapshot to install."""
+    return int(watch.execute("PRAGMA data_version").fetchone()[0])
+
+
+def _snapshot(watch: sqlite3.Connection, live: Path, dest: Path) -> tuple[sqlite3.Connection, int]:
+    """Consistent copy of the live board (main file + WAL) read through ``watch`` with the backup
+    API. Returns the watch connection to keep and its ``data_version`` from BEFORE the copy, so any
+    commit after the copy started shows up as a changed version. When SQLite refuses to read the
+    file, falls back to a raw copy of the main file + WAL with every connection of this process
+    closed first (a raw read would cancel their POSIX locks) and a fresh watch opened after it."""
     dest.unlink(missing_ok=True)
-    src = sqlite3.connect(str(live), timeout=30)
+    out = sqlite3.connect(str(dest))
     try:
-        version = src.execute("PRAGMA data_version").fetchone()[0]
-        out = sqlite3.connect(str(dest))
-        try:
-            src.backup(out)
-        finally:
-            out.close()
-        return int(version)
+        version = _data_version(watch)
+        watch.backup(out)
+        return watch, version
     except sqlite3.DatabaseError:
-        import shutil
-        shutil.copyfile(live, dest)
-        wal = live.with_name(live.name + "-wal")
-        if wal.exists():
-            shutil.copyfile(wal, dest.with_name(dest.name + "-wal"))
-        return -1
+        pass
     finally:
-        src.close()
+        out.close()
+    watch.close()
+    import shutil
+    shutil.copyfile(live, dest)
+    wal = live.with_name(live.name + "-wal")
+    if wal.exists():
+        shutil.copyfile(wal, dest.with_name(dest.name + "-wal"))
+    watch = sqlite3.connect(str(live), timeout=30)
+    try:
+        return watch, _data_version(watch)
+    except sqlite3.DatabaseError:
+        return watch, -1
 
 
-def _live_version(live: Path) -> int:
-    conn = sqlite3.connect(str(live), timeout=30)
-    try:
-        return int(conn.execute("PRAGMA data_version").fetchone()[0])
-    except sqlite3.DatabaseError:
-        return -1
-    finally:
-        conn.close()
+class InstalledUnverified(RuntimeError):
+    """The rebuilt board was written into the live file but the post-install check failed."""
 
 
 def _install(rebuilt: Path, live: Path) -> None:
     """Write ``rebuilt`` into ``live`` page by page with the backup API, inside SQLite's locking:
     the inode, the WAL and every other process's connection survive; they see the new content
-    on their next read. Verified with integrity_check through a fresh connection."""
+    on their next read. Verified with integrity_check through a fresh connection. The backup is
+    one write transaction, so a kill mid-copy (the child's alarm) leaves the old content."""
     src = sqlite3.connect(f"{rebuilt.resolve().as_uri()}?mode=ro", uri=True)
     dst = sqlite3.connect(str(live), timeout=60)
     try:
@@ -499,7 +528,19 @@ def _install(rebuilt: Path, live: Path) -> None:
         src.close()
     state, messages = classify(live)
     if state != "ok":
-        raise RuntimeError(f"installed board fails integrity_check: {messages[:3]}")
+        raise InstalledUnverified(f"installed board fails integrity_check: {messages[:3]}")
+
+
+# Full-size damaged snapshots kept per board (newest first); older ones are deleted.
+_SNAPSHOT_RETENTION = 3
+
+
+def _rotate_snapshots(path: Path) -> None:
+    snaps = sorted(path.parent.glob(f"{path.name}.recover-*.damaged.bak"), key=lambda p: p.name, reverse=True)
+    for stale in snaps[_SNAPSHOT_RETENTION:]:
+        for victim in (stale, stale.with_name(stale.name + "-wal"), stale.with_name(stale.name + "-shm")):
+            with contextlib.suppress(OSError):
+                victim.unlink(missing_ok=True)
 
 
 def _stamp() -> str:
@@ -530,28 +571,38 @@ def recover(db_path: Path, *, fill: bool = True, file_card: bool = True, reconci
                                  "index-only damage: the connect-time guard repairs it with REINDEX")
                 return result
             work = Path(tempfile.mkdtemp(prefix="kanban-recover-", dir=str(path.parent)))
+            stamp = _stamp()
+            snapshot = path.with_name(f"{path.name}.recover-{stamp}.damaged.bak")
+            watch = sqlite3.connect(str(path), timeout=30)
             try:
-                stamp = _stamp()
-                snapshot = path.with_name(f"{path.name}.recover-{stamp}.damaged.bak")
                 rebuilt = work / "rebuilt.db"
-                for _attempt in range(_MAX_SALVAGE_PASSES):
-                    version = _snapshot(path, snapshot)
+                for attempt in range(_MAX_SALVAGE_PASSES):
+                    watch, version = _snapshot(watch, path, snapshot)
                     fill_src = _healthy_fill_source(path, {snapshot}) if fill else None
                     result.tables = {}
                     _build(snapshot, rebuilt, fill_src, result)
                     result.snapshot_path, result.fill_source = str(snapshot), str(fill_src) if fill_src else None
-                    if version < 0 or _live_version(path) == version:
+                    # A commit after the snapshot would be overwritten by the install: rebuild again.
+                    if version >= 0 and _data_version(watch) == version:
                         break
+                    _log.warning("kanban recovery: %s was written during rebuild pass %d; rebuilding again",
+                                 path, attempt + 1)
                 else:
-                    result.concurrent_writes = True
+                    result.concurrent_writes = True  # still changing after the last pass: installed anyway
                 if dry_run:
                     result.status = "dry_run"
                     return result
-                _install(rebuilt, path)
-                result.status = "recovered"
+                try:
+                    _install(rebuilt, path)
+                    result.status = "recovered"
+                except InstalledUnverified:
+                    result.status = "installed_unverified"
+                    raise
             finally:
+                watch.close()
                 import shutil
                 shutil.rmtree(work, ignore_errors=True)
+                _rotate_snapshots(path)
             _invalidate_init_cache(path)
             result.finished_at = time.time()
             result.report_path = str(_write_report(path, result, stamp))
@@ -563,8 +614,9 @@ def recover(db_path: Path, *, fill: bool = True, file_card: bool = True, reconci
             result.card_id = _file_card(path, result)
         if result.report_path:
             Path(result.report_path).write_text(json.dumps(result.to_dict(), indent=2, default=str))
-    except Exception as exc:  # health: allow BLE001 -- the result carries the failure; nothing was installed
-        result.status = "failed" if result.status != "recovered" else result.status
+    except Exception as exc:  # health: allow BLE001 -- the result carries the failure and the status says what was written
+        if result.status not in ("recovered", "installed_unverified"):
+            result.status = "failed"  # nothing was written to the live board
         result.reason = f"{type(exc).__name__}: {exc}"
         _log.exception("kanban board %s recovery %s", path, result.status)
     result.finished_at = result.finished_at or time.time()
@@ -686,8 +738,13 @@ def spawn_recovery(db_path: Path, *, wait: bool = False, timeout: float = RECOVE
                              cwd=repo_root, start_new_session=True)
         _log.error("kanban board %s has table b-tree damage; started automatic recovery (log %s)", key, log)
         return None
-    done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, cwd=repo_root,
-                          stdin=subprocess.DEVNULL)
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, cwd=repo_root,
+                              stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired as exc:
+        # The child's own alarm normally ends it first; either way an unfinished backup is one
+        # uncommitted transaction, so the live board keeps its old content.
+        return {"status": "failed", "db_path": key, "reason": f"recovery timed out after {exc.timeout:.0f}s"}
     try:
         return json.loads(done.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -702,8 +759,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--no-fill", action="store_true")
     parser.add_argument("--no-card", action="store_true")
     parser.add_argument("--no-sync", action="store_true")
+    parser.add_argument("--timeout", type=int, default=RECOVERY_TIMEOUT_SECONDS - 30)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    with contextlib.suppress(ImportError):
+        from agent.delegation_context import kanban_path_is_fenced
+        if kanban_path_is_fenced(Path(args.db)):
+            print(json.dumps({"status": "failed", "db_path": args.db,
+                              "reason": "delegated child contexts may not rewrite a Kanban board"}))
+            return 1
+    # Bounded: a writer that never releases its lock would otherwise keep the backup retrying forever
+    # (holding the recovery lock). SIGALRM's default action ends the process; nothing half-written lands.
+    if args.timeout > 0 and hasattr(__import__("signal"), "SIGALRM"):
+        import signal
+        signal.alarm(args.timeout)
     result = recover(Path(args.db), fill=not args.no_fill, file_card=not args.no_card,
                      reconcile_sync=not args.no_sync, dry_run=args.dry_run)
     if args.json:
