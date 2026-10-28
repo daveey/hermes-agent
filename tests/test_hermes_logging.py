@@ -1033,3 +1033,31 @@ class TestRolloverPreservesLogOwnership:
         monkeypatch.setattr(os, "chown", _refuse)
         self._rolled_handler(log_path)
         assert log_path.exists()
+
+
+def _log_with_exc(logger_name: str, msg: str, exc: BaseException) -> None:
+    try:
+        raise exc
+    except BaseException:
+        logging.getLogger(logger_name).warning(msg, exc_info=True)
+
+
+@pytest.mark.parametrize("text", [
+    "cannot schedule new futures after interpreter shutdown",
+    "can't register atexit after shutdown",
+])
+def test_errors_log_collapses_process_exit_tracebacks_to_one_line(hermes_home, text):
+    """A process-exit scheduling error is exit noise, not a defect: errors.log gets one line (no
+    traceback, so the self-heal sweeper files nothing); agent.log keeps the full record."""
+    hermes_logging.setup_logging(hermes_home=hermes_home)
+    _log_with_exc("agent.some_new_site", "exit-noise-witness raised", RuntimeError(text))
+    _log_with_exc("agent.some_new_site", "real-bug-witness raised", RuntimeError("real bug"))
+    hermes_logging.flush_log_queue()
+    errors = (hermes_home / "logs" / "errors.log").read_text(encoding="utf-8-sig")
+    agent = (hermes_home / "logs" / "agent.log").read_text(encoding="utf-8-sig")
+    noise = [ln for ln in errors.splitlines() if "exit-noise-witness" in ln]
+    assert len(noise) == 1 and "process exiting" in noise[0] and text in noise[0], errors
+    assert errors.count("Traceback (most recent call last)") == 1, errors  # only the real bug's
+    assert f"RuntimeError: {text}" not in errors.replace(noise[0], ""), errors
+    assert "RuntimeError: real bug" in errors, errors
+    assert agent.count("Traceback (most recent call last)") == 2, agent  # full detail kept

@@ -278,6 +278,45 @@ class _ComponentFilter(logging.Filter):
         return record.name.startswith(self._prefixes)
 
 
+# CPython's process-exit scheduling refusals. Raised only while the interpreter is finalizing (or a
+# pool was shut down at exit), so any traceback carrying one is exit noise, not a defect.
+_PROCESS_EXIT_ERRORS = (
+    "cannot schedule new futures after",  # concurrent.futures (interpreter shutdown / pool shutdown)
+    "can't register atexit after shutdown",  # threading/atexit during finalization
+)
+
+
+def _process_exit_error(record: logging.LogRecord) -> Optional[BaseException]:
+    exc = record.exc_info[1] if record.exc_info else None
+    if isinstance(exc, RuntimeError) and any(s in str(exc).lower() for s in _PROCESS_EXIT_ERRORS):
+        return exc
+    return None
+
+
+class _ProcessExitNoiseFilter(logging.Filter):
+    """errors.log: a record whose exception is a process-exit scheduling error becomes one line.
+
+    Each thread-starting site would otherwise have to opt in to ``tools.interpreter_shutdown``
+    (the pre-final gate never did); this covers every present and future site. The full
+    traceback stays in agent.log. Other exceptions are untouched.
+    """
+
+    def filter(self, record: logging.LogRecord):
+        exc = _process_exit_error(record)
+        if exc is None:
+            return True
+        quiet = copy.copy(record)
+        quiet.msg = f"{record.getMessage()} [process exiting: {type(exc).__name__}: {exc}; traceback omitted]"
+        quiet.args = None
+        quiet.exc_info = None
+        quiet.exc_text = None  # an earlier handler's formatter may have cached the traceback text
+        quiet.stack_info = None
+        if sys.version_info >= (3, 12):
+            return quiet  # 3.12+: the handler emits this copy; other handlers keep the original
+        record.__dict__.update(quiet.__dict__)  # 3.11 cannot swap records; later handlers see one line too
+        return True
+
+
 # Logger name prefixes per component; used by _ComponentFilter and ``hermes logs --component``.
 COMPONENT_PREFIXES = {
     # ``plugins.platforms``: messaging adapters that migrated out of
@@ -380,7 +419,8 @@ def setup_logging(
         _add_rotating_handler(
             log_dir / filename, level=lvl, max_bytes=size, backup_count=count,
             formatter=RedactingFormatter(_LOG_FORMAT),
-            log_filter=_ComponentFilter(COMPONENT_PREFIXES[component]) if component else None,
+            log_filter=(_ComponentFilter(COMPONENT_PREFIXES[component]) if component
+                        else _ProcessExitNoiseFilter() if filename == "errors.log" else None),
         )
 
     if _WINDOWS_CLH_FALLBACK and not _fallback_warned:

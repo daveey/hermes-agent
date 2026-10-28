@@ -235,8 +235,15 @@ def _invoke(cb: Callable, kwargs: dict[str, Any], budget: int, limit: float) -> 
         return _call(cb, call_kwargs, limit)
     except concurrent.futures.TimeoutError:
         logger.warning("pre_final_gate hook %s timed out after %.1fs", name, limit)
-    except Exception:
-        logger.warning("pre_final_gate hook %s raised", name, exc_info=True)
+    except Exception as exc:
+        from tools.interpreter_shutdown import interpreter_shutting_down
+
+        if isinstance(exc, RuntimeError) and interpreter_shutting_down(exc):
+            # The process is exiting (Desktop quit, update, restart) while a turn finishes: not a
+            # gate failure. One quiet line, no traceback; fail open exactly as for any other error.
+            logger.info("pre_final_gate hook %s skipped: %s (process exiting)", name, exc)
+        else:
+            logger.warning("pre_final_gate hook %s raised", name, exc_info=True)
     return _FAILED
 
 

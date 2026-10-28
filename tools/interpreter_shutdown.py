@@ -8,12 +8,17 @@ CPython raises ``cannot schedule new futures after interpreter shutdown``
 (module-global flag) or ``... after shutdown`` (a pool whose ``shutdown()`` ran);
 the short prefix catches both — safe here because every pool involved is a
 module-global daemon or a ``with``-scoped local only finalization can shut down.
+A first ``ThreadPoolExecutor`` use after the main thread returned imports
+``concurrent.futures.thread``, whose ``threading._register_atexit`` raises
+``can't register atexit after shutdown`` instead: the same exit, another message.
 """
 
 from __future__ import annotations
 
 import sys
 from typing import Optional
+
+_SHUTDOWN_MESSAGES = ("cannot schedule new futures", "can't register atexit after shutdown")
 
 
 def interpreter_shutting_down(exc: Optional[BaseException] = None) -> bool:
@@ -22,4 +27,7 @@ def interpreter_shutting_down(exc: Optional[BaseException] = None) -> bool:
     flag can be set a hair before ``sys.is_finalizing()`` flips."""
     if sys.is_finalizing():
         return True
-    return exc is not None and "cannot schedule new futures" in str(exc).lower()
+    if exc is None:
+        return False
+    text = str(exc).lower()
+    return any(m in text for m in _SHUTDOWN_MESSAGES)

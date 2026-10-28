@@ -1785,7 +1785,11 @@ def _run_sequential_call(
         if dispatch.error_result is None:
             raise
         function_result = dispatch.error_result(tool_error)
-        logger.error(dispatch.error_log, ref.name, tool_error, exc_info=True)
+        if isinstance(tool_error, RuntimeError) and _is_interpreter_shutdown_submit_error(tool_error):
+            # Process exiting mid-tool: one line, no traceback (the result still records the error).
+            logger.info(dispatch.error_log + " (process exiting)", ref.name, tool_error)
+        else:
+            logger.error(dispatch.error_log, ref.name, tool_error, exc_info=True)
         managed = _ManagedToolResult(result=function_result, args=ref.args, middleware_trace=ref.trace, blocked=False, dispatched=False)
     finally:
         if dispatch.is_delegate:
