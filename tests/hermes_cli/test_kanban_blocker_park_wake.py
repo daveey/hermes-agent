@@ -285,3 +285,125 @@ def test_park_invariant_kernel_refuses_blocker_park_it_cannot_wake(kanban_home, 
         conn.commit()
         assert kb.block_task(conn, tid, reason="billing", kind="capability", blocker_id="x-wall")
         assert _has_way_back(conn, tid), kb.get_task(conn, tid).status
+
+
+# --- A woken card that re-parks without the id is not re-woken every tick -----------------
+# Repro of 2026-10-28 13:57-14:10 PDT: t_01a180e8c9732286 was woken by
+# ``shared_blocker_cleared`` four times in ~12 min. Each time it re-parked without the id, so it
+# stayed behind the (cleared) blocker and the next tick woke it again.
+
+def _clear_via_wake_check(conn, tid: str) -> None:
+    state = kwc.get_state(conn, tid)
+    assert kwc.apply_result(conn, tid, state["cmd"], 0, "200 OK", generation=state["generation"]) \
+        == kwc.CONDITION_MET_EVENT
+
+
+def _cleared_events(conn, tid: str) -> list:
+    return [e for e in kb.list_events(conn, tid) if e.kind == ksb.CLEARED_EVENT]
+
+
+def test_woken_card_that_reparks_without_id_after_running_is_not_rewoken(kanban_home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        a = _worker_block_behind(monkeypatch, conn, "a")
+        b = _worker_block_behind(monkeypatch, conn, "b")
+        _clear_via_wake_check(conn, b)                   # b's own blocker park + probe: real evidence
+        assert not ksb.blocker_states(conn)[BID].is_open
+        assert ksb.release_cleared_blockers(conn) == [a]   # a woken once
+        assert kb.get_task(conn, a).status == "ready"
+        # a runs, finds the wall still up, and re-parks WITHOUT the id (a "pass").
+        _as_worker(monkeypatch, conn, a)
+    out = json.loads(kt._handle_continue({"checkpoint": "API still 404; re-check later",
+                                          "resume_after_seconds": 3600, "wake_check": WAKE, "awaiting": AWAIT}))
+    assert "error" not in out, out
+    _as_parent(monkeypatch)
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, a).status == "scheduled"
+        assert ksb.release_cleared_blockers(conn) == []
+        res = kbd.dispatch_once(conn, spawn_fn=_spawn_noop)
+        assert a not in (res.shared_blocker_released or [])
+        assert kb.get_task(conn, a).status == "scheduled"
+        assert len(_cleared_events(conn, a)) == 1
+
+
+def test_woken_card_reparked_by_parent_before_running_is_not_rewoken(kanban_home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        a = _worker_block_behind(monkeypatch, conn, "a")
+        b = _worker_block_behind(monkeypatch, conn, "b")
+        _clear_via_wake_check(conn, b)
+        assert ksb.release_cleared_blockers(conn) == [a]
+    out = json.loads(kt._handle_schedule({"task_id": a, "reason": f"SCHEDULED_UNTIL={_tomorrow()} still 404",
+                                          "wake_check": WAKE, "awaiting": AWAIT}))
+    assert "error" not in out, out
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, a).status == "scheduled"
+        assert ksb.release_cleared_blockers(conn) == []
+        assert len(_cleared_events(conn, a)) == 1
+
+
+def test_newer_clear_after_a_repark_wakes_the_card_again(kanban_home, monkeypatch):
+    """Control: the skip is per clear. A card that re-parked after one clear is woken by a LATER clear."""
+    with kbc.connect_closing() as conn:
+        a = _worker_block_behind(monkeypatch, conn, "a")
+        b = _worker_block_behind(monkeypatch, conn, "b")
+        _clear_via_wake_check(conn, b)
+        assert ksb.release_cleared_blockers(conn) == [a]
+    out = json.loads(kt._handle_schedule({"task_id": a, "reason": f"SCHEDULED_UNTIL={_tomorrow()} still 404",
+                                          "wake_check": WAKE, "awaiting": AWAIT}))
+    assert "error" not in out, out
+    with kbc.connect_closing() as conn:
+        _age_all(conn, 120)
+        c = _worker_block_behind(monkeypatch, conn, "c")     # X re-asserted by a third card ...
+        _clear_via_wake_check(conn, c)                      # ... and cleared again, later
+        assert ksb.blocker_states(conn)[BID].cleared_by[0] == c
+        assert a in ksb.release_cleared_blockers(conn)
+
+
+def _age_all(conn, seconds: int) -> None:
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_runs SET started_at = started_at - ?, "
+                     "ended_at = CASE WHEN ended_at IS NULL THEN NULL ELSE ended_at - ? END", (seconds, seconds))
+        conn.execute("UPDATE task_events SET created_at = created_at - ?", (seconds,))
+
+
+# --- A wake_check clears X only when the park that set it carried X -----------------------
+# Repro of 2026-10-28 13:22-14:05 PDT: t_01a1800921b1ff50 was re-parked (no blocker_id) with
+# `ac8-live.sh || watch_eve.py ...`; the Slack half exited 0 on every new message, and each exit 0
+# was read as "github-askevepodcast-suspended is gone" (six false clears, API 404 throughout).
+
+OR_PROBE = "./ac8-live.sh || ./watch_eve.py --new-since-last"
+
+
+@pytest.mark.parametrize("op", ["schedule", "continue"])
+def test_or_probe_set_by_a_park_without_the_id_does_not_clear(kanban_home, monkeypatch, op):
+    with kbc.connect_closing() as conn:
+        a = _worker_block_behind(monkeypatch, conn, "a")
+        b = _worker_block_behind(monkeypatch, conn, "b")
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (a,))
+        conn.commit()
+        if op == "continue":
+            _as_worker(monkeypatch, conn, a)
+    if op == "schedule":
+        out = kt._handle_schedule({"task_id": a, "reason": f"SCHEDULED_UNTIL={_tomorrow()} still suspended",
+                                   "wake_check": OR_PROBE, "awaiting": AWAIT})
+    else:
+        out = kt._handle_continue({"checkpoint": "still suspended", "resume_after_seconds": 3600,
+                                   "wake_check": OR_PROBE, "awaiting": AWAIT})
+    assert "error" not in json.loads(out), out
+    _as_parent(monkeypatch)
+    with kbc.connect_closing() as conn:
+        assert kwc.get_state(conn, a)["cmd"] == OR_PROBE
+        _clear_via_wake_check(conn, a)              # the Slack half exits 0
+        assert kb.get_task(conn, a).status != "scheduled"   # a itself still wakes on its own probe
+        st = ksb.blocker_states(conn)[BID]
+        assert st.is_open, "a probe set by a park without blocker_id cleared the blocker"
+        assert ksb.release_cleared_blockers(conn) == []
+        res = kbd.dispatch_once(conn, spawn_fn=_spawn_noop)
+        assert b not in (res.shared_blocker_released or [])
+        assert kb.get_task(conn, b).status == "scheduled"
+        assert not _cleared_events(conn, b)
+
+
+def test_wake_check_schema_says_exit_0_must_test_only_the_wall():
+    from tools import kanban_tools_schemas as kts
+    desc = kts._WAKE_CHECK_PROPS["wake_check"]["description"]
+    assert "blocker_id" in desc and "only the wall" in desc

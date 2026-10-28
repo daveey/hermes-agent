@@ -198,7 +198,10 @@ _WAKE_CHECK_PROPS = {
         "`gh api repos/O/R/tags --jq '.[].name' | grep -q '^v2'`. A probe alone is not a producer: "
         "one that names no card or CI run is refused (opaque_probe_wait) unless `awaiting` says who "
         "will make it pass. A wait on another card on "
-        "this board is a parent link (kanban_link), not a park."
+        "this board is a parent link (kanban_link), not a park. On a park with blocker_id the "
+        "check must test only the wall: its exit 0 clears the shared blocker and wakes every "
+        "card behind it, so never OR it with unrelated probes (Slack, other cards). A check "
+        "set by a park without blocker_id never clears a shared blocker."
     )),
     "check_every": {"type": "integer", "description": (
         "Seconds between wake_check probes (default 900, min 120, max 21600)."
@@ -264,7 +267,7 @@ _BLOCKER_ID_DESC = (
     "dispatcher then holds every ready card behind it and runs one probe card per "
     "interval. The blocker clears only on evidence the wall is gone: a card behind "
     "it completes or hands off for review, a park passes clear_blocker=true, a run "
-    "names a different blocker_id, or a wake_check of a card behind it exits 0. "
+    "names a different blocker_id, or a wake_check set by a park that carried this id exits 0. "
     "Then every parked card behind it wakes. A later park WITHOUT the id (by you or "
     "a parent chat, via kanban_block, kanban_schedule or kanban_continue) does NOT "
     "clear it: the card stays behind the blocker."

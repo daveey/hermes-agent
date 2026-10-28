@@ -14,7 +14,8 @@ pipeline down) ends its run with ``kanban_block(..., blocker_id="<slug>")`` or
     (an explicit "the wall is gone", passed to kanban_block/kanban_schedule/kanban_continue);
   - the ``ended_at`` of such a run that named a different blocker (the probe got past X and
     hit another wall);
-  - a ``condition_met`` event (the card's wake_check exited 0) on a card behind X;
+  - a ``condition_met`` event (the card's wake_check exited 0) on a card behind X, when the park
+    that set that wake_check carried X (a probe set by a park without the id may test anything);
 * X is **open** while asserted > cleared.
 
 A re-park WITHOUT the id (``blocked``/``scheduled``/``continued`` with no ``clear_blocker``) says
@@ -29,7 +30,8 @@ that card probe at once (still one probe at a time). Every card parked behind X 
 wake (``kanban_timed_park``: a blocker park with no wake is given one after the probe interval),
 so the probe still runs when no card behind X sits ``ready``. When X clears, held ``ready``
 cards dispatch normally and cards still ``blocked`` or ``scheduled`` behind X are woken by
-:func:`release_cleared_blockers`.
+:func:`release_cleared_blockers`, once per clear: a card that was woken for it (or ran since)
+and re-parked without the id is not woken again until a later clear.
 
 Neutral outcomes (crash, timeout, reclaim, spawn failure, rate limit, give-up, failure) say
 nothing about the external condition, so they neither assert nor clear a blocker.
@@ -185,11 +187,11 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
             # The card's own wake_check exiting 0 after it parked behind X is evidence too.
             # Ordered by event id after the asserting run's own events (same-second safe).
             met = conn.execute(
-                "SELECT id, created_at FROM task_events WHERE task_id = ? AND kind = ? AND id > COALESCE("
+                "SELECT id, created_at, payload FROM task_events WHERE task_id = ? AND kind = ? AND id > COALESCE("
                 "(SELECT MAX(id) FROM task_events WHERE task_id = ? AND run_id = ?), 0) "
                 "ORDER BY id DESC LIMIT 1", (tid, CONDITION_MET_EVENT, tid, asserting_run),
             ).fetchone()
-            if met is not None:
+            if met is not None and _probe_parked_behind(conn, kb, tid, met, current[0]):
                 _mark_cleared(states[current[0]], tid, None,
                               max(kb._to_epoch(met["created_at"]) or 0, current[1]), via=CONDITION_MET_EVENT)
         if current is not None and live and current[0] in states:
@@ -198,6 +200,45 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
         # Probe starts only count once the card is (still) behind the blocker.
         st.probe_starts = {t: s for t, s in st.probe_starts.items() if t in st.behind}
     return states
+
+
+def _probe_parked_behind(conn: sqlite3.Connection, kb, task_id: str, met, blocker_id: str) -> bool:
+    """True when the wake_check whose exit 0 is ``met`` was set by a park that carried
+    ``blocker_id``. Every park replaces the card's probe (``kanban_wake_check.set_check``), so the
+    probe that fired is the one from the newest parking event before ``met``. A probe set by a
+    park WITHOUT the id may test anything (2026-10-28: ``ac8-live.sh || watch_eve.py`` exited 0
+    on every Slack message), so its exit 0 is not evidence the wall is gone. [daveey]"""
+    from hermes_cli.kanban_continuation import SCHEDULED_ENTRY_EVENTS
+
+    marks = ",".join("?" * len(SCHEDULED_ENTRY_EVENTS))
+    park = conn.execute(
+        f"SELECT payload FROM task_events WHERE task_id = ? AND kind IN ({marks}) AND id < ? "
+        "ORDER BY id DESC LIMIT 1", (task_id, *SCHEDULED_ENTRY_EVENTS, int(met["id"])),
+    ).fetchone()
+    if park is None:
+        return False
+    park_payload = kb._json_dict(park["payload"])
+    if normalize_blocker_id(park_payload.get("blocker_id")) != blocker_id:
+        return False
+    fired = kb._json_dict(met["payload"]).get("wake_check")
+    return not fired or park_payload.get("wake_check") == fired
+
+
+def _already_saw_clear(conn: sqlite3.Connection, kb, task_id: str, st: BlockerState) -> bool:
+    """True when ``task_id`` already acted after ``st``'s newest clear: it was woken for it (a
+    :data:`CLEARED_EVENT` for this blocker at or after ``cleared_at``) or a run of it started
+    after it. Such a card re-parked without the id on purpose (it checked and the wall still
+    stood for it); waking it again every tick looped forever (2026-10-28, t_01a180e8c9732286:
+    one wasted run per park). A LATER clear still wakes it. [daveey]"""
+    if st.probe_starts.get(task_id, 0) > st.cleared_at:
+        return True
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND created_at >= ? "
+        "ORDER BY id DESC LIMIT 20", (task_id, CLEARED_EVENT, st.cleared_at),
+    ):
+        if normalize_blocker_id(kb._json_dict(row["payload"]).get("blocker_id")) == st.blocker_id:
+            return True
+    return False
 
 
 def _mark_cleared(st: BlockerState, task_id: str, run_id: Optional[int], ended: int, *,
@@ -279,6 +320,8 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
                 continue
             row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
             if row is None or row["status"] not in ("blocked", "scheduled"):
+                continue
+            if _already_saw_clear(conn, kb, tid, st):
                 continue
             payload = {"blocker_id": st.blocker_id, "cleared_by_task": by_task, "cleared_by_run": by_run,
                        "cleared_via": st.cleared_via or "run"}
