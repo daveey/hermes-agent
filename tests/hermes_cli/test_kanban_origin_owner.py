@@ -10,6 +10,8 @@ from hermes_cli.kanban_parser import build_parser
 from hermes_cli import kanban_db_connect as kbc
 from tools import kanban_tools
 
+_PROFILE_CHECK = kanban_tools._profile_has_kanban_toolset
+
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
@@ -20,7 +22,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(profiles, '_get_default_hermes_home', lambda: tmp_path)
     monkeypatch.setenv('HERMES_HUB_STATE', str(tmp_path / 'hub'))
     cfg = tmp_path / 'mail.json'
-    cfg.write_text(json.dumps({'gateway': 'owner'}))
+    cfg.write_text(json.dumps({'gateway': 'owner'}), encoding='utf-8')
     monkeypatch.setenv('HERMES_MAIL_CONFIG', str(cfg))
     monkeypatch.setattr(kanban_tools, '_profile_has_kanban_toolset', lambda: True)
     kb.init_db()
@@ -39,18 +41,19 @@ def invoke(request, monkeypatch, capsys, command=None):
     return json.loads(capsys.readouterr().out)
 
 
-def test_real_cli_process_replays_persisted_creation(world, tmp_path):
+@pytest.mark.parametrize('config', ['', 'platform_toolsets:\n  cli: [kanban]\n'])
+def test_real_cli_process_replays_persisted_creation(world, tmp_path, config):
     import os
     from pathlib import Path
     import subprocess
     import sys
 
-    (tmp_path / 'config.yaml').write_text('platform_toolsets:\n  cli: [kanban]\n')
+    (tmp_path / 'config.yaml').write_text(config, encoding='utf-8')
     command = [sys.executable, '-m', 'hermes_cli.main', '-p', 'default',
                'kanban', 'origin-create', '--request-file', '-', '--json']
     results = []
     for _ in range(2):
-        run = subprocess.run(command, input=json.dumps(world), text=True, capture_output=True,
+        run = subprocess.run(command, input=json.dumps(world), text=True, encoding='utf-8', capture_output=True,
                              cwd=Path(__file__).parents[2], env=dict(os.environ), timeout=60, check=False)
         assert run.returncode == 0, run.stderr
         result = json.loads(run.stdout)
@@ -126,6 +129,27 @@ def test_missing_tool_is_typed_preflight_without_cards(world, monkeypatch, capsy
     assert result == {'status': 'pending', 'code': 'kanban_tool_unavailable', 'handoff_complete': False}
     with kbc.connect_closing() as conn:
         assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('adopting', [False, True])
+def test_courier_selection_is_scoped_and_preserves_child_fence(world, monkeypatch, capsys, adopting):
+    from tools.kanban_toolset_context import kanban_toolset_requested
+    monkeypatch.setattr(kanban_tools, '_profile_has_kanban_toolset', _PROFILE_CHECK)
+    monkeypatch.setattr(kanban_tools, 'load_config', dict)
+    assert not kanban_tools._check_kanban_mode()
+    if adopting:
+        with kbc.connect_closing() as conn:
+            tid = kb.create_task(conn, title='Existing', session_id='creator')
+        world = {**world, 'action': 'origin-adopt', 'key': 'default/default/' + tid,
+                 'args': {'origin': world['args']['origin']}}
+    with monkeypatch.context() as child:
+        child.setattr(kanban_tools, '_is_delegated_child_context', lambda: True)
+        assert invoke(world, monkeypatch, capsys)['code'] == 'kanban_tool_unavailable'
+    result = invoke(world, monkeypatch, capsys)
+    assert result.get('adopted' if adopting else 'created') is True, result
+    assert result['handoff_complete'] is False
+    assert kanban_toolset_requested() is None
+    assert not kanban_tools._check_kanban_mode()
 
 
 def test_owner_entry_creates_once_and_never_claims_handoff(world, monkeypatch, capsys):
