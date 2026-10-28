@@ -1,6 +1,7 @@
 """Native per-board dispatcher coordination (not a same-UID security boundary)."""
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ def connect_with_identity(path, **kwargs):
     from hermes_cli.kanban_db_connect import _dispatch_tick_lock
     canonical = Path(path).resolve()
     with _dispatch_tick_lock(canonical) as held:
-        conn = sqlite3.connect(str(canonical), **kwargs)
+        conn = _kanban_lockguard.connect(str(canonical), **kwargs)
         try:
             stat = canonical.stat() if held else None
             conn._dispatch_identity = (stat.st_dev, stat.st_ino) if stat else None

@@ -11,6 +11,7 @@ never gets re-split by a remote shell.
 """
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import os
 import shlex
@@ -43,7 +44,7 @@ def _query(path: Path, sql: str, args=()):
     last: Optional[Exception] = None
     for _ in range(3):  # WAL/lock flakes are transient
         try:
-            c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=20)
+            c = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=20)
             try:
                 return c.execute(sql, args).fetchall()
             finally:

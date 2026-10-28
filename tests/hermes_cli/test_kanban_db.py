@@ -1986,6 +1986,9 @@ def test_write_txn_check_reads_correct_header_fields(tmp_path):
 
     db = tmp_path / "synthetic.db"
     conn = connect(db_path=db)
+    # Leaving WAL needs EXCLUSIVE, which this connection's own OFD lock guard refuses. [daveey]
+    from hermes_cli.kanban_lockguard import unguard
+    unguard(conn)
     conn.execute("PRAGMA journal_mode=DELETE")
     page_size = conn.execute("PRAGMA page_size").fetchone()[0]
     conn.close()

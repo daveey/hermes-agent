@@ -15,6 +15,7 @@ never trusted without the scope, binding and expiry checks below.
 """
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import hashlib
 import json
 import math
@@ -43,7 +44,7 @@ def _open(path: Path) -> sqlite3.Connection:
     a WAL store can checkpoint and delete the WAL: a write. An unreadable store is
     ``unknown`` here (the sqlite error is caught by the caller), not a reason to write.
     """
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+    conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
     conn.execute("PRAGMA query_only = ON")
     conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
     conn.row_factory = sqlite3.Row

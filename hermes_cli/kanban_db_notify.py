@@ -7,6 +7,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import sqlite3
 import time
@@ -249,7 +250,7 @@ def count_notify_subs(
     query = "SELECT COUNT(*) FROM kanban_notify_subs"
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
-    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    conn = _kanban_lockguard.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         try:
             row = conn.execute(query, params).fetchone()

@@ -19,6 +19,7 @@ Binding is not handoff: the result says ``readback: pending`` until gateway A ha
 
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import os
 import re
@@ -85,11 +86,11 @@ def _hub_db() -> Optional[Path]:
 
 def _ro(path: Path) -> sqlite3.Connection:
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+        conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
         conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
         return conn
     except sqlite3.OperationalError:
-        conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=0.5)
+        conn = _kanban_lockguard.connect(f"file:{path}?mode=rw", uri=True, timeout=0.5)
         conn.execute("PRAGMA query_only = ON")
         return conn
 

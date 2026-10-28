@@ -20,6 +20,19 @@ from tests.hermes_state._wal_generation_harness import make_db, pin_wal, require
 pytestmark = pytest.mark.platforms("linux")
 
 
+def _handles_for(*paths) -> dict:
+    """This test's entries in the per-inode handle table. Other guarded databases in the process
+    (Kanban boards cached by earlier tests share the table since kanban_lockguard) are not ours."""
+    idents = set()
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        idents.add((st.st_dev, st.st_ino))
+    return {k: v for k, v in lg._HANDLES.items() if k in idents}
+
+
 def _foreign_exclusive_ok(path: str) -> bool:
     """Another process tries the EXCLUSIVE a close-time WAL reset needs; True = nothing guards."""
     code = (
@@ -69,7 +82,7 @@ def test_guard_never_outlives_the_handle_under_fd_reuse(tmp_path, monkeypatch):
     finally:
         c.close()
     assert _foreign_exclusive_ok(str(path)), "a lock survived the last handle's close"
-    assert not lg._HANDLES
+    assert not _handles_for(path, f"{path}-shm")
     assert sqlite3.connect(path).execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
 
 
@@ -99,4 +112,4 @@ def test_closing_writer_stays_guarded_until_sqlite_closes(tmp_path, monkeypatch)
     db.close()
     assert in_gap["shm"] == shm, "a sibling's close unlinked -shm under the closing writer"
     assert not os.path.exists(f"{path}-wal"), "the true last close must still end the generation"
-    assert _foreign_exclusive_ok(str(path)) and not lg._HANDLES
+    assert _foreign_exclusive_ok(str(path)) and not _handles_for(path, f"{path}-shm")

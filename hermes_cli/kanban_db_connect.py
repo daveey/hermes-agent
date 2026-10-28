@@ -7,6 +7,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import contextlib
 import hashlib
 import os
@@ -655,6 +656,9 @@ def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
             # DELETE with one ERROR log (see hermes_state_wal._WAL_INCOMPAT_MARKERS).
             from hermes_state_wal import apply_wal_with_fallback
             apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
+            # A fresh board only becomes WAL here: (re)apply the OFD lock guard now, so a stray
+            # in-process close can't strand this handle on a deleted generation. [daveey]
+            _kanban_lockguard.guard(conn)
             # FULL (not NORMAL): fsync before each checkpoint to narrow the
             # crash window that can leave a b-tree page header torn.
             conn.execute("PRAGMA synchronous=FULL")
@@ -735,7 +739,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
         # missing board or migrate on a descendant's behalf; the owner initializes it.
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn = _kanban_lockguard.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         conn.text_factory = _kb._lossy_text
         if not _schema_is_present(conn):

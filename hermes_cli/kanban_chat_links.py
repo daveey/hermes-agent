@@ -15,6 +15,7 @@ with one local query.
 
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import logging
 import sqlite3
 import time
@@ -172,7 +173,7 @@ def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[
     replicas = [(slug, ksc.shadow_path(slug)) for slug, _path in ksc.board_paths()]
     for _slug, path in replicas:
         if path.exists():
-            with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2) as conn:
+            with _kanban_lockguard.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2) as conn:
                 sessions |= {r[0] for r in conn.execute(
                     "SELECT DISTINCT chat_session FROM task_chat_links WHERE chat_gateway = ? AND released = 0", (gateway,))}
     replica: dict[str, set[tuple[str, str, str]]] = {}

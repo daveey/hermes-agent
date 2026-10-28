@@ -27,6 +27,7 @@ Config (``config.yaml``, default profile of the gateway)::
 """
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import os
 import re
@@ -175,7 +176,7 @@ def _ro(path: Path):
     import sqlite3
     if not path.exists():
         raise FileNotFoundError(str(path))
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+    return _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
 
 
 # --- probes --------------------------------------------------------------------------------

@@ -22,6 +22,7 @@ gateway's hub enrollment (``~/.config/hermes-mail/{config.json,gateway.key}``), 
 
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import logging
 import re
@@ -655,7 +656,7 @@ def outbox_pending(paths: Iterable[Path]) -> bool:
     """True when any synced board has a local change waiting to be pushed (one cheap read-only query each)."""
     for path in paths:
         try:
-            conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1)
+            conn = _kanban_lockguard.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1)
             try:
                 if conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1").fetchone():
                     return True

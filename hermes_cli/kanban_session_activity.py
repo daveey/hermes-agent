@@ -14,6 +14,7 @@ seconds because the sidebar polls.
 
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import contextlib
 import json
 import logging
@@ -357,7 +358,7 @@ UNSEEN_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "stat
 def _read_unseen(path: Path) -> dict[str, int]:
     """``tui`` subscriptions per chat whose cursor trails a terminal event: a result the session has not been
     handed yet (its backend is gone, so no poller claims it until the unloaded-session sweeper does). [daveey]"""
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+    conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
     try:
         ph = ",".join("?" for _ in UNSEEN_KINDS)
         rows = conn.execute(
@@ -385,11 +386,11 @@ def _open_ro(path: Path, check_same_thread: bool = True) -> sqlite3.Connection:
     """Read-only open that survives a WAL db whose -wal/-shm were just removed (plain ``mode=ro`` then fails);
     never creates the file."""
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5, check_same_thread=check_same_thread)
+        conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5, check_same_thread=check_same_thread)
         conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
         return conn
     except sqlite3.OperationalError:
-        conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=0.5, check_same_thread=check_same_thread)
+        conn = _kanban_lockguard.connect(f"file:{path}?mode=rw", uri=True, timeout=0.5, check_same_thread=check_same_thread)
         conn.execute("PRAGMA query_only = ON")
         return conn
 
@@ -398,15 +399,16 @@ def _open_ro(path: Path, check_same_thread: bool = True) -> sqlite3.Connection:
 # parse + WAL-index setup + close each time (~2.5 ms a board, the whole latency budget). The dashboard is long-lived,
 # so keep one read-only connection per file, shared across the threadpool (one per thread would hold ~3 fds per
 # board per worker). An idle autocommit reader holds no snapshot, so it never blocks writers or checkpoints.
-_RO_CACHE: dict[str, tuple[sqlite3.Connection, tuple[int, int], threading.Lock]] = {}
+_RO_CACHE: dict[str, tuple[sqlite3.Connection, tuple[int, int], threading.Lock, tuple[int, int] | None]] = {}
 _RO_CACHE_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
 def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
     """A shared read-only connection to ``path``, held exclusively for the ``with`` body. Reopened when the file is
-    replaced (new inode: a rebuilt replica) or after any sqlite error. Raises ``sqlite3.OperationalError`` when
-    the file is missing, like ``_open_ro``."""
+    replaced (new inode: a rebuilt replica), after any sqlite error, or when its ``-shm`` generation is gone (the
+    connection is stranded on a deleted WAL index and would fail with ``disk I/O error`` or read stale rows until
+    restart; kanban-759104eb56). Raises ``sqlite3.OperationalError`` when the file is missing, like ``_open_ro``."""
     key = str(path)
     try:
         st = os.stat(path)
@@ -419,12 +421,20 @@ def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
         if entry is not None and entry[1] != ident:
             stale = _RO_CACHE.pop(key)[0]
             entry = None
+        elif entry is not None and entry[3] is not None and _kanban_lockguard.shm_identity(path) != entry[3]:
+            _log.warning("kanban board %s: cached reader was on a deleted WAL/SHM generation; reopening", path)
+            stale = _RO_CACHE.pop(key)[0]
+            entry = None
+        if stale is not None:
+            # Close BEFORE reopening: a new connection in this process would otherwise share SQLite's
+            # per-inode WAL-index mapping with the stranded one and inherit its dead -shm.
+            _close_quietly(stale)
+            stale = None
         if entry is None:
-            entry = (_open_ro(path, check_same_thread=False), ident, threading.Lock())
+            conn = _open_ro(path, check_same_thread=False)
+            entry = (conn, ident, threading.Lock(), _kanban_lockguard.shm_identity(path))
             _RO_CACHE[key] = entry
-    if stale is not None:
-        _close_quietly(stale)
-    conn, _ident, lock = entry
+    conn, _ident, lock, _shm = entry
     with lock:  # bodies read every result they start: an unfinished cursor would pin a WAL snapshot
         conn.row_factory = None
         try:
@@ -816,7 +826,7 @@ def _remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str
         conn = _open_ro(path)
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, timeout=0.5)
+        conn = _kanban_lockguard.connect(path, timeout=0.5)
     try:
         scope = json.dumps(_origin_scope())
         if cards is not None:
@@ -1490,7 +1500,7 @@ def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool]) -> Call
 
 def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any]]]:
     """``(session_id, card)`` for done cards completed since ``since`` that a session created or shepherds."""
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+    conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
     conn.row_factory = sqlite3.Row
     try:
         has_runs = conn.execute(

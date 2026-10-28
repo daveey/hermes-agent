@@ -28,6 +28,7 @@ agent-owned owner card for a supervisor and the card waits on it (``repark_escal
 """
 from __future__ import annotations
 
+from hermes_cli import kanban_lockguard as _kanban_lockguard
 import hashlib
 import json
 import os
@@ -311,7 +312,7 @@ def answered_ask(task_id: str, text: str) -> Optional[dict]:
     if not path.is_file():
         return None
     try:
-        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+        c = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
         try:
             rows = c.execute("SELECT topic, answer, card_id, ts FROM answered ORDER BY ts DESC LIMIT 500").fetchall()
         finally:
