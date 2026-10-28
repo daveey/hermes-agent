@@ -4423,6 +4423,7 @@
     "sidebar.row.handoffOrigin",
     "sidebar.row.hideTabBar",
     "sidebar.row.kanbanAttention",
+    "sidebar.row.kanbanStalled",
     "sidebar.row.kanbanTasks",
     "sidebar.row.markRead",
     "sidebar.row.markUnread",
