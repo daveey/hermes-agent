@@ -86,7 +86,7 @@ test('connect() reuses the always-on dashboard: no spawn, no lockfile, nothing k
   const d = deps(ssh)
   const result: any = await connect(d)
 
-  assert.equal(result.alwaysOn, true)
+  assert.equal('alwaysOn' in result && result.alwaysOn, true)
   assert.equal(result.reused, true)
   assert.equal(result.pid, 4242)
   assert.equal(result.remotePort, 9147)
@@ -110,7 +110,7 @@ test('after a core update, connect() waits for the supervisor restart and reuses
 
   const result: any = await connect(d)
 
-  assert.equal(result.alwaysOn, true)
+  assert.equal('alwaysOn' in result && result.alwaysOn, true)
   assert.equal(result.pid, 5151)
   assert.ok(!ssh.calls.some(c => SPAWNS.test(c)), 'a restart window must not become a spawn')
   assert.deepEqual(d.cancelled, [9147], 'the stale probe forward is closed')
