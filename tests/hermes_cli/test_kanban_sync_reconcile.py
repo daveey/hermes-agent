@@ -80,6 +80,21 @@ def test_reconcile_never_reverts_a_local_edit_whose_outbox_entry_was_lost(live, 
     assert live.execute("SELECT title FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "after"
 
 
+def test_reconcile_never_resends_a_row_the_service_deleted(live, svc, kanban_home):
+    """The service's event GC tombstones old events of done cards; the file may still hold them."""
+    tid = kb.create_task(live, title="card", assignee="worker")
+    kb.add_comment(live, tid, "me", "gc'd on the service")
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=True)
+    uid = live.execute("SELECT uid FROM task_comments").fetchone()[0]
+    svc.hub("mini").ops(BOARD, [{"client_op_id": "del-1", "op": "delete", "table": "task_comments", "uid": uid,
+                                 "hlc": f"{9:013d}-0000-mini", "fields": {}}])
+
+    report = ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=svc.hub(ME))
+
+    assert "task_comments" not in report["queued"]
+    assert svc.board(BOARD)["rows"]["task_comments"][uid].get("deleted_at")
+
+
 def test_reconcile_is_a_no_op_on_a_board_in_step(live, svc, kanban_home):
     tid = kb.create_task(live, title="card", assignee="worker")
     kb.add_comment(live, tid, "me", "note")

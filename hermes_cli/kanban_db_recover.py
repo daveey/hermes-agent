@@ -300,7 +300,7 @@ def _healthy_fill_source(db_path: Path, exclude: set[Path]) -> Optional[Path]:
 
 def _tombstoned(dst: sqlite3.Connection) -> set[tuple[str, str]]:
     try:
-        return {(str(t), str(u)) for t, u in dst.execute("SELECT table_name, uid FROM kanban_sync_tombstones")}
+        return {(str(t), str(u)) for t, u in dst.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")}
     except sqlite3.DatabaseError:
         return set()
 

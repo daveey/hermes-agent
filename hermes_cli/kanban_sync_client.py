@@ -816,6 +816,16 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
         if mode == "off":
             return {"board": slug, "mode": "off"}
         ensure_identity(live, slug, ident.gateway)
+        # Rows the service deleted on purpose (its event GC of done cards, deletes) come back as tombstones in
+        # the replica: never re-send those.
+        _pull_replica(slug, hub, ident.gateway)
+        shadow = open_shadow(slug, ident.gateway)
+        try:
+            tombstoned: dict[str, set[str]] = {}
+            for table, uid in shadow.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones"):
+                tombstoned.setdefault(str(table), set()).add(str(uid))
+        finally:
+            shadow.close()
         live_uids = {table: _live_uids(live, table) for table in IMPORT_ORDER}
         service_uids: dict[str, set[str]] = {table: set() for table in IMPORT_ORDER}
         restored: dict[str, int] = {}
@@ -826,8 +836,11 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
                 rows = page.get("rows", [])
                 service_uids[table].update(str(r["uid"]) for r in rows)
                 if mode == "primary":
-                    lost = own_partition(live, [_row_change(table, r) for r in rows
-                                                if str(r["uid"]) not in live_uids[table]], ident.gateway)
+                    candidates = [r for r in rows if str(r["uid"]) not in live_uids[table]]
+                    # Rows written locally since live_uids was read reached the service meanwhile: re-check.
+                    now_live = _live_uids(live, table) if candidates else set()
+                    lost = own_partition(live, [_row_change(table, r) for r in candidates
+                                                if str(r["uid"]) not in now_live], ident.gateway)
                     if lost:
                         cursor = int((sync.sync_state(live) or {}).get("cursor") or 0)
                         sync.apply_remote_changes(live, lost, new_cursor=cursor, board=slug, observers=False)
@@ -835,7 +848,8 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
                 if not page.get("more"):
                     break
                 after = str(page["next"])
-        missing = {table: live_uids[table] - service_uids[table] for table in IMPORT_ORDER}
+        missing = {table: live_uids[table] - service_uids[table] - tombstoned.get(table, set())
+                   for table in IMPORT_ORDER}
         queued = import_board(live, only=missing)
         queued.pop("cleared_rejected", None)
         pushed = push(live, hub, slug, ident.gateway, primary=mode == "primary")
