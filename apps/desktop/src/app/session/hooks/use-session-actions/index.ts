@@ -174,6 +174,7 @@ import {
 } from '../session-context-drift'
 import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
+import { archiveOwnerRow } from './archive-owner'
 import { branchCreateKey } from './branch-create-key'
 import { confirmLinkedArchive } from './confirm-linked-archive'
 import { sessionCreateOverrideParams, type SessionCreateOverrides, type SessionSeedMessage } from './create-overrides'
@@ -3501,9 +3502,18 @@ export function useSessionActions({
 
       const listed = findListedSession(storedSessionId)
       let archived: SessionInfo | undefined
+      let listedRow: SessionInfo | undefined
 
       try {
-        archived = sessionActionRow(storedSessionId, options?.selectedRow) ?? listed?.session
+        archived = listedRow = sessionActionRow(storedSessionId, options?.selectedRow) ?? listed?.session
+
+        // A selected row is the user's explicit owner; every other door
+        // (hotkey, tile menu, plugins) resolves it like resume does, so a
+        // remote chat whose Recents row is momentarily absent or ownerless is
+        // neither checked nor archived on the registry primary.
+        if (!options?.selectedRow) {
+          archived = archiveOwnerRow(storedSessionId, archived)
+        }
       } catch (err) {
         notifyError(err, copy.archiveFailed)
 
@@ -3582,8 +3592,10 @@ export function useSessionActions({
 
         notify({ durationMs: 2_000, kind: 'success', message: copy.archived })
       } catch (err) {
-        if (archived) {
-          restoreListedSession(archived, listed?.slice)
+        // Only a row the sidebar actually listed comes back; an owner resolved
+        // from the project tree or a hint was never in that slice.
+        if (listedRow) {
+          restoreListedSession(listedRow, listed?.slice)
         }
 
         untombstoneSessions(archivedIds)
