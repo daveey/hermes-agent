@@ -1023,3 +1023,61 @@ def test_hermes_hub_pin_on_the_hub_itself_creates_locally(mac, monkeypatch):
     out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hermes-hub"}))
     assert out.get("ok") and out["task_id"] and "placed" not in out, out
     assert _local_count() == 1
+
+
+# --- heavy work goes to a worker node (kanban.placement.heavy_route) ------------------------------------
+
+HEAVY = {**ROUTE, "heavy_route": {"macbook": "worker-1"}}
+PICKS_UP = lambda name: True
+
+
+@pytest.mark.parametrize("args", [
+    {"title": "Kanban blockers: fix the re-wake loop + regression test"},
+    {"title": "Model gate bench-v2 scores Opus and Astra the same"},
+    {"title": "CI red on main", "body": "Reproduce with scripts/run_tests.sh tests/hermes_cli/ -j 4"},
+    {"title": "Coach report_only fix", "body": "run pytest on plugins/coach before pushing"},
+])
+def test_heavy_work_runs_on_the_worker_through_the_board_lease(args):
+    d = decide(args, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "local" and d["runs_on"] == ["machine:worker-1"], d
+    assert d["why"].startswith("heavy work") and "worker-1" in d["why"]
+
+
+def test_heavy_work_with_parents_still_runs_on_the_worker():
+    d = decide({"title": "Run the benchmark", "parents": ["t_1"]}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["runs_on"] == ["machine:worker-1"] and "defer" not in d, d
+
+
+def test_light_work_keeps_the_gateway_route():
+    d = decide({"title": "daveey/hermes CI: summarise the failing jobs"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "hub" and "runs_on" not in d, d
+
+
+def test_mac_only_heavy_work_stays_local_without_runs_on():
+    d = decide({"title": "Fix flaky macOS test in the pytest suite"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "local" and "runs_on" not in d and d["why"].startswith("local marker"), d
+
+
+def test_heavy_work_that_names_the_target_host_keeps_the_route():
+    d = decide({"title": "Run the regression tests on hermes-hub"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "hub" and "runs_on" not in d, d
+
+
+def test_heavy_work_falls_back_to_the_route_when_the_worker_does_not_pick_up():
+    d = decide({"title": "Run the benchmark"}, cfg=HEAVY, machine_ok=lambda name: False)
+    assert d["where"] == "hub" and "runs_on" not in d, d
+
+
+def test_heavy_route_is_off_unless_configured_and_an_explicit_pin_wins():
+    assert decide({"title": "Run the benchmark"}, machine_ok=PICKS_UP)["where"] == "hub"
+    assert decide({"title": "Run the benchmark"}, cfg=HEAVY, self_gw="mini", machine_ok=PICKS_UP)["where"] == "local"
+    d = decide({"title": "Run the benchmark", "placement": "hub"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "hub" and "runs_on" not in d, d
+    d = decide({"title": "Run the benchmark", "placement": "local"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "local" and "runs_on" not in d, d
+
+
+def test_configured_heavy_markers_replace_the_builtin_list():
+    cfg = {**HEAVY, "heavy_markers": [r"\bcrunch\b"]}
+    assert decide({"title": "Run the benchmark"}, cfg=cfg, machine_ok=PICKS_UP)["where"] == "hub"
+    assert decide({"title": "crunch the logs"}, cfg=cfg, machine_ok=PICKS_UP)["runs_on"] == ["machine:worker-1"]

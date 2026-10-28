@@ -1546,14 +1546,15 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
         state.close()
 
 
-def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id
+def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id, conn=None
                   ) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
 
     Returns ``(tool_result, None)`` when the card was queued there or the pin was refused,
     ``(None, None)`` to create it locally for any other reason, or ``(None, placement)`` when a
     text marker kept it here. ``placement`` is ``{where, why, remedy}`` so the create result can
-    say so. Never raises.
+    say so, or ``{where, why, runs_on}`` for heavy work created here and run on a worker node through
+    the Board lease (``kanban.placement.heavy_route``). Never raises.
     """
     try:
         from hermes_cli import kanban_placement as kp
@@ -1562,7 +1563,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
 
         view = {**args, "assignee": assignee, "skills": skills, "parents": parents,
                 "project_id": project_id}
-        decision = kp.decide(view)
+        from hermes_cli import kanban_worker_node as _wn
+        machine_ok = (lambda m: _wn.placement_runs_on(conn, m) is not None) if conn is not None else None
+        decision = kp.decide(view, machine_ok=machine_ok)
         target = decision["where"]
         if target == "refuse":
             return _placement_refused(decision["pin"], decision.get("why", "")), None
@@ -1571,6 +1574,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             if decision.get("defer"):
                 # Parents are local links: created here, forwarded to the target once they finish.
                 return None, {"where": "local", "defer": decision["defer"], "why": why}
+            if decision.get("runs_on"):
+                logger.info("kanban placement: local, runs_on %s (%s)", decision["runs_on"], why)
+                return None, {"where": "local", "runs_on": decision["runs_on"], "why": why}
             if why.startswith("local marker"):
                 logger.info("kanban placement: local (%s)", why)
                 return None, {"where": "local", "why": why, "remedy": kp.LOCAL_MARKER_REMEDY}
@@ -1733,9 +1739,11 @@ def _handle_create(args: dict, **kw) -> str:
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
             remote, marker_placement = _place_remote(
                 args, assignee=str(assignee), skills=skills, parents=parents,
-                project_id=project_id, session_id=session_id)
+                project_id=project_id, session_id=session_id, conn=conn)
             if remote is not None:
                 return remote
+            if marker_placement and marker_placement.get("runs_on") and runs_on is None:
+                runs_on = marker_placement["runs_on"]
         elif origin_intent is None and args.get("placement"):
             # An origin-bound card is created here by design, so a pin to another gateway cannot be honoured.
             from hermes_cli import kanban_capability_registry as _reg
@@ -1795,6 +1803,8 @@ def _handle_create(args: dict, **kw) -> str:
             extra["note"] = (f"Created here as {new_tid} so it can wait on its parents; it runs on "
                              f"{marker_placement['defer']}, not here: when the parents finish the dispatcher "
                              f"forwards it there and this card completes when that one does.")
+        elif marker_placement and marker_placement.get("runs_on"):
+            extra["placement"] = dict(marker_placement)
         elif marker_placement:
             extra["placement"] = {"where": marker_placement["where"], "why": marker_placement["why"]}
             extra["remedy"] = marker_placement["remedy"]

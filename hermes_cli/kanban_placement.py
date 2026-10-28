@@ -32,6 +32,13 @@ A card stays local when any of these holds:
 * the target is not live: this gateway's hermes-hub sync has not succeeded recently, or the
   target's capability record is stale.
 
+Heavy work (tests, builds, benchmarks, installs: :data:`DEFAULT_HEAVY_MARKERS`, replaced by
+``kanban.placement.heavy_markers``) with no local-only need goes to a worker node instead of the target
+when ``kanban.placement.heavy_route`` maps this gateway to one (``{"macbook": "worker-1"}``): the card is
+created here with ``runs_on=[machine:<worker>]`` and the worker claims it through the Board lease, so it
+keeps its parents and its chat. A card that names the target's own host (``hermes-hub``, "on the hub")
+keeps the normal route, and so does any card when the worker is not an active pickup machine.
+
 A worker on the target that still hits a local-only wall blocks with ``needs=[...]``; capability
 routing (:mod:`hermes_cli.kanban_capability_routing`) then opens an owner card back here.
 
@@ -86,6 +93,16 @@ DEFAULT_LOCAL_SKILL_MARKERS = (
     r"^apple", r"^imessage$", r"^findmy$", r"^macos-", r"^mac-", r"^invisible-chrome-agent$",
     r"^local-chrome-remote-debugging$", r"^computer-use$", r"^babybear", r"^bb-", r"^ios-",
 )
+# Phrases that mean the card runs tests, builds or benchmarks (CPU/IO heavy): with ``heavy_route`` set it
+# runs on a worker node rather than the routed target. Case-insensitive, title + body.
+DEFAULT_HEAVY_MARKERS = (
+    r"\bpytest\b", r"\brun_tests\.sh\b", r"\bvitest\b", r"\bnpm (run )?test\b", r"\btest suite\b",
+    r"\b(regression|unit|integration|e2e) tests?\b", r"\bbench(mark)?(s|ing)?\b", r"\bbench-v\d",
+    r"\bcargo (build|test)\b", r"\bdocker build\b", r"\bcompil(e|es|ing)\b", r"\buv sync\b",
+    r"\bpip install\b", r"\bnpm (ci|install)\b", r"\bvenv\b", r"\bflaky\b",
+)
+# The routed target's own host named in the card: that work belongs on the target, not a worker.
+TARGET_HOST_MARKERS = (r"\bhermes-hub\b", r"\bon the hub\b", r"\bthe hub's\b")
 # kanban_create options hermes-hub create-task cannot carry: a card using them stays local.
 UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "project", "project_id", "tenant")
 # kanban_create options a hermes-hub client with `create-task --option KEY=JSON` carries to the card.
@@ -141,6 +158,24 @@ class _Cfg:
         except (TypeError, ValueError):
             return DEFAULT_HUB_LIVE_SECONDS
 
+    def heavy_target(self, self_gw: Optional[str]) -> Optional[str]:
+        route = self.raw.get("heavy_route")
+        if not self_gw or not isinstance(route, dict):
+            return None
+        tgt = route.get(self_gw)
+        return tgt if isinstance(tgt, str) and tgt and tgt != self_gw else None
+
+    def heavy_markers(self) -> list[re.Pattern]:
+        base = self.raw.get("heavy_markers")
+        pats = list(base) if isinstance(base, list) else list(DEFAULT_HEAVY_MARKERS)
+        out = []
+        for p in pats:
+            try:
+                out.append(re.compile(str(p), re.IGNORECASE))
+            except re.error:
+                continue
+        return out
+
     def assignees(self) -> set[str]:
         v = self.raw.get("assignees")
         return {str(x) for x in v} if isinstance(v, list) and v else {"default"}
@@ -170,6 +205,25 @@ def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
             if rx.search(str(s)):
                 return f"skill {s}"
     return None
+
+
+def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
+    """The first heavy-work hit, or None (also None when the card names the target's own host)."""
+    full = f"{title or ''}\n{body or ''}"
+    if any(re.search(p, full, re.IGNORECASE) for p in TARGET_HOST_MARKERS):
+        return None
+    for rx in cfg.heavy_markers():
+        m = rx.search(full)
+        if m:
+            return f"mentions {m.group(0).lower()!r}"
+    return None
+
+
+def _machine_picks_up(name: str) -> bool:
+    """``name`` is an active machine in the Board registry that picks up other gateways' cards."""
+    from hermes_cli import kanban_worker_node as wn
+    entry = ((wn.registry() or {}).get("machines") or {}).get(name)
+    return bool(entry) and entry.get("state", "active") == "active" and wn.advertises_pickup(entry)
 
 
 def target_live(target: str, *, now: float, live_seconds: int,
@@ -340,7 +394,8 @@ def _raw_explicit_pin(args: dict) -> str:
 
 def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
            self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
-           locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None) -> dict:
+           locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None,
+           machine_ok: Optional[Callable[[str], bool]] = None) -> dict:
     """``_decide`` plus one rule: a caller who pinned another gateway never gets a silent local card.
 
     Any local outcome for such a pin (no route to that gateway, a structural limit, target not live)
@@ -354,7 +409,7 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
         sg = reg.self_gateway() if self_gw is None else self_gw
         known = sg.strip().lower() if isinstance(sg, str) else ""
         out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
-                      locate=locate, carries=carries)
+                      locate=locate, carries=carries, machine_ok=machine_ok)
         pin = explicit_foreign_pin(args, sg, cfg)
         if pin and origin_intent is None and out.get("where") == "local" and not out.get("defer"):
             return {"where": "refuse", "why": out.get("why", ""), "pin": pin}
@@ -372,8 +427,10 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
 
 def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
             self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
-            locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None) -> dict:
-    """``{"where": "local"|<gateway>, "why": str}`` for a ``kanban_create`` call. Never raises."""
+            locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None,
+            machine_ok: Optional[Callable[[str], bool]] = None) -> dict:
+    """``{"where": "local"|<gateway>, "why": str}`` for a ``kanban_create`` call; heavy work bound for a
+    worker is ``{"where": "local", "runs_on": [machine:<worker>], "why": ...}``. Never raises."""
     try:
         c = _Cfg(config() if cfg is None else cfg)
         if not isinstance(c.raw.get("route"), dict) or not c.raw["route"]:
@@ -421,6 +478,11 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
                                 args.get("skills"), c)
             if hit:
                 return {"where": "local", "why": f"local marker: {hit}"}
+            worker = c.heavy_target(self_gw)
+            heavy = _heavy_marker(args.get("title") or "", args.get("body") or "", c) if worker else None
+            if heavy and (machine_ok or _machine_picks_up)(worker):
+                return {"where": "local", "runs_on": [f"machine:{worker}"],
+                        "why": f"heavy work ({heavy}): runs on {worker} through the Board lease"}
         if has_parents:
             # Liveness is checked when the card is forwarded, not now: its parents may run for hours.
             return {"where": "local", "defer": target,
