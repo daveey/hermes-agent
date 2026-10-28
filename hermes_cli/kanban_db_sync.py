@@ -753,6 +753,22 @@ def release_lease(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str]
         _log.info("kanban sync: lease release for %s failed (%s); it expires on the server", task_id, exc)
 
 
+def held_by_us_live(conn: sqlite3.Connection, task_id: str, now: Optional[int] = None) -> bool:
+    """True when the mirrored Board lease on ``task_id`` is this gateway's and has not expired.
+
+    The Board's lease grant writes the card ``running`` and the feed can apply that row before (or,
+    when the claim is then refused and its lease released, instead of) the local claim CAS, so the
+    card reads ``running`` with no ``claim_lock`` while the claim is still being published. False on
+    a board that is not primary (no lease mirror)."""
+    if board_mode(conn) != "primary":
+        return False
+    row = conn.execute("SELECT lease_holder, lease_expires FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or row["lease_holder"] is None or row["lease_expires"] is None:
+        return False
+    now_ms = int((time.time() if now is None else now) * 1000)
+    return row["lease_holder"] == _state(conn)["gateway_id"] and int(row["lease_expires"]) > now_ms
+
+
 def held_elsewhere_sql(conn: sqlite3.Connection, alias: str = "") -> str:
     """SQL condition (``AND NOT ...``) that leaves out cards whose Board lease another gateway holds.
 

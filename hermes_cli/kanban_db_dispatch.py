@@ -979,15 +979,37 @@ def detect_stale_running(
     return reclaimed
 
 
+# A ``claimed`` event younger than this means a claim may still be publishing, so the orphan sweep leaves
+# the card alone. One claim publication (``claim_task``/``claim_review_task``) is: the Board lease grant
+# RPC (``kanban_sync_client.HTTP_TIMEOUT_S`` = 30 s), the claim txn's ``BEGIN IMMEDIATE`` (busy timeout,
+# ``DEFAULT_BUSY_TIMEOUT_MS`` = 120 s), then, when the CAS was refused, the release RPC of the unused
+# lease (30 s): 180 s worst case. The Board's grant row can reach the local DB anywhere in that window
+# and leaves the card ``running`` with no ``claim_lock``. A real orphan waits at most this long more.
+ORPHAN_CLAIM_GRACE_SECONDS = 180
+
+
+def _claim_in_flight(conn: sqlite3.Connection, task_id: str, now: int) -> bool:
+    """A claim on ``task_id`` may still be publishing: claimed within the grace, or the Board
+    lease mirror says this gateway holds an unexpired lease on it."""
+    if conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'claimed' AND created_at >= ? LIMIT 1",
+        (task_id, now - ORPHAN_CLAIM_GRACE_SECONDS),
+    ).fetchone():
+        return True
+    return _kb._sync.held_by_us_live(conn, task_id, now)
+
+
 def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
     """Requeue ``running`` cards with broken claim bookkeeping; returns their ids.
 
     A task ``running`` with NULL ``claim_lock``/``claim_expires`` (crash
     mid-claim, manual SQL, DB restore) is a zombie forever: ``release_stale_claims``
     needs ``claim_expires``, ``detect_crashed_workers`` needs a host-local lock +
-    pid, ``detect_stale_running`` is off by default. Orphans go back to ``ready``
-    with a comment, leaked run closed, ``reconciled`` event; a row with a live
-    host-local PID is deferred so no duplicate spawns beside it.
+    pid, ``detect_stale_running`` is off by default. Orphans go back to their
+    claimed source phase (``review`` for a reviewer run, else ``ready``) with a
+    comment, leaked run closed, ``reconciled`` event; a row with a live
+    host-local PID, or with a claim still in flight (:func:`_claim_in_flight`),
+    is deferred so no duplicate spawns beside it.
     """
     now = int(time.time())
     reconciled: list[str] = []
@@ -1006,14 +1028,20 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
                 "pid %s is alive on this host — deferring", tid, pid,
             )
             continue
+        if _claim_in_flight(conn, tid, now):
+            _kb._log.debug("kanban reconcile: task %s has a claim in flight — deferring", tid)
+            continue
         with _kb.write_txn(conn):
+            # Restore the claimed source phase, as every other release path does:
+            # a reviewer run must go back to review, not to an implementation run.
+            retry_status = _kb._retry_status_for_run(conn, tid)
             cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
                 "  AND claim_lock IS ? AND claim_expires IS ?",
-                (tid, row["claim_lock"], row["claim_expires"]),
+                (retry_status, tid, row["claim_lock"], row["claim_expires"]),
             )
             if cur.rowcount != 1:
                 continue
@@ -1023,6 +1051,7 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
                 "claim_expires": _kb._to_epoch(row["claim_expires"]),
                 "worker_pid": int(pid) if pid else None,
                 "now": now,
+                "retry_status": retry_status,
             }
             run_id = _kb._end_run(
                 conn, tid,
@@ -1033,7 +1062,7 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
             _kb._insert_comment(
                 conn, tid, "dispatcher",
                 "reconciliation: card was 'running' with no valid claim "
-                "(dead/gone worker) — requeued to ready",
+                f"(dead/gone worker) — requeued to {retry_status}",
                 now,
             )
             _kb._append_event(conn, tid, "reconciled", payload, run_id=run_id)

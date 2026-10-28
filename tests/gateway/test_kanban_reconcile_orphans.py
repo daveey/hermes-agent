@@ -22,6 +22,7 @@ Inspired by openai/symphony's tracker reconciliation (Apache-2.0), idea-level.
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,24 @@ def _orphan_running(conn, tid, *, claim_lock=None, claim_expires=None,
         (claim_lock, claim_expires, worker_pid, tid),
     )
     conn.commit()
+
+
+def _orphaned_claim(conn, lane, *, claimed_age=None):
+    """Claim a card through ``lane`` (``ready`` or ``review``), then drop its claim bookkeeping as a
+    dead claimer would. The ``claimed`` event is aged past the in-flight grace unless ``claimed_age``."""
+    tid = kb.create_task(conn, title=f"{lane}-orphan", assignee="w")
+    if lane == "review":
+        conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
+        conn.commit()
+        assert kb.claim_review_task(conn, tid)
+    else:
+        assert kb.claim_task(conn, tid)
+    age = 3600 if claimed_age is None else claimed_age  # well past ORPHAN_CLAIM_GRACE_SECONDS
+    conn.execute("UPDATE task_events SET created_at = ? WHERE task_id = ? AND kind = 'claimed'",
+                 (int(time.time()) - age, tid))
+    conn.commit()
+    _orphan_running(conn, tid)
+    return tid
 
 
 class TestReconcileOrphanedRunning:
@@ -140,6 +159,35 @@ class TestReconcileOrphanedRunning:
         _orphan_running(conn, tid, worker_pid=dead.pid)
 
         assert kbd.reconcile_orphaned_running(conn) == [tid]
+
+    def test_review_run_orphan_requeued_to_review(self, conn):
+        """A reviewer run that lost its claim goes back to ``review``: requeueing it to ``ready``
+        spawns an implementation worker on finished work (MacBook t_01a18189ff87b1c1)."""
+        tid = _orphaned_claim(conn, "review")
+
+        assert kbd.reconcile_orphaned_running(conn) == [tid]
+
+        assert conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()["status"] == "review"
+        recon = [e for e in kb.list_events(conn, tid) if e.kind == "reconciled"]
+        assert recon[-1].payload["retry_status"] == "review"
+        assert any("requeued to review" in (c.body or "") for c in kb.list_comments(conn, tid))
+
+    def test_implementation_run_orphan_still_requeued_to_ready(self, conn):
+        tid = _orphaned_claim(conn, "ready")
+
+        assert kbd.reconcile_orphaned_running(conn) == [tid]
+
+        assert conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()["status"] == "ready"
+        assert any("requeued to ready" in (c.body or "") for c in kb.list_comments(conn, tid))
+
+    def test_card_claimed_within_grace_is_not_reconciled(self, conn):
+        """A ``claimed`` event younger than the claim-publication grace means a claim is in flight
+        (the Board's grant row can land before, or instead of, the local claim): leave it."""
+        tid = _orphaned_claim(conn, "review", claimed_age=5)
+
+        assert kbd.reconcile_orphaned_running(conn) == []
+        assert conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()["status"] == "running"
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == "reconciled"]
 
     def test_non_running_statuses_ignored(self, conn):
         for status in ("todo", "ready", "blocked", "done"):
