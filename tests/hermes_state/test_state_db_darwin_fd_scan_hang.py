@@ -30,6 +30,16 @@ from hermes_state_dbfile import (
     _iter_darwin_sidecar_holders,
 )
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fresh_scan_cache():
+    dbfile._darwin_clean_until.clear()
+    yield
+    dbfile._darwin_clean_until.clear()
+
+
 # Far below the 5s production budget so the suite stays fast; far above zero
 # so scheduling jitter cannot flake it.
 BUDGET = 2.0
@@ -119,3 +129,35 @@ def test_healthy_scan_still_reports_holder(monkeypatch, tmp_path, caplog):
     assert not any(
         "timed out" in record.getMessage() for record in caplog.records
     ), "a successful scan must not log a timeout warning"
+
+
+def test_clean_verdict_is_reused_and_scans_are_single_flight(monkeypatch, tmp_path):
+    """Every SessionDB open used to walk all fds of all processes; a clean pass is now cached."""
+    calls = []
+
+    class _Empty:
+        def proc_pidinfo(self, *a):
+            calls.append(1)
+            return 0
+
+    monkeypatch.setattr(dbfile, "_darwin_libproc", lambda: _Empty())
+    monkeypatch.setattr(dbfile, "_darwin_all_pids", lambda _lib: [4242])
+    db = tmp_path / "state.db"
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(_iter_darwin_sidecar_holders(db)))
+               for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join(HANG_GUARD) for t in threads]
+    assert results == [[]] * 8
+    assert len(calls) == 1, "concurrent/cached opens must share one libproc pass"
+    dbfile._darwin_clean_until.clear()
+    _iter_darwin_sidecar_holders(db)
+    assert len(calls) == 2
+
+
+def test_timed_out_scan_is_not_cached(monkeypatch, tmp_path):
+    monkeypatch.setattr(dbfile, "_darwin_libproc", lambda: _HungLibproc())
+    monkeypatch.setattr(dbfile, "_darwin_all_pids", lambda _lib: [4242])
+    monkeypatch.setattr(dbfile, "_DARWIN_FD_SCAN_TIMEOUT_SECONDS", 0.3)
+    assert _iter_darwin_sidecar_holders(tmp_path / "state.db") == []
+    assert not dbfile._darwin_clean_until

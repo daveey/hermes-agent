@@ -239,6 +239,14 @@ _DARWIN_LIBPROC = None
 # expiry, failing open per the guard's contract.
 _DARWIN_FD_SCAN_TIMEOUT_SECONDS = 5.0
 
+# A clean (no holder) verdict is reused for this long, and only one scan runs at a time. Every
+# SessionDB open used to walk every fd of every process (~5 s of CPU, up to 5 s of abandoned
+# thread each on timeout); a busy Mac opening state.db from dozens of CLI/worker/wake_check
+# processes spent its cores on that. Positive verdicts are never cached.
+_DARWIN_FD_CLEAN_TTL_SECONDS = 30.0
+_darwin_scan_lock = threading.Lock()
+_darwin_clean_until: dict[str, float] = {}
+
 
 def _darwin_libproc():
     """libproc's fd-enumeration entry points, loaded once per process.
@@ -322,6 +330,25 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
     # APFS/HFS+ are case-insensitive by default and libproc reports the pathname as the opener
     # spelled it; ``os.path.normcase`` is the identity on darwin, so fold case here.
     watched = {path.casefold(): path for path in (base + "-wal", base + "-shm")}
+    now = time.monotonic()
+    if _darwin_clean_until.get(base, 0.0) > now:
+        return []
+    # Single flight: a concurrent scan in this process is waited on (bounded), never duplicated.
+    if not _darwin_scan_lock.acquire(timeout=_DARWIN_FD_SCAN_TIMEOUT_SECONDS):
+        return []  # fail open, as for a scan timeout
+    try:
+        if _darwin_clean_until.get(base, 0.0) > time.monotonic():
+            return []
+        holders, completed = _scan_darwin_sidecar_holders(base, watched, db_path)
+        if completed and not holders:
+            _darwin_clean_until[base] = time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS
+        return holders
+    finally:
+        _darwin_scan_lock.release()
+
+
+def _scan_darwin_sidecar_holders(base, watched, db_path) -> tuple[list[tuple[int, str]], bool]:
+    """One bounded libproc pass; the flag is False when the pass timed out (fail-open, not a verdict)."""
     holders: list[tuple[int, str]] = []
     errors: list[BaseException] = []
 
@@ -346,10 +373,10 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
             _DARWIN_FD_SCAN_TIMEOUT_SECONDS,
             db_path,
         )
-        return []
+        return [], False
     if errors:
         raise errors[0]
-    return holders
+    return holders, True
 
 
 def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
