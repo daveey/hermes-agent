@@ -3,6 +3,14 @@ import type { SessionInfo } from '@/hermes'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { hasFreshKanbanObservation } from '@/store/kanban-observation'
 
+/** A busy backend can legitimately take several seconds to answer; "unknown" must mean the read
+ * failed, not that it was slow. Each read gets a generous timeout and one retry on a timeout, all
+ * inside an overall budget so the dialog never hangs. */
+const READ_TIMEOUT_MS = 6_000
+const OVERALL_BUDGET_MS = 14_000
+
+const isTimeout = (error: unknown) => /timed out/i.test(String((error as Error)?.message ?? error))
+
 /** Expired sidebar evidence is a reason to read, not evidence of unfinished work.
  * Capture the row owner before awaiting; never borrow the foreground gateway.
  * Failed/malformed reads remain unknown, including incomplete ancestry. */
@@ -37,6 +45,16 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
   let timer: ReturnType<typeof setTimeout> | undefined
   let stage = 'start'
 
+  const request = async <T>(path: string): Promise<T> => {
+    try {
+      return await hermesApiAs<T>(owner, { path, timeoutMs: READ_TIMEOUT_MS })
+    } catch (error) {
+      if (!isTimeout(error)) {throw error}
+
+      return hermesApiAs<T>(owner, { path, timeoutMs: READ_TIMEOUT_MS })
+    }
+  }
+
   const read = async (): Promise<SessionInfo> => {
     const ids = new Set<string>()
     let current: string | null = id
@@ -46,9 +64,7 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
       ids.add(current)
       stage = `GET /api/sessions/${current}`
 
-      const row: { id?: string; parent_session_id?: string | null } = await hermesApiAs(owner, {
-        path: `/api/sessions/${encodeURIComponent(current)}`, timeoutMs: 2_000
-      })
+      const row: { id?: string; parent_session_id?: string | null } = await request(`/api/sessions/${encodeURIComponent(current)}`)
 
       if (row?.id !== current || (row.parent_session_id != null && typeof row.parent_session_id !== 'string')) {
         return unknownBecause(`malformed session row from ${stage}`)
@@ -60,9 +76,9 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
     if (current) {return unknownBecause('ancestry deeper than 12 hops')}
     stage = 'GET /api/session-kanban-tasks'
 
-    const result = await hermesApiAs<{ tasks?: Array<{ id?: string; status?: string; stale?: boolean; unfinished?: boolean }> }>(owner, {
-      path: `/api/session-kanban-tasks?ids=${encodeURIComponent([...ids].join(','))}`, timeoutMs: 2_000
-    })
+    const result = await request<{ tasks?: Array<{ id?: string; status?: string; stale?: boolean; unfinished?: boolean }> }>(
+      `/api/session-kanban-tasks?ids=${encodeURIComponent([...ids].join(','))}`
+    )
 
     if (!Array.isArray(result?.tasks)) {return unknownBecause(`malformed response from ${stage}`)}
     let active = 0
@@ -84,7 +100,7 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
 
   try {
     return await Promise.race([read(), new Promise<SessionInfo>(resolve => {
-      timer = setTimeout(() => resolve(unknownBecause(`no answer within 2500ms (${stage})`)), 2_500)
+      timer = setTimeout(() => resolve(unknownBecause(`no answer within ${OVERALL_BUDGET_MS}ms (${stage})`)), OVERALL_BUDGET_MS)
     })])
   } catch (error) {
     return unknownBecause(`${stage} failed`, error)

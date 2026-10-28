@@ -67,7 +67,7 @@ it('bounds a hung task read instead of hanging archive', async () => {
   vi.useFakeTimers()
   vi.stubGlobal('hermesDesktop', { api: () => new Promise(() => {}) })
   const pending = confirmLinkedArchive('tip', { id: 'tip', connection_id: 'owner' } as SessionInfo, 'work', en.desktop)
-  await vi.advanceTimersByTimeAsync(2500)
+  await vi.advanceTimersByTimeAsync(14_000)
   expect($confirmRequest.get()?.details).toEqual([{ label: 'Kanban tasks', value: en.desktop.archiveLinkedTasksUnknown }])
   expect($confirmRequest.get()?.description).not.toMatch(/still has work linked/)
   settleConfirm(false)
@@ -88,4 +88,26 @@ it.each([undefined, 'remote-owner'])('refreshes expired empty observations on th
   await expect(pending).resolves.toBe(true)
   expect($confirmRequest.get()).toBeNull()
   expect(api.mock.calls.every(([args]) => args.connectionId === (connectionId || 'primary-owner') && args.profile === 'work')).toBe(true)
+})
+
+it('retries a timed-out read once instead of reporting unknown', async () => {
+  const row = { id: 'tip', connection_id: 'owner', profile: 'work', kanban_unknown: true } as SessionInfo
+  let sessionCalls = 0
+
+  const api = vi.fn(async ({ path, timeoutMs }) => {
+    expect(timeoutMs).toBeGreaterThanOrEqual(5_000)
+
+    if (path.startsWith('/api/sessions/')) {
+      if (++sessionCalls === 1) {throw new Error('Timed out connecting to Hermes backend after 6000ms')}
+
+      return { id: 'tip', parent_session_id: null }
+    }
+
+    return { tasks: [] }
+  })
+
+  vi.stubGlobal('hermesDesktop', { api })
+  await expect(confirmLinkedArchive('tip', row, 'work', en.desktop)).resolves.toBe(true)
+  expect(sessionCalls).toBe(2)
+  expect($confirmRequest.get()).toBeNull()
 })
