@@ -9,6 +9,7 @@ respawn died with a SyntaxError, the runtime was booked ``failed`` and the recei
 ``gateway_restart`` follow-up, while launchd had already respawned the dashboard itself.
 """
 
+import os
 import sys
 import types
 from unittest.mock import patch
@@ -266,8 +267,9 @@ def _run_launcher_child_update(monkeypatch, successor_after, *, fence_owner=None
         if sig == 0:
             raise ProcessLookupError
 
-    def _children(tail):
+    def _children(tail, exclude_launchers=frozenset()):
         assert tail == tuple(_TAIL)
+        assert _LAUNCHER_PID in exclude_launchers  # the original launcher's children are never successors
         start = killed_at.get(_BACKEND_PID)
         if start is None:
             return [_BACKEND_PID]
@@ -357,3 +359,86 @@ def test_launcher_children_reads_the_process_table(monkeypatch):
     with patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout=table)), \
          patch.object(main_dashboard, "_dashboard_cmdline_for_pid", side_effect=argv.get):
         assert dashboard_procs._launcher_children(tuple(_TAIL)) == [_BACKEND_PID]
+
+
+_LAUNCHER_LABEL = "com.daveey.hermes-redde-serve"
+
+
+def _per_pid_psutil(argv_by_pid, env_by_pid):
+    def _proc(pid):
+        return types.SimpleNamespace(cmdline=lambda: list(argv_by_pid.get(pid) or []),
+                                     environ=lambda: dict(env_by_pid.get(pid) or {}))
+    return types.SimpleNamespace(Process=_proc, pid_exists=lambda pid: False)
+
+
+@pytest.mark.platforms("macos")
+@pytest.mark.parametrize(("launcher_label", "expect_bootout"),
+                         [(_LAUNCHER_LABEL, True), ("0", False)])
+def test_dashboard_stop_of_launcher_child_names_the_launchers_keepalive_job(
+        monkeypatch, capsys, launcher_label, expect_bootout):
+    """``hermes dashboard --stop`` of a launcher child: the launcher exits with it and launchd KeepAlive
+    brings the backend straight back, so the hint must be the launcher job's ``launchctl bootout``, not
+    "restart it when you're ready". Control: a launcher run outside launchd (no job) keeps the generic hint."""
+    monkeypatch.setitem(sys.modules, "psutil", _per_pid_psutil(
+        {_BACKEND_PID: ARGV, _LAUNCHER_PID: _LAUNCHER_ARGV},
+        {_BACKEND_PID: {"XPC_SERVICE_NAME": "0"}, _LAUNCHER_PID: {"XPC_SERVICE_NAME": launcher_label}}))
+    ancestry = {_BACKEND_PID: [_LAUNCHER_PID, 1], _LAUNCHER_PID: [1]}
+
+    def _fake_kill(pid, sig):
+        if sig == 0:
+            raise ProcessLookupError
+
+    with patch.object(main_dashboard, "_find_stale_dashboard_pids", return_value=[_BACKEND_PID]), \
+         patch.object(main_dashboard, "_loaded_launchd_backend_jobs", return_value=[]), \
+         patch.object(main_dashboard, "_dashboard_cmdline_for_pid",
+                      side_effect={_BACKEND_PID: ARGV, _LAUNCHER_PID: _LAUNCHER_ARGV}.get), \
+         patch("hermes_cli.gateway._launchd_print_service_pid", return_value=(True, _LAUNCHER_PID)), \
+         patch.object(main_dashboard, "_respawn_dashboard_processes") as respawn, \
+         patch("hermes_cli.dashboard_procs._process_ancestors", side_effect=lambda pid: ancestry.get(pid, [1])), \
+         patch("hermes_cli.dashboard_procs._posix_descendants", return_value={}), \
+         patch("os.kill", side_effect=_fake_kill), \
+         patch("time.sleep"):
+        result = dashboard_procs._kill_stale_dashboard_processes(restart_managed=False)
+
+    out = capsys.readouterr().out
+    respawn.assert_not_called()
+    assert result["killed"] == [_BACKEND_PID]
+    target = f"gui/{os.getuid()}/{_LAUNCHER_LABEL}"
+    assert (f"launchctl bootout {target}" in out) is expect_bootout
+    assert ("Restart the dashboard when you're ready" in out) is (not expect_bootout)
+
+
+@pytest.mark.platforms("macos")
+def test_surviving_wrapper_shell_under_the_old_launcher_is_not_a_successor(monkeypatch):
+    """Exec-less wrapper shape (launcher -> sh -> dashboard): just after the kill the ``sh`` is still the
+    OLD launcher's child. It is no successor; only a child of a respawned launcher (new pid) counts."""
+    sh_pid = 88000
+    old_table = "\n".join([
+        f"  {_LAUNCHER_PID}     1 python3 /x/hermes-gateway-launcher --home /h -- {_TAIL[0]}",
+        f"  {sh_pid} {_LAUNCHER_PID} /bin/sh {_TAIL[0]}",
+    ])
+    new_table = "\n".join([
+        f"  99000     1 python3 /x/hermes-gateway-launcher --home /h -- {_TAIL[0]}",
+        f"  99001 99000 /bin/sh {_TAIL[0]}",
+    ])
+    clock = _Clock()
+    respawn_at = [None]  # None: the old launcher (and its sh) never go away
+
+    def _ps(*_a, **_k):
+        table = new_table if respawn_at[0] is not None and clock.now - 1000.0 >= respawn_at[0] else old_table
+        return types.SimpleNamespace(returncode=0, stdout=table)
+
+    argv = {_LAUNCHER_PID: _LAUNCHER_ARGV, 99000: _LAUNCHER_ARGV}
+    waits = {tuple(_TAIL): [_BACKEND_PID]}
+    common = (patch("subprocess.run", side_effect=_ps),
+              patch.object(main_dashboard, "_dashboard_cmdline_for_pid", side_effect=argv.get),
+              patch("hermes_cli.update_gateway_fence.ancestor_fence_owner", return_value=None),
+              patch("time.monotonic", side_effect=clock.monotonic),
+              patch("time.sleep", side_effect=clock.sleep))
+    with common[0], common[1], common[2], common[3], common[4]:
+        assert dashboard_procs._await_launcher_successors(
+            waits, {_BACKEND_PID}, {tuple(_TAIL): {_LAUNCHER_PID}}) == [_BACKEND_PID]
+        # control: once launchd restarts the launcher (new pid), its fresh child is the successor
+        clock.now, respawn_at[0] = 1000.0, 17.0
+        assert dashboard_procs._await_launcher_successors(
+            waits, {_BACKEND_PID}, {tuple(_TAIL): {_LAUNCHER_PID}}) == []

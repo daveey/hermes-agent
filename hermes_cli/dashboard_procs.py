@@ -682,7 +682,8 @@ def _kill_stale_dashboard_processes(
                 return _empty_result()
     elif sys.platform != "win32":
         for pid in pids:
-            if job := _launchd_owner(pid, _dash._dashboard_cmdline_for_pid(pid)):
+            if job := (_launchd_owner(pid, _dash._dashboard_cmdline_for_pid(pid))
+                       or _launcher_launchd_job(pid)):
                 pid_launchd[pid] = job
     print(f"\n⟲ Stopping {len(pids)} dashboard process(es) ({reason})")
     killed: list[int] = []
@@ -767,7 +768,10 @@ def _restart_killed_backends(
         else:
             unrecovered.append(pid)
     if launcher_waits:
-        unrecovered.extend(_await_launcher_successors(launcher_waits, set(killed)))
+        old_launchers: dict[tuple[str, ...], set[int]] = {}
+        for launcher_pid, tail in (pid_launcher or {}).values():
+            old_launchers.setdefault(tail, set()).add(launcher_pid)
+        unrecovered.extend(_await_launcher_successors(launcher_waits, set(killed), old_launchers))
     for svc, err in failed_restarts:
         print(f"    ⚠ {svc}: {err}")
     respawn_cmds = _filter_dashboard_respawn_candidates(respawn_candidates)
@@ -820,8 +824,22 @@ def _launcher_supervisor(pid: int) -> tuple[int, tuple[str, ...]] | None:
     return None
 
 
-def _launcher_children(tail: tuple[str, ...]) -> list[int]:
-    """Live children of every ``hermes-gateway-launcher`` process supervising *tail*."""
+def _launcher_launchd_job(pid: int) -> tuple[str, str, int | None] | None:
+    """[daveey] The launchd job of the ``hermes-gateway-launcher`` supervising *pid*, or None.
+
+    ``dashboard --stop`` of a launcher child: the launcher exits with its child and the job's KeepAlive
+    restarts it, which brings the backend straight back. The launcher (the job's live process) carries
+    ``XPC_SERVICE_NAME=<label>``; the child's is ``0``, so only the launcher's env names the job."""
+    if not (supervisor := _launcher_supervisor(pid)):
+        return None
+    from hermes_cli import main_dashboard as _dash
+    launcher_pid = supervisor[0]
+    return _dash._launchd_job_from_launch_env(launcher_pid, _process_ancestors(launcher_pid))
+
+
+def _launcher_children(tail: tuple[str, ...], exclude_launchers: frozenset[int] | set[int] = frozenset()) -> list[int]:
+    """Live children of every ``hermes-gateway-launcher`` process supervising *tail*, except
+    launchers in *exclude_launchers*."""
     from hermes_cli import main_dashboard as _dash
     from hermes_cli.gateway_launchd import GATEWAY_LAUNCHER_NAME
     try:
@@ -835,13 +853,18 @@ def _launcher_children(tail: tuple[str, ...]) -> list[int]:
         if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
             rows.append((int(parts[0]), int(parts[1]), parts[2]))
     launchers = {pid for pid, _ppid, command in rows if GATEWAY_LAUNCHER_NAME in command
+                 and pid not in exclude_launchers
                  and _launcher_argv_tail(_dash._dashboard_cmdline_for_pid(pid)) == tail}
     return [pid for pid, ppid, _command in rows if ppid in launchers]
 
 
-def _await_launcher_successors(waits: dict[tuple[str, ...], list[int]], stopped: set[int]) -> list[int]:
+def _await_launcher_successors(waits: dict[tuple[str, ...], list[int]], stopped: set[int],
+                               old_launchers: dict[tuple[str, ...], set[int]] | None = None) -> list[int]:
     """Wait (bounded) until each launcher-supervised command has a fresh child; return the stopped
-    PIDs whose command never came back. Inside a core-update fence held by an ancestor of this
+    PIDs whose command never came back. A fresh child is one of a launcher that is NOT in
+    *old_launchers* (the launchers that supervised the stopped PIDs): the launcher exits with its child
+    and launchd restarts it under a new pid, while an exec-less wrapper ``sh`` can still be the old
+    launcher's child just after the kill and must not count as recovered. Inside a core-update fence held by an ancestor of this
     update every launcher is parked until the fence owner releases it after this process exits, so
     nothing can come back yet: recovery is the fence owner's to verify, not a failure here."""
     import time as _time
@@ -856,7 +879,8 @@ def _await_launcher_successors(waits: dict[tuple[str, ...], list[int]], stopped:
     deadline = _time.monotonic() + _LAUNCHER_SUCCESSOR_TIMEOUT_SECONDS
     while True:
         for tail in list(pending):
-            fresh = [pid for pid in _launcher_children(tail) if pid not in stopped]
+            fresh = [pid for pid in _launcher_children(tail, (old_launchers or {}).get(tail, set()))
+                     if pid not in stopped]
             if fresh:
                 print(f"    ✓ hermes-gateway-launcher restarted {os.path.basename(tail[0])} (PID {fresh[0]})")
                 del pending[tail]
