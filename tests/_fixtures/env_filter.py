@@ -164,6 +164,15 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_SESSION_ID",
     "HERMES_RPC_SOCKET",
     "HERMES_KERNEL_SENTINEL",
+    # A Kanban worker is a ``hermes -q`` one-shot, so its terminal exports HERMES_SINGLE_QUERY_SESSION=1.
+    # Inherited by pytest, ``is_single_query_session()`` turned on the one-shot paths (delegate_task's
+    # spawn budget: test_delegate_apiserver_background raised TypeError on hosts only). The other four are
+    # worker/UI lineage markers read through the same session/delegation helpers.
+    "HERMES_SINGLE_QUERY_SESSION",
+    "HERMES_UI_SESSION_ID",
+    "HERMES_KANBAN_WORKER_TASK",
+    "HERMES_DELEGATED_CHILD_OWNER",
+    "HERMES_SUPERVISED_CHILD",
     "HERMES_GATEWAY_SESSION",
     "HERMES_CRON_SESSION",
     "_HERMES_GATEWAY",

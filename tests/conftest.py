@@ -261,6 +261,7 @@ from tests._fixtures.live_system_guard import (
     _live_system_guard,
 )
 from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
+from tests._fixtures.session_context_reset import _reset_session_context_vars
 
 
 @pytest.fixture(autouse=True)
