@@ -265,13 +265,22 @@ function exeOf(pid: number): string {
   }
 }
 
-/** Live Desktop main processes of this install (the packaged exe, not its zygote/renderer/gpu children). */
+/**
+ * Live Desktop main processes of this install: the packaged exe itself, not its zygote/renderer/gpu children
+ * (`--type=`) and not the other binaries shipped beside it. `chrome_crashpad_handler` runs from the same
+ * directory with no `--type=`; an app's handler outlives its main by a moment (re-parented to init), so a
+ * directory-only match took the pre-update app's handler for the relaunched app and SIGTERMed the wrong pid.
+ */
 export function desktopMainProcesses(facts: InstallFacts): ProcInfo[] {
-  const exe = fs.realpathSync(path.dirname(packagedExe(facts)))
+  const exe = fs.realpathSync(packagedExe(facts))
+  const dir = path.dirname(exe)
 
-  return installProcesses(facts).filter(
-    proc => exeOf(proc.pid).startsWith(exe + path.sep) && !/--type=/.test(proc.cmdline)
-  )
+  return installProcesses(facts).filter(proc => {
+    // A main still running from a binary the update replaced reads as "<path> (deleted)".
+    const own = exeOf(proc.pid).replace(/ \(deleted\)$/, '')
+
+    return own.startsWith(dir + path.sep) && path.basename(own) === path.basename(exe) && !/--type=/.test(proc.cmdline)
+  })
 }
 
 /** The `hermes serve` backend(s) of this install (children of the backend excluded). */

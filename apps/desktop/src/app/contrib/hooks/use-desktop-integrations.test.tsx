@@ -255,6 +255,44 @@ describe('useDesktopIntegrations', () => {
       expect(navigate).not.toHaveBeenCalled()
     })
 
+    it('does not restore over a draft typed into the fresh chat this launch', () => {
+      window.localStorage.setItem('hermes.desktop.lastRoute.profile.default', '/remembered-session')
+      const result = render({ profileReady: true, sessions: [] })
+
+      // Typed while the session list was still loading (Enter not yet accepted).
+      stashSessionDraft(null, 'typed before the list arrived', [])
+
+      try {
+        result.rerender({
+          activeProfile: 'default',
+          locationPathname: '/',
+          profileReady: true,
+          resumeExhaustedSessionId: null,
+          resumeLastSession: true,
+          routedSessionId: null,
+          sessions: [session({ id: 'remembered-session', profile: 'default' })]
+        })
+
+        expect(navigate).not.toHaveBeenCalled()
+        expect(takeSessionDraft(null).text).toBe('typed before the list arrived')
+      } finally {
+        stashSessionDraft(null, '', [])
+      }
+    })
+
+    it('still restores over a fresh draft left from an earlier launch (control)', () => {
+      window.localStorage.setItem('hermes.desktop.lastRoute.profile.default', '/remembered-session')
+      stashSessionDraft(null, 'left over from last week', [])
+
+      try {
+        render({ profileReady: true, sessions: [session({ id: 'remembered-session', profile: 'default' })] })
+
+        expect(navigate).toHaveBeenCalledWith('/remembered-session', { replace: true })
+      } finally {
+        stashSessionDraft(null, '', [])
+      }
+    })
+
     it('still restores once a fresh-chat send has settled (control)', () => {
       window.localStorage.setItem('hermes.desktop.lastRoute.profile.default', '/remembered-session')
       beginFreshChatSend()()
