@@ -223,6 +223,13 @@ def _is_ephemeral_port_zero_backend(argv: list[str]) -> bool:
 
     See #78821.
     """
+    # [daveey] Desktop launches its backend through the ``Hermes Python.app -I -c <bootstrap>`` form,
+    # whose ``serve --port 0`` lives inside the inline source: read the argv the bootstrap runs, or
+    # a killed Desktop backend is replayed as a detached ``--port 0`` orphan next to Desktop's own.
+    from gateway.status_inline_source import command_line_runs_inline_source, inline_bootstrap_argv
+    tokens = [str(tok) for tok in argv]
+    if command_line_runs_inline_source(tokens):
+        argv = inline_bootstrap_argv(tokens) or argv
     if _dashboard_subcommand_index(argv) is None:
         return False
     return any((tok == "--port" and i + 1 < len(argv) and str(argv[i + 1]) == "0")
