@@ -164,6 +164,19 @@ def mark_turn_paused(home: Path | str, session_key: str, reason: str,
     return False
 
 
+def record_killed_jobs(home: Path | str, session_key: str, killed_jobs: list) -> bool:
+    """[daveey] Replace an existing marker's ``killed_jobs`` (reason, prompt and counters untouched).
+    True when a marker existed and the write landed."""
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not isinstance(entry, dict):
+            return None
+        entry["killed_jobs"] = list(killed_jobs)
+        return entries
+
+    return bool(session_key) and _update(home, session_key, mutate, "journal jobs")
+
+
 def _paused_killed_jobs(entry: dict) -> list[dict]:
     """Jobs a core-update pause actually stopped, or [] when the marker has none / junk."""
     raw = entry.get("killed_jobs")
@@ -183,8 +196,9 @@ def _paused_killed_jobs(entry: dict) -> list[dict]:
         job = {"session_id": sid, "command": str(item.get("command") or ""), "started_at": started,
                "notify_on_complete": bool(item.get("notify_on_complete")),
                "kill_state": str(item.get("kill_state") or "killed")}
-        if item.get("notice"):
-            job["notice"] = str(item["notice"])
+        for key in ("notice", "kill_reason", "termination_source"):
+            if item.get(key):
+                job[key] = str(item[key])
         if item.get("exit_code") is not None:
             job["exit_code"] = item["exit_code"]
         if item.get("output"):

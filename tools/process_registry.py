@@ -2535,9 +2535,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
 
     # Kill sources that are agent-lifecycle cleanup (session end / compression / error
     # recovery / turn abandon), not a deliberate stop: those must skip persist_on_release
-    # sessions. An explicit stop (process_manage kill, CLI /stop) passes its own source
-    # string and still reaches them.
-    _LIFECYCLE_KILL_SOURCES = frozenset({"kill_all", "gateway_turn_timeout", "agent_close", "core_update_pause"})
+    # sessions. An explicit stop (process_manage kill, CLI /stop) passes its own source and still reaches them.
+    _LIFECYCLE_KILL_SOURCES = frozenset({"kill_all", "gateway_turn_timeout", "agent_close", "core_update_pause",
+                                         "backend_shutdown"})
 
     def kill_started_since(self, task_id: str, baseline_ids, *, source: str) -> int:
         """Kill ``task_id`` processes created after ``baseline_ids``. Output is

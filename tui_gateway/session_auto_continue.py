@@ -166,7 +166,10 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         return None
     enabled, freshness_secs, max_attempts = _auto_continue_config()
     age = time.time() - marker["started_at"]
-    if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
+    # [daveey] A background-job receipt is a delivery, not a turn to redo: it keeps longer than a turn.
+    from tui_gateway.exit_job_receipts import JOBS_REASON, JOBS_RECEIPT_MAX_AGE_S, jobs_stopped_note
+    receipt = marker.get("reason") == JOBS_REASON
+    if not enabled or age > (JOBS_RECEIPT_MAX_AGE_S if receipt else freshness_secs) or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
     with session["history_lock"]:
@@ -179,11 +182,14 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if paused:
         from tui_gateway.update_pause import pause_note
         attempt, text = marker["attempts"], pause_note(marker["prompt"], marker.get("killed_jobs"))
+    elif receipt:
+        attempt, text = marker["attempts"], jobs_stopped_note(marker.get("killed_jobs"))
     else:
         attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
-    if not paused and marker.get("killed_jobs"):
-        from tui_gateway.update_pause import pause_note
-        text += "\n\n" + pause_note("", marker["killed_jobs"])
+    if not (paused or receipt) and marker.get("killed_jobs"):
+        from tui_gateway.update_pause import killed_jobs_report
+        text += "\n\n" + killed_jobs_report(marker["killed_jobs"], "Background jobs stopped when the turn was "
+                                            "interrupted:")
     pauses = int(marker.get("pauses") or 0)
 
     def kickoff() -> None:
@@ -230,6 +236,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             with _session_profile_runtime_scope(session):
                 def announce():
                     _emit("status.update", sid, {"kind": "process", "text": "Resuming paused turn…" if paused
+                                                 else "Reporting stopped background jobs…" if receipt
                                                  else "Resuming interrupted turn…"})
                     _emit("message.start", sid)
                 render_notification(announce, platform="tui", diagnostic=diagnostic)

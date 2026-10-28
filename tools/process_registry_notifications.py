@@ -424,6 +424,8 @@ def _delegation_attribution_line(evt: dict) -> str | None:
 def _completion_status(evt: dict) -> str:
     reason = evt.get("completion_reason") or "exited"
     if reason == "killed":
+        if evt.get("kill_reason"):
+            return str(evt["kill_reason"])
         if evt.get("termination_source") == "core_update_pause":
             return "killed by the Hermes update"
         return f"terminated by {evt.get('termination_source') or 'Hermes'}"

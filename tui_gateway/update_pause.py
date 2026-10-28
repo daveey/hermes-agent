@@ -110,12 +110,13 @@ def _format_start(started_at: Any) -> str:
 
 
 def _killed_job_notice(receipt: dict) -> str:
-    """The normal completion text, with the update named as the reason."""
+    """The normal completion text, with the receipt's reason (default: the update) named."""
     from tools.process_registry_notifications import format_process_notification
     text = format_process_notification({
         "type": "completion", "session_id": receipt["session_id"], "command": receipt.get("command") or "",
         "exit_code": receipt.get("exit_code", -15), "completion_reason": "killed",
-        "termination_source": PAUSE_REASON, "kill_reason": UPDATE_KILL_REASON,
+        "termination_source": receipt.get("termination_source") or PAUSE_REASON,
+        "kill_reason": receipt.get("kill_reason") or UPDATE_KILL_REASON,
         "output": receipt.get("output") or "",
     })
     return text or ""
@@ -139,14 +140,18 @@ def _update_jobs(session: dict) -> list[dict]:
     return jobs
 
 
-def stop_owned_jobs_for_update_pause(jobs: list[dict], save: Callable[[], bool]) -> bool:
-    """Journal intent BEFORE signaling, and each outcome before proceeding. Refuse pause on failure."""
+def stop_owned_jobs_for_update_pause(jobs: list[dict], save: Callable[[], bool], *, source: str = PAUSE_REASON,
+                                     reason: str = UPDATE_KILL_REASON) -> bool:
+    """Journal intent BEFORE signaling, and each outcome before proceeding. Refuse pause on failure.
+    ``source``/``reason`` name who stopped the job (the backend-exit journal passes its own)."""
     from tools.process_registry import process_registry, _redact_process_result
     for job in jobs:
         if job.get("kill_state") == "killed":
             continue
         sid = job["session_id"]
-        result = process_registry.kill_process(sid, source=PAUSE_REASON, consume_output=False)
+        if source != PAUSE_REASON:
+            job.update(termination_source=source, kill_reason=reason)
+        result = process_registry.kill_process(sid, source=source, consume_output=False)
         if result.get("status") == "already_exited":
             job["kill_state"] = "already_exited"
         elif result.get("status") == "killed":
@@ -157,7 +162,7 @@ def stop_owned_jobs_for_update_pause(jobs: list[dict], save: Callable[[], bool])
             if job.get("notify_on_complete"):
                 job["notice"] = _killed_job_notice(job)
         else:
-            logger.warning("core-update pause: job %s not stopped; refusing pause (%s)", sid, result.get("status"))
+            logger.warning("background job %s not stopped by %s (%s)", sid, source, result.get("status"))
             return False
         if not save():
             return False
@@ -211,16 +216,23 @@ def pause_note(prompt: str, killed_jobs: list | None = None) -> str:
     note = (f"{_AUTO_CONTINUE_NOTE_PREFIX} — it was paused at a step boundary for a Hermes update. Every "
             "tool result above is complete; continue with the next step and don't redo finished steps. "
             f"The paused request was:]\n\n{prompt}")
+    report = killed_jobs_report(killed_jobs, "Background jobs stopped for this Hermes update:")
+    return f"{note}\n\n{report}" if report else note
+
+
+def killed_jobs_report(killed_jobs: list | None, heading: str) -> str:
+    """One line per stopped job (id, UTC start, command head, restart advice) plus, for a notify job,
+    its completion notice with the reason. Empty when there are none."""
     jobs = [job for job in (killed_jobs or []) if isinstance(job, dict) and job.get("session_id")]
     if not jobs:
-        return note
-    lines = [note, "", "Background jobs stopped for this Hermes update:"]
+        return ""
+    lines = [heading]
     for job in jobs:
         command = job.get("command") or "(no command)"
         state = job.get("kill_state", "killed")
         if state != "killed":
             lines.append(f"- {job['session_id']} started {_format_start(job.get('started_at'))}: {command} "
-                         f"— update interruption outcome {state}; inspect its result before restarting")
+                         f"— interruption outcome {state}; inspect its result before restarting")
             continue
         lines.append(f"- {job['session_id']} started {_format_start(job.get('started_at'))}: {command} "
                      f"— restart it if you still need it")

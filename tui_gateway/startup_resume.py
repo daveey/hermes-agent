@@ -21,11 +21,19 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from tui_gateway.exit_job_receipts import JOBS_REASON, JOBS_RECEIPT_MAX_AGE_S
 from tui_gateway.turn_marker import _load, _marker_path, marker_writer_state, read_turn_marker
 
 logger = logging.getLogger(__name__)
 
 _ids = itertools.count(1)
+# [daveey] Markers the boot sweep retries while an old writer may still be exiting: core-update pauses and
+# background-job receipts (``exit_job_receipts``). A receipt also outlives the turn freshness window.
+_RETRY_REASONS = frozenset({"core_update_pause", JOBS_REASON})
+
+
+def _max_age(marker: dict, fresh: float) -> float:
+    return JOBS_RECEIPT_MAX_AGE_S if marker.get("reason") == JOBS_REASON else fresh
 
 
 def _settings(cfg: dict | None) -> tuple[bool, float, int, float]:
@@ -71,7 +79,7 @@ def pending_resumes(home: Path, cfg: dict | None, *, now: float | None = None) -
             m = read_turn_marker(h, key)
             if m is None or not m.get("auto_continue", True):
                 continue
-            if now - m["started_at"] > fresh or m["attempts"] >= max_attempts:
+            if now - m["started_at"] > _max_age(m, fresh) or m["attempts"] >= max_attempts:
                 continue
             if marker_writer_state(m) == "alive":
                 continue  # a live sibling backend owns this turn
@@ -85,7 +93,7 @@ def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, 
     """Call ``resume(rid, params)`` (the ``session.resume`` handler) for each pending marker; returns outcomes."""
     results = []
     for row in pending_resumes(home, cfg):
-        if paused_only and (read_turn_marker(row["home"], row["session_key"]) or {}).get("reason") != "core_update_pause":
+        if paused_only and (read_turn_marker(row["home"], row["session_key"]) or {}).get("reason") not in _RETRY_REASONS:
             continue
         # [daveey] No client is attached: run as the session's stored source, not this process's env default.
         params: dict[str, Any] = {"session_id": row["session_key"], "omit_messages": True, "source_from_store": True}
@@ -110,8 +118,8 @@ def _paused_markers_remain(home: Path, cfg: dict | None) -> bool:
     # Include live writers: they can still be retiring during the first boot sweep.
     _, fresh, max_attempts, _ = _settings(cfg)
     now = time.time()
-    return any(entry.get("reason") == "core_update_pause" and entry.get("auto_continue", True)
-               and now - float(entry.get("started_at") or 0) <= fresh
+    return any(entry.get("reason") in _RETRY_REASONS and entry.get("auto_continue", True)
+               and now - float(entry.get("started_at") or 0) <= _max_age(entry, fresh)
                and int(entry.get("attempts") or 0) < max_attempts
                for _, h in _homes(home) for key in _load(_marker_path(h))
                if (entry := read_turn_marker(h, key)) is not None)
