@@ -563,7 +563,11 @@ def try_acquire_active_session(
             logger.info("Pruned %d stale active session lease(s)", pruned)
 
         def refuse(message: str, reason: str, log: str, *args) -> tuple[None, ActiveSessionRefusal]:
-            _write_entries(state_path, entries)  # persist the prune even when refusing
+            # Persist a prune even when refusing, but never rewrite an unchanged
+            # registry: each write fsyncs under the exclusive lock, so a no-op write
+            # per refusal serializes every contender behind the disk.
+            if pruned:
+                _write_entries(state_path, entries)
             logger.info(log, *args)
             return None, ActiveSessionRefusal(message, reason)
 

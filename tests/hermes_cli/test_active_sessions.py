@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import active_sessions
+from tests.waiting import wait_until
 
 
 
@@ -53,6 +54,53 @@ def test_resolve_max_concurrent_sessions_values():
 
 
 
+# Hang guard for the whole cross-process cohort, not a latency bound: every wait
+# below is on an observable event (a ready/result file, process exit). Each
+# contender's attempt holds the registry's exclusive lock across an fsync'd write,
+# so on a busy CI disk the attempts serialize for seconds; per-phase 10s bounds
+# turned that into TimeoutExpired flakes.
+_COHORT_TIMEOUT = 120.0
+
+_CONTENDER_SCRIPT = (
+    "import os, time\n"
+    "from pathlib import Path\n"
+    "from hermes_cli.active_sessions import try_acquire_active_session\n"
+    "idx = os.environ['WORKER_INDEX']\n"
+    "worker_count = int(os.environ['WORKER_COUNT'])\n"
+    "late_worker = os.environ.get('LATE_WORKER_INDEX')\n"
+    "ready_dir = Path(os.environ['READY_DIR'])\n"
+    "results_dir = Path(os.environ['RESULTS_DIR'])\n"
+    "go_file = Path(os.environ['GO_FILE'])\n"
+    "deadline = float(os.environ['COHORT_DEADLINE'])\n"
+    "def wait_for(cond, what):\n"
+    "    while not cond():\n"
+    "        if time.time() > deadline:\n"
+    "            raise RuntimeError('timed out waiting for ' + what)\n"
+    "        time.sleep(0.01)\n"
+    "(ready_dir / idx).write_text('ready', encoding='utf-8')\n"
+    "wait_for(go_file.exists, 'go file')\n"
+    "if idx == late_worker:\n"
+    "    # Attempt only once another process provably holds the last slot.\n"
+    "    wait_for(lambda: any(p.read_text(encoding='utf-8') == 'OK'\n"
+    "                         for p in results_dir.iterdir()), 'a holder')\n"
+    "lease, message = try_acquire_active_session(\n"
+    "    session_id=f'process-{idx}',\n"
+    "    surface='cli',\n"
+    "    config={'max_concurrent_sessions': 1},\n"
+    ")\n"
+    "outcome = 'BLOCK' if lease is None else 'OK'\n"
+    "tmp = results_dir / f'.{idx}.tmp'\n"
+    "tmp.write_text(outcome, encoding='utf-8')\n"
+    "tmp.replace(results_dir / idx)\n"
+    "print(outcome, flush=True)\n"
+    "if lease is not None:\n"
+    "    wait_for(lambda: len([p for p in results_dir.iterdir()\n"
+    "                          if not p.name.startswith('.')]) >= worker_count,\n"
+    "             'all workers to attempt acquire')\n"
+    "    lease.release()\n"
+)
+
+
 def test_cross_process_acquire_claims_only_one_last_slot(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -62,58 +110,24 @@ def test_cross_process_acquire_claims_only_one_last_slot(tmp_path, monkeypatch):
     results_dir = tmp_path / "results"
     results_dir.mkdir()
     go_file = tmp_path / "go"
+    deadline = time.monotonic() + _COHORT_TIMEOUT
     env = os.environ.copy()
     env["HERMES_HOME"] = str(home)
     env["PYTHONPATH"] = str(repo_root)
-    script = (
-        "import os, time\n"
-        "from pathlib import Path\n"
-        "from hermes_cli.active_sessions import try_acquire_active_session\n"
-        "idx = os.environ['WORKER_INDEX']\n"
-        "worker_count = int(os.environ['WORKER_COUNT'])\n"
-        "delayed_worker = os.environ.get('DELAYED_WORKER_INDEX')\n"
-        "ready_dir = Path(os.environ['READY_DIR'])\n"
-        "results_dir = Path(os.environ['RESULTS_DIR'])\n"
-        "go_file = Path(os.environ['GO_FILE'])\n"
-        "(ready_dir / idx).write_text('ready', encoding='utf-8')\n"
-        "deadline = time.time() + 10\n"
-        "while not go_file.exists():\n"
-        "    if time.time() > deadline:\n"
-        "        raise RuntimeError('timed out waiting for go file')\n"
-        "    time.sleep(0.01)\n"
-        "if idx == delayed_worker:\n"
-        "    time.sleep(2.5)\n"
-        "lease, message = try_acquire_active_session(\n"
-        "    session_id=f'process-{idx}',\n"
-        "    surface='cli',\n"
-        "    config={'max_concurrent_sessions': 1},\n"
-        ")\n"
-        "if lease is None:\n"
-        "    (results_dir / idx).write_text('BLOCK', encoding='utf-8')\n"
-        "    print('BLOCK', flush=True)\n"
-        "else:\n"
-        "    (results_dir / idx).write_text('OK', encoding='utf-8')\n"
-        "    print('OK', flush=True)\n"
-        "    deadline = time.time() + 10\n"
-        "    while len(list(results_dir.iterdir())) < worker_count:\n"
-        "        if time.time() > deadline:\n"
-        "            raise RuntimeError('timed out waiting for all workers to attempt acquire')\n"
-        "        time.sleep(0.01)\n"
-        "    lease.release()\n"
-    )
+    env["COHORT_DEADLINE"] = str(time.time() + _COHORT_TIMEOUT)
     workers: list[subprocess.Popen[str]] = []
     try:
         for index in range(6):
             worker_env = env.copy()
             worker_env["WORKER_INDEX"] = str(index)
             worker_env["WORKER_COUNT"] = "6"
-            worker_env["DELAYED_WORKER_INDEX"] = "5"
+            worker_env["LATE_WORKER_INDEX"] = "5"
             worker_env["READY_DIR"] = str(ready_dir)
             worker_env["RESULTS_DIR"] = str(results_dir)
             worker_env["GO_FILE"] = str(go_file)
             workers.append(
                 subprocess.Popen(
-                    [sys.executable, "-c", script],
+                    [sys.executable, "-c", _CONTENDER_SCRIPT],
                     env=worker_env,
                     text=True,
                     stdout=subprocess.PIPE,
@@ -121,16 +135,18 @@ def test_cross_process_acquire_claims_only_one_last_slot(tmp_path, monkeypatch):
                 )
             )
 
-        deadline = time.time() + 10
-        while len(list(ready_dir.iterdir())) < len(workers):
-            if time.time() > deadline:
-                raise AssertionError("workers did not become ready")
-            time.sleep(0.01)
+        wait_until(
+            lambda: len(list(ready_dir.iterdir())) >= len(workers),
+            timeout=max(0.0, deadline - time.monotonic()),
+            what="every contender to become ready",
+        )
         go_file.write_text("go", encoding="utf-8")
 
         outputs = []
         for worker in workers:
-            stdout, stderr = worker.communicate(timeout=10)
+            stdout, stderr = worker.communicate(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
             assert worker.returncode == 0, stderr
             outputs.append(stdout.strip())
     finally:
@@ -144,6 +160,31 @@ def test_cross_process_acquire_claims_only_one_last_slot(tmp_path, monkeypatch):
     assert active_sessions.active_session_registry_snapshot() == []
 
 
+def test_refusal_without_prune_leaves_registry_file_untouched(tmp_path, monkeypatch):
+    """A refused claim that pruned nothing must not rewrite the registry.
+
+    Every registry write fsyncs while holding the exclusive lock, so a no-op
+    rewrite per refusal made N contenders queue behind N disk flushes.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    cfg = {"max_concurrent_sessions": 1}
+    holder, _ = active_sessions.try_acquire_active_session(
+        session_id="holder", surface="cli", config=cfg
+    )
+    assert holder is not None
+    state_path = active_sessions._state_path()
+    before = state_path.stat()
+
+    # Both refusal kinds: over the cap, and a second writer for a held session.
+    for session_id in ("over-cap", "holder"):
+        lease, refusal = active_sessions.try_acquire_active_session(
+            session_id=session_id, surface="desktop", config=cfg
+        )
+        assert lease is None and refusal is not None
+
+    after = state_path.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    holder.release()
 
 
 def test_release_orphaned_leases_reclaims_only_unowned_own_pid_entries(tmp_path, monkeypatch):

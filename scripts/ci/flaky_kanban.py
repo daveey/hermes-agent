@@ -184,13 +184,39 @@ def _gh(url: str, token: str) -> Any:
         return json.loads(resp.read())
 
 
-def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *, runs: int = 40) -> list[str]:
-    """File cards for FLAKY annotations on recently completed runs not seen before."""
+def _completed_runs(api: str, token: str, *, since: float, per_page: int = 100) -> list[dict[str, Any]]:
+    """Every run created since ``since`` that has completed, across all result pages.
+
+    The list is ordered by creation, but a run is only readable once it completes: a
+    40-minute test run finishes after dozens of newer short runs, so a fixed first page
+    (it used to be the newest 40) silently skipped exactly the long test runs that carry
+    FLAKY annotations. A creation-time window, paged out, keeps them in view until they
+    complete; ``state["runs"]`` dedupes across polls.
+    """
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since))
+    runs: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        batch = _gh(f"{api}/actions/runs?status=completed&created=%3E%3D{created}"
+                    f"&per_page={per_page}&page={page}", token).get("workflow_runs", [])
+        runs += batch
+        if len(batch) < per_page:
+            return runs
+        page += 1
+
+
+def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
+                lookback_hours: float = 6.0) -> list[str]:
+    """File cards for FLAKY annotations on recently completed runs not seen before.
+
+    ``lookback_hours`` must outlast the slowest workflow plus any cron outage, and stay
+    well under ``save_state``'s 1000-run dedupe memory (the repo sees ~50 runs/hour).
+    """
     api = f"https://api.github.com/repos/{repo}"
     log: list[str] = []
     done = set(state["runs"])
-    page = _gh(f"{api}/actions/runs?status=completed&per_page={runs}", token)
-    for run in sorted(page.get("workflow_runs", []), key=lambda r: r["id"]):
+    since = time.time() - lookback_hours * 3600
+    for run in sorted(_completed_runs(api, token, since=since), key=lambda r: r["id"]):
         key = f"{run['id']}/{run.get('run_attempt', 1)}"
         if key in done:
             continue

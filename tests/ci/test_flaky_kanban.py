@@ -120,6 +120,44 @@ def test_annotations_round_trip_through_the_github_poll(monkeypatch):
     assert len(board.cards) == 2
 
 
+def test_poll_pages_past_newer_runs_to_reach_a_long_test_run(monkeypatch):
+    """A long test run completes after more newer runs than one page holds.
+
+    Regression: PR run 40764402730 (37 min of tests) finished behind 53 newer
+    completed runs; the poll read only the newest 40, so its three FLAKY
+    annotations never became cards.
+    """
+    api = "https://api.github.com/repos/o/r"
+    # Newest first, as GitHub orders them; the slow test run is the oldest.
+    runs = [{"id": 1000 - i, "run_attempt": 1, "head_branch": "b", "html_url": f"https://r/{1000 - i}"}
+            for i in range(150)]
+    slow = runs[-1]["id"]
+    seen_urls = []
+
+    def fake_gh(url, token):
+        seen_urls.append(url)
+        if url.startswith(f"{api}/actions/runs?"):
+            query = dict(part.split("=", 1) for part in url.split("?", 1)[1].split("&"))
+            per_page, page = int(query["per_page"]), int(query.get("page", 1))
+            return {"workflow_runs": runs[(page - 1) * per_page: page * per_page]}
+        if url.startswith(f"{api}/actions/runs/{slow}/attempts/1/jobs"):
+            return {"jobs": [{"id": 7, "name": "Python tests / Run tests (1/2)", "html_url": "https://job/7"}]}
+        if "/attempts/" in url:
+            return {"jobs": []}
+        if url.startswith(f"{api}/check-runs/7/annotations"):
+            return [{"title": fk.ANNOTATION_TITLE, "message": "tests/slow.py::test_flaky\nE  boom"}]
+        raise AssertionError(url)
+
+    monkeypatch.setattr(fk, "_gh", fake_gh)
+    board, state = FakeBoard(), fk.load_state(Path("/nonexistent/state.json"))
+    log = fk.poll_github("o/r", "tok", board, state)
+
+    assert log == [f"opened {state['cards']['tests/slow.py::test_flaky']['card']} tests/slow.py::test_flaky"]
+    assert f"{slow}/1" in state["runs"] and len(state["runs"]) == len(runs)
+    # Bounded by a creation window, not by a page count.
+    assert all("created=%3E%3D" in u for u in seen_urls if u.startswith(f"{api}/actions/runs?"))
+
+
 def test_annotate_mode_tolerates_a_missing_report(tmp_path, capsys):
     assert fk.main(["--annotate", str(tmp_path / "absent.json")]) == 0
     assert "no flaky report" in capsys.readouterr().out

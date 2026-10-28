@@ -159,6 +159,12 @@ async def _drain_deferred(runner, timeout=10.0):
         )
 
 
+# The fake summary worker streams until the test releases it; it gives up after
+# this long only so a broken hold cannot hang the run. Generous on purpose: the
+# hold is proven by event order, so this bound never races a healthy turn.
+_WORKER_GIVE_UP_SECONDS = 45.0
+
+
 @pytest.mark.asyncio
 async def test_turn_hold_keeps_admission_and_adopts_watermark_fenced_summary(
     monkeypatch, tmp_path
@@ -168,6 +174,7 @@ async def test_turn_hold_keeps_admission_and_adopts_watermark_fenced_summary(
     the turn itself is still released at the budget (#90845 invariant).
     """
     worker_started = threading.Event()
+    worker_gave_up = threading.Event()
     release_worker = threading.Event()
     committed = threading.Event()
     cleanup_done = threading.Event()
@@ -205,7 +212,8 @@ async def test_turn_hold_keeps_admission_and_adopts_watermark_fenced_summary(
             # would hang at interpreter exit joining executor threads).
             _spin_started = time.monotonic()
             while not release_worker.is_set():
-                if time.monotonic() - _spin_started > 20:
+                if time.monotonic() - _spin_started > _WORKER_GIVE_UP_SECONDS:
+                    worker_gave_up.set()
                     return (messages, None)
                 if commit_fence is not None:
                     commit_fence.touch_progress()
@@ -232,14 +240,21 @@ async def test_turn_hold_keeps_admission_and_adopts_watermark_fenced_summary(
     adapter = _CaptureAdapter()
     runner = _build_runner(gateway_run, adapter, fake_db)
 
-    started = time.monotonic()
-    result = await asyncio.wait_for(runner._handle_message(_make_event()), timeout=15)
-    elapsed = time.monotonic() - started
+    result = await asyncio.wait_for(
+        runner._handle_message(_make_event()), timeout=_WORKER_GIVE_UP_SECONDS * 2
+    )
 
-    # #90845/#92318 invariant intact: the turn is released at the budget.
+    # #90845/#92318 invariant intact: the turn-hold budget released the turn
+    # while the summary worker was still streaming (never committed, never
+    # gave up). Ordered by events, not elapsed wall time: the handler's own
+    # latency on a loaded runner is not the hold (CI saw 5.7s against a
+    # 5.0s bound with a 0.3s budget). A turn that waited for the worker
+    # instead returns only after the worker gives up, which fails below.
     assert result == "ok"
-    assert elapsed < 5.0, f"turn held for {elapsed:.1f}s despite the turn-hold budget"
     assert worker_started.is_set()
+    assert not committed.is_set() and not worker_gave_up.is_set(), (
+        "the turn waited for the summary worker instead of the turn-hold budget"
+    )
     assert runner._run_agent.await_count == 1
 
     # (b) NO retry-after was armed while the attempt is still running —
