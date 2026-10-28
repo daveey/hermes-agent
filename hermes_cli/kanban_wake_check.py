@@ -359,14 +359,29 @@ def _run_probe(key: tuple[str, str], cmd: str, cwd: str, env: dict) -> tuple[Any
             _PROCS.pop(key, None)
 
 
+def _probe_diagnostics(cwd: str, env: dict) -> dict:
+    """Where a probe ran, so a false wake can be diagnosed from its ``condition_met`` event alone."""
+    import socket
+
+    return {"pid": os.getpid(), "host": socket.gethostname(), "cwd": cwd, "home": env.get("HOME"),
+            "path_head": [p for p in (env.get("PATH") or "").split(os.pathsep)[:3]]}
+
+
 def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int], generation: str) -> Any:
     key = (db_path, task_id)
     try:
         rc, out = _run_probe(key, cmd, cwd, env)
+        diag = None
+        if rc == 0:
+            # One stray exit 0 must not wake a card (a stolen wait status once read as 0): confirm
+            # with a second run and wake only if it passes again. The second result is what counts.
+            first = {"first_rc": rc, "first_output": _tail(out)}
+            rc, out = _run_probe(key, cmd, cwd, env)
+            diag = {**first, "confirm_rc": rc, **_probe_diagnostics(cwd, env)}
         from hermes_cli import kanban_db_connect as kbc
         conn = kbc.connect(Path(db_path))
         try:
-            apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation)
+            apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation, diagnostics=diag)
         finally:
             conn.close()
         return rc
@@ -376,7 +391,8 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
 
 
 def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out: str,
-                 *, generation: str, now: Optional[int] = None) -> Optional[str]:
+                 *, generation: str, now: Optional[int] = None,
+                 diagnostics: Optional[dict] = None) -> Optional[str]:
     """Record one probe result; wake the card on success or a broken probe. Returns the event
     kind appended (``condition_met`` / ``wake_check_broken``) or None. A result for a probe
     that is no longer the card's (re-parked, unblocked) is dropped."""
@@ -392,7 +408,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             return None
         rc_col = rc if isinstance(rc, int) else -1
         if rc == 0:
-            return _wake(conn, task_id, CONDITION_MET_EVENT, {"wake_check": cmd, "output": tail})
+            return _wake(conn, task_id, CONDITION_MET_EVENT, {
+                "wake_check": cmd, "output": tail, **({"diagnostics": diagnostics} if diagnostics else {})})
         if rc == 1 and not output_error(out):
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "

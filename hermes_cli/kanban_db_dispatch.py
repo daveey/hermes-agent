@@ -279,9 +279,9 @@ _RECENT_WORKER_EXIT_TTL_SECONDS = 600
 _RECENT_WORKER_EXITS_MAX = 4096
 _recent_worker_exits: dict[int, tuple[int, float]] = {}
 
-# Windows has no ``waitpid(-1)``: a child's exit code is only recoverable
-# through a live handle, so ``_default_spawn`` parks each worker's ``Popen``
-# here (Windows only) and ``reap_worker_zombies`` polls it. Entry: ``pid -> Popen``.
+# A child's exit code is only recoverable through a live handle (Windows has no
+# ``waitpid(-1)``; on POSIX ``waitpid(-1)`` would steal other children's status), so
+# ``_default_spawn`` parks each worker's ``Popen`` here and ``reap_worker_zombies`` polls it. Entry: ``pid -> Popen``.
 _live_worker_procs: dict[int, subprocess.Popen] = {}
 
 
@@ -368,27 +368,16 @@ def reap_worker_zombies() -> list[int]:
     parked by ``_default_spawn`` (the only way to learn a child's exit code
     there), so the rate-limit sentinel exit is classified on both hosts."""
     reaped: list[int] = []
-    if _kb._IS_WINDOWS:
-        for pid, proc in list(_live_worker_procs.items()):
-            returncode = proc.poll()
-            if returncode is None:
-                continue
-            _record_worker_exit(pid, _wait_status_from_returncode(returncode))
-            _live_worker_procs.pop(pid, None)
-            reaped.append(pid)
-        return reaped
-    try:
-        while True:
-            try:
-                pid, status = os.waitpid(-1, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if pid == 0:
-                break
-            _record_worker_exit(pid, status)
-            reaped.append(pid)
-    except Exception:
-        pass
+    # Only our own workers: waitpid(-1) also stole wake-check probe children, and Python 3.14's
+    # Popen then reported their exit as 0 (a false condition_met).
+    for pid, proc in list(_live_worker_procs.items()):
+        returncode = proc.poll()
+        if returncode is None:
+            continue
+        _record_worker_exit(
+            pid, _wait_status_from_returncode(returncode) if returncode >= 0 else -returncode)
+        _live_worker_procs.pop(pid, None)
+        reaped.append(pid)
     return reaped
 
 
@@ -3239,8 +3228,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         )
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
-    if _kb._IS_WINDOWS:
-        _live_worker_procs[proc.pid] = proc
+    _live_worker_procs[proc.pid] = proc
     return proc.pid
 
 
