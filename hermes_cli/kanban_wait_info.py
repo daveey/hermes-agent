@@ -33,7 +33,7 @@ STALL_AFTER_S = 2 * 3600
 LIVE_PRODUCER_KINDS = ("card", "ci", "deploy", "external", "clock")
 # Block kinds only an agent clears (core kanban_block_policy.AGENT_OWNED_KINDS, plus assignment routing). Untyped
 # (None/legacy) blocks are agent-owned too, but uncertain: they only count once stalled.
-AGENT_BLOCK_KINDS = ("transient", "capability", "assignment")
+AGENT_BLOCK_KINDS = ("transient", "capability", "assignment", "needs_input")
 # Events that put a card into its current parked state; the newest one dates the wait and carries its reason.
 # ``continued`` is a continuation checkpoint parking the card ``scheduled`` with a ``wake_at``.
 PARK_EVENT_KINDS = ("scheduled", "blocked", "gave_up", "continuation_exhausted", "block_loop_detected",
@@ -193,7 +193,8 @@ def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: 
         if kind is None:
             return out("blocked:untyped", "an agent to clear an untyped block", True, certain=False)
         if kind != "time":
-            # needs_input (or another human kind) without a validated ask: the user's move, just not visible.
+            # another human kind without a validated ask: the user's move, just not visible. (An ask-less
+            # needs_input is agent-owned, handled above; a validated ask returns early as ``human``.)
             return out(f"blocked:{kind}", f"an unvalidated ask ({kind})", False)
     # scheduled, or blocked kind=time: a park. Who produces what it waits for?
     wake_at = epoch_s(payload.get("wake_at"))

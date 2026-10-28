@@ -295,10 +295,15 @@ def test_parked_waits_lists_each_owning_session_with_wait_info(kanban_root):
 
 
 # ---- review fixes: false positives that must not wake anyone ------------------------------------------------------
-def test_needs_input_without_a_validated_ask_is_not_agent_owned():
-    info = d("blocked", block_kind="needs_input", human=False, park={"reason": "Two decisions for David"},
-             since=NOW - 30 * H)
-    assert info["agent_owned"] is False and info["wait_state"] == "waiting" and "unvalidated ask" in info["waiting_on"]
+def test_needs_input_without_a_validated_ask_is_agent_owned():
+    # Matches kanban_block_policy.AGENT_OWNED_KINDS: an ask-less needs_input is invisible to David, so an agent owns it.
+    from hermes_cli.kanban_block_policy import AGENT_OWNED_KINDS
+    assert "needs_input" in AGENT_OWNED_KINDS
+    fresh = d("blocked", block_kind="needs_input", human=False, park={"reason": "Two decisions for David"},
+              since=NOW - 60)
+    assert fresh["agent_owned"] is True and fresh["wait_state"] == "waiting"
+    stale = d("blocked", block_kind="needs_input", human=False, park={"reason": "x"}, since=NOW - 30 * H)
+    assert stale["agent_owned"] is True and stale["wait_state"] == "stalled"
 
 
 def test_untyped_legacy_block_counts_only_once_stalled():

@@ -351,3 +351,15 @@ def test_dispatcher_auto_decompose_tick_requests_human_skip(monkeypatch) -> None
     disp = kwd._KanbanDispatcher(SimpleNamespace(DEFAULT_BOARD="default"), settings)
     assert disp.auto_decompose_tick(5) == 0
     assert seen.get("skip_awaiting_human") is True
+
+
+def test_cmd_block_refuses_askless_needs_input(kanban_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`hermes kanban block --kind needs_input` with no human_request is refused (rc 2) and the task is untouched."""
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, title="askless")
+        args = argparse.Namespace(task_id=tid, ids=None, reason=["need", "a", "decision"], kind="needs_input")
+        assert kanban_cli._cmd_block(args) == 2
+        assert "agent_owned_block" in capsys.readouterr().err
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_kind) == ("running", None)
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == "blocked"]
