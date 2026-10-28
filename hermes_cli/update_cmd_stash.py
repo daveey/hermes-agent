@@ -106,7 +106,7 @@ def recover_flipped_bare_checkout(git_cmd: list[str], cwd: Path) -> bool:
     resolved = git_marker
     if git_marker.is_file():
         pointed = ""
-        for line in git_marker.read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in git_marker.read_text(encoding="utf-8-sig", errors="replace").splitlines():
             if line.strip().lower().startswith("gitdir:"):
                 pointed = line.split(":", 1)[1].strip()
                 break
