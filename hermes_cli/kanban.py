@@ -478,17 +478,21 @@ def _cmd_create(args: argparse.Namespace) -> int:
             from hermes_cli.kanban_capability_routing import preflight
             placement = preflight(conn, task_id, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
+    unlinked_warning = None
     if not in_worker and not session_id and not idem_hit and _agent_invoked():
         # An agent shelled out but no chat could be stamped (unknown/missing session env:
         # ssh to another host, `env -i`, another profile...). Say so loudly: an unlinked card
         # silently never shows in the chat's task strip or sidebar badge. [daveey]
-        print(f"⚠  {task_id} is not linked to any chat (no known HERMES_SESSION_KEY/ID in this "
-              "environment), so it won't show in the chat's task strip. Create cards with the "
-              "kanban_create tool instead, or link it to the chat: "
-              f"hermes kanban notify-subscribe {task_id} --platform tui --chat-id <session_id>",
-              file=sys.stderr)
+        unlinked_warning = (
+            f"{task_id} is not linked to any chat (no known HERMES_SESSION_KEY/ID in this "
+            "environment), so it won't show in the chat's task strip. Create cards with the "
+            "kanban_create tool instead, or link it to the chat: "
+            f"hermes kanban notify-subscribe {task_id} --platform tui --chat-id <session_id>")
+        print(f"⚠  {unlinked_warning}", file=sys.stderr)
     if getattr(args, "json", False):
         out = _task_to_dict(task)
+        if unlinked_warning:  # also in the payload: run_slash returns only stdout for --json
+            out["warning"] = unlinked_warning
         if origin_binding:
             out["origin_binding"] = origin_binding
         if placement:
@@ -1845,6 +1849,10 @@ def run_slash(rest: str) -> str:
             print(f"error: {exc}", file=sys.stderr)
 
     out, err = buf_out.getvalue().rstrip(), buf_err.getvalue().rstrip()
+    if out and getattr(args, "json", False):
+        # --json callers parse the result: stderr diagnostics would make it invalid JSON, so
+        # they stay out of it (commands that warn put the warning in the payload). [daveey]
+        return out
     if err and out:
         return f"{out}\n{err}"
     return err if err else (out or "(no output)")

@@ -315,3 +315,54 @@ def test_cli_block_agent_owned_allowed_with_wake_check(kanban_home):
         assert kb.get_task(conn, tid).status == "scheduled"
         row = conn.execute("SELECT cmd FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone()
         assert row is not None and row["cmd"] == "test -f /tmp/x"
+
+
+# ---------------------------------------------------------------------------
+# --json stays machine-readable when create warns about an unlinked card
+# ---------------------------------------------------------------------------
+
+
+def _create_unlinked_from_agent(monkeypatch, *flags):
+    # An agent shell whose session can't be stamped: an unknown HERMES_SESSION_ID marks the
+    # call agent-invoked, but no chat links the card, so create warns.
+    monkeypatch.setenv("HERMES_SESSION_ID", "no-such-session")
+    return kc.run_slash('create "agent card" --assignee default ' + " ".join(flags))
+
+
+def test_create_json_via_slash_is_pure_json_with_unlinked_warning_field(kanban_home, monkeypatch):
+    out = _create_unlinked_from_agent(monkeypatch, "--json")
+    payload = json.loads(out)  # nothing appended after the object
+    assert payload["id"].startswith("t_")
+    assert "is not linked to any chat" in payload["warning"]
+    assert payload["id"] in payload["warning"]
+
+
+def test_create_json_cli_keeps_stdout_pure_and_warns_on_stderr(kanban_home, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_SESSION_ID", "no-such-session")
+    parser = argparse.ArgumentParser()
+    kc.build_parser(parser.add_subparsers(dest="_top"))
+    args = parser.parse_args(["kanban", "create", "agent card", "--assignee", "default", "--json"])
+    kc.kanban_command(args)
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert "is not linked to any chat" in payload["warning"]
+    assert "is not linked to any chat" in captured.err
+
+
+def test_create_text_mode_still_shows_unlinked_warning(kanban_home, monkeypatch):
+    out = _create_unlinked_from_agent(monkeypatch)
+    assert out.startswith("Created t_")
+    assert "is not linked to any chat" in out
+
+
+def test_create_json_without_warning_has_no_warning_field(kanban_home, monkeypatch):
+    for name in kc._AGENT_ENV_MARKERS:
+        monkeypatch.delenv(name, raising=False)
+    payload = json.loads(kc.run_slash('create "plain card" --assignee default --json'))
+    assert "warning" not in payload
+
+
+def test_hermetic_env_drops_agent_session_markers():
+    # A test run launched from an agent shell or kernel must not look agent-invoked.
+    import os
+    assert not any(os.environ.get(n) for n in kc._AGENT_ENV_MARKERS), kc._AGENT_ENV_MARKERS

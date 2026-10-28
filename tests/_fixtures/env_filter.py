@@ -158,6 +158,12 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_SESSION_THREAD_ID",
     "HERMES_SESSION_SOURCE",
     "HERMES_SESSION_KEY",
+    # Also agent-session markers (``hermes_cli.kanban._AGENT_ENV_MARKERS``): a test run from an
+    # agent shell or execute_code kernel otherwise takes the CLI's agent-invoked path (e.g. the
+    # "not linked to any chat" warning on ``kanban create``) that CI never sees.
+    "HERMES_SESSION_ID",
+    "HERMES_RPC_SOCKET",
+    "HERMES_KERNEL_SENTINEL",
     "HERMES_GATEWAY_SESSION",
     "HERMES_CRON_SESSION",
     "_HERMES_GATEWAY",
