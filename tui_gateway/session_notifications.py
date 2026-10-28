@@ -658,6 +658,19 @@ def _forwarded_locally(remote_task_id: str) -> bool:
         return False
 
 
+def _remote_transcript_has(session_key: str):
+    """``(notice_key, task_id) -> bool`` over this chat's lineage, for orphan and legacy reconciliation."""
+    def check(notice_key: str, task_id: str) -> bool:
+        try:
+            with _session_db({"session_key": session_key}) as db:
+                from tui_gateway.kanban_remote_notices import notice_in_transcript
+                return notice_in_transcript(db, session_key, notice_key, task_id)
+        except Exception:
+            logger.debug("remote kanban transcript check failed", exc_info=True)
+            return False
+    return check
+
+
 def _collect_remote_kanban_notifications(session_key: str, claims: list | None) -> list:
     """Done/blocked notices for cards on other gateways linked to this chat (``kanban_remote_notices``). [daveey]"""
     try:
@@ -666,7 +679,8 @@ def _collect_remote_kanban_notifications(session_key: str, claims: list | None) 
         if not _krn.hub_db_path().is_file():
             return []
         found = _krn.collect(session_key, get_active_profile_name() or "default",
-                             lineage=_session_lineage(session_key), skip=_forwarded_locally)
+                             lineage=_session_lineage(session_key), skip=_forwarded_locally,
+                             transcript_has=_remote_transcript_has(session_key))
     except Exception as exc:
         _notif_log_failure("remote kanban notification poll failed", exc)
         return []
@@ -773,6 +787,16 @@ def _kb_ack_durable(session: dict, durable_ids: set) -> None:
     by_sub: dict = {}
     for claim in session.get("_kanban_claims") or []:
         if claim.get("remote"):
+            texts = claim.get("texts") or []
+            if texts and all(id(t) in durable_ids for t in texts) and not claim.get("acked"):
+                try:
+                    from tui_gateway import kanban_remote_notices as _krn
+                    if _krn.ack(claim["remote"]):
+                        claim["durable"] = True
+                        claim["acked"] = True
+                except Exception:
+                    logger.warning(
+                        "remote kanban notice ack failed (a restart redelivers; the row dedups)", exc_info=True)
             continue
         texts = claim.get("texts") or []
         if texts and all(id(t) in durable_ids for t in texts):
