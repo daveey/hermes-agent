@@ -81,13 +81,23 @@ const homeFirst = (projects: SidebarProjectTree[]): SidebarProjectTree[] =>
     ? projects
     : [...projects.filter(project => project.isNoProject), ...projects.filter(project => !project.isNoProject)]
 
+// `stable` (the "created" sort) drops the two keys that move rows on their own —
+// the active-project hoist and last activity — so a project keeps its slot
+// while you work in it; ties fall through to the label.
+export interface ProjectOrderOptions {
+  stable?: boolean
+}
+
 export function sortProjectsForOverview(
   projects: SidebarProjectTree[],
-  activeProjectId: null | string
+  activeProjectId: null | string,
+  { stable = false }: ProjectOrderOptions = {}
 ): SidebarProjectTree[] {
+  const hoistId = stable ? null : activeProjectId
+
   const sorted = [...projects].sort((a, b) => {
-    const aActive = Boolean(activeProjectId && a.id === activeProjectId && !a.isAuto)
-    const bActive = Boolean(activeProjectId && b.id === activeProjectId && !b.isAuto)
+    const aActive = Boolean(hoistId && a.id === hoistId && !a.isAuto)
+    const bActive = Boolean(hoistId && b.id === hoistId && !b.isAuto)
 
     if (aActive !== bActive) {
       return aActive ? -1 : 1
@@ -105,7 +115,7 @@ export function sortProjectsForOverview(
     }
 
     return (
-      projectActivityTime(b) - projectActivityTime(a) ||
+      (stable ? 0 : projectActivityTime(b) - projectActivityTime(a)) ||
       a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
     )
   })
@@ -124,8 +134,13 @@ export function sortProjectsForOverview(
 //
 // Fresh projects keep their place in the deterministic sort instead: ones with
 // real activity go on top (a project you just started still surfaces), and
-// zero-session discoveries sink below the hand-ordered list.
-export function orderProjectsByIds(projects: SidebarProjectTree[], orderIds: string[]): SidebarProjectTree[] {
+// zero-session discoveries sink below the hand-ordered list. Under `stable`
+// nothing jumps the hand-ordered list: fresh projects all follow it.
+export function orderProjectsByIds(
+  projects: SidebarProjectTree[],
+  orderIds: string[],
+  { stable = false }: ProjectOrderOptions = {}
+): SidebarProjectTree[] {
   if (!orderIds.length) {
     return projects
   }
@@ -137,6 +152,10 @@ export function orderProjectsByIds(projects: SidebarProjectTree[], orderIds: str
 
   if (!fresh.length) {
     return homeFirst(ordered)
+  }
+
+  if (stable) {
+    return homeFirst([...ordered, ...fresh])
   }
 
   return homeFirst([

@@ -1089,7 +1089,8 @@ export function ChatSidebar({
             isHiddenFromProjects
           )
         ),
-      activeProjectId
+      activeProjectId,
+      { stable: ordering === 'created' }
     )
 
     // Layer the user's manual drag-order on top of the deterministic sort. Empty
@@ -1109,12 +1110,13 @@ export function ChatSidebar({
       return true
     })
 
-    return orderProjectsByIds(deduped, projectOrderIds)
+    return orderProjectsByIds(deduped, projectOrderIds, { stable: ordering === 'created' })
   }, [
     visibleProjectTree,
     dismissedAutoProjects,
     orderRepos,
     activeProjectId,
+    ordering,
     projectFilter,
     projectOrderIds,
     isHiddenFromProjects,

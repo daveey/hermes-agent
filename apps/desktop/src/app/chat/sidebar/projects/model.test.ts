@@ -76,3 +76,44 @@ describe('sortProjectsForOverview', () => {
     expect(ids(sortProjectsForOverview(projects, 'active'))).toEqual([NO_PROJECT_ID, 'active', 'scanned'])
   })
 })
+
+describe('stable project order (created sort)', () => {
+  const named = (id: string, lastActive: number, isAuto = true): SidebarProjectTree => ({
+    ...makeProject(id, 1),
+    isAuto,
+    lastActive
+  })
+
+  it('does not hoist the active project or follow activity', () => {
+    const projects = [named('zeta', 900), named('alpha', 100), named('mid', 500)]
+
+    expect(ids(sortProjectsForOverview(projects, 'zeta', { stable: true }))).toEqual(['alpha', 'mid', 'zeta'])
+  })
+
+  it('keeps the same order when activity changes', () => {
+    const before = [named('b', 100), named('a', 200), named('c', 300)]
+    const after = [named('b', 999), named('a', 200), named('c', 1)]
+
+    expect(ids(sortProjectsForOverview(after, 'b', { stable: true }))).toEqual(
+      ids(sortProjectsForOverview(before, 'a', { stable: true }))
+    )
+  })
+
+  it('keeps explicit projects above auto repos and Home on top', () => {
+    const projects = [named('auto-a', 5), named('mine', 1, false), home()]
+
+    expect(ids(sortProjectsForOverview(projects, null, { stable: true }))).toEqual([NO_PROJECT_ID, 'mine', 'auto-a'])
+  })
+
+  it('keeps the default sort activity-led', () => {
+    const projects = [named('old', 100), named('new', 900)]
+
+    expect(ids(sortProjectsForOverview(projects, null))).toEqual(['new', 'old'])
+  })
+
+  it('appends a new active project below the hand-picked order instead of above it', () => {
+    const projects = [makeProject('ordered', 1), makeProject('just-started', 3)]
+
+    expect(ids(orderProjectsByIds(projects, ['ordered'], { stable: true }))).toEqual(['ordered', 'just-started'])
+  })
+})
