@@ -56,6 +56,16 @@ def serve_harness(monkeypatch):
     fake_web.start_server = _start_server  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server", fake_web)
     monkeypatch.setenv("HERMES_SERVE_UPDATE_POLL_S", "0.02")
+    # A fresh serve process: no identity cached by an earlier test. And never exec over pytest:
+    # the re-exec path is exercised for real in a child process below.
+    import hermes_cli.version_info as vi
+    monkeypatch.setattr(vi, "_cached_version_info", None)
+
+    def _no_exec(*_a):
+        raise AssertionError("cmd_dashboard tried to re-exec the test process")
+
+    monkeypatch.setattr(os, "execv", _no_exec)
+    monkeypatch.setattr(suw, "checkout_fingerprint", lambda: "git:refs/heads/main:" + "a" * 40)
 
     args = types.SimpleNamespace(
         ssh_session_token_file="/nonexistent/token", headless_backend=True, isolated=True,

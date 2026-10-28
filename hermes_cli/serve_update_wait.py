@@ -133,3 +133,106 @@ def wait_for_update_clear(*, update_probe: Optional[Callable[[], bool]] = None,
                 f"(bound {update_timeout_s if live else hold_timeout_s:.0f}s)")
             waiting_on = reason
         sleep(_env_seconds("HERMES_SERVE_UPDATE_POLL_S", POLL_S) or POLL_S)
+
+
+# ── re-exec once the wait is over ─────────────────────────────────────────────────────────────
+#
+# Waiting is not enough on its own. By the time the gate runs, ``hermes_cli.main``, its subcommand
+# parsers, ``hermes_cli.config`` and the bundled provider plugins are already imported, and
+# ``get_version_info()`` is already cached (the fireworks plugin reads it at import, and so does
+# the startup update-debt check). David-MBP 2026-10-28: serve pid 50733 started at 07:02:38.2,
+# filled that cache with cc29d783ed by 07:02:39 (the stamp is ``source: git``, so it is checked
+# against the live HEAD, which was still cc29d783ed then), waited until 07:03:40.6 while the
+# checkout moved to 42ea812e27 at 07:02:50, and then reported ``commit: cc29d783ed`` on
+# ``/api/health`` for its whole life, with old-tree modules loaded next to new ones.
+#
+# So when the checkout moved while this process waited (the revision read just before the wait
+# differs from the one on disk now), or the cached identity names a commit other than HEAD (it moved
+# between launch and the wait), the serve re-execs itself: same pid, same argv, same inherited fds (Desktop's READY pipe), before the one-shot SSH
+# token is read. The new image imports everything, identity included, from the new tree.
+
+REEXEC_ENV = "HERMES_SERVE_REEXEC_COUNT"
+MAX_REEXECS = 2  # a stamp that never matches HEAD must not loop; the skew watchdog still applies
+
+
+def _sha(fingerprint: Optional[str]) -> Optional[str]:
+    if not fingerprint:
+        return None
+    sha = fingerprint.rsplit(":", 1)[-1]
+    return sha if sha and sha != "unresolved" else None
+
+
+def checkout_fingerprint() -> Optional[str]:
+    """The revision of the checkout this process runs from (``hermes_cli.main``'s cheap reader)."""
+    try:
+        from hermes_cli.main import PROJECT_ROOT, _read_git_revision_fingerprint
+
+        return _read_git_revision_fingerprint(PROJECT_ROOT)
+    except Exception:
+        return None
+
+
+def _cached_commit() -> Optional[str]:
+    """The commit ``get_version_info()`` already cached, without filling the cache."""
+    try:
+        from hermes_cli import version_info as vi
+
+        cached = vi._cached_version_info
+        return cached.commit if cached is not None else None
+    except Exception:
+        return None
+
+
+def stale_after_wait(launch_fingerprint: Optional[str], current_fingerprint: Optional[str],
+                     cached_commit: Optional[str]) -> Optional[str]:
+    """Why this process no longer matches the checkout on disk, or ``None`` when it does."""
+    if current_fingerprint is None:
+        return None  # no git checkout to compare with (zip/nix installs): nothing to say
+    if launch_fingerprint is not None and launch_fingerprint != current_fingerprint:
+        return f"the checkout moved from {_sha(launch_fingerprint) or launch_fingerprint} to " \
+               f"{_sha(current_fingerprint) or current_fingerprint} while this backend waited"
+    head = _sha(current_fingerprint)
+    if head and cached_commit and cached_commit != head:
+        return f"its cached code identity is {cached_commit[:10]} but the checkout is at {head[:10]}"
+    return None
+
+
+def reexec_if_checkout_moved(result: str, launch_fingerprint: Optional[str], *,
+                             current_fingerprint: Optional[Callable[[], Optional[str]]] = None,
+                             cached_commit: Optional[Callable[[], Optional[str]]] = None,
+                             execv: Optional[Callable[[str, list], None]] = None,
+                             log: Optional[Callable[[str], None]] = None) -> bool:
+    """After :func:`wait_for_update_clear`: re-exec this serve if the code it loaded is stale.
+
+    Only a wait that ended because the update finished (``"cleared"``) re-execs: with nothing to
+    wait for nothing moved, and after a timeout the update is still running, so a new image would
+    only wait again. Returns False when no re-exec happened (``execv`` replaces the process
+    otherwise; a stub ``execv`` in tests returns True)."""
+    try:
+        count = int(os.environ.pop(REEXEC_ENV, "0") or 0)  # never leaks into the agent's children
+    except ValueError:
+        count = 0
+    if result != "cleared":
+        return False
+    emit = log or _stderr
+    why = stale_after_wait(launch_fingerprint, (current_fingerprint or checkout_fingerprint)(),
+                           (cached_commit or _cached_commit)())
+    if why is None:
+        return False
+    if count >= MAX_REEXECS:
+        emit(f"serve: {why}, but this backend already re-executed {count} times; starting anyway")
+        return False
+    if os.name == "nt":
+        # execv on Windows spawns a new pid, which the client's READY pipe does not follow.
+        emit(f"serve: {why}; cannot re-exec in place on Windows, starting anyway")
+        return False
+    argv = list(getattr(sys, "orig_argv", None) or [sys.executable, *sys.argv])
+    emit(f"serve: {why}; re-executing so this backend runs and reports only the new code")
+    os.environ[REEXEC_ENV] = str(count + 1)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    (execv or os.execv)(sys.executable, argv)
+    return True
