@@ -55,12 +55,18 @@ permissions:
 # A per-run group queued one full suite per push and saturated the shared
 # hermes-hub runners. [daveey]
 # Manual gate: a workflow_dispatch run (e.g. a green-gate run on main HEAD)
-# gets its own group `ci-dispatch-<run_id>`. Before, it shared `ci-main`: it
-# held the slot while pushes behind it were superseded one by one, and a
-# pending dispatch could itself be cancelled by the next push. Now a dispatch
-# is never superseded and never blocks the push group; pushes still coalesce.
+# gets its own group per ref (and per strict_acceptance value), separate from
+# `ci-main`: a push never supersedes or blocks a dispatch, and vice versa.
+# Dispatches on one ref coalesce like pushes: the dispatch in flight always
+# finishes (cancel-in-progress is false), and only the NEWEST pending dispatch
+# waits behind it; an older pending one is superseded (the newer one tests the
+# ref's newer HEAD). A per-run_id group (250ee8a8a8) let every dispatch stack a
+# full suite on the shared hermes-hub runners: on 2026-10-28 three dispatches
+# on main (09:48, 11:23, 13:41) sat queued at once and starved short required
+# PR jobs (check-common-ancestor, supply-chain) for over an hour. A stable
+# release dispatch (inputs.release) keeps its own run_id group. [daveey]
 concurrency:
-  group: ci-${{ inputs.release == true && github.run_id || github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id) || github.ref == 'refs/heads/main' && 'main' || (github.event_name == 'pull_request' && github.event.pull_request.number || github.ref) }}
+  group: ci-${{ inputs.release == true && github.run_id || github.event_name == 'workflow_dispatch' && format('dispatch-{0}-{1}', github.ref, inputs.strict_acceptance) || github.ref == 'refs/heads/main' && 'main' || (github.event_name == 'pull_request' && github.event.pull_request.number || github.ref) }}
   cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
 
 jobs:

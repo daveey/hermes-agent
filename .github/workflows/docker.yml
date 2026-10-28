@@ -47,14 +47,19 @@ on:
 permissions:
   contents: read
 
-# Concurrency: push/release runs are NEVER cancelled so every merge gets
-# its own image.  PR runs reuse a PR-scoped group with
-# cancel-in-progress: true so rapid pushes to the same PR collapse to
-# the latest commit. Release runs include the run_id: several reusable calls
-# (test/publish) of this workflow live inside ONE parent run, and a
-# shared group would cancel the parent mid-release.
+# Concurrency:
+# * Standalone main runs (push/dispatch) share ONE group without
+#   cancel-in-progress. An in-flight build/publish is never cancelled, and
+#   GitHub keeps only the newest pending main run (older pending ones are
+#   superseded). One run per merge left 60+ main runs queued on the docker-ci
+#   pool (t_01a18284c98aa108); the newest main image covers skipped SHAs.
+# * PR runs reuse a PR-scoped group with cancel-in-progress: true so rapid
+#   pushes to the same PR collapse to the latest commit.
+# * Release calls (release-phase != standalone) include the run_id: several
+#   reusable calls (test/publish) of this workflow live inside ONE parent run,
+#   and a shared group would cancel the parent mid-release.
 concurrency:
-  group: docker-${{ github.event.pull_request.number || (github.ref == 'refs/heads/main' && github.run_id) || github.ref }}-${{ inputs.release-phase || 'standalone' }}
+  group: docker-${{ github.event.pull_request.number || (github.ref == 'refs/heads/main' && (inputs.release-phase || 'standalone') != 'standalone' && github.run_id) || github.ref }}-${{ inputs.release-phase || 'standalone' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

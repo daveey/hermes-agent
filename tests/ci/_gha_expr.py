@@ -182,6 +182,15 @@ class _Parser:
             return json.dumps(args[0])
         if name == "fromJSON":
             return json.loads(args[0])
+        if name == "format":
+            template, *values = args
+
+            def _sub(match: re.Match[str]) -> str:
+                if match.group(0) in ("{{", "}}"):
+                    return match.group(0)[0]
+                return to_string(values[int(match.group(1))])
+
+            return re.sub(r"\{\{|\}\}|\{(\d+)\}", _sub, to_string(template))
         if name == "contains":
             hay, needle = args
             if isinstance(hay, list):
