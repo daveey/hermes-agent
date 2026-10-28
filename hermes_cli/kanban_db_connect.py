@@ -1018,8 +1018,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     ):
         conn.execute("UPDATE task_events SET kind = ? WHERE kind = ?", (new, old))
 
-    if _table_exists(conn, "kanban_notify_subs") and "delivery_metadata" in _column_names(conn, "kanban_notify_subs"):
-        # Unstamped legacy 'hub' subs get origin/shepherd provenance so inheritance can tell them apart. [daveey]
+    if (_table_exists(conn, "kanban_notify_subs") and "delivery_metadata" in _column_names(conn, "kanban_notify_subs")
+            and "created_at" in _column_names(conn, "tasks")):
+        # Unstamped legacy 'hub' subs get origin/shepherd provenance so inheritance can tell them apart. A legacy
+        # tasks table without created_at can't date its rows: leave them unstamped (inherit-time fallback). [daveey]
         from hermes_cli.kanban_db_notify import stamp_legacy_hub_sub_provenance
         try:
             stamp_legacy_hub_sub_provenance(conn)
