@@ -580,6 +580,18 @@ export function primaryGatewayConnectionId(): string {
 }
 
 /**
+ * The primary's registry connection id when it HAS one, else null. Unlike
+ * primaryGatewayConnectionId() this is safe to send as a request pin: its
+ * 'local' fallback names the "This device" registry entry, which Electron
+ * force-spawns a local backend for when the window's primary is a remote
+ * (env override / legacy global remote) — so a window talking to a remote
+ * would start a second, local `hermes serve` the user never asked for.
+ */
+export function primaryGatewayConnectionPin(): null | string {
+  return g.primaryConnectionId
+}
+
+/**
  * The registry connection serving the gateway the user is currently looking
  * at. A registry-backed primary takes its identity from the published primary
  * connection, falling back to Electron's active descriptor until that is set;

@@ -9,7 +9,7 @@ import {
   SIDEBAR_EXCLUDED_SOURCES
 } from '@/lib/session-source'
 import { markSidebarLive } from '@/store/boot-snapshot'
-import { gatewayActivationEpoch, primaryGatewayConnectionId } from '@/store/gateway'
+import { gatewayActivationEpoch, primaryGatewayConnectionId, primaryGatewayConnectionPin } from '@/store/gateway'
 import {
   $pinnedSessionIds,
   $sessionsLimit,
@@ -425,6 +425,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
         do {
           activationEpoch = gatewayActivationEpoch()
           primaryConnection = primaryGatewayConnectionId()
+          const primaryPin = primaryGatewayConnectionPin()
           result = await fetchPage()
 
           if (!owns()) { return }
@@ -441,7 +442,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
               (item.connection_id ?? primaryConnection) === (row.connection_id ?? primaryConnection)))
 
           refreshed = await refreshRetainedKanban(retained, row => getSession(row.id, {
-            connectionId: row.connection_id ?? primaryConnection,
+            connectionId: row.connection_id ?? primaryPin,
             profile: row.profile ?? 'default'
           }))
         } while (owns() && gatewayActivationEpoch() !== activationEpoch)

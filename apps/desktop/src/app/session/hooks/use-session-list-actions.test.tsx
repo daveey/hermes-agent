@@ -277,6 +277,18 @@ it('refreshes a retained remote row outside the recency page on its own owner', 
   expect($sessions.get().find(s => s.id === 'old')).toMatchObject({ kanban_active: 16, connection_id: 'remote' })
 })
 
+it('reads a legacy primary\'s retained row unpinned, never pinned to the "This device" entry', async () => {
+  // No connection_id and no registry-backed primary: the window's gateway is a
+  // legacy/env remote. Pinning 'local' would make Electron spawn a local backend.
+  setSessions([row('old', { kanban_active: 2 })])
+  settled.ids = ['old']
+  listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('new')] }))
+  getSession.mockResolvedValue(row('old', { kanban_active: 16, kanban_observed_at: 123 }))
+  const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+  await act(async () => { await result.current.refreshSessions() })
+  expect(getSession).toHaveBeenCalledWith('old', { connectionId: null, profile: 'default' })
+})
+
 describe('publishing retained task evidence without count changes', () => {
   it.each(['legacy', 'error'])('publishes unknown after a %s read and clears it on recovery', async failure => {
     const previous = row('old', { connection_id: 'remote', kanban_active: 16, kanban_observed_at: 123 })
