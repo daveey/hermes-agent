@@ -447,6 +447,40 @@ def divert_session_transcript_jsonl(session_id: str, messages) -> Optional[Path]
 
 # Process-wide shared SessionDB registry: long-lived in-process callers share ONE writer
 # connection per resolved path via hermes_state_registry.acquire(); one-shots use SessionDB() + close().
+# Hot-path writable opens: each writable SessionDB() runs schema init plus, before connect, the deleted-WAL holder
+# scan (on macOS every open file of every process: ~60 ms CPU per open, vs ~1 ms read-only). A caller that opens one
+# per poll held the Desktop backend near 100% CPU for hours (chat-closeout lineage reads, 23 per sidebar poll).
+# Count writable opens per call site and name a site that keeps doing it.
+_WRITABLE_OPEN_WINDOW_S = 60.0
+_WRITABLE_OPEN_WARN_COUNT = 30
+_WRITABLE_OPEN_WARN_INTERVAL_S = 600.0
+_writable_opens: dict[str, deque] = {}
+_writable_open_warned: dict[str, float] = {}
+_writable_opens_lock = threading.Lock()
+
+
+def _note_writable_open(site: str, now: Optional[float] = None) -> bool:
+    """Record one writable open from *site*; warn (at most every 10 min per site) when it opened
+    ``_WRITABLE_OPEN_WARN_COUNT`` or more within ``_WRITABLE_OPEN_WINDOW_S``. True when it warned."""
+    now = time.monotonic() if now is None else now
+    with _writable_opens_lock:
+        times = _writable_opens.setdefault(site, deque())
+        times.append(now)
+        while now - times[0] > _WRITABLE_OPEN_WINDOW_S:
+            times.popleft()
+        count = len(times)
+        last = _writable_open_warned.get(site)
+        if count < _WRITABLE_OPEN_WARN_COUNT or (last is not None and now - last < _WRITABLE_OPEN_WARN_INTERVAL_S):
+            return False
+        _writable_open_warned[site] = now
+    logger.warning(
+        "%d writable SessionDB() opens in %.0fs from %s; each runs schema init and a system-wide holder scan. "
+        "Reads belong on SessionDB(read_only=True) (closed after use); a long-lived writer on "
+        "hermes_state_registry.acquire().", count, _WRITABLE_OPEN_WINDOW_S, site,
+    )
+    return True
+
+
 def _foreign_state_db_holders(db_path: Path) -> list[tuple[int, str]]:
     """Compatibility delegate to the state-holder authority."""
     return _state_holders.foreign_state_db_holders(db_path)
@@ -655,6 +689,7 @@ class SessionDB(
                 # late cleanup must not import ctypes or look up it in a cleared module dictionary.
                 if not _close_time_checkpoint_configurable():
                     self._retire_connection = _prepare_connection_retirement()
+                _note_writable_open(self._creation_site)
                 self._open_writer()
             self._record_db_file_identity()
             initialization_complete = True
