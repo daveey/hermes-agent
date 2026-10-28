@@ -61,6 +61,7 @@ from pathlib import Path, PurePosixPath
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import selected_git_env, windows_hide_flags
 from hermes_cli.gitlock import clear_stale_tmp_packs
+from tools import checkpoint_staging as staging
 from typing import Dict, List, Optional, Set, Tuple
 
 from utils import env_int, rmtree_readonly
@@ -416,7 +417,8 @@ def _run_git(
             )
         return ok, stdout, stderr
     except subprocess.TimeoutExpired:
-        msg = f"git timed out after {timeout}s: {' '.join(cmd)}"
+        # Name the folder: it is what repeats group by (one slow project, not one git verb).
+        msg = f"git timed out after {timeout}s in {normalized_working_dir}: {' '.join(cmd)}"
         logger.error(msg, exc_info=True)
         return False, "", msg
     except FileNotFoundError as exc:
@@ -736,19 +738,6 @@ def _pre_v2_shadow_repos(base: Path) -> list[dict]:
     return out
 
 
-def _dir_file_count(path: str) -> int:
-    """Quick file count estimate (stops early if over _MAX_FILES)."""
-    count = 0
-    try:
-        for _ in Path(path).rglob("*"):
-            count += 1
-            if count > _MAX_FILES:
-                return count
-    except (PermissionError, OSError):
-        pass
-    return count
-
-
 def _dir_size_bytes(path: Path) -> int:
     """Best-effort recursive size in bytes.  Returns 0 on error."""
     total = 0
@@ -787,7 +776,8 @@ class CheckpointManager:
         are dropped when the store exceeds this after a commit.
     max_file_size_mb : int
         Skip adding any single file larger than this to a checkpoint.
-        (Implemented via ``.gitignore`` excludes + a post-stage size check.)
+        (A per-project ``core.excludesFile`` built before staging, so git
+        never reads them, plus a post-stage size check as a backstop.)
     """
 
     def __init__(
@@ -879,8 +869,10 @@ class CheckpointManager:
         index_file = _index_path(store, dir_hash)
 
         # Stage the current tree so the name-only diff sees new files too.
-        _run_git(["add", "-A"], store, abs_dir,
-                 timeout=_GIT_TIMEOUT * 2, index_file=index_file)
+        # Oversize files are excluded from staging (git never reads them) and
+        # no checkpoint holds them, so they count as changed by definition.
+        scan = staging.scan_tree(abs_dir, self.max_file_size_mb * 1024 * 1024, _MAX_FILES)
+        self._stage_all(store, abs_dir, index_file, scan)
         ok, names_out, err = _run_git(
             ["diff", "--name-only", "-z", commit_hash, "--cached"],
             store, abs_dir, index_file=index_file,
@@ -902,7 +894,7 @@ class CheckpointManager:
                     "ledger_empty": True}
         restore: list[str] = []
         skipped: list[str] = []
-        for rel in filter(None, names_out.split("\x00")):
+        for rel in dict.fromkeys([*filter(None, names_out.split("\x00")), *scan.oversize]):
             abs_path = Path(abs_dir) / rel
             entry = ledger.get(str(abs_path))
             recorded = entry.get("sha256") if isinstance(entry, dict) else None
@@ -942,6 +934,11 @@ class CheckpointManager:
             return False
 
         self._checkpointed_dirs.add(abs_dir)
+
+        backoff = staging.slow_remaining_s(_resolve_checkpoint_base(), abs_dir)
+        if backoff:
+            logger.debug("Checkpoint skipped: %s timed out staging; retry in %d min", abs_dir, backoff // 60 + 1)
+            return False
 
         try:
             from tools.checkpoint_pruning import store_lock
@@ -1060,8 +1057,7 @@ class CheckpointManager:
         index_file = _index_path(store, dir_hash)
 
         # Stage current state into the per-project index to compare.
-        _run_git(["add", "-A"], store, abs_dir,
-                 timeout=_GIT_TIMEOUT * 2, index_file=index_file)
+        self._stage_all(store, abs_dir, index_file)
 
         ok_stat, stat_out, _ = _run_git(
             ["diff", "--stat", commit_hash, "--cached"],
@@ -1432,7 +1428,8 @@ class CheckpointManager:
         _touch_project(store, working_dir)
 
         # Quick size guard — don't try to snapshot enormous directories
-        if _dir_file_count(working_dir) > _MAX_FILES:
+        scan = staging.scan_tree(working_dir, self.max_file_size_mb * 1024 * 1024, _MAX_FILES)
+        if scan.count > _MAX_FILES:
             logger.debug("Checkpoint skipped: >%d files in %s", _MAX_FILES, working_dir)
             return False
 
@@ -1466,18 +1463,22 @@ class CheckpointManager:
             # First snapshot for this project.
             index_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Stage with per-project index.  Include a per-stage file-size filter
-        # via ``core.bigFileThreshold`` is not what we want — instead, we
-        # rely on the exclude file for broad patterns and post-stage prune
-        # any path whose size exceeds max_file_size_mb.
-        ok, _, err = _run_git(
-            ["add", "-A"], store, working_dir,
-            timeout=_GIT_TIMEOUT * 2, index_file=index_file,
-        )
+        # Stage with per-project index; files over max_file_size_mb are
+        # excluded before git reads them.
+        ok, _, err = self._stage_all(store, working_dir, index_file, scan)
         if not ok:
-            logger.debug("Checkpoint git-add failed: %s", err)
+            if err.startswith("git timed out"):
+                staging.mark_slow(_resolve_checkpoint_base(), working_dir)
+                logger.warning(
+                    "Checkpoint of %s timed out staging (biggest files: %s); not retried for %d min",
+                    working_dir, scan.biggest_text(), staging._SLOW_DIR_BACKOFF_S // 60,
+                )
+            else:
+                logger.debug("Checkpoint git-add failed: %s", err)
             return False
 
+        # Backstop: anything over the cap that slipped past the excludes
+        # (a name gitignore cannot express, a file that grew mid-add).
         if self.max_file_size_mb > 0:
             self._drop_oversize_from_index(store, working_dir, index_file)
 
@@ -1567,6 +1568,51 @@ class CheckpointManager:
 
         return True
 
+    def _stage_all(
+        self, store: Path, working_dir: str, index_file: Path,
+        scan: Optional[staging.TreeScan] = None,
+    ) -> tuple[bool, str, str]:
+        """``git add -A`` into the project index without reading oversize files.
+
+        Files over ``max_file_size_mb`` go to git as a per-project
+        ``core.excludesFile`` and are unstaged first (excludes do not apply to
+        a path already in the index, e.g. one that grew past the cap since the
+        last snapshot). On a timeout, the killed git's partial pack and index
+        lock are removed. Callers hold the checkpoint store lock.
+        """
+        if scan is None:
+            scan = staging.scan_tree(working_dir, self.max_file_size_mb * 1024 * 1024, _MAX_FILES)
+        config: list[str] = []
+        if scan.oversize:
+            excludes = staging.write_oversize_excludes(store, _project_hash(working_dir), scan.oversize)
+            if excludes is not None:
+                config = ["-c", f"core.excludesFile={excludes}"]
+            self._unstage(store, working_dir, index_file, scan.oversize)
+        started = time.time()
+        ok, out, err = _run_git(
+            [*config, "add", "-A"], store, working_dir,
+            timeout=_GIT_TIMEOUT * 2, index_file=index_file,
+        )
+        if not ok and err.startswith("git timed out"):
+            removed = staging.clear_timeout_debris(store, started, index_file)
+            if removed:
+                logger.info("Checkpoint: removed %d partial file(s) left by the timed-out git add", len(removed))
+        return ok, out, err
+
+    @staticmethod
+    def _unstage(store: Path, working_dir: str, index_file: Path, paths: list[str]) -> None:
+        """Remove literal ``paths`` from the project index (absent ones are ignored).
+
+        ``update-index --force-remove`` takes paths literally (no pathspec
+        globbing) and, unlike ``rm --cached``, does not refuse an entry whose
+        staged content differs from both the file and the ref."""
+        batch = 200
+        for i in range(0, len(paths), batch):
+            _run_git(
+                ["update-index", "--force-remove", "--", *paths[i:i + batch]],
+                store, working_dir, index_file=index_file,
+            )
+
     def _exceeds_size_cap(self, path: Path) -> bool:
         """Whether *path* is larger than ``max_file_size_mb``.
 
@@ -1615,16 +1661,7 @@ class CheckpointManager:
             "Checkpoint: dropping %d oversize file(s) (>%d MB) from index",
             len(oversize), self.max_file_size_mb,
         )
-        # Use --pathspec-from-file for safety with many paths.
-        # Chunk into manageable batches.
-        BATCH = 200
-        for i in range(0, len(oversize), BATCH):
-            chunk = oversize[i:i + BATCH]
-            _run_git(
-                ["rm", "--cached", "--quiet", "--"] + chunk,
-                store, working_dir, index_file=index_file,
-                allowed_returncodes={128},
-            )
+        self._unstage(store, working_dir, index_file, oversize)
 
     def _prune(self, store: Path, working_dir: str, ref: str) -> None:
         """Checkpoint-take path: snapshot-count budget plus one size round, gc deferred to the

@@ -1443,3 +1443,127 @@ class TestWorkingDirVanishes:
         assert mgr._take(str(work_dir), "snap") is True
         assert pruned == []
         assert not [r for r in caplog.records if r.levelno >= 40]
+
+
+def _store_bytes(store: Path) -> int:
+    return sum(p.stat().st_size for p in store.rglob("*") if p.is_file())
+
+
+class TestOversizeFilesNeverStaged:
+    """A file over ``max_file_size_mb`` must be excluded BEFORE ``git add`` reads it.
+
+    Dropping it from the index after staging (the old order) still hashed and
+    compressed the whole file into the store: a 3 GB file ran ``git add -A``
+    past its timeout and left the snapshot unsaved."""
+
+    def test_big_file_is_excluded_before_staging(self, work_dir, checkpoint_base, monkeypatch):
+        monkeypatch.setattr("tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base)
+        big = work_dir / "data" / "weights [v1].bin"
+        big.parent.mkdir()
+        with open(big, "wb") as fh:
+            fh.writelines(os.urandom(1024 * 1024) for _ in range(50))
+        mgr = CheckpointManager(enabled=True, max_file_size_mb=1)
+        assert mgr.ensure_checkpoint(str(work_dir), "snap") is True
+        store = _store_path(checkpoint_base)
+        files = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", _ref_name(_project_hash(str(work_dir)))],
+            env={**os.environ, "GIT_DIR": str(store)}, capture_output=True, text=True, check=True,
+        ).stdout.split("\n")
+        assert "main.py" in files and "data/weights [v1].bin" not in files
+        # The blob was never read into the store (not even as a dangling object).
+        assert _store_bytes(store) < 5 * 1024 * 1024
+
+    def test_file_that_grew_past_the_cap_is_unstaged_before_add(self, work_dir, checkpoint_base, monkeypatch):
+        monkeypatch.setattr("tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base)
+        grower = work_dir / "grows.db"
+        grower.write_bytes(b"small")
+        mgr = CheckpointManager(enabled=True, max_file_size_mb=1)
+        assert mgr.ensure_checkpoint(str(work_dir), "small") is True
+        store = _store_path(checkpoint_base)
+        before = _store_bytes(store)
+        with open(grower, "wb") as fh:
+            fh.writelines(os.urandom(1024 * 1024) for _ in range(20))
+        (work_dir / "main.py").write_text("print('changed')\n")
+        mgr.new_turn()
+        assert mgr.ensure_checkpoint(str(work_dir), "grown") is True
+        assert _store_bytes(store) - before < 2 * 1024 * 1024
+
+
+class TestGitTimeoutRecovery:
+    """A timed-out ``git add`` leaves its partial pack and its index lock in the
+    store. Both must go, and the folder is not retried on every turn."""
+
+    @staticmethod
+    def _timeout_add(monkeypatch, store_holder, calls):
+        import tools.checkpoint_manager as cm
+        real_run = subprocess.run
+
+        def fake_run(cmd, *a, **kw):
+            if len(cmd) > 1 and cmd[-2:] == ["add", "-A"]:
+                calls.append(cmd)
+                store = Path(kw["env"]["GIT_DIR"])
+                pack_dir = store / "objects" / "pack"
+                pack_dir.mkdir(parents=True, exist_ok=True)
+                (pack_dir / "tmp_pack_abc123").write_bytes(b"x" * 4096)
+                (store / "objects" / "ab").mkdir(parents=True, exist_ok=True)
+                (store / "objects" / "ab" / "tmp_obj_q1w2e3").write_bytes(b"y")
+                Path(kw["env"]["GIT_INDEX_FILE"] + ".lock").write_bytes(b"")
+                store_holder.append(store)
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    def test_timeout_clears_debris_and_backs_off(self, work_dir, checkpoint_base, monkeypatch, caplog):
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        mgr = CheckpointManager(enabled=True)
+        # A foreign, older tmp pack (another run's debris) is not this run's to delete.
+        store = _store_path(checkpoint_base)
+        _init_store(store, str(work_dir))
+        foreign = store / "objects" / "pack" / "tmp_pack_foreign"
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        foreign.write_bytes(b"old")
+        old = time.time() - 3600
+        os.utime(foreign, (old, old))
+
+        stores, calls = [], []
+        self._timeout_add(monkeypatch, stores, calls)
+        caplog.set_level("DEBUG", logger="tools.checkpoint_manager")
+        assert mgr.ensure_checkpoint(str(work_dir), "snap") is False
+        assert len(calls) == 1
+        assert not list(store.rglob("tmp_pack_abc123")), "partial pack left in the store"
+        assert not list(store.rglob("tmp_obj_*")), "partial loose object left in the store"
+        assert not list((store / "indexes").glob("*.lock")), "index lock left behind"
+        assert foreign.exists()
+        # The timeout log names the folder so repeats group by project.
+        assert any(str(work_dir.resolve()) in r.getMessage() and "timed out" in r.getMessage()
+                   for r in caplog.records if r.levelno >= 30)
+
+        # Next turn: no git add for this folder during the back-off window.
+        mgr.new_turn()
+        assert mgr.ensure_checkpoint(str(work_dir), "snap-2") is False
+        assert len(calls) == 1
+
+        # A fresh manager (another agent in this process) honours it too.
+        assert CheckpointManager(enabled=True).ensure_checkpoint(str(work_dir), "snap-3") is False
+        assert len(calls) == 1
+
+        # After the window it retries.
+        import tools.checkpoint_staging as staging
+        later = staging._now() + staging._SLOW_DIR_BACKOFF_S + 1
+        monkeypatch.setattr(staging, "_now", lambda: later)
+        mgr.new_turn()
+        mgr.ensure_checkpoint(str(work_dir), "snap-4")
+        assert len(calls) == 2
+
+    def test_timeout_log_names_biggest_files(self, work_dir, checkpoint_base, monkeypatch, caplog):
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        (work_dir / "huge.sqlite").write_bytes(b"z" * 300_000)
+        stores, calls = [], []
+        self._timeout_add(monkeypatch, stores, calls)
+        caplog.set_level("DEBUG", logger="tools.checkpoint_manager")
+        assert CheckpointManager(enabled=True).ensure_checkpoint(str(work_dir), "snap") is False
+        msgs = [r.getMessage() for r in caplog.records if r.levelno >= 30]
+        assert any("huge.sqlite" in m and str(work_dir.resolve()) in m for m in msgs), msgs
