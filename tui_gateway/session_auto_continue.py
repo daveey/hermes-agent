@@ -19,6 +19,31 @@ from .method_ctx import bind_module
 _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
 
 
+def _resume_reuse_live_locked(ctx, sid: str, session: dict) -> dict:
+    """Warm resume recovery, with the caller holding _session_resume_lock."""
+    if (refusal := _reattach_refusal(ctx.rid, sid, session)) is not None:
+        return refusal
+    _cancel_ws_orphan_reap(sid)
+    payload = _live_session_payload(sid, session, cols=ctx.cols, touch=True, omit_messages=ctx.omit_messages,
+                                    transport=current_transport() or _stdio_transport,
+                                    inline_images=ctx.inline_images)
+    payload["resumed"] = ctx.target
+    # A boot sweep can race Desktop's mount or update hold. Retry on warm reuse too,
+    # but don't make stale code busy again before its replacement can take over.
+    if not ctx.lazy and not session.get("running") and not session.get("resume_hydrating"):
+        from tui_gateway.update_pause import _detect_skew
+        if _detect_skew() is None:
+            if (continuation := _maybe_schedule_auto_continue(sid, session, ctx.target)) is not None:
+                payload["auto_continue"] = continuation
+    if ctx.defer_history:
+        payload.update(messages=[], hydrating=bool(session.get("resume_hydrating")),
+                       message_count=int(session.get("resume_message_count") or payload["message_count"]))
+    # A lazy watch session never owns a run loop — overlay the child-run registry.
+    if session.get("agent") is None and _child_run_active(ctx.target, ctx.profile_home):
+        payload.update(running=True, status="streaming")
+    return _ok(ctx.rid, payload)
+
+
 def _auto_continue_config() -> tuple[bool, float, int]:
     """(enabled, freshness window in seconds, max attempts) from ``desktop.auto_continue`` in config.yaml."""
     desktop = _load_cfg().get("desktop")
@@ -92,9 +117,11 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
-    if session.get("_auto_continue_scheduled"):
-        return None
-    session["_auto_continue_scheduled"] = True
+    with session["history_lock"]:
+        if (session.get("_auto_continue_scheduled")
+                or session.get("_closing") or session.get("_finalized") or session.get("resume_hydrating")):
+            return None
+        session["_auto_continue_scheduled"] = True
     # [daveey] A core-update pause is not a crash: no attempt is used and the note says the step finished.
     paused = marker.get("reason") == "core_update_pause"
     if paused:

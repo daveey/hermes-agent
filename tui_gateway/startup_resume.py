@@ -80,10 +80,13 @@ def pending_resumes(home: Path, cfg: dict | None, *, now: float | None = None) -
     return out
 
 
-def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, cfg: dict | None) -> list[dict]:
+def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, cfg: dict | None,
+                                *, paused_only: bool = False) -> list[dict]:
     """Call ``resume(rid, params)`` (the ``session.resume`` handler) for each pending marker; returns outcomes."""
     results = []
     for row in pending_resumes(home, cfg):
+        if paused_only and (read_turn_marker(row["home"], row["session_key"]) or {}).get("reason") != "core_update_pause":
+            continue
         params: dict[str, Any] = {"session_id": row["session_key"], "omit_messages": True}
         if row["profile"]:
             params["profile"] = row["profile"]
@@ -102,6 +105,17 @@ def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, 
     return results
 
 
+def _paused_markers_remain(home: Path, cfg: dict | None) -> bool:
+    # Include live writers: they can still be retiring during the first boot sweep.
+    _, fresh, max_attempts, _ = _settings(cfg)
+    now = time.time()
+    return any(entry.get("reason") == "core_update_pause" and entry.get("auto_continue", True)
+               and now - float(entry.get("started_at") or 0) <= fresh
+               and int(entry.get("attempts") or 0) < max_attempts
+               for _, h in _homes(home) for key in _load(_marker_path(h))
+               if (entry := read_turn_marker(h, key)) is not None)
+
+
 def start_startup_resume_sweep() -> threading.Thread | None:
     """Backend boot hook: run the sweep on a daemon thread after a short settle delay (no-op unless enabled)."""
     try:
@@ -115,6 +129,8 @@ def start_startup_resume_sweep() -> threading.Thread | None:
     if not enabled:
         return None
 
+    home = Path(get_hermes_home())
+
     def _run() -> None:
         time.sleep(delay)
         try:
@@ -123,12 +139,21 @@ def start_startup_resume_sweep() -> threading.Thread | None:
             if handler is None:
                 logger.warning("startup resume: session.resume handler not installed")
                 return
-            done = resume_interrupted_sessions(handler, Path(get_hermes_home()), cfg)
+            done = resume_interrupted_sessions(handler, home, cfg)
             if done:
                 logger.info("startup resume: %d interrupted session(s) processed", len(done))
+            # Backend boot can precede hold release or the last old SSH writer's exit.
+            # Retry PAUSES only: ordinary crash recovery keeps its one-shot semantics.
+            deadline = time.monotonic() + 600.0
+            while time.monotonic() < deadline and _paused_markers_remain(home, cfg):
+                time.sleep(5.0)
+                resume_interrupted_sessions(handler, home, cfg, paused_only=True)
+            if _paused_markers_remain(home, cfg):
+                logger.warning("startup resume: paused turns still pending after the update recovery window")
         except Exception:
             logger.exception("startup resume sweep failed")
 
-    t = threading.Thread(target=_run, daemon=True, name="startup-resume-sweep")
+    from agent.memory_provider import spawn_context_thread
+    t = spawn_context_thread(_run, name="startup-resume-sweep")
     t.start()
     return t
