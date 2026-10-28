@@ -31,12 +31,16 @@ def parked(conn, *, authenticated=True):
     return task, reviews
 
 
-def finish_reviews(conn, reviews, *, verdict="changes_required", pr=PR):
+HEAD = "0d0f9d77a5e5bbb455499b0f4b69bf20201c24c7"
+
+
+def finish_reviews(conn, reviews, *, verdict="changes_required", pr=PR, metadata=None):
     for review in reviews:
         kb.claim_task(conn, review)
         run = kb.get_task(conn, review).current_run_id
+        body = {"verdict": verdict, "pr": pr, "reviewed_sha": "a" * 40} if metadata is None else metadata
         assert kb.complete_task(conn, review, summary="Review complete", expected_run_id=run,
-                                metadata={"verdict": verdict, "pr": pr, "reviewed_sha": "a" * 40})
+                                metadata=body)
     kb.recompute_ready(conn)
 
 
@@ -61,13 +65,56 @@ def test_completed_reviews_resume_same_pr_despite_later_comments(board):
 @pytest.mark.parametrize("mode", ["unowned", "unrelated", "approved", "new_pr", "noop_assign", "pending"])
 def test_dependency_and_comments_do_not_grant_generic_retry(board, mode):
     task, reviews = parked(board, authenticated=mode != "unowned")
-    if mode != "pending":
+    if mode in {"approved", "noop_assign"}:
+        # Approval without a full head is not an exact-head handoff.
+        finish_reviews(board, reviews, metadata={"verdict": "approved", "pr": PR, "head": "0d0f9d77"})
+    elif mode != "pending":
         finish_reviews(board, reviews,
-                       verdict="approved" if mode in {"approved", "noop_assign"} else "changes_required",
+                       verdict="changes_required",
                        pr=PR + "1" if mode == "unrelated" else PR)
     if mode == "new_pr":
         kb.add_comment(board, task, "dev", PR + "1")
     if mode == "noop_assign":
         kb.assign_task(board, task, "dev")
     kb.add_comment(board, task, "reviewer", "changes_required " + PR)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("metadata", [
+    {"verdict": "APPROVE", "head": HEAD},
+    {"verdict": "approved", "reviewed_sha": HEAD, "pr": PR},
+])
+def test_exact_head_approval_releases_once_despite_later_same_pr_comment(board, metadata):
+    """Production sequence: checkpoint records the PR, review completes at an
+    exact head, then a reviewer comment repeats that PR. Held before, released
+    after, and a crash/reclaim does not get a second continuation."""
+    task, reviews = parked(board)
+    kb.add_comment(board, task, "reviewer", "Reviewing " + PR)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+    task_row = kb.get_task(board, task)
+    assert task_row is not None and task_row.status != "done"
+    finish_reviews(board, reviews, metadata=metadata)
+    kb.add_comment(board, task, "reviewer", "APPROVE at exact head " + HEAD + " " + PR)
+    task_row = kb.get_task(board, task)
+    assert task_row is not None and task_row.status == "ready"
+    assert dispatch.check_respawn_guard(board, task) is None
+    assert kb.claim_task(board, task) is not None
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+    assert kb.reclaim_task(board, task, reason="Worker died", signal_fn=lambda *_: None)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+def test_exact_head_approval_of_unrelated_pr_stays_held(board):
+    task, reviews = parked(board)
+    finish_reviews(board, reviews, metadata={
+        "verdict": "APPROVE", "head": HEAD, "pr": PR + "1",
+    })
+    kb.add_comment(board, task, "reviewer", "Approved a different head " + PR)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+def test_new_pr_after_exact_head_approval_stays_held(board):
+    task, reviews = parked(board)
+    finish_reviews(board, reviews, metadata={"verdict": "APPROVE", "head": HEAD})
+    kb.add_comment(board, task, "reviewer", "Opened a new head " + PR + "9")
     assert dispatch.check_respawn_guard(board, task) == "active_pr"

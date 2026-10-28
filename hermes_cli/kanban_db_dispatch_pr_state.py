@@ -171,7 +171,10 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     an ``unblocked`` event: a worker that opened its PR and blocked itself waiting for the
     merge is resumed by that unblock to ship/verify THAT PR. So does an orderly park AFTER the
     PR comment (``continued`` checkpoint or ``scheduled`` timed wait): the owner parked knowing
-    its PR, and the wake resumes it from that checkpoint, not a context-free respawn. A
+    its PR, and the wake resumes it from that checkpoint, not a context-free respawn. So does
+    a completed exact-head review of the checkpointed PRs (repair metadata, or an approval
+    whose full head is ``head``/``reviewed_sha``): a later comment that repeats those PRs
+    does not invalidate it. A
     crash/reclaim is not a handoff, so the worker that opened the PR is still not re-spawned
     against it. A latest immediate checkpoint also permits a same-second PR report;
     scheduled checkpoints do not get that same-second exception. Dispatcher guard

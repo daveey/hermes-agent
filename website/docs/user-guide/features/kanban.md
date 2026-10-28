@@ -1230,18 +1230,25 @@ To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` 
 An owning worker can link independent review cards as parents with `kanban_link`,
 then call `kanban_block(kind="dependency")`. If its comments already identify the
 PR, the authenticated park captures the current run, parent IDs, and PR URLs.
-After all parents finish, the `active_pr` guard permits one continuation to repair
-those same PRs when each guarded PR has a completed review with structured metadata:
+After all parents finish, the `active_pr` guard permits one continuation of
+those same PRs. A repair requires each review's latest claimed completed run
+to carry:
 
 ```json
 {"verdict": "changes_required", "pr": "https://github.com/owner/repo/pull/123", "reviewed_sha": "0123456789abcdef0123456789abcdef01234567"}
 ```
 
+An exact-head approval is the landing continuation, not a second implementation
+and not merge or CI approval. The run metadata must use `approve` / `approved`
+/ `APPROVE` and a full 40-character `head` or `reviewed_sha`. If it names `pr`,
+that URL is the only one authorized; if it does not, the checkpoint's captured
+URLs are the binding. A short head is not exact.
+
 The evidence must come from the review card's latest, actually claimed completed
-run, finishing at or after the park. This is routing evidence, not merge approval
-or proof of current-head CI. Reviewer comments or guard notices repeating the same
-PR after the park do not invalidate it. A new PR, changed parent set, unclaimed
-completion, unrelated dependency, or malformed evidence does not authorize retry.
+run, finishing at or after the park. Reviewer comments or guard notices repeating the same
+PR after the park do not invalidate it. A new PR, a review that names a different
+PR, a changed parent set, an unclaimed completion, an unrelated dependency, a
+non-exact approval, or malformed evidence does not authorize retry.
 The next implementation claim consumes the checkpoint: a subsequent crash/reclaim
 stays guarded. Same-owner assignment remains a no-op for this guard.
 
