@@ -90,6 +90,57 @@ def test_ssh_runtime_marker_detects_recreated_venv_even_with_reused_inode(
         web_server._apply_ssh_owner_nonce(None)
 
 
+def _pkg(purelib, name, record):
+    info = purelib / f"{name}.dist-info"
+    info.mkdir()
+    (info / "RECORD").write_text(record, encoding="utf-8")
+
+
+def test_ssh_runtime_reattaches_only_when_the_rerealized_tree_holds_the_same_bytes(tmp_path, monkeypatch):
+    """[daveey] A PM repair re-realizes an identical tree: the marker dies with the old tree, but the
+    backend's runtime did not change, so it writes the marker back and stays reusable instead of
+    retiring. A tree whose packages changed is a real swap: no reattach, the watchdog retires."""
+    import shutil
+
+    purelib = tmp_path / "py" / "lib" / "site-packages"
+    purelib.mkdir(parents=True)
+    _pkg(purelib, "pip-26.2.1", "pip/__init__.py,sha256=aaa,10\n")
+    monkeypatch.setattr(
+        web_server,
+        "sysconfig",
+        types.SimpleNamespace(get_paths=lambda *a, **k: {"purelib": str(purelib)}),
+    )
+    web_server._apply_ssh_owner_nonce("0123456789abcdef")
+    marker = purelib / ".hermes-ssh-runtime-0123456789abcdef"
+    try:
+        assert web_server._ssh_runtime_reattach() is False  # nothing lost: nothing to do
+
+        shutil.rmtree(tmp_path / "py")
+        purelib.mkdir(parents=True)
+        _pkg(purelib, "pip-26.2.1", "pip/__init__.py,sha256=aaa,10\n")
+        assert web_server._ssh_runtime_intact() is False
+        assert web_server._ssh_runtime_reattach() is True
+        assert marker.is_file()
+        assert web_server._ssh_runtime_intact() is True
+
+        shutil.rmtree(tmp_path / "py")
+        purelib.mkdir(parents=True)
+        _pkg(purelib, "pip-26.3.0", "pip/__init__.py,sha256=bbb,10\n")
+        assert web_server._ssh_runtime_reattach() is False
+        assert not marker.exists()
+        assert web_server._ssh_runtime_intact() is False
+    finally:
+        web_server._apply_ssh_owner_nonce(None)
+
+
+def test_ssh_runtime_marker_name_is_the_shape_pm_digests_skip():
+    """The marker lives in a PM-published tree; PM must treat exactly this name as process state."""
+    from pm.store import is_runtime_state_file
+
+    assert is_runtime_state_file(".hermes-ssh-runtime-0123456789abcdef")
+    assert not is_runtime_state_file(".hermes-ssh-runtime-0123456789abcdef.py")
+
+
 def test_ssh_runtime_marker_survives_in_place_installs(tmp_path, monkeypatch):
     """pip/uv installs INTO the live venv must not read as a replacement."""
     purelib = tmp_path / "venv" / "lib" / "site-packages"
