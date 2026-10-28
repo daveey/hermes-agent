@@ -903,7 +903,7 @@ def test_overlapping_annotates_share_one_waiting_and_attention_pass(kanban_root,
     import threading
     import time
 
-    monkeypatch.setattr(ksa, "_all_counts", lambda **_k: ({}, {}, {}, {}, {}))
+    monkeypatch.setattr(ksa, "_all_counts", lambda **_k: ({}, {}, {}, {}, {}, {}, {}, {}, {}))
     calls = {"extra": 0, "attention": 0}
 
     def slow_extra():
@@ -946,7 +946,7 @@ def test_poll_during_annotation_refresh_returns_previous_counts(kanban_root, mon
     import threading
     import time
 
-    monkeypatch.setattr(ksa, "_all_counts", lambda **_k: ({"s1": 2}, {}, {}, {}, {}))
+    monkeypatch.setattr(ksa, "_all_counts", lambda **_k: ({"s1": 2}, {}, {}, {}, {}, {}, {}, {}, {}))
     monkeypatch.setattr(ksa, "_extra_waiting", dict)
     monkeypatch.setattr(ksa, "attention_task_counts", lambda now=None: {})
     first = [{"id": "s1"}]
@@ -962,7 +962,7 @@ def test_poll_during_annotation_refresh_returns_previous_counts(kanban_root, mon
         return {}
 
     monkeypatch.setattr(ksa, "_extra_waiting", slow_extra)
-    monkeypatch.setattr(ksa, "_all_counts", lambda **_k: ({"s1": 9}, {}, {}, {}, {}))
+    monkeypatch.setattr(ksa, "_all_counts", lambda **_k: ({"s1": 9}, {}, {}, {}, {}, {}, {}, {}, {}))
     holder = threading.Thread(target=lambda: ksa.annotate_kanban_activity([{"id": "s1"}]))
     holder.start()
     assert entered.wait(2)
