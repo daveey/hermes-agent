@@ -673,6 +673,8 @@ def _collect_remote_kanban_notifications(session_key: str, claims: list | None) 
     texts = []
     for item in found:
         text = _KanbanText(item["text"])
+        if item.get("event_key"):
+            text._kb_keys = (item["event_key"],)  # type: ignore[attr-defined]  # same identity the sweeper records
         texts.append(text)
         if claims is not None:
             claims.append({"remote": item, "texts": [text]})

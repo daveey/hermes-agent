@@ -134,6 +134,22 @@ def format_notice(gw: str, key: str, task: dict) -> str:
             + f" — {title}\n(on {gw}; read it with cross_task @task:{board}@{gw}/{tid})")
 
 
+def _event_key(owner: str, key: str, notice: dict) -> str:
+    """Event identity shared by the poller (``collect``) and the sweeper, so a chat gets one notice per event."""
+    return f"remote:{owner}:{key}:{notice['event_id']}"
+
+
+def _completion_text(gw: str, key: str, task: dict, me: str, profile: str, sid: str) -> Optional[str]:
+    """Standard done notice from the owner's published ``completion_notice`` (FINAL SEND aware), else None."""
+    notice = task.get("completion_notice")
+    if task.get("status") != "done" or not isinstance(notice, dict) or "event_id" not in notice:
+        return None
+    from tui_gateway.session_notifications import _format_kanban_event_text
+    sub = {"task_id": task["id"], "chat_id": f"{me}/{profile}/{sid}"}
+    ev = SimpleNamespace(kind="completed", payload=notice.get("payload"))
+    return _format_kanban_event_text(sub, SimpleNamespace(**task), ev, task.get("board", "default"))
+
+
 def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, ledger: Optional[Path] = None,
             now: Optional[float] = None, lineage: tuple[str, ...] = (),
             skip: Optional[Callable[[str], bool]] = None) -> list[dict]:
@@ -148,10 +164,10 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
     now = time.time() if now is None else now
     try:
         with _lock:
-            _, index = _index(path)
+            me, index = _index(path)
         cards = []
         for sid in (session_key, *lineage):
-            cards.extend(index.get((profile or "default", sid), ()))
+            cards.extend(dict(c, sid=sid) for c in index.get((profile or "default", sid), ()))
         if not cards:
             return []
         out: list[dict] = []
@@ -171,8 +187,12 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                     cur = conn.execute("INSERT OR IGNORE INTO notices VALUES (?,?,?,?,?)",
                                        (session_key, ref, state, now, 1 if fresh else 0))
                 if cur.rowcount == 1 and fresh:
-                    out.append({"text": format_notice(card["gw"], card["key"], task), "session": session_key,
-                                "ref": ref, "state": state})
+                    text = _completion_text(card["gw"], card["key"], task, me, profile or "default", card["sid"])
+                    item = {"text": text or format_notice(card["gw"], card["key"], task), "session": session_key,
+                            "ref": ref, "state": state}
+                    if text:
+                        item["event_key"] = _event_key(card["gw"], card["key"], task["completion_notice"])
+                    out.append(item)
                     if len(out) >= MAX_PER_POLL:
                         break
         finally:
@@ -230,7 +250,6 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
     delivers FINAL SEND lines when no chat is polling.
     """
     from hermes_cli.kanban_origin import _hub_db, gateway_names
-    from tui_gateway.session_notifications import _format_kanban_event_text
 
     path = replica_path if replica_path is not None else _hub_db()
     if path is None:
@@ -260,10 +279,9 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
                 event_id = notice["event_id"]
                 metadata = {"notice_id": f"remote:{owner}:{key}:{event_id}:{profile}:{sid}",
                             "board": task.get("board", "default"), "task_id": task["id"],
-                            "gateway": owner, "event_ids": [event_id]}
-                sub = {"task_id": task["id"], "chat_id": f"{me}/{profile}/{sid}"}
-                ev = SimpleNamespace(kind="completed", payload=notice["payload"])
-                text = _format_kanban_event_text(sub, SimpleNamespace(**task), ev, metadata["board"])
+                            "gateway": owner, "event_ids": [event_id],
+                            "kanban_event_keys": [_event_key(owner, key, notice)]}
+                text = _completion_text(owner, key, task, me, profile, sid)
                 with session_db(profile, sid) as (db, tip):
                     if db is not None:
                         row_id = db.append_kanban_notice(tip, text, metadata)

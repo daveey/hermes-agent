@@ -91,6 +91,39 @@ def test_legacy_done_cards_are_not_replayed_on_rollout(tmp_path):
         assert "completion_notice" not in task
 
 
+def test_poller_collect_delivers_final_send_and_sweeper_dedupes(tmp_path):
+    import time
+    from tui_gateway import kanban_remote_notices as krn
+
+    tid, replica = _replicate(tmp_path, f"proof prose\nFINAL SEND for @session:default@macbook/{CHAT}: poller proof")
+    with sqlite3.connect(replica) as conn:
+        data = json.loads(conn.execute("SELECT data FROM replica").fetchone()[0])
+        data["completed_at"] = time.time()
+        conn.execute("DROP TABLE replica")
+        conn.execute("CREATE TABLE replica(gw TEXT,coll TEXT,key TEXT,data TEXT,seq INTEGER)")
+        conn.execute("CREATE TABLE meta(k TEXT,v TEXT)")
+        conn.execute("INSERT INTO meta VALUES ('gateway','macbook')")
+        conn.execute("INSERT INTO replica VALUES (?,?,?,?,1)", ("hub", "tasks", f"default/default/{tid}", json.dumps(data)))
+    krn._reset_for_tests()
+    ledger = tmp_path / "ledger.db"
+    got = krn.collect(CHAT, "default", hub_db=replica, ledger=ledger)
+    assert len(got) == 1
+    assert "poller proof" in got[0]["text"] and "ran on hub" not in got[0]["text"]
+    assert "FINAL SEND" not in got[0]["text"]
+    other = krn.collect(OTHER, "default", hub_db=replica, ledger=ledger)
+    assert "poller proof" not in other[0]["text"]
+    with SessionDB(tmp_path / "state.db") as db:
+        db.create_session(CHAT, "desktop")
+        db.record_kanban_notice(CHAT, got[0]["text"], {"notice_id": "live:x", "kanban_event_keys": [got[0]["event_key"]]})
+
+        @contextlib.contextmanager
+        def opener(profile, sid):
+            yield (db, sid) if sid == CHAT else (None, None)
+
+        sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)
+        assert len(db.get_messages(CHAT)) == 1
+
+
 def test_absent_replica_is_read_only_and_not_created(tmp_path):
     path = tmp_path / "absent.db"
     assert sweep_remote_notices(replica_path=path, gateway="macbook") == []
