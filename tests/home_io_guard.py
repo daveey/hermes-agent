@@ -52,6 +52,27 @@ _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_P
 # guarded root (default install ``~/.hermes/hermes-agent``, or a worktree under ~/.hermes/cache) that
 # read is the checkout asking "am I a payload?", not Hermes state. Reads only; writes stay refused.
 _PAYLOAD_MANIFEST_STR = _normcase(os.fspath(Path(__file__).resolve().parent.parent.parent / "manifest.json"))
+# The same checkout also asks "am I stamped?" (pm.environments.store_root walks the checkout and
+# every ancestor looking for ``install-stamp.json``) and "does my parent root own me?"
+# (owning_home_root reads ``<checkout parent>/installs/<key>/facts.json``). A checkout inside a
+# guarded root -- the live ``~/.hermes/hermes-agent``, or a worktree under the Hermes scratch dir
+# (the TMPDIR Hermes workers export) -- makes those probes land in the home. Reads only.
+_CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
+_STAMP_PROBE_STRS = frozenset(
+    _normcase(os.fspath(d / "install-stamp.json")) for d in (_CHECKOUT_ROOT, *_CHECKOUT_ROOT.parents)
+)
+_OWNER_FACTS_DIR_STR = _normcase(os.fspath(_CHECKOUT_ROOT.parent / "installs"))
+
+
+def _is_checkout_probe(absolute: str) -> bool:
+    """A normalized absolute path the checkout reads to learn its own identity or owner."""
+    if absolute == _PAYLOAD_MANIFEST_STR or absolute in _STAMP_PROBE_STRS:
+        return True
+    prefix = _OWNER_FACTS_DIR_STR + os.sep
+    if absolute.startswith(prefix):
+        parts = absolute[len(prefix):].split(os.sep)
+        return len(parts) == 2 and parts[1] == "facts.json"
+    return False
 
 
 def _within(path: str, prefix: str) -> bool:
@@ -102,7 +123,7 @@ class HomeIOGuard:
             # which is not I/O against the home.
             if metadata and (absolute == "/proc" or absolute.startswith("/proc" + os.sep)):
                 return
-            if absolute == _PAYLOAD_MANIFEST_STR and not destructive:
+            if not destructive and _is_checkout_probe(absolute):
                 return
             resolved = self._refuse_installed_app_change(value, absolute) if destructive else None
             roots = tuple(_normcase(os.fspath(r)) for r in self.roots())
