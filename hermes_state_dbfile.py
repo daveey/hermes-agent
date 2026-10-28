@@ -246,6 +246,23 @@ _DARWIN_FD_SCAN_THREAD_NAME = "hermes-wal-holder-scan"
 _DARWIN_SCAN_LOCK = threading.Lock()
 _DARWIN_SCAN_IN_FLIGHT = None
 
+
+def _interpreter_thread_class():
+    """threading.Thread as the threading module defined it, even while the attribute is replaced: the
+    main thread is an instance of a subclass that module built at its own import."""
+    for cls in type(threading.main_thread()).__mro__:
+        if cls.__module__ == "threading" and cls.__name__ == "Thread":
+            return cls
+    return threading.Thread
+
+
+# The pass always runs on a real thread of its own. Tests replace threading.Thread with stubs whose
+# start() runs the target inline or never (93 call sites), and this module is imported lazily, often
+# while such a stub is installed, so the class can't just be bound at import. Run inline, the pass re-took
+# _DARWIN_SCAN_LOCK on the thread already holding it and deadlocked; never started, the SessionDB open
+# waited out the scan timeout and the stub mistook the pass for the thread under test.
+_SCAN_THREAD = _interpreter_thread_class()
+
 # A clean (no holder) verdict is reused for this long. Every SessionDB open used to walk every fd
 # of every process (~5 s of CPU, up to 5 s of abandoned thread each on timeout); a busy Mac opening
 # state.db from dozens of CLI/worker/wake_check processes spent its cores on that. Positive
@@ -424,7 +441,7 @@ def _join_darwin_fd_scan(base: str | None = None, key: tuple | None = None,
             scan = _DarwinFdScan(time.monotonic() + timeout)
             _DARWIN_SCAN_IN_FLIGHT = scan
             try:
-                threading.Thread(target=scan.run, name=_DARWIN_FD_SCAN_THREAD_NAME, daemon=True).start()
+                _SCAN_THREAD(target=scan.run, name=_DARWIN_FD_SCAN_THREAD_NAME, daemon=True).start()
             except BaseException:
                 _DARWIN_SCAN_IN_FLIGHT = None
                 raise
