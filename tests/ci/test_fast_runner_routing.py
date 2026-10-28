@@ -108,3 +108,18 @@ def test_e2e_upgrade_runs_only_on_bwrap_capable_slots():
         for name, j in data.get("jobs", {}).items():
             if "ci-bwrap" in _labels(j):
                 assert (wf, name) == ("tests.yml", "e2e-upgrade")
+
+
+def test_e2e_upgrade_has_release_tags_for_n_minus_1():
+    # N-1 = `git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1`. The fork
+    # carries no release tags, so without upstream's the git/core shards fail
+    # "No names found, cannot describe anything" (run 40658892506, e2e-upgrade (git)).
+    steps = _workflows()["tests.yml"]["jobs"]["e2e-upgrade"]["steps"]
+    names = [s.get("name") for s in steps]
+    fetch = steps[names.index("Fetch upstream release tags")]
+    assert names.index("Checkout code") < names.index("Fetch upstream release tags")
+    assert names.index("Fetch upstream release tags") < names.index("Run upgrade e2e tests (${{ matrix.shard }})")
+    assert "https://github.com/NousResearch/hermes-agent.git" in fetch["run"]
+    assert "refs/tags/v20*:refs/tags/v20*" in fetch["run"]
+    # The step proves N-1 resolves instead of letting every N-1 test fail on its own.
+    assert fetch["run"].rstrip().endswith("git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1")
