@@ -79,12 +79,15 @@ def test_archive_releases_only_previously_verified_completion(world, board, comp
         publish_observed(conn, replica, binding, version=4)
     row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)[0]
     assert row['reported_status'] == 'archived'
-    assert row['unfinished'] is not completed
-    assert row['status'] == ('archived' if completed else 'unknown')
+    # [daveey] An archive never waits: a verified completion releases it as done work, anything else is closed
+    # without counting as completed.
+    assert row['unfinished'] is False
+    assert row['status'] == 'archived'
+    assert row.get('closed_uncompleted', False) is not completed
 
 
 @pytest.mark.parametrize('fault', ['reopened', 'legacy', 'null', 'malformed'])
-def test_archive_without_current_completion_proof_stays_unknown(world, board, fault):
+def test_archive_without_current_completion_proof_is_closed_not_completed(world, board, fault):
     path, replica, binding = world
     with kbc.connect_closing() as conn:
         tid = create_bound(conn, binding)
@@ -99,7 +102,7 @@ def test_archive_without_current_completion_proof_stays_unknown(world, board, fa
             conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='archived'", (payload, tid))
         publish_observed(conn, replica, binding, version=4)
     row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)[0]
-    assert row['status'] == 'unknown' and row['unfinished']
+    assert row['status'] == 'archived' and not row['unfinished'] and row['closed_uncompleted'] is True
 
 
 def test_current_owner_verified_completion_releases(world, board):

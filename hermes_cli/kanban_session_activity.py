@@ -646,7 +646,9 @@ def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | 
         return False
     # A card bound through the origin ledger keeps the ledger's stricter release: its owner must
     # have verified the completion (lifecycle event, run, contract and goal receipts), not just closed it.
-    if task.get('origin_bindings') and evidence.get('verified') is not True:
+    # An archive is the exception: it produces nothing, so it closes the link without counting as completed
+    # (``closed_uncompleted`` on the row). [daveey]
+    if task.get('origin_bindings') and evidence.get('verified') is not True and task.get('status') != 'archived':
         return False
     beat = heartbeats.get((gw, owner_profile, board))
     return beat is not None and 0 <= now - beat <= SCOPE_HEARTBEAT_FRESH_S
@@ -889,6 +891,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
                 "ownership_state": 'unknown' if owner_profile is None else 'qualified',
                 "unfinished": not closed and (t.get("status") in LISTED_STATUSES or bool(t.get("unfinished"))),
                 "released": closed,
+                **({"closed_uncompleted": True} if closed and t.get("status") == "archived"
+                   and _owner_evidence_of(t).get("verified") is not True else {}),
                 "reported_status": t.get('reported_status', t.get('status')),
                 "synced_at": synced, "stale": stale,
                 "legacy_record": legacy_records.get((gw, owner_profile, board, tid)),
@@ -898,6 +902,12 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
                 **{k: t[k] for k in ("awaiting", "wake_check") if t.get(k)},
             }
     return list(found.values())
+
+
+def _owner_evidence_of(task: dict[str, Any]) -> dict[str, Any]:
+    """The hash-bound owner observation of a replica record, or {} (``kanban_origin_ledger._owner_evidence``)."""
+    from hermes_cli.kanban_origin_ledger import _owner_evidence
+    return _owner_evidence(task) if isinstance(task, dict) else {}
 
 
 def _park_of(task: dict[str, Any]) -> dict[str, Any] | None:

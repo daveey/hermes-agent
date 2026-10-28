@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from contextlib import closing, contextmanager
@@ -137,7 +138,7 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
         "SELECT id,run_id,created_at,payload FROM task_events WHERE task_id=? AND kind='completed' ORDER BY id DESC LIMIT 1",
         (task['id'],)).fetchone()
     run = conn.execute(
-        "SELECT id,status,outcome,ended_at FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+        "SELECT id,status,outcome,ended_at,summary FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
         (task['id'],)).fetchone()
     terminal = row[0] == 'done'
     if row[0] == 'archived' and event:
@@ -169,29 +170,81 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
             "SELECT payload,run_id FROM task_events WHERE id=? AND task_id=? AND kind='goal_verified' AND id<?",
             (receipt_id, task['id'], event[0])).fetchone() if type(receipt_id) is int else None
         if receipt and receipt[1] is not None and receipt[1] == event[1]:
+            from hermes_cli.kanban_db import _first_line
             from hermes_cli.kanban_goal_receipt import digest
             proof = json.loads(receipt[0] or '{}')
             subject = proof.get('subject') if isinstance(proof, dict) else None
             current = conn.execute('SELECT title,body FROM tasks WHERE id=?', (task['id'],)).fetchone()
+            recorded = (completed.get('summary') or completed.get('result') or '').strip()
+            judged = subject.get('evidence') if isinstance(subject, dict) else None
+            # [daveey] The completed event keeps only the handoff's first line (400 chars). A longer or multi-line
+            # handoff is bound through the closing run, which stores it whole, so it can still match the judged
+            # evidence; comparing against the event alone never released such a card.
+            evidence_ok = isinstance(judged, str) and (judged == recorded or (
+                _first_line(judged, 400) == recorded and run is not None and run[0] == event[1]
+                and judged == (run[4] or '').strip()))
             goal_verified = bool(isinstance(subject, dict) and proof.get('snapshot') == digest(subject)
                                  and subject.get('task_id') == task['id']
                                  and subject.get('title') == current[0] and subject.get('body') == current[1]
                                  and subject.get('contract') == row[4]
-                                 and subject.get('evidence') == (completed.get('summary') or completed.get('result') or '').strip())
+                                 and evidence_ok)
+    run_closed = bool(run and run[1] in ('done', 'completed') and run[2] == 'completed'
+                      and row[1] is not None and run[3] is not None and run[3] >= row[1])
     verified = bool(terminal and row[2] is None and goal_verified and contract_verified
-                    and event and run and event[1] == run[0] and run[1] in ('done', 'completed') and run[2] == 'completed'
-                    and row[1] is not None and event[2] >= row[1] and run[3] is not None and run[3] >= row[1])
+                    and event and run_closed and event[1] == run[0] and event[2] >= row[1])
+    legacy = False
+    if not verified and row[2] is None and run_closed and (event or row[0] == 'done'):
+        # [daveey] Completed before this board's first judge receipt: no receipt could exist then, and holding the
+        # card ``unknown`` forever left every origin session waiting on work nobody will produce. A completion
+        # event (when the board still has it) must be the one that closed this run; a board whose completion
+        # events were lost keeps only the closing run, which ``complete_task`` writes in the same transaction.
+        # Receipt-era cards and boards that never recorded a receipt get no legacy pass.
+        epoch = _receipt_epoch(conn)
+        if epoch is not None:
+            if event:
+                legacy = bool(terminal and event[0] < epoch[0] and event[1] == run[0] and event[2] >= row[1])
+                contract_ok = contract_verified
+            else:
+                legacy = row[1] < epoch[1]
+                contract_ok = row[4] == 'local-only'
+            legacy = bool(legacy and contract_ok)
+            verified = legacy
     payload = {k: v for k, v in task.items() if k != 'origin_observation'}
     if row[0] in ('scheduled', 'blocked'):
         from hermes_cli.kanban_wait_replica import observe_wait
         payload['wait_observation'] = observe_wait(conn, task['id'], now=now)
     # No per-task timestamp: an unchanged task must publish an identical record, or every sync republishes
     # every task. Owner liveness is the collector's per-scope heartbeat (``task_scopes[].observed_at``).
-    return {**payload, 'origin_observation': {
+    observation = {
         'schema': 1,
         'task_hash': hashlib.sha256(_json(payload).encode()).hexdigest(),
         'verified': verified,
-    }}
+    }
+    if legacy:
+        observation['basis'] = 'legacy_completed'  # only here, so every other record publishes unchanged
+    return {**payload, 'origin_observation': observation}
+
+
+# db file:inode -> (id, created_at) of its first ``goal_verified`` event. Immutable once it exists: events are append-only.
+_receipt_epochs: dict[str, tuple[int, int]] = {}
+
+
+def _receipt_epoch(conn: sqlite3.Connection) -> tuple[int, int] | None:
+    """``(event id, created_at)`` of the board's first judge receipt, or None when it never recorded one. [daveey]"""
+    try:
+        path = next((f for _, name, f in conn.execute('PRAGMA database_list') if name == 'main'), '') or ''
+        main = f'{path}:{os.stat(path).st_ino}' if path else ''  # a swapped-in (recovered) file is a new board
+    except (OSError, sqlite3.Error):
+        main = ''
+    if main and main in _receipt_epochs:
+        return _receipt_epochs[main]
+    found = conn.execute(
+        "SELECT id,created_at FROM task_events WHERE kind='goal_verified' ORDER BY id LIMIT 1").fetchone()
+    if found is None or type(found[0]) is not int or type(found[1]) is not int:
+        return None
+    if main:
+        _receipt_epochs[main] = (found[0], found[1])
+    return found[0], found[1]
 
 
 def _recent(observed_at: object, now: float, window: float = 180) -> bool:
@@ -397,7 +450,10 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 # terminal publication. Unknown status also remains unfinished.
                 known = status in ('todo', 'ready', 'running', 'scheduled', 'review',
                                    'blocked', 'triage', 'done', 'archived')
-                if not current or not known or (status in ('done', 'archived') and not released):
+                # [daveey] A currently observed owner archive without a verified completion produces nothing: the
+                # card is closed, not completed. It neither waits nor counts as done, and never releases as done.
+                closed = bool(current and status == 'archived' and not released and _owner_evidence(task))
+                if not current or not known or (status in ('done', 'archived') and not released and not closed):
                     status = 'unknown'
                 result.append({
                     **{k: task.get(k) for k in ('title', 'assignee', 'block_kind', 'created_at', 'started_at', 'priority')},
@@ -407,7 +463,8 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     'origin_profile': origin['profile'], 'origin_gateway': origin['gateway'],
                     'binding_id': binding['binding_id'], 'observation_version': version,
                     'status': status, 'reported_status': task.get('status'),
-                    'unfinished': not (current and released and status in ('done', 'archived')),
+                    'unfinished': not (current and (released or closed) and status in ('done', 'archived')),
+                    **({'closed_uncompleted': True} if closed else {}),
                     'stale': not current, 'synced_at': last_ok,
                     'remote': True, 'via': 'origin',
                     'legacy_aliases': aliases_for_projection(alias_receipts.get(binding_hash(binding), []), binding),
