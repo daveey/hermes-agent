@@ -265,7 +265,11 @@ def in_place_resume_action(session: dict, marker_key: str, *, skew: Callable[[],
         busy = bool(session.get("running") or session.get("_closing") or session.get("_finalized")
                     or session.get("_auto_continue_scheduled"))
     if busy:
-        return "done"
+        # A synthesized turn running over the paused marker (prompt_turn._carry_paused_marker) is not the
+        # user moving on: wait for it, then continue the paused turn.
+        with session["history_lock"]:
+            carried = session.get("_paused_marker_carried") == marker_key and session.get("running")
+        return "wait" if carried else "done"
     marker = read_turn_marker(_home(session), marker_key)
     if not marker or marker.get("reason") != PAUSE_REASON:
         return "done"

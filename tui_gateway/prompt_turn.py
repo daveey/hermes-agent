@@ -207,6 +207,21 @@ def _admit_prompt_turn(
     return images, agent
 
 
+def _carry_paused_marker(session: dict, home, marker_key: str) -> bool:
+    """[daveey] A synthesized turn (process completion, kanban notice, wake-up) landing on a turn paused for
+    a core update runs without a marker of its own: writing one would overwrite the paused request and its
+    retirement would drop it, so the paused turn never continued. Only a typed message retires the pause."""
+    from tui_gateway.turn_marker import read_turn_marker
+    from tui_gateway.update_pause import PAUSE_REASON
+    marker = read_turn_marker(home, marker_key) if marker_key else None
+    if not marker or marker.get("reason") != PAUSE_REASON:
+        return False
+    with session["history_lock"]:
+        session["_paused_marker_carried"] = marker_key
+    logger.info("core-update pause: synthesized turn on %s keeps the paused turn's marker", marker_key)
+    return True
+
+
 def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
                         notification_category: str | None = None) -> str:
     """Write the durable crash marker; returns the session key it was written under (compression
@@ -219,8 +234,12 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     marker_pauses = int(session.pop("_auto_continue_pauses", 0) or 0)
     killed_jobs = session.pop("_auto_continue_killed_jobs", None)
     marker_text = session.pop("_auto_continue_prompt", None) or text
+    session.pop("_paused_marker_carried", None)
+    synthesized = session.pop("_synthesized_turn", False)
     # [daveey] A core-update pause kept the previous turn's marker; this turn owns (and retires) its own.
     session.pop("_update_pause_marker_key", None)
+    if synthesized and not marker_attempt and _carry_paused_marker(session, marker_home, marker_key):
+        return ""
     if isinstance(marker_text, str) and marker_text.strip():
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
@@ -1297,10 +1316,12 @@ def _run_admitted_prompt(
                 from tui_gateway.free_tier_task_done import note_task_done
                 note_task_done(session, st.result, st.agent, display_kind)
             _emit("message.complete", sid, payload)
-            if paused_for_update:
+            # Kept until the next turn records its marker, so the backstop retire below also leaves it.
+            carried = session.get("_paused_marker_carried")
+            if paused_for_update or carried:
                 # The new backend continues it; if no update replaces this one, continue it here.
                 from tui_gateway import update_pause
-                update_pause.start_in_place_watcher(sid, session, st.marker_key)
+                update_pause.start_in_place_watcher(sid, session, str(st.marker_key or carried))
             goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)
             if status == "complete":
                 _after_complete_turn(sid, session, st, raw)

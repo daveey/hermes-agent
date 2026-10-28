@@ -70,7 +70,7 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
     if session.get("_exit_keeps_turn_marker"):
         return
     # [daveey] A core-update pause keeps its marker: the next backend (or the in-place watcher) continues it.
-    if session.get("_update_pause_marker_key"):
+    if session.get("_update_pause_marker_key") or session.get("_paused_marker_carried"):
         return
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):

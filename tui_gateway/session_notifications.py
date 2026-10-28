@@ -232,8 +232,12 @@ def _notif_run_submit(rid, sid, session, text, **kwargs):
         _notif_release_turn(session)
         return False
     session.pop("_turn_owner_refusal", None)
-    with stage(session):
-        accepted = _run_prompt_submit(rid, sid, session, text, **kwargs)
+    session["_synthesized_turn"] = True  # [daveey] keeps a core-update-paused marker (prompt_turn)
+    try:
+        with stage(session):
+            accepted = _run_prompt_submit(rid, sid, session, text, **kwargs)
+    finally:
+        session.pop("_synthesized_turn", None)
     reason = session.pop("_turn_owner_refusal", None)
     if not accepted and reason in _OWNER_REFUSAL_CODES:
         _notif_note_owner_refusal(session, reason)
