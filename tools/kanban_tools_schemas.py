@@ -691,7 +691,8 @@ KANBAN_CREATE_SCHEMA = _schema(
                     "if it waits too long."},
         "placement": _prop("string", (
                 "Where the card runs. 'auto' (default): on a gateway with a "
-                "kanban.placement route (e.g. the MacBook -> hermes-hub), a "
+                "kanban.placement route (e.g. the MacBook -> 'hub', the gateway "
+                "on the hermes-hub host; 'hermes-hub' is accepted as an alias), a "
                 "card with no local-only need is created on the target "
                 "gateway, still linked to this chat. 'local' pins it here "
                 "(use it when the work needs this machine: its Chrome, "

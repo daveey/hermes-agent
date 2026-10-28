@@ -981,3 +981,45 @@ def test_dispatcher_spawns_the_forwarder_for_a_deferred_card(mac, monkeypatch):
     tail = spawned[child][spawned[child].index("--") + 1:]
     assert "chat" in tail  # the worker it execs on fallback
     assert "hermes_cli.kanban_placement_forward" not in spawned[plain]
+
+
+# --- gateway aliases: 'hermes-hub' is the hub's host name, 'hub' its gateway name ------------------
+# Coach signature (6 sessions, 10-24..10-28): placement='hermes-hub' was refused as "not a routed
+# gateway (only 'hub')", so cron runs and chats created no card at all. [daveey]
+
+@pytest.mark.parametrize("pin", ["hermes-hub", "Hermes-Hub", " hermes-hub "])
+def test_host_style_alias_of_the_routed_target_is_placed_there(pin):
+    d = decide({"title": "CI fix", "placement": pin})
+    assert d["where"] == "hub", d
+
+
+def test_host_style_alias_of_own_gateway_means_local():
+    # On the hub (no route there), placement='hermes-hub' is this gateway: create locally.
+    assert decide({"title": "x", "placement": "hermes-hub"}, cfg={}, self_gw="hub")["where"] == "local"
+    assert kp.explicit_foreign_pin({"placement": "hermes-hub"}, "hub", {}) == ""
+
+
+def test_configured_alias_maps_any_name_and_unknown_names_still_refuse():
+    cfg = {**ROUTE, "aliases": {"ec2-hub": "hub"}}
+    assert decide({"title": "x", "placement": "ec2-hub"}, cfg=cfg)["where"] == "hub"
+    # Only a known gateway behind the 'hermes-' prefix resolves; anything else is refused as before.
+    d = decide({"title": "x", "placement": "hermes-mini"})
+    assert d["where"] == "refuse" and d["pin"] == "hermes-mini", d
+    assert decide({"title": "x", "placement": "hermes"})["where"] == "refuse"
+
+
+def test_hermes_hub_pin_through_the_tool_creates_on_the_hub_not_refused(mac):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hermes-hub"}))
+    assert out.get("ok"), out
+    assert out["placed"]["gateway"] == "hub" and mac["calls"], out
+    assert _local_count() == 0
+
+
+def test_hermes_hub_pin_on_the_hub_itself_creates_locally(mac, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", dict)
+    monkeypatch.setattr(reg, "self_gateway", lambda: "hub")
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hermes-hub"}))
+    assert out.get("ok") and out["task_id"] and "placed" not in out, out
+    assert _local_count() == 1

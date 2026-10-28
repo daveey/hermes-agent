@@ -41,6 +41,9 @@ answer (:func:`await_task_id`) and returns its task id like a local create. Stil
 as "not created" once called kanban_create again and made a duplicate card. An identical retry
 maps to the same request id (:func:`request_id`) and is never sent twice.
 
+A pinned name resolves aliases first (:func:`canonical_pin`): ``hermes-<gw>`` (the hub's host is
+``hermes-hub``, its gateway ``hub``) and ``kanban.placement.aliases``.
+
 Unset ``route`` (upstream default) never places anything remotely.
 """
 from __future__ import annotations
@@ -283,9 +286,40 @@ def _uncarried(args: dict, c: _Cfg, carries: Optional[bool]) -> list[str]:
     return [] if carries else legacy
 
 
-def explicit_foreign_pin(args: dict, self_gw: Optional[str]) -> str:
-    """The gateway the caller pinned that is neither this gateway nor 'local'/'auto', else ''."""
-    pin = str(args.get("placement") or "auto").strip().lower()
+def canonical_pin(pin, self_gw: Optional[str] = None, cfg: Optional[dict] = None) -> str:
+    """``pin`` lowercased, with a host-style alias resolved to its gateway name.
+
+    The hub gateway is named ``hub`` but its machine is ``hermes-hub`` (EC2 host, the hermes-hub
+    client, every doc and memory line), so models pin ``placement='hermes-hub'`` and got refused
+    ("not a routed gateway (only 'hub')"). ``kanban.placement.aliases`` (``{alias: gateway}``) maps
+    any name; built in, ``hermes-<gw>`` means ``<gw>`` when ``<gw>`` is this gateway or a routed one.
+    Unknown names pass through unchanged (and are refused as before). Never raises.
+    """
+    try:
+        p = str(pin or "").strip().lower()
+        raw = config() if cfg is None else cfg
+        raw = raw if isinstance(raw, dict) else {}
+        aliases = raw.get("aliases")
+        if isinstance(aliases, dict):
+            hit = {str(k).strip().lower(): str(v).strip().lower() for k, v in aliases.items()}.get(p)
+            if hit:
+                return hit
+        known = {str(self_gw or "").strip().lower()}
+        route = raw.get("route")
+        if isinstance(route, dict):
+            known |= {str(k).strip().lower() for k in route} | {str(v).strip().lower() for v in route.values()}
+        known.discard("")
+        if p.startswith("hermes-") and p[len("hermes-"):] in known:
+            return p[len("hermes-"):]
+        return p
+    except Exception:
+        return str(pin or "").strip().lower()
+
+
+def explicit_foreign_pin(args: dict, self_gw: Optional[str], cfg: Optional[dict] = None) -> str:
+    """The gateway the caller pinned that is neither this gateway nor 'local'/'auto', else ''.
+    Aliases resolve first (:func:`canonical_pin`)."""
+    pin = canonical_pin(args.get("placement") or "auto", self_gw, cfg)
     if pin in ("", "auto", "local", "here", (self_gw or "").lower()):
         return ""
     return pin
@@ -321,7 +355,7 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
         known = sg.strip().lower() if isinstance(sg, str) else ""
         out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
                       locate=locate, carries=carries)
-        pin = explicit_foreign_pin(args, sg)
+        pin = explicit_foreign_pin(args, sg, cfg)
         if pin and origin_intent is None and out.get("where") == "local" and not out.get("defer"):
             return {"where": "refuse", "why": out.get("why", ""), "pin": pin}
         return out
@@ -348,7 +382,7 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
         target = c.target(self_gw)
         if not target:
             return {"where": "local", "why": "no placement route for this gateway"}
-        pin = str(args.get("placement") or "auto").strip().lower()
+        pin = canonical_pin(args.get("placement") or "auto", self_gw, c.raw)
         if pin in ("local", "here", (self_gw or "").lower()):
             return {"where": "local", "why": "placement pinned local by the caller"}
         explicit = pin not in ("", "auto")
