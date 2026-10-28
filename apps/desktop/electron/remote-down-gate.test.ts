@@ -61,7 +61,7 @@ describe('remote down gate', () => {
     h.connect.mockClear()
 
     const startedAt = performance.now()
-    const error = await h.run(request).catch(e => e)
+    const error: any = await h.run(request).catch(e => e)
 
     expect(isRemoteBackendDownError(error)).toBe(true)
     expect(String(error.message)).toContain(KEY)
