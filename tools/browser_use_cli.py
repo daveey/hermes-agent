@@ -731,15 +731,16 @@ def _own_start() -> Optional[int]:
 
 def _owner_alive(stamp: str) -> bool:
     """``<pid>-<start>``: True while that exact process generation runs (a recycled pid has another start)."""
-    from gateway.status import get_process_start_time
+    from gateway.status import _pid_exists, get_process_start_time
     pid_s, _, start_s = stamp.partition("-")
     try:
         pid = int(pid_s)
-        os.kill(pid, 0)
-    except (ValueError, ProcessLookupError):
+    except ValueError:
         return False
-    except PermissionError:
-        return True
+    # gateway.status._pid_exists, not os.kill(pid, 0): on Windows that signal is
+    # CTRL_C_EVENT for the whole console group (bpo-14484). Zombies count as dead.
+    if not _pid_exists(pid):
+        return False
     if not start_s or start_s == "x":
         return True
     current = _quiet(lambda: get_process_start_time(pid), None, "process start time unavailable")

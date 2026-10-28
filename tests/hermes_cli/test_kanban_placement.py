@@ -390,7 +390,7 @@ def test_pin_to_an_unrouted_gateway_is_refused_not_created_locally(mac, pin):
 def test_pin_to_a_gateway_when_no_route_is_configured_is_refused(mac, monkeypatch):
     # The reported case: a hub worker (no route on the hub) pinned placement='macbook'.
     from tools import kanban_tools as kt
-    monkeypatch.setattr(kp, "config", lambda: {})
+    monkeypatch.setattr(kp, "config", dict)
     monkeypatch.setattr(reg, "self_gateway", lambda: "hub")
     out = json.loads(kt._handle_create({"title": "MacBook-only drill", "placement": "macbook"}))
     assert not out.get("ok") and out["code"] == "placement_unavailable", out
@@ -415,7 +415,7 @@ def test_pin_local_or_own_gateway_still_creates_locally(mac, pin):
 
 def test_own_gateway_pin_creates_locally_with_no_route_configured(mac, monkeypatch):
     from tools import kanban_tools as kt
-    monkeypatch.setattr(kp, "config", lambda: {})
+    monkeypatch.setattr(kp, "config", dict)
     monkeypatch.setattr(reg, "self_gateway", lambda: "hub")
     out = json.loads(kt._handle_create({"title": "Hub drill", "placement": "hub"}))
     assert out["ok"] and out["task_id"] and _local_count() == 1
