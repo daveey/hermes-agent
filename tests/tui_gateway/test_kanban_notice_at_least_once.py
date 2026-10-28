@@ -275,3 +275,95 @@ def test_unloaded_sweep_recovers_an_orphaned_claim(tmp_path, monkeypatch):
 
     assert [o["task_id"] for o in out] == [tid]
     assert len(_notices(d)) == 1 and tid in _notices(d)[0]["content"]
+
+
+def _as_other_live_process(monkeypatch):
+    """From here on this process claims as a DIFFERENT live process (our parent's pid): a second backend."""
+    import os
+    monkeypatch.setattr(kbn, "_my_holder", lambda: (os.getppid(), None))
+
+
+@pytest.mark.parametrize("flag", ["_finalized", "_closing", "_lease_taken_over"])
+def test_closed_session_hands_its_buffered_claim_back_while_the_process_lives(gate, flag, monkeypatch):
+    """Review r1 #1: a chat closed / evicted / taken over while its notice is buffered must not keep the claim in
+    flight under a still-live pid; that blocks every other backend's poller until this process exits."""
+    tid = _task()
+    before = _sub(tid)["last_event_id"]
+    _complete(tid)
+    busy = _session(running=True)
+    server._notif_poll_kanban_scoped("ui-old", busy)
+    assert len(busy["_kanban_pending"]) == 1 and _sub(tid)["inflight_from"] == before
+
+    busy[flag] = True
+    server._notif_poll_kanban_scoped("ui-old", busy)
+    assert _sub(tid)["inflight_from"] is None and _sub(tid)["last_event_id"] == before, "handed back"
+    assert not busy.get("_kanban_pending")
+
+    _as_other_live_process(monkeypatch)
+    server._notif_poll_kanban_scoped("ui-other-backend", _session())
+    assert len(gate["submitted"]) == 1 and tid in gate["submitted"][0][1], "the next backend delivers it"
+
+
+def test_poller_stop_hands_buffered_claims_back(gate, monkeypatch):
+    """Review r1 #1, the poller-thread path: the stop signal releases what the session still buffers."""
+    tid = _task()
+    before = _sub(tid)["last_event_id"]
+    _complete(tid)
+    busy = _session(running=True)
+    server._notif_poll_kanban_scoped("ui-old", busy)
+    assert _sub(tid)["inflight_from"] == before
+
+    stop = threading.Event()
+    stop.set()
+    server._notification_poller_scoped_loop(stop, "ui-old", busy)
+    assert _sub(tid)["inflight_from"] is None and _sub(tid)["last_event_id"] == before
+
+    _as_other_live_process(monkeypatch)
+    server._notif_poll_kanban_scoped("ui-other-backend", _session())
+    assert len(gate["submitted"]) == 1 and tid in gate["submitted"][0][1]
+
+
+def test_non_owner_backend_writes_no_row_and_leaves_the_notice_for_the_owner(gate, sdb, monkeypatch):
+    """Review r1 #2: the backend that does not own the chat must not write the row and ack the claim before the
+    admission refuses its turn; the owner's poller must get the event and run the turn."""
+    from hermes_cli.active_sessions import SESSION_NOT_OWNED, ActiveSessionRefusal
+
+    refusal = ActiveSessionRefusal("This chat is active in another Hermes window/terminal.", SESSION_NOT_OWNED)
+    # Another backend holds the chat's durable turn lease while the stranger polls.
+    monkeypatch.setattr(server, "_durable_owner_refusal",
+                        lambda session: None if session.get("_owner") else refusal)
+    tid = _task()
+    before = _sub(tid)["last_event_id"]
+    _complete(tid)
+
+    stranger = _session()
+    server._notif_poll_kanban_scoped("stranger", stranger)
+    assert _notices(sdb) == [] and gate["submitted"] == [], "no row and no turn in the non-owner"
+    assert _sub(tid)["last_event_id"] == before and _sub(tid)["inflight_from"] is None, "claim handed back"
+    assert stranger["running"] is False and not stranger.get("_kanban_pending")
+
+    server._notif_poll_kanban_scoped("owner", {**_session(), "_owner": True})
+    rows = _notices(sdb)
+    assert len(rows) == 1 and tid in rows[0]["content"]
+    assert [s for s, _t, _k in gate["submitted"]] == ["owner"]
+    assert _sub(tid)["inflight_from"] is None
+
+
+def test_chat_held_in_another_process_registry_writes_no_row(gate, sdb, monkeypatch):
+    """Review r1 #2, the registry owner: another live process holds the chat's active-session slot."""
+    import os
+
+    from hermes_cli import active_sessions as acs
+
+    state_path, _lock = acs._lease_paths()
+    entry = acs._lease_entry(lease_id="other-backend", session_id=KEY, surface="desktop")
+    entry.update(pid=os.getppid(), process_start_time=acs._process_start_time(os.getppid()))
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    acs._write_entries(state_path, [entry])
+    tid = _task()
+    before = _sub(tid)["last_event_id"]
+    _complete(tid)
+
+    server._notif_poll_kanban_scoped("stranger", _session())
+    assert _notices(sdb) == [] and gate["submitted"] == []
+    assert _sub(tid)["last_event_id"] == before and _sub(tid)["inflight_from"] is None

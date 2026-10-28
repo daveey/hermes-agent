@@ -845,11 +845,21 @@ def _kb_persist_batch(session: dict, batch: list, diagnostic: bool) -> tuple:
 
 def _kb_release_claims(session: dict) -> None:
     """The poller is stopping with notices still buffered: hand their claimed ranges back (newest first, CAS) so
-    the chat's next consumer delivers them now instead of after this process exits. Never raises. [daveey]"""
+    the chat's next consumer delivers them now instead of after this process exits. Never raises; takes no
+    lock (a turn may hold ``history_lock`` while the poller stops). [daveey]"""
+    if not session.get("_kanban_claims") and not session.get("_kanban_pending"):
+        return
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
     for claim in reversed(session.get("_kanban_claims") or []):
-        if claim.get("remote") or claim.get("durable") or not claim.get("texts"):
+        if claim.get("durable") or not claim.get("texts"):
+            continue
+        if claim.get("remote"):
+            try:
+                from tui_gateway import kanban_remote_notices as _krn
+                _krn.release(claim["remote"])
+            except Exception as exc:
+                _notif_log_failure("remote kanban notice release on poller stop failed", exc)
             continue
         try:
             with contextlib.closing(_kbc.connect(board=claim["board"])) as conn:
@@ -862,10 +872,45 @@ def _kb_release_claims(session: dict) -> None:
     session["_kanban_pending"] = []
 
 
+def _kb_owner_refusal(sid: str, session: dict):
+    """Probe, read-only, whether ANOTHER process owns this chat, BEFORE a kanban batch is written to its
+    transcript: a non-owner must not write the notice row and ack the claim, or the owner never hears the event
+    and no turn reacts to the row. Two owners count: a foreign durable turn lease (state.db) and, while this
+    session holds no registry slot, a live registry entry for the chat from another pid. Claims nothing (the
+    turn's admission still claims the slot); an unprovable answer is None and the admission decides. [daveey]"""
+    import os
+
+    from hermes_cli.active_sessions import SESSION_NOT_OWNED
+    try:
+        refusal = _durable_owner_refusal(session)
+        if getattr(refusal, "reason", None) != SESSION_NOT_OWNED:
+            refusal = None
+        key = str(session.get("session_key") or "")
+        if refusal is None and key and session.get("active_session_lease") is None:
+            from hermes_cli.active_sessions import (ActiveSessionRefusal, active_session_registry_snapshot,
+                                                    session_already_owned_message)
+            for entry in active_session_registry_snapshot(session.get("profile_home")):
+                if str(entry.get("session_id") or "") == key and int(entry.get("pid") or -1) != os.getpid():
+                    refusal = ActiveSessionRefusal(session_already_owned_message(key, entry), SESSION_NOT_OWNED)
+                    break
+    except Exception as exc:
+        _notif_log_failure("kanban notice ownership probe failed; the turn's admission decides", exc)
+        return None
+    if refusal is not None:
+        _notif_note_owner_refusal(session, SESSION_NOT_OWNED)
+    return refusal
+
+
 def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
     """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle. Events are
     cursor-claimed, so they wait in the buffer instead of dropping the agent turn; a turn the admission gate
     refuses hands its claims back (_kb_rewind_refused)."""
+    if session.get("_finalized") or session.get("_closing") or session.get("_lease_taken_over"):
+        # Closing or taken over: hand buffered claims back now, so the chat's next consumer (often another live
+        # backend) is not blocked behind this process's in-flight marker until it exits. [daveey]
+        if session.get("_kanban_claims") or session.get("_kanban_pending"):
+            _kb_release_claims(session)
+        return
     claims: list = []
     if time.monotonic() < float(session.get("_kanban_refused_until") or 0):
         texts = []
@@ -891,6 +936,11 @@ def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
         diagnostic = split and isinstance(pending[0], DiagnosticText)
         batch = [text for text in pending if not split or isinstance(text, DiagnosticText) == diagnostic]
         session["_kanban_pending"] = [text for text in pending if split and isinstance(text, DiagnosticText) != diagnostic]
+    # Only the chat's owner writes the row and acks; a non-owner hands the claims back for the owner's poller.
+    if _kb_owner_refusal(sid, session) is not None:
+        _notif_release_turn(session)
+        _kb_rewind_refused(session, batch)
+        return
     # At-least-once (t_01a1835174955959): the notices land in the transcript and the board claim is acked
     # BEFORE the turn runs; until then the claim is in flight and a process that dies first hands it back.
     verdict, fresh, submit_kwargs = _kb_persist_batch(session, batch, diagnostic)
@@ -1456,6 +1506,11 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
             # This thread is the session's only path to notifications, /loop, /heartbeat and its
             # bot mailbox; one bad event must not end all four.
             _notif_log_failure("notification dispatch failed", exc)
+    # Kanban claims still buffered go back to the board: the process may live on (close, evict). [daveey]
+    try:
+        _kb_release_claims(session)
+    except Exception as exc:
+        _notif_log_failure("kanban notice release on poller stop failed", exc)
     # Drain remaining events after the stop signal so nothing is lost on shutdown; foreign and orphaned-delegation
     # events are handed back to the shared queue afterwards.
     deferred: list = []
