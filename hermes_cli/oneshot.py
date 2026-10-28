@@ -235,6 +235,27 @@ def _write_usage_file(path: Optional[str], result: dict, failure: Optional[str] 
         pass
 
 
+def _silence_console_log_handlers() -> None:
+    """Mute every console log handler already attached, leaving file/queue handlers alone.
+
+    A ``StreamHandler`` binds its stream at creation, so ``redirect_stderr`` below does not
+    reach handlers attached earlier (``--verbose``, a library's ``basicConfig``). Raise their
+    level past CRITICAL instead. ``FileHandler`` subclasses ``StreamHandler`` and is kept, as are
+    the queued agent.log/errors.log handlers (``QueueHandler`` is not a ``StreamHandler``).
+    Handlers created later bind to the redirected (devnull) stream. ``logging.lastResort`` (used
+    only when no handler at all exists, e.g. setup_logging() failed) is replaced by a no-op so a
+    WARNING outside the redirect window cannot reach the real stderr.
+    """
+    logging.lastResort = logging.NullHandler()
+    loggers = [logging.getLogger()] + [
+        lg for lg in list(logging.root.manager.loggerDict.values()) if isinstance(lg, logging.Logger)
+    ]
+    for lg in loggers:
+        for handler in list(lg.handlers):
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                handler.setLevel(logging.CRITICAL + 1)
+
+
 def run_oneshot(
     prompt: str,
     model: Optional[str] = None,
@@ -252,9 +273,10 @@ def run_oneshot(
     the CLI layer: latest/title/--continue resolution) whose transcript is loaded and continued
     by this turn. Returns the exit code; the caller owns process termination.
     """
-    # Silence every stdlib logger: AIAgent, tools and provider adapters log to stderr through the
-    # root logger. File handlers from setup_logging() keep working (level-independent).
-    logging.disable(logging.CRITICAL)
+    # Keep the console clean (stdout = the reply, stderr = no log text) WITHOUT disabling logging:
+    # ``logging.disable`` short-circuits ``isEnabledFor`` for every logger, so the setup_logging()
+    # file handlers would see nothing and one-shot turns would leave no agent.log lines.
+    _silence_console_log_handlers()
 
     # --provider without --model is ambiguous (the provider may not host the configured model, and
     # picking its catalog default hides the mismatch). Validate BEFORE the stderr redirect.
