@@ -137,6 +137,44 @@ def infer_provider(model: str) -> Optional[str]:
     return "anthropic" if model.lower().startswith("claude") else None
 
 
+def class_unroutable_reason(model: str, config: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """None when this host can route ``class:<level>``; otherwise a short reason.
+
+    Non-allocating config check with the allocator's own billing/capability filter
+    (``agent.model_routing.eligible_routes``) plus the provider-enabled gate the worker applies. Credential
+    exhaustion is not checked here: that is a transient wall handled by ``kanban_provider_walls``.
+    Unreadable config returns None (unknown = do not change the decision).
+    """
+    from agent.model_routing import CLASSES, ModelRoutingError, eligible_routes, validate_policy
+    level = str(model).removeprefix("class:")
+    if config is None:
+        try:
+            from hermes_cli.config_effective import load_user_config_effective
+            config = load_user_config_effective() or {}
+        except Exception as exc:  # never break dispatch over config
+            logger.debug("kanban model tier: routing config unreadable (%s)", exc)
+            return None
+    policy = config.get("model_routing") or {}
+    try:
+        validate_policy(policy)
+    except ModelRoutingError:
+        return "invalid_policy"
+    if not policy.get("enabled", False):
+        return "routing_disabled"
+    if level not in CLASSES:
+        return "unknown_class"
+    from hermes_cli.config import is_provider_enabled
+    providers = config.get("providers") or {}
+
+    def enabled(route: dict) -> bool:
+        block = providers.get(route["provider"], {}) if isinstance(providers, dict) else {}
+        return is_provider_enabled(block if isinstance(block, dict) else {})
+
+    if not eligible_routes(policy, level, eligible=enabled):
+        return "no_eligible_routes"
+    return None
+
+
 def worker_model_args(model: str, provider: Optional[str]) -> list[str]:
     """Keep class allocation inside the owning worker, never the dispatcher.
 
@@ -177,6 +215,18 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
                 reason = f"{reason}+wall:{walled}"
         except Exception as exc:  # never break dispatch over wall bookkeeping
             logger.debug("kanban model tier: wall re-tier failed for %s (%s)", getattr(task, "id", "?"), exc)
+    if model:
+        from agent.model_routing import is_class_selector
+        why = class_unroutable_reason(model) if is_class_selector(model) else None
+        if why:
+            # A tier-chosen class this host cannot route would crash the worker at startup ("No eligible
+            # standard routes under billing/capability policy", 2026-10-27: shared config switched
+            # kanban.default_model to class:standard before the host's route registry landed). Keep the
+            # profile's own model instead; the next run re-decides once routes exist.
+            logger.warning("kanban model tier: %s is not routable on this host (%s); %s keeps its profile model",
+                           model, why, getattr(task, "id", "?"))
+            reason = f"{reason}+unroutable:{model}:{why}"
+            model = provider = None
     if model:
         task.model_override = model
         task.provider_override = provider
