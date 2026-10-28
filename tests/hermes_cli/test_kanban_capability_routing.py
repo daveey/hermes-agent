@@ -8,6 +8,7 @@ for an hour with no producer until David asked.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -45,6 +46,11 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # hub_cli_path() resolves `hermes-hub` through PATH first. On a host with the client installed
+    # (hermes-hub, the MacBook: ~/.local/bin/hermes-hub) argv[0] became that absolute path, so these
+    # asserts depended on the host. Drop PATH entries that carry a real hermes-hub.
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        d for d in os.environ.get("PATH", "").split(os.pathsep) if d and not (Path(d) / "hermes-hub").exists()))
     mail = tmp_path / "mail.json"
     mail.write_text(json.dumps({"gateway": "hub"}))
     monkeypatch.setenv("HERMES_MAIL_CONFIG", str(mail))

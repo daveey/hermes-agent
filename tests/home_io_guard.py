@@ -46,6 +46,12 @@ _INTERPRETER_PREFIXES = tuple({
 # resolve once at import, as before: they are fixed for the process lifetime.
 _normcase = os.path.normcase
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
+# The sealed-payload probe (pm.environments._payload_manifest) reads ``<checkout>/../manifest.json``
+# whenever hermes_bootstrap is first imported, which many modules do lazily mid-test (e.g.
+# hermes_state -> agent.context_compressor -> agent.conversation_loop). With the checkout inside a
+# guarded root (default install ``~/.hermes/hermes-agent``, or a worktree under ~/.hermes/cache) that
+# read is the checkout asking "am I a payload?", not Hermes state. Reads only; writes stay refused.
+_PAYLOAD_MANIFEST_STR = _normcase(os.fspath(Path(__file__).resolve().parent.parent.parent / "manifest.json"))
 
 
 def _within(path: str, prefix: str) -> bool:
@@ -95,6 +101,8 @@ class HomeIOGuard:
             # link to compare inode identity); resolving it names whatever file that fd holds,
             # which is not I/O against the home.
             if metadata and (absolute == "/proc" or absolute.startswith("/proc" + os.sep)):
+                return
+            if absolute == _PAYLOAD_MANIFEST_STR and not destructive:
                 return
             resolved = self._refuse_installed_app_change(value, absolute) if destructive else None
             roots = tuple(_normcase(os.fspath(r)) for r in self.roots())

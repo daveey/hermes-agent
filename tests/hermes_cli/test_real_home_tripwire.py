@@ -200,6 +200,22 @@ def test_checkout_inside_a_guarded_root_is_not_hermes_state():
         guard.check(PROJECT_ROOT.parent / "config.yaml")
 
 
+def test_payload_manifest_beside_a_guarded_checkout_is_readable_not_writable():
+    """hermes_bootstrap's sealed-payload probe reads ``<checkout>/../manifest.json`` on first import,
+    often lazily mid-test. With the checkout inside a guarded root (default install, or a worktree
+    under ~/.hermes/cache/scratch) that read is the checkout's own layout probe: allowed. Writing or
+    deleting it, and any other sibling, are still refused."""
+    from tests.home_io_guard import HomeIOGuard
+
+    guard = HomeIOGuard(lambda: [PROJECT_ROOT.parent])
+    manifest = PROJECT_ROOT.parent / "manifest.json"
+    guard.check(manifest)
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(manifest, destructive=True)
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(PROJECT_ROOT.parent / "manifest.json.bak")
+
+
 def test_hermes_exported_scratch_tmp_is_not_the_test_temp_root(tmp_path):
     """A Hermes-launched shell hands pytest TMPDIR=<home>/cache/scratch (tagged by
     HERMES_SCRATCH_DIR). With that home guarded, honoring it would put the session
