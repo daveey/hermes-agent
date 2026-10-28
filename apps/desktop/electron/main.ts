@@ -187,6 +187,7 @@ import {
   buildAgentRoster,
   connectionDialFieldsChanged,
   connectionIdForPendingLogin,
+  LOCAL_CONNECTION_ID,
   mergeConnectionInput,
   migrateV1ToRegistry,
   normalizeConnectionInput,
@@ -11244,6 +11245,7 @@ async function ensureRegistryBackend(
     // Pass the raw profile, not profileKey: profileKey collapses null to
     // 'default' and would refuse an unprofiled enumeration as a concrete dial.
     const localRoute = resolveRegistryLocalRoute(rawProfile || null, {
+      envRemotePrimary: Boolean(process.env.HERMES_DESKTOP_REMOTE_URL) && registry.primary === LOCAL_CONNECTION_ID,
       globalRemote: globalRemoteActive(),
       profileRemoteOverride: Boolean(profileHasRemoteOverride(profileKey)),
       ...(rawProfile ? { localProfileExists } : {})

@@ -531,11 +531,26 @@ function normalizedSshTarget(route: { host?: unknown; port?: unknown; user?: unk
  */
 export function resolveRegistryLocalRoute(
   profile: null | string | undefined,
-  opts: { globalRemote?: boolean; localProfileExists?: boolean; profileRemoteOverride?: boolean } = {}
+  opts: {
+    /** HERMES_DESKTOP_REMOTE_URL pins the app to a remote while the registry's primary is still 'local'. */
+    envRemotePrimary?: boolean
+    globalRemote?: boolean
+    localProfileExists?: boolean
+    profileRemoteOverride?: boolean
+  } = {}
 ): RegistryLocalRoute {
   const raw = String(profile ?? '').trim()
   const profileKey = raw || 'default'
   const concrete = raw.length > 0
+
+  // [daveey] The env override applies app-wide and never enters the registry, so the 'local' entry stays the
+  // registry primary: every renderer call routed to the primary arrives here as an explicit 'local' (the hub-sync
+  // replica read is the first, ~0.3 s after boot). Forcing a local child for it spawned a backend on a client the env
+  // had pinned to a remote, and the published local route then pulled the window's REST traffic onto that child.
+  // In that setup 'local' IS the primary, so it follows the v1 route to the env remote.
+  if (opts.envRemotePrimary) {
+    return { delegate: true, poolKey: profileKey }
+  }
 
   // A per-profile SSH/remote override is an explicit per-profile routing
   // decision: the override owns this profile's backend, so the 'local' entry
