@@ -256,7 +256,8 @@ def remote_body(args: dict, *, self_gw: str, target: str) -> str:
         f"Placed on {target} by {self_gw}'s default placement rule (kanban.placement): nothing in the card "
         f"named a {self_gw}-only need. If you hit something only {self_gw} has (its Chrome profile, Keychain, "
         f"Apple apps, launchd or Desktop state, AWS SSO profiles, ssh to the mini, a checkout this host "
-        f"lacks), block with needs=[<capability>] so capability routing opens an owner card on {self_gw}; "
+        f"lacks), block with needs=['host:{self_gw}'] (or the exact capability, e.g. "
+        f"'aws:<account>:admin', 'ssh:mini') so capability routing opens an owner card on {self_gw}; "
         "don't park or ask David.")
     return (body + "\n\n---\n" + "\n".join(extra)).strip()
 

@@ -1439,7 +1439,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         cfg = kp.config()
         placed = kp.create_remote(view, target=target, origin_session=session_id,
                                   origin_profile=current_profile_name("default") or "default",
-                                  self_gw=self_gw, cfg=cfg, hub_cli=cfg.get("hub_cli") or "hermes-hub")
+                                  self_gw=self_gw, cfg=cfg, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")))
         if not placed.get("ok"):
             logger.warning("kanban placement: %s refused the card (%s); creating it locally",
                            target, placed.get("error"))

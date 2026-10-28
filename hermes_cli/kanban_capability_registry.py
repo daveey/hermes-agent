@@ -152,6 +152,25 @@ def self_gateway() -> Optional[str]:
         return None
 
 
+def hub_cli_path(configured=None) -> str:
+    """The hermes-hub executable. [daveey]
+
+    Gateway and worker processes (launchd, Hermes Python.app) run without the login shell's PATH, so
+    the installer's ``~/.local/bin`` is usually missing there: a bare ``hermes-hub`` raised ENOENT and
+    every cross-gateway create silently failed. Order: configured value, PATH, ``~/.local/bin``.
+    """
+    import shutil
+
+    if isinstance(configured, str) and configured.strip():
+        value = os.path.expanduser(configured.strip())
+        return shutil.which(value) or value
+    found = shutil.which("hermes-hub")
+    if found:
+        return found
+    fallback = Path.home() / ".local" / "bin" / "hermes-hub"
+    return str(fallback) if fallback.exists() else "hermes-hub"
+
+
 def _ro(path: Path):
     import sqlite3
     if not path.exists():

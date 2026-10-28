@@ -80,9 +80,7 @@ def needs_from_requires(requires) -> list[str]:
 
 
 def _hub_cli() -> str:
-    cfg = reg._config()
-    value = cfg.get("hub_cli")
-    return value if isinstance(value, str) and value.strip() else "hermes-hub"
+    return reg.hub_cli_path(reg._config().get("hub_cli"))
 
 
 def _owner_assignee() -> str:

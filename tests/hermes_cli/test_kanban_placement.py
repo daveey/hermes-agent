@@ -273,3 +273,24 @@ def test_retry_reuses_the_request_id():
     assert kp.request_id("macbook", {"title": "t", "idempotency_key": "k"}, "s1") == \
         kp.request_id("macbook", {"title": "other", "idempotency_key": "k"}, "s1")
     assert len(a) <= 128 and reg.is_gateway_need("x:y")  # ids fit hermes-hub's alphabet/length
+
+
+def test_hub_cli_resolves_without_the_login_shell_path(tmp_path, monkeypatch):
+    """Gateway/worker processes have no ~/.local/bin on PATH: a bare 'hermes-hub' raised ENOENT."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert reg.hub_cli_path() == "hermes-hub"  # nothing installed: unchanged (the caller's error names it)
+    exe = tmp_path / ".local" / "bin" / "hermes-hub"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    assert reg.hub_cli_path() == str(exe)
+    assert reg.hub_cli_path(str(tmp_path / "custom")) == str(tmp_path / "custom")  # configured wins
+    from hermes_cli import kanban_capability_routing as kcr
+    monkeypatch.setattr(reg, "_config", lambda: {})
+    assert kcr._hub_cli() == str(exe)
+
+
+def test_remote_body_names_the_capability_to_route_back_with():
+    body = kp.remote_body({"body": "Do it."}, self_gw="macbook", target="hub")
+    assert "needs=['host:macbook']" in body and reg.is_gateway_need("host:macbook")
