@@ -26,6 +26,9 @@ def test_command_reports_outcome_and_releases_real_lock(tmp_path, monkeypatch, f
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_UPDATE_REEXEC", "1" if reexec else "")
     monkeypatch.setattr("os._exit", lambda *_: pytest.fail("normal cleanup bypassed"))
+    # The runner's interpreter (a PM test-environment venv under the real home) is not the
+    # checkout under test; retargeting would probe and re-exec it. Not this test's subject.
+    monkeypatch.setattr("hermes_cli.update_owning_install.retarget_to_owning_install", lambda *_: None)
     monkeypatch.setattr(main, "_update_preflight_handled", lambda args: False)
     monkeypatch.setattr(main, "_install_hangup_protection", lambda **kw: None)
     finalized = []
