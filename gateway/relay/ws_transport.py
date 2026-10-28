@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from hermes_cli.ws_logging import ws_logger
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.session import SessionSource
 from gateway.relay.descriptor import CapabilityDescriptor
@@ -432,7 +433,7 @@ class WebSocketRelayTransport:
         headers = self._upgrade_headers()
         if headers:
             kwargs["additional_headers"] = headers
-        self._ws = await websockets.connect(self._url, **kwargs)  # type: ignore[union-attr]
+        self._ws = await websockets.connect(self._url, logger=ws_logger(), **kwargs)  # type: ignore[union-attr]
         if self._auth_retry_pending:
             # The upgrade was ACCEPTED, so this connection's freshly minted token
             # reached an auth outcome: it is the fresh-token retry generation. A

@@ -126,5 +126,7 @@ class NodeServer:
                     continue
                 await ws.send(_proto.encode(await self._handle_request(msg)))
 
-        async with websockets.serve(_handler, self.host, self.port):
+        from hermes_cli.ws_logging import ws_logger
+
+        async with websockets.serve(_handler, self.host, self.port, logger=ws_logger("server")):
             await asyncio.Future()  # run until cancelled

@@ -31,9 +31,9 @@ from urllib.parse import urlsplit, urlunsplit
 from agent.secret_scope import is_multiplex_active as _is_multiplex_active
 from gateway.platforms._shared import (
     apply_yaml_bridge as _apply_yaml_bridge, get_scoped_secret as _shared_scoped_secret, profile_scoped as _profile_scoped,
-    seed_extra_from_env as _seed_extra_from_env,
+    seed_extra_from_env as _seed_extra_from_env, send_error,
 )
-from gateway.platforms._shared import send_error
+from hermes_cli.ws_logging import ws_logger
 
 
 def _get_scoped_secret(name, default=None):
@@ -1106,7 +1106,7 @@ class BuzzAdapter(BasePlatformAdapter):
         while True:
             try:
                 async with websockets.connect(
-                    self._websocket_url(), open_timeout=_WS_AUTH_TIMEOUT, close_timeout=5,
+                    self._websocket_url(), open_timeout=_WS_AUTH_TIMEOUT, close_timeout=5, logger=ws_logger(),
                     ping_interval=20, ping_timeout=20, max_size=_WS_MAX_MESSAGE_BYTES,
                     happy_eyeballs_delay=0.25,  # race IPv6/IPv4 in loop.create_connection (#114265)
                 ) as websocket:

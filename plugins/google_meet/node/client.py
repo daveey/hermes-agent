@@ -28,7 +28,9 @@ class NodeClient:
             raise RuntimeError("NodeClient requires the 'websockets' package. "
                                "Install it with: pip install websockets") from exc
         req = _proto.make_request(type, self.token, payload)
-        with connect(self.url, open_timeout=self.timeout, close_timeout=self.timeout) as ws:
+        from hermes_cli.ws_logging import ws_logger
+
+        with connect(self.url, open_timeout=self.timeout, close_timeout=self.timeout, logger=ws_logger()) as ws:
             ws.send(_proto.encode(req))
             resp = _proto.decode(ws.recv(timeout=self.timeout))
         if resp.get("type") == "error":

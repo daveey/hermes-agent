@@ -153,6 +153,11 @@ RULES: tuple[Rule, ...] = (
          " around `yield` eats the `with` block's own error and, on a second yield, becomes \"generator"
          " didn't stop after throw()\". Find the resource inside the `try`, then yield it outside any"
          " handler (keep what it opened alive with `contextlib.ExitStack`), or re-raise", "ast"),
+    # Logs: websockets reports a handled keepalive drop as ERROR + traceback unless the caller owns the logger.
+    Rule("HX015", "websockets connection without logger=", "pass `logger=ws_logger()`"
+         " (`hermes_cli.ws_logging`; `ws_logger(\"server\")` for `serve`): the library logs a peer that stopped"
+         " answering pings as `ERROR keepalive ping failed` + traceback even when this code handles the drop",
+         "ast", exclude=TESTS + ("scripts/*", "evals/*")),
 )
 
 RULES_BY_ID = {rule.id: rule for rule in RULES}

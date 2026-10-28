@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
+from hermes_cli.ws_logging import ws_logger
 from tools.browser_supervisor_dialogs import (
     DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S, RECENT_DIALOGS_MAX, _VALID_POLICIES, DialogRecord,
     DialogSupervisionMixin, PendingDialog,
@@ -378,7 +379,7 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
         connect_kwargs = {"max_size": 50 * 1024 * 1024, **loopback_connect_kwargs(self.cdp_url)}
         while not self._stop_requested:
             try:
-                self._ws = await asyncio.wait_for(websockets.connect(self.cdp_url, **connect_kwargs), timeout=10.0)
+                self._ws = await asyncio.wait_for(websockets.connect(self.cdp_url, logger=ws_logger(), **connect_kwargs), timeout=10.0)
             except Exception as e:
                 if self._fail_start(e):
                     return

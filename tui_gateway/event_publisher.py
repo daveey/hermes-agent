@@ -17,6 +17,8 @@ import queue
 import threading
 from typing import Optional
 
+from hermes_cli.ws_logging import ws_logger
+
 try:
     from websockets.sync.client import connect as ws_connect
 except ImportError:  # pragma: no cover - websockets is a required install path
@@ -41,7 +43,7 @@ class WsPublisherTransport:
         if self._dead:
             return
         try:
-            self._ws = ws_connect(url, open_timeout=connect_timeout, max_size=None)
+            self._ws = ws_connect(url, open_timeout=connect_timeout, max_size=None, logger=ws_logger())
         except Exception as exc:
             _log.debug("event publisher connect failed: %s", exc)
             self._dead = True

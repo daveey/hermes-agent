@@ -33,6 +33,7 @@ from array import array
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
+from hermes_cli.ws_logging import ws_logger
 from agent.memory_provider import spawn_context_thread
 from utils import is_truthy_value
 
@@ -187,7 +188,7 @@ class _WebSocketSession(StreamingSession):
         from websockets.sync.client import connect
 
         ws = connect(self.url, additional_headers=self.headers, open_timeout=_CONNECT_TIMEOUT_S,
-                     close_timeout=1, max_size=None)
+                     close_timeout=1, max_size=None, logger=ws_logger())
         try:
             return self._loop(ws)
         finally:

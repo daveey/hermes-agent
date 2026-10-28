@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 
 from urllib.parse import unquote
 
+from hermes_cli.ws_logging import ws_logger
 from gateway.platforms._shared import (
     decode_json_list_literal as _decode_json_list_literal, get_scoped_secret as _get_scoped_secret,
     platform_gate_env as _platform_gate_env, seed_extra_from_env as _seed_extra_from_env, send_error
@@ -161,7 +162,7 @@ class SimplexAdapter(BasePlatformAdapter):
             return False
         _warn_name_allowlist_entries()  # before the probe so a daemon-down cold boot still warns
         try:  # quick connectivity check — open and immediately close
-            async with _wsclient.connect(self.ws_url, open_timeout=10):
+            async with _wsclient.connect(self.ws_url, open_timeout=10, logger=ws_logger()):
                 pass
         except Exception as e:
             logger.error("SimpleX: cannot reach daemon at %s: %s", self.ws_url, e)
@@ -200,7 +201,8 @@ class SimplexAdapter(BasePlatformAdapter):
         while self._running:
             try:
                 logger.debug("SimpleX WS: connecting to %s", self.ws_url)
-                async with _wsclient.connect(self.ws_url, ping_interval=20, ping_timeout=20, close_timeout=10) as ws:
+                async with _wsclient.connect(self.ws_url, ping_interval=20, ping_timeout=20, close_timeout=10,
+                                             logger=ws_logger()) as ws:
                     self._ws = ws
                     backoff = WS_RETRY_DELAY_INITIAL
                     self._last_ws_activity = time.time()
@@ -659,7 +661,7 @@ async def _standalone_send(
         payload = {
             "corrId": f"{_CORR_PREFIX}snd-{int(time.time() * 1000)}",
             "cmd": _send_cmd(chat_id, [{"msgContent": {"type": "text", "text": message}}])}
-        async with _wsclient.connect(ws_url, open_timeout=10, close_timeout=5) as ws:
+        async with _wsclient.connect(ws_url, open_timeout=10, close_timeout=5, logger=ws_logger()) as ws:
             await ws.send(json.dumps(payload))
             await asyncio.sleep(0.5)  # let the daemon process the command before closing
         return {"success": True, "platform": "simplex", "chat_id": chat_id}

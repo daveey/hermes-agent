@@ -13,6 +13,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+from hermes_cli.ws_logging import ws_logger
 from tools.registry import registry, tool_error
 from tools.browser_extension_router import routed_browser_handler
 
@@ -177,7 +178,7 @@ async def _cdp_call(ws_url: str, method: str, params: dict[str, Any], target_id:
     # max_size=None: CDP responses (e.g. DOM.getDocument) can be large; ping_interval=None: CDP
     # servers don't expect pings.
     async with websockets.connect(ws_url, max_size=None, open_timeout=timeout, close_timeout=5,
-                                  ping_interval=None, **loopback_connect_kwargs(ws_url)) as ws:
+                                  ping_interval=None, logger=ws_logger(), **loopback_connect_kwargs(ws_url)) as ws:
         next_id = 1
 
         async def _send(req: dict[str, Any], what: str) -> dict[str, Any]:

@@ -54,11 +54,13 @@ class RealtimeSession:
                                "install with: pip install websockets") from exc
         url = f"{REALTIME_URL}?model={self.model}"
         headers = [("Authorization", f"Bearer {self.api_key}"), ("OpenAI-Beta", "realtime=v1")]
+        from hermes_cli.ws_logging import ws_logger
+
         # Newer websockets takes additional_headers=, older extra_headers=.
         try:
-            self._ws = connect(url, additional_headers=headers)
+            self._ws = connect(url, additional_headers=headers, logger=ws_logger())
         except TypeError:
-            self._ws = connect(url, extra_headers=headers)
+            self._ws = connect(url, extra_headers=headers, logger=ws_logger())
         self._send_json({"type": "session.update", "session": {
             "voice": self.voice, "instructions": self.instructions, "modalities": ["audio", "text"],
             "output_audio_format": "pcm16", "input_audio_format": "pcm16"}})

@@ -594,12 +594,13 @@ class FeedWatcher:
         except ImportError:  # optional: without it the loop polls
             _log.info("kanban sync: websockets not installed; %s is polled only", self.board)
             return
+        from hermes_cli.ws_logging import ws_logger
         backoff = 1.0
         while self.keep_running():
             try:
                 with connect(self.url(), additional_headers={"authorization": f"Bearer {self.ident.key}",
                                                              "user-agent": "hermes-kanban-sync/1"},
-                             open_timeout=HTTP_TIMEOUT_S) as ws:
+                             open_timeout=HTTP_TIMEOUT_S, logger=ws_logger()) as ws:
                     backoff = 1.0
                     while self.keep_running():
                         try:

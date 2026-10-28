@@ -17,6 +17,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from hermes_cli.ws_logging import ws_logger
 from agent.think_scrubber import THINK_TAG_NAMES
 from tools.tool_backend_helpers import resolve_openai_audio_api_key
 from tools.tts_tool import _get_provider, _load_tts_config
@@ -502,7 +503,7 @@ class XAIStreamer(StreamingTTSProvider):
         ws_url = f"{base}{sep}{params}"
 
         async with websockets.connect(
-            ws_url, additional_headers={"Authorization": f"Bearer {api_key}"}
+            ws_url, additional_headers={"Authorization": f"Bearer {api_key}"}, logger=ws_logger(),
         ) as ws:
             await ws.send(_json.dumps({"type": "text.delta", "delta": text}))
             await ws.send(_json.dumps({"type": "text.done"}))
