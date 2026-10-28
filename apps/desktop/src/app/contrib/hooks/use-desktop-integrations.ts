@@ -14,7 +14,7 @@ import { pathFromHermesDeepLink, resolveHermesOpenPath } from '@/lib/hermes-open
 import { canonicalizeCombo } from '@/lib/keybinds/combo'
 import { runBuiltinAction } from '@/lib/keybinds/plugin-actions'
 import { storedSessionIdForNotification } from '@/lib/session-ids'
-import { announceNewSessionDraftKey } from '@/store/composer'
+import { announceNewSessionDraftKey, freshChatSendInFlight } from '@/store/composer'
 import { recordAction } from '@/store/desktop-metrics'
 import { $comboIndex } from '@/store/keybinds'
 import { requestMcpInstallFromDeepLink } from '@/store/mcp-deeplink-install'
@@ -151,6 +151,16 @@ export function useDesktopIntegrations({
         }
 
         if (!resumeLastSession) {
+          restoredRef.current = true
+
+          return
+        }
+
+        // The user already sent from the fresh chat (Enter as soon as the
+        // composer enabled, before the session list arrived): that send owns
+        // the window. Navigating now would abort it as a session switch and
+        // drop the message; the new chat it creates is where they are.
+        if (freshChatSendInFlight()) {
           restoredRef.current = true
 
           return
