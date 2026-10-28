@@ -32,6 +32,10 @@ _PROFILE_SIGNATURE_FILES = ("config.yaml", ".env")
 # read it can end in has no timeout of its own — on Windows the named pipe stalls there until
 # its peer answers — so the await needs one. A healthy identify answers in milliseconds.
 _OWN_GATEWAY_PROBE_TIMEOUT_SECS = 5.0
+# Wall-clock cap for a control-socket lifecycle verb. The apply coroutine is milliseconds of
+# CPU and returns as soon as it finishes; a 5s cap expired on a CPU-throttled runner before
+# the loop ran it, and the client was told ``pending``. Must stay under the socket client's wait.
+_PROFILE_VERB_WAIT_S = 30.0
 
 
 def profile_serve_signature(home: Path) -> tuple:
@@ -342,7 +346,7 @@ def _profile_lifecycle_verb(runner, *, serve: bool):
     def handler(params):
         future = asyncio.run_coroutine_threadsafe(apply(params.get("name")), loop)
         try:
-            return future.result(timeout=5.0)
+            return future.result(timeout=_PROFILE_VERB_WAIT_S)
         except TimeoutError:
             # Keep running: the client must not interpret an incomplete teardown as stopped.
             return {"pending": True, "served_profiles": runner.served_profile_names()}

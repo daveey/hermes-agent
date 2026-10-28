@@ -252,6 +252,28 @@ async def test_profile_control_verbs_round_trip_and_refusals(tmp_path, monkeypat
         assert runner._profile_adapters["worker"][Platform.DISCORD].token.endswith("new-worker-token\n")
 
 
+@pytest.mark.asyncio
+async def test_profile_verb_waits_out_a_slow_apply(tmp_path, monkeypatch):
+    """``future.result(timeout=5)`` is wall clock. A throttled loop misses it and
+    the verb returns ``pending`` with no ``unserved`` key (SIGSTOP duty cycle).
+    """
+    from gateway import run_profile_reconcile as verbs
+
+    runner, home = _runner(tmp_path, monkeypatch)
+    _mkprofile(home, "worker", "DISCORD_BOT_TOKEN=worker-token\n")
+    with patch("hermes_cli.profiles.get_active_profile_name", return_value="default"):
+        await runner._start_secondary_profile_adapters()
+        real = runner._unserve_profile
+
+        async def slow_unserve(name, home):
+            await asyncio.sleep(6)
+            await real(name, home)
+
+        runner._unserve_profile = slow_unserve
+        answer = await asyncio.to_thread(verbs.unserve_profile_verb(runner), {"name": "worker"})
+    assert answer.get("unserved") == "worker", answer
+
+
 @pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_profile_lifecycle_over_real_control_socket(tmp_path, monkeypatch):
