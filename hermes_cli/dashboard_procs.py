@@ -640,6 +640,7 @@ def _kill_stale_dashboard_processes(
     pid_launchd: dict[int, tuple[str, str, int | None]] = {}
     pid_cmdline: dict[int, list[str]] = {}
     pid_home: dict[int, str | None] = {}
+    pid_launcher: dict[int, tuple[int, tuple[str, ...]]] = {}
     # macOS: a backend supervised by a launchd job (LaunchAgent / LaunchDaemon) must come back
     # through launchd, never as a detached argv respawn — the respawn holds the job's port, the
     # job then fails every KeepAlive restart with "port already in use", and the running backend
@@ -661,7 +662,11 @@ def _kill_stale_dashboard_processes(
             if pid_service[pid]:
                 continue
             cmdline = _dash._dashboard_cmdline_for_pid(pid)
-            if job := _launchd_owner(pid, cmdline):
+            if supervisor := _launcher_supervisor(pid):
+                # [daveey] Checked before launchd: the job's live pid is the LAUNCHER, so a fresh launchd
+                # pid proves nothing about the backend, and an argv replay races the launcher's own child.
+                pid_launcher[pid] = supervisor
+            elif job := _launchd_owner(pid, cmdline):
                 pid_launchd[pid] = job
             elif cmdline:
                 # Manual process: exact argv + HERMES_HOME for the respawn and its profile cap.
@@ -689,7 +694,8 @@ def _kill_stale_dashboard_processes(
         print(f"    ✗ failed to stop PID {pid}: {err_msg}")
     if killed and restart_managed:
         unrecovered = _restart_killed_backends(
-            killed, pid_service, pid_cgroup, pid_cmdline, pid_home, pid_launchd=pid_launchd)
+            killed, pid_service, pid_cgroup, pid_cmdline, pid_home, pid_launchd=pid_launchd,
+            pid_launcher=pid_launcher)
     else:
         unrecovered = list(killed)
         # A stopped launchd job with KeepAlive restarts itself: say so instead of a misleading
@@ -706,8 +712,10 @@ def _kill_stale_dashboard_processes(
 def _restart_killed_backends(
     killed: list[int], pid_service: dict[int, str | None], pid_cgroup: dict[int, str | None],
     pid_cmdline: dict[int, list[str]], pid_home: dict[int, str | None], *,
-    pid_launchd: dict[int, tuple[str, str, int | None]] | None = None) -> list[int]:
-    """Update path: restart systemd units, kickstart launchd jobs (macOS), respawn manual argv
+    pid_launchd: dict[int, tuple[str, str, int | None]] | None = None,
+    pid_launcher: dict[int, tuple[int, tuple[str, ...]]] | None = None) -> list[int]:
+    """Update path: restart systemd units, kickstart launchd jobs (macOS), wait for a
+    ``hermes-gateway-launcher``'s successor child, respawn manual argv
     (detached, headless, logged to logs/dashboard-restart.log; one per profile, no ``--port 0``).
     Returns PIDs not brought back."""
     # Two categories: Without this, a remote backend (hermes serve) under Restart=on-failure never comes
@@ -719,10 +727,15 @@ def _restart_killed_backends(
     failed_restarts: list[tuple[str, str]] = []
     seen_services: set[str] = set()
     respawn_candidates: list[tuple[int, list[str], str | None]] = []
+    launcher_waits: dict[tuple[str, ...], list[int]] = {}
     for pid in killed:
         svc_name = pid_service.get(pid)
         launchd_job = (pid_launchd or {}).get(pid)
-        if svc_name:
+        if supervisor := (pid_launcher or {}).get(pid):
+            # [daveey] The launcher brings its child back (it exits with the child; launchd KeepAlive
+            # restarts it and it spawns a fresh child from the updated checkout). Never argv-respawn.
+            launcher_waits.setdefault(supervisor[1], []).append(pid)
+        elif svc_name:
             if svc_name in seen_services:
                 continue
             seen_services.add(svc_name)
@@ -753,6 +766,8 @@ def _restart_killed_backends(
             respawn_candidates.append((pid, pid_cmdline[pid], pid_home.get(pid)))
         else:
             unrecovered.append(pid)
+    if launcher_waits:
+        unrecovered.extend(_await_launcher_successors(launcher_waits, set(killed)))
     for svc, err in failed_restarts:
         print(f"    ⚠ {svc}: {err}")
     respawn_cmds = _filter_dashboard_respawn_candidates(respawn_candidates)
@@ -761,6 +776,98 @@ def _restart_killed_backends(
         unrecovered.extend(p for p in killed if pid_cmdline.get(p) in failed_cmds)
     if failed_restarts or unrecovered:
         print("  Restart anything not auto-restarted when you're ready:\n    hermes dashboard --port <port>")
+    return unrecovered
+
+
+# [daveey] Backends supervised by the core-update launcher (hermes-sync ``hermes-gateway-launcher``,
+# docs/core-update-safety.md). A launchd plist runs ``hermes-gateway-launcher --home H -- <cmd>``; the
+# launcher spawns <cmd> (e.g. ``redde-serve``, which execs ``hermes dashboard --port 9119``) and exits
+# with it, and KeepAlive restarts the launcher, which spawns a fresh child. Neither launchd lookup sees
+# the backend (the plist's ProgramArguments is the launcher; the child's XPC_SERVICE_NAME is ``0``), so
+# an unfenced ``hermes update`` replayed its argv detached on the job's port while the launcher brought
+# its own child up: EADDRINUSE or a duplicate, unsupervised backend (David-MBP 2026-10-28).
+# Successor wait: launchd ThrottleInterval (redde-serve: 15 s) + the launcher's 2 s lock poll + startup.
+_LAUNCHER_SUCCESSOR_TIMEOUT_SECONDS = 60.0
+_LAUNCHER_SUCCESSOR_POLL_SECONDS = 1.0
+_WRAPPER_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def _launcher_argv_tail(argv: list[str] | None) -> tuple[str, ...] | None:
+    """The supervised command (argv after ``--``) when *argv* runs ``hermes-gateway-launcher``, else None."""
+    from hermes_cli.gateway_launchd import GATEWAY_LAUNCHER_NAME
+    if not argv or "--" not in argv:
+        return None
+    split = argv.index("--")
+    if not any(os.path.basename(arg) == GATEWAY_LAUNCHER_NAME for arg in argv[:min(split, 3)]):
+        return None
+    return tuple(argv[split + 1:]) or None
+
+
+def _launcher_supervisor(pid: int) -> tuple[int, tuple[str, ...]] | None:
+    """``(launcher_pid, supervised_cmd)`` when *pid*'s death makes a live launcher exit and respawn it:
+    the launcher is its parent, or is reached through exec-less wrapper shells only. A backend some
+    other long-lived process spawned under a launcher-supervised tree (a gateway's child) is not
+    respawned by the launcher, so it is not claimed here."""
+    if sys.platform == "win32":
+        return None
+    from hermes_cli import main_dashboard as _dash
+    for ancestor in _process_ancestors(pid):
+        argv = _dash._dashboard_cmdline_for_pid(ancestor)
+        if tail := _launcher_argv_tail(argv):
+            return (ancestor, tail)
+        if not argv or os.path.basename(argv[0]).lstrip("-") not in _WRAPPER_SHELLS:
+            return None
+    return None
+
+
+def _launcher_children(tail: tuple[str, ...]) -> list[int]:
+    """Live children of every ``hermes-gateway-launcher`` process supervising *tail*."""
+    from hermes_cli import main_dashboard as _dash
+    from hermes_cli.gateway_launchd import GATEWAY_LAUNCHER_NAME
+    try:
+        result = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,command="], timeout=10, **_PS_RUN_KWARGS,
+                                check=False)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    rows: list[tuple[int, int, str]] = []
+    for line in (result.stdout or "").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    launchers = {pid for pid, _ppid, command in rows if GATEWAY_LAUNCHER_NAME in command
+                 and _launcher_argv_tail(_dash._dashboard_cmdline_for_pid(pid)) == tail}
+    return [pid for pid, ppid, _command in rows if ppid in launchers]
+
+
+def _await_launcher_successors(waits: dict[tuple[str, ...], list[int]], stopped: set[int]) -> list[int]:
+    """Wait (bounded) until each launcher-supervised command has a fresh child; return the stopped
+    PIDs whose command never came back. Inside a core-update fence held by an ancestor of this
+    update every launcher is parked until the fence owner releases it after this process exits, so
+    nothing can come back yet: recovery is the fence owner's to verify, not a failure here."""
+    import time as _time
+
+    from hermes_cli.update_gateway_fence import ancestor_fence_owner
+    if (owner := ancestor_fence_owner()) is not None:
+        for tail in waits:
+            print(f"    ⏸ {os.path.basename(tail[0])}: hermes-gateway-launcher restarts it when the "
+                  f"core-update fence (pid {owner}) is released")
+        return []
+    pending = dict(waits)
+    deadline = _time.monotonic() + _LAUNCHER_SUCCESSOR_TIMEOUT_SECONDS
+    while True:
+        for tail in list(pending):
+            fresh = [pid for pid in _launcher_children(tail) if pid not in stopped]
+            if fresh:
+                print(f"    ✓ hermes-gateway-launcher restarted {os.path.basename(tail[0])} (PID {fresh[0]})")
+                del pending[tail]
+        if not pending or _time.monotonic() >= deadline:
+            break
+        _time.sleep(_LAUNCHER_SUCCESSOR_POLL_SECONDS)
+    unrecovered: list[int] = []
+    for tail, pids in pending.items():
+        print(f"    ⚠ {os.path.basename(tail[0])}: hermes-gateway-launcher brought no fresh child up within "
+              f"{int(_LAUNCHER_SUCCESSOR_TIMEOUT_SECONDS)}s; check its launchd job (KeepAlive) and log")
+        unrecovered.extend(pids)
     return unrecovered
 
 

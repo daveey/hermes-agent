@@ -216,3 +216,144 @@ def test_killed_desktop_bootstrap_backend_is_never_respawned():
     # control: a fixed-port backend in the same shape is still replayed
     assert dashboard_procs._filter_dashboard_respawn_candidates(
         [(87774, _desktop_bootstrap("9119"), None)], own_home="/Users/me/.hermes") == [_desktop_bootstrap("9119")]
+
+
+# --- [daveey] backend supervised by hermes-gateway-launcher (David-MBP 2026-10-28 04:45 PDT) -----------
+# launchd job com.daveey.hermes-redde-serve runs ``hermes-gateway-launcher --home ~/.hermes --
+# ~/.hermes/bin/redde-serve``; redde-serve execs the dashboard, whose XPC_SERVICE_NAME is ``0`` and whose
+# plist ProgramArguments is the launcher. Neither launchd lookup claimed it, so an unfenced update replayed
+# its argv detached on :9119 while the launcher (exiting with its child, restarted by KeepAlive) brought its
+# own child up: EADDRINUSE or a duplicate unsupervised backend.
+
+_LAUNCHER_PID = 85469
+_BACKEND_PID = 87824
+_TAIL = ["/Users/me/.hermes/bin/redde-serve"]
+_LAUNCHER_ARGV = ["/opt/homebrew/bin/python3", "/Users/me/.hermes/bin/hermes-gateway-launcher",
+                  "--home", "/Users/me/.hermes", "--", *_TAIL]
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += max(float(seconds), 0.01)
+
+
+def _run_launcher_child_update(monkeypatch, successor_after, *, fence_owner=None, ancestors=None,
+                               parent_argv=None):
+    """Run the update stop/restart against a launcher-child backend. The launcher's successor child
+    (pid 99001 under a respawned launcher 99000) appears *successor_after* seconds after the kill, or
+    never when None. Returns (result, respawn mock, launchd restart mock, clock)."""
+    monkeypatch.setitem(sys.modules, "psutil", _fake_psutil(argv=ARGV, env={"XPC_SERVICE_NAME": "0"}))
+    clock = _Clock()
+    killed_at = {}
+    parent_argv = parent_argv or _LAUNCHER_ARGV
+    ancestors = ancestors if ancestors is not None else [_LAUNCHER_PID, 1]
+
+    def _cmdline(pid):
+        if pid == _BACKEND_PID:
+            return ARGV
+        if pid in (_LAUNCHER_PID, 99000):
+            return parent_argv if pid == _LAUNCHER_PID else _LAUNCHER_ARGV
+        return None
+
+    def _fake_kill(pid, sig):
+        killed_at.setdefault(pid, clock.now)
+        if sig == 0:
+            raise ProcessLookupError
+
+    def _children(tail):
+        assert tail == tuple(_TAIL)
+        start = killed_at.get(_BACKEND_PID)
+        if start is None:
+            return [_BACKEND_PID]
+        if successor_after is not None and clock.now - start >= successor_after:
+            return [99001]
+        return []
+
+    with patch.object(main_dashboard, "_restart_managed_dashboard_service", return_value=False), \
+         patch.object(main_dashboard, "_find_stale_dashboard_pids", return_value=[_BACKEND_PID]), \
+         patch.object(main_dashboard, "_get_pid_cgroup_path", return_value=None), \
+         patch.object(main_dashboard, "_get_systemd_service_for_pid", return_value=None), \
+         patch.object(main_dashboard, "_loaded_launchd_backend_jobs", return_value=[]), \
+         patch.object(main_dashboard, "_dashboard_cmdline_for_pid", side_effect=_cmdline), \
+         patch("hermes_cli.gateway._launchd_print_service_pid", return_value=(True, _LAUNCHER_PID)), \
+         patch.object(main_dashboard, "_restart_launchd_job", return_value=True) as restart, \
+         patch.object(main_dashboard, "_respawn_dashboard_processes", return_value=[]) as respawn, \
+         patch("hermes_cli.dashboard_procs._process_ancestors", return_value=ancestors), \
+         patch("hermes_cli.dashboard_procs._posix_descendants", return_value={}), \
+         patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
+         patch("hermes_cli.dashboard_procs._launcher_children", side_effect=_children, create=True), \
+         patch("hermes_cli.update_gateway_fence.ancestor_fence_owner", return_value=fence_owner), \
+         patch("os.kill", side_effect=_fake_kill), \
+         patch("time.monotonic", side_effect=clock.monotonic), \
+         patch("time.sleep", side_effect=clock.sleep):
+        result = dashboard_procs._kill_stale_dashboard_processes(restart_managed=True)
+    return result, respawn, restart, clock
+
+
+@pytest.mark.platforms("macos")
+def test_launcher_child_dashboard_is_not_respawned_and_recovers_on_successor(monkeypatch):
+    result, respawn, restart, _clock = _run_launcher_child_update(monkeypatch, successor_after=20)
+    respawn.assert_not_called()  # an argv replay would sit on :9119 beside the launcher's own child
+    restart.assert_not_called()
+    assert result["killed"] == [_BACKEND_PID] and result["unrecovered"] == []
+
+
+@pytest.mark.platforms("macos")
+def test_launcher_child_that_never_returns_stays_unrecovered(monkeypatch):
+    """Control: no successor child within the bounded wait is booked unrecovered (the update keeps
+    warning), still without an argv respawn."""
+    result, respawn, _restart, clock = _run_launcher_child_update(monkeypatch, successor_after=None)
+    respawn.assert_not_called()
+    assert result["unrecovered"] == [_BACKEND_PID]
+    assert clock.now - 1000.0 <= dashboard_procs._LAUNCHER_SUCCESSOR_TIMEOUT_SECONDS + 15  # bounded
+
+
+@pytest.mark.platforms("macos")
+def test_launcher_child_inside_ancestor_fence_is_deferred_not_waited(monkeypatch):
+    """Inside a core-update fence held by an ancestor every launcher is parked until this update exits:
+    don't wait for a successor that cannot come, and don't book it unrecovered."""
+    result, respawn, _restart, clock = _run_launcher_child_update(
+        monkeypatch, successor_after=None, fence_owner=4321)
+    respawn.assert_not_called()
+    assert result["unrecovered"] == []
+    assert clock.now - 1000.0 < 5  # no successor wait
+
+
+@pytest.mark.platforms("macos")
+def test_launcher_tree_backend_behind_a_non_shell_parent_is_not_claimed(monkeypatch):
+    """Control: a dashboard some long-lived process (a gateway) spawned under a launcher-supervised tree
+    does not make the launcher respawn anything, so it keeps the argv respawn."""
+    gateway_pid = 70000
+    gateway_argv = [_PY, "-I", "-c", "gateway run"]
+
+    def _ancestors_cmdline(pid):
+        return {gateway_pid: gateway_argv, _LAUNCHER_PID: _LAUNCHER_ARGV}.get(pid, ARGV)
+
+    with patch.object(main_dashboard, "_dashboard_cmdline_for_pid", side_effect=_ancestors_cmdline), \
+         patch("hermes_cli.dashboard_procs._process_ancestors", return_value=[gateway_pid, _LAUNCHER_PID, 1]):
+        assert dashboard_procs._launcher_supervisor(_BACKEND_PID) is None
+    # through an exec-less shell wrapper the launcher still owns it
+    with patch.object(main_dashboard, "_dashboard_cmdline_for_pid",
+                      side_effect=lambda pid: {gateway_pid: ["/bin/sh", "-c", "x"]}.get(pid, _LAUNCHER_ARGV)), \
+         patch("hermes_cli.dashboard_procs._process_ancestors", return_value=[gateway_pid, _LAUNCHER_PID, 1]):
+        assert dashboard_procs._launcher_supervisor(_BACKEND_PID) == (_LAUNCHER_PID, tuple(_TAIL))
+
+
+def test_launcher_children_reads_the_process_table(monkeypatch):
+    """``_launcher_children`` matches launchers by their exact supervised command and returns their kids."""
+    table = "\n".join([
+        f"  {_LAUNCHER_PID}     1 python3 /x/hermes-gateway-launcher --home /h -- {_TAIL[0]}",
+        f"  {_BACKEND_PID} {_LAUNCHER_PID} python3.14 -I -c dashboard",
+        "  500     1 python3 /x/hermes-gateway-launcher --home /h -- /x/gateway",
+        "  501   500 gateway",
+    ])
+    argv = {_LAUNCHER_PID: _LAUNCHER_ARGV, 500: [*_LAUNCHER_ARGV[:-1], "/x/gateway"]}
+    with patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout=table)), \
+         patch.object(main_dashboard, "_dashboard_cmdline_for_pid", side_effect=argv.get):
+        assert dashboard_procs._launcher_children(tuple(_TAIL)) == [_BACKEND_PID]
