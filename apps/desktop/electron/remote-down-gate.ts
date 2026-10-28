@@ -10,7 +10,8 @@
 // backend" errors and blocked UI work behind them. This gate records the outage per pool key
 // (`conn:<id>::<profile>`) and, while it lasts, rejects requests at once with RemoteBackendDownError. After a short
 // backoff ONE request is let through as the trial: it reprobes/redials; its success reopens the gate, its failure
-// doubles the backoff. Requests that arrive while the trial is in flight fail fast too.
+// doubles the backoff. Only the first up->down transition and failed trials count toward the backoff; failures from
+// requests that were already in flight when the remote dropped are ignored, so one restart costs one 2 s backoff. Requests that arrive while the trial is in flight fail fast too.
 
 export const REMOTE_DOWN_INITIAL_BACKOFF_MS = 2_000
 export const REMOTE_DOWN_MAX_BACKOFF_MS = 30_000
@@ -67,22 +68,36 @@ export function isRemoteTimeout(error: unknown): boolean {
 }
 
 interface DownState {
+  // Failed trials so far, plus the first up->down transition. Only these escalate the backoff: requests that were
+  // already in flight when the remote dropped all fail together, and counting each would jump the backoff straight
+  // to the cap for a single ~10 s restart.
   failures: number
   reason: string
   since: number
   retryAt: number
-  trialInFlight: boolean
+  // The admission that owns the trial slot. Only that request's verdict may release it, escalate or reopen.
+  trialId: null | number
 }
 
 export interface RemoteDownAdmission {
   trial: boolean
+  // Per-key status epoch at admission (bumped on every up<->down transition) and, for the trial, its id. A request
+  // admitted in an earlier epoch is stale: its failure says nothing new about this outage.
+  readonly epoch?: number
+  readonly trialId?: number
+  // Epoch when the request was actually sent (after connect, which may have reconnected). An answer to a request sent
+  // during the current epoch is fresh evidence, even if it was not the trial (e.g. a failed dispatch probe marked the
+  // remote down and the same request's reconnect then succeeded).
+  sentEpoch?: number
 }
 
 export class RemoteDownGate {
   readonly #down = new Map<string, DownState>()
+  readonly #epoch = new Map<string, number>()
   readonly #now: () => number
   readonly #initialBackoffMs: number
   readonly #maxBackoffMs: number
+  #nextTrialId = 1
 
   constructor(
     now: () => number = Date.now,
@@ -98,50 +113,116 @@ export class RemoteDownGate {
     return this.#down.has(key)
   }
 
+  epochOf(key: string): number {
+    return this.#epochOf(key)
+  }
+
+  #epochOf(key: string): number {
+    return this.#epoch.get(key) ?? 0
+  }
+
+  #bumpEpoch(key: string): void {
+    this.#epoch.set(key, this.#epochOf(key) + 1)
+  }
+
+  #backoff(failures: number): number {
+    return Math.min(this.#initialBackoffMs * 2 ** (failures - 1), this.#maxBackoffMs)
+  }
+
   /** Throws RemoteBackendDownError while `key` is down; otherwise admits the request (as the trial when down). */
   admit(key: string): RemoteDownAdmission {
     const state = this.#down.get(key)
+    const epoch = this.#epochOf(key)
 
     if (!state) {
-      return { trial: false }
+      return { trial: false, epoch }
     }
 
     const now = this.#now()
 
-    if (state.trialInFlight || now < state.retryAt) {
+    if (state.trialId !== null || now < state.retryAt) {
       throw new RemoteBackendDownError(key, state.reason, now - state.since, Math.max(0, state.retryAt - now))
     }
 
-    state.trialInFlight = true
+    const trialId = this.#nextTrialId++
+    state.trialId = trialId
 
-    return { trial: true }
+    return { trial: true, epoch, trialId }
   }
 
-  markDown(key: string, reason: string): void {
+  #ownsTrial(state: DownState, admission?: RemoteDownAdmission): boolean {
+    return Boolean(admission?.trial && admission.trialId !== undefined && admission.trialId === state.trialId)
+  }
+
+  /**
+   * Record that `key` failed. Without an admission (e.g. a failed dispatch probe) this is outside evidence: it takes
+   * an up remote down but never escalates an existing outage. With an admission, only a current-epoch request may take
+   * an up remote down, and only the owning trial may escalate the backoff and release the trial slot; stale in-flight
+   * failures are ignored.
+   */
+  markDown(key: string, reason: string, admission?: RemoteDownAdmission): void {
     const now = this.#now()
-    const previous = this.#down.get(key)
-    const failures = (previous?.failures ?? 0) + 1
-    const backoff = Math.min(this.#initialBackoffMs * 2 ** (failures - 1), this.#maxBackoffMs)
+    const state = this.#down.get(key)
+    const cleanReason = String(reason || 'unreachable').slice(0, 160)
 
-    this.#down.set(key, {
-      failures,
-      reason: String(reason || 'unreachable').slice(0, 160),
-      since: previous?.since ?? now,
-      retryAt: now + backoff,
-      trialInFlight: false
-    })
+    if (!state) {
+      const seenEpoch = admission?.sentEpoch ?? admission?.epoch
+
+      if (seenEpoch !== undefined && seenEpoch !== this.#epochOf(key)) {
+        return
+      }
+
+      this.#bumpEpoch(key)
+      this.#down.set(key, {
+        failures: 1,
+        reason: cleanReason,
+        since: now,
+        retryAt: now + this.#backoff(1),
+        trialId: null
+      })
+
+      return
+    }
+
+    if (!this.#ownsTrial(state, admission)) {
+      return
+    }
+
+    state.failures += 1
+    state.reason = cleanReason
+    state.retryAt = now + this.#backoff(state.failures)
+    state.trialId = null
   }
 
-  markUp(key: string): boolean {
-    return this.#down.delete(key)
+  /**
+   * The backend answered. While down, only the owning trial (or an outside caller with no admission) reopens the
+   * gate; an answer to a request admitted before the outage may predate the reset.
+   */
+  markUp(key: string, admission?: RemoteDownAdmission): boolean {
+    const state = this.#down.get(key)
+
+    if (!state) {
+      return false
+    }
+
+    const fresh = admission?.sentEpoch !== undefined && admission.sentEpoch === this.#epochOf(key)
+
+    if (admission && !this.#ownsTrial(state, admission) && !fresh) {
+      return false
+    }
+
+    this.#down.delete(key)
+    this.#bumpEpoch(key)
+
+    return true
   }
 
   /** A trial that ended without a verdict (e.g. a slow endpoint) hands the trial slot back. */
-  releaseTrial(key: string): void {
+  releaseTrial(key: string, admission?: RemoteDownAdmission): void {
     const state = this.#down.get(key)
 
-    if (state) {
-      state.trialInFlight = false
+    if (state && (admission ? this.#ownsTrial(state, admission) : true)) {
+      state.trialId = null
     }
   }
 }
@@ -172,7 +253,8 @@ export async function dispatchThroughRemoteDownGate<TConnection extends { baseUr
   forgetAnswer,
   log
 }: GatedRemoteDispatchOptions<TConnection, TResult>): Promise<TResult> {
-  const { trial } = gate.admit(key)
+  const admission = gate.admit(key)
+  const { trial } = admission
   let connection: TConnection
 
   try {
@@ -188,14 +270,14 @@ export async function dispatchThroughRemoteDownGate<TConnection extends { baseUr
 
     if (/^No connection with id|does not exist|^Passive read: no warm backend/.test(message)) {
       if (trial) {
-        gate.releaseTrial(key)
+        gate.releaseTrial(key, admission)
       }
 
       throw error
     }
 
     const wasUp = !gate.isDown(key)
-    gate.markDown(key, `connect failed: ${message}`)
+    gate.markDown(key, `connect failed: ${message}`, admission)
 
     if (wasUp) {
       log?.(`[remote-down] ${key} marked down (connect failed: ${message.slice(0, 160)}); failing fast until it answers`)
@@ -205,9 +287,10 @@ export async function dispatchThroughRemoteDownGate<TConnection extends { baseUr
   }
 
   try {
+    admission.sentEpoch = gate.epochOf(key)
     const result = await request(connection)
 
-    if (gate.markUp(key)) {
+    if (gate.markUp(key, admission)) {
       log?.(`[remote-down] ${key} answered again; gate open`)
     }
 
@@ -217,7 +300,7 @@ export async function dispatchThroughRemoteDownGate<TConnection extends { baseUr
       forgetAnswer?.(connection?.baseUrl)
       const wasUp = !gate.isDown(key)
       const message = String((error as { message?: unknown } | null)?.message ?? error)
-      gate.markDown(key, message)
+      gate.markDown(key, message, admission)
 
       if (wasUp) {
         log?.(`[remote-down] ${key} marked down (${message.slice(0, 160)}); failing fast until it answers`)
@@ -226,9 +309,9 @@ export async function dispatchThroughRemoteDownGate<TConnection extends { baseUr
       forgetAnswer?.(connection?.baseUrl)
 
       if (trial) {
-        gate.markDown(key, 'trial request timed out')
+        gate.markDown(key, 'trial request timed out', admission)
       }
-    } else if (gate.markUp(key)) {
+    } else if (gate.markUp(key, admission)) {
       // An HTTP status error (4xx/5xx) or a bad payload is still an answer: the backend is reachable.
       log?.(`[remote-down] ${key} answered again; gate open`)
     }

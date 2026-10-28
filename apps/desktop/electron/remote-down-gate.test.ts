@@ -103,16 +103,126 @@ describe('remote down gate', () => {
     h.time.advance(REMOTE_DOWN_INITIAL_BACKOFF_MS)
     await expect(h.run(async () => 'back')).resolves.toBe('back')
 
+    // Every further failed trial doubles again, up to the cap.
     const capped = new RemoteDownGate(h.time.now)
+    capped.markDown(KEY, 'reset')
 
     for (let i = 0; i < 20; i++) {
-      capped.markDown(KEY, 'reset')
+      h.time.advance(REMOTE_DOWN_MAX_BACKOFF_MS)
+      capped.markDown(KEY, 'reset', capped.admit(KEY))
     }
 
     h.time.advance(REMOTE_DOWN_MAX_BACKOFF_MS - 1)
     expect(() => capped.admit(KEY)).toThrow()
     h.time.advance(1)
-    expect(capped.admit(KEY)).toEqual({ trial: true })
+    expect(capped.admit(KEY)).toMatchObject({ trial: true })
+  })
+
+  it('many requests failing together in one outage cost one initial backoff, not the cap', async () => {
+    const h = harness()
+
+    // Several renderer polls (hub-sync/status, kanban/board, runners) are in flight when the hub restarts.
+    await Promise.allSettled([1, 2, 3, 4, 5].map(() => h.run(async () => Promise.reject(reset()))))
+    expect(h.gate.isDown(KEY)).toBe(true)
+
+    const blocked = (() => {
+      try {
+        h.gate.admit(KEY)
+      } catch (error) {
+        return error as { retryInMs: number }
+      }
+
+      return null
+    })()
+
+    expect(blocked?.retryInMs).toBe(REMOTE_DOWN_INITIAL_BACKOFF_MS)
+    h.time.advance(REMOTE_DOWN_INITIAL_BACKOFF_MS - 1)
+    expect(() => h.gate.admit(KEY)).toThrow()
+    h.time.advance(1)
+    await expect(h.run(async () => 'back')).resolves.toBe('back')
+    expect(h.gate.isDown(KEY)).toBe(false)
+  })
+
+  it('a stale failure during the trial neither frees the trial slot nor extends the backoff', async () => {
+    const h = harness()
+
+    let failStale: (error: Error) => void = () => {}
+    const stale = h.run(() => new Promise((_, reject) => (failStale = reject))).catch(e => e)
+
+    await vi.waitFor(() => expect(h.connect).toHaveBeenCalledTimes(1))
+    await h.run(async () => Promise.reject(reset())).catch(() => {})
+    h.time.advance(REMOTE_DOWN_INITIAL_BACKOFF_MS)
+
+    let failTrial: (error: Error) => void = () => {}
+    const trial = h.run(() => new Promise((_, reject) => (failTrial = reject))).catch(e => e)
+
+    await vi.waitFor(() => expect(h.connect).toHaveBeenCalledTimes(3))
+
+    // The request admitted before the outage fails late, while the trial is still running.
+    failStale(reset())
+    await stale
+
+    const during = (() => {
+      try {
+        h.gate.admit(KEY)
+      } catch (error) {
+        return error as { retryInMs: number }
+      }
+
+      return null
+    })()
+
+    expect(during).not.toBeNull()
+    expect(during?.retryInMs).toBe(0)
+    h.time.advance(REMOTE_DOWN_MAX_BACKOFF_MS)
+    expect(() => h.gate.admit(KEY)).toThrow(/reconnect in progress/)
+
+    // The trial's own failure escalates exactly once: 2 s -> 4 s.
+    failTrial(reset())
+    await trial
+    h.time.advance(2 * REMOTE_DOWN_INITIAL_BACKOFF_MS - 1)
+    expect(() => h.gate.admit(KEY)).toThrow()
+    h.time.advance(1)
+    expect(h.gate.admit(KEY)).toMatchObject({ trial: true })
+  })
+
+  it('an answer to a request admitted before the outage does not reopen the gate', async () => {
+    const h = harness()
+
+    let finishStale: (value: unknown) => void = () => {}
+    const stale = h.run(() => new Promise(resolve => (finishStale = resolve)))
+
+    await vi.waitFor(() => expect(h.connect).toHaveBeenCalledTimes(1))
+    await h.run(async () => Promise.reject(reset())).catch(() => {})
+    finishStale({ ok: true })
+    await expect(stale).resolves.toEqual({ ok: true })
+    expect(h.gate.isDown(KEY)).toBe(true)
+  })
+
+  it('a dispatch probe that marks the remote down, then reconnects and answers, reopens the gate', async () => {
+    const h = harness()
+
+    // connect() runs the dispatch probe; its retire path marks the key down before redialing.
+    h.connect.mockImplementationOnce(async () => {
+      h.gate.markDown(KEY, 'dispatch probe failed: socket hang up')
+
+      return { baseUrl: BASE_URL }
+    })
+    await expect(h.run(async () => 'fresh')).resolves.toBe('fresh')
+    expect(h.gate.isDown(KEY)).toBe(false)
+  })
+
+  it('outside evidence (a failed dispatch probe) never escalates an existing outage', () => {
+    const h = harness()
+
+    h.gate.markDown(KEY, 'reset')
+
+    for (let i = 0; i < 5; i++) {
+      h.gate.markDown(KEY, 'dispatch probe failed')
+    }
+
+    h.time.advance(REMOTE_DOWN_INITIAL_BACKOFF_MS)
+    expect(h.gate.admit(KEY)).toMatchObject({ trial: true })
   })
 
   it('an HTTP error is an answer: it does not mark the remote down, and it reopens a down gate', async () => {
