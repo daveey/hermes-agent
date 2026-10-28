@@ -3112,3 +3112,13 @@ kanban:
 ```
 
 `kanban.sync.enabled` is off by default. When enabled, boards opened afterwards gain the sync tables and outbox triggers used by the central-sync client seams. Existing boards are unaffected until reopened.
+
+## Kanban strong model tier
+
+```yaml
+kanban:
+  strong_model: ""      # model used for the strong tier of kanban workers (empty = profile default)
+  strong_provider: ""   # provider for strong_model (empty = inferred from the model)
+```
+
+`kanban.strong_model` names the model dispatched for strong-tier cards; `kanban.strong_provider` optionally pins its provider, otherwise it is inferred from the model name.
