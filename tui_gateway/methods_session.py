@@ -50,17 +50,6 @@ def _flag(params: dict, name: str) -> bool:
     return is_truthy_value(params.get(name, False))
 
 
-def _create_hidden(params: dict) -> bool:
-    """``session.create``'s born-hidden intent: an explicit ``hidden`` always wins; without one, a chat created
-    over an agent-declared transport (``/api/ws?client=agent``) is born hidden so agent probes never land in the
-    user's sidebar. [daveey]"""
-    if params.get("hidden") is not None:
-        return _flag(params, "hidden")
-    from tui_gateway.transport import is_agent_client
-
-    return is_agent_client()
-
-
 def _new_runtime_ids(params: dict) -> tuple[str, str]:
     """Fresh runtime sid + resolved DB ``source`` for a session minted from ``params``."""
     return uuid.uuid4().hex[:8], _resolve_session_source(_str_param(params, "source") or None)
@@ -406,6 +395,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
     explicit_cwd, session_cwd, remote_cwd = _resolve_create_cwd(params, source, profile_home)
     _enable_gateway_prompts()
     from .methods_session_model_guard import create_overrides
+    from .methods_session_hidden import create_hidden  # [daveey] agent clients' chats are born hidden
     try:
         session_model_override, create_reasoning_override, create_service_tier_override = create_overrides(params)
     except ValueError as exc:
@@ -428,12 +418,11 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
             "history": history, "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
             "seeded": bool(history),  # gates _persist_branch_seed: only create-time history is unpersisted
             "cwd": session_cwd, "inflight_turn": None, "last_active": now,
-            "model_override": session_model_override,
-            "composer_override_profile": composer_override_profile,
+            "model_override": session_model_override, "composer_override_profile": composer_override_profile,
             "create_reasoning_override": create_reasoning_override,
             "create_service_tier_override": create_service_tier_override,
             "parent_session_id": parent_session_id, "pending_title": _str_param(params, "title") or None,
-            "pending_hidden": _create_hidden(params), "room_plumbing": _flag(params, "room_plumbing"),
+            "pending_hidden": create_hidden(params), "room_plumbing": _flag(params, "room_plumbing"),
             "follow_profile_config": _flag(params, "follow_profile_config"),
             "profile_home": str(profile_home) if profile_home is not None else None,
             "running": False, "session_key": key, "show_reasoning": _load_show_reasoning(), "source": source,
