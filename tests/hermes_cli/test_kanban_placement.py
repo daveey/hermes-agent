@@ -467,3 +467,42 @@ def test_hub_cli_resolves_without_the_login_shell_path(tmp_path, monkeypatch):
 def test_remote_body_names_the_capability_to_route_back_with():
     body = kp.remote_body({"body": "Do it."}, self_gw="macbook", target="hub")
     assert "needs=['host:macbook']" in body and reg.is_gateway_need("host:macbook")
+
+
+def test_pin_with_an_origin_session_is_refused_not_created_locally(mac):
+    # An origin-bound card is created on this gateway by design; a pin elsewhere cannot be honoured.
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "MacBook-only drill", "placement": "mini",
+                                        "origin_session": "hub:abc123"}))
+    assert not out.get("ok") and out["code"] == "placement_unavailable", out
+    assert _local_count() == 0
+
+
+def test_pin_with_a_structural_limit_is_refused_through_the_tool(mac):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "x", "placement": "hub", "workspace_kind": "dir",
+                                        "workspace_path": "/tmp/x"}))
+    assert not out.get("ok") and out["code"] == "placement_unavailable", out
+    assert _local_count() == 0 and mac["calls"] == []
+
+
+def test_pin_to_a_target_that_is_not_live_is_refused_through_the_tool(mac, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "target_live", lambda *a, **k: "hub's capability record is stale or missing")
+    out = json.loads(kt._handle_create({"title": "x", "placement": "hub"}))
+    assert not out.get("ok") and out["code"] == "placement_unavailable", out
+    assert _local_count() == 0
+
+
+def test_pin_is_case_insensitive_for_the_own_gateway(mac):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "x", "placement": "MacBook"}))
+    assert out["ok"] and out["task_id"] and _local_count() == 1
+
+
+def test_exception_while_placing_a_pinned_card_is_refused(mac, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "create_remote", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = json.loads(kt._handle_create({"title": "x", "placement": "hub"}))
+    assert not out.get("ok") and out["code"] == "placement_unavailable", out
+    assert _local_count() == 0

@@ -1452,7 +1452,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                                   origin_profile=current_profile_name("default") or "default",
                                   self_gw=self_gw, cfg=cfg, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")))
         if not placed.get("ok"):
-            logger.warning("kanban placement: %s refused the card (%s); creating it locally",
+            logger.warning("kanban placement: %s refused the card (%s)",
                            target, placed.get("error"))
             if kp.explicit_foreign_pin(view, reg.self_gateway()):
                 return _placement_refused(target, f"{target} refused the card: {placed.get('error')}")
@@ -1474,7 +1474,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                                         "queued_only": bool(placed.get("queued_only"))},
                    note=note)
     except Exception as exc:
-        logger.warning("kanban placement failed; creating the card locally", exc_info=True)
+        logger.warning("kanban placement failed", exc_info=True)
         try:
             from hermes_cli import kanban_placement as kp2
             from hermes_cli import kanban_capability_registry as reg2
@@ -1563,6 +1563,13 @@ def _handle_create(args: dict, **kw) -> str:
                                    project_id=project_id, session_id=session_id)
             if remote is not None:
                 return remote
+        elif origin_intent is None and args.get("placement"):
+            # An origin-bound card is created here by design, so a pin to another gateway cannot be honoured.
+            from hermes_cli import kanban_capability_registry as _reg
+            from hermes_cli import kanban_placement as _kp
+            _pin = _kp.explicit_foreign_pin(args, _reg.self_gateway())
+            if _pin:
+                return _placement_refused(_pin, "an origin-bound card is created on this gateway")
         new_tid = kb.create_task(
             conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
             parents=tuple(parents), tenant=(args.get("tenant") if origin_intent is not None

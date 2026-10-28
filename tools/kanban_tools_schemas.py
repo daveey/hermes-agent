@@ -669,10 +669,12 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "gateway, still linked to this chat. 'local' pins it here "
                 "(use it when the work needs this machine: its Chrome, "
                 "Keychain, Apple apps, launchd/Desktop state, local "
-                "checkouts). A gateway name pins it there; if that gateway "
-                "cannot be reached by a placement route the call fails with "
-                "code placement_unavailable and creates nothing (never a "
-                "silent local card). Your own gateway's name means local."
+                "checkouts). A gateway name pins it there; if the card cannot be "
+                "placed there (no placement route to it, a parent link, a "
+                "non-scratch workspace, a non-default board, an origin-bound "
+                "card, target not live, ...) the call fails with code "
+                "placement_unavailable and creates nothing (never a silent "
+                "local card). Your own gateway's name means local."
         )),
         "max_runtime_seconds": _prop("integer", (
                 "Per-task runtime cap. When exceeded, the "
