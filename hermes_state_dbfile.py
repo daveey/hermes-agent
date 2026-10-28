@@ -309,6 +309,21 @@ def _darwin_all_pids(lib) -> list[int]:
         size *= 2
 
 
+def _darwin_fd_target(pid: int, fd: int):
+    """Read one live vnode descriptor; a closed fd is not a held snapshot."""
+    import ctypes
+
+    record = ctypes.create_string_buffer(_DARWIN_FD_RECORD_SIZE)
+    if _darwin_libproc().proc_pidfdinfo(pid, fd, _DARWIN_PIDFDVNODEPATHINFO, record,
+                                      _DARWIN_FD_RECORD_SIZE) <= 0:
+        return None
+    raw = record.raw
+    identity = (struct.unpack_from("<I", raw, _DARWIN_FD_DEV_OFFSET)[0],
+                struct.unpack_from("<Q", raw, _DARWIN_FD_INO_OFFSET)[0])
+    target = raw[_DARWIN_FD_PATH_OFFSET:].split(b"\x00", 1)[0].decode("utf-8", "replace")
+    return target, identity
+
+
 def _iter_darwin_fd_targets():
     """Yield ``(pid, fd, last pathname, (st_dev, st_ino))`` for every vnode fd libproc reports.
 
@@ -332,15 +347,9 @@ def _iter_darwin_fd_targets():
             continue
         for offset in range(0, used - _DARWIN_PROC_FD_INFO_SIZE + 1, _DARWIN_PROC_FD_INFO_SIZE):
             fd = struct.unpack_from("<i", listing.raw, offset)[0]
-            record = ctypes.create_string_buffer(_DARWIN_FD_RECORD_SIZE)
-            if lib.proc_pidfdinfo(pid, fd, _DARWIN_PIDFDVNODEPATHINFO, record,
-                                  _DARWIN_FD_RECORD_SIZE) <= 0:
-                continue
-            raw = record.raw
-            identity = (struct.unpack_from("<I", raw, _DARWIN_FD_DEV_OFFSET)[0],
-                        struct.unpack_from("<Q", raw, _DARWIN_FD_INO_OFFSET)[0])
-            target = raw[_DARWIN_FD_PATH_OFFSET:].split(b"\x00", 1)[0].decode("utf-8", "replace")
-            yield pid, fd, target, identity
+            current = _darwin_fd_target(pid, fd)
+            if current is not None:
+                yield pid, fd, *current
 
 
 def _darwin_clean_key(base: str) -> tuple:
@@ -375,47 +384,70 @@ class _DarwinFdScan:
     def __init__(self, deadline: float):
         self.deadline = deadline
         self.done = threading.Event()
-        self.candidates: list[tuple[int, str, tuple[int, int]]] = []
+        self.candidates: list[tuple[int, int, str, tuple[int, int]]] = []
         self.error: BaseException | None = None
         self.expired = False
         self.waiters = 0
         # ``base -> (key, watched)`` of every caller that joined; a clean verdict for each is
         # recorded before this pass stops being in flight (see :meth:`run`).
         self.watchers: dict[str, tuple[tuple, dict[str, str]]] = {}
+        self.verdicts: dict[str, list[tuple[int, str]]] = {}
 
     def run(self) -> None:
         global _DARWIN_SCAN_IN_FLIGHT
         try:
-            for pid, _fd, target, identity in _iter_darwin_fd_targets():
+            for pid, fd, target, identity in _iter_darwin_fd_targets():
                 if time.monotonic() > self.deadline:
                     self.expired = True
                     break
                 if target.casefold().endswith(("-wal", "-shm")):
-                    self.candidates.append((pid, target, identity))
+                    self.candidates.append((pid, fd, target, identity))
+            self._judge_watchers()
         except BaseException as exc:
             self.error = exc
         finally:
             with _DARWIN_SCAN_LOCK:
-                # Cache clean verdicts BEFORE clearing the in-flight slot: a caller that missed the
-                # cache and then finds no pass in flight re-checks the cache under this lock, so it
-                # reuses this pass instead of starting another (the gap used to let it rescan).
-                if self.error is None and not self.expired:
-                    for base, (key, watched) in list(self.watchers.items()):
-                        with contextlib.suppress(Exception):
-                            if not _darwin_holders(self.candidates, watched):
-                                _darwin_clean_until[base] = (
-                                    time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS, key)
                 if _DARWIN_SCAN_IN_FLIGHT is self:
                     _DARWIN_SCAN_IN_FLIGHT = None
             self.done.set()
 
+    def _judge_watchers(self) -> None:
+        """Judge registered paths on the bounded worker, never under the join lock."""
+        global _DARWIN_SCAN_IN_FLIGHT
+        while True:
+            if time.monotonic() > self.deadline:
+                self.expired = True
+                return
+            with _DARWIN_SCAN_LOCK:
+                pending = [(base, watched) for base, (_key, watched) in self.watchers.items()
+                           if base not in self.verdicts]
+                if not pending:
+                    # Publish caches and retire the flight atomically: every caller
+                    # that joined this pass has a verdict, including late joiners.
+                    for base, (key, _watched) in self.watchers.items():
+                        if not self.verdicts[base]:
+                            _darwin_clean_until[base] = (
+                                time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS, key)
+                    if _DARWIN_SCAN_IN_FLIGHT is self:
+                        _DARWIN_SCAN_IN_FLIGHT = None
+                    return
+            for base, watched in pending:
+                self.verdicts[base] = _darwin_holders(self.candidates, watched)
+                if time.monotonic() > self.deadline:
+                    self.expired = True
+                    return
+
 
 def _darwin_holders(candidates, watched: dict[str, str]) -> list[tuple[int, str]]:
     holders: list[tuple[int, str]] = []
-    for pid, target, identity in candidates:
+    for pid, fd, target, identity in candidates:
         literal = watched.get(target.casefold())
         if literal is not None and _identity_is_truly_unlinked(identity, literal):
-            holders.append((pid, target))
+            # Revalidate AFTER stat: last-close may unlink and close the fd
+            # while we compare paths. A historical vnode cannot keep a WAL alive.
+            current = _darwin_fd_target(pid, fd)
+            if current is not None and current[1] == identity:
+                holders.append((pid, target))
     return holders
 
 
@@ -485,10 +517,7 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
         return []
     if scan.error is not None:
         raise scan.error
-    holders = _darwin_holders(scan.candidates, watched)
-    if not holders:
-        _darwin_clean_until[base] = (time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS, key)
-    return holders
+    return scan.verdicts[base]
 
 
 def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:

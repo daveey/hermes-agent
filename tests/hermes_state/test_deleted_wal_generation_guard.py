@@ -602,7 +602,7 @@ def _scan_threads():
             if t.name == hermes_state_dbfile._DARWIN_FD_SCAN_THREAD_NAME and t.is_alive()]
 
 
-def test_darwin_concurrent_callers_during_slow_scan_share_one_scan_thread(tmp_path, fake_darwin_scan):
+def test_darwin_concurrent_callers_during_slow_scan_share_one_scan_thread(tmp_path, fake_darwin_scan, monkeypatch):
     import threading
 
     from tests.waiting import wait_until
@@ -611,6 +611,7 @@ def test_darwin_concurrent_callers_during_slow_scan_share_one_scan_thread(tmp_pa
     sidecar = os.path.realpath(str(path) + "-wal")
     Path(sidecar).write_bytes(b"current generation")
     fake_darwin_scan["yield"] = [(4242, 7, sidecar, (0, 0))]  # identity != the linked file: retired
+    monkeypatch.setattr(hermes_state_dbfile, "_darwin_fd_target", lambda pid, fd: (sidecar, (0, 0)))
     results: list = []
 
     def caller():
