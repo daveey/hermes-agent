@@ -40,7 +40,8 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # time (one user hit 124). Oldest-by-mtime beyond the cap are pruned after each
 # new backup.
 _CORRUPT_BACKUP_RETENTION = 10
-
+# The suffix ``_backup_corrupt_db`` mints (``.corrupt.<sha256[:16]>.bak``); only those rotate.
+_CONTENT_ADDRESSED_BACKUP = re.compile(r"\.corrupt\.[0-9a-f]{16}\.bak")
 # Bounded init-lock acquire: a bare blocking flock let a wedged holder block the
 # dispatcher's next-tick connect forever. Poll non-blocking until the deadline,
 # then proceed without the lock (in-process _INIT_LOCK + idempotent init backstop).
@@ -330,10 +331,14 @@ def _prune_corrupt_backups(parent: Path, base_name: str, keep: Optional[Path] = 
     existing backups. Best-effort: prune failures never mask the corruption
     error the caller is about to raise."""
     try:
+        # Only the guard's own content-addressed copies (``corrupt.<16 hex>.bak``) rotate: a burst of
+        # quarantines (14 in one minute on the hub, 2026-10-28) must not delete a manual forensic copy
+        # (``corrupt.manual-<ts>.bak``) or the first damaged original along with the newer duplicates.
         backups = [
             candidate
             for candidate in parent.glob(f"{base_name}.corrupt.*.bak")
             if candidate.is_file() and candidate != keep
+            and _CONTENT_ADDRESSED_BACKUP.fullmatch(candidate.name[len(base_name):])
         ]
     except OSError:
         return

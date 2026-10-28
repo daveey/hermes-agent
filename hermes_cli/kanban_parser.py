@@ -540,7 +540,27 @@ _SPECS = [
         _cmd("links", help="Reconcile this gateway's chat links (which chats each card belongs to) now"),
         _cmd("links-diff", [_json_flag()],
              help="Compare chat links from the origin ledger with the synced links in the replicas (exit 1 if not clean)"),
+        _cmd("reconcile", [_json_flag()],
+             help="After the board file lost rows (a recovery): upload rows the service lacks, restore this "
+                  "gateway's rows the file lost from the service snapshot, then diff (exit 1 if not clean)"),
     ]), help="Central Kanban sync (kanban.sync.*): attach, import, status, diff"),
+    _cmd("recover", [
+        _json_flag(help="Emit the recovery report as JSON"),
+        _arg("--dry-run", action="store_true", help="Rebuild and report the loss, but do not write the board"),
+        _arg("--no-fill", action="store_true",
+             help="Do not fill rows the damaged file lost from the newest healthy quarantine backup"),
+    ], help="Rebuild a board whose table b-trees are corrupt (what `repair` refuses), in place, with a loss report",
+         description=(
+             "For integrity_check failures that REINDEX cannot fix. Runs in a fresh process under the board's "
+             "recovery lock (a concurrent recovery exits 'busy'): snapshots the damaged file with the SQLite "
+             "backup API (kept as <db>.recover-<ts>.damaged.bak), reads every table forward, backward and through "
+             "each index, fills rows still missing from the newest quarantine backup that passes quick_check, "
+             "writes <db>.recovery-<ts>.json with per-table loss counts, and writes the rebuilt board back INTO "
+             "the live file with the backup API, so open connections stay valid. Never `mv` a rebuilt copy over a "
+             "live kanban.db: every process with the old file open keeps writing to it. Also files a follow-up "
+             "card and runs `sync reconcile` for synced boards. The gateway dispatcher starts it automatically "
+             "when kanban.auto_recover_corruption is true (default)."
+         )),
     _cmd("repair", [_json_flag(help="Emit the repair report as JSON")],
          help="Check kanban.db integrity and auto-repair index-only corruption",
          description=(

@@ -218,6 +218,7 @@ class _KanbanDispatcher:
                     "then run `hermes kanban init` if you need a fresh board.",
                     slug, fingerprint[0],
                 )
+                self._start_auto_recovery(slug, fingerprint[0])
                 return None
             logger.exception("kanban dispatcher: tick failed on board %s", slug)
             return None
@@ -225,6 +226,21 @@ class _KanbanDispatcher:
             if conn is not None:
                 with contextlib.suppress(Exception):
                     conn.close()
+
+    @staticmethod
+    def _start_auto_recovery(slug: str, db_path: str) -> None:
+        """A board with table b-tree damage stays down until it is rebuilt: start the rebuild now
+        (``hermes_cli.kanban_db_recover``) instead of waiting for someone to notice. It runs in a
+        detached child (this process may itself be stranded on deleted sidecars, and its raw reads
+        would cancel its own locks), re-checks the damage from a clean process, holds the board's
+        recovery lock, and writes the board back in place, which changes the fingerprint and
+        lifts this pause. Rate-limited per board; ``kanban.auto_recover_corruption: false`` opts out."""
+        try:
+            from hermes_cli import kanban_db_recover as rec
+            if db_path and rec.auto_recover_enabled():
+                rec.spawn_recovery(Path(db_path))
+        except Exception:  # health: allow BLE001 -- the pause and its ERROR log above still stand
+            logger.exception("kanban dispatcher: could not start automatic recovery of board %s", slug)
 
     def tick_once(self, *, suppress_spawn: bool = False) -> list[tuple[str, Optional[object]]]:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""

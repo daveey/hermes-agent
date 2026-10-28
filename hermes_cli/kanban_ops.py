@@ -408,9 +408,32 @@ def _cmd_repair(args: argparse.Namespace) -> int:
     if report.backup_path:
         err(f"  corrupt copy quarantined at: {report.backup_path}")
     err(
-        "  Recover manually (copy kanban.db aside FIRST, then run "
-        "`sqlite3 <copy> \".recover\"` into a fresh file — never against "
-        "the live path, a WAL-reset-vulnerable sqlite3 CLI can corrupt it "
-        "further) or move the file aside to start a new board."
+        "  Not index-only: rebuild it in place with `hermes kanban recover` (salvages every readable row, "
+        "fills from the newest healthy backup, writes a loss report). Never `mv` a rebuilt copy over the "
+        "live kanban.db while any process has it open."
     )
     return 1
+
+
+def _cmd_recover(args: argparse.Namespace) -> int:
+    """Rebuild a board with table b-tree damage in place (``hermes_cli.kanban_db_recover``), in a
+    fresh process so this CLI's own state can't strand anything. Exit 0 = recovered / healthy /
+    dry run, 1 otherwise (busy, failed)."""
+    from hermes_cli import kanban_db_recover as rec
+    path = kb.kanban_db_path()
+    extra = (["--dry-run"] if args.dry_run else []) + (["--no-fill"] if args.no_fill else [])
+    result = rec.spawn_recovery(path, wait=True, extra_args=extra)
+    if result is None:  # pragma: no cover - wait=True always returns a result
+        return _err("kanban recover: no result from the recovery process")
+    if getattr(args, "json", False):
+        _print_json(result, ascii=True)
+    else:
+        print(f"{result.get('db_path')}: {result.get('status')} {result.get('reason') or ''}".rstrip())
+        for name, loss in sorted((result.get("tables") or {}).items()):
+            if loss.get("known_lost") or loss.get("possibly_lost") or loss.get("filled_from_backup"):
+                print(f"  {name}: {loss.get('recovered')} read, {loss.get('filled_from_backup')} filled, "
+                      f"{loss.get('known_lost')} known lost ({loss.get('possibly_lost')} possibly)")
+        for key in ("report_path", "snapshot_path", "fill_source", "card_id", "sync"):
+            if result.get(key):
+                print(f"  {key}: {result[key]}")
+    return 0 if result.get("status") in ("recovered", "healthy", "dry_run") else 1

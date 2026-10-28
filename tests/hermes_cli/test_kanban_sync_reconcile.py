@@ -1,0 +1,108 @@
+"""``kanban_sync_client.reconcile``: after a board file lost rows (a corruption rebuild), the board and the
+Board service are brought back in step, including the unsent outbox the rebuild could not recover. [daveey]"""
+
+from __future__ import annotations
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_sync_client as ksc
+from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli.kanban_sync_fake_board import FakeService
+
+ME, BOARD = "hub", "default"
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    return support.kanban_home(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def svc():
+    return FakeService()
+
+
+@pytest.fixture
+def live(kanban_home):
+    support.write_sync_config(kanban_home, True)
+    conn = kbc.connect(kanban_home / "kanban.db")
+    ksc.ensure_identity(conn, BOARD, ME)
+    sync.set_mode(conn, "primary")
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _without_capture(conn, sql, params=()):
+    """A row vanishing from the file the way a rebuild loses it: no trigger, no outbox entry."""
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE kanban_sync_state SET applying = 1")
+        conn.execute(sql, params)
+        conn.execute("UPDATE kanban_sync_state SET applying = 0")
+
+
+def test_reconcile_restores_lost_rows_and_resends_the_lost_outbox(live, svc, kanban_home):
+    tid = kb.create_task(live, title="card", assignee="worker")
+    kb.add_comment(live, tid, "me", "synced note")
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=True)
+    # The rebuild lost a synced comment row and every pending outbox op (an unsent comment and a new card).
+    _without_capture(live, "DELETE FROM task_comments WHERE body = 'synced note'")
+    kb.add_comment(live, tid, "me", "unsent note")
+    unsent = kb.create_task(live, title="unsent card", assignee="worker")
+    live.execute("DELETE FROM kanban_sync_outbox")
+    live.commit()
+
+    report = ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=svc.hub(ME))
+
+    assert report["restored"] == {"task_comments": 1}
+    assert report["queued"]["tasks"] == 1 and report["queued"]["task_comments"] == 1
+    assert report["rejected"] == 0 and report["clean"] is True
+    bodies = {r[0] for r in live.execute("SELECT body FROM task_comments")}
+    assert {"synced note", "unsent note"} <= bodies
+    rows = svc.board(BOARD)["rows"]
+    assert unsent in rows["tasks"]
+    assert any(r["body"] == "unsent note" for r in rows["task_comments"].values())
+
+
+def test_reconcile_never_reverts_a_local_edit_whose_outbox_entry_was_lost(live, svc, kanban_home):
+    tid = kb.create_task(live, title="before", assignee="worker")
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=True)
+    live.execute("UPDATE tasks SET title = 'after' WHERE id = ?", (tid,))
+    live.execute("DELETE FROM kanban_sync_outbox")
+    live.commit()
+
+    ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=svc.hub(ME))
+
+    assert live.execute("SELECT title FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "after"
+
+
+def test_reconcile_is_a_no_op_on_a_board_in_step(live, svc, kanban_home):
+    tid = kb.create_task(live, title="card", assignee="worker")
+    kb.add_comment(live, tid, "me", "note")
+    ksc.push(live, svc.hub(ME), BOARD, ME, primary=True)
+    calls = len(svc.calls)
+    report = ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=svc.hub(ME))
+    assert report["queued"] == {} and report["restored"] == {} and report["clean"] is True
+    assert not [c for c in svc.calls[calls:] if c[0] == "ops"]
+
+
+def test_cli_sync_reconcile_runs_against_the_service(live, svc, kanban_home, monkeypatch, capsys):
+    import argparse
+    import json
+
+    from hermes_cli import kanban as kc
+    tid = kb.create_task(live, title="card", assignee="worker")
+    live.execute("DELETE FROM kanban_sync_outbox WHERE 1 = 1")
+    live.commit()
+    monkeypatch.setattr(ksc, "load_identity", lambda cfg=None: svc.hub(ME).ident)
+    monkeypatch.setattr(ksc, "Hub", lambda ident, timeout=None: svc.hub(ident.gateway))
+    parser = argparse.ArgumentParser()
+    kc.build_parser(parser.add_subparsers(dest="command"))
+    rc = kc.kanban_command(parser.parse_args(["kanban", "sync", "reconcile", "--json"]))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["queued"] == {"tasks": 1, "task_events": 1} and out["clean"] is True
+    assert tid in svc.board(BOARD)["rows"]["tasks"]
