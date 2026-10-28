@@ -29,6 +29,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 PAUSE_REASON = "core_update_pause"
+UPDATE_KILL_REASON = "killed by the Hermes update"
 MAX_PAUSES = 3
 PAUSE_STATUS_TEXT = "Paused for a Hermes update; continues automatically"
 # The update itself takes a few minutes: a turn that would age out of the freshness window meanwhile is
@@ -96,6 +97,73 @@ def not_resumable_reason(session: dict, marker_key: str) -> str | None:
     return None
 
 
+def _command_head(command: str, limit: int = 80) -> str:
+    head = " ".join(str(command or "").split())
+    return head if len(head) <= limit else head[:limit - 3] + "..."
+
+
+def _format_start(started_at: Any) -> str:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(started_at)))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "unknown"
+
+
+def _killed_job_notice(receipt: dict) -> str:
+    """The normal completion text, with the update named as the reason."""
+    from tools.process_registry_notifications import format_process_notification
+    text = format_process_notification({
+        "type": "completion", "session_id": receipt["session_id"], "command": receipt.get("command") or "",
+        "exit_code": receipt.get("exit_code", -15), "completion_reason": "killed",
+        "termination_source": PAUSE_REASON, "kill_reason": UPDATE_KILL_REASON,
+        "output": receipt.get("output") or "",
+    })
+    return text or ""
+
+
+def _update_jobs(session: dict) -> list[dict]:
+    """Snapshot and redact before journaling intent, so no kill can go unmentioned after a crash."""
+    from tools.process_registry import process_registry, _redact_process_result
+    owners = set(getattr(session.get("agent"), "_process_owner_task_ids", ()) or ())
+    jobs = []
+    for proc in process_registry.list_sessions():
+        if proc.get("owner_task_id") not in owners or proc.get("status") != "running" or proc.get("persist_on_release"):
+            continue
+        live = process_registry.get(proc["session_id"])
+        if live is not None:
+            job = _redact_process_result({"session_id": live.id, "command": live.command,
+                "started_at": live.started_at, "notify_on_complete": live.notify_on_complete,
+                "kill_state": "pending"})
+            job["command"] = _command_head(job["command"])
+            jobs.append(job)
+    return jobs
+
+
+def stop_owned_jobs_for_update_pause(jobs: list[dict], save: Callable[[], bool]) -> bool:
+    """Journal intent BEFORE signaling, and each outcome before proceeding. Refuse pause on failure."""
+    from tools.process_registry import process_registry, _redact_process_result
+    for job in jobs:
+        if job.get("kill_state") == "killed":
+            continue
+        sid = job["session_id"]
+        result = process_registry.kill_process(sid, source=PAUSE_REASON, consume_output=False)
+        if result.get("status") == "already_exited":
+            job["kill_state"] = "already_exited"
+        elif result.get("status") == "killed":
+            live = process_registry.get(sid)
+            job.update(kill_state="killed", exit_code=getattr(live, "exit_code", -15),
+                       output=result.get("output") or "")
+            _redact_process_result(job)
+            if job.get("notify_on_complete"):
+                job["notice"] = _killed_job_notice(job)
+        else:
+            logger.warning("core-update pause: job %s not stopped; refusing pause (%s)", sid, result.get("status"))
+            return False
+        if not save():
+            return False
+    return True
+
+
 def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | None]:
     """The per-turn ``agent.step_boundary_pause``: one stat per step while no pause is requested."""
     declined: list[str] = []
@@ -109,8 +177,26 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
                 declined.append(why)
                 logger.info("core-update pause: session %s keeps running (%s)", marker_key, why)
             return None
-        from tui_gateway.turn_marker import mark_turn_paused
-        if not mark_turn_paused(_home(session), marker_key, PAUSE_REASON):
+        from tui_gateway.turn_marker import mark_turn_paused, read_turn_marker
+        home = _home(session)
+        marker = read_turn_marker(home, marker_key)
+        if marker is None:
+            return None
+        jobs = {job["session_id"]: job for job in marker.get("killed_jobs", [])}
+        jobs.update({job["session_id"]: job for job in _update_jobs(session)})
+        killed = list(jobs.values())
+        # Write-ahead journal: even a crash during kill or a later disk failure leaves an
+        # explicit uncertain-outcome record. Never claim an unverified kill succeeded.
+        if not mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed,
+                                increment=marker.get("reason") != PAUSE_REASON):
+            return None
+        def save() -> bool:
+            return mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed, increment=False)
+        try:
+            if not stop_owned_jobs_for_update_pause(killed, save):
+                return None
+        except Exception:
+            logger.warning("core-update pause: background cleanup failed; refusing pause for %s", marker_key, exc_info=True)
             return None
         with session["history_lock"]:
             session["_update_pause_marker_key"] = marker_key
@@ -120,11 +206,29 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
     return hook
 
 
-def pause_note(prompt: str) -> str:
+def pause_note(prompt: str, killed_jobs: list | None = None) -> str:
     from tui_gateway.session_history import _AUTO_CONTINUE_NOTE_PREFIX
-    return (f"{_AUTO_CONTINUE_NOTE_PREFIX} — it was paused at a step boundary for a Hermes update. Every "
+    note = (f"{_AUTO_CONTINUE_NOTE_PREFIX} — it was paused at a step boundary for a Hermes update. Every "
             "tool result above is complete; continue with the next step and don't redo finished steps. "
             f"The paused request was:]\n\n{prompt}")
+    jobs = [job for job in (killed_jobs or []) if isinstance(job, dict) and job.get("session_id")]
+    if not jobs:
+        return note
+    lines = [note, "", "Background jobs stopped for this Hermes update:"]
+    for job in jobs:
+        command = job.get("command") or "(no command)"
+        state = job.get("kill_state", "killed")
+        if state != "killed":
+            lines.append(f"- {job['session_id']} started {_format_start(job.get('started_at'))}: {command} "
+                         f"— update interruption outcome {state}; inspect its result before restarting")
+            continue
+        lines.append(f"- {job['session_id']} started {_format_start(job.get('started_at'))}: {command} "
+                     f"— restart it if you still need it")
+        if job.get("notify_on_complete"):
+            notice = job.get("notice") or _killed_job_notice(job)
+            if notice:
+                lines.append(notice)
+    return "\n".join(lines)
 
 
 def announce_pause(sid: str, payload: dict) -> None:

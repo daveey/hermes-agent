@@ -126,9 +126,12 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     paused = marker.get("reason") == "core_update_pause"
     if paused:
         from tui_gateway.update_pause import pause_note
-        attempt, text = marker["attempts"], pause_note(marker["prompt"])
+        attempt, text = marker["attempts"], pause_note(marker["prompt"], marker.get("killed_jobs"))
     else:
         attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
+    if not paused and marker.get("killed_jobs"):
+        from tui_gateway.update_pause import pause_note
+        text += "\n\n" + pause_note("", marker["killed_jobs"])
     pauses = int(marker.get("pauses") or 0)
 
     def kickoff() -> None:
@@ -163,6 +166,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             # nested notes). Set here, not at schedule time, so a bail above leaves nothing for a racing user turn.
             session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
             session["_auto_continue_pauses"] = pauses
+            session["_auto_continue_killed_jobs"] = marker.get("killed_jobs", [])
         try:
             from gateway.warning_notifications import render_notification
             diagnostic = marker.get("notification_category") == "diagnostic"

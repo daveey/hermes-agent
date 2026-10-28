@@ -2263,10 +2263,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
                 session.exit_code = -15  # SIGTERM
                 session.completion_reason = "killed"
                 session.termination_source = source
-            # The reader thread can finalise the session while the signal path
-            # blocks in the SIGKILL grace window: its ``save_completed_result``
-            # then persists this kill as a plain ``exited``. Re-write the receipt
-            # so the durable record matches what the caller was told.
+            self._log_lifecycle_kill(session, source)
+            # A reader can persist a plain exit during the SIGKILL wait; rewrite the receipt.
             if not self._move_to_finished(session):
                 save_completed_result(session)
             self._write_checkpoint()
@@ -2539,7 +2537,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
     # recovery / turn abandon), not a deliberate stop: those must skip persist_on_release
     # sessions. An explicit stop (process_manage kill, CLI /stop) passes its own source
     # string and still reaches them.
-    _LIFECYCLE_KILL_SOURCES = frozenset({"kill_all", "gateway_turn_timeout", "agent_close"})
+    _LIFECYCLE_KILL_SOURCES = frozenset({"kill_all", "gateway_turn_timeout", "agent_close", "core_update_pause"})
 
     def kill_started_since(self, task_id: str, baseline_ids, *, source: str) -> int:
         """Kill ``task_id`` processes created after ``baseline_ids``. Output is

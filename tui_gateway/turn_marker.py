@@ -100,7 +100,7 @@ def _store(path: Path, entries: dict[str, dict]) -> None:
     atomic_json_write(path, entries, indent=None, mode=0o600)
 
 
-def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
+def _update(home: Path | str, session_key: str, mutate, what: str) -> bool:
     """Load → ``mutate(entries)`` → store under the lock; ``mutate`` returns None to skip the write."""
     try:
         with _lock:
@@ -108,13 +108,15 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
             entries = mutate(_load(path))
             if entries is not None:
                 _store(path, entries)
+                return True
     except Exception:
-        logger.debug("failed to %s turn marker for %s", what, session_key, exc_info=True)
+        logger.warning("failed to %s turn marker for %s", what, session_key, exc_info=True)
+    return False
 
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
                       auto_continue: bool = True, notification_category: str | None = None,
-                      pauses: int = 0) -> None:
+                      pauses: int = 0, killed_jobs: list | None = None) -> None:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
     this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume.
     ``pauses`` = core-update pauses this logical turn already took (``mark_turn_paused``), counted apart
@@ -124,6 +126,8 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
     now = time.time()
     entry = {"attempts": max(0, int(attempts)), "prompt": prompt[:_MAX_PROMPT_CHARS], "started_at": now,
              "auto_continue": bool(auto_continue), **_writer_identity()}
+    if killed_jobs:
+        entry["killed_jobs"] = list(killed_jobs)
     if pauses:
         entry["pauses"] = max(0, int(pauses))
     if notification_category == "diagnostic":
@@ -139,24 +143,54 @@ def clear_turn_marker(home: Path | str, session_key: str) -> None:
         _update(home, session_key, lambda e: {k: v for k, v in e.items() if k != session_key} if session_key in e else None, "clear")
 
 
-def mark_turn_paused(home: Path | str, session_key: str, reason: str) -> bool:
+def mark_turn_paused(home: Path | str, session_key: str, reason: str,
+                     *, killed_jobs: list | None = None, increment: bool = True) -> bool:
     """[daveey] Stamp a live turn's marker as paused at a step boundary for a core update: ``reason``,
     ``paused_at``, ``pauses`` + 1, and this process as its writer. ``auto_continue`` stays as recorded.
-    True when a marker existed to stamp."""
-    stamped = []
-
+    ``killed_jobs`` are the jobs this pause actually stopped; they ride the same write so a resume
+    after restart can list them. True when a marker existed to stamp."""
     def mutate(entries):
         entry = entries.get(session_key)
         if not isinstance(entry, dict):
             return None
-        entry.update(reason=str(reason), paused_at=time.time(), pauses=int(entry.get("pauses") or 0) + 1,
+        entry.update(reason=str(reason), paused_at=time.time(), pauses=int(entry.get("pauses") or 0) + int(increment),
                      **_writer_identity())
-        stamped.append(True)
+        if killed_jobs:
+            entry["killed_jobs"] = list(killed_jobs)
         return entries
 
     if session_key:
-        _update(home, session_key, mutate, "pause")
-    return bool(stamped)
+        return _update(home, session_key, mutate, "pause")
+    return False
+
+
+def _paused_killed_jobs(entry: dict) -> list[dict]:
+    """Jobs a core-update pause actually stopped, or [] when the marker has none / junk."""
+    raw = entry.get("killed_jobs")
+    if not isinstance(raw, list):
+        return []
+    jobs = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("session_id") or "")
+        if not sid:
+            continue
+        try:
+            started = float(item.get("started_at") or 0)
+        except (TypeError, ValueError):
+            started = 0.0
+        job = {"session_id": sid, "command": str(item.get("command") or ""), "started_at": started,
+               "notify_on_complete": bool(item.get("notify_on_complete")),
+               "kill_state": str(item.get("kill_state") or "killed")}
+        if item.get("notice"):
+            job["notice"] = str(item["notice"])
+        if item.get("exit_code") is not None:
+            job["exit_code"] = item["exit_code"]
+        if item.get("output"):
+            job["output"] = str(item["output"])
+        jobs.append(job)
+    return jobs
 
 
 def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | None:
@@ -166,9 +200,12 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
     try:
         with _lock:
             entry = _load(_marker_path(home)).get(session_key)
-        prompt = str(entry.get("prompt") or "") if isinstance(entry, dict) else ""
+        if not isinstance(entry, dict):
+            return None
+        prompt = str(entry.get("prompt") or "")
         if not prompt.strip():
             return None
+        killed = _paused_killed_jobs(entry)
         return {"attempts": max(0, int(entry.get("attempts") or 0)), "prompt": prompt, "started_at": _started_at(entry),
                 "auto_continue": bool(entry.get("auto_continue", True)),
                 "pauses": max(0, int(entry.get("pauses") or 0)),
@@ -176,6 +213,7 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
                 **{k: entry[k] for k in ("writer_pid", "writer_start_time") if entry.get(k) is not None},
                 **({"reason": str(entry["reason"])} if entry.get("reason") else {}),
                 **({"notification_category": "diagnostic"}
-                   if entry.get("notification_category") == "diagnostic" else {})}
+                   if entry.get("notification_category") == "diagnostic" else {}),
+                **({"killed_jobs": killed} if killed else {})}
     except Exception:
         return None

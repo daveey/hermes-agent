@@ -217,6 +217,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     marker_key = str(session.get("session_key") or "")
     marker_attempt = int(session.pop("_auto_continue_attempt", 0) or 0)
     marker_pauses = int(session.pop("_auto_continue_pauses", 0) or 0)
+    killed_jobs = session.pop("_auto_continue_killed_jobs", None)
     marker_text = session.pop("_auto_continue_prompt", None) or text
     # [daveey] A core-update pause kept the previous turn's marker; this turn owns (and retires) its own.
     session.pop("_update_pause_marker_key", None)
@@ -224,7 +225,8 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
         record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
-                          auto_continue=auto_continue, **({"pauses": marker_pauses} if marker_pauses else {}),
+                          auto_continue=auto_continue, **({"killed_jobs": killed_jobs} if killed_jobs else {}),
+                          **({"pauses": marker_pauses} if marker_pauses else {}),
                           **({"notification_category": "diagnostic"}
                              if notification_category == "diagnostic" else {}))
         with session["history_lock"]:
