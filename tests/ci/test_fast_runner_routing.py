@@ -94,9 +94,12 @@ def test_fast_label_is_known_and_checks_cannot_bypass_the_gate():
 def test_e2e_upgrade_runs_only_on_bwrap_capable_slots():
     # Its probe step refuses to run the updater unsandboxed; a plain hermes-hub slot cannot
     # start bubblewrap (Docker seccomp/AppArmor, masked /proc, host userns restriction).
+    # hermes-hub is intentionally absent: the bwrap slots are spot, and that label on spot
+    # is what scheduled long jobs onto hosts EC2 stops mid-run.
     workflows = _workflows()
     job = workflows["tests.yml"]["jobs"]["e2e-upgrade"]
-    assert _labels(job) == ["self-hosted", "hermes-hub", "ci-bwrap"]
+    assert _labels(job) == ["self-hosted", "ci-bwrap"]
+    assert "hermes-hub" not in _labels(job)
     probe = [s for s in job["steps"] if s.get("name") == "Install bubblewrap"]
     assert probe and "assert BWRAP_OK" in probe[0]["run"]
     labels = YAML(typ="safe").load((ROOT / ".github" / "actionlint.yaml").read_text(encoding="utf-8"))
