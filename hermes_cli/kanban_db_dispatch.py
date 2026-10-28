@@ -95,7 +95,7 @@ _COMPLETION_GATE_ERROR_PREFIXES = ("PR acceptance ",)
 DEFAULT_GUARD_HOLD_CAP_SECONDS = 30 * 60
 DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS = 6 * 3600
 _GUARD_HOLD_SHORT_CAP_REASONS = frozenset({"blocker_auth"})
-_GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch"})
+_GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch", "model_pin_not_in_routing_registry"})
 
 
 def _env_seconds(name: str, default: int) -> int:

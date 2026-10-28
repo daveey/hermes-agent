@@ -251,3 +251,33 @@ def test_single_decomposer_returns_rejected_outcome(restricted_creator, monkeypa
     assert "lacks required capabilities" in outcome.reason
     with kbc.connect_closing() as conn:
         assert kb.get_task(conn, tid).status == "triage"
+
+
+@pytest.mark.parametrize("surface", ["tool", "cli", "rest"])
+def test_every_create_path_refuses_a_pin_the_managed_registry_rejects(chat, monkeypatch, surface):
+    """[daveey] A pin the worker's managed subscription policy refuses at startup is refused at create on every path."""
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    (chat / "config.yaml").write_text("model:\n  default: claude-sonnet-5-5\n  provider: anthropic\n" + _managed_yaml())
+    monkeypatch.setattr(kc, "_check_dispatcher_presence", lambda **kw: (True, ""))
+    if surface == "tool":
+        from tools.registry import registry
+        bad = json.loads(registry.dispatch("kanban_create", {"title": "Bad", "assignee": "default",
+                                                             "model": "claude-sonnet-4-5"}))
+        assert bad["code"] == "model_pin_not_in_routing_registry", bad
+    elif surface == "cli":
+        root = argparse.ArgumentParser()
+        kc.build_parser(root.add_subparsers())
+        assert kc._cmd_create(root.parse_args(["kanban", "create", "Bad", "--assignee", "default",
+                                               "--model", "claude-sonnet-4-5"])) == 2
+    else:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from plugins.kanban.dashboard.plugin_api import router
+        app = FastAPI()
+        app.include_router(router)
+        with TestClient(app) as client:
+            bad = client.post("/tasks", json={"title": "Bad", "assignee": "default",
+                                              "model_override": "claude-sonnet-4-5"})
+            assert bad.status_code == 400 and "model_pin_not_in_routing_registry" in bad.text, bad.text
+    with kbc.connect_closing() as conn:
+        assert kb.list_tasks(conn) == []

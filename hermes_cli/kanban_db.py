@@ -1560,12 +1560,9 @@ def set_model_override(
     Allowed while ``running``: it applies on the NEXT dispatch, which is the
     rate-limit-recovery flow (set, then reclaim/retry)."""
     model, provider = _validate_model_override(model, provider)
-    if model and not provider:
-        # [daveey] Same pin-time binding as create_task: resolve against the card's assignee, or refuse.
-        from hermes_cli.kanban_pin_provider import resolve_pin_provider
-        row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        model, provider = resolve_pin_provider(model, None, assignee=row[0] if row else None)
-        _reject_spaced_pin(model, provider)
+    if model:
+        from hermes_cli.kanban_model_assignment import validate_task_pin
+        model, provider = validate_task_pin(conn, task_id, model, provider)
     return _set_task_override(
         conn, task_id,
         "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),

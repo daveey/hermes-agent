@@ -19,6 +19,21 @@ def managed_config(config=None):
     return config
 
 
+class ManagedPinRejectedError(ModelRoutingError):
+    """A concrete pin the registry cannot serve. Config, not a transient: a retry never heals it. [daveey]"""
+
+    def __init__(self, model, provider, allowed):
+        self.model, self.provider, self.allowed = model, provider, list(allowed)
+        super().__init__("Managed subscription policy rejects unregistered or ambiguous concrete pin")
+
+
+def allowed_pins(config):
+    """Sorted model names an exact pin may name under ``config``'s managed policy."""
+    policy = config["model_routing"]
+    return sorted({route["model"] for level in policy.get("routes", {})
+                   for route in eligible_routes(policy, level) if route["billing"] == "subscription"})
+
+
 def pin_policy(model, provider, config):
     """Only an unambiguous, eligible exact native tuple is an approved pin."""
     policy = config["model_routing"]
@@ -27,7 +42,7 @@ def pin_policy(model, provider, config):
                if route["billing"] == "subscription" and route["model"] == model
                and provider in (None, "", "auto", route["provider"])]
     if len(matches) != 1:
-        raise ModelRoutingError("Managed subscription policy rejects unregistered or ambiguous concrete pin")
+        raise ManagedPinRejectedError(model, provider, allowed_pins(config))
     level, route = matches[0]
     restricted = deepcopy(config)
     restricted["model_routing"]["routes"] = {level: [route]}

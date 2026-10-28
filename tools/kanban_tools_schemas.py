@@ -739,8 +739,9 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "model": _prop("string", (
                 "Pin the dispatched worker to this model instead of "
-                "the assignee profile's configured model. Use the "
-                "exact model name the target provider expects. Omit "
+                "the assignee profile's configured model. Leave this out "
+                "unless you need another tier; the name must be in this "
+                "host's model routing registry when one is enforced. Omit "
                 "to use the profile default."
         )),
         "provider": _prop("string", (
