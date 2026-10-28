@@ -22,6 +22,7 @@ def test_guard_teardown_with_mocked_popen(tmp_path, monkeypatch, fake_kind, muta
     monkeypatch.setattr(guard, "_live_git_config_paths", lambda: [cfg])
     request = SimpleNamespace(node=SimpleNamespace(get_closest_marker=lambda name: None, stash=pytest.Stash()))
     guard._live_git_config_guard.__wrapped__(request)
+    pristine = guard._read_bytes_or_none(cfg)
     if mutate:
         subprocess.run([
             "git", "config", "--file", str(cfg), "user.email", "fixture@example.invalid",
@@ -42,7 +43,7 @@ def test_guard_teardown_with_mocked_popen(tmp_path, monkeypatch, fake_kind, muta
         if mutate:
             with pytest.raises(pytest.fail.Exception, match="test wrote user.* into a live checkout"):
                 guard._check_live_git_configs(request.node)
-            assert guard._read_bytes_or_none(cfg) == b""
+            assert guard._read_bytes_or_none(cfg) == pristine
         else:
             guard._check_live_git_configs(request.node)
 
@@ -60,7 +61,7 @@ def test_guard_teardown_survives_empty_path(tmp_path, monkeypatch, mutate):
         if mutate:
             with pytest.raises(pytest.fail.Exception, match="test wrote user"):
                 _assert_git_configs_unchanged(snapshots)
-            assert _read_bytes_or_none(cfg) == b""
+            assert _read_bytes_or_none(cfg) == snapshots[cfg]
         else:
             _assert_git_configs_unchanged(snapshots)
 
