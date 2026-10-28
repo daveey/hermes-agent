@@ -50,6 +50,13 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
     }
   }
 
+  // Remote gateways are held warm by the B prewarmer (remote-prewarm); prefetch only
+  // rides a pool entry that already exists and never starts a cold SSH dial or spawn
+  // (and, being passive, never counts as an open). The local backend may be started.
+  const dialOptions = (connectionId: string) => ({
+    passive: connectionId !== (deps.registry().primary || 'local')
+  })
+
   const guarded = <T>(label: string, fn: () => T, fallback: T): T => {
     try {
       return fn()
@@ -131,7 +138,7 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
       learnedThisRun.add(connectionId)
 
       try {
-        const descriptor = await deps.backendFor(connectionId, { passive: false })
+        const descriptor = await deps.backendFor(connectionId, dialOptions(connectionId))
         const status = await deps.getJson(descriptor, '/api/plugins/hub-sync/status', { timeoutMs: 8_000 })
         const name = typeof status?.gateway === 'string' ? status.gateway.trim() : ''
 
@@ -154,7 +161,7 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
   const prefetcher = new TranscriptPrefetcher({
     connectionForGateway,
     fetchLatest: async (key, limit) => {
-      const descriptor = await deps.backendFor(key.connectionId, { passive: false })
+      const descriptor = await deps.backendFor(key.connectionId, dialOptions(key.connectionId))
 
       const query = new URLSearchParams({
         include_compacted: 'true',
