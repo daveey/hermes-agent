@@ -84,7 +84,8 @@ def test_strong_model_unset_keeps_old_behaviour(board):
 def test_pins_and_out_of_scope_profiles_ignore_strong_model(board):
     cfg = _cfg(strong_model=OPUS, default_model_profiles=["default"])
     with kbc.connect() as conn:
-        pinned = kb.get_task(conn, kb.create_task(conn, title="impl", assignee="default", model_override=SONNET))
+        pinned = kb.get_task(conn, kb.create_task(conn, title="impl", assignee="default", model_override=SONNET,
+                                                      provider_override="anthropic"))
         other = kb.get_task(conn, kb.create_task(conn, title="impl", assignee="bb-dev"))
         assert tier.resolve_model_tier(conn, pinned, lane="review", cfg=cfg) == (None, None, "pinned")
         assert tier.resolve_model_tier(conn, other, lane="review", cfg=cfg) == (None, None, "profile_out_of_scope")

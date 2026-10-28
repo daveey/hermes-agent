@@ -428,6 +428,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             (idem_key,)).fetchone() is not None
         from hermes_cli.kanban_db_workspace import WorktreeWorkspaceConfigError
         from hermes_cli.kanban_capabilities import CapabilityMismatchError
+        from hermes_cli.kanban_pin_provider import PinProviderUnresolvedError
         try:
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
@@ -456,6 +457,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             return _err(f"kanban: --workspace: {exc}", 2)
         except CapabilityMismatchError as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
+        except PinProviderUnresolvedError as exc:
+            return _err(f"kanban: {exc}", 2)
         if session_key and not idem_hit:
             # Same completion subscription the kanban_create tool adds, so the chat
             # that shelled out hears when the card lands (and its row stays busy).
