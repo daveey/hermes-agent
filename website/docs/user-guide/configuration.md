@@ -866,6 +866,16 @@ Each context file read is also bounded by `context_file_read_timeout` (seconds, 
 context_file_read_timeout: 5.0
 ```
 
+### Global context files
+
+`agent.global_context_files` lists user-level instruction files (for example `~/AGENTS.md`) that load into every session of the profile, whatever its working directory. That includes Kanban workers in scratch dirs and cron jobs. They load right before the project context chain. A file the cwd chain already loaded (when cwd is `~`) is skipped, so the prompt never carries it twice. The default `[]` loads none.
+
+```yaml
+agent:
+  global_context_files:
+    - ~/AGENTS.md
+```
+
 ## File Read Safety
 
 Controls how much content a single `read_file` call can return. Reads that exceed the limit are rejected with an error telling the agent to use `offset` and `limit` for a smaller range. This prevents a single read of a minified JS bundle or large data file from flooding the context window.
