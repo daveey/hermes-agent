@@ -1696,3 +1696,14 @@ class TestStagingBudget:
         assert out.returncode == 0, out.stderr
         result = json.loads(out.stdout.strip().splitlines()[-1])
         assert result == {"took": False, "adds": 0}, (result, out.stderr[-2000:])
+
+
+def test_slow_dir_backoff_file_with_bom_is_read(tmp_path):
+    """Windows tools BOM files they touch; the persisted back-off must still load."""
+    import tools.checkpoint_staging as staging
+
+    store = tmp_path / "store"
+    path = staging._slow_file(store)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"/w": 123.0}).encode())
+    assert staging._read_slow(store) == {"/w": 123.0}

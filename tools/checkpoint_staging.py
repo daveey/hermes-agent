@@ -219,7 +219,7 @@ def _slow_file(store: Path) -> Path:
 
 def _read_slow(store: Path) -> dict[str, float]:
     try:
-        data = json.loads(_slow_file(store).read_text(encoding="utf-8"))
+        data = json.loads(_slow_file(store).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):
