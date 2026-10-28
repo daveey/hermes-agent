@@ -88,3 +88,21 @@ def test_completion_entry_records_real_goal_success(board, monkeypatch, entry):
     with kbc.connect_closing() as conn:
         conn.execute('BEGIN')
         assert ledger.observe_owner_task(conn, {'id': tid, 'status': 'done'}, now=1000)['origin_observation']['verified']
+
+
+@pytest.mark.parametrize('evidence', [
+    'FINAL SEND for @session:default/20261026_abc: hello',
+    'Tested\nsecond line\nFINAL SEND for @session:default/20261026_abc: hello',
+])
+def test_goal_release_survives_final_send_in_evidence(board, monkeypatch, evidence):
+    """The public preview hides FINAL SEND blocks; the receipt must still match the judged text."""
+    monkeypatch.setattr(kanban_tools, '_goal_judge_available', lambda: True)
+    monkeypatch.setattr(kanban_tools, 'judge_goal', lambda **kw: ('done', 'verified', None, None, False))
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title='Build', assignee='default', goal_mode=True,
+                             completion_contract='local-only')
+        proof = kanban_tools._goal_gate('kanban_complete', kb.get_task(conn, tid), tid, evidence)
+        assert kb.complete_task(conn, tid, summary=evidence, goal_verification=proof)
+        conn.execute('BEGIN')
+        observed = ledger.observe_owner_task(conn, {'id': tid, 'status': 'done'}, now=1000)
+        assert observed['origin_observation']['verified'] is True

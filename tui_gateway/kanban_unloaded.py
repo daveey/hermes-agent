@@ -454,6 +454,8 @@ def _loop(stop: threading.Event) -> None:
     stop.wait(_env_float("HERMES_KANBAN_UNLOADED_FIRST_S", FIRST_RUN_DELAY_S))
     while not stop.is_set():
         try:
+            from tui_gateway.kanban_remote_notices import sweep_remote_notices
+            sweep_remote_notices()
             sweep_once(live_session_ids(), grace_s=grace)
         except Exception:
             logger.warning("kanban unloaded sweep failed", exc_info=True)

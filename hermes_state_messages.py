@@ -500,9 +500,9 @@ class SessionMessagesMixin:
         from hermes_state_sessions import _LINEAGE_CTE_SQL  # watermark is lineage-stamped
 
         def _do(conn):
-            existing = conn.execute(
-                "SELECT m.id FROM messages m WHERE m.session_id = ? AND m.display_kind = 'kanban_notice' "
-                "AND json_extract(m.display_metadata, '$.notice_id') = ? LIMIT 1", (session_id, notice_id)).fetchone()
+            existing = conn.execute(_LINEAGE_CTE_SQL +
+                "SELECT m.id FROM messages m JOIN lineage l ON m.session_id=l.id WHERE m.display_kind='kanban_notice' "
+                "AND json_extract(m.display_metadata, '$.notice_id') = ? LIMIT 1", (session_id, session_id, notice_id)).fetchone()
             if existing is None and keys:
                 existing = conn.execute(
                     _LINEAGE_CTE_SQL + " SELECT m.id FROM messages m, "

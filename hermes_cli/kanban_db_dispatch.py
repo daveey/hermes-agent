@@ -367,16 +367,14 @@ def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional
 
 
 def reap_worker_zombies() -> list[int]:
-    """Reap exited workers without blocking; returns reaped PIDs. POSIX reaps
-    every child via ``waitpid(-1)``; Windows polls the ``Popen`` handles
-    parked by ``_default_spawn`` (the only way to learn a child's exit code
-    there), so the rate-limit sentinel exit is classified on both hosts."""
+    """Reap registered worker handles. Drop a non-Popen so a missing poll() cannot traceback a tick."""
     reaped: list[int] = []
-    # Only our own workers: waitpid(-1) also stole wake-check probe children, and Python 3.14's
-    # Popen then reported their exit as 0 (a false condition_met).
     for pid, proc in list(_live_worker_procs.items()):
-        returncode = proc.poll()
-        if returncode is None:
+        poll = getattr(proc, "poll", None)
+        returncode = poll() if callable(poll) else None
+        if not isinstance(returncode, int):
+            if not callable(poll):
+                _live_worker_procs.pop(pid, None)
             continue
         _record_worker_exit(
             pid, _wait_status_from_returncode(returncode) if returncode >= 0 else -returncode)

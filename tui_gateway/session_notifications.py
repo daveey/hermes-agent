@@ -425,8 +425,9 @@ def _kb_first_line(value: Any, limit: int) -> str:
 
 
 def _kb_completed(task, payload: dict, title: str) -> str:
+    from hermes_cli.kanban_final_send import public_summary
     handoff = (_kb_first_line(payload["summary"], 200) if payload.get("summary")
-               else _kb_first_line(task.result, 160) if getattr(task, "result", None) else "")
+               else _kb_first_line(public_summary(getattr(task, "result", None)), 160))
     return f" done — {title}{handoff}"
 
 
@@ -466,7 +467,13 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     title = (getattr(task, "title", None) or task_id)[:120]
     who = getattr(task, "assignee", None) or ""
     prefix = f"{glyph} " + (f"[{board_slug}] " if board_slug else "") + (f"@{who} " if who else "")
-    return f"{prefix}Kanban {task_id}{fmt(task, getattr(ev, 'payload', None) or {}, title)}"
+    payload = getattr(ev, "payload", None) or {}
+    if getattr(ev, "kind", "") == "completed":
+        # A worker refused a send into this chat put its message in the summary as a FINAL SEND line. [daveey]
+        from hermes_cli.kanban_final_send import final_send_for_chat
+        if final := final_send_for_chat(payload, str(sub.get("chat_id") or "")):
+            return f"{prefix}Kanban {task_id} done — {title}\n{final}"
+    return f"{prefix}Kanban {task_id}{fmt(task, payload, title)}"
 
 
 def _kb_board_key(_kb, board_meta) -> tuple[str, str]:

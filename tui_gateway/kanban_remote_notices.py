@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import sqlite3
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 FRESH_S = 6 * 3600.0
@@ -198,3 +200,74 @@ def release(claim: dict, *, ledger: Optional[Path] = None) -> bool:
 def _reset_for_tests() -> None:
     global _index_memo
     _index_memo = None
+
+
+logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _session_db(profile, sid):
+    from hermes_cli.profiles import get_profile_dir
+    from hermes_state import SessionDB
+
+    path = get_profile_dir(profile) / "state.db"
+    if not path.is_file():
+        yield None, None
+        return
+    db = SessionDB(path)
+    try:
+        yield (db, db.get_compression_tip(sid) or sid) if db.get_session(sid) else (None, None)
+    finally:
+        db.close()
+
+
+def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session_db) -> list[dict]:
+    """Read owner completion evidence and persist addressed notices exactly once.
+
+    SessionDB deduplicates by owner+board+card+event+destination in its writer
+    transaction. Busy chats refuse the write; an unchanged replica is retried
+    on the next sweep. Kept beside collect() so a background sweep still
+    delivers FINAL SEND lines when no chat is polling.
+    """
+    from hermes_cli.kanban_origin import _hub_db, gateway_names
+    from tui_gateway.session_notifications import _format_kanban_event_text
+
+    path = replica_path if replica_path is not None else _hub_db()
+    if path is None:
+        return []
+    me = gateway if gateway is not None else gateway_names()[0]
+    if not me:
+        return []
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+            rows = conn.execute("SELECT gw,key,data FROM replica WHERE coll='tasks' AND gw!=?", (me,)).fetchall()
+    except sqlite3.Error:
+        logger.debug("remote Kanban replica unavailable", exc_info=True)
+        return []
+    delivered = []
+    for owner, key, raw in rows:
+        try:
+            task = json.loads(raw)
+            notice = task.get("completion_notice")
+            if task.get("status") != "done" or not isinstance(notice, dict):
+                continue
+            for link in task.get("sessions", []):
+                if link.get("rel") != "shepherd" or link.get("gw") != me:
+                    continue
+                profile, sid = link.get("profile"), link.get("session")
+                if not profile or not sid:
+                    continue
+                event_id = notice["event_id"]
+                metadata = {"notice_id": f"remote:{owner}:{key}:{event_id}:{profile}:{sid}",
+                            "board": task.get("board", "default"), "task_id": task["id"],
+                            "gateway": owner, "event_ids": [event_id]}
+                sub = {"task_id": task["id"], "chat_id": f"{me}/{profile}/{sid}"}
+                ev = SimpleNamespace(kind="completed", payload=notice["payload"])
+                text = _format_kanban_event_text(sub, SimpleNamespace(**task), ev, metadata["board"])
+                with session_db(profile, sid) as (db, tip):
+                    if db is not None:
+                        row_id = db.append_kanban_notice(tip, text, metadata)
+                        delivered.append({"task_id": task["id"], "session_id": tip, "message_row": row_id})
+        except Exception:
+            logger.debug("remote Kanban notice deferred for %s/%s", owner, key, exc_info=True)
+    return delivered

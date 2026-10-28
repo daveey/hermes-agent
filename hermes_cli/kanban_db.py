@@ -2883,11 +2883,15 @@ def complete_task(
         event_summary = handoff_summary
         if prior_status == "review" and not event_summary:
             event_summary = _REVIEW_APPROVED_NOTE
-        completion_payload = _completed_event_payload(result, event_summary, verified_cards, metadata)
+        from hermes_cli.kanban_db_completion_payload import completed_event_payload
+        completion_payload = completed_event_payload(result, event_summary, verified_cards, metadata)
         if goal_event_id is not None:
             conn.execute('UPDATE task_events SET run_id=? WHERE id=? AND task_id=?',
                          (run_id, goal_event_id, task_id))
             completion_payload['goal_verified_event_id'] = goal_event_id
+            # The preview above hides FINAL SEND blocks and is clipped; the origin ledger must
+            # compare the exact evidence the judge saw.
+            completion_payload['goal_evidence'] = (summary or result or '').strip()
         if acceptance_event_id is not None:
             conn.execute("UPDATE task_events SET run_id=? WHERE id=? AND task_id=?",
                          (run_id, acceptance_event_id, task_id))
@@ -2996,31 +3000,6 @@ def _cleaned_artifact_paths(metadata: Any) -> list[str]:
     if not isinstance(raw, (list, tuple)):
         return []
     return [str(p).strip() for p in raw if isinstance(p, str) and str(p).strip()]
-
-
-def _completed_event_payload(
-    result: Optional[str], event_summary: Optional[str], verified_cards: list[str], metadata: Any,
-) -> dict:
-    """``completed`` event payload: first summary line (400 chars) so gateway
-    notifiers / dashboard WS render without a second round-trip; verified
-    cards; and ``metadata["artifacts"]`` promoted so the notifier can upload
-    them as native attachments without fetching the run row."""
-    # Mirror CLI's _show_voice_status: include STT/TTS provider availability so the user can tell at a
-    # glance *why* voice mode isn't working ("STT provider: MISSING ..." is the common case). ``record_key``
-    # mirrors the configured ``voice.record_key`` so the TUI can both bind it (frontend
-    # ``isVoiceToggleKey``) and display it in /voice status — previously the TUI hardcoded Ctrl+B and
-    # ignored the config (#18994).
-    payload: dict = {
-        "result_len": len(result) if result else 0,
-        "summary": _first_line(event_summary, 400) or None,
-    }
-    if verified_cards:
-        payload["verified_cards"] = verified_cards
-    if isinstance(metadata, dict):
-        cleaned = _cleaned_artifact_paths(metadata)
-        if cleaned:
-            payload["artifacts"] = cleaned
-    return payload
 
 
 def _flag_phantom_prose_refs(

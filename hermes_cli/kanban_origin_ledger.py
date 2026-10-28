@@ -180,8 +180,11 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
             # [daveey] The completed event keeps only the handoff's first line (400 chars). A longer or multi-line
             # handoff is bound through the closing run, which stores it whole, so it can still match the judged
             # evidence; comparing against the event alone never released such a card.
+            # The event preview hides FINAL SEND blocks (public_summary), so accept that form of the first line too.
+            from hermes_cli.kanban_final_send import public_summary
             evidence_ok = isinstance(judged, str) and (judged == recorded or (
-                _first_line(judged, 400) == recorded and run is not None and run[0] == event[1]
+                recorded in (_first_line(judged, 400), _first_line(public_summary(judged), 400) or '')
+                and run is not None and run[0] == event[1]
                 and judged == (run[4] or '').strip()))
             goal_verified = bool(isinstance(subject, dict) and proof.get('snapshot') == digest(subject)
                                  and subject.get('task_id') == task['id']
@@ -210,6 +213,10 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
             legacy = bool(legacy and contract_ok)
             verified = legacy
     payload = {k: v for k, v in task.items() if k != 'origin_observation'}
+    # Only post-rollout events opt in: do not replay the replica's historical done-card inventory.
+    if terminal and event and json.loads(event[3] or '{}').get('notice_version') == 1:
+        payload['completion_notice'] = {'event_id': event[0], 'created_at': event[2],
+                                        'payload': json.loads(event[3] or '{}')}
     if row[0] in ('scheduled', 'blocked'):
         from hermes_cli.kanban_wait_replica import observe_wait
         payload['wait_observation'] = observe_wait(conn, task['id'], now=now)

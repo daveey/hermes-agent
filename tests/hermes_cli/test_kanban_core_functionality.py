@@ -692,6 +692,12 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
         def __init__(self):
             self.pid = 99999
 
+        def poll(self):
+            # reap_worker_zombies polls registered Popen handles. Without
+            # this, the double stays in _live_worker_procs and a later
+            # dispatcher tick in this process logs an AttributeError.
+            return None
+
     def fake_popen(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["env"] = kwargs.get("env", {})
@@ -708,6 +714,7 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
         pid = kbd._default_spawn(task, str(workspace))
         assert pid == 99999
     finally:
+        kbd._live_worker_procs.pop(99999, None)
         conn.close()
 
     cmd = captured["cmd"]
@@ -723,6 +730,17 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     env = captured["env"]
     assert env.get("HERMES_KANBAN_TASK") == tid
     assert env.get("HERMES_PROFILE") == "some-profile"
+
+
+def test_reap_drops_non_popen_without_traceback(monkeypatch):
+    """A spawn-test double with no poll() must not traceback a later tick."""
+
+    class BareProc:
+        pid = 99991
+
+    monkeypatch.setattr(kbd, "_live_worker_procs", {99991: BareProc()})
+    assert kbd.reap_worker_zombies() == []
+    assert 99991 not in kbd._live_worker_procs
 
 
 # ---------------------------------------------------------------------------
