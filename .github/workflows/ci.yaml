@@ -54,8 +54,13 @@ permissions:
 # older pending one is superseded — the newer run tests a tree containing it).
 # A per-run group queued one full suite per push and saturated the shared
 # hermes-hub runners. [daveey]
+# Manual gate: a workflow_dispatch run (e.g. a green-gate run on main HEAD)
+# gets its own group `ci-dispatch-<run_id>`. Before, it shared `ci-main`: it
+# held the slot while pushes behind it were superseded one by one, and a
+# pending dispatch could itself be cancelled by the next push. Now a dispatch
+# is never superseded and never blocks the push group; pushes still coalesce.
 concurrency:
-  group: ci-${{ inputs.release == true && github.run_id || github.ref == 'refs/heads/main' && 'main' || (github.event_name == 'pull_request' && github.event.pull_request.number || github.ref) }}
+  group: ci-${{ inputs.release == true && github.run_id || github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id) || github.ref == 'refs/heads/main' && 'main' || (github.event_name == 'pull_request' && github.event.pull_request.number || github.ref) }}
   cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
 
 jobs:
