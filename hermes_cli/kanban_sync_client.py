@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
@@ -515,6 +515,7 @@ class RoundResult:
     pulled: int = 0
     push: Optional[PushResult] = None
     error: Optional[str] = None
+    repaired: dict[str, list[str]] = field(default_factory=dict)  # cards re-pushed by repair_divergence
 
 
 def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
@@ -563,6 +564,11 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
             except Resync:
                 _log.warning("kanban sync: %s live cursor below the retention floor; rebuilding from a snapshot", slug)
                 resync(live, hub, slug, observers=True, partition=gateway)
+        replica = open_shadow(slug, gateway)
+        try:
+            result.repaired = repair_divergence(live, replica, gateway)
+        finally:
+            replica.close()
         result.push = push(live, hub, slug, gateway, primary=mode == "primary")
         return result
     finally:
@@ -953,6 +959,43 @@ def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> 
     return {"clean": clean, "checked": len(checked), "pending": len(pending_tasks & set(live_tasks)),
             "missing_in_shadow": missing, "extra_in_shadow": extra, "field_mismatch": fields,
             "child_mismatch": children, "rejected_ops": rejected, "foreign_cards": foreign}
+
+
+def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> dict[str, list[str]]:
+    """Queue the local values of this gateway's cards that the service never received.
+
+    A card whose live ``sync_version`` equals the replica's, with no outbox op in flight, has seen every service
+    write. Any synced field that still differs was then written locally with no capture trigger, e.g. in the
+    window while another process re-installed the triggers. The gap heal in ``install_or_remove`` only finds
+    child rows (they have no uid yet). A task row has no such marker, so this is the only place that finds it.
+    Hub incident 2026-10-28: a ``scheduled -> ready`` wake reached the service as its event but not as its
+    status, and the service refused every lease as ``not_claimable`` for 3 h. Returns {task id: fields queued}."""
+    from hermes_cli.kanban_db_connect import write_txn
+    held = {r[0] for r in live.execute(
+        "SELECT DISTINCT row_uid FROM kanban_sync_outbox WHERE table_name = 'tasks' AND state IN ('pending', 'rejected')")}
+    seen = {r[0]: r[1] for r in shadow.execute(
+        "SELECT id, sync_version FROM tasks WHERE (created_on = ? OR created_on IS NULL) AND sync_version IS NOT NULL",
+        (gateway,))}
+    repaired: dict[str, list[str]] = {}
+    rows = live.execute("SELECT * FROM tasks WHERE sync_version IS NOT NULL").fetchall()
+    for row in rows:
+        tid = row["id"]
+        if tid in held or seen.get(tid) != row["sync_version"]:
+            continue
+        theirs = shadow.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        mine, remote = _row_fields(live, "tasks", row), _row_fields(shadow, "tasks", theirs)
+        fields = {k: v for k, v in mine.items() if k in remote and remote[k] != v}
+        if not fields:
+            continue
+        with write_txn(live):
+            live.execute(
+                "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
+                "VALUES (?, 'tasks', ?, 'upsert', ?, ?, '', ?)",
+                (sync.uuid7(), tid, json.dumps(fields), row["sync_version"], int(time.time() * 1000)))
+        repaired[tid] = sorted(fields)
+        _log.warning("kanban sync: %s %s differed from the service with nothing in flight (an uncaptured write); "
+                     "re-queued", tid, ", ".join(sorted(fields)))
+    return repaired
 
 
 # --- leases (primary boards) ----------------------------------------------------------------------
