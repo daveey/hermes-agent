@@ -1045,7 +1045,7 @@ BROWSER_EXEC_SCHEMA = {
         "type": "object",
         "properties": {
             "code": {"type": "string", "description": "Python code to execute using the pre-imported browser helpers. Use print(...) for any data you need back."},
-            "session": {"type": "string", "description": "Named isolated browser session — its own daemon and (on cloud backends) own browser, so concurrent tasks don't share tabs. Reuse the same name on every related call; omit for the shared default session."},
+            "session": {"type": "string", "description": "Omit for normal work: the shared default session is reused across sites, tabs and calls. Set a name only when this task runs at the same time as another browser task and needs its own tab (or, on cloud backends, its own browser); each name starts another daemon and browser connection, stopped when its agent exits. Reuse the same name on every related call; never invent per-site or per-job names."},
             "timeout_s": {"type": "integer", "default": _DEFAULT_TIMEOUT_S,
                           "description": f"Max seconds to wait for the code to finish (default {_DEFAULT_TIMEOUT_S}, max {_MAX_TIMEOUT_S})."},
         },
