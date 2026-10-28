@@ -97,6 +97,49 @@ REF_COLUMNS: dict[tuple[str, str], str] = {
     ("task_events", "run_id"): "run_uid",
 }
 SYNCED_TABLES = tuple(SYNCED_COLUMNS)
+# Synced columns core keeps in Unix SECONDS (``int(time.time())``). The service's own clocks (leases, HLCs, the feed,
+# tombstones) are milliseconds; a millisecond value in one of these columns makes every ``now - started_at`` reader
+# wrong by 1000x (2026-10-27: the Board's lease grants wrote ``task_runs.started_at`` in ms and
+# ``coach_fixer.utc_day`` crashed on "year 58792"). The apply path normalizes them, whatever a peer sends.
+SECONDS_COLUMNS: dict[str, frozenset[str]] = {
+    "tasks": frozenset({"created_at", "started_at", "completed_at"}),
+    "task_runs": frozenset({"started_at", "ended_at"}),
+    "task_comments": frozenset({"created_at"}),
+    "task_events": frozenset({"created_at"}),
+    "task_attachments": frozenset({"created_at"}),
+    "task_chat_links": frozenset({"created_at"}),
+}
+# Above this a timestamp is milliseconds: 1e11 s is the year 5138, 1e11 ms is 1973.
+MS_THRESHOLD = 100_000_000_000
+
+
+def to_seconds(value: Any) -> Any:
+    """A seconds-column value from the wire: a millisecond number becomes seconds, anything else is unchanged."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > MS_THRESHOLD:
+        return int(value // 1000)
+    return value
+
+
+def repair_ms_timestamps(conn: sqlite3.Connection) -> int:
+    """Rewrite millisecond values in ``SECONDS_COLUMNS`` to seconds; returns the number of cells fixed.
+
+    Runs with ``applying`` set, so nothing is captured: the service repairs its own copy, and any later write of a
+    row sends the repaired value. The caller holds the write transaction."""
+    fixed = 0
+    present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    conn.execute("UPDATE kanban_sync_state SET applying = 1")
+    try:
+        for table, columns in SECONDS_COLUMNS.items():
+            if table not in present:
+                continue
+            have = set(table_columns(conn, table))
+            for column in sorted(columns & have):
+                fixed += conn.execute(
+                    f"UPDATE {table} SET {column} = CAST({column} / 1000 AS INTEGER) WHERE {column} > ?",
+                    (MS_THRESHOLD,)).rowcount
+    finally:
+        conn.execute("UPDATE kanban_sync_state SET applying = 0")
+    return fixed
 _UID_TABLES = ("task_comments", "task_events", "task_runs", "task_attachments", "task_chat_links")
 # Append-only rows leave only with their task; a delete trigger there would echo
 # every cascade row of a task delete the service already cascades itself.
@@ -163,6 +206,8 @@ _SYNC_COLUMN_DDL = (
     ("tasks", "lease_version", "lease_version INTEGER"),
     ("tasks", "created_on", "created_on TEXT"),
     ("kanban_sync_outbox", "retry_after", "retry_after INTEGER"),
+    # 1 once repair_ms_timestamps ran on this file (the one-time repair of rows applied before the guard).
+    ("kanban_sync_state", "seconds_repaired", "seconds_repaired INTEGER NOT NULL DEFAULT 0"),
 )
 
 # Resolved db paths whose triggers this process installed. Empty = no synced
@@ -282,6 +327,11 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
                 _queue_rows(conn, table, missed)
                 _log.warning("kanban sync: %d %s row(s) were written without capture; queued for upload", len(missed), table)
         install_triggers(conn)
+        if not conn.execute("SELECT seconds_repaired FROM kanban_sync_state").fetchone()[0]:
+            fixed = repair_ms_timestamps(conn)
+            conn.execute("UPDATE kanban_sync_state SET seconds_repaired = 1")
+            if fixed:
+                _log.warning("kanban sync: %d millisecond timestamp(s) rewritten to seconds", fixed)
     _SYNCED_PATHS.add(db_path)
 
 
@@ -801,7 +851,7 @@ def _local_run_id(conn: sqlite3.Connection, uid: Optional[str], task_id: Any) ->
 
 
 def _local_fields(conn: sqlite3.Connection, table: str, fields: Mapping[str, Any], task_id: Any) -> dict[str, Any]:
-    """Wire fields -> local columns: drop local-only/key/unknown columns, uids -> local ids."""
+    """Wire fields -> local columns: drop local-only/key/unknown columns, uids -> local ids, ms -> seconds."""
     present = set(table_columns(conn, table))
     allowed = set(captured_columns(conn, table)) | (SERVER_COLUMNS.get(table, frozenset()) & present)
     out: dict[str, Any] = {}
@@ -810,6 +860,8 @@ def _local_fields(conn: sqlite3.Connection, table: str, fields: Mapping[str, Any
         if wire not in fields:
             continue
         value = _from_wire(fields[wire])
+        if column in SECONDS_COLUMNS.get(table, ()):
+            value = to_seconds(value)
         out[column] = _local_run_id(conn, value, task_id) if (table, column) in REF_COLUMNS else value
     return out
 

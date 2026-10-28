@@ -174,3 +174,64 @@ def test_apply_refuses_an_unsynced_board(kanban_home):
     with kbc.connect_closing(kanban_home / "plain.db") as conn:
         with pytest.raises(RuntimeError):
             sync.apply_remote_changes(conn, [], new_cursor=1)
+
+
+# --- seconds columns (2026-10-27: the Board wrote task_runs.started_at in ms; readers crashed on "year 58792") ---
+
+def test_millisecond_timestamps_from_the_wire_are_stored_in_seconds(synced_conn):
+    """A run claimed through a Board lease: the server's copy of the run row carries ms. A whole-row push of the
+    damaged local row would then send ms back, so the apply path must normalize every seconds column."""
+    conn = synced_conn
+    tid = kb.create_task(conn, title="claimed via lease", assignee="worker")
+    kb.claim_task(conn, tid)
+    run_uid = conn.execute("SELECT r.uid FROM tasks t JOIN task_runs r ON r.id = t.current_run_id WHERE t.id = ?",
+                           (tid,)).fetchone()[0]
+    started_s = conn.execute("SELECT started_at FROM task_runs WHERE uid = ?", (run_uid,)).fetchone()[0]
+    ms = started_s * 1000 + 955
+    page = [
+        _ch(1, "task_runs", run_uid, {"task_id": tid, "status": "running", "profile": "worker", "started_at": ms,
+                                      "ended_at": None}),
+        _ch(2, "task_events", "ev-ms", {"task_id": tid, "run_uid": run_uid, "kind": "claimed",
+                                        "payload": '{"holder": "macbook"}', "created_at": ms}),
+        _ch(3, "task_comments", "c-ms", {"task_id": tid, "author": "a", "body": "b", "created_at": ms}),
+        _ch(4, "tasks", "t_remote_ms000001", _task_fields(created_at=ms, started_at=ms, completed_at=ms)),
+    ]
+    sync.apply_remote_changes(conn, page, new_cursor=4)
+    assert conn.execute("SELECT started_at FROM task_runs WHERE uid = ?", (run_uid,)).fetchone()[0] == started_s
+    assert conn.execute("SELECT created_at FROM task_events WHERE uid = 'ev-ms'").fetchone()[0] == started_s
+    assert conn.execute("SELECT created_at FROM task_comments WHERE uid = 'c-ms'").fetchone()[0] == started_s
+    assert tuple(conn.execute("SELECT created_at, started_at, completed_at FROM tasks WHERE id = 't_remote_ms000001'")
+                 .fetchone()) == (started_s, started_s, started_s)
+    # Seconds and nulls pass through untouched.
+    sync.apply_remote_changes(conn, [_ch(5, "task_runs", run_uid, {"task_id": tid, "ended_at": started_s + 7})],
+                              new_cursor=5)
+    assert conn.execute("SELECT ended_at FROM task_runs WHERE uid = ?", (run_uid,)).fetchone()[0] == started_s + 7
+    assert sync.to_seconds(None) is None and sync.to_seconds(True) is True and sync.to_seconds("x") == "x"
+
+
+def test_rows_already_in_milliseconds_are_repaired_once_on_open(kanban_home):
+    support.write_sync_config(kanban_home, True)
+    path = kanban_home / "kanban.db"
+    conn = kbc.connect(path)
+    try:
+        tid = kb.create_task(conn, title="damaged", assignee="worker")
+        kb.claim_task(conn, tid)
+        run_id, started_s = conn.execute("SELECT id, started_at FROM task_runs WHERE task_id = ?", (tid,)).fetchone()
+        conn.execute("UPDATE kanban_sync_state SET applying = 1")
+        conn.execute("UPDATE task_runs SET started_at = ? WHERE id = ?", (started_s * 1000 + 1, run_id))
+        conn.execute("UPDATE task_events SET created_at = created_at * 1000 WHERE task_id = ?", (tid,))
+        conn.execute("UPDATE kanban_sync_state SET applying = 0, seconds_repaired = 0")
+        conn.commit()
+        outbox_before = _outbox_count(conn)
+    finally:
+        conn.close()
+    sync._SYNCED_PATHS.clear()
+    kbc._INITIALIZED_PATHS.clear()
+    conn = kbc.connect(path)
+    try:
+        assert conn.execute("SELECT started_at FROM task_runs WHERE id = ?", (run_id,)).fetchone()[0] == started_s
+        assert conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ?", (tid,)).fetchone()[0] < sync.MS_THRESHOLD
+        assert conn.execute("SELECT seconds_repaired FROM kanban_sync_state").fetchone()[0] == 1
+        assert _outbox_count(conn) == outbox_before  # the repair is not captured: the service repairs its own copy
+    finally:
+        conn.close()
