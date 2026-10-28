@@ -16,6 +16,21 @@ from pm.runtime import is_runtime, runtime_command, runtime_environment
 from pm.worker_operations import OPERATIONS
 
 
+def _raise_target_gap(package) -> None:
+    """Raise the worker's ``unavailable on <target>`` refusal here, without spawning it.
+
+    A gap (``Git.gaps``: POSIX uses system git by choice) is a static fact of the package and the host
+    target, so the worker can only refuse. ``selected_git_env`` asks for git on every internal git call:
+    a worker per call cost ~0.7-2 s and a fresh interpreter each time (~1/s from one busy agent).
+    """
+    from pm.store import current_target
+
+    target = current_target()
+    reason = package.missing_reason(target)
+    if reason is not None:
+        raise InstallError(package.name, f"unavailable on {target}: {reason}", "none")
+
+
 def _missing_or_refuse(name):
     from pm.install import _refuse_lazy, is_installed, lazy_installs_allowed
     from pm.registry import walk
@@ -187,6 +202,7 @@ def ensure(name, *, base_env=None, explicit=False, verify=True, progress=None, p
         from pm.install import ensure as direct
         return direct(name, base_env=base_env, explicit=explicit, verify=verify, progress=progress,
                       pause_event=pause_event, download_progress=download_progress)
+    _raise_target_gap(get_package(name))
     if not explicit and not isinstance(get_package(name), StatePackage):
         if not _missing_or_refuse(name):
             return Runner(name, env_for(name, base_env=base_env))
