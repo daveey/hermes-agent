@@ -214,12 +214,42 @@ def _owner_evidence(task: dict) -> dict:
     return evidence
 
 
+def _advanced_observation(binding_raw: str, observed: int, source: sqlite3.Connection) -> tuple | None:
+    """``(task, version, released)`` when the replica holds a newer, exactly bound record for this obligation."""
+    binding = json.loads(binding_raw)
+    validate_binding(binding)
+    row = source.execute(
+        "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
+        (binding['owner']['gateway'], binding['task_record_key'])).fetchone()
+    if not row or type(row[0]) is not int or row[0] <= observed:
+        return None
+    task = json.loads(row[1])
+    owner = binding['owner']
+    if (not isinstance(task, dict)
+            or any(task.get(f) != owner[f] for f in ('gateway', 'profile', 'board'))
+            or task.get('id') != owner['task_id']):
+        return None
+    marker = {k: v for k, v in binding.items() if k != 'publication_version'}
+    markers = task.get('origin_bindings')
+    if not isinstance(markers, list) or marker not in [
+            {k: v for k, v in m.items() if k != 'publication_version'}
+            for m in markers if isinstance(m, dict)]:
+        return None
+    released = (task.get('status') in ('done', 'archived')
+                and _owner_evidence(task).get('verified') is True)
+    return task, row[0], released
+
+
 def refresh_observations(path: Path, replica: Path, *, timeout: float = 5) -> None:
     """Advance durable observations only from newer, exactly bound owner records.
 
     Disappearance is not completion. Corrupt/unreadable stores raise to let callers
     display unknown, rather than returning an empty successful projection. A newer
     nonterminal publication reopens a previously released obligation.
+
+    [daveey] The write lock is taken only when some observation would advance: a read-only scan decides first.
+    Every projection in every process refreshes, so an unconditional ``BEGIN IMMEDIATE`` made readers collide with
+    each other, and the loser's projection went stale for a poll.
     """
     if not path.is_file() or not replica.is_file():
         return
@@ -227,36 +257,37 @@ def refresh_observations(path: Path, replica: Path, *, timeout: float = 5) -> No
 
     source = _ro(replica)
     try:
+        try:
+            with closing(_ro(path)) as ledger:
+                pending = any(
+                    _advanced_observation(raw, observed, source) is not None
+                    for raw, observed in ledger.execute(
+                        "SELECT binding_json,observation_version FROM origin_obligations").fetchall())
+        except sqlite3.OperationalError:
+            pending = True  # no table yet (or unreadable read-only): the locked path below decides
+        if not pending:
+            return
         with _db(path, timeout=timeout) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             for key, raw, observed in conn.execute(
                     "SELECT binding_id,binding_json,observation_version FROM origin_obligations").fetchall():
-                binding = json.loads(raw)
-                validate_binding(binding)
-                row = source.execute(
-                    "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
-                    (binding['owner']['gateway'], binding['task_record_key'])).fetchone()
-                if not row or type(row[0]) is not int or row[0] <= observed:
+                advanced = _advanced_observation(raw, observed, source)
+                if advanced is None:
                     continue
-                task = json.loads(row[1])
-                owner = binding['owner']
-                if (not isinstance(task, dict)
-                        or any(task.get(f) != owner[f] for f in ('gateway', 'profile', 'board'))
-                        or task.get('id') != owner['task_id']):
-                    continue
-                marker = {k: v for k, v in binding.items() if k != 'publication_version'}
-                markers = task.get('origin_bindings')
-                if not isinstance(markers, list) or marker not in [
-                        {k: v for k, v in m.items() if k != 'publication_version'}
-                        for m in markers if isinstance(m, dict)]:
-                    continue
-                released = (task.get('status') in ('done', 'archived')
-                            and _owner_evidence(task).get('verified') is True)
+                task, version, released = advanced
                 conn.execute(
                     "UPDATE origin_obligations SET task_json=?,observation_version=?,released=? WHERE binding_id=?",
-                    (_json(task), row[0], int(released), key))
+                    (_json(task), version, int(released), key))
     finally:
         source.close()
+
+
+def _lock_busy(exc: sqlite3.Error) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
 
 
 def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
@@ -284,8 +315,15 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
             meta = dict(source.execute("SELECT k,v FROM meta"))
             last_ok = float(meta.get('last_ok') or 0)
             # Inventory readers must not queue behind a receipt/sync writer.
-            # Only a successful refresh can make these observations current.
-            refresh_observations(path, replica, timeout=0)
+            try:
+                refresh_observations(path, replica, timeout=0)
+            except sqlite3.OperationalError as exc:
+                # [daveey] Another process holds the ledger's write lock (it is advancing these same
+                # observations). The stored ones are still evidence: below, a row is current only when the
+                # replica holds exactly its stored version, so a row this refresh would have advanced reads
+                # not-current on its own. Marking the whole replica stale here flickered every hub row.
+                if not _lock_busy(exc):
+                    raise
             fresh = (0 <= now - last_ok <= 180 and not meta.get('offline_since'))
     except (OSError, sqlite3.Error, ValueError, TypeError):
         # A failed refresh never erases a receipt. Reading the ledger below
