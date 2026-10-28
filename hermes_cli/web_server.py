@@ -254,6 +254,20 @@ async def _lifespan(app: FastAPI):
     except Exception:
         _log.warning("startup resume sweep did not start", exc_info=True)
 
+    # Unloaded-session kanban delivery cannot wait for the first /api/ws client.
+    # entry.py and ws.py are the only other starters; an always-on `hermes serve`
+    # (the desktop SSH backend included) hosts chats and loads plugins with no
+    # websocket attached, so unseen tui completions sit unclaimed. Idempotent
+    # with those callers. Skipped under the test harness so a TestClient
+    # lifespan does not spawn a sweeper into the suite sandbox. [daveey]
+    if not os.environ.get("HERMES_TEST_ISOLATION"):
+        try:
+            from tui_gateway.kanban_unloaded import start_kanban_unloaded_sweeper
+
+            start_kanban_unloaded_sweeper()
+        except Exception:
+            _log.warning("kanban unloaded-session sweeper start failed", exc_info=True)
+
     # Re-adopt background jobs a previous backend's chats left running (orphans of a Desktop
     # restart) and wake each chat when its job exits (tools/process_registry_readopt.py). [daveey]
     try:

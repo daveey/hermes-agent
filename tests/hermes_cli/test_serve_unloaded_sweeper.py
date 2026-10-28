@@ -1,0 +1,67 @@
+"""`hermes serve` must start the unloaded-session kanban sweeper at boot.
+
+entry.py and ws.py start it, but an always-on desktop backend (`hermes serve
+--isolated`) hosts chats and loads plugins with no /api/ws client attached.
+Waiting for that client leaves unseen tui completions unclaimed. [daveey]
+"""
+
+from __future__ import annotations
+
+import os
+
+from fastapi.testclient import TestClient
+
+from hermes_cli import free_tier_bootstrap, web_server
+from hermes_cli.local_runtime import bootstrap as local_runtime_bootstrap
+from tools import process_registry_readopt
+from tui_gateway import kanban_unloaded
+from tui_gateway import methods_groups, startup_resume
+
+
+def _quiet_boot(monkeypatch):
+    """Lifespan side effects are not this test. Keep them from touching a live host."""
+    monkeypatch.setattr(web_server, "_warm_gateway_module", lambda: None)
+    monkeypatch.setattr(web_server, "_eager_reconcile_own_session_db", lambda: None)
+    monkeypatch.setattr(free_tier_bootstrap, "start_background_bootstrap", lambda: None)
+    monkeypatch.setattr(
+        local_runtime_bootstrap, "ensure_local_runtime", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        process_registry_readopt, "start_checkpoint_keeper", lambda: None
+    )
+    monkeypatch.setattr(
+        process_registry_readopt, "start_tui_orphan_recovery", lambda: None
+    )
+    monkeypatch.setattr(methods_groups, "start_hosted_room_service", lambda: None)
+    monkeypatch.setattr(methods_groups, "stop_hosted_room_service", lambda **_k: True)
+    monkeypatch.setattr(startup_resume, "start_startup_resume_sweep", lambda: None)
+
+
+def test_serve_lifespan_starts_unloaded_sweeper_without_websocket(monkeypatch):
+    """Boot calls the same start the TUI gateway uses, before any /api/ws client."""
+    _quiet_boot(monkeypatch)
+    monkeypatch.delenv("HERMES_TEST_ISOLATION", raising=False)
+    calls = []
+
+    def _spy():
+        calls.append("start")
+
+    monkeypatch.setattr(kanban_unloaded, "start_kanban_unloaded_sweeper", _spy)
+    # Entering the app runs the lifespan. No websocket is opened.
+    with TestClient(web_server.app, raise_server_exceptions=False):
+        pass
+    assert calls == ["start"]
+    assert os.environ.get("HERMES_TEST_ISOLATION") is None
+
+
+def test_serve_lifespan_does_not_start_sweeper_under_test_isolation(monkeypatch):
+    """TestClient lifespans must not spawn a sweeper thread into the suite sandbox."""
+    _quiet_boot(monkeypatch)
+    monkeypatch.setenv("HERMES_TEST_ISOLATION", "1")
+    calls = []
+    monkeypatch.setattr(
+        kanban_unloaded, "start_kanban_unloaded_sweeper", lambda: calls.append("start")
+    )
+    with TestClient(web_server.app, raise_server_exceptions=False):
+        pass
+    assert calls == []
