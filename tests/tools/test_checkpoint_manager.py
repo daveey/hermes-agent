@@ -1698,6 +1698,159 @@ class TestStagingBudget:
         assert result == {"took": False, "adds": 0}, (result, out.stderr[-2000:])
 
 
+class TestColdIndexSeeding:
+    """A fresh git checkout has no checkpoint index, so its first snapshot priced every file and a big
+    worktree (19k files) on a loaded host was skipped until the host went quiet. The checkout's own
+    index seeds the checkpoint index, so only files that differ from it are priced and hashed."""
+
+    _GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+    @classmethod
+    def _git(cls, cwd, *args):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(cls._GIT_ENV)
+        return subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+            cwd=str(cwd), env=env, check=True, capture_output=True, text=True,
+        ).stdout
+
+    @classmethod
+    def _repo_with_worktree(cls, tmp_path, populate):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        cls._git(repo, "init", "-q", "-b", "main")
+        populate(repo)
+        cls._git(repo, "add", "-A")
+        cls._git(repo, "add", "-f", ".")
+        cls._git(repo, "commit", "-q", "-m", "init")
+        wt = tmp_path / "wt"
+        cls._git(repo, "worktree", "add", "-q", str(wt), "HEAD")  # the cold checkout
+        return repo, wt
+
+    @staticmethod
+    def _store_git(*args):
+        import tools.checkpoint_manager as cm
+        store = cm._store_path()
+        ok, out, err = cm._run_git(list(args), store, str(store.parent))
+        assert ok, err
+        return out
+
+    @staticmethod
+    def _tip(mgr, wt):
+        return mgr.list_checkpoints(str(wt))[0]["hash"]
+
+    def test_cold_20k_file_worktree_is_snapshotted_within_budget_under_load(
+        self, tmp_path, checkpoint_base, monkeypatch,
+    ):
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+
+        def populate(repo):
+            for d in range(200):
+                sub = repo / f"pkg{d}"
+                sub.mkdir()
+                for f in range(100):
+                    (sub / f"mod{f}.py").write_text(f"# {d}/{f}\n" + "x = 1\n" * 20)
+
+        _repo, wt = self._repo_with_worktree(tmp_path, populate)
+        time.sleep(1.1)
+        (wt / "pkg0" / "mod0.py").write_text("changed in the worktree\n")
+        (wt / "new_file.py").write_text("untracked\n")
+        (wt / "pkg1" / "mod1.py").unlink()
+
+        TestStagingBudget._loaded(monkeypatch, 40.0)  # cold estimate: 20,000 files x40 >> 30 s budget
+        adds = TestStagingBudget._spy_adds(monkeypatch)
+        mgr = CheckpointManager(enabled=True)
+        started = time.monotonic()
+        assert mgr.ensure_checkpoint(str(wt), "first") is True
+        took = time.monotonic() - started
+        assert took < cm.staging.budget_s(cm._GIT_TIMEOUT * 2), took
+        assert len(adds) == 1
+
+        tip = self._tip(mgr, wt)
+        names = set(self._store_git("ls-tree", "-r", "--name-only", tip).splitlines())
+        assert len(names) == 20000  # 20,000 tracked - 1 deleted + 1 new
+        assert "new_file.py" in names and "pkg1/mod1.py" not in names
+        assert self._store_git("show", f"{tip}:pkg0/mod0.py") == "changed in the worktree"
+        assert self._store_git("show", f"{tip}:pkg5/mod7.py").startswith("# 5/7")
+        # Every object the checkpoint names is in the store itself (copied, not borrowed).
+        missing = [line for line in self._store_git("rev-list", "--objects", "--missing=print", tip).splitlines()
+                   if line.startswith("?")]
+        assert missing == []
+
+    @pytest.mark.parametrize("layout", ["no-repo", "untracked-in-repo"])
+    def test_untracked_heavy_tree_is_still_skipped(self, layout, work_dir, checkpoint_base, monkeypatch):
+        """Control: seeding only vouches for files the checkout's index already knows."""
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        if layout == "untracked-in-repo":
+            self._git(work_dir, "init", "-q")
+            self._git(work_dir, "add", "-A")
+            self._git(work_dir, "commit", "-q", "-m", "readme only")
+        TestStagingBudget._sub_cap_tree(work_dir)
+        TestStagingBudget._loaded(monkeypatch, 40.0)
+        adds = TestStagingBudget._spy_adds(monkeypatch)
+        assert CheckpointManager(enabled=True).ensure_checkpoint(str(work_dir), "snap") is False
+        assert adds == []
+
+    def test_seeded_snapshot_equals_a_cold_one(self, tmp_path, checkpoint_base, monkeypatch):
+        """The seeded tree matches what a cold add of the same files produces: tracked files the
+        checkpoint excludes (node_modules/, *.pyc, force-added gitignored files) stay out."""
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+
+        def populate(repo):
+            (repo / "main.py").write_text("print('hi')\n")
+            (repo / ".gitignore").write_text("secret.txt\n")
+            (repo / "secret.txt").write_text("force-added\n")
+            (repo / "node_modules").mkdir()
+            (repo / "node_modules" / "dep.js").write_text("module.exports = 1\n")
+            (repo / "lib").mkdir()
+            (repo / "lib" / "mod.pyc").write_bytes(b"\0pyc")
+            (repo / "lib" / "keep.py").write_text("x = 1\n")
+
+        _repo, wt = self._repo_with_worktree(tmp_path, populate)
+        time.sleep(1.1)
+        (wt / "main.py").write_text("print('edited')\n")
+        (wt / "lib" / "new.py").write_text("y = 2\n")
+
+        plain = tmp_path / "plain"
+        shutil.copytree(wt, plain, ignore=shutil.ignore_patterns(".git"))
+        mgr = CheckpointManager(enabled=True)
+        assert mgr.ensure_checkpoint(str(wt), "seeded") is True
+        assert mgr.ensure_checkpoint(str(plain), "cold") is True
+        seeded_tree = self._store_git("rev-parse", f"{self._tip(mgr, wt)}^{{tree}}")
+        cold_tree = self._store_git("rev-parse", f"{self._tip(mgr, plain)}^{{tree}}")
+        names = self._store_git("ls-tree", "-r", "--name-only", seeded_tree).splitlines()
+        assert "node_modules/dep.js" not in names and "lib/mod.pyc" not in names and "secret.txt" not in names
+        assert seeded_tree == cold_tree, names
+
+    def test_assume_unchanged_entry_does_not_hide_an_edit(self, tmp_path, checkpoint_base, monkeypatch):
+        """An index bit that makes git skip a file must not be inherited by the checkpoint index."""
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        _repo, wt = self._repo_with_worktree(tmp_path, lambda r: (r / "conf.py").write_text("old\n"))
+        self._git(wt, "update-index", "--assume-unchanged", "conf.py")
+        (wt / "conf.py").write_text("new\n")
+        mgr = CheckpointManager(enabled=True)
+        assert mgr.ensure_checkpoint(str(wt), "snap") is True
+        assert self._store_git("show", f"{self._tip(mgr, wt)}:conf.py") == "new"
+
+    def test_second_worktree_reuses_the_stores_blobs(self, tmp_path, checkpoint_base, monkeypatch):
+        """A sibling worktree of a repo already in the store copies no blobs again."""
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        repo, wt = self._repo_with_worktree(tmp_path, lambda r: (r / "a.py").write_text("a\n"))
+        wt2 = tmp_path / "wt2"
+        self._git(repo, "worktree", "add", "-q", str(wt2), "HEAD")
+        mgr = CheckpointManager(enabled=True)
+        assert mgr.ensure_checkpoint(str(wt), "one") is True
+        packs = set((cm._store_path() / "objects" / "pack").glob("*.pack"))
+        assert len(packs) == 1
+        assert mgr.ensure_checkpoint(str(wt2), "two") is True
+        assert set((cm._store_path() / "objects" / "pack").glob("*.pack")) == packs
+
+
 def test_slow_dir_backoff_file_with_bom_is_read(tmp_path):
     """Windows tools BOM files they touch; the persisted back-off must still load."""
     import tools.checkpoint_staging as staging
