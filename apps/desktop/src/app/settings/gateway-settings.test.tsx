@@ -2,7 +2,7 @@ import { GatewayReauthRequiredError } from '@hermes/shared'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { $notifications } from '@/store/notifications'
+import { $notifications, clearNotifications } from '@/store/notifications'
 import { deferred } from '@/test/deferred'
 
 // Collect the component graph before the behavioral test deadline starts.
@@ -76,6 +76,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  // Toast auto-dismiss timers must not outlive this file's jsdom window (CI: "window is not defined" in
+  // dismissNotification after teardown).
+  clearNotifications()
   vi.clearAllMocks()
 })
 
