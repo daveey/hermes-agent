@@ -9,6 +9,7 @@ tracks live connections so raw reads happen only when none exist.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 import sqlite3
@@ -255,3 +256,167 @@ def offline_file_access(path: Path | str, *, what: str = "read"):
                 "connection's POSIX advisory locks. Close all database "
                 "handles (stop the gateway/dashboard) and retry.")
         yield
+
+
+# ---------------------------------------------------------------------------------------------
+# Lock-safe raw reads. ``open()``/``close()`` of a live database file (or its -wal/-shm) from
+# inside a process that holds connections cancels that process's POSIX locks even when the
+# registry above says "nothing live" (untracked read-only caches, sync readers, ...). A sibling's
+# close then takes EXCLUSIVE, checkpoints and UNLINKS -wal/-shm, stranding every connection here
+# on a deleted generation: integrity_check then reports phantom index errors / SQLITE_CORRUPT /
+# SQLITE_IOERR on a healthy file. These helpers pread from a per-inode fd that is cached for the
+# life of the process and never closed (opening cannot cancel locks; closing can), so they are
+# safe whatever connections exist.
+# ---------------------------------------------------------------------------------------------
+_PREAD_LOCK = threading.Lock()
+_PREAD_FDS: dict[str, tuple[int, int, int]] = {}  # path -> (fd, st_dev, st_ino)
+_RETIRED_PREAD_FDS: list[int] = []  # superseded inodes: closed only once unlinked (see sweep)
+
+
+def _fd_is_unlinked(fd: int) -> bool:
+    try:
+        return os.fstat(fd).st_nlink == 0
+    except OSError:
+        return True  # already invalid: nothing to protect, drop it from the cache
+
+
+def _release_unlinked_locked() -> None:
+    """Close cached reader fds whose inode no path names any more (``st_nlink == 0``).
+
+    Closing such an fd is lock-safe: POSIX locks on a dead inode protect nothing, since no
+    process can newly open it, and a connection still attached to it is already stranded.
+    Keeping it open would pin a deleted -wal/-shm generation on disk forever and show up as a
+    false "stranded on a deleted generation" in every ``/proc/<pid>/fd`` scan."""
+    for key, entry in list(_PREAD_FDS.items()):
+        if _fd_is_unlinked(entry[0]):
+            _PREAD_FDS.pop(key, None)
+            try:
+                os.close(entry[0])
+            except OSError:
+                pass
+    keep: list[int] = []
+    for fd in _RETIRED_PREAD_FDS:
+        if _fd_is_unlinked(fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        else:
+            keep.append(fd)
+    _RETIRED_PREAD_FDS[:] = keep
+
+
+def release_unlinked_fds() -> None:
+    """Public sweep: close lock-safe reader fds whose file has been unlinked."""
+    with _PREAD_LOCK:
+        _release_unlinked_locked()
+
+
+def lock_safe_fds() -> frozenset[int]:
+    """Descriptor numbers owned by the lock-safe readers (not connection fds). Sweeps reader
+    fds on unlinked inodes first, so callers scanning ``/proc/self/fd`` see only live ones."""
+    with _PREAD_LOCK:
+        _release_unlinked_locked()
+        return frozenset([entry[0] for entry in _PREAD_FDS.values()] + _RETIRED_PREAD_FDS)
+
+
+def _pread_fd(path: Path | str) -> Optional[tuple[int, os.stat_result]]:
+    key = str(path)
+    try:
+        st = os.stat(key)
+    except OSError:
+        return None
+    with _PREAD_LOCK:
+        _release_unlinked_locked()
+        cached = _PREAD_FDS.get(key)
+        if cached is not None and (cached[1], cached[2]) != (st.st_dev, st.st_ino):
+            _RETIRED_PREAD_FDS.append(_PREAD_FDS.pop(key)[0])  # closed by the sweep once unlinked
+            cached = None
+        if cached is None:
+            try:
+                fd = os.open(key, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                fst = os.fstat(fd)
+            except OSError:
+                return None
+            cached = _PREAD_FDS[key] = (fd, fst.st_dev, fst.st_ino)
+        return cached[0], st
+
+
+def pread_lock_safe(path: Path | str, offset: int, length: int) -> Optional[bytes]:
+    """``length`` bytes at ``offset`` of *path* without ever closing a descriptor on it."""
+    entry = _pread_fd(path)
+    if entry is None:
+        return None
+    try:
+        return os.pread(entry[0], length, offset)
+    except OSError:
+        return None
+
+
+def read_header_lock_safe(path: Path | str, length: int = 100) -> Optional[bytes]:
+    """First bytes of a database file; safe while connections (tracked or not) are open."""
+    return pread_lock_safe(path, 0, length)
+
+
+def sha256_lock_safe(path: Path | str, chunk: int = 1024 * 1024) -> Optional[str]:
+    """sha256 of *path* via lock-safe preads, or ``None`` when unreadable."""
+    entry = _pread_fd(path)
+    if entry is None:
+        return None
+    digest = hashlib.sha256()
+    offset = 0
+    try:
+        while True:
+            data = os.pread(entry[0], chunk, offset)
+            if not data:
+                break
+            digest.update(data)
+            offset += len(data)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def copy_file_out_of_process(src: Path | str, dst: Path | str, timeout: float = 120.0) -> bool:
+    """Copy *src* to *dst* (``copy2`` semantics) in a short-lived child process.
+
+    Use for a database's ``-wal``/``-shm``: the child's open()/close() cannot touch this
+    process's POSIX locks, and no descriptor on the sidecar is left behind here. A cached
+    in-process reader fd would outlive the generation once SQLite unlinks it, pinning a
+    deleted -wal/-shm that external stranded-process watchdogs (which scan /proc/*/fd and may
+    restart the unit) read as a stranded process."""
+    import subprocess
+    import sys
+
+    try:
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", "import shutil, sys; shutil.copy2(sys.argv[1], sys.argv[2])",
+             os.fspath(src), os.fspath(dst)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def copy_file_lock_safe(src: Path | str, dst: Path | str, chunk: int = 1024 * 1024) -> bool:
+    """Copy *src* to *dst* (``copy2`` semantics: bytes, mode, mtime) with lock-safe preads."""
+    entry = _pread_fd(src)
+    if entry is None:
+        return False
+    fd, st = entry
+    try:
+        with open(dst, "wb") as out:
+            offset = 0
+            while True:
+                data = os.pread(fd, chunk, offset)
+                if not data:
+                    break
+                out.write(data)
+                offset += len(data)
+        os.chmod(dst, st.st_mode & 0o7777)
+        os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+    except OSError:
+        return False
+    return True

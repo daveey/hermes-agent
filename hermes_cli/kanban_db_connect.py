@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 import contextlib
-import hashlib
+import json
 import os
 import random
 import re
 import secrets
-import shutil
+import sys
 import sqlite3
 import threading
 import time
@@ -285,12 +285,12 @@ def _validate_sqlite_header(path: Path) -> None:
             return
     except OSError:
         return
-    # Byte-level probe: must run BEFORE any connection to this path exists
-    # (read_header_bytes_preopen refuses once one is live, because the close()
-    # would cancel this process's POSIX locks).
-    from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
+    # Byte-level probe through a cached, never-closed fd: an open()/close()
+    # here would cancel this process's POSIX locks on a live board even when
+    # the connection registry sees nothing (untracked read-only caches).
+    from hermes_cli.sqlite_safe_read import read_header_lock_safe
 
-    head = read_header_bytes_preopen(path, length=64)
+    head = read_header_lock_safe(path, length=64)
     if head is None or head.startswith(_SQLITE_HEADER):
         return
     signature = ""
@@ -371,36 +371,30 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
     resolved = path.resolve()
     parent = resolved.parent
     base_name = resolved.name  # basename only
-    # Fingerprinting reads the whole file — a close()-on-a-database-file hazard
-    # (cancels this process's POSIX advisory locks; see sqlite_safe_read), so it
-    # must only run once the board is out of service. Another SessionDB/kanban
-    # connection in this process would still be at risk — so REFUSE rather than
-    # warn-and-proceed: losing a forensic copy beats corrupting the live DB.
-    from hermes_cli.sqlite_safe_read import has_live_connection
+    # Fingerprinting and copying read the live file AND its -wal/-shm. A plain
+    # open()/close() of any of them cancels every POSIX lock this process holds
+    # on the board (including connections the registry cannot see); a sibling's
+    # close then takes EXCLUSIVE and unlinks -wal/-shm, stranding this process
+    # on a deleted WAL generation. The main file is read by pread from a cached
+    # fd that is never closed while its inode is linked, so it is safe with
+    # connections open. The -wal/-shm are copied by a child process instead: no
+    # in-process fd on them can then outlive their generation (a pinned deleted
+    # sidecar reads as "stranded" to /proc watchdogs that restart the unit).
+    from hermes_cli.sqlite_safe_read import (
+        copy_file_lock_safe, copy_file_out_of_process, sha256_lock_safe,
+    )
 
-    if has_live_connection(resolved):
-        _kb._log.error(
-            "refusing to quarantine %s: a connection to it is still open in "
-            "this process, and fingerprinting the file would cancel that "
-            "connection's POSIX locks. Close all connections first.",
-            resolved,
-        )
+    fingerprint = sha256_lock_safe(resolved)
+    if fingerprint is None:
         return None
-    digest = hashlib.sha256()
-    try:
-        with resolved.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError:
-        return None
-    candidate = parent / f"{base_name}.corrupt.{digest.hexdigest()[:16]}.bak"
+    candidate = parent / f"{base_name}.corrupt.{fingerprint[:16]}.bak"
     # Defensive: candidate must still be inside parent after construction.
     if candidate.parent != parent:
         return None
     if not candidate.exists():
-        try:
-            shutil.copy2(resolved, candidate)
-        except OSError:
+        if not copy_file_lock_safe(resolved, candidate):
+            with contextlib.suppress(OSError):
+                candidate.unlink(missing_ok=True)
             return None
         # A NEW backup landed — enforce the retention cap so mutating-corruption
         # loops can't accumulate quarantines forever.
@@ -413,8 +407,7 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
             or sidecar_backup.parent != parent or sidecar_backup.exists()
         ):
             continue
-        with contextlib.suppress(OSError):
-            shutil.copy2(sidecar, sidecar_backup)
+        copy_file_out_of_process(sidecar, sidecar_backup)
     return candidate
 
 
@@ -439,15 +432,164 @@ def _run_integrity_check(conn: sqlite3.Connection) -> list[str]:
     return [str(row[0]) for row in rows if row is not None and row[0] is not None]
 
 
+# SQLite primary result codes that describe the environment, not the file:
+# BUSY, LOCKED, NOMEM, IOERR (every SQLITE_IOERR_* extended code), FULL,
+# CANTOPEN, PROTOCOL. They are retried and never quarantine a board.
+_TRANSIENT_SQLITE_PRIMARY_CODES = frozenset({5, 6, 7, 10, 13, 14, 15})
+_TRANSIENT_MESSAGE_MARKERS = (
+    "disk i/o error", "database is locked", "database is busy",
+    "unable to open database file", "database or disk is full",
+)
+_PROBE_TRANSIENT_RETRIES = 3
+_PROBE_TRANSIENT_BACKOFF_SECONDS = (0.05, 0.25)
+
+
+def _is_transient_sqlite_error(exc: BaseException) -> bool:
+    """True for SQLITE_IOERR*/BUSY/LOCKED/CANTOPEN/FULL/NOMEM/PROTOCOL failures,
+    whatever exception class the driver raised them as."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in _TRANSIENT_SQLITE_PRIMARY_CODES
+    message = str(exc).lower()
+    return any(marker in message for marker in _TRANSIENT_MESSAGE_MARKERS)
+
+
+class KanbanDbUnreliableViewError(sqlite3.OperationalError):
+    """This process cannot get a trustworthy view of an existing kanban DB: it is
+    stranded on a deleted WAL/SHM generation, or its integrity probe disagrees
+    with an independent process. Transient and NOT corruption: the board is
+    never quarantined for it, and the next ``connect()`` re-evaluates."""
+
+
+def _stranded_sidecars(resolved: Path) -> list[str]:
+    """Sidecars (``-wal``/``-shm``) of ``resolved`` that THIS process still holds
+    open but that the path no longer names (unlinked or replaced by a sibling's
+    close). Connections here are attached to a dead generation: their reads mix
+    a stale WAL with a newer main file and their writes never reach the board.
+    Linux ``/proc`` only; empty elsewhere. Lock-safe reader fds are skipped."""
+    fd_dir = Path("/proc/self/fd")
+    try:
+        names = os.listdir(fd_dir)
+    except OSError:
+        return []
+    from hermes_cli.sqlite_safe_read import lock_safe_fds
+
+    skip = lock_safe_fds()
+    watched = {str(resolved) + "-wal", str(resolved) + "-shm"}
+    stranded: set[str] = set()
+    for name in names:
+        if not name.isdigit() or int(name) in skip:
+            continue
+        try:
+            target = os.readlink(fd_dir / name)
+        except OSError:
+            continue
+        deleted = target.endswith(" (deleted)")
+        base = target[: -len(" (deleted)")] if deleted else target
+        if base not in watched:
+            continue
+        if deleted:
+            stranded.add(base)
+            continue
+        try:
+            held = os.stat(fd_dir / name)
+            current = os.stat(base)
+        except OSError:
+            stranded.add(base)
+            continue
+        if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+            stranded.add(base)
+    return sorted(stranded)
+
+
+_INDEPENDENT_CHECK_SCRIPT = (
+    "import json, sqlite3, sys\n"
+    "try:\n"
+    "    c = sqlite3.connect(sys.argv[1], uri=True, timeout=30)\n"
+    "    rows = [str(r[0]) for r in c.execute('PRAGMA integrity_check').fetchall() if r and r[0] is not None]\n"
+    "    print(json.dumps({'status': 'messages', 'messages': rows}))\n"
+    "except sqlite3.DatabaseError as e:\n"
+    "    transient = type(e) is sqlite3.OperationalError\n"
+    "    print(json.dumps({'status': 'transient' if transient else 'corrupt', 'error': str(e)}))\n"
+)
+_INDEPENDENT_CHECK_TIMEOUT_SECONDS = 180.0
+
+
+def _independent_integrity(resolved: Path) -> tuple[str, list[str]]:
+    """Integrity verdict from a FRESH process (its own fds and locks, so an
+    in-process stranded generation cannot colour it), opened read-only.
+    ``(status, detail)``: ``("messages", rows)`` | ``("corrupt", [error])`` |
+    ``("unknown", [why])`` when the child could not give a verdict."""
+    import subprocess
+
+    try:
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", _INDEPENDENT_CHECK_SCRIPT, resolved.as_uri() + "?mode=ro"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_INDEPENDENT_CHECK_TIMEOUT_SECONDS, check=False,
+        )
+        verdict = json.loads(done.stdout.strip().splitlines()[-1])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as exc:
+        return "unknown", [f"independent integrity check unavailable: {exc}"]
+    status = verdict.get("status")
+    if status == "messages":
+        return "messages", [str(m) for m in verdict.get("messages") or []]
+    if status == "corrupt":
+        return "corrupt", [str(verdict.get("error"))]
+    return "unknown", [str(verdict.get("error") or "independent check inconclusive")]
+
+
+def _confirm_corruption(resolved: Path, messages: Optional[list[str]], reason: str) -> tuple[Optional[list[str]], str]:
+    """Gate every quarantine/repair on a failure that is real, not an artefact
+    of THIS process's view. Raises :class:`KanbanDbUnreliableViewError` when the
+    process is stranded on a deleted WAL generation or an independent process
+    finds the file healthy/unreadable-for-transient-reasons; otherwise returns
+    the independently confirmed ``(messages, reason)``."""
+    stranded = _stranded_sidecars(resolved)
+    if stranded:
+        _kb._log.error(
+            "kanban DB %s: integrity probe failed (%s) but this process holds deleted WAL/SHM "
+            "generation(s) %s — its view is stale, the board is NOT corrupt and was not "
+            "quarantined. Restart this process so it reopens the live generation.",
+            resolved, reason, ", ".join(stranded),
+        )
+        raise KanbanDbUnreliableViewError(
+            f"kanban DB {resolved.name}: this process is attached to a deleted WAL/SHM generation "
+            f"({', '.join(Path(s).name for s in stranded)}); restart it (not corruption)"
+        )
+    status, detail = _independent_integrity(resolved)
+    if status == "messages" and not _integrity_messages_ok(detail):
+        return detail, f"integrity_check returned {detail[0] if detail else '<no row>'!r}"
+    if status == "corrupt":
+        return None, f"sqlite refused to open file: {detail[0]}"
+    _kb._log.warning(
+        "kanban DB %s: in-process probe failed (%s) but an independent process reports %s %s; "
+        "treating as a transient view problem, not quarantining.",
+        resolved, reason, status, detail[:1],
+    )
+    raise KanbanDbUnreliableViewError(
+        f"kanban DB {resolved.name}: integrity probe disagrees with an independent process; "
+        "transient, not quarantined"
+    )
+
+
 def _probe_integrity(path: Path) -> list[str]:
     """Open ``path`` read/write (so SQLite can recover/checkpoint a healthy WAL
     / hot-journal DB before we judge it) and return ``integrity_check``
-    messages. ``OperationalError`` (locked/busy) propagates raw — not corruption."""
-    probe = _sqlite_connect(path)
-    try:
-        return _run_integrity_check(probe)
-    finally:
-        probe.close()
+    messages. Transient errors (SQLITE_IOERR*/BUSY/LOCKED/...) are retried with
+    a short backoff and then propagate raw — never corruption."""
+    for attempt in range(_PROBE_TRANSIENT_RETRIES):
+        try:
+            probe = _sqlite_connect(path)
+            try:
+                return _run_integrity_check(probe)
+            finally:
+                probe.close()
+        except sqlite3.Error as exc:
+            if not _is_transient_sqlite_error(exc) or attempt == _PROBE_TRANSIENT_RETRIES - 1:
+                raise
+            time.sleep(_PROBE_TRANSIENT_BACKOFF_SECONDS[min(attempt, len(_PROBE_TRANSIENT_BACKOFF_SECONDS) - 1)])
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _repairable_index_names(messages: list[str]) -> Optional[list[str]]:
@@ -514,6 +656,8 @@ def _probe_for_corruption(resolved: Path) -> tuple[Optional[list[str]], Optional
     except sqlite3.OperationalError:
         raise
     except sqlite3.DatabaseError as exc:
+        if _is_transient_sqlite_error(exc):
+            raise
         return None, f"sqlite refused to open file: {exc}"
     if _integrity_messages_ok(messages):
         return messages, None
@@ -542,6 +686,10 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     messages, reason = _probe_for_corruption(resolved)
     if reason is None:
         return
+    # The probe ran in THIS process, whose view can be stale (deleted WAL/SHM
+    # generation after a sibling's close). Only an independently confirmed failure
+    # may quarantine or REINDEX the board.
+    messages, reason = _confirm_corruption(resolved, messages, reason)
     # Quarantine FIRST — both the repair and fail-closed paths preserve the
     # pre-touch bytes before anything mutates the file.
     backup = _backup_corrupt_db(resolved)
@@ -600,6 +748,8 @@ def repair_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) ->
 
     with _cross_process_init_lock(resolved):
         messages, reason = _probe_for_corruption(resolved)
+        if reason is not None:
+            messages, reason = _confirm_corruption(resolved, messages, reason)
         if messages is None:
             # Same quarantine the connect-time guard takes when sqlite
             # refuses to open the file at all.

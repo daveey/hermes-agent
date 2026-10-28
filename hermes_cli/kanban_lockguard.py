@@ -169,7 +169,13 @@ def stranded_sidecars(db_path: Any) -> list[str]:
         names = os.listdir("/proc/self/fd")
     except OSError:
         return out
+    # Lock-safe pread fds (quarantine copies, header probes) are not connections: skip them.
+    from hermes_cli.sqlite_safe_read import lock_safe_fds
+
+    skip = lock_safe_fds()
     for name in names:
+        if name.isdigit() and int(name) in skip:
+            continue
         try:
             target = os.readlink(f"/proc/self/fd/{name}")
         except OSError:
