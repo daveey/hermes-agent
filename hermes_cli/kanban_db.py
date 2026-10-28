@@ -1212,14 +1212,13 @@ def create_task(
     provider_override: Optional[str] = None, reasoning_effort: Optional[str] = None,
     goal_mode: bool = False, goal_max_turns: Optional[int] = None, initial_status: str = "running",
     session_id: Optional[str] = None, board: Optional[str] = None, project_id: Optional[str] = None,
-    project_source_task_id: Optional[str] = None,
-    creator_task_id: Optional[str] = None,
+    project_source_task_id: Optional[str] = None, creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
     validate_workspace: bool = False, validate_skills: bool = False,
     human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None,
     requires: Optional[list[str]] = None,
-    lint_blocked: bool = True,
+    lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1228,7 +1227,7 @@ def create_task(
     ``origin_intent`` atomically persists the task and receipt intent, not origin readback.
     ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project ``worktree`` workspace
     that could never resolve at spawn (``WorktreeWorkspaceConfigError``); ``validate_skills=True`` rejects
-    a pinned skill the assignee cannot load (``UnknownSkillError``). [daveey]
+    a pinned skill the assignee cannot load (``UnknownSkillError``). [daveey] ``runs_on``: placement labels.
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
     forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
@@ -1374,6 +1373,7 @@ def create_task(
                         json.dumps(required),
                     ),
                 )
+                _sync.set_runs_on(conn, task_id, runs_on)  # placement labels (RFC "Placement"), synced boards only
                 for pid in parents:
                     _link(conn, pid, task_id)
                 from hermes_cli.kanban_db_creation import record_created

@@ -1633,6 +1633,17 @@ def _handle_create(args: dict, **kw) -> str:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
         marker_placement = None
+        # Placement on a synced board: ``runs_on`` labels, and a pin to an enrolled machine becomes
+        # ``runs_on=[machine:<name>]`` (created here, run there through the Board lease). [daveey]
+        from hermes_cli import kanban_worker_node as _wn
+        try:
+            runs_on = _wn.normalize_runs_on(args.get("runs_on"))
+        except ValueError as exc:
+            return tool_error(str(exc))
+        if runs_on is None and origin_intent is None:
+            runs_on = _wn.placement_runs_on(conn, args.get("placement"))
+            if runs_on is not None:
+                args = {**args, "placement": "local"}
         if origin_intent is None and origin is None:
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
             remote, marker_placement = _place_remote(
@@ -1660,7 +1671,7 @@ def _handle_create(args: dict, **kw) -> str:
             creator_task_id=self_tid,
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-            requires=args.get("requires"),
+            requires=args.get("requires"), runs_on=runs_on,
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             completion_contract=args.get("completion_contract"),

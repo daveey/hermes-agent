@@ -216,6 +216,9 @@ _SPECS = [
              help="Required configured capability (repeatable): terminal, file, git, host_repo, or a "
                   "namespaced gateway capability such as aws:<acct>:<action> or ssh:<host> "
                   "(placed/pre-routed where it is held); repo work also infers requirements"),
+        _arg("--runs-on", dest="runs_on", default=None, metavar="LABELS",
+             help="Machine labels the card needs, comma-separated (synced boards only): linux, "
+                  "macos,xcode, machine:<name>; '' or '[]' = any machine; omit for the default placement"),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
         _arg("--workspace",
              help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "

@@ -453,7 +453,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 human_request=getattr(args, "human_request", None),
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
-                validate_workspace=True, validate_skills=True,
+                validate_workspace=True, validate_skills=True, runs_on=getattr(args, "runs_on", None),
             )
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)

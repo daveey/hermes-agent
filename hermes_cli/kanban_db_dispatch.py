@@ -920,7 +920,7 @@ def detect_stale_running(
         "       COALESCE(r.started_at, t.started_at) AS active_started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running'"
+        "WHERE t.status = 'running'" + _kb._sync.held_elsewhere_sql(conn, "t")
     ).fetchall()
 
     for row in rows:
@@ -1005,7 +1005,7 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute(
         "SELECT id, claim_lock, claim_expires, worker_pid, worker_started_at FROM tasks "
         "WHERE status = 'running' "
-        "  AND (claim_lock IS NULL OR claim_expires IS NULL)"
+        "  AND (claim_lock IS NULL OR claim_expires IS NULL)" + _kb._sync.held_elsewhere_sql(conn)
     ).fetchall()
     for row in rows:
         tid = row["id"]
@@ -2094,7 +2094,7 @@ def count_running_tasks(conn: sqlite3.Connection) -> int:
     try:
         return int(
             conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+                "SELECT COUNT(*) FROM tasks WHERE status = 'running'" + _kb._sync.held_elsewhere_sql(conn)
             ).fetchone()[0]
         )
     except Exception:
@@ -2628,6 +2628,7 @@ def _dispatch_once_locked(
             sweep_stale_triage(conn, default_assignee=_resolve_default_assignee(default_assignee))
         except Exception:
             _kb._log.debug("kanban dispatch: triage sweep failed", exc_info=True)
+    _kb._sync.worker_pickup(conn, spawn_budget, dry_run, _profile_exists_fn)  # worker node (RFC "Placement")
     ready_rows = lane_rows(conn, "ready")
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
@@ -2647,9 +2648,8 @@ def _dispatch_once_locked(
     per_profile_running: dict[str, int] = {}
     if per_profile_cap is not None:
         for prow in conn.execute(
-            "SELECT assignee, COUNT(*) AS n FROM tasks "
-            "WHERE status = 'running' AND assignee IS NOT NULL "
-            "GROUP BY assignee"
+            "SELECT assignee, COUNT(*) AS n FROM tasks WHERE status = 'running' AND assignee IS NOT NULL"
+            + _kb._sync.held_elsewhere_sql(conn) + " GROUP BY assignee"
         ):
             per_profile_running[prow["assignee"]] = int(prow["n"])
     # Review-lane reservation: the ready loop runs first and would otherwise
