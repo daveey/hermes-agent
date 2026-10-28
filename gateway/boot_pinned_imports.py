@@ -25,11 +25,12 @@ import importlib.util
 import linecache
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import threading
 from typing import Callable, Optional
+
+from hermes_platform.resolver import locate_command
 
 _log = logging.getLogger(__name__)
 
@@ -98,7 +99,8 @@ class BootPinnedFinder(importlib.abc.MetaPathFinder):
         self.root = os.path.realpath(root)
         self.boot_sha = boot_sha
         self._current_sha = current_sha
-        self._git = git or shutil.which("git")
+        command = (git,) if git else locate_command("git").command
+        self._git = command[0] if command else None
         self._top_level = self._list_top_level()
         self._lock = threading.RLock()
         self._local = threading.local()
