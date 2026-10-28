@@ -35,7 +35,7 @@ from hermes_cli.profiles import ProfileIdentitySettlementPending
 from hermes_cli.web_server_config import (
     _apply_main_model_assignment, _normalize_main_model_assignment, _validated_main_model_selection,
 )
-from hermes_cli.kanban_session_activity import annotate_kanban_activity
+from hermes_cli.kanban_session_activity import annotate_kanban_activity, one_annotation_snapshot
 from hermes_cli.cron_session_activity import annotate_cron_activity
 from hermes_cli.goal_session_activity import annotate_goal_activity
 from hermes_cli.process_session_activity import annotate_background_activity
@@ -649,12 +649,13 @@ def get_profiles_sessions_sidebar(
             "messaging": _failed_load_slice(retryable, total=0),
             "errors": errors, "storage": storage}
 
-    body = {
-        "recents": {"sessions": _window("recents"), "profiles_truncated": recents_truncated,
-                    "profiles_usage": profile_totals},
-        "cron": {"sessions": _window("cron")},
-        "messaging": {"sessions": _window("messaging"), "total": len(rows["messaging"])},
-        "errors": errors, "storage": storage}
+    with one_annotation_snapshot():
+        body = {
+            "recents": {"sessions": _window("recents"), "profiles_truncated": recents_truncated,
+                        "profiles_usage": profile_totals},
+            "cron": {"sessions": _window("cron")},
+            "messaging": {"sessions": _window("messaging"), "total": len(rows["messaging"])},
+            "errors": errors, "storage": storage}
     # A sibling profile still listed does not make the failed profile's absence
     # a successful empty slice. Stamp that profile as a failed load with Retry.
     failed = _profiles_failed(retryable)

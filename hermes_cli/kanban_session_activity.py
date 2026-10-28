@@ -153,28 +153,32 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
     Each (session, task) pair counts once."""
     conn = _open_ro(path)
     try:
-        if "session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
-            return {}  # explicitly supported pre-session schema, not a failed read
-        match, params = _status_filter(conn, statuses)
-        pairs: set[tuple[str, str]] = {
-            (str(sid), str(tid)) for sid, tid in conn.execute(
-                f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL "
-                f"AND session_id != '' AND {match}",
-                params,
-            )
-        }
-        try:
-            pairs.update(
-                (str(sid), str(tid)) for sid, tid in conn.execute(
-                    f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}",
-                    params,
-                )
-            )
-        except sqlite3.Error:  # board predates notify subscriptions
-            pass
+        return _counts_on(conn, statuses)
     finally:
         conn.close()
+
+
+def _counts_on(conn: sqlite3.Connection, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
+    if "session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+        return {}  # explicitly supported pre-session schema, not a failed read
+    match, params = _status_filter(conn, statuses)
+    pairs: set[tuple[str, str]] = {
+        (str(sid), str(tid)) for sid, tid in conn.execute(
+            f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL "
+            f"AND session_id != '' AND {match}",
+            params,
+        )
+    }
+    try:
+        pairs.update(
+            (str(sid), str(tid)) for sid, tid in conn.execute(
+                f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}",
+                params,
+            )
+        )
+    except sqlite3.Error:  # board predates notify subscriptions
+        pass
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
@@ -196,15 +200,20 @@ def _local_wait_info(conn: sqlite3.Connection, task_ids: Iterable[str], now: flo
     """[daveey] ``{task_id: wait info}`` (``kanban_wait_info.describe``) for the parked cards among ``task_ids``: what
     each waits on, since when, and whether only an agent can end it. One query for the cards, one for their newest
     park events. Missing columns/tables degrade to status-only info."""
+    return _describe_waits(*_local_wait_rows(conn, task_ids), now=now)
+
+
+def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str]) -> tuple[dict[str, tuple], dict[str, tuple]]:
+    """``(parked, events)``: the stored rows ``_describe_waits`` turns into wait info. Separate so a board memo can
+    keep the rows and re-judge their age at each read (the stall cut-off moves with the clock, the rows do not)."""
     from hermes_cli import kanban_wait_info as kwi
 
     ids = [str(t) for t in dict.fromkeys(task_ids)]
     if not ids:
-        return {}
+        return {}, {}
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     pick = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in ("id", "status", "block_kind", "human_request",
                                                                           "awaiting"))
-    out: dict[str, dict[str, Any]] = {}
     parked: dict[str, tuple] = {}
     for i in range(0, len(ids), 500):
         chunk = ids[i:i + 500]
@@ -214,7 +223,7 @@ def _local_wait_info(conn: sqlite3.Connection, task_ids: Iterable[str], now: flo
                 chunk):
             parked[str(tid)] = (status, kind, request, awaiting)
     if not parked:
-        return {}
+        return {}, {}
     events: dict[str, tuple] = {}
     keys = list(parked)
     kph = ",".join("?" for _ in kwi.PARK_EVENT_KINDS)
@@ -229,6 +238,14 @@ def _local_wait_info(conn: sqlite3.Connection, task_ids: Iterable[str], now: flo
                 events[str(tid)] = (kind, payload, at)
         except sqlite3.Error:  # board predates task_events
             break
+    return parked, events
+
+
+def _describe_waits(parked: dict[str, tuple], events: dict[str, tuple], now: float | None = None,
+                    ) -> dict[str, dict[str, Any]]:
+    from hermes_cli import kanban_wait_info as kwi
+
+    out: dict[str, dict[str, Any]] = {}
     for tid, (status, kind, request, awaiting) in parked.items():
         ev_kind, payload, at = events.get(tid, (None, None, None))
         try:
@@ -250,38 +267,42 @@ def _read_parked(path: Path) -> tuple[dict[str, int], dict[str, int]]:
     ``task_links`` classify by status alone."""
     conn = _open_ro(path)
     try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-        if "session_id" not in cols:
-            return {}, {}
-        match, params = _status_filter(conn, ACTIVE_STATUSES)
-        evidence = "t.human_request" if "human_request" in cols else "NULL"
-        kind = "t.block_kind" if "block_kind" in cols else "NULL"
-        pairs: set[tuple[str, str]] = {
-            (str(sid), str(tid)) for sid, tid in conn.execute(
-                f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL AND session_id != '' AND {match}",
-                params)}
-        try:
-            pairs.update(
-                (str(sid), str(tid)) for sid, tid in conn.execute(
-                    f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                    f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}",
-                    params))
-        except sqlite3.Error:  # board predates notify subscriptions
-            pass
-        if not pairs:
-            return {}, {}
-        info: dict[str, tuple[str, bool]] = {
-            str(tid): (status, bool(human)) for tid, status, human in conn.execute(
-                f"SELECT t.id, t.status, kanban_needs_human({evidence}, {kind}) FROM tasks t "
-                f"WHERE t.status NOT IN ({','.join('?' * len(_FINISHED_STATUSES))})", _FINISHED_STATUSES)}
-        parents: dict[str, list[str]] = {}
-        try:
-            for parent, child in conn.execute("SELECT parent_id, child_id FROM task_links"):
-                parents.setdefault(str(child), []).append(str(parent))
-        except sqlite3.Error:  # board predates dependencies
-            pass
+        return _parked_on(conn)
     finally:
         conn.close()
+
+
+def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]]:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    if "session_id" not in cols:
+        return {}, {}
+    match, params = _status_filter(conn, ACTIVE_STATUSES)
+    evidence = "t.human_request" if "human_request" in cols else "NULL"
+    kind = "t.block_kind" if "block_kind" in cols else "NULL"
+    pairs: set[tuple[str, str]] = {
+        (str(sid), str(tid)) for sid, tid in conn.execute(
+            f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL AND session_id != '' AND {match}",
+            params)}
+    try:
+        pairs.update(
+            (str(sid), str(tid)) for sid, tid in conn.execute(
+                f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}",
+                params))
+    except sqlite3.Error:  # board predates notify subscriptions
+        pass
+    if not pairs:
+        return {}, {}
+    info: dict[str, tuple[str, bool]] = {
+        str(tid): (status, bool(human)) for tid, status, human in conn.execute(
+            f"SELECT t.id, t.status, kanban_needs_human({evidence}, {kind}) FROM tasks t "
+            f"WHERE t.status NOT IN ({','.join('?' * len(_FINISHED_STATUSES))})", _FINISHED_STATUSES)}
+    parents: dict[str, list[str]] = {}
+    try:
+        for parent, child in conn.execute("SELECT parent_id, child_id FROM task_links"):
+            parents.setdefault(str(child), []).append(str(parent))
+    except sqlite3.Error:  # board predates dependencies
+        pass
 
     def open_parents(tid: str) -> list[str]:
         return [p for p in parents.get(tid, ()) if p in info]  # finished/unknown parents never wait
@@ -338,14 +359,30 @@ def _read_stalled(path: Path, now: float | None = None) -> dict[str, int]:
     """[daveey] Per session, its parked cards whose wait is agent-owned and older than
     ``kanban_wait_info.STALL_AFTER_S`` (nothing outside the agents will end it): the sidebar's amber "stalled".
     Same (session, task) pairs as the counts."""
+    return _stalled_counts(*_read_stall_rows(path), now=now)
+
+
+def _read_stall_rows(path: Path) -> tuple[set[tuple[str, str]], dict[str, tuple], dict[str, tuple]]:
+    """``(pairs, parked, events)`` behind ``_read_stalled``: what the board stores, before the clock judges it."""
     conn = _open_ro(path)
     try:
-        pairs = _parked_pairs(conn)
-        if not pairs:
-            return {}
-        info = _local_wait_info(conn, (tid for _, tid in pairs), now=now)
+        return _stall_rows_on(conn)
     finally:
         conn.close()
+
+
+def _stall_rows_on(conn: sqlite3.Connection) -> tuple[set[tuple[str, str]], dict[str, tuple], dict[str, tuple]]:
+    pairs = _parked_pairs(conn)
+    if not pairs:
+        return set(), {}, {}
+    return (pairs, *_local_wait_rows(conn, (tid for _, tid in pairs)))
+
+
+def _stalled_counts(pairs: set[tuple[str, str]], parked: dict[str, tuple], events: dict[str, tuple],
+                    now: float | None = None) -> dict[str, int]:
+    if not pairs:
+        return {}
+    info = _describe_waits(parked, events, now=now)
     out: dict[str, int] = {}
     for sid, tid in pairs:
         if (info.get(tid) or {}).get("wait_state") == "stalled":
@@ -363,6 +400,13 @@ def _read_unseen(path: Path) -> dict[str, int]:
     handed yet (its backend is gone, so no poller claims it until the unloaded-session sweeper does). [daveey]"""
     conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
     try:
+        return _unseen_on(conn)
+    finally:
+        conn.close()
+
+
+def _unseen_on(conn: sqlite3.Connection) -> dict[str, int]:
+    try:
         ph = ",".join("?" for _ in UNSEEN_KINDS)
         rows = conn.execute(
             f"SELECT s.chat_id, COUNT(*) FROM kanban_notify_subs s WHERE s.platform = 'tui' AND s.chat_id != '' "
@@ -370,8 +414,6 @@ def _read_unseen(path: Path) -> dict[str, int]:
             f"AND e.kind IN ({ph})) GROUP BY s.chat_id", UNSEEN_KINDS).fetchall()
     except sqlite3.Error:  # board predates notify subscriptions
         return {}
-    finally:
-        conn.close()
     return {str(sid): int(n) for sid, n in rows}
 
 
@@ -655,13 +697,17 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         info_rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'gateway' AND key = 'info'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
         key = None
+        stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
         if live and {'seq', 'version'} <= columns:
             probe = conn.execute(_REPLICA_PROBE).fetchone()
             if probe[0] == probe[1]:  # a row without seq proves nothing about its text: never memoize it
-                key = (str(path), me, version_column, tuple(info_rows), last_ok, offline, probe,
-                       get_active_profile_name())
+                key = (str(path), me, version_column, tuple(info_rows), offline, probe, get_active_profile_name())
             memo = _remote_read_memo
-            if key is not None and memo is not None and memo[0] == key and memo[1] <= now < memo[2]:
+            # [daveey] ``last_ok`` moves on every hub pull (~2 s) while the task rows rarely do; it reaches the
+            # answer only through the stale verdict and each card's ``synced_at`` (``_replica_synced``), so the
+            # memo compares those instead of ``last_ok`` itself.
+            if (key is not None and memo is not None and memo[0] == key and memo[1] <= now < memo[2]
+                    and memo[6] == stale and memo[7] == _replica_synced(memo[8], last_ok)):
                 if qualified_out is not None:
                     qualified_out.update(memo[4])
                 if owners_out is not None:
@@ -675,11 +721,14 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                                 qualified_out=qualified_out, owners_out=owners_out)
     qualified: set = set()
     owners: set = set()
-    horizon: list[float] = []
+    seen_at: dict[str, float] = {}
     cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
-                             qualified_out=qualified, owners_out=owners, horizon_out=horizon)
-    _remote_read_memo = (key, now, min(horizon, default=float('inf')), list(cards),
-                         frozenset(qualified), frozenset(owners))
+                             qualified_out=qualified, owners_out=owners, seen_out=seen_at)
+    # Reuse ends at the next scope-heartbeat cut-off; the hub-staleness cut-off is the ``stale`` comparison above.
+    beats = [beat + d for beat in _scope_heartbeats(info_rows).values() for d in (0.0, SCOPE_HEARTBEAT_FRESH_S)]
+    _remote_read_memo = (key, now, min((t for t in beats if t > now), default=float('inf')), list(cards),
+                         frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
+                         dict(seen_at))
     if qualified_out is not None:
         qualified_out.update(qualified)
     if owners_out is not None:
@@ -687,9 +736,19 @@ def _read_remote_links(path: Path, now: float | None = None, *,
     return cards
 
 
+def _replica_synced(seen_at: dict[str, float], last_ok: float | None) -> tuple:
+    """Per owner gateway, the ``synced_at`` ``_project_replica`` stamps on its cards (same expression)."""
+    out = []
+    for gw, seen in sorted(seen_at.items()):
+        owner_seen = seen or None
+        out.append((gw, min(owner_seen, last_ok) if (owner_seen and last_ok) else (owner_seen or last_ok)))
+    return tuple(out)
+
+
 def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: list, last_ok: float | None,
                      offline: float | None, *, qualified_out: set | None = None, owners_out: set | None = None,
-                     horizon_out: list[float] | None = None) -> list[dict[str, Any]]:
+                     horizon_out: list[float] | None = None,
+                     seen_out: dict[str, float] | None = None) -> list[dict[str, Any]]:
     """``_read_remote_links`` of rows already read. ``horizon_out`` collects every wall time after ``now`` at which
     the same rows could project differently (hub-sync staleness, scope-heartbeat freshness)."""
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
@@ -737,6 +796,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
                 t = {**t, 'reported_status': t.get('status'), 'status': 'unknown', 'unfinished': True}
             tasks[key] = t
     _replica_decoded = decoded
+    if seen_out is not None:
+        seen_out.update(seen_at)
     if owners_out is not None and not stale:
         # A fresh replica that still carries the owner row is authoritative about its links: a remembered
         # (session, card) pair absent from it is a dropped link, not an unreadable replica.
@@ -944,7 +1005,10 @@ def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
 
 
 _links_lock = threading.Lock()
-_links_cache: tuple[float, tuple, tuple, list[dict[str, Any]]] | None = None  # (expires, scope, fingerprint, cards)
+# (expires, scope, fingerprint, cards, origin rows): origin rows are the ledger ``project()`` rows the cards came
+# from, released ones included (``remote_links_and_origin_rows``).
+_links_cache: tuple[float, tuple, tuple, list[dict[str, Any]], list[dict[str, Any]]] | None = None
+_origin_rows_sink = threading.local()  # .rows: set by _project_remote_links for _store_links
 
 
 # The links projection's fingerprint covers every store it reads except state.db (compression alias tips), so its
@@ -968,6 +1032,13 @@ def _links_fingerprint() -> tuple:
     return tuple(signature)
 
 
+def remote_links_and_origin_rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """[daveey] ``(_remote_links(), origin rows)`` from one cached projection: the origin rows are the ledger
+    ``project()`` rows behind the cards, released rows included (the cards omit those). Plugins that need released
+    rows (chat-closeout) take them here instead of projecting the ledger again on every pass."""
+    return _links_entry(False, with_rows=True)
+
+
 def _remote_links(stale_ok: bool = False) -> list[dict[str, Any]]:
     """Shared origin-ledger projection, with preserved legacy associations.
 
@@ -979,31 +1050,56 @@ def _remote_links(stale_ok: bool = False) -> list[dict[str, Any]]:
     gets the previous projection at once and one background rebuild replaces it, so a busy board (workers writing
     every few seconds) cannot hold the strip behind the projection lock. Every other reader keeps read-your-writes:
     a release or association it just wrote is in the answer."""
-    scope, fingerprint = _origin_scope(), _links_fingerprint()
+    return _links_entry(stale_ok)
+
+
+def _links_entry(stale_ok: bool, *, with_rows: bool = False):
+    def out(entry):
+        return (list(entry[3]), list(entry[4])) if with_rows else list(entry[3])
+
+    scope = _origin_scope()
+    # [daveey] Inside ``one_annotation_snapshot`` every reader (the counts, then a plugin's waiting pass) shares the
+    # first projection: a board WAL moving between them (they all do, every few seconds) would project again.
+    pinned = getattr(_annotation_scope, "links", None)
+    if pinned is not None and pinned[1] == scope:
+        return out(pinned)
+    entry = _links_lookup(scope, stale_ok)
+    if getattr(_annotation_scope, "reads", None) is not None:
+        _annotation_scope.links = entry
+    return out(entry)
+
+
+def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
+    fingerprint = _links_fingerprint()
     hit = _links_cache
     if hit is not None and hit[1] == scope:
         fresh = hit[2] == fingerprint and time.monotonic() < hit[0]
         if fresh:
-            return list(hit[3])
+            return hit
         if stale_ok:
             _refresh_links_in_background(scope)
-            return list(hit[3])
+            return hit
     with _links_lock:
         hit = _links_cache
         if hit is not None and hit[1] == scope and hit[2] == fingerprint and time.monotonic() < hit[0]:
-            return list(hit[3])
+            return hit
         if stale_ok and hit is not None and hit[1] == scope:
-            return list(hit[3])
+            return hit
         return _store_links(scope, fingerprint)
 
 
-def _store_links(scope: tuple, fingerprint: tuple) -> list[dict[str, Any]]:
-    """Project and publish (caller holds ``_links_lock``). ``fingerprint`` is taken before projecting, so a store
-    change during the projection leaves the cache stale and triggers another rebuild."""
+def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
+    """Project and publish (caller holds ``_links_lock``); returns the published entry. ``fingerprint`` is taken
+    before projecting, so a store change during the projection leaves the cache stale and triggers another rebuild."""
     global _links_cache
-    cards = _project_remote_links()
-    _links_cache = (time.monotonic() + _LINKS_MAX_AGE_S, scope, fingerprint, cards)
-    return list(cards)
+    _origin_rows_sink.rows = []
+    try:
+        cards = _project_remote_links()
+        rows = _origin_rows_sink.rows
+    finally:
+        _origin_rows_sink.rows = None
+    _links_cache = (time.monotonic() + _LINKS_MAX_AGE_S, scope, fingerprint, cards, rows)
+    return _links_cache
 
 
 _links_refreshing = False
@@ -1049,6 +1145,9 @@ def _project_remote_links() -> list[dict[str, Any]]:
     missing = get_hermes_home() / 'kanban' / 'absent-replica.db'
     gateway, profile = _gateway(replica or missing), get_active_profile_name()
     rows = project(ledger, replica=replica, gateway=gateway, profile=profile)
+    sink = getattr(_origin_rows_sink, "rows", None)
+    if sink is not None:
+        sink.extend(rows)
     rows = _without_local_open_duplicates(rows, gateway=gateway, profile=profile)
     legacy = _legacy_remote_links()
     # A receipt proves its original and accepted tip aliases. Other aliases
@@ -1057,11 +1156,16 @@ def _project_remote_links() -> list[dict[str, Any]]:
     from hermes_cli.kanban_origin_adapter import _resolve_session
 
     tips: dict[str, str | None] = {}
+    state_db = get_hermes_home() / 'state.db'
+    tip_conn: list[sqlite3.Connection] = []  # one state.db connection for every lookup in this projection
 
     def tip(sid: str) -> str | None:
         if sid not in tips:
             try:
-                tips[sid] = _resolve_session(get_hermes_home() / 'state.db', sid)
+                if not tip_conn:
+                    from hermes_cli.kanban_origin import _ro
+                    tip_conn.append(_ro(state_db))
+                tips[sid] = _resolve_session(state_db, sid, tip_conn[0])
             except (OSError, sqlite3.Error, ValueError):
                 tips[sid] = None
         return tips[sid]
@@ -1092,8 +1196,12 @@ def _project_remote_links() -> list[dict[str, Any]]:
 
     # Unknown/stale receipt rows replace duplicates, not obligations: they are
     # still unfinished. Only project() can authorize a verified live release.
-    return [card for card in legacy if not superseded(card)] + [
-        row for row in rows if row['unfinished']]
+    try:
+        return [card for card in legacy if not superseded(card)] + [
+            row for row in rows if row['unfinished']]
+    finally:
+        for conn in tip_conn:
+            _close_quietly(conn)
 
 
 def _legacy_remote_links() -> list[dict[str, Any]]:
@@ -1243,26 +1351,92 @@ def _read_local_pairs_into(active: dict[str, int], blocked: dict[str, int],
             _pairs_sink = None
 
 
+# [daveey] Per-board read memo: {board path: (stat key, reads)}. A board whose kanban.db and -wal have not moved
+# since its last read holds the same rows, so a write on one board re-reads that board only; the other boards cost
+# a stat. Only the stall verdict depends on the clock, so the memo keeps its rows and re-judges them on each use.
+# Touched only under ``_pairs_lock``.
+_board_memo: dict[str, tuple[tuple, dict[str, Any]]] = {}
+
+
+def _board_stat(path: Path) -> tuple:
+    out = []
+    for p in (path, Path(str(path) + "-wal")):
+        try:
+            st = p.stat()
+            out.append((st.st_ino, st.st_size, st.st_mtime_ns))
+        except FileNotFoundError:
+            out.append(None)
+    return tuple(out)
+
+
+def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, Any], bool]:
+    """Every count read of one board, on its shared connection in one read transaction (one snapshot; five fresh
+    opens cost ~5 ms on a board with no rows): ``(reads, complete)``. ``complete`` is False when a display-only read
+    failed (unseen/stalled log and count nothing, as before); such a read is not memoized, so the next pass retries."""
+    global _pairs_sink
+    reads: dict[str, Any] = {}
+    complete = True
+    with cached_ro(path) as conn:
+        conn.execute("BEGIN")
+        try:
+            try:
+                reads["unseen"] = _unseen_on(conn)
+            except sqlite3.Error as exc:
+                _log.debug("kanban unseen read failed for %s: %s", path, exc)
+                reads["unseen"] = {}
+                complete = False
+            outer, _pairs_sink = _pairs_sink, set()
+            try:
+                reads["active"] = _counts_on(conn, ACTIVE_STATUSES)
+                reads["blocked"] = _counts_on(conn, BLOCKED_STATUSES)
+                reads["pairs"] = _pairs_sink
+            finally:
+                _pairs_sink = outer
+            if parked:
+                reads["parked"] = _parked_on(conn)
+            if stalled:
+                try:
+                    reads["stall_rows"] = _stall_rows_on(conn)
+                except Exception as exc:  # display-only: a failed read never fails the counts
+                    _log.debug("kanban stalled read failed for %s: %s", path, exc)
+                    reads["stall_rows"] = (set(), {}, {})
+                    complete = False
+        finally:
+            conn.execute("COMMIT")
+    return reads, complete
+
+
 def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: dict[str, int]) -> None:
     sink = getattr(_parked_sink, "maps", None)
-    for path in _board_db_paths():
-        try:
-            for sid, n in _read_unseen(path).items():
-                unseen[sid] = unseen.get(sid, 0) + n
-        except sqlite3.Error as exc:
-            _log.debug("kanban unseen read failed for %s: %s", path, exc)
-        for statuses, into in ((ACTIVE_STATUSES, active), (BLOCKED_STATUSES, blocked)):
-            for sid, n in _read_counts(path, statuses).items():
+    stalled = getattr(_parked_sink, "stalled", None)
+    paths = _board_db_paths()
+    for gone in set(_board_memo) - {str(p) for p in paths}:
+        _board_memo.pop(gone, None)
+    now = time.time()
+    for path in paths:
+        key = _board_stat(path)
+        hit = _board_memo.get(str(path))
+        reads = hit[1] if hit is not None and hit[0] == key else None
+        if reads is not None and ((sink is not None and "parked" not in reads)
+                                  or (stalled is not None and "stall_rows" not in reads)):
+            reads = None
+        if reads is None:
+            _board_memo.pop(str(path), None)
+            reads, complete = _read_board(path, parked=sink is not None, stalled=stalled is not None)
+            if complete:
+                _board_memo[str(path)] = (key, reads)
+        for src, into in ((reads["unseen"], unseen), (reads["active"], active), (reads["blocked"], blocked)):
+            for sid, n in src.items():
                 into[sid] = into.get(sid, 0) + n
+        if _pairs_sink is not None:
+            _pairs_sink.update(reads["pairs"])
         if sink is not None:
-            board_parked, board_held = _read_parked(path)
-            for src, into in zip((board_parked, board_held), sink):
+            for src, into in zip(reads["parked"], sink):
                 for sid, n in src.items():
                     into[sid] = into.get(sid, 0) + n
-        stalled = getattr(_parked_sink, "stalled", None)
         if stalled is not None:
             try:
-                for sid, n in _read_stalled(path).items():
+                for sid, n in _stalled_counts(*reads["stall_rows"], now=now).items():
                     stalled[sid] = stalled.get(sid, 0) + n
             except Exception as exc:  # display-only: a failed read never fails the counts
                 _log.debug("kanban stalled read failed for %s: %s", path, exc)
@@ -1668,6 +1842,26 @@ def _lineage_remote_duplicates(remote_keys: dict[str, frozenset[tuple[str, str, 
     return out
 
 
+# [daveey] Set by ``one_annotation_snapshot``: the reads the first annotation in the scope made, for the others.
+_annotation_scope = threading.local()
+
+
+@contextlib.contextmanager
+def one_annotation_snapshot() -> Iterator[None]:
+    """[daveey] Every ``annotate_kanban_activity`` call in this block (this thread) stamps from one read of the boards,
+    the remote links (every ``_remote_links`` reader in the block, plugins included) and the waiting sources. The sidebar annotates its recents, cron and messaging slices in turn;
+    a board write between them recomputed every count (~130 ms) up to three times per response, and the slices
+    could disagree about the same session. A failed read is not shared: the next call in the block retries."""
+    if getattr(_annotation_scope, "reads", None) is not None:
+        yield
+        return
+    _annotation_scope.reads, _annotation_scope.attention, _annotation_scope.links = [], None, None
+    try:
+        yield
+    finally:
+        _annotation_scope.reads = _annotation_scope.attention = _annotation_scope.links = None
+
+
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_waiting_on`` (local open card ids), ``kanban_unseen`` (finished cards whose result the
     session has not been handed yet) and ``kanban_attention`` (done cards a registered check flags) on each session row
@@ -1678,13 +1872,20 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     # Conservative lower bound: counts may come from the short monotonic cache.
     # Never re-date a cached zero as a new owner observation.
     observed_at = time.time() - _CACHE_TTL_S
+    shared = getattr(_annotation_scope, "reads", None)
     try:
-        active, blocked, unseen, remote_stale, waiting = _all_counts(include_waiting=True)
-        with _cache_lock:  # the snapshot that call just read or wrote: never a second projection
-            parked, held = _parked_cache[0]
-            stalled = _stalled_cache[0]
-            remote_keys = _remote_keys_cache[0]
-        extra = _extra_waiting()
+        if shared:
+            active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = shared[0]
+        else:
+            active, blocked, unseen, remote_stale, waiting = _all_counts(include_waiting=True)
+            with _cache_lock:  # the snapshot that call just read or wrote: never a second projection
+                parked, held = _parked_cache[0]
+                stalled = _stalled_cache[0]
+                remote_keys = _remote_keys_cache[0]
+            extra = _extra_waiting()
+            if shared is not None:
+                shared.append((active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys,
+                               extra))
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
         # row off done) and drop the counts rather than present them as fresh.
@@ -1697,11 +1898,15 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row.pop("kanban_waiting_on", None)
             row["kanban_unknown"] = True
         return rows
-    try:
-        attention = attention_task_counts()
-    except Exception:
-        _log.debug("kanban attention unavailable", exc_info=True)
-        attention = {}
+    attention = getattr(_annotation_scope, "attention", None)
+    if attention is None:
+        try:
+            attention = attention_task_counts()
+        except Exception:
+            _log.debug("kanban attention unavailable", exc_info=True)
+            attention = {}
+        if shared is not None:
+            _annotation_scope.attention = attention
     for row in rows:
         row["kanban_observed_at"] = observed_at
         row.pop("kanban_unknown", None)
@@ -1751,6 +1956,8 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     global _hub_signature_memo
     _remote_read_memo = None
     _hub_signature_memo = None
+    with _pairs_lock:
+        _board_memo.clear()
     with _links_lock:
         _links_cache = None
     with _cache_lock:
