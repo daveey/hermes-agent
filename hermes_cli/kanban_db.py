@@ -1317,6 +1317,9 @@ def create_task(
                                    workspace_path=workspace_path)
     from hermes_cli.kanban_model_assignment import validate_model_assignment
     validate_model_assignment(assignee, model_override, provider_override)
+    # [daveey] Bind a provider-less concrete pin now (or refuse), never late-bind it to config at spawn.
+    from hermes_cli.kanban_pin_provider import resolve_pin_provider
+    model_override, provider_override = resolve_pin_provider(model_override, provider_override, assignee=assignee)
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -1505,6 +1508,11 @@ def set_model_override(
     Allowed while ``running``: it applies on the NEXT dispatch, which is the
     rate-limit-recovery flow (set, then reclaim/retry)."""
     model, provider = _validate_model_override(model, provider)
+    if model and not provider:
+        # [daveey] Same pin-time binding as create_task: resolve against the card's assignee, or refuse.
+        from hermes_cli.kanban_pin_provider import resolve_pin_provider
+        row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        model, provider = resolve_pin_provider(model, None, assignee=row[0] if row else None)
     return _set_task_override(
         conn, task_id,
         "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),

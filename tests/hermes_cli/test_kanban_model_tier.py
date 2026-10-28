@@ -81,6 +81,8 @@ def test_dispatcher_default_off_is_upstream_behaviour(board):
 
 def test_kanban_create_tool_pin_survives_default_and_unpinned_gets_default(board, monkeypatch):
     _write_cfg(board, default_model=SONNET)
+    from hermes_cli import models_detect
+    monkeypatch.setattr(models_detect, "provider_has_credentials", lambda pid: pid == "anthropic")
     from tools import kanban_tools as kt
     pinned = json.loads(kt._handle_create({"title": "adversarial review", "assignee": "default", "model": OPUS}))
     plain = json.loads(kt._handle_create({"title": "routine docs", "assignee": "default"}))
@@ -91,6 +93,7 @@ def test_kanban_create_tool_pin_survives_default_and_unpinned_gets_default(board
     assert seen[pinned["task_id"]][0] == OPUS
     assert seen[plain["task_id"]][0] == SONNET
     assert pinned_events[0]["reason"] == "pinned" and pinned_events[0]["model"] == OPUS
+    assert pinned_events[0]["provider"] == "anthropic"  # bound at pin time, not late-bound to config
 
 
 def test_review_lane_keeps_profile_model(board):

@@ -225,7 +225,9 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                 from hermes_cli.kanban_assignment_routing import AssignmentRoutingError
                 from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
                 from hermes_cli.kanban_awaiting import AwaitingError
-                if isinstance(e, (AssignmentRoutingError, ModelProviderMismatchError, AwaitingError)):
+                from hermes_cli.kanban_pin_provider import PinProviderUnresolvedError
+                if isinstance(e, (AssignmentRoutingError, ModelProviderMismatchError, AwaitingError,
+                                  PinProviderUnresolvedError)):
                     return tool_error(str(e), code=e.code)
                 if isinstance(e, CapabilityMismatchError):
                     return tool_error(str(e), code=e.code, assignee=e.assignee, missing=e.missing)

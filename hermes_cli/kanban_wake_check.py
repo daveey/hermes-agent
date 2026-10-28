@@ -72,6 +72,9 @@ def dry_run_error(cmd: Optional[str], *, cwd: Optional[str] = None, env: Optiona
     """Run ``cmd`` once at park time; refusal text when it can never succeed (rc >= 2, could
     not start, or exit 0/1 with error output), else None. A timeout is accepted: slow is not
     broken. ``HERMES_KANBAN_WAKE_DRYRUN=0`` skips it (tests)."""
+    if cmd and re.search(r"\bhermes-hub\s+tasks\b", cmd) and re.search(r"\bt_[0-9a-f]{8,16}\b", cmd):
+        return ("refused: hand-rolled replica task probes hide missing or stale cards. Use "
+                "`hermes kanban wait-check task <id> --gateway <name> --until done,blocked` instead.")
     if not cmd or os.environ.get("HERMES_KANBAN_WAKE_DRYRUN") == "0":
         return None
     rc, out = _run_probe(("dry-run", cmd), cmd, cwd or str(Path.home()), env if env is not None else dict(os.environ))
@@ -101,7 +104,7 @@ GUARD_HELP = (
     "default 900, min 120). Examples: "
     "`sqlite3 ~/.bb/hub.db \"select build from devices where name='watch'\" | grep -q 559`, "
     "`gh api repos/OWNER/REPO/tags --jq '.[].name' | grep -q '^desktop-client-v'`, "
-    "`hermes kanban show t_xxxx --json | jq -e '.task.status==\"done\"'`. "
+    "`hermes kanban wait-check task <id> --gateway <name> --until done,blocked`. "
     "A wait on another card on this board is a parent link (kanban_link), not a park. "
     "Only a pure time wait (a soak window, a calendar date, a timed re-measure) may pass "
     "clock_only=true; SCHEDULED_UNTIL stays the deadline either way."

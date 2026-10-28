@@ -331,8 +331,9 @@ def confirm_remote(awaiting: Optional[dict]) -> None:
     if rc not in (0, 1):
         raise AwaitingError(INVALID_AWAITING, f"cannot confirm producer card {ref} on {awaiting['gateway']}: "
                                               f"{out[-200:]}")
-    status = out.split()[-1] if out.split() else ""
-    if status in ("archived", "triage"):
+    words = out.split()
+    status = words[1] if len(words) >= 2 and words[0] == ref else ""
+    if status in ("archived", "triage") or "orphan producer" in out or "agent-owned park:" in out:
         raise AwaitingError(AGENT_ACTION_WAIT, f"the producer card is not live: {ref} on {awaiting['gateway']} "
                                                f"is {status}, so nobody is producing it. {_REMEDY}")
     _REMOTE_CONFIRMED[(awaiting["gateway"], ref)] = (time.monotonic(), out[-120:])

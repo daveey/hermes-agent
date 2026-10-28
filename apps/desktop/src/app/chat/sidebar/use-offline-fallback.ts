@@ -9,6 +9,7 @@
 import { useStore } from '@nanostores/react'
 import { useCallback, useMemo } from 'react'
 
+import { prepaintClickedTranscript } from '@/app/session/hooks/use-session-actions/provisional-transcript'
 import type { SessionInfo } from '@/hermes'
 import { markOpenClick } from '@/lib/open-timing'
 import { clearAsleepOpen, hasCachedTranscriptFor, markAsleepOpen } from '@/store/asleep-session'
@@ -52,6 +53,8 @@ export function useOfflineFallback(
         markAsleepOpen(session)
       } else {
         clearAsleepOpen()
+        // [daveey] The cached transcript goes on screen in this click, with the route change (see prepaint).
+        prepaintClickedTranscript(sessionId, session)
       }
 
       resumeSession(sessionId, session)

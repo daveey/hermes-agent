@@ -280,6 +280,12 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     for name in _HERMES_BEHAVIORAL_VARS:
         monkeypatch.delenv(name, raising=False)
 
+    # 2b. Git repository location inherited from the caller (a git hook, a shell that exported it).
+    # With GIT_DIR set, a test's ``git init --bare <tmp>`` reinitializes THAT repo instead: on
+    # 2026-10-27 the live install's shared .git/config was flipped to core.bare=true this way.
+    for name in _GIT_LOCATION_VARS:
+        monkeypatch.delenv(name, raising=False)
+
     # Honcho's fallback host/config resolution legitimately reads the user's
     # global ~/.honcho/config.json. Keep HOME stable (subprocess tests depend
     # on it), but pin the host so ordinary tests cannot inherit a developer's
@@ -487,6 +493,11 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
     monkeypatch.setattr(_kbd_mod, "_system_memory_sample", dict, raising=False)
 
 
+_GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                      "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+# Entries a test must never change in a live checkout's shared config: identity (later commits get
+# authored as a fixture) and core.bare (every worktree and ``hermes update`` then refuse to run).
+_GUARDED_GIT_KEYS = r"^(user\..*|core\.bare)$"
 _LIVE_GIT_CONFIGS: list | None = None
 # Teardown may run before monkeypatch restores a test's deliberately empty PATH.
 _GUARD_PATH = os.environ.get("PATH", os.defpath)
@@ -532,17 +543,24 @@ def _plain_run(argv: list):
 
 
 def _read_bytes_or_none(path: Path):
-    """Identity (``user.*``) entries of a git config file, or None if it is absent.
+    """Guarded (``user.*``, ``core.bare``) entries of a git config file, or None if it is absent.
 
     Read through ``git config --file`` so the in-process home-I/O guard is not
-    involved. Only ``user.*`` is compared: branch/remote entries in the shared
+    involved. Only guarded keys are compared: branch/remote entries in the shared
     config legitimately change whenever any worktree or branch is created.
     """
-    import subprocess
-
     if _plain_run(["test", "-f", str(path)])[0] != 0:
         return None
-    return _plain_run(["git", "config", "--file", str(path), "--get-regexp", r"^user\."])[1]
+    return _plain_run(["git", "config", "--file", str(path), "--get-regexp", _GUARDED_GIT_KEYS])[1]
+
+
+def _config_entries(raw) -> dict:
+    """``{key: [values]}`` from ``git config --get-regexp`` output."""
+    entries: dict = {}
+    for ln in (raw or b"").splitlines():
+        key, _, value = ln.partition(b" ")
+        entries.setdefault(key.decode(), []).append(value.decode())
+    return entries
 
 
 def _assert_git_configs_unchanged(snapshots: dict) -> None:
@@ -553,16 +571,19 @@ def _assert_git_configs_unchanged(snapshots: dict) -> None:
         if after == before:
             continue
         changed.append(str(path))
-        before_keys = {ln.split(b" ", 1)[0] for ln in (before or b"").splitlines()}
-        for ln in (after or b"").splitlines():
-            key = ln.split(b" ", 1)[0]
-            if key not in before_keys:
-                _plain_run(["git", "config", "--file", str(path), "--unset-all", key.decode()])
+        old, new = _config_entries(before), _config_entries(after)
+        for key in set(old) | set(new):
+            if old.get(key) == new.get(key):
+                continue
+            # Put every changed guarded key back exactly as it was: unset, then re-add the old values.
+            _plain_run(["git", "config", "--file", str(path), "--unset-all", key])
+            for value in old.get(key, []):
+                _plain_run(["git", "config", "--file", str(path), "--add", key, value])
     if changed:
         pytest.fail(
-            "test wrote user.* into a live checkout's git config (removed): "
+            "test wrote user.* or core.bare into a live checkout's git config (restored): "
             + ", ".join(changed)
-            + " - run git config only inside a tmp_path repo",
+            + " - run git only inside a tmp_path repo, and never with an inherited GIT_DIR",
             pytrace=False,
         )
 

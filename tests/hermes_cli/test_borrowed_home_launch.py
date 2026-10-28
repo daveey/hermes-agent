@@ -8,6 +8,7 @@ dependency sync leaves.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 import sys
@@ -208,3 +209,79 @@ def test_the_owner_still_owes_and_runs_its_tail(tmp_path, monkeypatch, completio
     assert venv_sync.prepare_launch(root, []) == Path(sys.executable)
     assert len(completion_tail) == 1
     assert published == [root]
+
+
+def test_borrowed_launch_already_on_the_store_interpreter_does_not_reexec(tmp_path, monkeypatch):
+    """A fresh borrowed home syncs, then stays on the store interpreter.
+
+    Returning that interpreter anyway re-execs. A script that mints a new HERMES_HOME on
+    each start would sync and re-exec forever once the import no longer dies first.
+    """
+    import pm
+    from hermes_cli import _launchers
+
+    root = _checkout(tmp_path, monkeypatch)
+    _state(tmp_path / ".hermes", root)
+    _home(monkeypatch, tmp_path / "tmp" / "borrowed")
+    borrowed_facts = install_state_dir(root) / "facts.json"
+    python = tmp_path / ".hermes" / "tools" / "python" / "bin" / "python3"
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: borrowed_facts.is_file())
+    monkeypatch.setattr(pm, "sync_venv", lambda *a, **kw: (
+        borrowed_facts.parent.mkdir(parents=True, exist_ok=True)
+        or borrowed_facts.write_text("{}", encoding="utf-8")))
+    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _: python)
+
+    assert venv_sync.prepare_launch(root, ["kanban", "init"]) is None
+    assert borrowed_facts.is_file()
+
+
+def test_temp_home_relaunch_imports_hermes_state_without_dropping_venv_deps(tmp_path):
+    """A venv-launched script under a temp HERMES_HOME re-enters on a bare interpreter.
+
+    That interpreter has none of the launching venv's packages. The script imports
+    hermes_state (which needs ruamel) before any entry point would import
+    hermes_bootstrap. The re-entry must load this checkout's bootstrap first so those
+    deps are selected, not dropped (# borrowed-home relaunch).
+    """
+    checkout = tmp_path / "checkout"
+    deps = tmp_path / "deps"
+    (deps / "ruamel").mkdir(parents=True)
+    (deps / "ruamel" / "__init__.py").write_text("", encoding="utf-8")
+    (deps / "ruamel" / "yaml.py").write_text("YAML = object\n", encoding="utf-8")
+    checkout.mkdir()
+    # Stands in for activate_dependencies: the committed env, not the bare interpreter.
+    (checkout / "hermes_bootstrap.py").write_text(
+        "import site\n" + f"site.addsitedir({str(deps)!r})\n",
+        encoding="utf-8",
+    )
+    (checkout / "hermes_state.py").write_text(
+        "from ruamel.yaml import YAML\nclass SessionDB:\n    pass\n",
+        encoding="utf-8",
+    )
+    script = tmp_path / "launch.py"
+    script.write_text(
+        "import os, sys, tempfile\n"
+        "home = tempfile.mkdtemp(prefix='borrowed-home-')\n"
+        "os.environ['HERMES_HOME'] = home\n"
+        "os.environ.pop('HERMES_KANBAN_DB', None)\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from hermes_state import SessionDB\n"
+        "print('ok')\n"
+        "print(home)\n",
+        encoding="utf-8",
+    )
+    bare = tmp_path / "bare-venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(bare)], check=True, timeout=60)
+    python = bare / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    argv = [str(script), str(checkout)]
+    # Same shape as a borrowed relaunch: store interpreter, -I, run_path of the script.
+    command = venv_sync.relaunch_command(python, checkout, argv, [str(python), *argv], None)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("VIRTUAL_ENV", None)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=env, check=False)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == "ok"
+    assert lines[1].startswith(str(tmp_path)) or "borrowed-home-" in lines[1]

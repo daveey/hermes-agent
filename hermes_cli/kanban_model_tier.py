@@ -200,6 +200,17 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
     except Exception as exc:
         logger.warning("kanban model tier: resolve failed for %s (%s)", getattr(task, "id", "?"), exc)
         return "error"
+    if reason == "pinned" and not _str(getattr(task, "provider_override", None)):
+        # A row pinned before pin-time binding (concrete model, NULL provider) used to take its provider from
+        # the profile's config.yaml at spawn; bind it with the same resolver the create paths use. [daveey]
+        from hermes_cli.kanban_pin_provider import resolve_legacy_pin
+        bound, unresolved = resolve_legacy_pin(task)
+        if bound:
+            task.provider_override = bound
+            reason = "pinned+provider_resolved"
+        elif unresolved:
+            logger.warning("kanban model tier: %s pin has no provider (%s)", getattr(task, "id", "?"), unresolved)
+            reason = "pinned+provider_unresolved"
     if reason not in ("off", "profile_out_of_scope"):
         try:
             from hermes_cli import kanban_provider_walls as _walls

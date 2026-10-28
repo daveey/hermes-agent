@@ -746,8 +746,44 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
     return project_history_commentary(projected_messages, home=home)
 
 
+# [daveey] The Desktop marks its transcript reads (electron/display-transcript.ts). Those pages drop provider
+# replay data the transcript never shows and are gzipped: a long hub session's 120-row page went from 1.4 MB to
+# 168 KB, which over the SSH tunnel is the difference between a 2.5 s and a sub-second open. Other clients
+# (no header) get the full page as before.
+DISPLAY_TRANSCRIPT_HEADER = "x-hermes-display-transcript"
+
+
+def _slim_for_display(messages):
+    """Drop what a transcript view never reads: ``reasoning_details`` when ``reasoning`` carries the text, and
+    ``reasoning_content`` when it repeats ``reasoning``. Messages without ``reasoning`` keep both (the Desktop
+    falls back to them for display)."""
+    out = []
+    for m in messages:
+        if isinstance(m, dict) and m.get("reasoning") and (
+                "reasoning_details" in m or m.get("reasoning_content") == m.get("reasoning")):
+            m = dict(m)
+            m.pop("reasoning_details", None)
+            if m.get("reasoning_content") == m.get("reasoning"):
+                m.pop("reasoning_content", None)
+        out.append(m)
+    return out
+
+
+def _display_transcript_response(request: Request, body: dict):
+    import gzip as _gzip
+
+    from fastapi.responses import Response
+
+    if "gzip" not in (request.headers.get("accept-encoding") or "").lower():
+        return body
+    raw = json.dumps(jsonable_encoder(body), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return Response(content=_gzip.compress(raw, compresslevel=5), media_type="application/json",
+                    headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+
+
 @manage_router.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(
+    request: Request,
     session_id: str, profile: Optional[str] = None, limit: Optional[int] = Query(None, ge=0),
     offset: int = Query(0, ge=0), order: Optional[str] = Query(None),
     include_compacted: bool = Query(False), inline_images: bool = Query(True)):
@@ -781,7 +817,10 @@ async def get_session_messages(
     projected_messages = await asyncio.to_thread(
         _project_for_display, messages, home=_history_profile_home(profile),
         inline_images=inline_images)
-    return {
+    display = request.headers.get(DISPLAY_TRANSCRIPT_HEADER) == "1"
+    if display:
+        projected_messages = _slim_for_display(projected_messages)
+    body = {
         "session_id": sid,
         # The same stamp list rows carry, so the Desktop keys a page under the
         # owner it already routes the session by.
@@ -791,6 +830,7 @@ async def get_session_messages(
             "limit": _limit, "offset": offset,
             "order": order or ("latest" if limit is None else "oldest"),
             "returned": len(projected_messages)}}
+    return _display_transcript_response(request, body) if display else body
 
 
 def _timeline_session_id(db, session_id: str, owner: str) -> str:

@@ -1,8 +1,9 @@
 import type { SessionInfo } from '@/hermes'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { markOpenPaint } from '@/lib/open-timing'
-import { $messages, setMessages } from '@/store/session'
-import type { SessionProfileRoute } from '@/store/session-request-router'
+import { $messages, $selectedStoredSessionId, setMessages } from '@/store/session'
+import { sessionOwnerRouteFromRow, type SessionProfileRoute } from '@/store/session-request-router'
+import { $sessionTiles } from '@/store/session-states'
 import { loadTranscriptTail, type TranscriptTailScope } from '@/store/transcript-tail-cache'
 
 import { chatMessageArraysEquivalent } from './utils'
@@ -79,4 +80,37 @@ export function provisionalTranscriptPaint(storedSessionId: string, isCurrent: (
       return { changed: true, shown: true }
     }
   }
+}
+
+/**
+ * [daveey] Paint a clicked row's cached transcript in the click itself. Opening a session in main routes first and
+ * resumes in the route effect, after React has rendered the route change: 80-100 ms of every open (warm reopens,
+ * which read no cache, measured the same). Painting here lands the cached rows in the same commit as the route.
+ * The resume then repaints the same rows from the same scope, display-only as before.
+ *
+ * Only when the click loads the session into main: a session already selected or open as a tile is focused, not
+ * reloaded, and an asleep gateway's row has its own read-only open. Returns whether it painted.
+ */
+export function prepaintClickedTranscript(storedSessionId: string, row: SessionInfo | undefined): boolean {
+  if (
+    !storedSessionId ||
+    !row ||
+    row.offline_cached ||
+    $selectedStoredSessionId.get() === storedSessionId ||
+    $sessionTiles.get().some(tile => tile.storedSessionId === storedSessionId)
+  ) {
+    return false
+  }
+
+  const scope = transcriptRestScope(sessionOwnerRouteFromRow(row), row, '')
+  const messages = scope ? loadTranscriptTail(storedSessionId, scope) : null
+
+  if (!messages?.length) {
+    return false
+  }
+
+  setMessages(messages)
+  markOpenPaint(storedSessionId, 'cache', messages.length)
+
+  return true
 }
