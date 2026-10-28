@@ -157,6 +157,35 @@ def test_clean_verdict_is_reused_and_scans_are_single_flight(monkeypatch, tmp_pa
     assert len(calls) == 2
 
 
+def test_caller_arriving_after_pass_but_before_cache_write_reuses_it(monkeypatch, tmp_path):
+    """A caller that missed the cache and then found no pass in flight used to start another
+    pass, because the finished pass's clean verdict was only cached after its waiters woke. Here
+    the second caller arrives in exactly that gap, so the old code made two passes every time."""
+    calls = []
+
+    class _Empty:
+        def proc_pidinfo(self, *a):
+            calls.append(1)
+            return 0
+
+    monkeypatch.setattr(dbfile, "_darwin_libproc", lambda: _Empty())
+    monkeypatch.setattr(dbfile, "_darwin_all_pids", lambda _lib: [4242])
+    db = tmp_path / "state.db"
+    real_join = dbfile._join_darwin_fd_scan
+    nested = []
+
+    def join_then_late_caller(*args, **kwargs):
+        scan = real_join(*args, **kwargs)
+        if not nested:  # the pass is done and out of flight; the first caller has not cached yet
+            nested.append(_iter_darwin_sidecar_holders(db))
+        return scan
+
+    monkeypatch.setattr(dbfile, "_join_darwin_fd_scan", join_then_late_caller)
+    assert _iter_darwin_sidecar_holders(db) == []
+    assert nested == [[]]
+    assert len(calls) == 1, "a caller arriving after the pass must reuse its clean verdict"
+
+
 def test_timed_out_scan_is_not_cached(monkeypatch, tmp_path):
     monkeypatch.setattr(dbfile, "_darwin_libproc", lambda: _HungLibproc())
     monkeypatch.setattr(dbfile, "_darwin_all_pids", lambda _lib: [4242])

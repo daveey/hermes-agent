@@ -362,6 +362,9 @@ class _DarwinFdScan:
         self.error: BaseException | None = None
         self.expired = False
         self.waiters = 0
+        # ``base -> (key, watched)`` of every caller that joined; a clean verdict for each is
+        # recorded before this pass stops being in flight (see :meth:`run`).
+        self.watchers: dict[str, tuple[tuple, dict[str, str]]] = {}
 
     def run(self) -> None:
         global _DARWIN_SCAN_IN_FLIGHT
@@ -376,19 +379,47 @@ class _DarwinFdScan:
             self.error = exc
         finally:
             with _DARWIN_SCAN_LOCK:
+                # Cache clean verdicts BEFORE clearing the in-flight slot: a caller that missed the
+                # cache and then finds no pass in flight re-checks the cache under this lock, so it
+                # reuses this pass instead of starting another (the gap used to let it rescan).
+                if self.error is None and not self.expired:
+                    for base, (key, watched) in list(self.watchers.items()):
+                        with contextlib.suppress(Exception):
+                            if not _darwin_holders(self.candidates, watched):
+                                _darwin_clean_until[base] = (
+                                    time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS, key)
                 if _DARWIN_SCAN_IN_FLIGHT is self:
                     _DARWIN_SCAN_IN_FLIGHT = None
             self.done.set()
 
 
-def _join_darwin_fd_scan() -> _DarwinFdScan | None:
-    """Wait for the in-flight pass, starting one only if none is alive; ``None`` on timeout."""
+def _darwin_holders(candidates, watched: dict[str, str]) -> list[tuple[int, str]]:
+    holders: list[tuple[int, str]] = []
+    for pid, target, identity in candidates:
+        literal = watched.get(target.casefold())
+        if literal is not None and _identity_is_truly_unlinked(identity, literal):
+            holders.append((pid, target))
+    return holders
+
+
+_DARWIN_SCAN_CACHED = _DarwinFdScan(0.0)  # sentinel, never run: a clean verdict appeared while waiting for the lock
+
+
+def _join_darwin_fd_scan(base: str | None = None, key: tuple | None = None,
+                         watched: dict[str, str] | None = None) -> _DarwinFdScan | None:
+    """Wait for the in-flight pass, starting one only if none is alive; ``None`` on timeout.
+
+    With *base*/*key*/*watched*, returns ``_DARWIN_SCAN_CACHED`` when a pass that just finished
+    already recorded a clean verdict for *base*, and registers the caller so the pass records its
+    verdict before it leaves the in-flight slot."""
     global _DARWIN_SCAN_IN_FLIGHT
     timeout = _DARWIN_FD_SCAN_TIMEOUT_SECONDS
     with _DARWIN_SCAN_LOCK:
         scan = _DARWIN_SCAN_IN_FLIGHT
         if scan is not None and time.monotonic() > scan.deadline:
             return None  # stuck past its deadline (kernel-blocked): it can only end expired
+        if scan is None and base is not None and key is not None and _darwin_clean_cached(base, key):
+            return _DARWIN_SCAN_CACHED
         if scan is None:
             scan = _DarwinFdScan(time.monotonic() + timeout)
             _DARWIN_SCAN_IN_FLIGHT = scan
@@ -398,6 +429,8 @@ def _join_darwin_fd_scan() -> _DarwinFdScan | None:
                 _DARWIN_SCAN_IN_FLIGHT = None
                 raise
         scan.waiters += 1
+        if base is not None and key is not None and watched is not None:
+            scan.watchers.setdefault(base, (key, watched))
     try:
         # ponytail: a kernel-blocked proc_pidfdinfo cannot be interrupted, so that one thread
         # may outlive us; it is the only one, and it dies with the process.
@@ -422,7 +455,9 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
     key = _darwin_clean_key(base)  # taken before the pass, so a change during it invalidates
     if _darwin_clean_cached(base, key):
         return []
-    scan = _join_darwin_fd_scan()
+    scan = _join_darwin_fd_scan(base, key, watched)
+    if scan is _DARWIN_SCAN_CACHED:
+        return []
     if scan is None:
         # Fail open: an unfinished pass never yields a refusal, and is never cached.
         logger.warning(
@@ -433,11 +468,7 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
         return []
     if scan.error is not None:
         raise scan.error
-    holders: list[tuple[int, str]] = []
-    for pid, target, identity in scan.candidates:
-        literal = watched.get(target.casefold())
-        if literal is not None and _identity_is_truly_unlinked(identity, literal):
-            holders.append((pid, target))
+    holders = _darwin_holders(scan.candidates, watched)
     if not holders:
         _darwin_clean_until[base] = (time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS, key)
     return holders
