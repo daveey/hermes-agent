@@ -187,6 +187,8 @@ def test_millisecond_timestamps_from_the_wire_are_stored_in_seconds(synced_conn)
     run_uid = conn.execute("SELECT r.uid FROM tasks t JOIN task_runs r ON r.id = t.current_run_id WHERE t.id = ?",
                            (tid,)).fetchone()[0]
     started_s = conn.execute("SELECT started_at FROM task_runs WHERE uid = ?", (run_uid,)).fetchone()[0]
+    # The claim's own rows have been pushed (a still-pending local edit of a run keeps the local row).
+    conn.execute("DELETE FROM kanban_sync_outbox")
     ms = started_s * 1000 + 955
     page = [
         _ch(1, "task_runs", run_uid, {"task_id": tid, "status": "running", "profile": "worker", "started_at": ms,
@@ -203,7 +205,8 @@ def test_millisecond_timestamps_from_the_wire_are_stored_in_seconds(synced_conn)
     assert tuple(conn.execute("SELECT created_at, started_at, completed_at FROM tasks WHERE id = 't_remote_ms000001'")
                  .fetchone()) == (started_s, started_s, started_s)
     # Seconds and nulls pass through untouched.
-    sync.apply_remote_changes(conn, [_ch(5, "task_runs", run_uid, {"task_id": tid, "ended_at": started_s + 7})],
+    sync.apply_remote_changes(conn, [_ch(5, "task_runs", run_uid, {"task_id": tid, "ended_at": started_s + 7},
+                                                   version=2)],
                               new_cursor=5)
     assert conn.execute("SELECT ended_at FROM task_runs WHERE uid = ?", (run_uid,)).fetchone()[0] == started_s + 7
     assert sync.to_seconds(None) is None and sync.to_seconds(True) is True and sync.to_seconds("x") == "x"

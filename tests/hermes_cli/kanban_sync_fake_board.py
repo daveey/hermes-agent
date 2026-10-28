@@ -16,10 +16,13 @@ FENCED = {"status", "current_run_uid", "result", "started_at", "completed_at"}
 
 
 class FakeService:
-    def __init__(self) -> None:
+    def __init__(self, *, lease_runs: bool = False) -> None:
         self.boards: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str, Any]] = []
         self.offline = False
+        # Like transitions.ts grantLease/releaseTask: a grant writes the card running plus its run row, a release
+        # ends that run and returns the card to ready. Off by default (the older tests count rows).
+        self.lease_runs = lease_runs
 
     def board(self, bid: str) -> dict[str, Any]:
         return self.boards.setdefault(bid, {"seq": 0, "floor": 0, "changes": [], "rows": {}, "applied": {}, "leases": {}})
@@ -134,14 +137,29 @@ class FakeHub:
         b = self.svc.board(board)
         task, run = body["task"], body["run_uid"]
         cur = b["leases"].get(task)
+        op_id, hlc, gw = body.get("client_op_id"), f"{9_999_999_999_998:013d}-0000-board", self.gateway
+        version = None
         if body["action"] == "grant":
             if cur and cur["holder"] != self.gateway:
                 return {"status": "rejected", "reason": "lease_held", "lease": cur}
             b["leases"][task] = {"task_id": task, "holder": self.gateway, "run_uid": run, "expires": 9_999_999_999_999}
+            if self.svc.lease_runs and task in b["rows"].get("tasks", {}):
+                self.svc._put(b, "task_runs", run, {"task_id": task, "status": "running", "started_at": 1,
+                                                    "ended_at": None, "outcome": None}, gw, op_id, hlc)
+                version = self.svc._put(b, "tasks", task, {"status": "running", "current_run_uid": run,
+                                                           "lease_holder": gw, "lease_expires": 9_999_999_999_999},
+                                        gw, op_id, hlc)["version"]
         elif body["action"] == "renew":
             if not cur or cur["holder"] != self.gateway or cur["run_uid"] != run:
                 return {"status": "rejected", "reason": "lease_lost", "lease": cur}
         else:
             b["leases"].pop(task, None)
+            runs = b["rows"].get("task_runs", {})
+            if (self.svc.lease_runs and cur and cur["run_uid"] == run and run in runs
+                    and runs[run].get("ended_at") is None):
+                self.svc._put(b, "task_runs", run, {"status": "released", "outcome": "released", "ended_at": 2},
+                              gw, op_id, hlc)
+                self.svc._put(b, "tasks", task, {"status": "ready", "current_run_uid": None, "lease_holder": None,
+                                                 "lease_expires": None}, gw, op_id, hlc)
             return {"status": "applied", "lease": None}
-        return {"status": "applied", "lease": b["leases"][task]}
+        return {"status": "applied", "lease": b["leases"][task], "version": version}

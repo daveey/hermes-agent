@@ -340,6 +340,11 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     if row["table_name"] == "tasks" and res.get("version"):
                         conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",
                                      (res["version"], row["row_uid"]))
+                    elif row["table_name"] == "task_runs" and res.get("version"):
+                        # The Board now holds this row at that version: its own feed copy of it (or anything
+                        # older) must not overwrite the local row later.
+                        conn.execute("UPDATE task_runs SET sync_version = MAX(COALESCE(sync_version, 0), ?) "
+                                     "WHERE uid = ?", (res["version"], row["row_uid"]))
                     setattr(out, status, getattr(out, status) + 1)
                     if status == "merged" and primary and res.get("row"):
                         authoritative.append(_row_change(row["table_name"], res["row"]))

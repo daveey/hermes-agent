@@ -80,7 +80,10 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     "task_links": frozenset(),
     "task_comments": frozenset(),
     "task_events": frozenset(),
-    "task_runs": frozenset({"claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at"}),
+    # ``sync_version``: the Board version of the row this gateway last applied or had acknowledged (the fence that
+    # keeps an older copy of a run from the feed off a newer local row).
+    "task_runs": frozenset({"claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at",
+                            "sync_version"}),
     "task_attachments": frozenset({"stored_path"}),
     "task_chat_links": frozenset(),
 }
@@ -200,6 +203,7 @@ _SYNC_COLUMN_DDL = (
     *((t, "uid", "uid TEXT") for t in _UID_TABLES),
     ("task_attachments", "blob_key", "blob_key TEXT"),
     ("tasks", "sync_version", "sync_version INTEGER"),
+    ("task_runs", "sync_version", "sync_version INTEGER"),
     ("tasks", "field_hlc", "field_hlc TEXT"),
     ("tasks", "lease_holder", "lease_holder TEXT"),
     ("tasks", "lease_expires", "lease_expires INTEGER"),
@@ -933,10 +937,16 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
                             (cols["parent_id"], cols["child_id"])).rowcount == 1
     existing = conn.execute(f"SELECT id FROM {table} WHERE uid = ?", (ch.uid,)).fetchone()
     if existing is not None:
+        if _local_row_is_newer(conn, table, ch, existing[0]):
+            return False
+        if table == "task_runs" and ch.version:
+            cols["sync_version"] = ch.version
         assignments = ", ".join(f"{c} = ?" for c in cols)
         if cols:
             conn.execute(f"UPDATE {table} SET {assignments} WHERE id = ?", (*cols.values(), existing[0]))
         return True
+    if table == "task_runs" and ch.version:
+        cols["sync_version"] = ch.version
     if table == "task_attachments":
         cols["stored_path"] = ""
         result.blobs_to_fetch.append(ch.uid)
@@ -944,6 +954,24 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     conn.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                  (ch.uid, *cols.values()))
     return True
+
+
+def _local_row_is_newer(conn: sqlite3.Connection, table: str, ch: RemoteChange, row_id: int) -> bool:
+    """True when the feed's copy of an existing child row must not overwrite it.
+
+    Child rows have no per-field clocks, so the last write wins wherever it lands. Two copies are older than what
+    this gateway holds: one while a local edit of the row is still in the outbox (the push sends the row whole and
+    makes it the Board's newest version), and one at or below the Board version this gateway last applied or had
+    acknowledged (``task_runs.sync_version``). Without this, our own earlier push of a run (its outbox row already
+    gone) or the Board's lease-grant copy, pulled after the run ended here, reopened it as ``running`` and the next
+    push sent that back to the Board."""
+    if conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name = ? AND row_uid = ? AND state = 'pending' "
+                    "LIMIT 1", (table, ch.uid)).fetchone():
+        return True
+    if table != "task_runs" or not ch.version:
+        return False
+    seen = conn.execute("SELECT sync_version FROM task_runs WHERE id = ?", (row_id,)).fetchone()[0]
+    return seen is not None and ch.version <= seen
 
 
 def _delete_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> bool:

@@ -1038,6 +1038,39 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
     return reconciled
 
 
+# A run younger than this may still be settling (a claim and its run row land in one txn, but a synced board's
+# feed can briefly carry a run ahead of its card's row), so the sweep leaves it alone.
+DANGLING_RUN_MIN_AGE_SECONDS = 600
+
+
+def close_dangling_runs(conn: sqlite3.Connection, *, min_age_seconds: int = DANGLING_RUN_MIN_AGE_SECONDS) -> list[int]:
+    """Close runs still ``running`` that are not their card's current run; returns their ids. [daveey]
+
+    Every claim path ends its run through ``current_run_id``. Once that pointer has moved on (cleared by a
+    terminal transition, or pointing at a newer run) nothing can reach the old row again, so a run that a path
+    abandoned, or that a sync race reopened after it ended, stays ``running`` forever and reads as live work.
+    The row is closed ``reclaimed``; on a synced board the capture trigger sends that to the Board."""
+    cutoff = int(time.time()) - min_age_seconds
+    closed: list[int] = []
+    with _kb.write_txn(conn):
+        rows = conn.execute(
+            "SELECT r.id, r.task_id FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+            "WHERE r.status = 'running' AND r.ended_at IS NULL AND r.started_at < ? "
+            "  AND (t.current_run_id IS NULL OR t.current_run_id != r.id)", (cutoff,),
+        ).fetchall()
+        now = int(time.time())
+        for row in rows:
+            cur = conn.execute(
+                "UPDATE task_runs SET status = 'reclaimed', outcome = 'reclaimed', ended_at = ?, "
+                "claim_expires = NULL, error = COALESCE(error, ?) WHERE id = ? AND ended_at IS NULL",
+                (now, "dangling run: no longer the card's current run", row["id"]),
+            )
+            if cur.rowcount == 1:
+                closed.append(int(row["id"]))
+                _kb._log.info("kanban reconcile: closed dangling run %s of task %s", row["id"], row["task_id"])
+    return closed
+
+
 def _error_fingerprint(error_text: str) -> str:
     """Normalize an error message (strip PIDs, timestamps) so same-root-cause errors group."""
     fp = re.sub(r'\bpid \d+\b', 'pid N', error_text[:80])
@@ -2350,6 +2383,7 @@ def _run_reclaim_phase(
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
+        close_dangling_runs(conn)
     result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
     result.crashed = detect_crashed_workers(conn, board=board)
     # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
