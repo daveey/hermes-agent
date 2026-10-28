@@ -197,6 +197,24 @@ describe('ChatSidebar offline fallback rows', () => {
     expect(notices).not.toMatch(/its gateway|never synced/)
   })
 
+  it('a remote stale-list row with a cached transcript still resumes live, not read-only', () => {
+    $sessions.set([makeSessionInfo({ connection_id: 'conn-mini', id: 'busy', source: 'desktop', title: 'Busy one' })])
+    saveTranscriptTail('busy', [{ content: 'kept on this mac', id: 1, role: 'user', timestamp: 1 } as never], {
+      connectionId: 'conn-mini',
+      profile: 'default'
+    })
+    act(() => recordSessionGatewayUnavailable('conn-mini'))
+    const resume = vi.fn()
+    mount(resume)
+
+    fireEvent.click(screen.getByText('Busy one'))
+
+    expect(resume).toHaveBeenCalledWith('busy', expect.objectContaining({ offline_stale_list: true }))
+    expect(asleepOpenFor('busy')).toBeNull()
+    expect($notifications.get().map(n => n.message).join(' ')).toMatch(/^mini is not responding/)
+    clearTranscriptTails()
+  })
+
   it('opens a live row normally', () => {
     const resume = vi.fn()
     mount(resume)
