@@ -638,7 +638,14 @@ def _fenced_page_op(task_id: Optional[str], fn) -> str:
     from tools.browser_tool_session import run_fenced
 
     session = _active_sessions.get(_last_session_key(task_id or "default")) or {}
-    res = run_fenced(session, lambda: {"raw": fn()})
+    from tools.browser_agent_lifecycle import ManagedBrowserError, renew_selected
+    try:
+        # Managed Chrome: keep the scope the vault addresses (last browser_exec / built-in tool scope)
+        # leased for the whole page operation; a no-op otherwise.
+        with renew_selected("browser_vault", task_id or "default", 120):
+            res = run_fenced(session, lambda: {"raw": fn()})
+    except ManagedBrowserError as exc:
+        return json.dumps({"success": False, "error": str(exc)})
     return res["raw"] if "raw" in res else json.dumps(res)
 
 

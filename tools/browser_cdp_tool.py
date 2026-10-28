@@ -104,9 +104,12 @@ def _run_async(coro):
 
 def _resolve_cdp_endpoint() -> str:
     """Normalized CDP WebSocket URL via ``browser_tool_cdp._get_cdp_override``, or ""."""
+    from tools.browser_agent_lifecycle import ManagedBrowserError
     try:
         from tools.browser_tool_cdp import _get_cdp_override  # type: ignore[import-not-found]
         return (_get_cdp_override() or "").strip()
+    except ManagedBrowserError:
+        raise  # managed Chrome outside a lease: a clear error, never "no endpoint" or the raw root
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp: failed to resolve CDP endpoint: %s", exc)
         return ""
@@ -393,16 +396,31 @@ def _browser_cdp_check() -> bool:
     return bool(check_browser_requirements() and _get_cdp_override_raw())
 
 
+def _managed_browser_cdp(args: dict, task_id: Optional[str]) -> str:
+    """browser_cdp inside an owner lease when ``browser.managed_agent`` applies (no-op otherwise)."""
+    from tools.browser_agent_lifecycle import ManagedBrowserError, tool_lease
+    timeout = args.get("timeout", 30.0)
+    try:
+        lease_timeout = float(timeout)
+    except (TypeError, ValueError):
+        lease_timeout = 30.0
+    try:
+        with tool_lease("browser_cdp", task_id or "default", min(max(lease_timeout, 1.0), 300.0)):
+            return browser_cdp(
+                method=args.get("method", ""), params=args.get("params"), target_id=args.get("target_id"),
+                frame_id=args.get("frame_id"), timeout=timeout, task_id=task_id,
+            )
+    except ManagedBrowserError as exc:
+        return tool_error(str(exc), method=args.get("method", ""))
+
+
 registry.register(
     name="browser_cdp",
     toolset="browser-cdp",
     schema=BROWSER_CDP_SCHEMA,
     handler=lambda args, **kw: routed_browser_handler(
         "browser_cdp", args,
-        fallback=lambda: browser_cdp(
-            method=args.get("method", ""), params=args.get("params"), target_id=args.get("target_id"),
-            frame_id=args.get("frame_id"), timeout=args.get("timeout", 30.0), task_id=kw.get("task_id"),
-        ),
+        fallback=lambda: _managed_browser_cdp(args, kw.get("task_id")),
         task_id=kw.get("task_id"), session_id=kw.get("session_id"),
     ),
     check_fn=_browser_cdp_check,

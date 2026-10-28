@@ -348,12 +348,26 @@ def _create_cloud_session_or_fallback(task_id: str, provider) -> dict[str, Any]:
         return session_info
 
 
+def _managed_lease_rotated(session_info: dict[str, Any]) -> bool:
+    """Inside a managed tool lease, a cached session attached through any other endpoint (an older
+    capability, or a pre-activation raw attach) must be re-created on the current lease."""
+    from tools.browser_agent_lifecycle import current_tool_lease
+    lease = current_tool_lease()
+    return bool(lease) and session_info.get("managed_lease") != lease
+
+
 def _create_session_for_key(task_id: str, force_local: bool) -> dict[str, Any]:
     """Fresh session for ``task_id`` (runs OUTSIDE the lock: cloud mode makes a network call).
     Precedence: CDP override > hybrid local sidecar (never real-profile) > cloud > local."""
     cdp_override = _cdp._get_cdp_override()
     if cdp_override and not force_local:
-        return _create_cdp_session(task_id, cdp_override)
+        info = _create_cdp_session(task_id, cdp_override)
+        from tools.browser_agent_lifecycle import current_tool_lease
+        if lease := current_tool_lease():
+            # Pin the session to its lease: a rotated capability must recreate the daemon's attach.
+            info["features"] = {**(info.get("features") or {}), "managed_agent": True}
+            info["managed_lease"] = lease
+        return info
     if force_local:
         return _create_local_session(task_id, allow_real_profile=False)
     provider = _cloud._get_cloud_provider()
@@ -382,6 +396,14 @@ def _get_session_info(task_id: Optional[str] = None) -> dict[str, Any]:
         with _bt._cleanup_lock:
             replacement = _bt._active_sessions.get(task_id)
         return replacement if replacement is not None and replacement is not existing_session else None
+
+    if existing_session is not None and _managed_lease_rotated(existing_session):
+        _bt.logger.info("Managed browser lease for task %s rotated; re-attaching its session", task_id)
+        _lifecycle._cleanup_single_browser_session(task_id)
+        replacement = _replacement_after_teardown()
+        if replacement is not None:
+            return replacement
+        existing_session = None
 
     if existing_session is not None:
         # Suspect recycle: a command timeout marked this session; the expensive recycle
@@ -900,6 +922,22 @@ def _run_browser_command(
         timeout = _bt._safe_command_timeout()
     args = args or []
 
+    from tools.browser_agent_lifecycle import ManagedBrowserError, tool_lease
+    tool = f"browser ({command})"
+    try:
+        if command == "close":
+            from tools.browser_agent_lifecycle import _managed_config
+            if _managed_config(tool) is not None:
+                # Cleanup never wakes an idle managed Chrome: releasing the owner lease closes its tabs.
+                return {"success": True, "data": {"closed": False, "reason": "managed browser: lease release owns tab cleanup"}}
+        with tool_lease(tool, _bt._bare_task_id_for_session_key(task_id or "default"), timeout):
+            return _run_browser_command_unleased(task_id, command, args, timeout, _engine_override)
+    except ManagedBrowserError as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def _run_browser_command_unleased(task_id: str, command: str, args: list[str], timeout: int,
+                                  _engine_override: Optional[str]) -> dict[str, Any]:
     preflight = _browser_command_preflight()
     if "browser_cmd" not in preflight:
         return preflight
@@ -931,6 +969,10 @@ def _run_browser_command(
     # Lightpanda automatic Chrome fallback — runs for ALL exit paths (timeout,
     # empty, non-JSON, nonzero rc, parsed).
     fallback_reason = _lp._lightpanda_fallback_reason(engine, command, result)
+    if fallback_reason and (session_info.get("features") or {}).get("managed_agent"):
+        # A managed Chrome session never retries in a temporary local Chrome outside its lease.
+        _bt.logger.info("Lightpanda fallback skipped for managed browser session (task=%s)", task_id)
+        fallback_reason = None
     if fallback_reason:
         _bt.logger.info("Lightpanda fallback: retrying '%s' with Chrome (task=%s): %s", command, task_id, fallback_reason)
         if command == "screenshot":  # separate Chrome session to the same URL

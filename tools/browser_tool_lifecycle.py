@@ -743,6 +743,9 @@ def _cleanup_single_browser_session(task_id: str) -> None:
             _bt.logger.warning("lightpanda stop failed for task %s: %s", task_id, e)
     elif _session_has_expired(session_info):
         _bt.logger.debug("Skipping agent-browser close for expired session %s", task_id)
+    elif (session_info.get("features") or {}).get("managed_agent"):
+        # The owner lease's release closes its tabs; a close here would wake an idle managed Chrome.
+        _bt.logger.debug("Skipping agent-browser close for managed browser session %s", task_id)
     else:
         try:
             _session._run_browser_command(task_id, "close", [], timeout=10)

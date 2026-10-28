@@ -64,10 +64,15 @@ def _get_cdp_override() -> str:
     """Resolved CDP URL override, or "" (skips cloud AND local launch).
 
     May perform HTTP ``/json/version`` discovery — only call on paths about to *connect*; pure gates must use
-    :func:`_get_cdp_override_raw`.
+    :func:`_get_cdp_override_raw`. Under ``browser.managed_agent`` the override resolves through the enclosing
+    tool lease's scoped endpoint, and raises ``ManagedBrowserError`` outside one (never the unscoped root).
     """
     _bt = _origin()
-    return _resolve_cdp_override(raw) if (raw := _get_cdp_override_raw()) else ""
+    raw = _get_cdp_override_raw()
+    if not raw:
+        return ""
+    from tools.browser_agent_lifecycle import scoped_override
+    return _resolve_cdp_override(scoped_override(raw) or raw)
 
 
 def _get_dialog_policy_config() -> tuple[str, float]:
@@ -108,7 +113,11 @@ def _ensure_cdp_supervisor(task_id: str) -> None:
     snapshots just lack ``pending_dialogs`` / ``frame_tree``.
     """
     _bt = _origin()
-    cdp_url = _get_cdp_override()
+    from tools.browser_agent_lifecycle import ManagedBrowserError
+    try:
+        cdp_url = _get_cdp_override()
+    except ManagedBrowserError:
+        cdp_url = ""  # outside a lease: only the session's own lease-scoped URL below, never the raw root
     if not cdp_url:
         with _bt._cleanup_lock:
             session_info = _bt._active_sessions.get(task_id, {})

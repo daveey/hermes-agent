@@ -85,7 +85,13 @@ def browser_dialog(
                 "Call browser_navigate or /browser connect first."
             ),
         })
-    result = supervisor.respond_to_dialog(action=action, prompt_text=prompt_text, dialog_id=dialog_id)
+    from tools.browser_agent_lifecycle import ManagedBrowserError, tool_lease
+    try:
+        # Managed Chrome: the supervisor's socket is lease-scoped; keep the owner lease live meanwhile.
+        with tool_lease("browser_dialog", task_id or "default", 30):
+            result = supervisor.respond_to_dialog(action=action, prompt_text=prompt_text, dialog_id=dialog_id)
+    except ManagedBrowserError as exc:
+        return json.dumps({"success": False, "error": str(exc)})
     if result.get("ok"):
         return json.dumps({"success": True, "action": action, "dialog": result.get("dialog", {})})
     return json.dumps({"success": False, "error": result.get("error", "unknown error")})

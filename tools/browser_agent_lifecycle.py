@@ -5,6 +5,7 @@ only keeps this process's capabilities for task-scoped release. A dead worker's
 request protection expires at the supervisor; open daemon sockets are not activity.
 """
 import contextlib
+import contextvars
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -121,7 +122,125 @@ def _validate_grant(config: dict, result: dict) -> None:
 def request_lease(config: dict, task_id: str | None, session: str, timeout: int, env: dict):
     if not task_id:
         raise ManagedBrowserError("Managed browser requires a tool task/session identity; refusing shared default ownership")
-    owner = (str(get_hermes_home()), task_id, f"named:{session}" if session else "default")
+    with _owner_lease(config, task_id, f"named:{session}" if session else "default", timeout, env) as grant:
+        yield grant
+
+
+# Owner scope of the built-in browser tools (agent-browser, browser_cdp, browser_dialog). It can
+# never collide with a browser_exec scope ("default" / "named:<session>").
+TOOLS_SCOPE = "tools"
+_tool_scope: contextvars.ContextVar = contextvars.ContextVar("hermes_managed_browser_tool_scope", default=None)
+
+
+def _managed_config(tool: str) -> dict | None:
+    """The managed route for built-in tools: ``browser.managed_agent`` matching the raw override."""
+    from tools.browser_use_cli import _read_browser_cfg
+    try:
+        return configured_route(_read_browser_cfg(), {})
+    except ManagedBrowserError as exc:
+        raise ManagedBrowserError(f"{tool}: {exc}") from None
+
+
+@contextlib.contextmanager
+def tool_lease(tool: str, task_id: str | None, timeout: float):
+    """Hold an owner lease on the managed Chrome while a built-in browser tool runs.
+
+    Yields None (and does nothing else) when ``browser.managed_agent`` does not match the selected
+    CDP override. Otherwise yields the lease-scoped HTTP root; :func:`scoped_override` returns it to
+    every CDP resolution inside the block, so nothing reaches the unscoped endpoint. Nested calls
+    for the same task reuse the outer lease. Released by :func:`release_task` / :func:`release_all`.
+    """
+    config = _managed_config(tool)
+    if config is None:
+        yield None
+        return
+    if not task_id:
+        raise ManagedBrowserError(f"{tool}: managed browser requires a task identity; refusing shared default ownership")
+    current = _tool_scope.get()
+    if current and current[:3] == (str(get_hermes_home()), task_id, config["endpoint"]):
+        yield current[3]
+        return
+    timeout = max(1, min(86400, int(timeout or 0) or 1))
+    try:
+        with _owner_lease(config, task_id, TOOLS_SCOPE, timeout, None) as grant:
+            token = _tool_scope.set((str(get_hermes_home()), task_id, config["endpoint"], grant["endpoint"]))
+            try:
+                yield grant["endpoint"]
+            finally:
+                _tool_scope.reset(token)
+    except ManagedBrowserError as exc:
+        message = str(exc)
+        raise ManagedBrowserError(message if message.startswith(tool + ":") else f"{tool}: {message}") from None
+
+
+def scoped_override(raw: str, tool: str = "browser") -> str:
+    """Lease-scoped replacement for the raw CDP override, "" when unmanaged.
+
+    Raises ManagedBrowserError when the override is the managed endpoint but no tool lease is held:
+    a caller outside :func:`tool_lease` must fail, never fall back to the unscoped root.
+    """
+    current = _tool_scope.get()
+    if current and current[2] == raw and current[0] == str(get_hermes_home()):
+        return current[3]
+    if _managed_config(tool) is None:
+        return ""
+    raise ManagedBrowserError(f"{tool}: managed Chrome requires an owner lease; this path ran outside one")
+
+
+def current_tool_lease() -> str:
+    """Lease endpoint held by the enclosing :func:`tool_lease`, or ""."""
+    current = _tool_scope.get()
+    return current[3] if current and current[0] == str(get_hermes_home()) else ""
+
+
+@contextlib.contextmanager
+def renew_selected(tool: str, task_id: str | None, timeout: float):
+    """Keep the scope the vault addresses (the last browser_exec or built-in tool scope) leased.
+
+    Unmanaged: no-op. No scope selected yet: a fresh built-in tool lease. A rotated capability
+    means the selected scope's tabs and supervisor are gone, so fail instead of acting elsewhere.
+    """
+    config = _managed_config(tool)
+    if config is None:
+        yield None
+        return
+    if not task_id:
+        raise ManagedBrowserError(f"{tool}: managed browser requires a task identity; refusing shared default ownership")
+    home = str(get_hermes_home())
+    with _lock:
+        selected = _vault_owners.get((home, task_id))
+        found = next(((key, record) for key, record in _leases.items()
+                      if key[:2] == (home, task_id) and key[3] == config["endpoint"]
+                      and record.supervisor == selected and record.capability and not record.closing), None)
+    if found is None or found[0][2] == TOOLS_SCOPE:
+        previous = found[1].capability if found else ""
+        with tool_lease(tool, task_id, timeout) as endpoint:
+            if previous and not endpoint.endswith("/lease/" + previous):
+                raise ManagedBrowserError(f"{tool}: the managed browser lease for this task expired, so its tabs "
+                                          "are gone; open the page again (browser_navigate) and retry")
+            yield endpoint
+        return
+    key, record = found
+    previous = record.capability
+    timeout = max(1, min(86400, int(timeout or 0) or 1))
+    try:
+        with _owner_lease(config, task_id, key[2], timeout, dict(record.env) if record.env else None) as grant:
+            if grant["capability"] != previous:
+                raise ManagedBrowserError(f"{tool}: the managed browser lease for the selected browser_exec "
+                                          "session expired, so its tabs are gone; run browser_exec in that "
+                                          "session again and retry")
+            yield grant["endpoint"]
+    except ManagedBrowserError as exc:
+        message = str(exc)
+        raise ManagedBrowserError(message if message.startswith(tool + ":") else f"{tool}: {message}") from None
+
+
+@contextlib.contextmanager
+def _owner_lease(config: dict, task_id: str, owner_session: str, timeout: int, env: dict | None):
+    """Acquire/complete one request on the owner's lease; ``env`` (browser_exec only) is pointed at the
+    lease and remembered so the harness daemon can be shut down on release. Without ``env`` the
+    scope is a built-in tool scope whose supervisor is keyed by the task id."""
+    owner = (str(get_hermes_home()), task_id, owner_session)
     key = (*owner, config["endpoint"])
     with _lock:
         pending = _leases.get(key)
@@ -136,22 +255,27 @@ def request_lease(config: dict, task_id: str | None, session: str, timeout: int,
     try:
         # Serialize this owner's grant mutation, never unrelated owners or cleanup.
         with record.lock:
+            extra = {"daemon_dir": _daemon_dir(env)} if env is not None else {}
             result = _post(config, "acquire", owner=list(owner), timeout_s=timeout,
-                           worker_pid=os.getpid(), daemon_dir=_daemon_dir(env))
+                           worker_pid=os.getpid(), **extra)
             _validate_grant(config, result)
             grant = result
-            env.pop("BU_CDP_WS", None)
-            env.update(BU_CDP_URL=grant["endpoint"], BU_NAME=grant["daemon_name"],
-                       BH_RUNTIME_DIR_SHARED="1", BH_TMP_DIR_SHARED="1", BU_AUTOSPAWN="0")
+            if env is not None:
+                env.pop("BU_CDP_WS", None)
+                env.update(BU_CDP_URL=grant["endpoint"], BU_NAME=grant["daemon_name"],
+                           BH_RUNTIME_DIR_SHARED="1", BH_TMP_DIR_SHARED="1", BU_AUTOSPAWN="0")
+            supervisor = supervisor_identity(task_id, grant["capability"]) if env is not None else task_id
             with _lock:
                 if record.capability and record.capability != grant["capability"]:
-                    record.retired.append(_Lease(record.config, capability=record.capability,
-                                                 env=record.env, supervisor=record.supervisor))
+                    # A built-in tool scope keeps its supervisor key across rotations: never let
+                    # disposing the old capability stop the supervisor the new one re-attaches.
+                    record.retired.append(_Lease(record.config, capability=record.capability, env=record.env,
+                                                 supervisor="" if record.supervisor == supervisor else record.supervisor))
                 record.capability = grant["capability"]
-                record.env = dict(env)
-                record.supervisor = supervisor_identity(task_id, record.capability)
+                record.env = dict(env) if env is not None else {}
+                record.supervisor = supervisor
                 _vault_owners[owner[:2]] = record.supervisor
-        yield
+        yield grant
     finally:
         if grant:
             try:

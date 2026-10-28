@@ -1356,10 +1356,22 @@ def _routed_check_fn(name: str):
     return check
 
 
+def _managed_tool_call(name: str, task_id, fn):
+    """Run a built-in browser tool inside an owner lease when ``browser.managed_agent`` applies (a
+    no-op otherwise); a lease failure is a clear tool error naming the tool, never a raw-endpoint retry."""
+    from tools.browser_agent_lifecycle import ManagedBrowserError, tool_lease
+    try:
+        with tool_lease(name, task_id or "default", _safe_command_timeout()):
+            return fn()
+    except ManagedBrowserError as exc:
+        return json.dumps({"success": False, "error": str(exc)})
+
+
 def _routed_handler(name: str, fallback):
     def handler(args, **kw):
         return record_browser_call(lambda legacy: routed_browser_handler(
-            name, args, fallback=lambda: legacy(lambda: fallback(args, kw)),
+            name, args, fallback=lambda: legacy(lambda: _managed_tool_call(
+                name, kw.get("task_id"), lambda: fallback(args, kw))),
             task_id=kw.get("task_id"), session_id=kw.get("session_id"),
         ), _cloud.browser_backend_name)
     return handler
