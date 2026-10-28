@@ -30,6 +30,7 @@ import { sessionCreatedAt } from '@/lib/session-branch-tree'
 import { sessionMatchesSearch } from '@/lib/session-search'
 import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
 import { cn } from '@/lib/utils'
+import { markSidebarFirstRows } from '@/store/boot-snapshot'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $activeConnectionId } from '@/store/connections'
 import { $cronJobs } from '@/store/cron'
@@ -1599,6 +1600,16 @@ export function ChatSidebar({
   // off the filtered one, a filter that matches nothing showed skeletons on
   // every background refresh instead of the empty state.
   const showSessionSkeletons = sessionsLoading && scopedSessions.length === 0
+
+  // [daveey] Cold-start timing: when this launch's sidebar first drew rows, and whether they were live or the boot
+  // snapshot (hub.db rows / last projects tree) painted before the backend was up.
+  const drawnRows = sortedSessions.length + (projectOverview?.length ?? 0)
+
+  useEffect(() => {
+    if (drawnRows > 0) {
+      markSidebarFirstRows(drawnRows, !sessionsLoading)
+    }
+  }, [drawnRows, sessionsLoading])
 
   // Filtered down to nothing still renders the section: the empty state is what
   // tells you the filter — not an empty account — is why the list is bare.

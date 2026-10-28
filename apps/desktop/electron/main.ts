@@ -581,6 +581,7 @@ import {
   SESSION_WINDOW_MIN_WIDTH
 } from './session-windows'
 import { ensureLoginShellPath } from './shell-path'
+import { installSidebarBootSnapshot } from './sidebar-boot-snapshot'
 import { removeStaleSingletonLock } from './singleton-lock'
 import { createSourcePythonBackend, resolveSourceInstallationBackend, type SourceBackend } from './source-backend'
 import { resolveSourcePython } from './source-python'
@@ -19502,6 +19503,19 @@ app.whenReady().then(() => {
   void minimizeToTray.start()
   mainProcessLagWatchdog.start()
   f12Blocked = readPersistedDisableF12()
+
+  // [daveey] Sidebar boot snapshot (cold start): hub.db sessions + the last projects tree,
+  // read by the first window over sync IPC so the sidebar paints before the backend is up.
+  try {
+    installSidebarBootSnapshot({
+      appStartMs: Math.round(Date.now() - process.uptime() * 1000),
+      ipcMain,
+      log: line => rememberLog(`[sidebar-boot] ${line}`),
+      userDataDir: app.getPath('userData')
+    })
+  } catch (error) {
+    rememberLog(`[sidebar-boot] disabled: ${(error as Error)?.message || error}`)
+  }
 
   // [daveey] Local transcript cache + prefetch (instant session loads, C1). Before the
   // first window: the renderer's cache read is a sync IPC. Prefetch waits out boot.

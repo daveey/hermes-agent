@@ -9,6 +9,7 @@ import { useI18n } from '@/i18n'
 import { isOnboardingEnabled } from '@/lib/onboarding-enabled'
 import { cn } from '@/lib/utils'
 import { $desktopBoot, type DesktopBootState } from '@/store/boot'
+import { $bootSnapshot } from '@/store/boot-snapshot'
 import { $gatewaySwitching } from '@/store/gateway-switch'
 import { $onboardingStateRead } from '@/store/onboarding-gate'
 import { $introStartExit, $introView } from '@/store/onboarding-intro'
@@ -48,15 +49,21 @@ function forcedPreview(): boolean {
 // gateway state back to closed/error while the app reconnects. Do not cover
 // the chat then — users should still be able to type drafts, open settings,
 // and recover instead of staring at a modal CONNECTING screen.
-function isInitialConnect(
+//
+// [daveey] A cold boot whose sidebar already painted from the boot snapshot (hub.db rows / last projects tree) is
+// treated the same way: the shell shows those rows while the backend starts, instead of a blank CONNECTING screen.
+export function isInitialConnect(
   boot: DesktopBootState,
   gatewaySwitching: boolean,
   gatewayState: ConnectionState,
-  coldBootDone: boolean
+  coldBootDone: boolean,
+  snapshotPainted = false
 ): boolean {
   const initialBootActive = boot.visible || boot.running || boot.progress < 100
 
-  return !coldBootDone && !gatewaySwitching && gatewayState !== 'open' && !boot.error && initialBootActive
+  return (
+    !coldBootDone && !snapshotPainted && !gatewaySwitching && gatewayState !== 'open' && !boot.error && initialBootActive
+  )
 }
 
 interface ConnectingOverlayViewProps {
@@ -136,7 +143,8 @@ export function GatewayConnectingOverlay() {
     coldBootDoneRef.current = true
   }
 
-  const connecting = isInitialConnect(boot, gatewaySwitching, gatewayState, coldBootDoneRef.current)
+  const snapshotPainted = useStore($bootSnapshot).painted
+  const connecting = isInitialConnect(boot, gatewaySwitching, gatewayState, coldBootDoneRef.current, snapshotPainted)
 
   // Latches once we've actually shown the overlay, so the brief frame where
   // gatewayState flips to "open" (connecting -> false) before the exit phase
@@ -149,8 +157,13 @@ export function GatewayConnectingOverlay() {
 
   // The first-run intro's `starting` screen is this overlay: it stays up until the backend says
   // whether the intro runs and, if it does, until the setup chat is open.
+  // A painted boot snapshot means this Desktop has run before (a live backend saved it), so no first-run hold.
   const introHolds =
-    !previewing && isMainWindow() && isOnboardingEnabled() && (!onboardingStateRead || introView === 'starting')
+    !previewing &&
+    !snapshotPainted &&
+    isMainWindow() &&
+    isOnboardingEnabled() &&
+    (!onboardingStateRead || introView === 'starting')
 
   // Kick off the exit when connected: real connect, or a faked timer in preview.
   useEffect(() => {

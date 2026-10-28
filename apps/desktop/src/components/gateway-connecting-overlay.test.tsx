@@ -2,6 +2,7 @@ import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { $desktopBoot } from '@/store/boot'
+import { $bootSnapshot, _resetBootSnapshotForTests } from '@/store/boot-snapshot'
 import { $gatewaySwitching } from '@/store/gateway-switch'
 import { $desktopOnboarding } from '@/store/onboarding'
 import { setGatewayState } from '@/store/session'
@@ -49,7 +50,10 @@ function resetStores() {
   })
 }
 
-beforeEach(resetStores)
+beforeEach(() => {
+  resetStores()
+  _resetBootSnapshotForTests()
+})
 afterEach(cleanup)
 
 // The connecting overlay renders "CONN" + a scrambled tail inside one
@@ -171,6 +175,30 @@ describe('connecting overlay vs recovery surface', () => {
     // Escape hatch is reachable; the connecting overlay bows out.
     expect(isRecoveryShown()).toBe(true)
     expect(screen.getByRole('button', { name: /gateway settings/i })).toBeTruthy()
+    expect(isConnectingShown()).toBe(false)
+  })
+})
+
+// [daveey] Cold start with a boot snapshot (hub.db rows / last projects tree already painted in the sidebar): the shell
+// stays visible while the backend starts, exactly like a post-boot reconnect. Without one, cold boot still covers.
+describe('connecting overlay vs the sidebar boot snapshot', () => {
+  const coldBoot = () =>
+    $desktopBoot.set({ ...$desktopBoot.get(), progress: 10, running: true, visible: true, error: null })
+
+  it('a cold boot with no snapshot still shows CONNECTING', () => {
+    setGatewayState('connecting')
+    coldBoot()
+    render(<GatewayConnectingOverlay />)
+
+    expect(isConnectingShown()).toBe(true)
+  })
+
+  it('a cold boot whose sidebar painted from the snapshot keeps the shell visible', () => {
+    setGatewayState('connecting')
+    coldBoot()
+    $bootSnapshot.set({ ...$bootSnapshot.get(), painted: true })
+    render(<GatewayConnectingOverlay />)
+
     expect(isConnectingShown()).toBe(false)
   })
 })

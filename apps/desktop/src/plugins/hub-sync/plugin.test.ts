@@ -6,13 +6,23 @@ import plugin from './plugin'
 // [daveey] The hub-sync Desktop half is a service now: cached sessions flow
 // into the ordinary sidebar list; it contributes no sidebar section of its own.
 
-const api = vi.hoisted(() => ({ cursor: 1 as null | number, loads: 0 }))
+const api = vi.hoisted(() => ({
+  cursor: 1 as null | number,
+  loads: 0,
+  published: [] as unknown[][],
+  rows: [] as unknown[] | null
+}))
+
+vi.mock('@hermes/plugin-sdk', async importOriginal => ({
+  ...(await importOriginal<object>()),
+  publishOfflineSessions: (rows: unknown[]) => void api.published.push(rows)
+}))
 
 vi.mock('./api', () => ({
   loadReplicaSidebarRows: vi.fn(async () => {
     api.loads++
 
-    return []
+    return api.rows
   }),
   replicaCursor: vi.fn(async () => api.cursor)
 }))
@@ -67,6 +77,32 @@ describe('hub-sync plugin: replica cursor polling (instant loads)', () => {
       expect(api.loads).toBeGreaterThan(afterFirst + 1)
       disposers.forEach(dispose => dispose())
     } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('hub-sync plugin: a failed replica read publishes nothing (cold start)', () => {
+  it('publishes nothing while the read has no answer, and publishes once it does', async () => {
+    vi.useFakeTimers()
+
+    try {
+      api.published = []
+      api.rows = null // backend still starting: hub-sync answers nothing
+      const { ctx, disposers } = fakeContext()
+      plugin.register(ctx as never)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(api.published).toEqual([]) // the rows already showing (boot snapshot / last poll) stay
+
+      api.rows = [{ id: 's_mini' }]
+      api.cursor = 99
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(api.published).toEqual([[{ id: 's_mini' }]])
+      disposers.forEach(dispose => dispose())
+    } finally {
+      api.rows = []
       vi.useRealTimers()
     }
   })

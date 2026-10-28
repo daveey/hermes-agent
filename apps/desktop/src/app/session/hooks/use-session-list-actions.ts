@@ -8,6 +8,7 @@ import {
   normalizeSessionSource,
   SIDEBAR_EXCLUDED_SOURCES
 } from '@/lib/session-source'
+import { markSidebarLive } from '@/store/boot-snapshot'
 import { gatewayActivationEpoch, primaryGatewayConnectionId } from '@/store/gateway'
 import {
   $pinnedSessionIds,
@@ -81,6 +82,11 @@ function recordSidebarFreshness(result: Awaited<ReturnType<typeof listSidebarSes
             ],
             recents.failed === true || recents.retry === true
           )
+
+  // [daveey] Cold-start timing: the first live list this launch.
+  if (recents.failed !== true && recents.retry !== true) {
+    markSidebarLive()
+  }
 }
 
 // The messaging slice is the inverse: drop cron + every local source so only

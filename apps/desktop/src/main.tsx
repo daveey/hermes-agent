@@ -31,6 +31,8 @@ import { installClipboardShim } from './lib/clipboard'
 import { queryClient } from './lib/query-client'
 import { installRendererAnimationPauseState } from './lib/renderer-loop-pause'
 import { installSelectionCopyColorGuard } from './lib/selection-copy-colors'
+import { applyBootSnapshot } from './store/boot-snapshot'
+import { isMainWindow } from './store/windows'
 import { ThemeProvider } from './themes/context'
 
 installClipboardShim()
@@ -85,6 +87,12 @@ if (winParam === 'overlay') {
   // main window's visibility state to :root so decorative infinite
   // animations stop producing frames when nobody can see them.
   installRendererAnimationPauseState()
+
+  // [daveey] Paint the sidebar from the boot snapshot (hub.db rows + last projects tree) before the
+  // backend is up. Main window only: secondary windows open after boot, against a live backend.
+  if (isMainWindow()) {
+    applyBootSnapshot()
+  }
 
   createRoot(document.getElementById('root')!).render(
     <StrictMode>

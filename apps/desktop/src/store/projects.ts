@@ -75,6 +75,7 @@ export const $projects = atom<ProjectInfo[]>([])
 
 // The atom itself lives in ./project-tree (a leaf); re-exported here so every
 // existing import path keeps working — projects.ts remains its only writer.
+import { saveBootTree } from './boot-snapshot'
 import { $projectTree } from './project-tree'
 export { $projectTree }
 export const $activeProjectId = atom<null | string>(null)
@@ -638,6 +639,8 @@ function applyProjectTreePayload(res: ProjectTreePayload, owner: ProjectRowOwner
     )
   )
   $activeProjectId.set(res.active_id ?? null)
+  // [daveey] The next cold start paints this tree before the backend is up.
+  saveBootTree(owner.connectionId, res.active_id ?? null)
   const tombstones = $removedSessionIds.get()
 
   if (tombstones.size) {

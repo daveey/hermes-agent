@@ -73,6 +73,23 @@ declare global {
       // a prompt turn leases the backend (early skip for cooperative
       // retirement; the backend probe is the proof).
       touchBackend: (profile?: string | null, options?: { activeTurn?: boolean }) => Promise<{ ok: boolean }>
+      // [daveey] Sidebar boot snapshot (Electron main): hub.db session rows + the last projects tree, read once
+      // by the first window so the sidebar paints before the backend is up.
+      bootSnapshot?: {
+        read: () => null | {
+          appStartMs: number
+          hub: null | {
+            available: true
+            gateway: null | string
+            sessions: Record<string, unknown>[]
+            stale: boolean
+            synced_at: null | number
+          }
+          readMs: number
+          tree: null | { activeProjectId: null | string; connectionId: string; savedAt: number; tree: unknown[] }
+        }
+        saveTree: (payload: { activeProjectId: null | string; connectionId: string; tree: unknown[] }) => void
+      }
       // [daveey] Local transcript cache (Electron main, SQLite). Raw /messages rows keyed by
       // (connection, profile, stored session id); '' connection means the registry primary.
       transcriptCache?: {

@@ -59,8 +59,13 @@ export async function replicaCursor(): Promise<null | number> {
 /**
  * Status failure invalidates retained lists. Status success cannot repair a
  * failed owner list: only its next successful sidebar refresh can do that.
+ *
+ * [daveey] null = no answer (backend still starting, hub-sync unavailable): publish nothing, so a failed read never
+ * wipes rows already showing (the cold-start boot snapshot's, or the last good poll's).
  */
-export async function loadReplicaSidebarRows(shouldPublish: () => boolean = () => true): Promise<HubSessionRow[]> {
+export async function loadReplicaSidebarRows(
+  shouldPublish: () => boolean = () => true
+): Promise<HubSessionRow[] | null> {
   const primary = hubReplicaConnectionId()
 
   // The replica read is local and answers in milliseconds; never wait on the reachability probes (each one goes over
@@ -68,11 +73,11 @@ export async function loadReplicaSidebarRows(shouldPublish: () => boolean = () =
   void markUnreachableGateways(primary)
   const result = await hubGet<{ sessions?: HubSessionRow[] }>(`/sessions?limit=${REPLICA_LIMIT}`, primary)
 
-  if (!shouldPublish()) {
-    return []
+  if (!shouldPublish() || !result || !Array.isArray(result.sessions)) {
+    return null
   }
 
-  const rows = Array.isArray(result?.sessions) ? result.sessions : []
+  const rows = result.sessions
   const primaryName = hubGatewayForConnection(primary)
 
   // A live owner list wins over the replica only once it is fresh; until then (a cold start) the replica rows show.

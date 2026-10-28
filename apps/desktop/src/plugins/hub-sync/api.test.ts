@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // probes (each one is an SSH round trip); a live owner list hides them only once it is fresh.
 
 const sdk = vi.hoisted(() => ({
+  down: false,
   fresh: new Set<string>(),
   statusCalls: 0,
   unavailable: [] as string[]
@@ -17,6 +18,10 @@ vi.mock('@hermes/plugin-sdk', () => ({
   hubGatewayForConnection: (c: string) => (c === 'local' ? 'macbook' : undefined),
   hubGet: vi.fn(async (path: string, conn: string) => {
     if (path.startsWith('/sessions')) {
+      if (sdk.down) {
+        return null
+      }
+
       return { sessions: [ROW('mini', 's_m'), ROW('hub', 's_h'), ROW('macbook', 's_l')] }
     }
 
@@ -35,6 +40,7 @@ import { loadReplicaSidebarRows } from './api'
 
 describe('loadReplicaSidebarRows', () => {
   beforeEach(() => {
+    sdk.down = false
     sdk.fresh.clear()
     sdk.statusCalls = 0
   })
@@ -55,5 +61,11 @@ describe('loadReplicaSidebarRows', () => {
     const rows = (await loadReplicaSidebarRows()) as Array<{ id: string }>
 
     expect(rows.map(r => r.id)).toEqual(['s_h'])
+  })
+
+  it('answers null (publish nothing) when the replica read has no answer, never an empty list', async () => {
+    sdk.down = true
+
+    expect(await loadReplicaSidebarRows()).toBeNull()
   })
 })

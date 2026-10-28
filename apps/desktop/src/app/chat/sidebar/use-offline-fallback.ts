@@ -10,15 +10,17 @@ import { useCallback, useMemo } from 'react'
 import type { SessionInfo } from '@/hermes'
 import { markOpenClick } from '@/lib/open-timing'
 import { clearAsleepOpen, hasCachedTranscriptFor, markAsleepOpen } from '@/store/asleep-session'
+import { $sidebarFallbackSessions } from '@/store/boot-snapshot'
 import { notify } from '@/store/notifications'
 import { offlineOpenNotice } from '@/store/offline-session-actions'
-import { $offlineSessions, $sessionListFreshness, mergeOfflineFallback } from '@/store/offline-sessions'
+import { $sessionListFreshness, mergeOfflineFallback } from '@/store/offline-sessions'
 
 export function useOfflineFallback(
   liveSessions: SessionInfo[],
   resumeSession: (sessionId: string, session?: SessionInfo) => void
 ) {
-  const offlineSessions = useStore($offlineSessions)
+  // [daveey] Plugin rows of unreachable gateways + the cold-start boot snapshot's rows.
+  const offlineSessions = useStore($sidebarFallbackSessions)
   const freshness = useStore($sessionListFreshness)
 
   const sessions = useMemo(

@@ -44,6 +44,11 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   getProfileRoutes: profiles => ipcRenderer.invoke('hermes:plugin-profile-routes', profiles),
   revalidateConnection: () => ipcRenderer.invoke('hermes:connection:revalidate'),
   touchBackend: (profile, options) => ipcRenderer.invoke('hermes:backend:touch', profile, options),
+  // [daveey] Sidebar boot snapshot (cold start): read once, synchronously, before the backend is up.
+  bootSnapshot: {
+    read: () => ipcRenderer.sendSync('hermes:boot-snapshot:read'),
+    saveTree: payload => ipcRenderer.send('hermes:boot-snapshot:save-tree', payload)
+  },
   // [daveey] Local transcript cache (instant session loads). `read` is synchronous so a
   // click paints the cached transcript in the same tick; writes are fire-and-forget.
   transcriptCache: {

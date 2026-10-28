@@ -156,7 +156,9 @@ export function recordSessionListResult(
 export function offlineSessionsFromReplica(
   records: readonly OfflineReplicaRecord[],
   connectionForGateway: (gateway: string) => string | undefined,
-  nowS: number = Date.now() / 1000
+  nowS: number = Date.now() / 1000,
+  // [daveey] The cold-start boot snapshot also shows this gateway's own (`local`) rows until its live list arrives.
+  { includeLocal = false }: { includeLocal?: boolean } = {}
 ): SessionInfo[] {
   // Read lazily: callers that mock @/lib/session-source never reach the conversion.
   const excluded = new Set<string>(SIDEBAR_EXCLUDED_SOURCES)
@@ -186,7 +188,7 @@ export function offlineSessionsFromReplica(
   for (const record of byId.values()) {
     const connectionId = connectionForGateway(record.gateway)
 
-    if (connectionId && isRecentsEligible(record, excluded) && !superseded.has(record)) {
+    if (connectionId && isRecentsEligible(record, excluded, includeLocal) && !superseded.has(record)) {
       out.push(rowFromRecord(record, connectionId, lineageOf(record, parentOf), nowS))
     }
   }
@@ -200,11 +202,11 @@ const recordKey = (record: OfflineReplicaRecord, id: string) =>
 const isCompressionAncestor = (record: OfflineReplicaRecord) => record.end_reason === 'compression'
 
 /** The normal recents rule: no excluded source, not empty/archived/hidden, has a title. */
-function isRecentsEligible(record: OfflineReplicaRecord, excluded: ReadonlySet<string>): boolean {
+function isRecentsEligible(record: OfflineReplicaRecord, excluded: ReadonlySet<string>, includeLocal: boolean): boolean {
   const source = normalizeSessionSource(record.source)
 
   return !(
-    record.local ||
+    (record.local && !includeLocal) ||
     record.archived ||
     record.hidden ||
     (source && excluded.has(source)) ||
