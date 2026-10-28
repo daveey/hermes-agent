@@ -154,7 +154,10 @@ def kanban_command(args: argparse.Namespace) -> int:
     if _is_delegated_child_cli_mutation(args):
         from hermes_cli.top_level_env import delegated_child_refusal  # names a leaked worker env [daveey]
         return _err(delegated_child_refusal(
-            "kanban: delegate_task child contexts cannot mutate Kanban tasks via the CLI"))
+            "kanban: delegate_task child contexts cannot mutate Kanban tasks via the CLI "
+            "(this shell descends from a Kanban worker or a delegate_task child, whose terminals "
+            "are fenced from board writes by design; make the change with the agent's kanban_* "
+            "tools, e.g. kanban_comment, kanban_block, kanban_link, kanban_unlink, kanban_create)"))
 
     # Origin obligations are profile-local, not current-board state; do not
     # auto-initialize a board or route by a worker's inherited board override.
@@ -538,8 +541,10 @@ def _cmd_list(args: argparse.Namespace) -> int:
     if args.mine and not assignee:
         assignee = _profile_author()
     with kbc.connect_closing() as conn:
-        # Cheap mini-dispatch so list reflects dependencies cleared since the last tick.
-        kb.recompute_ready(conn)
+        # Cheap mini-dispatch so list reflects dependencies cleared since the last tick. It is a
+        # write, so a fenced worker/delegate shell skips it: listing must not fail there. [daveey]
+        with contextlib.suppress(PermissionError):
+            kb.recompute_ready(conn)
         tasks = kb.list_tasks(
             conn, assignee=assignee, status=args.status, tenant=args.tenant, session_id=args.session,
             include_archived=args.archived, order_by=getattr(args, "sort", None),

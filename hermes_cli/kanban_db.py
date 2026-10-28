@@ -558,13 +558,34 @@ def _board_path(
     board, else ``board_dir(slug)/leaf``."""
     pin = os.environ.get(env_var, "").strip() if env_var else ""
     slug = _explicit_board_slug(board)
-    if pin and (slug is None or _explicit_board_intent_pinned()):
+    if pin and (slug is None or (_explicit_board_intent_pinned()
+                                 and not _descendant_may_follow_explicit_board(slug))):
         return Path(pin).expanduser()
     if slug is None:
         slug = get_current_board()
     if slug == DEFAULT_BOARD:
         return kanban_home().joinpath(*default_parts)
     return board_dir(slug) / leaf
+
+
+def _descendant_may_follow_explicit_board(slug: str) -> bool:
+    """A worker-terminal descendant's explicit board wins over the pin when the board's own DB
+    stays inside the write fence (:func:`agent.delegation_context.explicit_board_resolves_inside_fence`).
+    Machine flows (:func:`pin_first_board_resolution`) never follow it. [daveey]"""
+    if _PIN_FIRST_BOARD_RESOLUTION.get():
+        return False
+    from agent.delegation_context import explicit_board_resolves_inside_fence
+    return explicit_board_resolves_inside_fence(board_own_db_path(slug))
+
+
+def board_own_db_path(slug: Optional[str]) -> Path:
+    """The board's own ``kanban.db``, ignoring every env pin: ``<root>/kanban.db`` for
+    ``default``, else ``board_dir(slug)/kanban.db``. For read-only listings that must describe
+    each board (``boards list`` counts), never for routing a write. [daveey]"""
+    s = _slug_or_default(slug)
+    if s == DEFAULT_BOARD:
+        return kanban_home() / "kanban.db"
+    return board_dir(s) / "kanban.db"
 
 
 def kanban_db_path(board: Optional[str] = None) -> Path:

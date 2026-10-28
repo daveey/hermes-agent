@@ -427,13 +427,34 @@ class BaseEnvironment(ABC):
         return shlex.quote(path)
 
     def _wrap_command(self, command: str, cwd: str) -> str:
-        """Full bash script: source snapshot, cd, run, re-dump env, emit CWD markers."""
+        """Full bash script: source snapshot, cd, run, re-dump env, emit CWD markers.
+
+        Inside a delegate_task child the script reads and writes that child's overlay snapshot
+        (falling back to the enclosing child's, then the parent's), because children share the
+        parent's environment object: without it a child's ``export HERMES_KANBAN_DB=...`` landed
+        in the shared snapshot and every later parent command sourced it. [daveey]"""
+        kwargs = self._snapshot_script_kwargs(cwd)
+        fallbacks: list[str] = []
+        from agent.delegation_context import delegated_child_scope_chain
+        chain = delegated_child_scope_chain()
+        if chain:
+            paths = [self._child_snapshot_path(scope) for scope in chain]
+            own = paths[-1]
+            fallbacks = [self._quote_shell_path(p) for p in reversed(paths[:-1])]
+            fallbacks.append(kwargs["quoted_snap"])
+            kwargs["quoted_snap"] = self._quote_shell_path(own)
+            kwargs["snap_tmp_template"] = self._quote_shell_path(own + _SNAP_TMP_SUFFIX)
         return _wrap_command_script(
             command,
             passthrough_names=self._snapshot_excluded_passthrough_names(),
             snapshot_ready=self._snapshot_ready,
             persist_env=self._persist_env,
-            **self._snapshot_script_kwargs(cwd))
+            fallback_snaps=fallbacks,
+            **kwargs)
+
+    def _child_snapshot_path(self, scope: str) -> str:
+        """Per-delegate-child overlay next to the session snapshot (``…-<session>.child-<id>.sh``)."""
+        return f"{self._snapshot_path.removesuffix('.sh')}.child-{scope}.sh"
 
     @staticmethod
     def _embed_stdin_heredoc(command: str, stdin_data: str) -> str:

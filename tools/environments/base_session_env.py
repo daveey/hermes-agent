@@ -28,7 +28,7 @@ from typing import Iterable
 # name/prefix instead of grepping declare lines (see below / issue #71296).
 _SNAPSHOT_EXCLUDED_ENV_REGEX = (
     "^declare -x (HERMES_SESSION_|HERMES_UI_SESSION_ID|HERMES_CRON_AUTO_DELIVER_|"
-    "HERMES_CRON_SESSION|HERMES_BROWSER_CONTROL_|HERMES_DELEGATED_CHILD_CONTEXT|"
+    "HERMES_CRON_SESSION|HERMES_BROWSER_CONTROL_|HERMES_DELEGATED_CHILD_CONTEXT|HERMES_DELEGATED_CHILD_OWNER|"
     "HERMES_RPC_|HERMES_KERNEL_DIR)")
 _SHELL_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -76,7 +76,8 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
         # Scope markers stamped onto a delegate_task child's / cron run's subprocess
         # env; a snapshot taken inside that window would re-assert them on every
         # later ``source`` and fence the PARENT session's kanban CLI (#90782).
-        "HERMES_DELEGATED_CHILD_CONTEXT HERMES_CRON_SESSION "
+        # The owner token rides with the marker. [daveey]
+        "HERMES_DELEGATED_CHILD_CONTEXT HERMES_DELEGATED_CHILD_OWNER HERMES_CRON_SESSION "
         # Remote code-execution channel vars (RPC token, kernel/rpc dirs): a
         # leaked token in the snapshot would re-export into every later command
         # on the backend and outlive the private dir it protects.
@@ -129,13 +130,29 @@ def _passthrough_save_restore(names: Iterable[str]) -> tuple[list[str], list[str
     return save, restore
 
 
+def _source_snapshot_line(quoted_snap: str, fallback_snaps: Iterable[str]) -> str:
+    """``source`` the first existing snapshot: *quoted_snap* itself, else each fallback in order.
+    A delegate_task child writes its own overlay snapshot and falls back to its parent's, so it
+    starts from the parent's shell state while its exports stay out of the parent's file. [daveey]"""
+    fallbacks = list(fallback_snaps)
+    if not fallbacks:
+        return f"source {quoted_snap} >/dev/null 2>&1 || true"
+    chain = [quoted_snap, *fallbacks]
+    branches = [f"{'if' if i == 0 else 'elif'} [ -f {snap} ]; then source {snap} >/dev/null 2>&1 || true"
+                for i, snap in enumerate(chain)]
+    return "; ".join(branches) + "; fi"
+
+
 def _wrap_command_script(
     command: str, *, quoted_cwd: str, quoted_snap: str, snap_tmp_template: str,
     passthrough_names: Iterable[str], snapshot_ready: bool, cwd_marker: str,
-    persist_env: bool = True) -> str:
+    persist_env: bool = True, fallback_snaps: Iterable[str] = ()) -> str:
     """Per-command bash script: source snapshot, cd, run, re-dump env, emit CWD marker.
     ``persist_env=False`` skips the re-dump, so every command starts from the login-time
     snapshot and exports from one command never reach the next (the CWD marker still runs).
+    ``fallback_snaps`` are read (first existing wins) while *quoted_snap* does not exist yet;
+    the re-dump always writes *quoted_snap* (a delegate child's overlay, see
+    ``_source_snapshot_line``).
     ``source`` stdout goes to /dev/null because macOS bash 3.2 / some Homebrew builds echo
     ``declare -x`` lines when sourcing. AI_AGENT/HERMES_AGENT advertise the harness to remote
     backends (whose env is not inherited); ``${VAR:-default}`` never clobbers an outer harness.
@@ -149,7 +166,7 @@ def _wrap_command_script(
     save, restore = _passthrough_save_restore(passthrough_names)
     parts = list(save)
     if snapshot_ready:
-        parts.append(f"source {quoted_snap} >/dev/null 2>&1 || true")
+        parts.append(_source_snapshot_line(quoted_snap, fallback_snaps))
     parts += restore
     parts += [
         'export AI_AGENT="${AI_AGENT:-hermes-agent}" HERMES_AGENT="${HERMES_AGENT:-true}"',

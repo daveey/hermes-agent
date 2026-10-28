@@ -16,6 +16,11 @@ from contextvars import ContextVar, Token
 from typing import Iterator, Mapping, MutableMapping, overload
 
 _DELEGATED_CHILD_CONTEXT: ContextVar[bool] = ContextVar("hermes_delegated_child_context", default=False)
+# One opaque id per entered delegate_task child, outermost first. delegate_task children share
+# the parent's terminal environment (the #16177 shared-container intent), so the terminal keys a
+# per-child bash snapshot overlay on these ids: a child's ``export`` persists for that child's
+# later commands but never reaches the parent's (or a sibling's) shell. [daveey]
+_DELEGATED_CHILD_SCOPE: ContextVar[tuple[str, ...]] = ContextVar("hermes_delegated_child_scope", default=())
 # Any in-process execution that is NOT the dispatcher-owned worker (cron jobs). Kept separate
 # so delegate_task-specific behaviour (subprocess env scrubbing, its error strings) is unchanged.
 _NON_DISPATCHER_OWNED_CONTEXT: ContextVar[bool] = ContextVar("hermes_non_dispatcher_owned_context", default=False)
@@ -103,19 +108,29 @@ def delegated_child_context(session_id: str | None = None) -> Iterator[None]:
     """Mark child execution and isolate its task-local session identity. Even a context
     entered without an id must restore the parent's session ContextVar (child
     construction calls ``set_current_session_id``)."""
+    import uuid
+
     token = _DELEGATED_CHILD_CONTEXT.set(True)
+    scope_token = _DELEGATED_CHILD_SCOPE.set((*_DELEGATED_CHILD_SCOPE.get(), uuid.uuid4().hex[:12]))
     try:
         from gateway.session_context import scoped_current_session_id  # lazy: it calls is_delegated_child_context()
 
         with scoped_current_session_id(session_id):
             yield
     finally:
+        _DELEGATED_CHILD_SCOPE.reset(scope_token)
         _DELEGATED_CHILD_CONTEXT.reset(token)
 
 
 def is_delegated_child_context() -> bool:
     """Return True while code is running for a delegate_task child."""
     return bool(_DELEGATED_CHILD_CONTEXT.get())
+
+
+def delegated_child_scope_chain() -> tuple[str, ...]:
+    """Ids of the delegate_task children this code runs inside, outermost first (``()`` outside
+    any child). Used to give each child its own terminal snapshot overlay. [daveey]"""
+    return _DELEGATED_CHILD_SCOPE.get() if _DELEGATED_CHILD_CONTEXT.get() else ()
 
 
 def enter_non_dispatcher_owned_context() -> Token[bool]:
@@ -164,6 +179,25 @@ def explicit_board_intent_is_pinned() -> bool:
     if os.environ.get(DELEGATED_CHILD_ENV_MARKER):
         return True
     return bool((os.environ.get("HERMES_KANBAN_TASK") or "").strip())
+
+
+def explicit_board_resolves_inside_fence(path: os.PathLike[str] | str) -> bool:
+    """Whether a spawned descendant's explicit board (``hermes kanban --board B`` run from a
+    worker's terminal) may resolve to *path*, its own board file, instead of the inherited
+    ``HERMES_KANBAN_DB`` pin. [daveey]
+
+    Only for a process fenced by an inherited env marker alone: not an in-process delegate child
+    and not the dispatcher-owned worker (``HERMES_KANBAN_TASK``), whose tools stay pinned. And
+    only when *path* is itself fenced (under the lineage's board root), so writes there are still
+    refused by ``kanban_db._assert_not_delegated_child_mutation``: the descendant gains reads of
+    the board it named, never a write outside the fence. Without this a worker's
+    ``hermes kanban --board runners show <id>`` silently read its own board and said "no such task".
+    """
+    if _DELEGATED_CHILD_CONTEXT.get() or (os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+        return False
+    if not _live_env_marker():
+        return False
+    return kanban_path_is_fenced(path)
 
 
 def owned_kanban_task() -> str:
@@ -363,6 +397,13 @@ def delegated_child_subprocess_env(
 
     Location and credentials are untouched; callers retain their existing secret policy.
     Dispatcher workers and supervised tool transports grant their own explicit scope.
+
+    Accepted limit [daveey]: this fence is cooperative. Anything the descendant runs as the same
+    OS user can drop it (``env -u HERMES_DELEGATED_CHILD_CONTEXT hermes kanban ...``) or skip it
+    (``sqlite3 <board>/kanban.db``), because it owns write access to the board files. No layer
+    inside Hermes can close that; only OS confinement can (a separate uid or a sandbox without the
+    board mounted). The fence exists to stop an agent from writing the board by accident or by
+    habit, steering it to the ``kanban_*`` tools, whose ownership checks are the real contract.
     """
     if not (is_delegated_child_process_context() or os.environ.get("HERMES_KANBAN_TASK")
             or (env and (env.get("HERMES_KANBAN_TASK")
