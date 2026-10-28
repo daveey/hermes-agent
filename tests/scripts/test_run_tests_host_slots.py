@@ -118,3 +118,68 @@ def test_runner_attempt_waits_for_a_slot_and_marks_the_child(slot_env, monkeypat
     assert time.monotonic() - started >= 0.9, "the attempt waited for the only slot"
     assert code == 0, output
     assert mod._SLOT_WAIT_NOTED.is_set(), "the run says once that it is waiting for slots"
+
+
+# --- per-host config fallback + direct pytest runs [daveey] -----------------------------------
+
+def test_host_config_sets_the_cap_when_the_env_does_not(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model:\n  default: x\ntests:\n  # MacBook: agents' tests share 4 cores\n  host_slots: 4\n")
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(cfg))
+    monkeypatch.delenv("HERMES_TEST_HOST_SLOTS", raising=False)
+    assert slots.host_slot_count() == 4
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "2")  # env still wins
+    assert slots.host_slot_count() == 2
+
+
+def test_host_config_parses_without_pyyaml(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("tests:\n  other: 1\n\n  host_slots: 3\nkanban:\n  host_slots: 9\n")
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(cfg))
+    monkeypatch.delenv("HERMES_TEST_HOST_SLOTS", raising=False)
+    monkeypatch.setitem(sys.modules, "yaml", None)  # import yaml -> ImportError
+    assert slots.host_slot_count() == 3
+
+
+def test_missing_or_unset_host_config_keeps_cpu_count(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_TEST_HOST_SLOTS", raising=False)
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(tmp_path / "absent.yaml"))
+    assert slots.host_slot_count() == (os.cpu_count() or 4)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("tests:\n  other: 1\n")
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(cfg))
+    assert slots.host_slot_count() == (os.cpu_count() or 4)
+
+
+def test_direct_pytest_run_holds_a_slot_for_its_session(slot_env, monkeypatch, tmp_path):
+    """A bare `python -m pytest` of this tree (no run_tests.sh) waits for, and holds, a host slot."""
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "1")
+    probe = tmp_path / "probe_slot.py"
+    probe.write_text(
+        "import os, sys, importlib.util\n"
+        f"sys.path.insert(0, {str(REPO_ROOT / 'tests')!r})\n"
+        "import conftest\n"
+        "class C: pass\n"
+        "c = C()\n"
+        "conftest._take_host_test_slot(c)\n"
+        "print('held', c._hermes_host_slot_fd is not None, os.environ.get('HERMES_TEST_SLOT_HELD'), flush=True)\n"
+        "sys.stdin.readline()\n"
+        "conftest._release_host_test_slot(c)\n"
+        "print('released', flush=True)\n")
+    env = {k: v for k, v in os.environ.items() if k != slots.HELD_ENV}
+    first = subprocess.Popen([sys.executable, str(probe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, env=env, cwd=str(REPO_ROOT))
+    try:
+        assert first.stdout.readline().split() == ["held", "True", "1"]
+        second = subprocess.Popen([sys.executable, str(probe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, env=env, cwd=str(REPO_ROOT))
+        time.sleep(1.0)
+        assert second.poll() is None  # waiting: the only slot is taken
+        first.stdin.write("\n"); first.stdin.flush()
+        assert first.stdout.readline().strip() == "released"
+        assert second.stdout.readline().split() == ["held", "True", "1"]
+        second.communicate("\n", timeout=30)
+    finally:
+        for p in (first,):
+            if p.poll() is None:
+                p.kill()

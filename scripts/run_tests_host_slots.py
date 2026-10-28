@@ -11,12 +11,18 @@ crashed run frees its slots with its file descriptors.
 A run started from inside a slot holder (a test that runs the runner) inherits
 ``HERMES_TEST_SLOT_HELD=1`` and skips the cap, so nested runs cannot wait on slots their own parent
 holds. ``HERMES_TEST_HOST_SLOTS=0`` disables the cap. Non-POSIX hosts are uncapped.
+
+The cap is ``HERMES_TEST_HOST_SLOTS``, else the host's ``tests.host_slots`` in ``~/.hermes/config.yaml``
+(per-host: a laptop the user works on sets a few, so agents' tests never take every core), else
+``os.cpu_count()``. A direct ``pytest`` run of this tree (a PM test-environment interpreter rather than
+scripts/run_tests.sh) holds one slot for its whole session (tests/conftest.py). [daveey]
 """
 from __future__ import annotations
 
 import contextlib
 import os
 import random
+import re
 import time
 from collections.abc import Iterator
 
@@ -24,13 +30,42 @@ HELD_ENV = "HERMES_TEST_SLOT_HELD"
 POLL_S = 0.1
 
 
+def _config_slots() -> int | None:
+    """Per-host ``tests.host_slots`` from the Hermes config (``HERMES_TEST_SLOT_CONFIG`` overrides the path).
+
+    A laptop the user works on caps the tests every agent runs on it without restarting anything that
+    would have to inherit an env var. [daveey]
+    """
+    path = os.environ.get("HERMES_TEST_SLOT_CONFIG") or os.path.join(os.path.expanduser("~"), ".hermes", "config.yaml")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    try:
+        import yaml
+
+        value = ((yaml.safe_load(text) or {}).get("tests") or {}).get("host_slots")
+    except Exception:  # no PyYAML in this interpreter, or a config it cannot parse: read the one key
+        m = re.search(r"^tests:[ \t]*\n(?:[ \t]+.*\n|[ \t]*\n)*?[ \t]+host_slots:[ \t]*(\d+)", text, re.M)
+        value = m.group(1) if m else None
+    try:
+        return max(0, int(value)) if value is not None and not isinstance(value, bool) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def host_slot_count() -> int:
+    """``HERMES_TEST_HOST_SLOTS`` env, else the host's ``tests.host_slots`` config, else ``os.cpu_count()``."""
     raw = os.environ.get("HERMES_TEST_HOST_SLOTS", "").strip()
     if raw:
         try:
             return max(0, int(raw))
         except ValueError:
             pass
+    configured = _config_slots()
+    if configured is not None:
+        return configured
     return os.cpu_count() or 4
 
 
@@ -54,12 +89,14 @@ def _try_slot(path: str) -> int | None:
     return fd
 
 
-@contextlib.contextmanager
-def host_test_slot(on_wait=None) -> Iterator[None]:
-    """Hold one host slot for the body. ``on_wait()`` is called once if every slot is taken."""
+def acquire_host_slot(on_wait=None) -> int | None:
+    """Block until one host slot is held; return its fd (None when the cap does not apply).
+
+    ``on_wait()`` is called once if every slot is taken. Close the fd (``release_host_slot``) to free it;
+    a crashed holder frees it with its file descriptors.
+    """
     if not host_slots_enabled():
-        yield
-        return
+        return None
     directory = host_slot_dir()
     os.makedirs(directory, mode=0o700, exist_ok=True)
     order = list(range(host_slot_count()))
@@ -68,14 +105,25 @@ def host_test_slot(on_wait=None) -> Iterator[None]:
     while True:
         for n in order:
             fd = _try_slot(os.path.join(directory, f"{n}.lock"))
-            if fd is None:
-                continue
-            try:
-                yield
-            finally:
-                os.close(fd)
-            return
+            if fd is not None:
+                return fd
         if not waited and on_wait is not None:
             on_wait()
         waited = True
         time.sleep(POLL_S)
+
+
+def release_host_slot(fd: int | None) -> None:
+    if fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+@contextlib.contextmanager
+def host_test_slot(on_wait=None) -> Iterator[None]:
+    """Hold one host slot for the body. ``on_wait()`` is called once if every slot is taken."""
+    fd = acquire_host_slot(on_wait)
+    try:
+        yield
+    finally:
+        release_host_slot(fd)

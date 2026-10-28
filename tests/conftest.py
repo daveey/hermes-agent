@@ -1228,13 +1228,58 @@ def require_mcp_2_sdk():
         pytest.skip(f"requires mcp=={pinned} (found {found}); install the [mcp] extra")
 
 
+def _host_slots_module():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "run_tests_host_slots.py"
+    spec = importlib.util.spec_from_file_location("_hermes_run_tests_host_slots", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _take_host_test_slot(config) -> None:
+    """[daveey] A direct ``pytest`` run of this tree (a PM test-environment interpreter, not
+    scripts/run_tests.sh) holds one host-wide test slot for the whole session, like each per-file
+    process of the runner does. Runner children inherit HERMES_TEST_SLOT_HELD=1 and skip this; so
+    does anything this run spawns. xdist workers skip it (the controller holds the slot)."""
+    if hasattr(config, "workerinput"):
+        return
+    try:
+        slots = _host_slots_module()
+        if not slots.host_slots_enabled():
+            return
+
+        def note():
+            sys.stderr.write(f"(waiting for a host test slot: other runs hold all {slots.host_slot_count()} "
+                             f"in {slots.host_slot_dir()})\n")
+            sys.stderr.flush()
+
+        config._hermes_host_slot_fd = slots.acquire_host_slot(on_wait=note)
+        os.environ[slots.HELD_ENV] = "1"
+    except Exception as exc:  # the cap is advisory; never fail a run on it
+        sys.stderr.write(f"(host test slot unavailable: {exc})\n")
+
+
+def _release_host_test_slot(config) -> None:
+    fd = getattr(config, "_hermes_host_slot_fd", None)
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        config._hermes_host_slot_fd = None
+
+
 def pytest_unconfigure(config):
+    _release_host_test_slot(config)
     _remove_relocated_basetemp(config)
 
 
 @pytest.hookimpl(trylast=True)  # after _pytest.tmpdir has built config._tmp_path_factory
 def pytest_configure(config):
     """Register markers used by hermetic conftest."""
+    _take_host_test_slot(config)
     _relocate_basetemp_outside_operator_home(config)
     config.addinivalue_line(
         "markers",
