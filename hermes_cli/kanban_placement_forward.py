@@ -86,7 +86,7 @@ def forward_argv(task, board: Optional[str], worker_cmd: list) -> Optional[list]
         path = kb.kanban_db_path(board=board)
         if not os.path.exists(path):
             return None
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)  # noqa: kanban-lockguard — short-lived read-only handle, closed in the finally below
         try:
             st = state(conn, task.id)
         finally:
