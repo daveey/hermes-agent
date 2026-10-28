@@ -601,6 +601,19 @@ def _decode_replica_task(record_key: str, data: Any) -> tuple[dict[str, Any], st
     return t, digest, evidence
 
 
+# [daveey] Last live (``now=None``) replica read: (key, read_at, valid_until, cards, qualified, owners). The remote
+# projection rebuilds on every local board write (its fingerprint covers every kanban.db), and hub.db itself is
+# written ~45 times a minute (outbox, ledger, cursor), but its task rows change only when a pull lands. Re-reading
+# ~6k replica rows (~23 MB of JSON) cost ~0.1 s CPU per sidebar poll for an unchanged answer. hermes-hub stamps
+# every replica write with the hub feed's monotonic ``seq``, so an insert or update raises ``max(seq)`` and a
+# delete lowers ``count``: ``_REPLICA_PROBE`` (index-only, ~6 ms) plus the small identity/heartbeat rows is the
+# whole input. Reused while that key and the origin profile are unchanged and wall time stays inside the window
+# where no hub-staleness or scope-heartbeat cut-off can flip (``valid_until``).
+_remote_read_memo: tuple | None = None
+_REPLICA_PROBE = ("SELECT count(*), count(seq), max(seq), total(seq), total(version), total(octet_length(data)) "
+                  "FROM replica WHERE coll = 'tasks'")
+
+
 def _read_remote_links(path: Path, now: float | None = None, *,
                        qualified_out: set | None = None,
                        owners_out: set | None = None) -> list[dict[str, Any]]:
@@ -608,22 +621,69 @@ def _read_remote_links(path: Path, now: float | None = None, *,
 
     Open and unproven cards come back ``unfinished``; cards their owner attests closed
     (``_owner_attests_terminal``) come back as explicit ``released`` rows, so a durable snapshot sees them
-    as present-and-closed rather than missing."""
+    as present-and-closed rather than missing. A live read (``now=None``) of unchanged replica task rows is
+    served from ``_remote_read_memo``; an explicit ``now`` always reads every row."""
+    global _remote_read_memo
+    from hermes_cli.profiles import get_active_profile_name
+
+    live = now is None
+    now = time.time() if now is None else now
     conn = _open_ro(path)
     try:
+        conn.execute("BEGIN")  # one snapshot: the memo key must describe the rows it maps to
         me = _self_gateway(conn)
         if not me:
             return []
         # Old replicas can still be displayed, but cannot prove an exact revision.
-        version_column = 'version' if any(r[1] == 'version' for r in conn.execute('PRAGMA table_info(replica)')) else 'NULL'
-        rows = conn.execute(f"SELECT gw, key, data, updated_at, {version_column} FROM replica WHERE coll = 'tasks'").fetchall()
+        columns = {r[1] for r in conn.execute('PRAGMA table_info(replica)')}
+        version_column = 'version' if 'version' in columns else 'NULL'
         info_rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'gateway' AND key = 'info'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
+        key = None
+        if live and {'seq', 'version'} <= columns:
+            probe = conn.execute(_REPLICA_PROBE).fetchone()
+            if probe[0] == probe[1]:  # a row without seq proves nothing about its text: never memoize it
+                key = (str(path), me, version_column, tuple(info_rows), last_ok, offline, probe,
+                       get_active_profile_name())
+            memo = _remote_read_memo
+            if key is not None and memo is not None and memo[0] == key and memo[1] <= now < memo[2]:
+                if qualified_out is not None:
+                    qualified_out.update(memo[4])
+                if owners_out is not None:
+                    owners_out.update(memo[5])
+                return list(memo[3])  # cards are read-only, as in ``_links_cache``
+        rows = conn.execute(f"SELECT gw, key, data, updated_at, {version_column} FROM replica WHERE coll = 'tasks'").fetchall()
     finally:
         conn.close()
-    now = time.time() if now is None else now
+    if key is None:
+        return _project_replica(path, now, me, rows, info_rows, last_ok, offline,
+                                qualified_out=qualified_out, owners_out=owners_out)
+    qualified: set = set()
+    owners: set = set()
+    horizon: list[float] = []
+    cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
+                             qualified_out=qualified, owners_out=owners, horizon_out=horizon)
+    _remote_read_memo = (key, now, min(horizon, default=float('inf')), list(cards),
+                         frozenset(qualified), frozenset(owners))
+    if qualified_out is not None:
+        qualified_out.update(qualified)
+    if owners_out is not None:
+        owners_out.update(owners)
+    return cards
+
+
+def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: list, last_ok: float | None,
+                     offline: float | None, *, qualified_out: set | None = None, owners_out: set | None = None,
+                     horizon_out: list[float] | None = None) -> list[dict[str, Any]]:
+    """``_read_remote_links`` of rows already read. ``horizon_out`` collects every wall time after ``now`` at which
+    the same rows could project differently (hub-sync staleness, scope-heartbeat freshness)."""
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
     heartbeats = _scope_heartbeats(info_rows)
+    if horizon_out is not None:
+        cutoffs = [beat + d for beat in heartbeats.values() for d in (0.0, SCOPE_HEARTBEAT_FRESH_S)]
+        if not stale:
+            cutoffs.append(last_ok + HUB_STALE_AFTER_S)
+        horizon_out.extend(t for t in cutoffs if t > now)
     tasks: dict[tuple[str, str | None, str, str], dict[str, Any]] = {}
     raw: dict[tuple[str, str | None, str, str], dict[str, Any]] = {}
     released: set[tuple[str, str | None, str, str]] = set()
@@ -934,15 +994,22 @@ def _project_remote_links() -> list[dict[str, Any]]:
                 tips[sid] = None
         return tips[sid]
 
+    # [daveey] Both tests below need an exact identity match, so index the receipt rows by it: scanning every
+    # row per legacy card was ~2.4k x ~200 ``supersedes`` calls (~45 ms) per projection.
+    by_origin: dict[tuple, list[dict[str, Any]]] = {}
+    by_key: dict[tuple, list[dict[str, Any]]] = {}
+    if legacy:
+        for row in rows:
+            by_origin.setdefault((row['gateway'], row['origin_gateway'], row['origin_profile'],
+                                  row['origin_session']), []).append(row)
+            by_key.setdefault((row['key'], row['origin_gateway'], row['origin_profile']), []).append(row)
+
     def superseded(card: dict[str, Any]) -> bool:
         from hermes_cli.kanban_origin_legacy import supersedes
-        for row in rows:
-            if supersedes(card, row):
-                return True
-            if (card.get('key') != row['key']
-                    or card.get('origin_gateway') != row['origin_gateway']
-                    or card.get('origin_profile') != row['origin_profile']):
-                continue
+        origin = (card.get('gateway'), card.get('origin_gateway'), card.get('origin_profile'), card.get('session'))
+        if any(supersedes(card, row) for row in by_origin.get(origin, ())):
+            return True
+        for row in by_key.get((card.get('key'), card.get('origin_gateway'), card.get('origin_profile')), ()):
             aliases = (row['origin_session'], row['session'])
             if card['session'] in aliases:
                 return True
@@ -1582,7 +1649,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:
-    global _cache, _attention_cache, _remote_last, _links_cache, _snapshot_saved
+    global _cache, _attention_cache, _remote_last, _links_cache, _snapshot_saved, _remote_read_memo
+    _remote_read_memo = None
     with _links_lock:
         _links_cache = None
     with _cache_lock:
