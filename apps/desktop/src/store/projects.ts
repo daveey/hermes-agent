@@ -1057,6 +1057,9 @@ function expireRemoteProjectTree(connectionId: string): void {
 
 const labelKey = (label: string): string => label.trim().toLowerCase()
 
+/** `session.workspace.move`'s refusal of a folder that doesn't exist on that host. */
+const MISSING_WORKDIR_RE = /working directory does not exist/
+
 /** Shell word for a path; a `~/` prefix stays expandable. */
 function shellPath(path: string): string {
   const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
@@ -1064,9 +1067,12 @@ function shellPath(path: string): string {
   return path.startsWith('~/') ? `"$HOME"/${quote(path.slice(2))}` : quote(path)
 }
 
-/** `/Users/x/code/a` or `/home/x/code/a` → `~/code/a`, so it lands in the other host's home. */
+/**
+ * `/Users/x/code/a`, `/home/x/code/a`, `/root/code/a` or `/opt/data/code/a`
+ * (the Docker image's home) → `~/code/a`, so it lands in the other host's home.
+ */
 export function homeRelativePath(path: string): string {
-  const m = path.match(/^(?:\/Users|\/home)\/[^/]+(\/.*)?$/) ?? path.match(/^\/root(\/.*)?$/)
+  const m = path.match(/^(?:\/Users|\/home)\/[^/]+(\/.*)?$/) ?? path.match(/^\/(?:root|opt\/data)(\/.*)?$/)
 
   return m ? `~${m[1] ?? ''}` : path
 }
@@ -1107,9 +1113,15 @@ function projectSourceFor(node: SidebarProjectTree | undefined): null | { connec
 
 /**
  * The destination project's root folder ON `target`, creating the project
- * (and its folder) there when that gateway doesn't have it yet.
+ * (and its folder) there when that gateway doesn't have it yet. `missing` is a
+ * folder the target already refused: its own same-named project at that path
+ * gets the folder made instead of being returned again.
  */
-async function ensureProjectRootOn(target: MoveTarget, node: SidebarProjectTree | undefined): Promise<string> {
+async function ensureProjectRootOn(
+  target: MoveTarget,
+  node: SidebarProjectTree | undefined,
+  missing = ''
+): Promise<string> {
   if (!node || node.isNoProject) {
     return ''
   }
@@ -1125,6 +1137,12 @@ async function ensureProjectRootOn(target: MoveTarget, node: SidebarProjectTree 
 
   const existingPath = existing?.primary_path || existing?.folders?.[0]?.path
 
+  if (existingPath && existingPath === missing) {
+    await makeFolderOn(target, existingPath)
+
+    return existingPath
+  }
+
   if (existingPath) {
     return existingPath
   }
@@ -1139,9 +1157,7 @@ async function ensureProjectRootOn(target: MoveTarget, node: SidebarProjectTree 
   return createProjectFolderOn(target, node.label, homeRelativePath(source.path), profile)
 }
 
-/** `mkdir -p` the folder ON `target`, then register a project named `name` there. */
-async function createProjectFolderOn(target: MoveTarget, name: string, path: string, profile: string): Promise<string> {
-  // Projects only organize the sidebar here, so the folder just has to exist.
+async function makeFolderOn(target: MoveTarget, path: string): Promise<void> {
   const make = await moveTargetRequest<ShellResult>(target, 'shell.exec', {
     command: `mkdir -p ${shellPath(path)}`
   })
@@ -1149,6 +1165,12 @@ async function createProjectFolderOn(target: MoveTarget, name: string, path: str
   if (make.code !== 0) {
     throw new Error(`Could not create ${path} on ${target.connectionId}: ${(make.stderr || make.stdout).trim()}`)
   }
+}
+
+/** `mkdir -p` the folder ON `target`, then register a project named `name` there. */
+async function createProjectFolderOn(target: MoveTarget, name: string, path: string, profile: string): Promise<string> {
+  // Projects only organize the sidebar here, so the folder just has to exist.
+  await makeFolderOn(target, path)
 
   const created = await moveTargetRequest<{ project: null | ProjectInfo }>(target, 'projects.create', {
     name,
@@ -1182,11 +1204,24 @@ export async function moveSessionToProject(
   // [daveey] The session's OWN gateway does the move, and the destination is
   // that gateway's copy of the project — created there (folder cloned if
   // needed) when only another gateway has it. The fast path below is the
-  // original single-gateway behavior.
-  const cwd =
-    !target.remote && node && !isRemoteProjectId(node.id) && projectRootCwd(node)
-      ? projectRootCwd(node)
-      : await ensureProjectRootOn(target, node)
+  // original single-gateway behavior; a merged lane can carry another
+  // profile's folder (a Docker profile's `/opt/data/...`) that this host
+  // lacks, so a refused folder falls through to the create-it-here path.
+  const fast = !target.remote && node && !isRemoteProjectId(node.id) ? projectRootCwd(node) : ''
+
+  if (fast) {
+    try {
+      await moveSessionToCwd(target, sessionId, fast)
+
+      return
+    } catch (error) {
+      if (!MISSING_WORKDIR_RE.test(String((error as Error)?.message ?? error))) {
+        throw error
+      }
+    }
+  }
+
+  const cwd = await ensureProjectRootOn(target, node, fast)
 
   if (!cwd) {
     throw new Error(translateNow('sidebar.projects.moveNoFolder'))

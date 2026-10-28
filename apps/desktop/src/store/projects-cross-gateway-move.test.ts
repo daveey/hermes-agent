@@ -189,6 +189,99 @@ describe('moveSessionToProject across gateways', () => {
   })
 })
 
+describe('moveSessionToProject into a lane whose folder this gateway lacks', () => {
+  // Another profile on the active gateway (a Docker one) owns the lane, so its
+  // root is a container path the host refuses.
+  const DOCKER_PATH = '/opt/data/code/fabric-play'
+
+  const refusing =
+    (extra: Handler): Handler =>
+    (method, params) => {
+      if (method === 'session.workspace.move' && params.cwd === DOCKER_PATH) {
+        throw new Error(`working directory does not exist: ${DOCKER_PATH}`)
+      }
+
+      if (method === 'session.workspace.move') {
+        return { branch: null, cwd: params.cwd, git_repo_root: null }
+      }
+
+      return extra(method, params)
+    }
+
+  beforeEach(() => {
+    $projectTree.set([{ id: 'p_docker', label: 'fabric', path: DOCKER_PATH, repos: [], sessionCount: 1 }])
+  })
+
+  it("creates the project in the session's home instead of failing", async () => {
+    setup(
+      refusing(method =>
+        method === 'projects.list'
+          ? { active_id: null, projects: [] }
+          : method === 'shell.exec'
+            ? { code: 0, stderr: '', stdout: '' }
+            : method === 'projects.create'
+              ? { project: { id: 'p_new', name: 'fabric', primary_path: '/home/ubuntu/code/fabric-play' } }
+              : {}
+      ),
+      () => {
+        throw new Error('no remote call expected')
+      }
+    )
+
+    await moveSessionToProject('local-s', 'p_docker', 'default')
+
+    // Background refreshes (projects.tree, a post-create projects.list) interleave; only the move's own calls count.
+    const firstList = localCalls.findIndex(([m]) => m === 'projects.list')
+    const steps = localCalls.filter(([m], i) => m !== 'projects.tree' && (m !== 'projects.list' || i === firstList))
+
+    expect(steps.map(([m]) => m)).toEqual([
+      'session.workspace.move',
+      'projects.list',
+      'shell.exec',
+      'projects.create',
+      'session.workspace.move'
+    ])
+    expect(steps[2][1]).toMatchObject({ command: `mkdir -p "$HOME"/'code/fabric-play'` })
+    expect(steps[3][1]).toMatchObject({ name: 'fabric', primary_path: '~/code/fabric-play' })
+    expect(steps[4][1]).toMatchObject({ cwd: '/home/ubuntu/code/fabric-play', session_key: 'local-s' })
+  })
+
+  it("makes the folder of the session profile's own project at that path", async () => {
+    setup(
+      refusing(method =>
+        method === 'projects.list'
+          ? { active_id: null, projects: [{ id: 'p_docker', name: 'fabric', primary_path: DOCKER_PATH }] }
+          : method === 'shell.exec'
+            ? { code: 1, stderr: 'mkdir: /opt: Permission denied', stdout: '' }
+            : {}
+      ),
+      () => {
+        throw new Error('no remote call expected')
+      }
+    )
+
+    await expect(moveSessionToProject('local-s', 'p_docker', 'default')).rejects.toThrow(/Permission denied/)
+    expect(localCalls.map(([m]) => m)).toEqual(['session.workspace.move', 'projects.list', 'shell.exec'])
+    expect(localCalls.some(([m]) => m === 'projects.create')).toBe(false)
+  })
+
+  it('still surfaces any other move error', async () => {
+    setup(
+      method => {
+        if (method === 'session.workspace.move') {
+          throw new Error('session busy')
+        }
+
+        return {}
+      },
+      () => ({})
+    )
+
+    await expect(moveSessionToProject('local-s', 'p_docker', 'default')).rejects.toThrow(/session busy/)
+    expect(localCalls.map(([m]) => m)).toEqual(['session.workspace.move'])
+  })
+})
+
 describe('createProjectAndMoveSession', () => {
   it('creates an empty ~/code/<slug> folder + project, then moves the session', async () => {
     setup(
@@ -250,6 +343,8 @@ describe('cross-gateway move helpers', () => {
   it('maps home paths across hosts', () => {
     expect(homeRelativePath('/Users/daveey/code/babybear')).toBe('~/code/babybear')
     expect(homeRelativePath('/home/ubuntu/code/x')).toBe('~/code/x')
+    expect(homeRelativePath('/opt/data/code/fabric-play')).toBe('~/code/fabric-play')
+    expect(homeRelativePath('/opt/database')).toBe('/opt/database')
     expect(homeRelativePath('/srv/repo')).toBe('/srv/repo')
   })
 
