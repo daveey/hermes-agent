@@ -139,12 +139,49 @@ def _packaged_desktop_current_for_head(desktop_dir: Path, project_root: Path) ->
     if resources is None:
         return False
     from hermes_cli.steward import read_install_stamp
-    from hermes_cli.version_info import _run_git
 
-    commit = read_install_stamp(resources).get("commit")
-    if not isinstance(commit, str) or commit != _run_git(project_root, "rev-parse", "HEAD"):
+    if not _stamp_commit_serves_head(project_root, read_install_stamp(resources).get("commit")):
         return False
     return not _desktop_build_needed(desktop_dir, project_root, source_mode=False)
+
+
+# [daveey] What the desktop build reads from the checkout: sourceHash('desktop') in
+# scripts/build/freshness.mjs (test-enforced mirror). The baked install stamp is the one desktop
+# input outside this list, and the only one a commit that touches none of these changes.
+DESKTOP_SOURCE_INPUT_PATHS = (
+    "apps/desktop", "apps/shared", "package.json", "package-lock.json", ".npmrc", "pm/lock.json",
+    "scripts/build", "scripts/generate-icons.mjs", "scripts/generate_icons.py",
+    "assets", "pyproject.toml", "uv.lock",
+)
+
+
+def _stamp_commit_serves_head(project_root: Path, commit: object) -> bool:
+    """True when an app baked from ``commit`` is the app HEAD would build.
+
+    [daveey] Either ``commit`` is HEAD, or it is an ancestor of HEAD and git proves no desktop
+    source input differs between the two. The app then differs from a fresh pack only in the
+    commit its stamp names, which bundle-skew (no runtime-path commits after it) and
+    bundle-swap (it compares the running app with the one on disk) both accept. Anything git
+    cannot answer means False ("build")."""
+    from hermes_cli.version_info import _run_git
+
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", commit):
+        return False
+    head = _run_git(project_root, "rev-parse", "HEAD")
+    if not head:
+        return False
+    if commit == head:
+        return True
+
+    def git_ok(*args: str) -> bool:
+        try:
+            return subprocess.run(["git", *args], cwd=str(project_root), capture_output=True,
+                                  timeout=10, check=False).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    return (git_ok("merge-base", "--is-ancestor", commit, head)
+            and git_ok("diff", "--quiet", commit, head, "--", *DESKTOP_SOURCE_INPUT_PATHS))
 
 
 # [daveey] A bundle packed off to the side (hermes-sync stages the next origin/main while Desktop turns
@@ -165,9 +202,10 @@ def _prebuilt_signature_error(app: Path) -> Optional[str]:
 def _prebuilt_desktop_app_mismatch(app: Path, desktop_dir: Path, project_root: Path) -> Optional[str]:
     """Why the prebuilt ``Hermes.app`` can't stand in for packing HEAD, or None when it can.
 
-    Same bar as ``_packaged_desktop_current_for_head`` (baked commit == HEAD, intact renderer,
-    node-pty present, receipt current for THIS checkout's inputs) plus a verifying signature
-    that does not downgrade the live app's signing team."""
+    Same bar as ``_packaged_desktop_current_for_head`` (baked commit is HEAD or an ancestor no
+    desktop input changed since, intact renderer, node-pty present, receipt current for THIS
+    checkout's inputs) plus a verifying signature that does not downgrade the live app's
+    signing team."""
     if sys.platform != "darwin":
         return "prebuilt desktop apps are only supported on macOS"
     if not (app / "Contents" / "MacOS" / "Hermes").is_file():
@@ -177,9 +215,9 @@ def _prebuilt_desktop_app_mismatch(app: Path, desktop_dir: Path, project_root: P
 
     resources = app / "Contents" / "Resources"
     commit = read_install_stamp(resources).get("commit")
-    head = _run_git(project_root, "rev-parse", "HEAD")
-    if not isinstance(commit, str) or commit != head:
-        return f"built from {str(commit)[:10]}, HEAD is {str(head)[:10]}"
+    if not _stamp_commit_serves_head(project_root, commit):
+        head = _run_git(project_root, "rev-parse", "HEAD")
+        return f"built from {str(commit)[:10]}, HEAD is {str(head)[:10]} and desktop inputs differ or are unknown"
     dist = resources / "app.asar.unpacked" / "dist"
     if not dist.is_dir() or _renderer_bundle_torn(dist):
         return "renderer bundle missing or incomplete"
