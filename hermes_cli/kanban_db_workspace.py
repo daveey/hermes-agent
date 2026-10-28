@@ -393,6 +393,17 @@ def _scratch_tree_removable(path: Path) -> bool:
     return True
 
 
+def _log_scratch_removal(conn: sqlite3.Connection, task_id: str, wp: Path, what: str) -> None:
+    """INFO line naming who removed a scratch workspace, so an agent that later
+    finds its cwd gone (checkpoint 'working directory not found') can be traced
+    to the run whose completion deleted it."""
+    row = conn.execute(
+        "SELECT id, status FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    run = f"run {row['id']} ({row['status']})" if row else "no run"
+    _kb._log.info("Removed %s for task %s, last %s, by pid %d: %s", what, task_id, run, os.getpid(), wp)
+
+
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
     Called from :func:`complete_task` after the transaction commits; best-effort
@@ -442,7 +453,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
                 elif not _defer_shared_workspace_cleanup(conn, task_id, path):
                     release_lsp_clients(str(wp))
                     shutil.rmtree(wp, ignore_errors=True)
-                    _kb._log.debug("Removed scratch workspace: %s", wp)
+                    _log_scratch_removal(conn, task_id, wp, "scratch workspace")
             else:
                 _kb._log.warning(
                     "Refusing to remove out-of-scratch workspace for task %s: %s "
@@ -594,7 +605,7 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
                     continue
                 release_lsp_clients(str(wp))
                 shutil.rmtree(wp, ignore_errors=True)
-                _kb._log.debug("Deferred cleanup: removed parent %s scratch workspace: %s", parent_id, wp)
+                _log_scratch_removal(conn, parent_id, wp, f"deferred parent scratch workspace (child {task_id} done)")
     except Exception:
         pass  # best-effort
 

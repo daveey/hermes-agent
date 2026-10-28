@@ -1386,3 +1386,60 @@ class TestSessionDiff:
         assert result["success"] is True
         assert "feature.py" in result["diff"]
         assert "+x = 1" in result["diff"]
+
+
+class TestWorkingDirVanishes:
+    """Kanban scratch workspaces are deleted by design (card completion), so a
+    checkpoint may find its working directory gone, even between the
+    existence check and the git spawn. That is an expected outcome: one WARNING
+    line, no traceback, the same (False, "", msg) result."""
+
+    @staticmethod
+    def _assert_one_quiet_warning(caplog, msg):
+        records = [r for r in caplog.records if r.name == "tools.checkpoint_manager"]
+        assert not [r for r in records if r.levelno >= 40], [r.getMessage() for r in records]
+        assert not [r for r in records if r.exc_info], "traceback logged"
+        warnings = [r for r in records if r.levelno == 30]
+        assert len(warnings) == 1 and msg in warnings[0].getMessage()
+
+    def test_deleted_between_check_and_spawn(self, work_dir, checkpoint_base, monkeypatch, caplog):
+        import tools.checkpoint_manager as cm
+        real_which = shutil.which
+
+        def which_then_delete(name, path=None):
+            shutil.rmtree(work_dir)
+            return real_which(name, path=path)
+
+        monkeypatch.setattr(cm.shutil, "which", which_then_delete)
+        caplog.set_level("DEBUG", logger="tools.checkpoint_manager")
+        result = _run_git(["rev-list", "--reverse", "refs/hermes/x"], checkpoint_base, str(work_dir))
+        msg = f"working directory not found: {work_dir.resolve()}"
+        assert result == (False, "", msg)
+        self._assert_one_quiet_warning(caplog, msg)
+
+    def test_already_gone(self, tmp_path, checkpoint_base, caplog):
+        gone = tmp_path / "gone"
+        caplog.set_level("DEBUG", logger="tools.checkpoint_manager")
+        result = _run_git(["status"], checkpoint_base, str(gone))
+        msg = f"working directory not found: {gone.resolve()}"
+        assert result == (False, "", msg)
+        self._assert_one_quiet_warning(caplog, msg)
+
+    def test_take_skips_prune_once_dir_is_gone(self, work_dir, fake_home, monkeypatch, caplog):
+        import tools.checkpoint_manager as cm
+        real_run_git = cm._run_git
+
+        def run_git_then_delete(args, *a, **kw):
+            out = real_run_git(args, *a, **kw)
+            if args[0] == "update-ref":
+                shutil.rmtree(work_dir)
+            return out
+
+        monkeypatch.setattr(cm, "_run_git", run_git_then_delete)
+        pruned = []
+        monkeypatch.setattr(CheckpointManager, "_prune", lambda self, *a: pruned.append(a))
+        caplog.set_level("DEBUG", logger="tools.checkpoint_manager")
+        mgr = CheckpointManager(enabled=True)
+        assert mgr._take(str(work_dir), "snap") is True
+        assert pruned == []
+        assert not [r for r in caplog.records if r.levelno >= 40]

@@ -371,8 +371,9 @@ def _run_git(
     """
     normalized_working_dir = _normalize_path(working_dir)
     if not normalized_working_dir.exists():
+        # Kanban scratch workspaces are deleted on card completion by design.
         msg = f"working directory not found: {normalized_working_dir}"
-        logger.error("Git command skipped: %s (%s)", " ".join(["git"] + list(args)), msg)
+        logger.warning("Git command skipped: %s (%s)", " ".join(["git"] + list(args)), msg)
         return False, "", msg
     if not normalized_working_dir.is_dir():
         msg = f"working directory is not a directory: {normalized_working_dir}"
@@ -424,7 +425,11 @@ def _run_git(
             logger.error("Git executable not found: %s", " ".join(cmd), exc_info=True)
             return False, "", "git not found"
         msg = f"working directory not found: {normalized_working_dir}"
-        logger.error("Git command failed before execution: %s (%s)", " ".join(cmd), msg, exc_info=True)
+        if not normalized_working_dir.is_dir():
+            # Deleted between the check above and the spawn (Kanban cleanup).
+            logger.warning("Git command skipped, working directory removed: %s (%s)", " ".join(cmd), msg)
+        else:
+            logger.error("Git command failed before execution: %s (%s)", " ".join(cmd), msg, exc_info=True)
         return False, "", msg
     except Exception as exc:
         logger.error("Unexpected git error running %s: %s", " ".join(cmd), exc, exc_info=True)
@@ -1555,8 +1560,9 @@ class CheckpointManager:
 
         logger.debug("Checkpoint taken in %s: %s (%s)", working_dir, reason, new_sha[:8])
 
-        # Count and size budgets share one failure boundary.
-        if prune:
+        # Count and size budgets share one failure boundary. A workspace
+        # removed after the snapshot landed (Kanban cleanup) has nothing to prune.
+        if prune and os.path.isdir(working_dir):
             self._prune(store, working_dir, ref)
 
         return True
