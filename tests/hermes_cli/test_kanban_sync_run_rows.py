@@ -131,6 +131,43 @@ def test_board_grant_row_mid_claim_is_not_reconciled(live, kanban_home, svc):
     gate.__exit__(None, None, None)  # the unused lease is released, as the refused claim does
 
 
+def _age_out_mirror_only_claim(live, tid):
+    """Past the grace with the lease lapsed: the claim that the grant began never landed locally."""
+    live.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (int(time.time() - 5) * 1000, tid))
+    live.execute("UPDATE task_events SET created_at = created_at - ? WHERE task_id = ? AND kind = 'claimed'",
+                 (kd.ORPHAN_CLAIM_GRACE_SECONDS + 60, tid))
+    live.commit()
+
+
+@pytest.mark.parametrize("prior_impl_run", [False, True], ids=["fresh-review-card", "after-implementation-run"])
+def test_board_grant_row_for_review_card_requeues_to_review_after_grace(live, kanban_home, svc, prior_impl_run):
+    """Follow-up to the grant-row test (t_01a182bbad9df5ac): once the grace passed and the lease lapsed, the
+    mirror-only ``running`` row of a REVIEW card is a real orphan. No local claim opened a run, so the current
+    run (if any) is not the reviewer's; the card must still go back to ``review``, not to ``ready``."""
+    tid = kb.create_task(live, title="review mirror-only", assignee="worker")
+    if prior_impl_run:
+        _round(kanban_home, svc)
+        assert kb.claim_task(live, tid, ttl_seconds=900, claimer=f"{kb._host_prefix()}:1")
+        assert kb.request_review(live, tid, summary="impl done")
+    else:
+        live.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (tid,))
+        live.commit()
+    assert kb.get_task(live, tid).status == "review"
+    _round(kanban_home, svc)
+    gate = sync.claim_gate(live, tid, int(time.time()) + 900, lane="review")
+    assert gate.lease is not None and gate.lease.granted
+    _round(kanban_home, svc)  # the grant's row reaches us: running, our lease, no local claim
+    row = live.execute("SELECT status, claim_lock, lease_holder FROM tasks WHERE id = ?", (tid,)).fetchone()
+    assert (row["status"], row["claim_lock"], row["lease_holder"]) == ("running", None, ME)
+
+    _age_out_mirror_only_claim(live, tid)
+    assert kd.reconcile_orphaned_running(live) == [tid]
+    assert kb.get_task(live, tid).status == "review"
+    (ev,) = [e for e in kb.list_events(live, tid) if e.kind == "reconciled"]
+    assert ev.payload["retry_status"] == "review"
+    gate.__exit__(None, None, None)
+
+
 def test_a_run_that_ends_before_its_first_push_survives_the_grants_own_run_row(live, kanban_home, svc):
     """The Board's grant wrote the run row before the local claim did; that copy reaching the gateway after the
     run already ended (a slow round) must not reopen it."""

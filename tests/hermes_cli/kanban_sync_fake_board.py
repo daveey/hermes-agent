@@ -8,6 +8,8 @@ Implements the contract the client relies on: row ops (per-field LWW by HLC on t
 from __future__ import annotations
 
 import copy
+import json
+import time
 from typing import Any, Optional
 
 from hermes_cli import kanban_sync_client as ksc
@@ -149,6 +151,13 @@ class FakeHub:
                 version = self.svc._put(b, "tasks", task, {"status": "running", "current_run_uid": run,
                                                            "lease_holder": gw, "lease_expires": 9_999_999_999_999},
                                         gw, op_id, hlc)["version"]
+                # As the Board's grantLease (hermes-hub worker/src/transitions.ts): the claimed event, tagged with
+                # the lane the claim came from, so a reviewer run retries to ``review``.
+                payload = {"holder": gw, "run_uid": run, "expires": 9_999_999_999_999,
+                           **({"source_status": "review"} if body.get("lane") == "review" else {})}
+                self.svc._put(b, "task_events", f"ev-{run}", {"task_id": task, "run_uid": run, "kind": "claimed",
+                                                              "payload": json.dumps(payload),
+                                                              "created_at": int(time.time())}, gw, op_id, hlc)
         elif body["action"] == "renew":
             if not cur or cur["holder"] != self.gateway or cur["run_uid"] != run:
                 return {"status": "rejected", "reason": "lease_lost", "lease": cur}
