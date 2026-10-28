@@ -12,7 +12,8 @@ import {
   $offlineSessions,
   _resetOfflineSessionsForTests,
   type OfflineReplicaRecord,
-  offlineSessionsFromReplica
+  offlineSessionsFromReplica,
+  recordSessionGatewayUnavailable
 } from '@/store/offline-sessions'
 import { $profiles } from '@/store/profile'
 import { $sessions } from '@/store/session'
@@ -165,6 +166,53 @@ describe('ChatSidebar offline fallback rows', () => {
 
     expect(resume).not.toHaveBeenCalled()
     expect($notifications.get().map(n => n.message).join(' ')).toMatch(/mini is offline/)
+  })
+
+  it('a replica row stays refused while its owner list is failing too', () => {
+    setCached([rec('a')])
+    act(() => recordSessionGatewayUnavailable('conn-mini'))
+    const resume = vi.fn()
+    mount(resume)
+
+    fireEvent.click(screen.getByText('Chat a'))
+
+    expect(resume).not.toHaveBeenCalled()
+    expect($notifications.get().map(n => n.message).join(' ')).toMatch(/mini is offline/)
+  })
+
+  it('a stale-list row of a busy local backend still opens, naming the connection as not responding', () => {
+    act(() => recordSessionGatewayUnavailable('local'))
+    const resume = vi.fn()
+    mount(resume)
+
+    expect(screen.getByTestId('session-row-offline').getAttribute('aria-label')).toBe(
+      'Not responding · This computer, showing its last list'
+    )
+
+    fireEvent.click(screen.getByText('Live one'))
+
+    expect(resume).toHaveBeenCalledWith('live-1', expect.objectContaining({ id: 'live-1', offline_stale_list: true }))
+    const notices = $notifications.get().map(n => n.message).join(' ')
+    expect(notices).toMatch(/This computer is not responding/)
+    expect(notices).not.toMatch(/its gateway|never synced/)
+  })
+
+  it('a remote stale-list row with a cached transcript still resumes live, not read-only', () => {
+    $sessions.set([makeSessionInfo({ connection_id: 'conn-mini', id: 'busy', source: 'desktop', title: 'Busy one' })])
+    saveTranscriptTail('busy', [{ content: 'kept on this mac', id: 1, role: 'user', timestamp: 1 } as never], {
+      connectionId: 'conn-mini',
+      profile: 'default'
+    })
+    act(() => recordSessionGatewayUnavailable('conn-mini'))
+    const resume = vi.fn()
+    mount(resume)
+
+    fireEvent.click(screen.getByText('Busy one'))
+
+    expect(resume).toHaveBeenCalledWith('busy', expect.objectContaining({ offline_stale_list: true }))
+    expect(asleepOpenFor('busy')).toBeNull()
+    expect($notifications.get().map(n => n.message).join(' ')).toMatch(/^mini is not responding/)
+    clearTranscriptTails()
   })
 
   it('opens a live row normally', () => {

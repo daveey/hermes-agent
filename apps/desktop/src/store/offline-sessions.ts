@@ -272,7 +272,8 @@ function rowFromRecord(record: OfflineReplicaRecord, connectionId: string, linea
   }
 }
 
-/** Fresh owner lists win; retained rows from a failed list are cached, not live. */
+/** Fresh owner lists win; retained rows from a failed list are cached, not live. A retained row with no replica
+ * copy is stamped `offline_stale_list`: its owner failed one list, which does not prove it is unreachable. */
 export function mergeOfflineFallback(
   live: SessionInfo[],
   offline: readonly SessionInfo[],
@@ -289,7 +290,7 @@ export function mergeOfflineFallback(
 
     if (!fresh) {
       const cached = cachedById.get(offlineIdentity(row))
-      effective = cached ?? { ...row, offline_cached: true, is_active: false }
+      effective = cached ?? { ...row, is_active: false, offline_cached: true, offline_stale_list: true }
       changed = true
     } else if (!row.offline_cached) {
       freshOwners.add(ownerKey(row.connection_id, row.profile))

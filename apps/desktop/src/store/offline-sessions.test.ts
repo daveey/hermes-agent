@@ -224,6 +224,22 @@ describe('mergeOfflineFallback', () => {
     expect(ids(merged)).toEqual(['tip'])
   })
 
+  it('a retained row of a failed list is stamped stale-list only when no replica copy replaces it', () => {
+    recordSessionListResult([], [], 'conn-mini', 'all', [], true)
+    const merged = mergeOfflineFallback(
+      [live('c1', { connection_id: 'conn-mini' }), live('busy', { connection_id: 'conn-mini' })],
+      cached
+    )
+
+    expect(merged.find(r => r.id === 'busy')).toMatchObject({
+      is_active: false,
+      offline_cached: true,
+      offline_stale_list: true
+    })
+    expect(merged.find(r => r.id === 'c1')).toMatchObject({ offline_cached: true, offline_gateway: 'mini' })
+    expect(merged.find(r => r.id === 'c1')?.offline_stale_list).toBeUndefined()
+  })
+
   it('keeps reference identity when nothing is added', () => {
     const rows = [live('l1')]
 
