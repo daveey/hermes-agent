@@ -17,7 +17,7 @@ import {
   recordSessionGatewayUnavailable
 } from '@/store/offline-sessions'
 import { $profiles } from '@/store/profile'
-import { $sessions } from '@/store/session'
+import { $messages, $sessions, setMessages } from '@/store/session'
 import { clearTranscriptTails, saveTranscriptTail } from '@/store/transcript-tail-cache'
 import { makeSessionInfo } from '@/test/session-info'
 
@@ -301,5 +301,34 @@ describe('ChatSidebar offline fallback rows', () => {
 
     expect(screen.getAllByText('Chat a')).toHaveLength(1)
     expect(screen.queryAllByTestId('session-row-offline')).toHaveLength(0)
+  })
+
+  it('[daveey] paints an awake row\'s cached transcript in the click, before resume runs', () => {
+    // Awake owner (published within the asleep window): an ordinary row that resumes live.
+    setCached([rec('w', { synced_at: Math.floor(Date.now() / 1000) - 5 })])
+    saveTranscriptTail('w', [{ content: 'cached on click', id: 1, role: 'user', timestamp: 1 } as never], {
+      connectionId: 'conn-mini',
+      profile: 'default'
+    })
+    act(() => setMessages([]))
+    let onScreenWhenResumed = ''
+    mount(() => (onScreenWhenResumed = JSON.stringify($messages.get())))
+
+    fireEvent.click(screen.getByText('Chat w'))
+
+    expect(onScreenWhenResumed).toContain('cached on click')
+    clearTranscriptTails()
+    act(() => setMessages([]))
+  })
+
+  it('[daveey] does not prepaint a row with no cached transcript', () => {
+    setCached([rec('n', { synced_at: Math.floor(Date.now() / 1000) - 5 })])
+    act(() => setMessages([]))
+    let onScreenWhenResumed = 'unset'
+    mount(() => (onScreenWhenResumed = JSON.stringify($messages.get())))
+
+    fireEvent.click(screen.getByText('Chat n'))
+
+    expect(onScreenWhenResumed).toBe('[]')
   })
 })
