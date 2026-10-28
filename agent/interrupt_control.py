@@ -51,6 +51,36 @@ def interrupted_during_api_call_reason(agent) -> str:
     return f"interrupted_during_api_call({issuer})" if issuer else "interrupted_during_api_call"
 
 
+# Fixed slug per human interrupt category; system producers keep their own issuer slug.
+_USER_REASON_SLUGS = {
+    _REASON_HARD_STOP: "user_stop", _REASON_NEW_MESSAGE: "new_message", _REASON_USER_INTERRUPT: "user_interrupt",
+}
+
+
+def interrupt_reason(agent) -> str:
+    """Fixed slug naming WHY the pending interrupt fired (``user_stop``, ``new_message``, ``backend_exit``,
+    ``ws_orphan``, ...), recorded on the interrupted row so a slow model can be told from a lost turn."""
+    reason = getattr(agent, "_tool_interrupt_reason", None)
+    if not reason:
+        return "unknown"
+    return _USER_REASON_SLUGS.get(reason) or interrupt_issuer(agent) or "unknown"
+
+
+def record_api_interrupt(agent, waited_s: float, messages) -> dict:
+    """[daveey] Note an interrupt that landed while waiting for the model: ``{reason, waited_s, prompt_tokens}``
+    on ``agent._last_api_interrupt`` (the finalizer stamps it on the interrupted row and the turn result) and one
+    INFO line in agent.log. Before this every producer saved the same bare text (self-heal agent-38bad5aced)."""
+    from agent.model_metadata import estimate_messages_tokens_rough
+    prompt_tokens = int(estimate_messages_tokens_rough(list(messages or [])))
+    info = {"reason": interrupt_reason(agent), "waited_s": round(max(0.0, float(waited_s)), 1),
+            "prompt_tokens": prompt_tokens}
+    agent._last_api_interrupt = info
+    logger.info("turn interrupted: reason=%s waited=%.1fs prompt_tokens=%d model=%s session=%s",
+                info["reason"], info["waited_s"], prompt_tokens, getattr(agent, "model", None),
+                getattr(agent, "session_id", None) or "none")
+    return info
+
+
 def _fence_cancel_before_commit(fence, *, when_in_flight: bool, failure_log: str) -> None:
     """Call ``type(fence).cancel_before_commit(fence)`` when ``commit_in_flight`` matches.
 

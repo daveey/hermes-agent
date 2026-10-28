@@ -184,6 +184,8 @@ def _resolve_budget_fallback(
                 interrupted = True
                 _turn_exit_reason = interrupted_during_api_call_reason(agent)
                 final_response = f"{INTERRUPT_WAITING_FOR_MODEL_PREFIX}{time.time() - _summary_start:.1f}s elapsed)."
+                from agent.interrupt_control import record_api_interrupt
+                record_api_interrupt(agent, time.time() - _summary_start, messages)
 
         from agent.pre_final_gate import UnresolvedFallback
         if _gate_budget_output and not isinstance(_pending_verification_response, UnresolvedFallback):
@@ -269,7 +271,9 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, _recove
     # providers don't see ``tool → user`` (placeholder: final_response is usually empty).
     if interrupted:
         from agent.message_sanitization import close_interrupted_tool_sequence
-        close_interrupted_tool_sequence(messages, final_response)
+        _info = getattr(agent, "_last_api_interrupt", None)
+        close_interrupted_tool_sequence(
+            messages, final_response, display_metadata={"interrupt": _info} if isinstance(_info, dict) else None)
 
     # Recovery ``break`` sites can return a final_response with no closing assistant
     # row; enforce "delivered final_response ⇒ assistant row" here. Compare content,
@@ -577,6 +581,23 @@ def _prepare_final_gate_fallback(
     return final_response, unresolved
 
 
+def _stamp_interrupt_attribution(agent, result, interrupted) -> None:
+    """Who and why for an interrupted turn, stamped on the result before ``clear_interrupt``."""
+    # [daveey] Why a model wait was cut short ({reason, waited_s, prompt_tokens}); consumed once per turn.
+    api_interrupt = vars(agent).pop("_last_api_interrupt", None)
+    if not interrupted:
+        return
+    if agent._interrupt_message:
+        result["interrupt_message"] = agent._interrupt_message
+    # [daveey] Which system producer stopped the turn (None for a human stop), so clients can
+    # tell "you pressed Stop" from "Hermes stopped this" (tui_gateway/prompt_turn surfaces it).
+    from agent.interrupt_control import interrupt_issuer as _interrupt_issuer
+    if _issuer_slug := _interrupt_issuer(agent):
+        result["interrupt_issuer"] = _issuer_slug
+    if isinstance(api_interrupt, dict):
+        result["interrupt"] = api_interrupt
+
+
 def _stamp_unresolved_failure(result, goal_unresolved):
     if goal_unresolved and not result.get("error"):
         # Delivery adapters understand error; completed=False alone is not a
@@ -828,14 +849,7 @@ def finalize_turn(
         result["pending_steer"] = _leftover_steer
     agent._response_was_previewed = False
     agent._reused_response_text = None
-    if interrupted and agent._interrupt_message:
-        result["interrupt_message"] = agent._interrupt_message
-    if interrupted:
-        # [daveey] Which system producer stopped the turn (None for a human stop), so clients can
-        # tell "you pressed Stop" from "Hermes stopped this" (tui_gateway/prompt_turn surfaces it).
-        from agent.interrupt_control import interrupt_issuer as _interrupt_issuer
-        if _issuer_slug := _interrupt_issuer(agent):
-            result["interrupt_issuer"] = _issuer_slug
+    _stamp_interrupt_attribution(agent, result, interrupted)
     agent.clear_interrupt()
     agent._stream_callback = None  # don't leak into future calls
 

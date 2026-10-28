@@ -250,10 +250,12 @@ class HostSupervisor:
             raise
         return request_id
 
-    def interrupt(self, sid: str, *, request_id: str | None = None) -> None:
+    def interrupt(self, sid: str, *, request_id: str | None = None, reason: str | None = None) -> None:
         self.start()
-        self._send_frame(
-            {"type": "interrupt", "sid": sid, "request_id": request_id or uuid.uuid4().hex})
+        frame = {"type": "interrupt", "sid": sid, "request_id": request_id or uuid.uuid4().hex}
+        if reason:
+            frame["reason"] = reason  # [daveey] why the turn is stopped; the child records it on the row
+        self._send_frame(frame)
 
     def has_pending_turn(self, sid: str) -> bool:
         """True when a host completion callback is still registered for ``sid``.

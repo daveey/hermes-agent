@@ -285,7 +285,7 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     return "{}"
 
 
-def close_interrupted_tool_sequence(messages: list, final_response: Any = None) -> bool:
+def close_interrupted_tool_sequence(messages: list, final_response: Any = None, display_metadata: Any = None) -> bool:
     """Append a synthetic assistant turn when an interrupted tail is a tool result: a transcript
     ending on a raw ``tool`` message makes the next user message land as ``tool → user``, an
     alternation violation strict providers (Gemini, Claude) answer by hallucinating a
@@ -297,7 +297,8 @@ def close_interrupted_tool_sequence(messages: list, final_response: Any = None) 
     ``display_kind="hidden"`` keep it out of rendered transcripts, matching the
     ``_INTERRUPTED_PLACEHOLDER`` shape in ``turn_api_call.py``. A caller-supplied banner
     (truncation notices, partial-delivery text) stays visible: it is the turn's only
-    user-facing explanation."""
+    user-facing explanation. ``display_metadata`` (the interrupt's recorded reason) rides on the
+    closing row either way."""
     last = messages[-1] if messages else None
     if not isinstance(last, dict) or last.get("role") != "tool":
         return False
@@ -305,10 +306,11 @@ def close_interrupted_tool_sequence(messages: list, final_response: Any = None) 
     from agent.message_metadata import append_message
 
     stripped = text.strip()
-    if not stripped or stripped == _INTERRUPTED_PLACEHOLDER:
-        append_message(messages, hidden_interrupt_placeholder_row())
-    else:
-        append_message(messages, {"role": "assistant", "content": stripped})
+    row: dict[str, Any] = (hidden_interrupt_placeholder_row() if not stripped or stripped == _INTERRUPTED_PLACEHOLDER
+           else {"role": "assistant", "content": stripped})
+    if display_metadata:
+        row["display_metadata"] = dict(display_metadata)
+    append_message(messages, row)
     return True
 
 

@@ -96,7 +96,7 @@ def _revoke_taken_over_lease(sid: str, session: dict, lease, taker: dict) -> boo
     logger.warning("Session %s (%s) was taken over by pid=%s surface=%s; stopping this runtime",
                    sid, lease.session_id, taker.get("pid"), taker.get("surface"))
     try:
-        _interrupt_session_turn(sid, session, request_id="lease-taken-over")
+        _interrupt_session_turn(sid, session, request_id="lease-taken-over", reason="lease_takeover")
     except Exception:
         logger.exception("takeover interrupt failed sid=%s", sid)
     with contextlib.suppress(Exception):

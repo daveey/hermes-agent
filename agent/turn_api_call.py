@@ -188,6 +188,8 @@ def handle_api_interrupt(
     api_elapsed = time.time() - api_start_time
     agent._vprint(f"{agent.log_prefix}⚡ Interrupted during API call.", force=True)
     interrupted = True
+    from agent.interrupt_control import record_api_interrupt
+    _interrupt_info = record_api_interrupt(agent, api_elapsed, messages)
     # A Stop during the empty-response nudge request leaves the synthetic assistant+nudge
     # pair after an executed tool result; strip it so the row appended below follows the tool
     # row (the finalizer then closes the tail with this exit's own reason).
@@ -199,11 +201,13 @@ def handle_api_interrupt(
         # The interrupted row is replayed next turn; looped bytes there re-seed the loop
         # (#112764). Same hidden shape as the redirect placeholder: nothing visible in the
         # transcript, a neutral api_content so the pre-call sanitizer does not re-heal it.
-        append_message(messages, hidden_interrupt_placeholder_row())
+        append_message(messages, {**hidden_interrupt_placeholder_row(),
+                                  "display_metadata": {"interrupt": _interrupt_info}})
         final_response = REPETITION_LOOP_INTERRUPTED
     elif _partial:
         append_message(messages, {
-            "role": "assistant", "content": _partial, "display_metadata": {"interrupted": True},
+            "role": "assistant", "content": _partial,
+            "display_metadata": {"interrupted": True, "interrupt": _interrupt_info},
         })
         final_response = _partial
     else:

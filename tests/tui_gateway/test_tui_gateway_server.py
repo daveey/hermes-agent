@@ -5053,8 +5053,8 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
             return None
 
     class _Supervisor:
-        def interrupt(self, sid, *, request_id=None):
-            interrupted.append((sid, request_id))
+        def interrupt(self, sid, *, request_id=None, reason=None):
+            interrupted.append((sid, request_id, reason))  # [daveey] reason: the child records why it stopped
 
     session = _session(
         agent=None,
@@ -5084,7 +5084,7 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
         server._schedule_ws_orphan_reap("isolated-sid")
         callbacks.pop(0)()
 
-        assert interrupted == [("isolated-sid", "client-gone-isolated-sid")]
+        assert interrupted == [("isolated-sid", "client-gone-isolated-sid", "ws_orphan")]
         assert session["_turn_cancel_requested"] is True
         assert session["queued_prompt"] is None
         assert session["history"] == [{"role": "assistant", "content": "partial"}]
@@ -5092,7 +5092,7 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
 
         callbacks.pop(0)()
 
-        assert interrupted == [("isolated-sid", "client-gone-isolated-sid")]
+        assert interrupted == [("isolated-sid", "client-gone-isolated-sid", "ws_orphan")]
         assert len(callbacks) == 1
 
         session["running"] = False
