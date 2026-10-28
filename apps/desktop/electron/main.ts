@@ -37,6 +37,7 @@ import type { Session } from 'electron'
 import { type ActiveRuntimeState, classifyActiveRuntime } from './active-runtime-state'
 import { hideAgentTestInstance, isHiddenAgentTestInstance } from './agent-test-instance'
 import { HERMES_API_EXPECTED_404 } from './api-expected-404'
+import { formatApiRequestFailure } from './api-request-failure'
 import {
   destroyKeepaliveAgents,
   htmlResponseError,
@@ -17780,20 +17781,6 @@ async function handleHermesApiRequest(request) {
   }
 
   return response
-}
-
-// Format an api-request failure for desktop.log. The renderer only ever sees
-// the invoke rejection; the real stack lives here in main, so persist it
-// before rethrowing. Clamp: paths and error detail must not bloat the log.
-function formatApiRequestFailure(
-  request: { method?: string; path?: string } | null | undefined,
-  error: unknown
-): string {
-  const method = String(request?.method ?? 'GET').toUpperCase()
-  const path = String(request?.path ?? '(no path)').slice(0, 500)
-  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
-
-  return `[hermes:api ${method} ${path}] ${detail}`.slice(0, 6000)
 }
 
 ipcMain.handle('hermes:api', async (_event, request) => {
