@@ -545,7 +545,7 @@ import {
 } from './remote-liveness'
 import { resolveRemoteOauthTicket, rosterSourceEnumerationTimeoutMs } from './remote-oauth-ticket'
 import { createRemoteOwnerCache } from './remote-owner-cache'
-import { RemotePrewarmer } from './remote-prewarm'
+import { prewarmTargets, RecentRemoteProfiles, RemotePrewarmer } from './remote-prewarm'
 import { remoteSessionCookies } from './remote-session-cookies'
 import {
   attachRemoteRequestHeaderListener,
@@ -11066,16 +11066,28 @@ async function ensureBackend(
 // a genuinely-local child when the v1 mode says remote; non-local connections
 // pool under the composite key from backendScopeKey() and reuse the same pool
 // entry lifecycle (LRU, idle reaper, touch) as per-profile local backends.
-// Part B (instant session loads): dial every SSH gateway at startup and keep it warm (remote-prewarm.ts).
+// Part B (instant session loads): dial every SSH gateway at startup and keep it warm (remote-prewarm.ts): its
+// default profile plus each named profile dispatched to in the last 24 h (one remote backend per profile).
+const recentRemoteProfiles = new RecentRemoteProfiles({
+  load: () => JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'remote-prewarm-profiles.json'), 'utf8')),
+  save: data =>
+    fs.writeFileSync(path.join(app.getPath('userData'), 'remote-prewarm-profiles.json'), JSON.stringify(data), {
+      mode: 0o600
+    })
+})
+
 const remotePrewarmer = new RemotePrewarmer({
-  listConnectionIds: () =>
+  listTargets: () =>
     process.env.HERMES_DESKTOP_REMOTE_PREWARM === '0'
       ? []
-      : readDesktopConnectionsRegistry()
-          .connections.filter(connection => connection.kind === 'ssh')
-          .map(connection => connection.id),
-  ensure: (connectionId, { forceProbe }) =>
-    ensureRegistryBackend(connectionId, 'default', '', { forceProbe, spawnPriority: 'background' }),
+      : prewarmTargets(
+          readDesktopConnectionsRegistry()
+            .connections.filter(connection => connection.kind === 'ssh')
+            .map(connection => connection.id),
+          recentRemoteProfiles
+        ),
+  ensure: ({ connectionId, profile }, { forceProbe }) =>
+    ensureRegistryBackend(connectionId, profile, '', { forceProbe, spawnPriority: 'background' }),
   log: line => rememberLog(line)
 })
 
@@ -11108,6 +11120,10 @@ async function ensureRegistryBackend(
   // archive on them all failed with "Profile 'default@mac-mini' does not exist."
   if (!PROFILE_NAME_RE.test(profileKey)) {
     throw new Error(`Profile '${profileKey}' does not exist.`)
+  }
+
+  if (source.kind === 'ssh' && !passive && !opts.forceProbe) {
+    recentRemoteProfiles.touch(id, profileKey)
   }
 
   let resolvedRegistrySshConfig

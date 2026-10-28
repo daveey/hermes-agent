@@ -84,7 +84,7 @@ const KILLS = /\bkill (-9 |-TERM )?4242\b|os\.kill\(/
 test('connect() reuses the always-on dashboard: no spawn, no lockfile, nothing killed', async () => {
   const ssh = fakeHost([['ALIVE', record()]])
   const d = deps(ssh)
-  const result = await connect(d)
+  const result: any = await connect(d)
 
   assert.equal(result.alwaysOn, true)
   assert.equal(result.reused, true)
@@ -108,7 +108,7 @@ test('after a core update, connect() waits for the supervisor restart and reuses
     probeReuseProof: async () => (++probes === 1 ? 'authenticated-stale' : 'authenticated-ok')
   })
 
-  const result = await connect(d)
+  const result: any = await connect(d)
 
   assert.equal(result.alwaysOn, true)
   assert.equal(result.pid, 5151)

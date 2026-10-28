@@ -8,7 +8,14 @@ import {
   ensureHealthyPooledRemoteBackendForDispatch,
   RemoteAnswerLedger
 } from './remote-liveness'
-import { PREWARM_BACKOFF_MS, RemotePrewarmer } from './remote-prewarm'
+import {
+  PREWARM_BACKOFF_MS,
+  prewarmTargets,
+  RECENT_PROFILE_TTL_MS,
+  RECENT_PROFILES_PER_CONNECTION,
+  RecentRemoteProfiles,
+  RemotePrewarmer
+} from './remote-prewarm'
 
 // Part B (instant session loads): Desktop prewarms every SSH gateway at startup, holds it with a forced keepalive
 // probe, reconnects when the tunnel drops, and skips the per-dispatch /api/health probe while the backend answered
@@ -95,7 +102,7 @@ describe('reconnect after a dropped tunnel', () => {
     })
 
     const prewarmer = new RemotePrewarmer({
-      listConnectionIds: () => ['mac-mini'],
+      listTargets: () => [{ connectionId: 'mac-mini', profile: 'default' }],
       ensure,
       log: line => logs.push(line),
       now: () => now,
@@ -108,7 +115,7 @@ describe('reconnect after a dropped tunnel', () => {
     up = false
     now += 15_000
     await prewarmer.tick()
-    expect(ensure).toHaveBeenLastCalledWith('mac-mini', { forceProbe: true })
+    expect(ensure).toHaveBeenLastCalledWith({ connectionId: 'mac-mini', profile: 'default' }, { forceProbe: true })
     expect(prewarmer.isWarm('mac-mini')).toBe(false)
 
     now += PREWARM_BACKOFF_MS[0] - 1
@@ -120,7 +127,7 @@ describe('reconnect after a dropped tunnel', () => {
     await prewarmer.tick()
     expect(ensure).toHaveBeenCalledTimes(3)
     expect(prewarmer.isWarm('mac-mini')).toBe(true)
-    expect(logs.some(line => /mac-mini reconnected/.test(line))).toBe(true)
+    expect(logs.some(line => /mac-mini::default reconnected/.test(line))).toBe(true)
     prewarmer.stop()
   })
 })
@@ -133,9 +140,12 @@ describe('prewarm at startup', () => {
     const gate = new Promise<void>(resolve => (release = resolve))
 
     const prewarmer = new RemotePrewarmer({
-      listConnectionIds: () => ['mac-mini', 'hermes-hub'],
-      ensure: async (id, opts) => {
-        order.push(`${id}:${opts.forceProbe}`)
+      listTargets: () => [
+        { connectionId: 'mac-mini', profile: 'default' },
+        { connectionId: 'hermes-hub', profile: 'default' }
+      ],
+      ensure: async (target, opts) => {
+        order.push(`${target.connectionId}:${opts.forceProbe}`)
         await gate
       },
       log: () => {},
@@ -158,7 +168,13 @@ describe('prewarm at startup', () => {
   it('drops a connection removed from connections.json', async () => {
     let ids = ['mac-mini', 'hermes-hub']
     const ensure = vi.fn(async () => {})
-    const prewarmer = new RemotePrewarmer({ listConnectionIds: () => ids, ensure, log: () => {}, setTimer: () => ({}) })
+
+    const prewarmer = new RemotePrewarmer({
+      listTargets: () => ids.map(connectionId => ({ connectionId, profile: 'default' })),
+      ensure,
+      log: () => {},
+      setTimer: () => ({})
+    })
 
     await prewarmer.start()
     ids = ['mac-mini']
@@ -166,6 +182,70 @@ describe('prewarm at startup', () => {
 
     expect(prewarmer.isWarm('hermes-hub')).toBe(false)
     expect(ensure).toHaveBeenCalledTimes(3)
+    prewarmer.stop()
+  })
+})
+
+describe('recently used named profiles stay warm', () => {
+  function store(now: () => number, initial: unknown = null) {
+    const saved: any[] = []
+    const recent = new RecentRemoteProfiles({ load: () => initial, save: data => saved.push(structuredClone(data)), now })
+
+    return { recent, saved }
+  }
+
+  it('prewarms each connection default plus its named profiles used in the last 24 h', () => {
+    let now = 1_000_000
+    const { recent, saved } = store(() => now)
+    recent.touch('mac-mini', 'bb-dev')
+    recent.touch('mac-mini', 'default') // always warm, never recorded
+    now += 1000
+    recent.touch('mac-mini', 'api-e1628a809db4c3f7')
+
+    expect(prewarmTargets(['mac-mini', 'hermes-hub'], recent)).toEqual([
+      { connectionId: 'mac-mini', profile: 'default' },
+      { connectionId: 'mac-mini', profile: 'api-e1628a809db4c3f7' },
+      { connectionId: 'mac-mini', profile: 'bb-dev' },
+      { connectionId: 'hermes-hub', profile: 'default' }
+    ])
+    expect(saved).toHaveLength(2)
+
+    now += RECENT_PROFILE_TTL_MS
+    expect(recent.profilesFor('mac-mini')).toEqual([])
+  })
+
+  it('caps the named profiles per connection and survives a restart from the persisted file', () => {
+    let now = 0
+    const { recent, saved } = store(() => now)
+
+    for (let i = 0; i < RECENT_PROFILES_PER_CONNECTION + 2; i++) {
+      now += 120_000
+      recent.touch('mac-mini', `p${i}`)
+    }
+
+    expect(recent.profilesFor('mac-mini')).toHaveLength(RECENT_PROFILES_PER_CONNECTION)
+    expect(recent.profilesFor('mac-mini')[0]).toBe(`p${RECENT_PROFILES_PER_CONNECTION + 1}`)
+
+    const restarted = store(() => now, saved.at(-1)).recent
+    expect(restarted.profilesFor('mac-mini')).toEqual(recent.profilesFor('mac-mini'))
+    expect(store(() => now, 'garbage').recent.profilesFor('mac-mini')).toEqual([])
+  })
+
+  it('the prewarmer holds a named-profile target like a default one', async () => {
+    const ensure = vi.fn(async () => {})
+
+    const prewarmer = new RemotePrewarmer({
+      listTargets: () => [{ connectionId: 'mac-mini', profile: 'bb-dev' }],
+      ensure,
+      log: () => {},
+      setTimer: () => ({})
+    })
+
+    await prewarmer.start()
+    await prewarmer.tick()
+
+    expect(ensure).toHaveBeenLastCalledWith({ connectionId: 'mac-mini', profile: 'bb-dev' }, { forceProbe: true })
+    expect(prewarmer.isWarm('mac-mini::bb-dev')).toBe(true)
     prewarmer.stop()
   })
 })
@@ -182,7 +262,14 @@ describe('main.ts wiring', () => {
 
   it('prewarms registry SSH connections through ensureRegistryBackend with a forced keepalive probe', () => {
     expect(main).toMatch(/connection\.kind === 'ssh'/)
-    expect(main).toMatch(/ensureRegistryBackend\(connectionId, 'default', '', \{ forceProbe, spawnPriority: 'background' \}\)/)
+    expect(main).toMatch(/ensureRegistryBackend\(connectionId, profile, '', \{ forceProbe, spawnPriority: 'background' \}\)/)
+    expect(main).toMatch(/prewarmTargets\(\n\s+readDesktopConnectionsRegistry\(\)/)
+  })
+
+  it('records a named profile on every user dispatch to an SSH connection, not on prewarm or passive calls', () => {
+    expect(main).toMatch(
+      /if \(source\.kind === 'ssh' && !passive && !opts\.forceProbe\) \{\n\s+recentRemoteProfiles\.touch\(id, profileKey\)/
+    )
   })
 
   it('pooled dispatch skips the probe from the shared answer ledger unless forced', () => {
