@@ -717,6 +717,30 @@ def _last_ready_entry_ts(events: Iterable[Any]) -> int:
     return max([_latest_event_ts(events, _READY_WAIT_FLOOR_KINDS), *continued_ready])
 
 
+def _foreign_machines(task, cfg) -> list[str]:
+    """``machine:<m>`` runs_on labels naming a machine other than this hub (cfg ``own_machine``)."""
+    raw = _task_field(task, "runs_on")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = [raw]
+    own = str(cfg.get("own_machine", "hub"))
+    return [str(l).split(":", 1)[1] for l in (raw or [])
+            if str(l).startswith("machine:") and str(l).split(":", 1)[1] != own]
+
+
+def _ready_hold_reason(task, events, cfg) -> Optional[str]:
+    """Why a ready card is deliberately not claimed: its last event is ``respawn_guarded`` (the
+    dispatcher is holding it), or it is pinned to a foreign machine this hub never runs. [daveey]"""
+    evs = list(events or [])
+    if evs and _event_kind(max(evs, key=_event_ts)) == "respawn_guarded":
+        return "respawn_guarded"
+    if _foreign_machines(task, cfg):
+        return "foreign_runs_on"
+    return None
+
+
 def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Assigned, unclaimed, ``ready`` for >= cfg["stranded_threshold_seconds"]
     (default 30 min). Deliberately age-based and identity-agnostic so it
@@ -731,6 +755,9 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         return []
     assignee = _task_field(task, "assignee") or ""
     if not assignee.strip():
+        return []
+    # A deliberate hold is reported by _rule_held_in_ready, not as a stranded card.
+    if _ready_hold_reason(task, events, cfg):
         return []
 
     # Most recent event that put the task into ready; with none (old task /
@@ -775,6 +802,34 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         first_seen_at=last_ready_ts, last_seen_at=last_ready_ts, count=1,
         data={"ready_since": last_ready_ts, "age_seconds": int(age_seconds),
               "assignee": assignee, "threshold_seconds": int(threshold_seconds)},
+    )]
+
+
+
+def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Unclaimed ``ready`` >= the stranded threshold, but held on purpose (respawn guard, or a
+    ``runs_on`` pin to another machine). Kept apart from ``stranded_in_ready`` so idle sweeps
+    do not nag about cards they cannot unstick. [daveey]"""
+    if _task_field(task, "status") != "ready" or _task_field(task, "claim_lock"):
+        return []
+    if not (_task_field(task, "assignee") or "").strip():
+        return []
+    reason = _ready_hold_reason(task, events, cfg)
+    if not reason:
+        return []
+    since = _last_ready_entry_ts(events) or int(_task_field(task, "created_at", 0) or 0)
+    age = now - since
+    if not since or age < float(cfg.get("stranded_threshold_seconds", 30 * 60)):
+        return []
+    return [Diagnostic(
+        kind="held_in_ready", severity="warning",
+        title=f"Ready {int(age / 60)}m, held ({reason})",
+        detail=f"Not stranded: {reason}. A respawn_guarded hold ends at its cap; a foreign "
+               f"machine:* pin waits for that machine (or a re-file).",
+        actions=[_cli_hint("Check dispatcher status", "hermes kanban diagnostics")],
+        first_seen_at=since, last_seen_at=since, count=1,
+        data={"ready_since": since, "age_seconds": int(age), "hold_reason": reason,
+              "foreign_machines": _foreign_machines(task, cfg)},
     )]
 
 
@@ -998,6 +1053,7 @@ _RULES: list[RuleFn] = [
     _rule_stuck_in_blocked,
     _rule_block_unblock_cycling,
     _rule_stranded_in_ready,
+    _rule_held_in_ready,
     _rule_overdue_wake,
     _rule_scheduled_without_wake,
     _rule_clock_only_park,

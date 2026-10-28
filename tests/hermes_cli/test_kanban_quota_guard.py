@@ -207,3 +207,24 @@ def test_auth_hold_block_is_not_released(kanban_home, monkeypatch):
         assert task.status == "blocked" and task.block_kind == "capability"
         ev = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='blocked'", (tid,)).fetchone()
         assert json.loads(ev[0])["kind"] == "capability"
+
+
+def test_hold_clock_survives_non_dispatcher_comments(kanban_home, monkeypatch):
+    """A comment from an orchestrator/human must not restart the hold clock (t_d5d83916)."""
+    monkeypatch.setenv("HERMES_KANBAN_GUARD_HOLD_CAP_LONG_SECONDS", "3600")
+    now = 5_000_000
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="pr held", assignee="a")
+        monkeypatch.setattr(kb.time, "time", lambda: now)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "respawn_guarded", {"reason": "active_pr"})
+        monkeypatch.setattr(kb.time, "time", lambda: now + 1800)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "commented", {"author": "default", "len": 10})
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "respawn_guarded", {"reason": "active_pr"})
+        from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at
+        assert guard_hold_started_at(conn, tid) == now
+        monkeypatch.setattr(kb.time, "time", lambda: now + 3700)
+        assert kbd._block_if_guard_hold_capped(conn, tid, "active_pr") is True
+        assert kb.get_task(conn, tid).status != "ready"
