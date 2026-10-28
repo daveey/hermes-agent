@@ -23,8 +23,17 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from cron.constants import is_recurring
 from hermes_time import now as _hermes_now
+
+try:
+    from cron.constants import is_recurring
+except ImportError:
+    # A scheduler still running the previous release imports this module lazily (will_retry,
+    # is_model_unreachable_failure) from the tree an update just swapped in, while its in-memory
+    # cron.constants predates is_recurring. Failing here lost the run's bookkeeping and the next
+    # tick ran the one-shot job again (e2e-upgrade handoff, release N-1 -> HEAD).
+    def is_recurring(job: dict) -> bool:
+        return (job.get("schedule") or {}).get("kind") in {"cron", "interval"}
 
 logger = logging.getLogger("cron.scheduler")
 
