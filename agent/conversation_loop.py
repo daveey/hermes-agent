@@ -1699,6 +1699,9 @@ def _run_conversation_turn(
         name: getattr(s, name)
         for name in inspect.signature(finalize_turn).parameters if name != "agent"
     })
+    # [daveey] A core-update pause at a step boundary (turn_iteration_prep.begin_iteration).
+    if _paused := vars(agent).pop("_step_boundary_paused", None):
+        result["paused_for_update"] = _paused
     if s._compression_timeout_exhausted:
         # Reuse the gateway's context-recovery contract: transcript stays intact while
         # future input can move to a clean session (#98722).
@@ -1736,6 +1739,7 @@ def run_conversation(
 
     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
     agent._turn_user_intervened = False
+    vars(agent).pop("_step_boundary_paused", None)  # [daveey] per-turn core-update pause verdict
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
     with native_turn_images(user_message):

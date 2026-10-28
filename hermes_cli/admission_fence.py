@@ -147,6 +147,45 @@ def clear_hold(home):
         (root / "holds" / "hermes-sync").unlink(missing_ok=True)
 
 
+# [daveey] Core-update pause request (t_01a1827558218fed). hermes-sync's drain window writes this JSON
+# file beside the hold ({"version": 1, "expires_at": <epoch s>, ...}) to ask turns the next backend can
+# auto-continue to end at their next step boundary. It counts only while the hold stands and before
+# expires_at, so a file a crashed drainer leaves behind never outlives its window. hermes-sync writes it
+# directly (no core call), so the format is the contract: keep it backward compatible.
+PAUSE_REQUEST = "pause-request"
+
+
+def pause_requested(home):
+    """Cheap boundary check: one stat when no request exists. Never raises."""
+    root = Path(home) / "core-update"
+    try:
+        (root / PAUSE_REQUEST).stat()
+    except OSError:
+        return False
+    try:
+        body = json.loads((root / PAUSE_REQUEST).read_text(encoding="utf-8"))
+        expires_at = float(body["expires_at"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    try:
+        return expires_at > time.time() and is_held(root)
+    except OSError:
+        return False
+
+
+def request_pause(home, *, expires_at, pid=None):
+    root = Path(home) / "core-update"
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = root / f".{PAUSE_REQUEST}.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps({"version": 1, "pid": pid or os.getpid(), "requested_at": time.time(),
+                               "expires_at": float(expires_at)}) + "\n", encoding="utf-8")
+    os.replace(tmp, root / PAUSE_REQUEST)
+
+
+def clear_pause_request(home):
+    (Path(home) / "core-update" / PAUSE_REQUEST).unlink(missing_ok=True)
+
+
 def main():
     import argparse
 

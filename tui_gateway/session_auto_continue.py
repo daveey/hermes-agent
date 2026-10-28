@@ -44,6 +44,9 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
     (``_stop_turns_before_exit`` flags it) so the next boot auto-continues it like a crash."""
     if session.get("_exit_keeps_turn_marker"):
         return
+    # [daveey] A core-update pause keeps its marker: the next backend (or the in-place watcher) continues it.
+    if session.get("_update_pause_marker_key"):
+        return
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
         if key:
@@ -92,7 +95,14 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if session.get("_auto_continue_scheduled"):
         return None
     session["_auto_continue_scheduled"] = True
-    attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
+    # [daveey] A core-update pause is not a crash: no attempt is used and the note says the step finished.
+    paused = marker.get("reason") == "core_update_pause"
+    if paused:
+        from tui_gateway.update_pause import pause_note
+        attempt, text = marker["attempts"], pause_note(marker["prompt"])
+    else:
+        attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
+    pauses = int(marker.get("pauses") or 0)
 
     def kickoff() -> None:
         rid = f"__auto_continue__{int(time.time() * 1000)}"
@@ -125,12 +135,14 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             # Marker inputs read back by _run_prompt_submit: attempt count (crash breaker) and the ORIGINAL prompt (no
             # nested notes). Set here, not at schedule time, so a bail above leaves nothing for a racing user turn.
             session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
+            session["_auto_continue_pauses"] = pauses
         try:
             from gateway.warning_notifications import render_notification
             diagnostic = marker.get("notification_category") == "diagnostic"
             with _session_profile_runtime_scope(session):
                 def announce():
-                    _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
+                    _emit("status.update", sid, {"kind": "process", "text": "Resuming paused turn…" if paused
+                                                 else "Resuming interrupted turn…"})
                     _emit("message.start", sid)
                 render_notification(announce, platform="tui", diagnostic=diagnostic)
                 _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue",
@@ -141,8 +153,9 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if _start_session_work(kickoff, name=f"auto-continue-{sid}", home=session.get("profile_home")) is None:
         session["_auto_continue_scheduled"] = False
         return None
-    logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago, writer pid %s: %s, "
-                "reader pid %s)", session_key, attempt, age, marker.get("writer_pid"), writer_state, os.getpid())
+    logger.info("auto-continue scheduled for session %s (attempt %d%s, interrupted %.0fs ago, writer pid %s: %s, "
+                "reader pid %s)", session_key, attempt, ", core-update pause" if paused else "", age,
+                marker.get("writer_pid"), writer_state, os.getpid())
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
 
 
