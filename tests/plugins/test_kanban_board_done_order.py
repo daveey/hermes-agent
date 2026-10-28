@@ -113,3 +113,49 @@ def test_queue_lane_keeps_fifo_default(client):
 
     ready = _column(client, "ready")  # no parents -> both land ready (dispatch order)
     assert [t["id"] for t in ready] == [b["id"], a["id"]]
+
+
+def _finish_at(client, task_id, completed_at, body=None):
+    _finish(client, task_id)
+    with kbc.connect() as conn:
+        conn.execute("UPDATE tasks SET completed_at = ? WHERE id = ?", (completed_at, task_id))
+        if body is not None:
+            conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, task_id))
+        conn.commit()
+
+
+def test_board_poll_caps_done_column_and_previews_body(client):
+    """The Desktop poll must not ship every done card's full body. The list
+    keeps the newest ``done_limit`` cards and a short preview; the drawer
+    still loads the full text from /tasks/:id."""
+    long_body = "x" * 500
+    older = client.post("/api/plugins/kanban/tasks", json={"title": "older"}).json()["task"]
+    newer = client.post("/api/plugins/kanban/tasks", json={"title": "newer"}).json()["task"]
+    _finish_at(client, older["id"], 1000, long_body)
+    _finish_at(client, newer["id"], 2000, long_body)
+
+    r = client.get("/api/plugins/kanban/board?done_limit=1")
+    assert r.status_code == 200, r.text
+    col = next(c for c in r.json()["columns"] if c["name"] == "done")
+    assert col["total"] == 2
+    assert col["omitted"] == 1
+    assert [t["id"] for t in col["tasks"]] == [newer["id"]]
+    assert len(col["tasks"][0]["body"]) <= 200
+    assert col["tasks"][0]["body_truncated"] is True
+
+    full = client.get(f"/api/plugins/kanban/tasks/{newer['id']}")
+    assert full.status_code == 200, full.text
+    assert full.json()["task"]["body"] == long_body
+
+
+def test_done_limit_zero_returns_every_done_card(client):
+    first = client.post("/api/plugins/kanban/tasks", json={"title": "first"}).json()["task"]
+    second = client.post("/api/plugins/kanban/tasks", json={"title": "second"}).json()["task"]
+    _finish_at(client, first["id"], 1000)
+    _finish_at(client, second["id"], 2000)
+
+    r = client.get("/api/plugins/kanban/board?done_limit=0")
+    assert r.status_code == 200, r.text
+    col = next(c for c in r.json()["columns"] if c["name"] == "done")
+    assert col["omitted"] == 0
+    assert [t["id"] for t in col["tasks"]] == [second["id"], first["id"]]

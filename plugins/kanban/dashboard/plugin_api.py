@@ -177,6 +177,11 @@ def _errors_to_500(prefix: str) -> Iterator[None]:
 BOARD_COLUMNS: list[str] = list(kanban_workflow.DEFAULT_WORKFLOW.keys())
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
+# Newest done cards on the board poll. A busy board's done column is history
+# (thousands of cards, multi-MB bodies). Shipping all of it encodes megabytes
+# on the request and cannot cross an SSH tunnel inside the Desktop's 6s
+# timeout. 0 returns the whole column. [daveey]
+_BOARD_DONE_LIMIT = 80
 
 
 def _task_dict(task: kanban_db.Task, *, latest_summary: Optional[str] = None,
@@ -309,7 +314,9 @@ def get_board(
     include_archived: bool = Query(False),
     board: Optional[str] = _BOARD_Q,
     workflow_template_id: Optional[str] = Query(None, description="Restrict to tasks using this workflow template id"),
-    current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key")):
+    current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key"),
+    done_limit: int = Query(_BOARD_DONE_LIMIT, ge=0, le=10000, description="Newest done cards to include. 0 returns the whole column."),
+):
     """Full board grouped by status column; omitting ``board`` uses the active board
     (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``).
 
@@ -322,18 +329,27 @@ def get_board(
     sig = key = None
     try:
         path = str(kanban_db.kanban_db_path(board=resolved))
-        key = (path, tenant, include_archived, workflow_template_id, current_step_key)
+        key = (path, tenant, include_archived, workflow_template_id, current_step_key, int(done_limit))
         sig = file_sig(path)  # before the read: a commit during it is read again next time
     except Exception:
         pass
 
     def read():
-        return _get_board_uncached(tenant, include_archived, resolved, workflow_template_id, current_step_key)
+        return _get_board_uncached(
+            tenant, include_archived, resolved, workflow_template_id, current_step_key, int(done_limit))
 
     return serve(key, sig, read, now=time.monotonic())
 
 
-def _get_board_uncached(tenant, include_archived, board, workflow_template_id, current_step_key):
+def _preview_list_body(task: dict) -> None:
+    """List cards carry a short body. The drawer loads the full text from /tasks/:id."""
+    body = task.get("body")
+    if isinstance(body, str) and len(body) > _CARD_SUMMARY_PREVIEW_CHARS:
+        task["body"] = body[:_CARD_SUMMARY_PREVIEW_CHARS]
+        task["body_truncated"] = True
+
+
+def _get_board_uncached(tenant, include_archived, board, workflow_template_id, current_step_key, done_limit=_BOARD_DONE_LIMIT):
     with _board_conn(board) as (board, conn):
         tasks = kanban_db.list_tasks(
             conn, tenant=tenant, include_archived=include_archived,
@@ -374,6 +390,7 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
             # subscriber, else the session that created it.
             d["managing_session_id"] = managers.get(t.id) or (t.session_id or None)
             _attach_diagnostics(d, diagnostics_per_task.get(t.id))
+            _preview_list_body(d)
             columns[t.status if t.status in columns else "todo"].append(d)
 
         # Queue lanes keep the list_tasks dispatch order; the done column is
@@ -381,6 +398,10 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
         # into the "completed_at DESC NULLS LAST, id DESC" SQL key.
         columns["done"].sort(key=lambda d: d["id"], reverse=True)
         columns["done"].sort(key=lambda d: (d["completed_at"] is None, -(d["completed_at"] or 0)))
+        done_total = len(columns["done"])
+        limit = int(done_limit or 0)
+        if limit > 0 and done_total > limit:
+            columns["done"] = columns["done"][:limit]
 
         # Queue columns keep list_tasks' dispatch order (priority DESC, created_at ASC).
         tenants = [r["tenant"] for r in conn.execute("SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant")]
@@ -391,8 +412,15 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
         # lane immediately, matching the assignee picker at /assignees
         # which already uses this helper.
         assignees = [entry["name"] for entry in kanban_db.known_assignees(conn)]
+        columns_out = []
+        for name, tasks in columns.items():
+            col = {"name": name, "tasks": tasks}
+            if name == "done":
+                col["total"] = done_total
+                col["omitted"] = done_total - len(tasks)
+            columns_out.append(col)
         return {
-            "columns": [{"name": name, "tasks": columns[name]} for name in columns], "tenants": tenants,
+            "columns": columns_out, "tenants": tenants,
             "assignees": assignees, "latest_event_id": int(latest_event_id), "now": int(time.time())}
 
 
@@ -441,6 +469,7 @@ async def get_board_endpoint(
     board: Optional[str] = _BOARD_Q,
     workflow_template_id: Optional[str] = Query(None, description="Restrict to tasks using this workflow template id"),
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key"),
+    done_limit: int = Query(_BOARD_DONE_LIMIT, ge=0, le=10000, description="Newest done cards to include. 0 returns the whole column."),
 ):
     # Resolve selection before keying so a board switch cannot join an older read.
     result = await _read_board(
@@ -449,10 +478,12 @@ async def get_board_endpoint(
         board=board or kanban_db.get_current_board(),
         workflow_template_id=workflow_template_id,
         current_step_key=current_step_key,
+        done_limit=done_limit,
     )
-    # The board is plain JSON data (multi-MB on a busy board): json.dumps it directly. FastAPI's jsonable_encoder
-    # walked ~190k objects per poll (~275 ms) for byte-identical output.
-    return Response(content=json.dumps(result), media_type="application/json")
+    # Encode off the loop. A busy board used to json.dumps several MB here and
+    # stall every other request (hub-sync's 4s timeout included). [daveey]
+    payload = await asyncio.to_thread(json.dumps, result)
+    return Response(content=payload, media_type="application/json")
 
 
 # --- GET /tasks/:id ---------------------------------------------------------
