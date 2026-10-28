@@ -24,7 +24,8 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_ORIGIN_ADOPT_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
-    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_ARCHIVE_SCHEMA)
+    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_ARCHIVE_SCHEMA,
+    KANBAN_UNLINK_SCHEMA)
 
 logger = logging.getLogger(__name__)
 
@@ -864,6 +865,18 @@ def _handle_list(args: dict, **kw) -> str:
             "promoted": promoted})
 
 
+def _parked_by_own_run(conn, tid: str, run_id: int) -> bool:
+    """True when ``run_id`` is the card's latest run, ended by ``kanban_block``, and nothing has
+    claimed the card since (no current run, no claim lock, status ready/blocked)."""
+    row = conn.execute("SELECT status, current_run_id, claim_lock FROM tasks WHERE id = ?", (tid,)).fetchone()
+    if row is None or row["current_run_id"] is not None or row["claim_lock"] \
+            or row["status"] not in ("ready", "blocked"):
+        return False
+    last = conn.execute("SELECT id, outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                        (tid,)).fetchone()
+    return bool(last and last["id"] == run_id and last["outcome"] == "blocked")
+
+
 @_kanban_handler("kanban_complete", classify_rejections=True)
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff. Every refusal
@@ -893,9 +906,14 @@ def _handle_complete(args: dict, **kw) -> str:
         task = kb.get_task(conn, tid)
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
+            run_id = _worker_run_id(tid)
+            if run_id is not None and _parked_by_own_run(conn, tid, run_id):
+                # This worker parked its card with kanban_block, then edited its own edges (kanban_unlink):
+                # its run is over but nothing has claimed the card since, so it may still close its own card.
+                run_id = None
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
-                created_cards=created_cards, expected_run_id=_worker_run_id(tid), goal_verification=goal_verification)
+                created_cards=created_cards, expected_run_id=run_id, goal_verification=goal_verification)
         except kb.ArtifactPreservationError as artifact_err:
             # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
             # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
@@ -1860,6 +1878,24 @@ def _handle_link(args: dict, **kw) -> str:
                    **({"gated_by": parent_id} if gated else {}))
 
 
+@_kanban_handler("kanban_unlink")
+def _handle_unlink(args: dict, **kw) -> str:
+    """Remove a dependency edge. Same ownership rule as kanban_link: a dispatcher worker
+    edits only its OWN card's edges (it is the child or the parent); orchestrators any."""
+    _reject_delegated_child_mutation("kanban_unlink")
+    parent_id = args.get("parent_id")
+    child_id = args.get("child_id")
+    _check(parent_id and child_id, "both parent_id and child_id are required")
+    parent_id, child_id = str(parent_id), str(child_id)
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    if env_tid and env_tid not in (parent_id, child_id):
+        raise _Reject(f"kanban_unlink refused: this worker owns {env_tid}, not the edge "
+                      f"{parent_id} -> {child_id}; it may only unlink edges of its own card")
+    with _board(args.get("board")) as (kb, conn):
+        _check(kb.unlink_tasks(conn, parent_id, child_id), f"no such link: {parent_id} -> {child_id}")
+        return _ok(parent_id=parent_id, child_id=child_id, unlinked=True)
+
+
 @_kanban_handler("kanban_origin_adopt")
 def _handle_origin_adopt(args: dict, **kw) -> str:
     _reject_delegated_child_mutation("kanban_origin_adopt")
@@ -1906,6 +1942,7 @@ _TOOLS = (
     ("kanban_origin_adopt", KANBAN_ORIGIN_ADOPT_SCHEMA, _handle_origin_adopt, "🔗"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"),
+    ("kanban_unlink", KANBAN_UNLINK_SCHEMA, _handle_unlink, "✂"),
     ("kanban_archive", KANBAN_ARCHIVE_SCHEMA, _handle_archive, "🗄"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:

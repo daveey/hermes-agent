@@ -89,6 +89,9 @@ def _board_db(env: Mapping[str, str]) -> Optional[Path]:
         return None
 
 
+_TERMINAL_STATUSES = frozenset({"done", "archived"})
+
+
 def _task_state(db: Path, task_id: str) -> Optional[tuple[str, Optional[int]]]:
     """``(status, worker_pid)`` of ``task_id``; ``("", None)`` when absent; ``None`` when unreadable."""
     import sqlite3
@@ -104,6 +107,16 @@ def _task_state(db: Path, task_id: str) -> Optional[tuple[str, Optional[int]]]:
             conn.execute("PRAGMA query_only=ON")
         try:
             row = conn.execute("SELECT status, worker_pid FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is not None and not row[1] and str(row[0] or "") not in _TERMINAL_STATUSES:
+                # A live worker whose card was parked (kanban_block -> todo/blocked) has its pid cleared on
+                # the card but retained on its latest run: that is still the worker, not a leak.
+                try:
+                    run = conn.execute("SELECT worker_pid FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                                       (task_id,)).fetchone()
+                except sqlite3.Error:
+                    run = None
+                if run is not None and run[0]:
+                    row = (row[0], run[0])
         finally:
             conn.close()
     except sqlite3.Error:
@@ -177,7 +190,7 @@ def leaked_worker_env_diagnosis(environ: Optional[Mapping[str, str]] = None) -> 
     status, worker_pid = state
     if not status:
         reason = f"its worker card {tid} is not on the board"
-    elif status != "running":
+    elif status != "running" and (status in _TERMINAL_STATUSES or not worker_pid):
         reason = f"its worker card {tid} is {status}"
     elif worker_pid and not _pid_alive(worker_pid):
         reason = f"{tid}'s worker pid {worker_pid} is gone"

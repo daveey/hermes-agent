@@ -217,3 +217,49 @@ def test_cli_refusal_names_the_leak(leaked_desktop, capsys):
     text = err.err + err.out
     assert "cannot mutate Kanban tasks via the CLI" in text and "leaked worker env" in text and tid in text
 
+
+
+# ── a live worker whose card was parked by kanban_block is not a leak ──────────────────────────
+
+def _parked_board(tmp_path, status, run_pid):
+    """A card parked by kanban_block: card pid cleared, latest run keeps its worker pid."""
+    db = _board(tmp_path, [("t_45d5a361", status, None)])
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, worker_pid INTEGER)")
+    conn.execute("INSERT INTO task_runs (task_id, worker_pid) VALUES ('t_45d5a361', 99999999)")  # older run
+    conn.execute("INSERT INTO task_runs (task_id, worker_pid) VALUES ('t_45d5a361', ?)", (run_pid,))
+    conn.commit()
+    conn.close()
+    return db
+
+
+@pytest.mark.parametrize("status", ["todo", "blocked", "scheduled"])
+def test_no_diagnosis_for_a_live_worker_whose_card_was_parked(tmp_path, status):
+    """kanban_block(kind=dependency) moves the card to todo while the worker keeps running."""
+    db = _parked_board(tmp_path, status, os.getpid())
+    assert tle.leaked_worker_env_diagnosis(_leak_env(db)) is None
+
+
+def test_parked_card_whose_worker_pid_is_gone_is_still_a_leak(tmp_path):
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    db = _parked_board(tmp_path, "todo", p.pid)
+    msg = tle.leaked_worker_env_diagnosis(_leak_env(db))
+    assert msg and f"worker pid {p.pid} is gone" in msg
+
+
+def test_parked_card_with_a_foreign_live_pid_is_still_a_leak(tmp_path):
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        db = _parked_board(tmp_path, "todo", p.pid)
+        msg = tle.leaked_worker_env_diagnosis(_leak_env(db))
+        assert msg and "does not descend from" in msg
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_parked_card_without_any_run_pid_is_still_a_leak(tmp_path):
+    db = _board(tmp_path, [("t_45d5a361", "todo", None)])
+    msg = tle.leaked_worker_env_diagnosis(_leak_env(db))
+    assert msg and "is todo" in msg

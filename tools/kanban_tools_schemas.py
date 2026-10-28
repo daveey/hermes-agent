@@ -787,6 +787,22 @@ KANBAN_LINK_SCHEMA = _schema(
     ["parent_id", "child_id"],
 )
 
+KANBAN_UNLINK_SCHEMA = _schema(
+    "kanban_unlink",
+    (
+        "Remove a parent→child dependency edge. A dispatcher worker may "
+        "only remove edges of its own card (its dependencies or its "
+        "children), e.g. to undo a kanban_link it made before a "
+        "kanban_block(kind='dependency'); an orchestrator may unlink any "
+        "edge. A child that no longer waits on anything is promoted at once."
+    ),
+    {
+        "parent_id": {"type": "string", "description": "Parent task id."},
+        "child_id":  {"type": "string", "description": "Child task id."},
+    },
+    ["parent_id", "child_id"],
+)
+
 KANBAN_ARCHIVE_SCHEMA = _schema(
     "kanban_archive",
     (
