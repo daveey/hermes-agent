@@ -488,6 +488,7 @@ def claim_unseen_events_for_sub(
     chat_id: str,
     thread_id: Optional[str] = None,
     kinds: Optional[Iterable[str]] = None,
+    durable: bool = False,
 ) -> tuple[int, int, list[Event]]:
     """Atomically claim unseen events for one subscription.
 
@@ -497,8 +498,25 @@ def claim_unseen_events_for_sub(
     writer lock and only the first claims a given event range. Callers send the
     events, then leave the cursor or call :func:`rewind_notify_cursor` on
     delivery failure.
+
+    ``durable=True`` (the tui chat consumers) also records the claim as IN FLIGHT, owned by this process
+    (``inflight_from`` = first unacknowledged cursor, ``inflight_pid``/``inflight_start``): the claimer calls
+    :func:`ack_notify_claim` once the notice is durably in the chat's transcript. A claim whose holder process
+    died before that ack is rewound (:func:`recover_orphaned_notify_claims`, also run here) and delivered again,
+    so a serve replaced while its chat was mid-turn no longer loses the notice it held in memory. While another
+    LIVE process holds an unacknowledged claim on the row, nothing is claimed here. [daveey]
     """
     with _kb.write_txn(conn):
+        key = _sub_key(task_id, platform, chat_id, thread_id)
+        if durable:
+            row = conn.execute(
+                "SELECT inflight_from, inflight_pid, inflight_start FROM kanban_notify_subs " + _SUB_KEY_WHERE, key,
+            ).fetchone()
+            if row is not None and row["inflight_from"] is not None and not _holder_is_me(row):
+                if _holder_alive(row):
+                    cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id) or 0
+                    return cursor, cursor, []
+                _rewind_orphan(conn, key, row)
         old_cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id)
         if old_cursor is None:
             return 0, 0, []
@@ -508,8 +526,160 @@ def claim_unseen_events_for_sub(
         )
         if not events:
             return old_cursor, old_cursor, []
-        _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), new_cursor, old_cursor)
+        _cas_cursor(conn, key, new_cursor, old_cursor)
+        if durable:
+            pid, start = _my_holder()
+            conn.execute(
+                "UPDATE kanban_notify_subs SET inflight_from = COALESCE(inflight_from, ?), inflight_pid = ?, "
+                "inflight_start = ? " + _SUB_KEY_WHERE, (int(old_cursor), pid, start, *key),
+            )
         return old_cursor, new_cursor, events
+
+
+# ---------------------------------------------------------------------------
+# In-flight (claimed, not yet durably delivered) notice claims. [daveey]
+# ---------------------------------------------------------------------------
+
+_MY_HOLDER: Optional[tuple[int, Optional[int]]] = None
+
+
+def _my_holder() -> tuple[int, Optional[int]]:
+    """``(pid, start-time fingerprint)`` of this process (PID-reuse guard), cached per pid."""
+    import os
+    global _MY_HOLDER
+    pid = os.getpid()
+    if _MY_HOLDER is None or _MY_HOLDER[0] != pid:
+        _MY_HOLDER = (pid, _process_start(pid))
+    return _MY_HOLDER
+
+
+def _process_start(pid: int) -> Optional[int]:
+    try:
+        from gateway.status import _get_process_start_time
+        return _get_process_start_time(int(pid))
+    except Exception:
+        return None
+
+
+def _holder_is_me(row) -> bool:
+    return row["inflight_pid"] is not None and int(row["inflight_pid"]) == _my_holder()[0]
+
+
+def _holder_alive(row) -> bool:
+    """True unless the holder process is provably gone (dead pid, or a recycled pid with another start time)."""
+    import os
+    pid = row["inflight_pid"]
+    if pid is None:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # exists, owned by someone else
+    except (OSError, ValueError, TypeError):
+        return False
+    recorded = row["inflight_start"]
+    if recorded is None:
+        return True
+    current = _process_start(int(pid))
+    if current is None:
+        return True
+    try:
+        from gateway.status import start_time_fingerprints_match
+        return start_time_fingerprints_match(recorded, current)
+    except Exception:
+        return int(recorded) == int(current)
+
+
+def _rewind_orphan(conn: sqlite3.Connection, key: tuple, row) -> bool:
+    """Hand an orphaned claim's range back (cursor -> ``inflight_from``), CAS on the dead holder."""
+    cur = conn.execute(
+        "UPDATE kanban_notify_subs SET last_event_id = MIN(last_event_id, inflight_from), inflight_from = NULL, "
+        "inflight_pid = NULL, inflight_start = NULL " + _SUB_KEY_WHERE
+        + " AND inflight_from = ? AND inflight_pid IS ?",
+        (*key, row["inflight_from"], row["inflight_pid"]),
+    )
+    if cur.rowcount:
+        import logging
+        logging.getLogger(__name__).warning(
+            "kanban notice claim for %s -> %s/%s was never delivered (holder pid %s is gone); rewound to event %s "
+            "for redelivery", key[0], key[1], key[2], row["inflight_pid"], row["inflight_from"])
+    return cur.rowcount > 0
+
+
+def recover_orphaned_notify_claims(
+    conn: sqlite3.Connection, *, platform: Optional[str] = None, chat_id: Optional[str] = None,
+) -> int:
+    """Rewind every in-flight claim whose holder process is gone; returns how many. Never touches a claim held
+    by this process or by a live one."""
+    where = ["inflight_from IS NOT NULL"]
+    params: list[Any] = []
+    if platform is not None:
+        where.append("LOWER(platform) = LOWER(?)")
+        params.append(platform)
+    if chat_id is not None:
+        where.append("chat_id = ?")
+        params.append(chat_id)
+    try:
+        rows = conn.execute(
+            "SELECT task_id, platform, chat_id, thread_id, inflight_from, inflight_pid, inflight_start "
+            "FROM kanban_notify_subs WHERE " + " AND ".join(where), params,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0  # pre-migration board
+    orphans = [r for r in rows if not _holder_is_me(r) and not _holder_alive(r)]
+    if not orphans:
+        return 0
+    n = 0
+    with _kb.write_txn(conn):
+        for r in orphans:
+            n += _rewind_orphan(conn, _sub_key(r["task_id"], r["platform"], r["chat_id"], r["thread_id"]), r)
+    return n
+
+
+def ack_notify_claim(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    upto: int,
+    from_cursor: Optional[int] = None,
+) -> None:
+    """Every event of this subscription up to ``upto`` is durably delivered: clear the in-flight marker (or move
+    it to ``upto`` when a later claim is still outstanding). ``from_cursor`` (the delivered range's start) skips
+    the ack while an EARLIER claim is still outstanding (``inflight_from < from_cursor``), so its marker is kept.
+    A sub whose task was archived meanwhile is removed now (its removal waited for this ack)."""
+    key = _sub_key(task_id, platform, chat_id, thread_id)
+    guard = "" if from_cursor is None else " AND inflight_from >= ?"
+    with _kb.write_txn(conn):
+        conn.execute(
+            "UPDATE kanban_notify_subs SET "
+            "inflight_pid = CASE WHEN last_event_id <= ? THEN NULL ELSE inflight_pid END, "
+            "inflight_start = CASE WHEN last_event_id <= ? THEN NULL ELSE inflight_start END, "
+            "inflight_from = CASE WHEN last_event_id <= ? THEN NULL ELSE MAX(inflight_from, ?) END "
+            + _SUB_KEY_WHERE + " AND inflight_from IS NOT NULL" + guard,
+            (int(upto), int(upto), int(upto), int(upto), *key,
+             *(() if from_cursor is None else (int(from_cursor),))),
+        )
+        row = conn.execute(
+            "SELECT s.inflight_from, t.status FROM kanban_notify_subs s LEFT JOIN tasks t ON t.id = s.task_id "
+            "WHERE s.task_id = ? AND s.platform = ? AND s.chat_id = ? AND s.thread_id = ?", key,
+        ).fetchone()
+        if row is not None and row["inflight_from"] is None and row["status"] == "archived":
+            conn.execute("DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE, key)
+
+
+def notify_claim_in_flight(
+    conn: sqlite3.Connection, *, task_id: str, platform: str, chat_id: str, thread_id: Optional[str] = None,
+) -> bool:
+    row = conn.execute(
+        "SELECT inflight_from FROM kanban_notify_subs " + _SUB_KEY_WHERE,
+        _sub_key(task_id, platform, chat_id, thread_id),
+    ).fetchone()
+    return row is not None and row["inflight_from"] is not None
 
 
 def _cas_cursor(conn: sqlite3.Connection, key: tuple, new_cursor: int, expected: int) -> sqlite3.Cursor:
@@ -563,7 +733,21 @@ def rewind_notify_cursor(
     notifier advanced the row, so retries never clobber newer progress.
     """
     with _kb.write_txn(conn):
-        cur = _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), old_cursor, claimed_cursor)
+        key = _sub_key(task_id, platform, chat_id, thread_id)
+        cur = _cas_cursor(conn, key, old_cursor, claimed_cursor)
+        if cur.rowcount > 0:
+            # The handed-back range is no longer in flight; an earlier, still-held claim keeps its marker.
+            try:
+                conn.execute(
+                    "UPDATE kanban_notify_subs SET "
+                    "inflight_pid = CASE WHEN inflight_from < ? THEN inflight_pid END, "
+                    "inflight_start = CASE WHEN inflight_from < ? THEN inflight_start END, "
+                    "inflight_from = CASE WHEN inflight_from < ? THEN inflight_from END "
+                    + _SUB_KEY_WHERE + " AND inflight_from IS NOT NULL",
+                    (int(old_cursor), int(old_cursor), int(old_cursor), *key),
+                )
+            except sqlite3.OperationalError:
+                pass  # pre-migration board
     return cur.rowcount > 0
 
 

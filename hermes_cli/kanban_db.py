@@ -1002,6 +1002,9 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     last_ping_event_id INTEGER NOT NULL DEFAULT 0,
+    inflight_from INTEGER,
+    inflight_pid  INTEGER,
+    inflight_start INTEGER,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
@@ -4098,7 +4101,7 @@ def specify_triage_task(
     return True
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> bool:
+def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None) -> bool:
     """Archive a task; a *running* task's host-local worker is terminated.
 
     Clearing ``worker_pid`` in the DB alone left the OS process running past its
@@ -4133,7 +4136,10 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> b
             conn, task_id, outcome="reclaimed", status="reclaimed",
             summary="task archived with run still active",
         )
-        _append_event(conn, task_id, "archived", {"source_status": row["status"]}, run_id=run_id)
+        payload = {"source_status": row["status"]}
+        if via:
+            payload["via"] = via  # archived outside the creator scope (stranded-runs_on sweep) [daveey]
+        _append_event(conn, task_id, "archived", payload, run_id=run_id)
     if was_running:
         termination = _terminate_reclaimed_worker(prev_pid, prev_lock, signal_fn=signal_fn, started_at=prev_started)
         with write_txn(conn):

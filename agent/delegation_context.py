@@ -35,6 +35,12 @@ KANBAN_ENV_KEYS: tuple[str, ...] = (
     "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK",
     "HERMES_KANBAN_GOAL_MODE", "HERMES_KANBAN_GOAL_MAX_TURNS",
 )
+# [daveey] Informational only: the card a Kanban worker's tool children (terminal, background
+# processes, execute_code, ...) run for. ``scrub_kanban_env`` removes ``HERMES_KANBAN_TASK`` from
+# them so a nested ``hermes`` never acts as the worker, which also left shell tooling (gh-shim
+# attribution, bb-land card notes, the compile cap) unable to tell it runs for a card. Nothing
+# that decides worker identity, tools or board scope may read this name; use ``owned_kanban_task``.
+KANBAN_WORKER_TASK_ENV = "HERMES_KANBAN_WORKER_TASK"
 
 # --- Agent-scope env: what a top-level surface must never inherit. [daveey] -----------------
 # A worker's terminal subprocesses carry DELEGATED_CHILD_ENV_MARKER by design
@@ -355,7 +361,25 @@ def scrub_kanban_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[
     cleaned[DELEGATED_CHILD_ENV_MARKER] = inherited if inherited and inherited != "1" else _fenced_kanban_root()
     if not (cleaned.get(DELEGATED_CHILD_OWNER_ENV) or "").strip():
         cleaned[DELEGATED_CHILD_OWNER_ENV] = _owner_token()
+    worker_task = _worker_task_for_children(env)
+    if worker_task:
+        cleaned[KANBAN_WORKER_TASK_ENV] = worker_task
     return cleaned
+
+
+def _worker_task_for_children(env: Mapping[str, str]) -> str:
+    """[daveey] The card id to export as :data:`KANBAN_WORKER_TASK_ENV` to a scrubbed child.
+
+    The worker's own ``HERMES_KANBAN_TASK`` first: from *env*, else from this process, since some
+    callers pass an env already filtered of ``HERMES_*`` (execute_code's sandbox). Then an inherited
+    marker, so a worker terminal's own descendants keep naming the card. ``""`` outside any worker
+    (a delegate child of an interactive chat has no card)."""
+    for key in ("HERMES_KANBAN_TASK", KANBAN_WORKER_TASK_ENV):
+        for source in (env, os.environ):
+            value = (source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
 
 
 def kanban_path_is_fenced(path: os.PathLike[str] | str) -> bool:

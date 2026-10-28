@@ -70,7 +70,7 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
     if session.get("_exit_keeps_turn_marker"):
         return
     # [daveey] A core-update pause keeps its marker: the next backend (or the in-place watcher) continues it.
-    if session.get("_update_pause_marker_key"):
+    if session.get("_update_pause_marker_key") or session.get("_paused_marker_carried"):
         return
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
@@ -84,6 +84,58 @@ def _auto_continue_note(prompt: str) -> str:
     return (f"{_AUTO_CONTINUE_NOTE_PREFIX} — the app or its backend process stopped before the turn could finish. "
             "Some of the work may already be complete; check the current state before redoing anything, then "
             f"finish the task. The interrupted request was:]\n\n{prompt}")
+
+
+# [daveey] Surfaces a client-less continuation adopts from the stored row (t_01a183149a00c941). No client is
+# attached when a boot sweep or the in-place watcher continues a turn, so the env fallback says nothing about
+# where the user reads it; anything else (missing, unknown) keeps today's default.
+_STORED_CONTINUATION_SOURCES = frozenset({"desktop", "tui"})
+
+
+def _stored_continuation_source(row) -> str | None:
+    """The stored ``sessions.source`` a continuation should run as, or None to keep the current default."""
+    source = str((row or {}).get("source") or "").strip() if isinstance(row, dict) else ""
+    return source if source in _STORED_CONTINUATION_SOURCES else None
+
+
+def _read_stored_continuation_source(session: dict, session_key: str) -> str | None:
+    """``_stored_continuation_source`` of the session's state.db row (profile-aware); None on any read failure."""
+    db = getattr(session.get("agent"), "_session_db", None)
+    owns = False
+    try:
+        if db is None:
+            db, owns = _profile_session_db(session.get("profile_home"))
+        return _stored_continuation_source(db.get_session(session_key) if db is not None else None)
+    except Exception:
+        logger.debug("auto-continue: stored source of %s unreadable", session_key, exc_info=True)
+        return None
+    finally:
+        if owns:
+            _release_db(db)
+
+
+def _adopt_stored_continuation_source(sid: str, session: dict, session_key: str) -> None:
+    """Run the continuation as the session's stored surface: set the record's source, and rebuild an agent that
+    was already built for another platform (the in-place watcher continues the agent that ran the paused turn)."""
+    stored = _read_stored_continuation_source(session, session_key)
+    if stored is None:
+        return
+    previous = _session_source(session)
+    if previous != stored:
+        logger.info("auto-continue for %s runs as stored source %s (record had %s)", session_key, stored, previous)
+        session["source"] = stored
+    agent = session.get("agent")
+    if agent is None or getattr(agent, "platform", stored) == stored:
+        return
+    tokens = _set_session_context(sid, cwd=_session_cwd(session))
+    try:
+        _rebuild_session_agent(sid, session, session_id=session_key, platform_override=stored,
+                               context_cwd_is_launch_artifact=_context_cwd_is_launch_artifact(session))
+    except Exception:
+        logger.warning("auto-continue for %s: agent rebuild for source %s failed; continuing on platform %s",
+                       session_key, stored, getattr(agent, "platform", "?"), exc_info=True)
+    finally:
+        _clear_session_context(tokens)
 
 
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
@@ -114,7 +166,10 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         return None
     enabled, freshness_secs, max_attempts = _auto_continue_config()
     age = time.time() - marker["started_at"]
-    if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
+    # [daveey] A background-job receipt is a delivery, not a turn to redo: it keeps longer than a turn.
+    from tui_gateway.exit_job_receipts import JOBS_REASON, JOBS_RECEIPT_MAX_AGE_S, jobs_stopped_note
+    receipt = marker.get("reason") == JOBS_REASON
+    if not enabled or age > (JOBS_RECEIPT_MAX_AGE_S if receipt else freshness_secs) or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
     with session["history_lock"]:
@@ -126,16 +181,27 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     paused = marker.get("reason") == "core_update_pause"
     if paused:
         from tui_gateway.update_pause import pause_note
-        attempt, text = marker["attempts"], pause_note(marker["prompt"])
+        attempt, text = marker["attempts"], pause_note(marker["prompt"], marker.get("killed_jobs"))
+    elif receipt:
+        attempt, text = marker["attempts"], jobs_stopped_note(marker.get("killed_jobs"))
     else:
         attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
+    if not (paused or receipt) and marker.get("killed_jobs"):
+        from tui_gateway.update_pause import killed_jobs_report
+        text += "\n\n" + killed_jobs_report(marker["killed_jobs"], "Background jobs stopped when the turn was "
+                                            "interrupted:")
     pauses = int(marker.get("pauses") or 0)
 
     def kickoff() -> None:
         rid = f"__auto_continue__{int(time.time() * 1000)}"
         try:
+            with contextlib.suppress(Exception):  # [daveey] before the build, so a deferred build gets it right
+                _adopt_stored_continuation_source(sid, session, session_key)
             _start_agent_build(sid, session)
             err = _wait_agent(session, rid, timeout=120.0)
+            if not err:  # a build already in flight (or the paused turn's agent) may predate the adoption
+                with contextlib.suppress(Exception):
+                    _adopt_stored_continuation_source(sid, session, session_key)
         except Exception:
             logger.warning("auto-continue agent build failed for %s", sid, exc_info=True)
             err = {"error": {"message": "agent build failed"}}
@@ -163,12 +229,14 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             # nested notes). Set here, not at schedule time, so a bail above leaves nothing for a racing user turn.
             session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
             session["_auto_continue_pauses"] = pauses
+            session["_auto_continue_killed_jobs"] = marker.get("killed_jobs", [])
         try:
             from gateway.warning_notifications import render_notification
             diagnostic = marker.get("notification_category") == "diagnostic"
             with _session_profile_runtime_scope(session):
                 def announce():
                     _emit("status.update", sid, {"kind": "process", "text": "Resuming paused turn…" if paused
+                                                 else "Reporting stopped background jobs…" if receipt
                                                  else "Resuming interrupted turn…"})
                     _emit("message.start", sid)
                 render_notification(announce, platform="tui", diagnostic=diagnostic)

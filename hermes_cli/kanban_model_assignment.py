@@ -62,7 +62,7 @@ def _check_managed_pin(model, provider, config):
         raise ModelPinNotInRegistryError(model, provider, exc.allowed) from exc
 
 
-def validate_model_assignment(assignee, model, provider):
+def validate_model_assignment(assignee, model, provider, *, check_registry=True):
     """Validate pinned models only; unknown/custom providers and models remain supported.
 
     This is configuration validation, not an entitlement or credential probe. Never
@@ -74,7 +74,8 @@ def validate_model_assignment(assignee, model, provider):
         return
     model = model.strip()
     config = _assignee_config(assignee)
-    _check_managed_pin(model, (provider or '').strip() or None, config)
+    if check_registry:
+        _check_managed_pin(model, (provider or '').strip() or None, config)
     if not provider and assignee:
         if config is None:
             # Non-profile lanes are supported; their executor owns provider selection.
@@ -91,6 +92,15 @@ def validate_model_assignment(assignee, model, provider):
     }
     if model.startswith(incompatible.get(provider, ())):
         raise ModelProviderMismatchError(model, provider)
+
+
+def _family_mismatch(assignee, model, provider):
+    """True when the pin fails the vendor/provider family check alone (registry check skipped)."""
+    try:
+        validate_model_assignment(assignee, model, provider, check_registry=False)
+    except ModelProviderMismatchError:
+        return True
+    return False
 
 
 def validate_task_pin(conn, task_id, model, provider):
@@ -117,8 +127,45 @@ def dispatch_guard(conn, task_id, *, lane, dry_run=False):
             or check_respawn_guard(conn, task_id, lane=lane))
 
 
+REFUSED_PIN_COMMENT_AUTHOR = 'kanban-dispatcher'
+
+
+def clear_refused_pin(conn, task_id, model, provider, allowed, *, author=REFUSED_PIN_COMMENT_AUTHOR):
+    """[daveey] Drop a stored pin the routing registry refuses; the card runs on the profile default.
+
+    A stored pin is history, not a request (the kanban sibling of resume's ``stale_managed_pin``).
+    Compare-and-swap on the exact pin so a concurrent ``set-model`` wins. Never substitutes another
+    concrete model or a paid provider: clearing is the only repair. Returns True when it cleared.
+    """
+    from hermes_cli import kanban_db as kb
+
+    allowed = list(allowed or [])
+    reason = ModelPinNotInRegistryError.code
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET model_override = NULL, provider_override = NULL "
+            "WHERE id = ? AND model_override IS ? AND provider_override IS ? AND status != 'archived'",
+            (task_id, model, provider))
+        if cur.rowcount != 1:
+            return False
+        kb._append_event(conn, task_id, 'model_override_cleared',
+                         {'model': model, 'provider': provider, 'reason': reason, 'allowed': allowed})
+        on = f' on {provider}' if provider else ''
+        kb.add_comment(conn, task_id, author,
+                       f'Model pin {model}{on} was cleared: this host\'s model routing registry refuses it '
+                       f'({reason}; registered: {", ".join(allowed) or "none"}), so its worker could not start. '
+                       'The card now runs on the profile default. Pin a registered model with '
+                       '`hermes kanban set-model` if it needs a specific one.')
+    kb.notify_task_updated(conn, task_id, ('model_override', 'provider_override'))
+    return True
+
+
 def route_model_mismatch(conn, task, *, dry_run=False):
-    """Return a typed guard reason when dispatch needs durable supervisor repair."""
+    """Return a typed guard reason when dispatch needs durable supervisor repair.
+
+    [daveey] When the registry refuses the pin and no supervisor can take the assignment block,
+    clear the pin and return None so this same tick dispatches the card on the profile default
+    (previously it sat ``ready`` behind a cap-exempt hold indefinitely)."""
     from hermes_cli import kanban_db as kb
 
     try:
@@ -130,6 +177,13 @@ def route_model_mismatch(conn, task, *, dry_run=False):
                 kb.block_task(conn, task.id, reason=str(exc), kind='assignment',
                               expected_run_id=task.current_run_id)
             except AssignmentRoutingError as routing_error:
+                if (isinstance(exc, ModelPinNotInRegistryError)
+                        and not _family_mismatch(task.assignee, task.model_override, task.provider_override)
+                        and clear_refused_pin(conn, task.id, task.model_override, task.provider_override,
+                                              exc.allowed)):
+                    kb._log.warning('kanban: cleared refused model pin %s/%s on %s (no supervisor: %s)',
+                                    task.model_override, task.provider_override, task.id, routing_error)
+                    return None
                 # One invalid card must not starve the rest of the board. The
                 # dispatcher records this guard hold; leave recovery agent-owned.
                 kb._log.warning('kanban: model assignment repair for %s: %s', task.id, routing_error)

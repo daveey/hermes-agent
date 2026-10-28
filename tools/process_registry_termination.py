@@ -20,6 +20,15 @@ class ProcessTerminationMixin:
     """The subclass supplies ``_host_pid_is_ours``, ``_is_host_pid_alive``,
     ``_detached_host_fate`` and ``_daemon_term_grace_seconds``. See ProcessRegistry."""
 
+    def _log_lifecycle_kill(self, session, source: str) -> None:
+        """One INFO line per agent-lifecycle kill: chat session, process id, source."""
+        if source not in getattr(self, "_LIFECYCLE_KILL_SOURCES", ()):
+            return
+        logger.info(
+            "lifecycle kill session=%s process=%s source=%s",
+            getattr(session, "session_key", None) or getattr(session, "owner_task_id", None) or "",
+            session.id, source)
+
     @staticmethod
     def _proc_alive(proc) -> bool:
         """True if a psutil.Process is running and not a zombie (already dead, just unreaped)."""

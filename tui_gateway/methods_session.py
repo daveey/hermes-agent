@@ -640,6 +640,11 @@ class _Resume:
     def mint(self, prompts: bool = True) -> tuple:
         """``(runtime sid, source, cwd)`` for the live record this resume registers (+ gateway prompts on)."""
         ids = _new_runtime_ids(self.params)
+        # [daveey] A client-less resume (the startup sweep) names no source: run as the stored row's surface,
+        # never the env fallback of a process no client is attached to (t_01a183149a00c941).
+        if (_flag(self.params, "source_from_store") and not _str_param(self.params, "source")
+                and (stored := _stored_continuation_source(self.found)) is not None):
+            ids = (ids[0], stored)
         if prompts:
             _enable_gateway_prompts()
         return *ids, self.profile_resume_cwd or _default_session_cwd()

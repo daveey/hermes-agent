@@ -1819,9 +1819,11 @@ def _handle_create(args: dict, **kw) -> str:
         # a caller that can't tell re-creates it, or never learns it is stranded. [daveey]
         extra["runs_where"] = _runs_where(runs_on, pinned_machine, marker_placement)
         if origin_intent is not None:
+            # The courier is not a chat: the bound origin is subscribed from the binding in the same txn
+            # (kanban_origin_creation._subscribe_origin), never the receiving process's ambient session. [daveey]
             return json.dumps({"ok": False, "created": True, "code": "origin_bind_pending",
                                "task_id": new_tid, **landed, **gate,
-                               "subscribed": _maybe_auto_subscribe(conn, new_tid), **extra})
+                               "subscribed": False, **extra})
         return _ok(task_id=new_tid, **landed, **gate,
                    subscribed=_maybe_auto_subscribe(conn, new_tid), **extra)
 
@@ -1852,6 +1854,38 @@ def _live_tui_session_key(session_key: str, profile: Optional[str]) -> str:
         return session_key
 
 
+def _bound_session_var(name: str) -> Optional[str]:
+    """The request-scoped ContextVar value of a ``HERMES_SESSION_*`` var, or None when it was never bound in this
+    context. Unlike ``get_session_env`` it never falls back to ``os.environ``. [daveey]"""
+    try:
+        from gateway import session_context as _sc
+        var = _sc._VAR_MAP.get(name)
+        if var is None:
+            return None
+        value = var.get()
+        return None if value is _sc._UNSET else str(value or "")
+    except Exception:
+        return None
+
+
+def _tui_session_key() -> str:
+    """The chat a TUI/Desktop subscription belongs to: the bound ContextVar key. Otherwise the process-global
+    ``os.environ`` key (a CLI subprocess that inherited its chat's env), but never when it names a different
+    chat than the session id bound in this context. In a multi-session serve process ``os.environ`` holds
+    whichever chat was set up last, so trusting it subscribed another chat to this one's card.
+    ``HERMES_SESSION_ID`` alone never subscribes (it is set for every CLI run). [daveey]"""
+    key = _bound_session_var("HERMES_SESSION_KEY")
+    if key:
+        return key
+    env_key = os.environ.get("HERMES_SESSION_KEY", "")
+    sid = _bound_session_var("HERMES_SESSION_ID")
+    if env_key and sid and env_key != sid:
+        logger.info("kanban auto-subscribe: ignoring process HERMES_SESSION_KEY %s; this context runs %s",
+                    env_key, sid)
+        return ""
+    return env_key
+
+
 def _resolve_notify_target() -> Optional[dict[str, Any]]:
     """``kanban_db.add_notify_sub`` kwargs for the calling session, or None (CLI/cron/tests).
     Gateway sessions: ``HERMES_SESSION_PLATFORM``/``CHAT_ID`` ContextVars. TUI/desktop:
@@ -1861,7 +1895,7 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
     from gateway.session_context import get_session_env as env
     platform, chat_id = env("HERMES_SESSION_PLATFORM", ""), env("HERMES_SESSION_CHAT_ID", "")
     if not platform or not chat_id:
-        session_key = env("HERMES_SESSION_KEY", "") or os.environ.get("HERMES_SESSION_KEY", "")
+        session_key = _tui_session_key()
         if not session_key:
             return None
         platform, chat_id = "tui", session_key
@@ -1973,11 +2007,11 @@ def _handle_archive(args: dict, **kw) -> str:
     _check(tid, "task_id is required")
     tid = str(tid)
     with _board(args.get("board")) as (kb, conn):
-        from hermes_cli.kanban import worker_may_archive
-        refusal = worker_may_archive(conn, tid)
+        from hermes_cli.kanban import worker_archive_scope
+        refusal, via = worker_archive_scope(conn, tid)
         if refusal:
             raise _Reject(refusal)
-        _check(kb.archive_task(conn, tid), f"cannot archive {tid}")
+        _check(kb.archive_task(conn, tid, via=via), f"cannot archive {tid}")
         return _ok(task_id=tid, status="archived")
 
 

@@ -238,3 +238,19 @@ def test_dispatch_pass_runs_the_dangling_run_sweep(live, monkeypatch):
     monkeypatch.setattr(kd, "close_dangling_runs", lambda conn, **kw: called.append(conn) or [])
     kd.dispatch_once(live, dry_run=True)
     assert called
+
+
+def test_the_dangling_sweep_keeps_the_real_end_of_a_run_the_card_already_finished(live, kanban_home, svc):
+    """A completed run whose row came back ``running`` (sync race / recovery) is restored to completed, not reclaimed."""
+    tid, uid = _claimed(live, kanban_home, svc, "done then reopened")
+    assert kb.complete_task(live, tid, summary="all done")
+    done = live.execute("SELECT id FROM task_runs WHERE uid = ?", (uid,)).fetchone()
+    old = int(time.time()) - kd.DANGLING_RUN_MIN_AGE_SECONDS - 1
+    with kbc.write_txn(live):  # the reopen: status back to running, end wiped
+        live.execute("UPDATE task_runs SET status = 'running', outcome = NULL, ended_at = NULL, started_at = ? "
+                     "WHERE id = ?", (old, done["id"]))
+    assert kd.close_dangling_runs(live) == [done["id"]]
+    row = live.execute("SELECT status, outcome, error, ended_at FROM task_runs WHERE id = ?", (done["id"],)).fetchone()
+    assert (row["status"], row["outcome"], row["error"]) == ("done", "completed", None)
+    assert row["ended_at"] == live.execute(
+        "SELECT created_at FROM task_events WHERE run_id = ? AND kind = 'completed'", (done["id"],)).fetchone()[0]

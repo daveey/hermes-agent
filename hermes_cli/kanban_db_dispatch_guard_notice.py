@@ -25,12 +25,13 @@ GUARD_HOLD_NOTE_MARKER = "[respawn-guard]"
 
 def guard_hold_started_at(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
     """When the current unbroken run of ``respawn_guarded`` events began: the first one
-    after the newest event of any other kind (a claim, a block, an unblock, a comment...)."""
+    after the newest event of any other kind (a claim, a block, an unblock...). Comments of any
+    author do not restart it: a note or reply fixes nothing, and resetting on them held
+    t_d5d83916 in ``ready`` 374 min after its first guard event (09:24Z). [daveey]"""
     row = conn.execute(
         "SELECT MIN(created_at) FROM task_events WHERE task_id = ? AND kind = 'respawn_guarded' "
         "AND id > COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ? "
-        "AND kind != 'respawn_guarded' AND NOT (kind = 'commented' AND "
-        "json_extract(payload, '$.author') = 'kanban-dispatcher')), 0)", (task_id, task_id),
+        "AND kind != 'respawn_guarded' AND kind != 'commented'), 0)", (task_id, task_id),
     ).fetchone()
     return int(row[0]) if row and row[0] is not None else None
 

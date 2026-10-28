@@ -296,6 +296,11 @@ def sweep_once(
         except Exception:
             continue
         with contextlib.closing(conn):
+            # Claims whose holder process died before the notice reached the transcript (a serve replaced while
+            # its chat was mid-turn) go back to the cursor, so this sweep or the chat's next poller delivers
+            # them (t_01a1835174955959). [daveey]
+            with contextlib.suppress(Exception):
+                _kbn.recover_orphaned_notify_claims(conn, platform="tui")
             try:
                 subs = _kbn.list_notify_subs(conn)
             except Exception:
@@ -353,7 +358,9 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
         return None
     text = "\n".join(texts)
     metadata = {"notice_id": f"{slug}:{ident['task_id']}:{old}-{new}", "board": slug, "display_text": text,
-                "task_id": ident["task_id"], "event_ids": [int(e.id) for e in claimed]}
+                "task_id": ident["task_id"], "event_ids": [int(e.id) for e in claimed],
+                # event-id identity shared with the live poller: a notice it already wrote is not written twice
+                "kanban_event_keys": [f"{slug}:{int(e.id)}" for e in claimed if fmt(sub, task, e, slug)]}
     held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s)
     persisted = True
     if verdict is None:  # a worker slot is ours: the job wakes, or writes the row itself

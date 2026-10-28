@@ -43,6 +43,7 @@ from tui_gateway.checkpoints import (_load_checkpoints_enabled, _resolve_checkpo
                                      resolve_checkpoints_enabled as _resolve_checkpoints_enabled)
 from tui_gateway._env import env_float, env_int
 from tui_gateway.turn_marker import clear_turn_marker, marker_writer_state, read_turn_marker, record_turn_start
+from tui_gateway.exit_job_receipts import journal_background_jobs_before_exit as _journal_background_jobs_before_exit
 from tui_gateway.contracts import registry as _contracts
 # User-facing copy shared with the split method modules (they close over this namespace).
 from tui_gateway.user_messages import (
@@ -395,7 +396,9 @@ def _load_interim_assistant_messages() -> bool:
 
 def _shutdown_sessions() -> None:
     # Durable-first: flush transcripts (bounded budget) BEFORE the slow teardown so a supervisor SIGKILL can't lose them.
-    for step in (_flush_sessions_before_exit, _release_gateway_wake_owner, _stop_turns_before_exit):
+    # [daveey] Background jobs are journaled after the turns stop and before close kills them unreported.
+    for step in (_flush_sessions_before_exit, _release_gateway_wake_owner, _stop_turns_before_exit,
+                 _journal_background_jobs_before_exit):
         with contextlib.suppress(Exception):
             step()
     with _sessions_lock:

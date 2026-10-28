@@ -986,6 +986,7 @@ def _read_git_revision_fingerprint(repo_root: Path) -> str | None:
         return None
 
 
+
 def _termux_bundled_skills_fingerprint() -> str:
     """Cheap invalidation key for Termux bundled-skill startup sync."""
     git_fp = _read_git_revision_fingerprint(PROJECT_ROOT)
@@ -2799,9 +2800,12 @@ def cmd_dashboard(args):
         # [daveey] Never boot a backend on a tree a core update is about to swap: wait out a live
         # update or hermes-sync's admission hold (bounded, logged) before the one-shot SSH token is
         # consumed and before the agent stack is imported (hermes_cli/serve_update_wait.py).
-        from hermes_cli.serve_update_wait import wait_for_update_clear
+        # If the checkout moved while this process waited (or its cached identity is not HEAD),
+        # re-exec in place so the modules and the /api/health commit all come from the new tree.
+        from hermes_cli import serve_update_wait as _update_gate
 
-        wait_for_update_clear()
+        _before_wait = _update_gate.checkout_fingerprint()
+        _update_gate.reexec_if_checkout_moved(_update_gate.wait_for_update_clear(), _before_wait)
 
     _ssh_session_token = _read_ssh_session_token_file(_token_file) if _token_file else None
     _mcp_discovery_after_bind = _dashboard_prepare_runtime(args, _headless_backend)

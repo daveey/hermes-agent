@@ -207,6 +207,39 @@ def _admit_prompt_turn(
     return images, agent
 
 
+def _carry_paused_marker(session: dict, home, marker_key: str) -> bool:
+    """[daveey] A synthesized turn (process completion, kanban notice, wake-up) landing on a turn paused for
+    a core update runs without a marker of its own: writing one would overwrite the paused request and its
+    retirement would drop it, so the paused turn never continued. Only a typed message retires the pause."""
+    from tui_gateway.turn_marker import read_turn_marker
+    from tui_gateway.update_pause import PAUSE_REASON
+    marker = read_turn_marker(home, marker_key) if marker_key else None
+    if not marker or marker.get("reason") != PAUSE_REASON:
+        return False
+    with session["history_lock"]:
+        session["_paused_marker_carried"] = marker_key
+    logger.info("core-update pause: synthesized turn on %s keeps the paused turn's marker", marker_key)
+    return True
+
+
+def _rearm_carried_pause_watcher(sid: str, session: dict, st) -> None:
+    """[daveey] A synthesized turn that ran over a core-update-paused marker re-arms the in-place watcher however
+    it ended (complete, raised, refused at prepare): otherwise, on a backend that already restarted, nothing
+    continues the paused turn. ``_paused_marker_carried`` stays set until the next turn records its own marker,
+    so later retire paths (the backstop above, an idle Stop) keep the paused request too."""
+    if st.marker_key:  # this turn wrote a marker of its own, so it did not carry the pause
+        return
+    with session["history_lock"]:
+        carried = str(session.get("_paused_marker_carried") or "")
+    if not carried:
+        return
+    try:
+        from tui_gateway import update_pause
+        update_pause.start_in_place_watcher(sid, session, carried)
+    except Exception:  # health: allow BLE001 -- a failed re-arm must not mask the turn's own outcome; logged
+        logger.exception("core-update pause: could not re-arm the watcher for %s", carried)
+
+
 def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
                         notification_category: str | None = None) -> str:
     """Write the durable crash marker; returns the session key it was written under (compression
@@ -217,14 +250,20 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     marker_key = str(session.get("session_key") or "")
     marker_attempt = int(session.pop("_auto_continue_attempt", 0) or 0)
     marker_pauses = int(session.pop("_auto_continue_pauses", 0) or 0)
+    killed_jobs = session.pop("_auto_continue_killed_jobs", None)
     marker_text = session.pop("_auto_continue_prompt", None) or text
+    session.pop("_paused_marker_carried", None)
+    synthesized = session.pop("_synthesized_turn", False)
     # [daveey] A core-update pause kept the previous turn's marker; this turn owns (and retires) its own.
     session.pop("_update_pause_marker_key", None)
+    if synthesized and not marker_attempt and _carry_paused_marker(session, marker_home, marker_key):
+        return ""
     if isinstance(marker_text, str) and marker_text.strip():
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
         record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
-                          auto_continue=auto_continue, **({"pauses": marker_pauses} if marker_pauses else {}),
+                          auto_continue=auto_continue, **({"killed_jobs": killed_jobs} if killed_jobs else {}),
+                          **({"pauses": marker_pauses} if marker_pauses else {}),
                           **({"notification_category": "diagnostic"}
                              if notification_category == "diagnostic" else {}))
         with session["history_lock"]:
@@ -1343,7 +1382,10 @@ def _run_admitted_prompt(
                         session.pop("_auto_continue_scheduled", None)
                 _emit_settled_session_info(sid, session, st.agent)
             finally:
-                _post_turn_housekeeping(sid, session, st)
+                try:
+                    _post_turn_housekeeping(sid, session, st)
+                finally:
+                    _rearm_carried_pause_watcher(sid, session, st)
         return st.result, goal_followup
     def run():
         from agent.notification_presentation import notification_turn

@@ -462,27 +462,62 @@ class SessionMessagesMixin:
         one writer txn so two gateway processes cannot both land it. Refuses (SessionTurnLeaseLostError) while
         another backend runs a live turn in the session: that backend's poller owns delivery. A NULL
         ``last_read_at`` (never tracked = read) is stamped just before the notice so it reads unread. [daveey]"""
+        return self.record_kanban_notice(session_id, content, metadata)[0]
+
+    def kanban_notice_keys_delivered(self, session_id: str, keys: Any) -> set[str]:
+        """Which of ``keys`` (``"<board>:<event id>"``) already have a kanban notice row anywhere in this
+        session's compression lineage: the event-id dedup for at-least-once kanban delivery. [daveey]"""
+        wanted = {str(k) for k in keys or () if k}
+        if not wanted:
+            return set()
+        from hermes_state_sessions import _LINEAGE_CTE_SQL
+        with self._read_ctx() as conn:
+            rows = conn.execute(
+                _LINEAGE_CTE_SQL + " SELECT DISTINCT j.value FROM messages m, "
+                "json_each(json_extract(m.display_metadata, '$.kanban_event_keys')) j "
+                "WHERE m.session_id IN (SELECT id FROM lineage) AND m.display_kind = 'kanban_notice' "
+                "AND json_valid(m.display_metadata)", (session_id, session_id)).fetchall()
+        return wanted & {str(r[0]) for r in rows}
+
+    def record_kanban_notice(self, session_id: str, content: str, metadata: dict[str, Any], *,
+                             message: Optional[dict[str, Any]] = None,
+                             reject_active_turn: bool = True) -> tuple[int, bool]:
+        """:meth:`append_kanban_notice` returning ``(row id, inserted)``. Besides ``notice_id``, any of
+        ``metadata['kanban_event_keys']`` already present in the session's lineage counts as delivered (no row is
+        written and that row's id is returned), checked in the same writer txn. ``message`` supplies the
+        stamped dict (timestamp, uid) a live turn will adopt; ``reject_active_turn=False`` is for the backend
+        that just admitted the turn itself. [daveey]"""
         notice_id = metadata.get("notice_id")
         if not notice_id:
             raise ValueError("Kanban notice requires a stable notice_id")
-        msg = {"content": content, "display_kind": "kanban_notice", "display_metadata": metadata}
-        stamp_message_uid(msg)
-        ts = time.time()
+        msg: dict[str, Any] = dict(message) if message else {"content": content}
+        msg.update({"content": content, "display_kind": "kanban_notice", "display_metadata": metadata})
+        if not msg.get("message_uid"):
+            stamp_message_uid(msg)
+        ts = float(msg.get("timestamp") or time.time())
         params = self._message_row_params(session_id, "user", msg, None, ts, keep_reasoning=True)
+        keys = [str(k) for k in metadata.get("kanban_event_keys") or () if k]
+        from hermes_state_sessions import _LINEAGE_CTE_SQL  # watermark is lineage-stamped
 
         def _do(conn):
             existing = conn.execute(
                 "SELECT m.id FROM messages m WHERE m.session_id = ? AND m.display_kind = 'kanban_notice' "
                 "AND json_extract(m.display_metadata, '$.notice_id') = ? LIMIT 1", (session_id, notice_id)).fetchone()
+            if existing is None and keys:
+                existing = conn.execute(
+                    _LINEAGE_CTE_SQL + " SELECT m.id FROM messages m, "
+                    "json_each(json_extract(m.display_metadata, '$.kanban_event_keys')) j "
+                    "WHERE m.session_id IN (SELECT id FROM lineage) AND m.display_kind = 'kanban_notice' "
+                    "AND json_valid(m.display_metadata) AND j.value IN (" + ",".join("?" * len(keys)) + ") LIMIT 1",
+                    (session_id, session_id, *keys)).fetchone()
             if existing is not None:
-                return existing[0]
-            self._check_transcript_write_guards(conn, session_id, None, reject_active_turn_lease=True)
+                return existing[0], False
+            self._check_transcript_write_guards(conn, session_id, None, reject_active_turn_lease=reject_active_turn)
             msg_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
             self._bump_session_counters(conn, session_id, 1, 0, unit=True)
-            from hermes_state_sessions import _LINEAGE_CTE_SQL  # watermark is lineage-stamped
             conn.execute(_LINEAGE_CTE_SQL + "UPDATE sessions SET last_read_at = ? WHERE last_read_at IS NULL "
                          "AND id IN (SELECT id FROM lineage)", (session_id, session_id, ts - 0.001))
-            return msg_id
+            return msg_id, True
 
         return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 

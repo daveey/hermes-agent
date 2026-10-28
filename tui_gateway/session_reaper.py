@@ -167,6 +167,8 @@ def _handle_exit_flush_signal(signum, frame) -> None:
     # before a supervisor's SIGKILL can cut the graceful shutdown (and its atexit) short.
     with contextlib.suppress(Exception):
         _stop_turns_before_exit()
+    with contextlib.suppress(Exception):
+        _journal_background_jobs_before_exit()
     if callable(prev):
         prev(signum, frame)
     else:

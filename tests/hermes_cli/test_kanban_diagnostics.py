@@ -283,3 +283,31 @@ def test_stranded_in_ready_counts_a_continue_that_resumed_straight_to_ready():
               _event("continued", ts=now - 5 * 60, status="ready", resume_status="ready")]
     assert [d for d in kd.compute_task_diagnostics(task, events, [], now=now)
             if d.kind == "stranded_in_ready"] == []
+
+
+def _kinds(diags):
+    return sorted(d.kind for d in diags if d.kind in ("stranded_in_ready", "held_in_ready"))
+
+
+def test_ready_hold_is_reported_apart_from_stranded():
+    """A respawn_guarded last event, or a foreign machine:* pin, is a held card, not a stranded one."""
+    now = 100_000
+    old = now - 90 * 60
+    guarded = [_event("created", ts=old), _event("respawn_guarded", ts=now - 60)]
+    d = kd.compute_task_diagnostics(_task(), guarded, [], now=now)
+    assert _kinds(d) == ["held_in_ready"]
+    assert next(x for x in d if x.kind == "held_in_ready").data["hold_reason"] == "respawn_guarded"
+
+    pinned = _task(runs_on='["machine:macbook"]')
+    d = kd.compute_task_diagnostics(pinned, [_event("created", ts=old)], [], now=now)
+    assert _kinds(d) == ["held_in_ready"]
+    assert next(x for x in d if x.kind == "held_in_ready").data["foreign_machines"] == ["macbook"]
+
+    # pinned to this hub, or a plain old ready card: still stranded
+    own = _task(runs_on=["machine:hub"])
+    assert _kinds(kd.compute_task_diagnostics(own, [_event("created", ts=old)], [], now=now)) == ["stranded_in_ready"]
+    # a guarded card that later got another event is no longer held
+    later = guarded + [_event("commented", ts=now - 10)]
+    assert _kinds(kd.compute_task_diagnostics(_task(), later, [], now=now)) == ["stranded_in_ready"]
+    # a young hold is not reported at all
+    assert _kinds(kd.compute_task_diagnostics(pinned, [_event("created", ts=now - 60)], [], now=now)) == []

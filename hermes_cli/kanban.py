@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -477,17 +478,21 @@ def _cmd_create(args: argparse.Namespace) -> int:
             from hermes_cli.kanban_capability_routing import preflight
             placement = preflight(conn, task_id, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
+    unlinked_warning = None
     if not in_worker and not session_id and not idem_hit and _agent_invoked():
         # An agent shelled out but no chat could be stamped (unknown/missing session env:
         # ssh to another host, `env -i`, another profile...). Say so loudly: an unlinked card
         # silently never shows in the chat's task strip or sidebar badge. [daveey]
-        print(f"⚠  {task_id} is not linked to any chat (no known HERMES_SESSION_KEY/ID in this "
-              "environment), so it won't show in the chat's task strip. Create cards with the "
-              "kanban_create tool instead, or link it to the chat: "
-              f"hermes kanban notify-subscribe {task_id} --platform tui --chat-id <session_id>",
-              file=sys.stderr)
+        unlinked_warning = (
+            f"{task_id} is not linked to any chat (no known HERMES_SESSION_KEY/ID in this "
+            "environment), so it won't show in the chat's task strip. Create cards with the "
+            "kanban_create tool instead, or link it to the chat: "
+            f"hermes kanban notify-subscribe {task_id} --platform tui --chat-id <session_id>")
+        print(f"⚠  {unlinked_warning}", file=sys.stderr)
     if getattr(args, "json", False):
         out = _task_to_dict(task)
+        if unlinked_warning:  # also in the payload: run_slash returns only stdout for --json
+            out["warning"] = unlinked_warning
         if origin_binding:
             out["origin_binding"] = origin_binding
         if placement:
@@ -1022,25 +1027,83 @@ def _creator_task_id(conn, task_id: str) -> Optional[str]:
         return None
 
 
+_TASK_ID_RE = re.compile(r"\bt_[0-9a-f]{16}\b")
+_REFILED_RE = re.compile(r"\bre-?filed\b", re.IGNORECASE)
+
+
+def _is_stranded_runs_on_copy(conn, task) -> bool:
+    """A foreign card no machine will ever run, already re-filed elsewhere. [daveey]
+
+    All must hold: ``ready``; no ``claimed`` event ever; ``runs_on`` has at least one
+    ``machine:<m>`` label and every such ``<m>`` is another gateway that
+    ``placement_runs_on`` refuses today (no advertised pickup), read from a reachable
+    machine registry; and a comment says it was re-filed, naming another task id.
+    """
+    from hermes_cli import kanban_db_sync as ksync
+    from hermes_cli import kanban_worker_node as wn
+
+    if task.status != "ready":
+        return False
+    if conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'claimed' LIMIT 1",
+                    (task.id,)).fetchone():
+        return False
+    try:
+        if "runs_on" not in ksync.table_columns(conn, "tasks"):
+            return False
+        row = conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (task.id,)).fetchone()
+        machines = [label.split(":", 1)[1] for label in (wn._parse(row[0] if row else None) or [])
+                    if label.startswith("machine:")]
+        if not machines or wn.registry() is None:
+            return False
+        own = wn._own(conn)
+        if any(not m or m == own or wn.placement_runs_on(conn, m) for m in machines):
+            return False
+    except Exception:  # health: allow BLE001 -- unreadable sync state: not provably stranded, refuse
+        return False
+    for (body,) in conn.execute("SELECT body FROM task_comments WHERE task_id = ?", (task.id,)):
+        body = body or ""
+        if _REFILED_RE.search(body) and any(t != task.id for t in _TASK_ID_RE.findall(body)):
+            return True
+    return False
+
+
+def worker_archive_scope(conn, task_id: str) -> tuple[Optional[str], Optional[str]]:
+    """``(refusal, via)`` for archiving ``task_id`` from this process.
+
+    ``refusal`` is None when allowed. ``via`` is set when the archive is allowed only
+    as a stranded-``runs_on`` sweep of a foreign card; record it on the archived event.
+    """
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    if not env_tid:
+        return None, None
+    if env_tid == task_id:
+        return ("refusing to archive the assigned task; finish it with kanban_complete"), None
+    task = kb.get_task(conn, task_id)
+    if task is None:
+        return f"no such task: {task_id}", None
+    if _creator_task_id(conn, task_id) != env_tid:
+        if not (task.claim_lock or task.worker_pid) and _is_stranded_runs_on_copy(conn, task):
+            return None, f"stranded-runs_on sweep by {env_tid}"
+        return (f"worker is scoped to task {env_tid}; refusing to archive {task_id}. "
+                "A worker may archive only an unclaimed card its own task created."), None
+    return _worker_may_archive_own(task), None
+
+
 def worker_may_archive(conn, task_id: str) -> Optional[str]:
     """None if this process may archive ``task_id``, else the refusal.
 
     A dispatcher worker may archive an unclaimed card its own task created
-    (``creator_task_id`` is ``HERMES_KANBAN_TASK``). Every other foreign card is
-    refused — that is the "scoped worker can't archive it" wall. No env task
-    (a human or an orchestrator) may archive any card, as before.
+    (``creator_task_id`` is ``HERMES_KANBAN_TASK``), or a foreign card that is a
+    provably stranded ``runs_on`` copy (see ``_is_stranded_runs_on_copy``). Every
+    other foreign card is refused — that is the "scoped worker can't archive it"
+    wall. No env task (a human or an orchestrator) may archive any card, as before.
     """
-    env_tid = os.environ.get("HERMES_KANBAN_TASK")
-    if not env_tid:
-        return None
-    if env_tid == task_id:
-        return ("refusing to archive the assigned task; finish it with kanban_complete")
-    task = kb.get_task(conn, task_id)
-    if task is None:
-        return f"no such task: {task_id}"
-    if _creator_task_id(conn, task_id) != env_tid:
-        return (f"worker is scoped to task {env_tid}; refusing to archive {task_id}. "
-                "A worker may archive only an unclaimed card its own task created.")
+    return worker_archive_scope(conn, task_id)[0]
+
+
+def _worker_may_archive_own(task) -> Optional[str]:
+    """The refusal for a card this worker's task created, else None."""
+    task_id = task.id
     if task.status == "running" or task.claim_lock or task.worker_pid:
         return (f"cannot archive {task_id}: it is claimed (status={task.status}). "
                 "A worker may archive only an unclaimed card its own task created.")
@@ -1468,11 +1531,12 @@ def _cmd_archive(args: argparse.Namespace) -> int:
         if purge_ids:
             return _bulk_apply(purge_ids, lambda tid: kb.delete_archived_task(conn, tid), lambda tid: f"Deleted {tid}",
                                lambda tid: f"cannot delete {tid} (must already be archived)")
+        vias: dict[str, Optional[str]] = {}
         for tid in ids:
-            refusal = worker_may_archive(conn, tid)
+            refusal, vias[tid] = worker_archive_scope(conn, tid)
             if refusal:
                 return _err(refusal)
-        return _bulk_apply(ids, lambda tid: kb.archive_task(conn, tid),
+        return _bulk_apply(ids, lambda tid: kb.archive_task(conn, tid, via=vias.get(tid)),
                            lambda tid: f"Archived {tid}", lambda tid: f"cannot archive {tid}")
 
 
@@ -1787,6 +1851,10 @@ def run_slash(rest: str) -> str:
             print(f"error: {exc}", file=sys.stderr)
 
     out, err = buf_out.getvalue().rstrip(), buf_err.getvalue().rstrip()
+    if out and getattr(args, "json", False):
+        # --json callers parse the result: stderr diagnostics would make it invalid JSON, so
+        # they stay out of it (commands that warn put the warning in the payload). [daveey]
+        return out
     if err and out:
         return f"{out}\n{err}"
     return err if err else (out or "(no output)")

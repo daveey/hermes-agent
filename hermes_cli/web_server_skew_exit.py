@@ -156,6 +156,16 @@ def _run_retirement_watchdog(server, *, observe: Callable[[], Optional[str]], fe
     return thread
 
 
+# [daveey] Live code-skew watchdog threads of this process. A core-update-paused turn asks whether
+# anything will retire this backend before it waits for a successor (tui_gateway.update_pause).
+_SKEW_WATCHDOGS: list[threading.Thread] = []
+
+
+def skew_watchdog_armed() -> bool:
+    """Whether this process runs a code-skew retirement watchdog that is still polling."""
+    return any(thread.is_alive() for thread in _SKEW_WATCHDOGS)
+
+
 _RUNTIME_REASON = ("SSH-isolated backend's runtime was replaced under it (runtimeIntact false); "
                    "retiring so its client respawns it on the new runtime.")
 
@@ -218,6 +228,8 @@ def start_code_skew_watchdog(server, *, skew_fn: Optional[Callable[[], Skew]] = 
             if book is not None:
                 book.record(runtime_key(), clock())
 
-    return _run_retirement_watchdog(server, observe=_observe, fence=fence, poll_s=poll_s,
-                                    max_polls=max_polls, thread_name="ssh-isolated-skew-watchdog",
-                                    on_retire=_on_retire)
+    thread = _run_retirement_watchdog(server, observe=_observe, fence=fence, poll_s=poll_s,
+                                      max_polls=max_polls, thread_name="ssh-isolated-skew-watchdog",
+                                      on_retire=_on_retire)
+    _SKEW_WATCHDOGS[:] = [t for t in _SKEW_WATCHDOGS if t.is_alive()] + [thread]
+    return thread

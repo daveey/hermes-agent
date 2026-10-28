@@ -15,10 +15,24 @@ from pathlib import Path
 from hermes_cli.kanban_origin_adapter import _gateway
 
 
+def _dispatch_owner_tool(name, args, intent):
+    """The validated courier selects Kanban explicitly, independent of chat defaults.
+
+    Keep registry availability checks (including delegated-child fences) and the
+    real dispatch path; never mutate profile configuration or process env.
+    """
+    from tools.kanban_toolset_context import scoped_kanban_toolset_selection
+    from tools.registry import registry
+
+    with scoped_kanban_toolset_selection(['kanban']):
+        if not registry.get_definitions({name}, quiet=True):
+            return {'status': 'pending', 'code': 'kanban_tool_unavailable', 'handoff_complete': False}
+        return _dispatch_result(registry.dispatch(name, args, origin_intent=intent))
+
+
 def receive(request: dict) -> dict:
     from hermes_cli.profiles import get_active_profile_name
     from tools import kanban_tools  # built-in self-registration
-    from tools.registry import registry
 
     del kanban_tools
     profile = get_active_profile_name()
@@ -61,11 +75,7 @@ def receive(request: dict) -> dict:
         intent['owner']['task_id'] = task_id
         validate_binding({'binding_id': 'validation', 'version': 1, 'publication_version': 1,
                           'owner': intent['owner'], 'origin': origin, 'task_record_key': key})
-        if not registry.get_definitions({'kanban_origin_adopt'}, quiet=True):
-            return {'status': 'pending', 'code': 'kanban_tool_unavailable', 'handoff_complete': False}
-        raw_result = registry.dispatch('kanban_origin_adopt', {'task_id': task_id, 'board': board},
-                                       origin_intent=intent)
-        return _dispatch_result(raw_result)
+        return _dispatch_owner_tool('kanban_origin_adopt', {'task_id': task_id, 'board': board}, intent)
     create = request['args'].get('create')
     if (set(request['args']) != {'origin', 'create'} or not isinstance(create, dict)
             or not isinstance(create.get('session_id'), str)
@@ -73,10 +83,7 @@ def receive(request: dict) -> dict:
             or ('board' in create and create['board'] != board)):
         raise ValueError('origin_request_invalid')
     args = {**create, 'board': board}
-    if not registry.get_definitions({'kanban_create'}, quiet=True):
-        return {'status': 'pending', 'code': 'kanban_tool_unavailable', 'handoff_complete': False}
-    raw_result = registry.dispatch('kanban_create', args, origin_intent=intent)
-    return _dispatch_result(raw_result)
+    return _dispatch_owner_tool('kanban_create', args, intent)
 
 
 def _dispatch_result(raw_result):

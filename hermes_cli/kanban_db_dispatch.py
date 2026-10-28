@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import signal
@@ -1080,6 +1081,9 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
 # A run younger than this may still be settling (a claim and its run row land in one txn, but a synced board's
 # feed can briefly carry a run ahead of its card's row), so the sweep leaves it alone.
 DANGLING_RUN_MIN_AGE_SECONDS = 600
+_DANGLING_RUN_TERMINAL_EVENTS = {
+    "completed": ("done", "completed"), "blocked": ("blocked", "blocked"), "crashed": ("crashed", "crashed"),
+}
 
 
 def close_dangling_runs(conn: sqlite3.Connection, *, min_age_seconds: int = DANGLING_RUN_MIN_AGE_SECONDS) -> list[int]:
@@ -1099,6 +1103,28 @@ def close_dangling_runs(conn: sqlite3.Connection, *, min_age_seconds: int = DANG
         ).fetchall()
         now = int(time.time())
         for row in rows:
+            # A run the card already ended (a sync race or a recovery reopened its row) keeps that real end: the
+            # terminal event is the proof, and rewriting it to ``reclaimed`` hides the completion from the owner.
+            ended = conn.execute(
+                "SELECT kind, created_at, payload FROM task_events WHERE run_id = ? AND kind IN "
+                "('completed', 'blocked', 'crashed') ORDER BY id DESC LIMIT 1", (row["id"],),
+            ).fetchone()
+            if ended is not None:
+                status, outcome = _DANGLING_RUN_TERMINAL_EVENTS[ended["kind"]]
+                try:
+                    summary = (json.loads(ended["payload"] or "{}") or {}).get("summary")
+                except (ValueError, AttributeError):
+                    summary = None
+                cur = conn.execute(
+                    "UPDATE task_runs SET status = ?, outcome = ?, ended_at = ?, claim_expires = NULL, "
+                    "summary = COALESCE(summary, ?) WHERE id = ? AND ended_at IS NULL",
+                    (status, outcome, int(ended["created_at"]), summary if isinstance(summary, str) else None, row["id"]),
+                )
+                if cur.rowcount == 1:
+                    closed.append(int(row["id"]))
+                    _kb._log.info("kanban reconcile: restored run %s of task %s to %s from its %s event",
+                                  row["id"], row["task_id"], outcome, ended["kind"])
+                continue
             cur = conn.execute(
                 "UPDATE task_runs SET status = 'reclaimed', outcome = 'reclaimed', ended_at = ?, "
                 "claim_expires = NULL, error = COALESCE(error, ?) WHERE id = ? AND ended_at IS NULL",
