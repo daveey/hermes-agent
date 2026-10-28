@@ -121,7 +121,7 @@ def _run_serve(tmp_path, *, update_running: bool, new: str = NEW):
     env = {k: v for k, v in os.environ.items() if k != "HERMES_SERVE_REEXEC_COUNT"}
     env.update(HERMES_HOME=str(home), HERMES_SERVE_UPDATE_POLL_S="0.05")
     proc = subprocess.run([sys.executable, str(script), str(REPO), str(state), new],
-                          env=env, capture_output=True, text=True, timeout=120)
+                          env=env, capture_output=True, text=True, timeout=120, check=False)
     assert proc.returncode == 0, proc.stderr[-4000:]
     result = json.loads((state / "result.json").read_text())
     incarnations = (state / "incarnations").read_text().split()
