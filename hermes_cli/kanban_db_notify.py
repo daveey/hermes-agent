@@ -306,10 +306,12 @@ def stamp_legacy_hub_sub_provenance(conn: sqlite3.Connection) -> int:
     Before provenance stamping, the origin binding and hermes-hub shepherd subs were both bare 'hub' rows, and
     inheritance copied them to children with the CHILD's creation time, so a copied observer looked exactly
     like a fresh origin binding and kept spreading down the program. Resolve each row through the card graph:
-    a row whose chat also sits on one of the card's parents or its creator task is an inherited copy and takes
-    that ancestor's resolved reason; any other row is the card's own, ``origin`` when written within
-    ``LEGACY_ORIGIN_BIND_WINDOW_S`` of the card's creation, else ``shepherd``. Idempotent and cheap once done
-    (no unstamped rows left). Returns the number of rows stamped."""
+    a row whose chat also sits on one of the card's parents or its creator task, written no later than the row,
+    is an inherited copy and takes that ancestor's resolved reason; any other row is the card's own, ``origin``
+    when written within ``LEGACY_ORIGIN_BIND_WINDOW_S`` of the card's creation, else ``shepherd``. Known
+    ambiguity: where old code collapsed a copied observer and the same chat's origin binding into one row
+    (``INSERT OR IGNORE``), it is stamped ``shepherd`` (under-inherits, never over-inherits). Idempotent and
+    cheap once done (no unstamped rows left). Returns the number of rows stamped."""
     rows = conn.execute(
         "SELECT s.task_id, s.chat_id, s.thread_id, s.created_at AS sub_at, t.created_at AS task_at "
         "FROM kanban_notify_subs s LEFT JOIN tasks t ON t.id = s.task_id "
@@ -339,28 +341,43 @@ def stamp_legacy_hub_sub_provenance(conn: sqlite3.Connection) -> int:
 
     resolved: dict[tuple[str, str], str] = {}
 
-    def _stamped(task_id: str, chat_id: str) -> Optional[str]:
+    def _row(task_id: str, chat_id: str) -> Optional[tuple[Optional[str], int]]:
+        """``(reason or None, created_at)`` of the card's hub row for ``chat_id``; None without one."""
+        key = (task_id, chat_id)
+        if key in pending:
+            return None if key not in resolved else (resolved[key], int(pending[key]["sub_at"] or 0))
         row = conn.execute(
-            "SELECT delivery_metadata FROM kanban_notify_subs WHERE task_id = ? AND platform = 'hub' AND chat_id = ? "
-            "ORDER BY thread_id LIMIT 1", (task_id, chat_id)).fetchone()
+            "SELECT delivery_metadata, created_at FROM kanban_notify_subs WHERE task_id = ? AND platform = 'hub' "
+            "AND chat_id = ? ORDER BY thread_id LIMIT 1", (task_id, chat_id)).fetchone()
         if row is None:
             return None
-        return _decode_notify_delivery_metadata(row["delivery_metadata"]).get("reason") or "origin"
+        return (_decode_notify_delivery_metadata(row["delivery_metadata"]).get("reason") or "origin",
+                int(row["created_at"] or 0))
 
     def _resolve(task_id: str, chat_id: str, seen: frozenset) -> Optional[str]:
         key = (task_id, chat_id)
         if key in resolved:
             return resolved[key]
         if key not in pending:
-            return _stamped(task_id, chat_id)
-        inherited = [reason for anc in sorted(_ancestors(task_id)) if anc not in seen
-                     for reason in [_resolve(anc, chat_id, seen | {task_id})] if reason is not None]
+            got = _row(task_id, chat_id)
+            return got[0] if got else None
+        row = pending[key]
+        sub_at = int(row["sub_at"] or 0)
+        # Only an ancestor row written no later than this one can be its source: a copy is written after the
+        # row it copies. A later same-chat row on an ancestor is an independent shepherd of that ancestor.
+        inherited = []
+        for anc in sorted(_ancestors(task_id)):
+            if anc in seen:
+                continue
+            reason = _resolve(anc, chat_id, seen | {task_id})
+            got = _row(anc, chat_id)
+            if reason is not None and got is not None and got[1] <= sub_at:
+                inherited.append(reason)
         if inherited:
-            reason = "origin" if any(r in OWNING_SUB_REASONS for r in inherited) else "shepherd"
+            reason = "shepherd" if all(r in OBSERVER_SUB_REASONS for r in inherited) else "origin"
         else:
-            row = pending[key]
             bound_at_creation = (row["task_at"] is not None and row["sub_at"] is not None
-                                 and int(row["sub_at"]) <= int(row["task_at"]) + LEGACY_ORIGIN_BIND_WINDOW_S)
+                                 and sub_at <= int(row["task_at"]) + LEGACY_ORIGIN_BIND_WINDOW_S)
             reason = "origin" if bound_at_creation else "shepherd"
         resolved[key] = reason
         return reason

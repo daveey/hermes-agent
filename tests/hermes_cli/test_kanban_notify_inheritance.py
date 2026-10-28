@@ -178,7 +178,8 @@ def test_backfill_stops_legacy_observer_copies_spreading(kanban_home, edge):
         else:
             parent = kb.create_task(conn, title="linked", assignee="w")
             kb.link_tasks(conn, grand, parent)
-        p_at = kb.get_task(conn, parent).created_at
+        p_at = g_at + 7200  # created after the observer subscribed to the grandparent
+        conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?", (p_at, parent))
         conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (parent,))
         for chat in ("macbook/default/origin", "macbook/default/observer"):  # what the old code wrote
             _legacy_hub(conn, parent, chat, p_at)
@@ -239,6 +240,27 @@ def test_board_open_survives_a_fenced_backfill(kanban_home, monkeypatch):
     try:
         assert _reasons(conn, parent) == {"gw/p/late": None}
         child = kb.create_task(conn, title="c", assignee="w", creator_task_id=parent)
+        assert _sub_keys(conn, child) == []
+    finally:
+        conn.close()
+
+
+def test_backfill_ignores_ancestor_rows_written_after_the_row(kanban_home):
+    """A copy is written after the row it copies: an ancestor's same-chat row written LATER is not the source,
+    so a late unstamped shepherd on the parent stays a shepherd even when the ancestor's later row is owning."""
+    conn = kbc.connect()
+    try:
+        grand = kb.create_task(conn, title="program", assignee="default")
+        parent = kb.create_task(conn, title="fan-out", assignee="w", creator_task_id=grand)
+        p_at = kb.get_task(conn, parent).created_at
+        _legacy_hub(conn, parent, "macbook/default/x", p_at + 600)
+        conn.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, thread_id, created_at, "
+                     "delivery_metadata) VALUES (?, 'hub', 'macbook/default/x', '', ?, '{\"reason\": \"origin\"}')",
+                     (grand, p_at + 5000))
+        conn.commit()
+        assert kbn.stamp_legacy_hub_sub_provenance(conn) == 1
+        assert _reasons(conn, parent) == {"macbook/default/x": "shepherd"}
+        child = kb.create_task(conn, title="next", assignee="w", creator_task_id=parent)
         assert _sub_keys(conn, child) == []
     finally:
         conn.close()
