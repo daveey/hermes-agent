@@ -171,3 +171,152 @@ def test_registered_adoption_tool_requires_trusted_context(board):
     assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
     refused = json.loads(registry.dispatch("kanban_origin_adopt", {"task_id": tid, "board": "default"}))
     assert refused.get("code") == "origin_context_required", refused
+
+
+# --- Refusal outside courier context names the supported CLI path [daveey] -------------------------------------
+
+def _hub_state(tmp_path, monkeypatch, me, tasks=()):
+    """A minimal hermes-hub state dir: this gateway's id plus replica rows (gw, profile/board/task)."""
+    import sqlite3
+    state = tmp_path / "hub-state"
+    state.mkdir(exist_ok=True)
+    with sqlite3.connect(state / "hub.db") as db:
+        db.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS replica (gw TEXT, coll TEXT, key TEXT, version INTEGER, seq INTEGER, "
+                   "data TEXT, PRIMARY KEY (gw, coll, key))")
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('gateway', ?)", (me,))
+        for gw in {me, *(t[0] for t in tasks)}:
+            db.execute("INSERT OR REPLACE INTO replica (gw, coll, key, data) VALUES (?, 'gateway', 'info', '{}')", (gw,))
+        for gw, key in tasks:
+            db.execute("INSERT OR REPLACE INTO replica (gw, coll, key, data) VALUES (?, 'tasks', ?, '{}')", (gw, key))
+    monkeypatch.setenv("HERMES_HUB_STATE", str(state))
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+    for name in ("HERMES_KANBAN_TASK", "HERMES_ORIGIN_SESSION", "HERMES_SESSION_ID", "HERMES_PROFILE_NAME"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _refuse(task_id, board="default"):
+    from tools import kanban_tools  # registers the tool
+    from tools.registry import registry
+    return json.loads(registry.dispatch("kanban_origin_adopt", {"task_id": task_id, "board": board}))
+
+
+def test_chat_refusal_names_exact_adopt_task_command(board, tmp_path, monkeypatch):
+    _hub_state(tmp_path, monkeypatch, "macbook", [("hub", "default/default/t_remote1")])
+    monkeypatch.setenv("HERMES_SESSION_ID", "20261025_234720_c405df")
+    refused = _refuse("t_remote1")
+    assert refused["code"] == "origin_context_required", refused
+    assert refused["handoff_complete"] is False
+    assert refused["next_step"] == ("hermes-hub adopt-task hub default/default/t_remote1 "
+                                    "--origin-session 20261025_234720_c405df --origin-profile default "
+                                    "--id adopt:t_remote1:20261025_234720_c405df")
+    assert refused["run_on"] == "macbook"
+    assert refused["complete"] is True
+    assert "hermes-hub adopt-task" in refused["error"]
+
+
+def test_chat_refusal_uses_owner_profile_and_board_from_replica(board, tmp_path, monkeypatch):
+    _hub_state(tmp_path, monkeypatch, "macbook", [("mini", "bb-dev/bb/t_bb1"), ("hub", "default/default/t_other")])
+    monkeypatch.setenv("HERMES_SESSION_ID", "s_chat")
+    monkeypatch.setenv("HERMES_PROFILE", "work")
+    refused = _refuse("t_bb1", board="bb")
+    assert refused["next_step"] == ("hermes-hub adopt-task mini bb-dev/bb/t_bb1 --origin-session s_chat "
+                                    "--origin-profile work --id adopt:t_bb1:s_chat")
+
+
+def test_chat_refusal_with_unknown_owner_keeps_placeholders(board, tmp_path, monkeypatch):
+    _hub_state(tmp_path, monkeypatch, "macbook")
+    refused = _refuse("t_nowhere")
+    assert refused["code"] == "origin_context_required"
+    assert refused["next_step"].startswith("hermes-hub adopt-task <owner-gateway> <owner-profile>/default/t_nowhere ")
+    assert "--origin-session <origin-session-id>" in refused["next_step"]
+    assert refused["run_on"] == "macbook"
+    assert refused["complete"] is False
+    assert "not in this gateway's hermes-hub replica" in refused["error"]
+    assert "Replace every <placeholder>" in refused["error"]
+
+
+@pytest.mark.parametrize("task_id,board_slug,session", [
+    ("t_x; touch /tmp/pwned", "default", "s_ok"),
+    ("t_x", "de fault", "s_ok"),
+    ("t_x", "default", "$(id)"),
+    ("t_x", "default", "--help"),
+])
+def test_unsafe_values_become_placeholders_never_shell_text(board, tmp_path, monkeypatch, task_id, board_slug, session):
+    _hub_state(tmp_path, monkeypatch, "macbook", [("hub", "default/default/t_x")])
+    monkeypatch.setenv("HERMES_SESSION_ID", session)
+    refused = _refuse(task_id, board=board_slug)
+    assert refused["complete"] is False
+    for bad in (";", "$(", " de fault", "--help", "touch"):
+        assert bad not in refused["next_step"]
+
+
+def test_chat_refusal_for_card_on_this_gateway_subscribes_instead(board, tmp_path, monkeypatch):
+    _conn, tid = board
+    _hub_state(tmp_path, monkeypatch, "hub", [("hub", f"default/default/{tid}")])
+    monkeypatch.setenv("HERMES_SESSION_ID", "s_local")
+    refused = _refuse(tid)
+    assert refused["next_step"] == (f"hermes kanban --board default notify-subscribe {tid} "
+                                    "--platform tui --chat-id s_local")
+    assert refused["run_on"] == "hub"
+
+
+def test_chat_refusal_for_card_on_another_local_profile_names_it(board, tmp_path, monkeypatch):
+    _hub_state(tmp_path, monkeypatch, "hub", [("hub", "work/release/t_rel1")])
+    monkeypatch.setenv("HERMES_SESSION_ID", "s_local")
+    refused = _refuse("t_rel1", board="release")
+    assert refused["next_step"] == ("hermes -p work kanban --board release notify-subscribe t_rel1 "
+                                    "--platform tui --chat-id s_local")
+
+
+def test_worker_refusal_points_at_origin_gateway_cli(board, tmp_path, monkeypatch):
+    _conn, tid = board
+    _hub_state(tmp_path, monkeypatch, "hub", [("hub", f"default/default/{tid}"), ("macbook", "default/default/t_x")])
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_ORIGIN_SESSION", "@session:default@macbook/20261025_234720_c405df")
+    refused = _refuse(tid)
+    assert refused["next_step"] == (f"hermes-hub adopt-task hub default/default/{tid} "
+                                    "--origin-session 20261025_234720_c405df --origin-profile default "
+                                    f"--id adopt:{tid}:20261025_234720_c405df")
+    assert refused["run_on"] == "macbook"
+    assert refused["complete"] is True
+    assert refused["delegate"].startswith("hermes-hub create-task macbook ")
+    assert "--origin-session ''" in refused["delegate"]
+    assert f"--expect hub/default/default/{tid}" in refused["delegate"]
+    assert "kanban_origin_adopt" not in refused["next_step"]
+
+
+def test_worker_refusal_carries_non_default_profiles(board, tmp_path, monkeypatch):
+    """Owner card on profile bb-dev, origin chat on profile personal: both must survive into the command and the
+    links check (a 3-part --expect ref means the default profile)."""
+    _conn, tid = board
+    _hub_state(tmp_path, monkeypatch, "mini", [("mini", f"bb-dev/default/{tid}"), ("macbook", "personal/default/t_y")])
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_PROFILE", "bb-dev")
+    monkeypatch.setenv("HERMES_ORIGIN_SESSION", "@session:personal@macbook/s_mac")
+    refused = _refuse(tid)
+    assert refused["next_step"] == (f"hermes-hub adopt-task mini bb-dev/default/{tid} --origin-session s_mac "
+                                    f"--origin-profile personal --id adopt:{tid}:s_mac")
+    assert f"--expect mini/bb-dev/default/{tid}" in refused["delegate"]
+
+
+def test_worker_refusal_without_known_origin_names_placeholders(board, tmp_path, monkeypatch):
+    _conn, tid = board
+    _hub_state(tmp_path, monkeypatch, "hub", [("hub", f"default/default/{tid}")])
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    refused = _refuse(tid)
+    assert refused["next_step"].startswith(f"hermes-hub adopt-task hub default/default/{tid} --origin-session <origin-session-id>")
+    assert refused["run_on"] == "<origin-gateway>"
+    assert refused["complete"] is False
+    assert refused["delegate"].startswith("hermes-hub create-task <origin-gateway> ")
+
+
+def test_worker_with_origin_on_same_gateway_gets_no_self_addressed_delegate(board, tmp_path, monkeypatch):
+    _conn, tid = board
+    _hub_state(tmp_path, monkeypatch, "hub", [("hub", f"default/default/{tid}")])
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_ORIGIN_SESSION", "@session:default@hub/s_here")
+    refused = _refuse(tid)
+    assert "delegate" not in refused
+    assert refused["next_step"] == f"hermes kanban --board default notify-subscribe {tid} --platform tui --chat-id s_here"
+    assert "cross_session" in refused["error"]

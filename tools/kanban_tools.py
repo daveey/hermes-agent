@@ -1936,8 +1936,16 @@ def _handle_origin_adopt(args: dict, **kw) -> str:
     _reject_delegated_child_mutation("kanban_origin_adopt")
     intent = kw.get("origin_intent")
     if intent is None:
-        return tool_error("authenticated origin courier context required", code="origin_context_required",
-                          handoff_complete=False)
+        # Never a dead end: name the supported CLI path (hermes-hub adopt-task) filled in from args. [daveey]
+        from hermes_cli.kanban_origin import adopt_next_step
+        try:
+            hint = adopt_next_step(str(args.get("task_id") or "<task-id>"), str(args.get("board") or "default"))
+        except Exception:
+            logger.debug("kanban_origin_adopt next_step failed", exc_info=True)
+            hint = {}
+        message = hint.pop("message", "")
+        return tool_error(f"authenticated origin courier context required. {message}".strip().rstrip("."),
+                          code="origin_context_required", handoff_complete=False, **hint)
     from hermes_cli.kanban_origin import OriginError
     from hermes_cli.kanban_origin_creation import adopt_with_origin
     if (not isinstance(intent, dict) or not isinstance(intent.get("owner"), dict)
