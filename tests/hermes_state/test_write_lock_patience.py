@@ -27,13 +27,16 @@ import pytest
 from hermes_state import SessionDB
 
 
-def _hold_write_lock(db_path, hold_s, started_evt):
-    """Hold the SQLite write lock on *db_path* for *hold_s* seconds."""
+def _hold_write_lock(db_path, hold_s, started_evt, release_evt=None):
+    """Hold the SQLite write lock on *db_path* for *hold_s* seconds (or until *release_evt*)."""
     conn = sqlite3.connect(str(db_path), timeout=1.0, isolation_level=None)
     try:
         conn.execute("BEGIN IMMEDIATE")
         started_evt.set()
-        time.sleep(hold_s)
+        if release_evt is None:
+            time.sleep(hold_s)
+        else:
+            release_evt.wait(hold_s)
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -86,9 +89,12 @@ class TestTranscriptWritePatience:
         held by another process — not read like disk/permission damage."""
         monkeypatch.setattr(SessionDB, "_WRITE_PATIENCE_S", 0.2)
 
-        started = threading.Event()
+        # Hold until the assertion is done, not for a fixed 2 s: one 1 s busy_timeout wait lasts
+        # ~3 s with the SQLite builds on macOS, so a 2 s hold ended inside the FIRST wait there
+        # and the write succeeded (this test failed on every Mac, never on Linux CI).
+        started, release = threading.Event(), threading.Event()
         holder = threading.Thread(
-            target=_hold_write_lock, args=(db.db_path, 2.0, started)
+            target=_hold_write_lock, args=(db.db_path, 30.0, started, release)
         )
         holder.start()
         try:
@@ -96,6 +102,7 @@ class TestTranscriptWritePatience:
             with pytest.raises(sqlite3.OperationalError) as excinfo:
                 db.set_meta("k", "v")  # routine write, short patience
         finally:
+            release.set()
             holder.join(timeout=10.0)
         assert not holder.is_alive()
         text = str(excinfo.value)

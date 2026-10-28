@@ -7,6 +7,7 @@ while never live-downgrading an on-disk WAL database and never flagging an ordin
 
 import logging
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,7 +38,10 @@ class TestDetectCrossVmFs:
         ("/data/native/db", False),     # ext4 mounted over the virtiofs tree — longest prefix wins
         ("/datastore", False),          # sibling path sharing a prefix string, not a mount prefix
     ])
-    def test_only_virtiofs_and_9p_mounts_are_flagged(self, tmp_path, path, expected):
+    def test_only_virtiofs_and_9p_mounts_are_flagged(self, tmp_path, monkeypatch, path, expected):
+        # The mountinfo parser is what is pinned here; _detect_cross_vm_fs answers False off Linux
+        # before reading the file, so present as Linux or every True case fails on a Mac.
+        monkeypatch.setattr(hermes_state_wal, "sys", SimpleNamespace(platform="linux"))
         mi = _mountinfo(tmp_path, [ROOT_EXT4, BIND_VIRTIOFS, BIND_9P, NESTED_EXT4, SPACE_VIRTIOFS])
         assert _detect_cross_vm_fs(path, mountinfo_path=mi) is expected
 

@@ -542,6 +542,35 @@ def foreign_state_db_holders(db_path: Path) -> list[tuple[int, str]]:
             holders.append((-1, f"open-file scan failed: {exc}"))
         return holders
 
+    if sys.platform == "darwin":
+        # libproc, not psutil: psutil.Process.open_files() stats every file every process has
+        # open (isfile_strict), and the old leg then realpath'd each one. Touching other
+        # processes' files makes the verdict depend on whether each of them can be stat'ed,
+        # and in tests it tripped the real-home I/O guard on another Hermes process's
+        # ~/.hermes/logs/*.log, so every macOS run saw a phantom live writer and refused repair.
+        # libproc hands back the kernel path and the vnode's (st_dev, st_ino) with no file I/O,
+        # so this leg judges by identity exactly like the /proc leg above. A watched path whose
+        # identity moved on (a retired, unlinked generation) still counts, as on Linux.
+        try:
+            from hermes_state_dbfile import _iter_darwin_fd_targets
+
+            own_pid = os.getpid()
+            # APFS/HFS+ are case-insensitive by default and libproc reports the opener's spelling.
+            watched_folded = {path.casefold() for path in watched}
+            for pid, _fd, target, identity in _iter_darwin_fd_targets():
+                if pid == own_pid:
+                    continue
+                if identity in watched_ids or target.casefold() in watched_folded:
+                    holders.append((pid, target))
+        except Exception as exc:
+            logger.warning(
+                "Could not prove state.db has no foreign holders; "
+                "deferring structural maintenance: %s",
+                exc,
+            )
+            holders.append((-1, f"open-file scan failed: {exc}"))
+        return holders
+
     if psutil is None:
         return [(-1, "open-file scan unavailable")]
     try:
