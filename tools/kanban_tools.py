@@ -1973,11 +1973,11 @@ def _handle_archive(args: dict, **kw) -> str:
     _check(tid, "task_id is required")
     tid = str(tid)
     with _board(args.get("board")) as (kb, conn):
-        from hermes_cli.kanban import worker_may_archive
-        refusal = worker_may_archive(conn, tid)
+        from hermes_cli.kanban import worker_archive_scope
+        refusal, via = worker_archive_scope(conn, tid)
         if refusal:
             raise _Reject(refusal)
-        _check(kb.archive_task(conn, tid), f"cannot archive {tid}")
+        _check(kb.archive_task(conn, tid, via=via), f"cannot archive {tid}")
         return _ok(task_id=tid, status="archived")
 
 
