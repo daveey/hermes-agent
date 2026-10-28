@@ -17,6 +17,7 @@
  *    paths. Nothing here ever throws into a caller.
  */
 import { pluginRest } from '@/api/plugins'
+import type { SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import type { SessionOwnerRoute } from '@/store/session-request-router'
 
@@ -74,7 +75,7 @@ export interface HubWhereHit {
 
 export interface HubRequestBody {
   gateway: string
-  coll: 'inbox' | 'sessions' | 'tasks'
+  coll: 'inbox' | 'projects' | 'sessions' | 'tasks'
   key: string
   action: string
   args?: Record<string, unknown>
@@ -315,7 +316,11 @@ export async function hubSessionOwner(
 }
 
 /** Kanban cards the replica holds for hub gateway `gateway` on `board`. */
-export async function hubGatewayTasks(gateway: string, board: string, includeClosed = false): Promise<HubTask[] | null> {
+export async function hubGatewayTasks(
+  gateway: string,
+  board: string,
+  includeClosed = false
+): Promise<HubTask[] | null> {
   const params = new URLSearchParams({ board: board || 'default', gateway })
 
   if (includeClosed) {
@@ -325,6 +330,32 @@ export async function hubGatewayTasks(gateway: string, board: string, includeClo
   const result = await hubGet<{ tasks?: HubTask[] }>(`/tasks?${params.toString()}`)
 
   return Array.isArray(result?.tasks) ? result.tasks : null
+}
+
+/** One gateway's member of a replica project group: what a shared-field set targets. */
+export interface HubProjectMember {
+  gateway: string
+  profile: string
+  id: string
+  key: string
+  kind: 'auto' | 'explicit' | 'none'
+}
+
+export interface HubProjectNode extends SidebarProjectTree {
+  members?: HubProjectMember[]
+}
+
+/** Hub gateway `gateway`'s project tree as the replica holds it (hermes-hub >= 1.9.0), or null. */
+export async function hubGatewayProjects(gateway: string, previewLimit = 3): Promise<HubProjectNode[] | null> {
+  const params = new URLSearchParams({ gateway, preview_limit: String(previewLimit) })
+
+  const result = await hubGet<{ gateways?: Record<string, { projects?: HubProjectNode[] }> }>(
+    `/projects?${params.toString()}`
+  )
+
+  const projects = result?.gateways?.[gateway]?.projects
+
+  return Array.isArray(projects) ? projects : null
 }
 
 /** Test seam: forget every cache (names, status, where). */

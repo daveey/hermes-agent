@@ -79,6 +79,9 @@ export interface SidebarProjectTree {
   // Every session id the backend assigned to this project — the authoritative
   // owner set the live overlay keys on (complete, unlike `previewSessions`).
   sessionIds?: string[]
+  // [daveey] Another gateway's declared project (projects.db row there): it can be renamed / themed from
+  // here as a hub shared field, even while that gateway sleeps. `id` is its id on the owner.
+  remoteProject?: { connectionId: string; id: string }
 }
 
 /** Path split into segments, ignoring trailing slashes and mixed separators. */

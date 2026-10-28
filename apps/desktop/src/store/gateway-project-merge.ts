@@ -193,6 +193,9 @@ export function mergeGatewayProjectTrees(
       indexByKey.set(key, out.length)
       out.push({
         ...remote,
+        ...(!remote.isAuto && !remote.isNoProject && remote.id.startsWith('p_')
+          ? { remoteProject: { connectionId, id: remote.id } }
+          : {}),
         id: remoteProjectId(connectionId, remote.id),
         // A remote folder can't be opened, themed or used as a cwd from here.
         path: null,

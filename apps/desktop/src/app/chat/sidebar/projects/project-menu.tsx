@@ -91,10 +91,20 @@ function useProjectActions({
   // Rename / add folder / set active — explicit projects only (auto ones lack a
   // materialized record). Appearance is handled per-surface (popover vs submenu)
   // by the caller since its picker chrome differs.
+  // [daveey] Another gateway's declared project renames through the hub (shared field), owner awake or not.
+  const renameItem: ActionItemSpec = {
+    icon: 'edit',
+    key: 'rename',
+    label: p.menuRename,
+    onSelect: () => openProjectRename(target)
+  }
+
   const identityItems: ActionItemSpec[] = project.isAuto
-    ? []
+    ? project.remoteProject
+      ? [renameItem]
+      : []
     : [
-        { icon: 'edit', key: 'rename', label: p.menuRename, onSelect: () => openProjectRename(target) },
+        renameItem,
         {
           icon: 'new-folder',
           key: 'add-folder',
@@ -255,8 +265,9 @@ export function ProjectMenu({
             // Inherited (auto) repos can still be themed — the change adopts the
             // repo as a real project. Rename / add-folder / set-active stay out
             // until then (they need the materialized record).
-            project.path && (
+            (project.path || project.remoteProject) && (
               <>
+                {identityItems.map(item => renderActionItem(DROPDOWN_KIT, item))}
                 {appearanceItem}
                 <DropdownMenuSeparator />
               </>
@@ -322,7 +333,7 @@ export function ProjectContextMenu({
     scoped
   })
 
-  const canTheme = !project.isAuto || Boolean(project.path)
+  const canTheme = !project.isAuto || Boolean(project.path || project.remoteProject)
 
   const applyAppearance = (patch: { color?: null | string; icon?: null | string }) => {
     void setProjectAppearance(project, patch)

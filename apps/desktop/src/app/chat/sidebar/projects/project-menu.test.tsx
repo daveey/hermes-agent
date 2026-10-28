@@ -3,6 +3,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { dismissAutoProject, restoreAutoProject } from '@/store/layout'
 import { notify } from '@/store/notifications'
+import { openProjectRename } from '@/store/projects'
 
 import { ProjectMenu } from './project-menu'
 import type { SidebarProjectTree } from './workspace-groups'
@@ -149,5 +150,34 @@ describe('ProjectMenu', () => {
     expect(restoreAutoProject).not.toHaveBeenCalled()
     input.action?.onClick()
     expect(restoreAutoProject).toHaveBeenCalledWith('/auto/repo')
+  }, 15000)
+
+  // [daveey] Another gateway's declared project renames / themes through the hub; its auto groups do not.
+  it("offers rename and appearance on another gateway's declared project, and neither on its auto group", async () => {
+    const remote = {
+      ...autoProject,
+      id: 'gw:mini:p_garden',
+      label: 'Garden',
+      path: null,
+      remoteProject: { connectionId: 'mini', id: 'p_garden' }
+    } as unknown as SidebarProjectTree
+
+    render(<ProjectMenu isActive={false} project={remote} />)
+    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }))
+    expect(openProjectRename).toHaveBeenCalledWith({ id: 'gw:mini:p_garden', name: 'Garden' })
+    cleanup()
+
+    render(<ProjectMenu isActive={false} project={remote} />)
+    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
+    expect(await screen.findByRole('menuitem', { name: 'Appearance' })).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: 'Add folder' })).toBeNull()
+    cleanup()
+
+    render(<ProjectMenu isActive={false} project={{ ...autoProject, id: 'gw:mini:/r/x', path: null } as never} />)
+    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
+    await screen.findByRole('menuitem', { name: 'Remove from sidebar' })
+    expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: 'Appearance' })).toBeNull()
   }, 15000)
 })

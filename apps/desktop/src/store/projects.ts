@@ -65,6 +65,8 @@ import {
   remoteScopedSessionIds
 } from './gateway-project-merge'
 import { $hiddenGatewayIds } from './gateway-visibility'
+import { hubGatewayForConnection, hubGatewayProjects, hubRequest, learnHubGatewayName } from './hub-sync'
+import { type OfflineReplicaRecord, offlineSessionsFromReplica } from './offline-sessions'
 
 // First-class, per-profile Projects (named, multi-folder workspaces). State is
 // served by the live gateway's `projects.*` JSON-RPC methods, which wrap the
@@ -570,6 +572,37 @@ async function fetchRemoteProjectTree(connectionId: string, profile: string): Pr
   }
 }
 
+// [daveey] The hub replica's copy of a remote's tree (hermes-hub >= 1.9.0): what the overview shows for a gateway
+// this run hasn't reached yet (cold start) or can't reach (asleep), so its groups never vanish and a shared rename
+// made while it sleeps shows. Null when the replica has nothing for it (no hub-sync, older client, unknown name).
+async function replicaProjectTree(connectionId: string): Promise<null | SidebarProjectTree[]> {
+  const gateway = hubGatewayForConnection(connectionId)
+  const nodes = gateway ? await hubGatewayProjects(gateway, projectTreePreviewLimit()) : null
+
+  if (!nodes?.length) {
+    return null
+  }
+
+  return nodes.map(({ members: _members, ...node }) => ({
+    ...node,
+    previewSessions: offlineSessionsFromReplica(
+      (node.previewSessions ?? []) as unknown as OfflineReplicaRecord[],
+      () => connectionId,
+      Date.now() / 1000,
+      { includeLocal: true }
+    )
+  }))
+}
+
+async function fillFromReplica(connectionId: string, entry: RemoteTreeEntry): Promise<void> {
+  const replica = await replicaProjectTree(connectionId).catch(() => null)
+
+  if (replica) {
+    entry.projects = replica
+    reapplyLastProjectTree()
+  }
+}
+
 async function refreshRemoteProjectTree(connectionId: string, profile: string): Promise<void> {
   const now = Date.now()
   const entry = remoteTrees.get(connectionId) ?? { projects: [], fetchedAt: 0, failedAt: 0, inFlight: false }
@@ -586,6 +619,10 @@ async function refreshRemoteProjectTree(connectionId: string, profile: string): 
   remoteTrees.set(connectionId, entry)
 
   try {
+    if (!entry.fetchedAt && !entry.projects.length) {
+      await fillFromReplica(connectionId, entry)
+    }
+
     const res = await fetchRemoteProjectTree(connectionId, profile)
 
     entry.projects = res.projects ?? []
@@ -593,6 +630,7 @@ async function refreshRemoteProjectTree(connectionId: string, profile: string): 
     reapplyLastProjectTree()
   } catch {
     entry.failedAt = Date.now()
+    await fillFromReplica(connectionId, entry)
   } finally {
     entry.inFlight = false
   }
@@ -1641,22 +1679,19 @@ export async function updateProject(
   id: string,
   patch: { name?: string; color?: null | string; icon?: null | string }
 ): Promise<void> {
-  const context = await activeProjectsContext(writableProjectProfile())
   const snap = snapshotProjects()
+  const remote = snap.tree.find(node => node.id === id)?.remoteProject
 
-  $projectTree.set(
-    snap.tree.map(node =>
-      node.id === id
-        ? {
-            ...node,
-            ...(patch.name !== undefined && { label: patch.name }),
-            ...(patch.color !== undefined && { color: patch.color }),
-            ...(patch.icon !== undefined && { icon: patch.icon })
-          }
-        : node
-    )
-  )
-  $projects.set(snap.projects.map(proj => (proj.id === id ? { ...proj, ...patch } : proj)))
+  if (remote) {
+    applyOptimisticProjectPatch(snap, id, patch)
+    await persistOrRollback(snap, () => updateRemoteProject(remote, patch))
+
+    return
+  }
+
+  const context = await activeProjectsContext(writableProjectProfile())
+
+  applyOptimisticProjectPatch(snap, id, patch)
 
   // Backend treats null/undefined as "leave unchanged"; "" clears (stores NULL).
   // Map explicit null → "" so "no color"/"no icon" actually clear.
@@ -1677,6 +1712,57 @@ export async function updateProject(
   )
 }
 
+type ProjectPatch = { name?: string; color?: null | string; icon?: null | string }
+
+const patchNode = <T extends SidebarProjectTree>(node: T, patch: ProjectPatch): T => ({
+  ...node,
+  ...(patch.name !== undefined && { label: patch.name }),
+  ...(patch.color !== undefined && { color: patch.color }),
+  ...(patch.icon !== undefined && { icon: patch.icon })
+})
+
+function applyOptimisticProjectPatch(snap: ProjectsSnapshot, id: string, patch: ProjectPatch): void {
+  $projectTree.set(snap.tree.map(node => (node.id === id ? patchNode(node, patch) : node)))
+  $projects.set(snap.projects.map(proj => (proj.id === id ? { ...proj, ...patch } : proj)))
+}
+
+// [daveey] Another gateway's declared project: each field is a hub shared-field set on every declared project
+// the group stands for (the same folder in two of its profiles is one group), applied by the owner when it is
+// next awake. The cached remote tree takes the change too, so a repaint before the next fetch keeps it.
+async function updateRemoteProject(target: { connectionId: string; id: string }, patch: ProjectPatch): Promise<void> {
+  let gateway = hubGatewayForConnection(target.connectionId)
+
+  if (!gateway && (await learnHubGatewayName(target.connectionId))) {
+    gateway = hubGatewayForConnection(target.connectionId)
+  }
+
+  const nodes = gateway ? await hubGatewayProjects(gateway) : null
+  const node = nodes?.find(n => n.members?.some(m => m.kind === 'explicit' && m.id === target.id))
+  const members = node?.members?.filter(m => m.kind === 'explicit') ?? []
+
+  if (!members.length) {
+    throw new Error('This project is not in the hub replica yet; try again after the next sync.')
+  }
+
+  const fields: [string, string, string][] = [
+    ...(patch.name !== undefined ? [['rename', 'name', patch.name] as [string, string, string]] : []),
+    ...(patch.icon !== undefined ? [['icon', 'icon', patch.icon ?? ''] as [string, string, string]] : []),
+    ...(patch.color !== undefined ? [['color', 'color', patch.color ?? ''] as [string, string, string]] : [])
+  ]
+
+  for (const member of members) {
+    for (const [action, field, value] of fields) {
+      await hubRequest({ action, args: { [field]: value }, coll: 'projects', gateway: member.gateway, key: member.key })
+    }
+  }
+
+  const entry = remoteTrees.get(target.connectionId)
+
+  if (entry) {
+    entry.projects = entry.projects.map(p => (p.id === target.id ? patchNode(p, patch) : p))
+  }
+}
+
 // Appearance for an AUTO (inherited git-repo) project has no projects.db row to
 // write to — its id is just the repo path. So the first color/icon change ADOPTS
 // the repo as a real project (folder = repo root, name = its label) carrying the
@@ -1684,10 +1770,10 @@ export async function updateProject(
 // Returns true when an adoption happened, so an incremental picker can close
 // (the node's id changes on adopt, and a second stale write would double-create).
 export async function setProjectAppearance(
-  project: Pick<SidebarProjectTree, 'color' | 'icon' | 'id' | 'isAuto' | 'label' | 'path'>,
+  project: Pick<SidebarProjectTree, 'color' | 'icon' | 'id' | 'isAuto' | 'label' | 'path' | 'remoteProject'>,
   patch: { color?: null | string; icon?: null | string }
 ): Promise<boolean> {
-  if (!project.isAuto) {
+  if (!project.isAuto || project.remoteProject) {
     await updateProject(project.id, patch)
 
     return false
