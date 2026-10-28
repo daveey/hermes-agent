@@ -332,3 +332,35 @@ def test_failed_exit_cleanup_kill_is_logged_as_a_warning(monkeypatch, caplog):
         assert base.kill_live_foreground_processes() == 1
     assert any(r.levelname == "WARNING" and "exit-time kill" in r.getMessage() and r.exc_info
                for r in caplog.records), caplog.text
+
+
+def test_exit_cleanup_waits_for_a_spawn_not_yet_registered(monkeypatch):
+    """The child runs before ``execute`` publishes it to ``_live_foreground`` (Popen returns, then
+    the start-time read, then registration). A loaded host can exit inside that window; the
+    graceful kill must wait for the spawn to land instead of snapshotting an empty registry."""
+    from tools.environments import base
+
+    released = threading.Event()
+    real_run_bash = LocalEnvironment._run_bash
+
+    def _slow_to_return(self, *a, **kw):
+        proc = real_run_bash(self, *a, **kw)
+        released.wait(10.0)  # child is live, not yet registered
+        return proc
+
+    monkeypatch.setattr(LocalEnvironment, "_run_bash", _slow_to_return)
+    env = LocalEnvironment(cwd="/tmp")
+    threading.Thread(target=lambda: env.execute("sleep 3518", timeout=600), daemon=True).start()
+    try:
+        deadline = time.monotonic() + 20.0
+        while (proc := _descendant_running("sleep 3518")) is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert proc is not None, "test setup: foreground sleep never started"
+        pgid = os.getpgid(proc.pid)
+        threading.Timer(0.3, released.set).start()
+
+        assert base.kill_live_foreground_processes() == 1
+        assert _wait_for_pgid_exit(pgid, timeout=15.0), _process_group_snapshot(pgid)
+    finally:
+        released.set()
+        env.cleanup()

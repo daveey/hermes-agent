@@ -63,6 +63,7 @@ _live_foreground_cond = threading.Condition(threading.RLock())
 _exit_fenced = False  # one-way, set by the hard-exit kill: no foreground command spawns after it
 _spawns_in_flight = 0  # past the fence check, child maybe alive, not yet in _live_foreground
 _HARD_KILL_BUDGET_S = 0.5
+_GRACEFUL_SPAWN_WAIT_S = 5.0  # a spawn is Popen + a /proc read; this only bounds a wedged one
 
 
 def _enter_foreground_spawn() -> bool:
@@ -103,6 +104,9 @@ def kill_live_foreground_processes(*, now: bool = False) -> int:
     global _exit_fenced
     if not now:
         with _live_foreground_cond:
+            # A spawn past the fence check already has a live child that is not yet registered; a
+            # snapshot taken now would miss it and orphan its tree. No fence here: callers may go on.
+            _live_foreground_cond.wait_for(lambda: _spawns_in_flight == 0, _GRACEFUL_SPAWN_WAIT_S)
             live = list(_live_foreground.values())
         for env, proc in live:
             # A failed kill here orphans the command's tree to init, so it must leave a trace. The
