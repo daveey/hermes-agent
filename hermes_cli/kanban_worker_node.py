@@ -16,6 +16,10 @@ Placement rules mirrored from the Board (``runs_on`` a JSON list of labels):
   creator has gone silent. The Board decides the time part; locally only the label and workspace parts are checked.
 * a ``pinned_only`` machine takes another gateway's card only when its ``runs_on`` names the machine's
   ``machine:`` label; its own cards are always its own.
+
+``kanban_create(placement=<name>)`` turns the pin into ``runs_on=[machine:<name>]`` only when the machine's registry
+entry advertises ``pickup`` (:func:`advertises_pickup`; a missing field means no pickup). Otherwise the pin keeps its
+gateway meaning (``kanban.placement`` route), so a card is never parked for a machine that never copies it.
 """
 from __future__ import annotations
 
@@ -68,15 +72,25 @@ def set_runs_on(conn: sqlite3.Connection, task_id: str, runs_on: Optional[list[s
                  (None if runs_on is None else json.dumps(runs_on), task_id))
 
 
+def advertises_pickup(entry: Optional[Mapping[str, Any]]) -> bool:
+    """True when a registry entry says the machine copies other gateways' cards (``kanban.sync.pickup`` on).
+    A missing field means no pickup: a ``runs_on=[machine:<name>]`` card for such a machine is never claimed."""
+    value = (entry or {}).get("pickup")
+    if isinstance(value, str):
+        return value.strip().lower() in ("explicit", "all", "true", "on", "1", "yes")
+    return value is True
+
+
 def placement_runs_on(conn: sqlite3.Connection, placement: Any) -> Optional[list[str]]:
-    """``placement=<gateway>`` on a primary board, naming another active machine in the registry ->
-    ``[machine:<gateway>]``. None for ``auto``/``local``/this gateway/unknown names (today's placement applies)."""
+    """``placement=<gateway>`` on a primary board, naming another active machine in the registry that picks up other
+    gateways' cards -> ``[machine:<gateway>]``. None for ``auto``/``local``/this gateway/unknown names/machines
+    without pickup (today's placement applies, e.g. the ``kanban.placement`` route)."""
     name = str(placement or "").strip()
     if not name or name in ("auto", "local") or sync.board_mode(conn) != "primary" or name == _own(conn):
         return None
     reg = registry()
     entry = (reg or {}).get("machines", {}).get(name)
-    if not entry or entry.get("state", "active") != "active":
+    if not entry or entry.get("state", "active") != "active" or not advertises_pickup(entry):
         return None
     return [f"machine:{name}"]
 

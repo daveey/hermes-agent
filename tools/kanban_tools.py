@@ -1543,14 +1543,15 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             note = (f"{retry}Created on {target} as {tid}, not here: {decision['why']} (kanban.placement). It runs "
                     f"there{shows}. Read it with cross_task @task:default@{target}/{tid} or "
                     f"`hermes-hub tasks --gw {target}`.")
-            return _ok(task_id=tid, status=remote_status or "created", **fields, note=note), None
+            return _ok(task_id=tid, status=remote_status or "created", **fields, runs_where=target,
+                       note=note), None
         note = (f"{retry}The card IS created: it is queued on {target} as request {rid} and {target} makes the "
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
                 "for this card: an identical call returns this same request, and any changed call creates a "
                 f"second, duplicate card. Its task id appears once {target} applies the request "
                 + ("(this chat's tasks, " if session_id else "(")
                 + "`hermes-hub requests`).")
-        return _ok(task_id=None, status="queued", **fields, note=note), None
+        return _ok(task_id=None, status="queued", **fields, runs_where=target, note=note), None
     except Exception as exc:
         logger.warning("kanban placement failed", exc_info=True)
         try:
@@ -1563,6 +1564,22 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         if pin:
             return _placement_refused(pin, f"placement failed: {exc}"), None
         return None, None
+
+
+def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
+    """Where a card created on this board runs, for the kanban_create result. Never raises."""
+    if runs_on is not None:
+        if pinned_machine:
+            return f"{pinned_machine} via the board lease (runs_on={runs_on})"
+        return f"a machine matching runs_on={runs_on} via the board lease"
+    if marker_placement and marker_placement.get("defer"):
+        return f"{marker_placement['defer']} once its parents finish"
+    try:
+        from hermes_cli import kanban_capability_registry as _reg
+        gw = _reg.self_gateway()
+    except Exception:
+        gw = None
+    return f"here ({gw})" if gw else "here"
 
 
 @_kanban_handler("kanban_create")
@@ -1636,8 +1653,9 @@ def _handle_create(args: dict, **kw) -> str:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
         marker_placement = None
-        # Placement on a synced board: ``runs_on`` labels, and a pin to an enrolled machine becomes
-        # ``runs_on=[machine:<name>]`` (created here, run there through the Board lease). [daveey]
+        # Placement on a synced board: ``runs_on`` labels, and a pin to an enrolled machine that advertises
+        # pickup becomes ``runs_on=[machine:<name>]`` (created here, run there through the Board lease). Any
+        # other pin, a routed gateway included, falls through to the gateway route below. [daveey]
         from hermes_cli import kanban_worker_node as _wn
         try:
             runs_on = _wn.normalize_runs_on(args.get("runs_on"))
@@ -1732,6 +1750,9 @@ def _handle_create(args: dict, **kw) -> str:
                 extra["placement"] = {"where": "local", "runs_on": runs_on, "machine": pinned_machine}
                 extra["note"] = (f"Created here as {new_tid}; it runs on {pinned_machine} via the board lease "
                                  f"(runs_on={runs_on}). The pin was honoured: do not re-create it.")
+        # Every result says where the card runs (`placed` for a routed card, `runs_on` for a board-lease card):
+        # a caller that can't tell re-creates it, or never learns it is stranded. [daveey]
+        extra["runs_where"] = _runs_where(runs_on, pinned_machine, marker_placement)
         if origin_intent is not None:
             return json.dumps({"ok": False, "created": True, "code": "origin_bind_pending",
                                "task_id": new_tid, **landed, **gate,
