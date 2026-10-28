@@ -5,6 +5,19 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_kanban_worker_process_registries(monkeypatch):
+    """Spawn doubles and exit classifications belong to one test, not the next tick's test.
+
+    Restoring Popen alone leaves its fake handles parked in the dispatcher's registries.
+    Use fresh dictionaries rather than clearing shared ones so teardown restores their owner.
+    """
+    from hermes_cli import kanban_db_dispatch
+
+    monkeypatch.setattr(kanban_db_dispatch, "_live_worker_procs", {})
+    monkeypatch.setattr(kanban_db_dispatch, "_recent_worker_exits", {})
+
+
 @pytest.fixture
 def all_assignees_spawnable(monkeypatch):
     """Pretend every assignee maps to a real Hermes profile.
