@@ -178,6 +178,25 @@ def test_shadow_pull_fills_the_shadow_copy_and_never_touches_the_live_board(live
     assert _tables_digest(live) == live_before  # pushes only clear outbox rows; no remote row lands live
 
 
+def test_a_replica_pull_stamps_pulled_at_and_a_failed_one_does_not(live, svc, kanban_home):
+    """Readers derive a replica's staleness from its last successful pull (kanban_chat_links.replica_cards)."""
+    before = time.time()
+    assert _round(kanban_home, svc).error is None
+    shadow = _shadow()
+    try:
+        stamped = sync.sync_state(shadow)["pulled_at"]
+    finally:
+        shadow.close()
+    assert stamped is not None and stamped >= before
+    svc.offline = True
+    assert ksc.sync_all_once(svc.hub(ME))[0].error  # the round failed
+    shadow = _shadow()
+    try:
+        assert sync.sync_state(shadow)["pulled_at"] == stamped  # an offline round never refreshes it
+    finally:
+        shadow.close()
+
+
 def test_pull_advances_the_cursor_with_the_page_and_keeps_it_when_apply_fails(live, svc, monkeypatch):
     sync.set_mode(live, "primary")
     _other_creates(svc, "t_a")

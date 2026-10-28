@@ -8,14 +8,15 @@ with one local query.
   links into a board file: chats that created a card here (``tasks.session_id``), chats that shepherd a card here
   (``tui`` subscriptions), and this gateway's chats' links to other gateways' cards from the origin-ledger
   projection, with its released state. Links it no longer finds are marked released, never deleted.
-- :func:`replica_cards` answers a chat lineage's cards on other gateways from the replicas; ``session_tasks`` uses
-  it instead of the origin ledger when ``kanban.sync.links_reader`` is ``replica``.
-- :func:`links_diff` compares the two answers per chat; readers switch only once it is clean.
+- :func:`replica_cards` answers a chat lineage's cards on other gateways from the replicas; ``session_tasks`` AND the
+  sidebar counts use it instead of the origin ledger when ``kanban.sync.links_reader`` is ``replica``, so the
+  count and the task strip are one projection in each mode.
+- :func:`links_diff` compares the two answers per chat, ``unknown`` unfinished obligations included; readers
+  switch only once it is clean.
 """
 
 from __future__ import annotations
 
-from hermes_cli import kanban_lockguard as _kanban_lockguard
 import logging
 import sqlite3
 import time
@@ -108,81 +109,216 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     return {"added": added, "changed": changed, "released": released}
 
 
-def replica_cards(session_ids: Iterable[str], gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES,
-                  replicas: Optional[list[tuple[str, Path]]] = None) -> list[dict[str, Any]]:
-    """This gateway's chats' (``session_ids``, one lineage) unreleased links to cards created on OTHER gateways,
-    from every board's replica, shaped like the origin-ledger rows ``session_tasks`` appends."""
-    ids = [s for s in dict.fromkeys(str(s) for s in session_ids if s)]
-    if not ids:
+TERMINAL_STATUSES = ("done", "archived")
+UNKNOWN = "unknown"
+# Rows last read from each replica, so an unreadable replica keeps its rows (stale) instead of dropping them.
+_last_good: dict[tuple[str, str, str], tuple[list[dict[str, Any]], Optional[float]]] = {}
+
+
+def _reset_for_tests() -> None:
+    _last_good.clear()
+
+
+def _stale_after_s() -> float:
+    """A replica not pulled for this long is stale: the hub-sync window, or three sync periods if that is longer."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_session_activity import HUB_STALE_AFTER_S
+    try:
+        period = float(sync.sync_config().get("interval_seconds") or 0)
+    except (TypeError, ValueError):
+        period = 0.0
+    return max(HUB_STALE_AFTER_S, 3 * period)
+
+
+def _read_replica(path: Path, gateway: str, profile: str) -> tuple[list[dict[str, Any]], Optional[float]]:
+    """Every unreleased link of this gateway+profile's chats in one replica, with its card row (or none when the
+    card row is missing), and the replica's last successful pull. Raises ``sqlite3.Error`` when unreadable."""
+    from hermes_cli.kanban_session_activity import cached_ro  # lazy: that module imports this one
+    with cached_ro(path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
+            "t.priority, t.block_kind, t.human_request, t.created_on, l.chat_session, l.chat_profile, l.kind "
+            "FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id "
+            "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
+            "AND (t.id IS NULL OR (t.created_on IS NOT NULL AND t.created_on != ?))",
+            (gateway, profile, gateway)).fetchall()]
+        try:
+            row = conn.execute("SELECT pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
+            pulled = float(row[0]) if row and row[0] is not None else None
+        except sqlite3.OperationalError:  # replica written before pulls were stamped
+            pulled = None
+    return rows, pulled
+
+
+def _ledger_owners() -> dict[tuple[str, str], list[tuple[str, str, str, bool]]]:
+    """``(board, id) -> [(owner gateway, owner profile, session, released)]`` from the origin-ledger projection. A
+    synced board is one file per gateway with one row per id, shared by that gateway's profiles, so the replica
+    row carries no owner profile: the ledger only labels it (``_owner_of``)."""
+    from hermes_cli.kanban_session_activity import _remote_links
+    try:
+        cards = _remote_links()
+    except Exception as exc:  # health: allow BLE001 -- the profile is a label; a failed ledger read must not hide cards
+        _log.info("kanban chat links: owner profiles unavailable (%s: %s)", type(exc).__name__, exc)
+        return {}
+    out: dict[tuple[str, str], list[tuple[str, str, str, bool]]] = {}
+    for c in cards:
+        if c.get("gateway") and c.get("board") and c.get("id") and c.get("profile"):
+            out.setdefault((str(c["board"]), str(c["id"])), []).append(
+                (str(c["gateway"]), str(c["profile"]), str(c.get("session") or ""), bool(c.get("released"))))
+    return out
+
+
+def _owner_of(known: list[tuple[str, str, str, bool]], owner: Optional[str],
+              session: str) -> tuple[Optional[str], str]:
+    """The ONE (owner gateway, owner profile) for a replica card: the profile this chat's own unreleased ledger row
+    names, else the only one any unreleased row names, else ``default`` (never several rows for one card)."""
+    if owner is not None:
+        known = [k for k in known if k[0] == owner]
+    for pick in ([k for k in known if k[2] == session and not k[3]], [k for k in known if not k[3]]):
+        pairs = sorted({(k[0], k[1]) for k in pick})
+        if len(pairs) == 1:
+            return pairs[0]
+    gateways = sorted({k[0] for k in known})
+    return (owner if owner is not None else gateways[0] if len(gateways) == 1 else None), "default"
+
+
+def _ledger_fallback(board: str, gateway: str, profile: str, statuses: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Cold start with an unreadable replica: the ledger's rows for that board, all stale (never "no cards")."""
+    from hermes_cli.kanban_session_activity import _remote_links
+    try:
+        cards = _remote_links()
+    except Exception as exc:  # health: allow BLE001 -- both sources unreadable: nothing to show, logged
+        _log.warning("kanban chat links: replica and ledger both unreadable for %s (%s)", board, exc)
+        return []
+    out = []
+    for c in cards:
+        if (c.get("board") != board or c.get("origin_gateway") not in (None, gateway)
+                or c.get("origin_profile") not in (None, profile) or not c.get("session") or c.get("released")):
+            continue
+        if c.get("status") in statuses or (c.get("status") == UNKNOWN and c.get("unfinished")):
+            out.append({**c, "session_id": c["session"], "remote": True, "stale": True, "source": "ledger-fallback"})
+    return out
+
+
+def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES,
+                  replicas: Optional[list[tuple[str, Path]]] = None, *, now: Optional[float] = None,
+                  ledger_fallback: bool = True, unreadable_out: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """This gateway's chats' (``session_ids``, one lineage; ``None`` = every chat) unreleased links to cards created
+    on OTHER gateways, from every board's replica, shaped like the origin-ledger rows ``session_tasks`` appends.
+
+    The sidebar counts read this too when ``links_reader`` is ``replica``, so both answers are one projection:
+    - an unreleased link to a ``done``/``archived`` card, or to a card row the replica lacks, is an ``unknown``,
+      unfinished obligation (the ledger's done-without-verified-release); only a released link drops it;
+    - only this origin profile's links (``chat_profile``) count;
+    - ``stale``/``synced_at`` come from the replica's last successful pull;
+    - an unreadable replica keeps its last rows, stale; on a cold start the ledger's rows for that board, stale.
+      ``ledger_fallback=False`` (links_diff) skips both, so a diff never compares the ledger with itself;
+      ``unreadable_out`` collects the boards whose replica could not be read;
+    - one row per (chat, card); the key carries the owner profile the ledger names for it, else ``default``."""
+    from hermes_cli.profiles import get_active_profile_name
+    ids = None if session_ids is None else set(str(s) for s in session_ids if s)
+    if ids is not None and not ids:
         return []
     if replicas is None:
         from hermes_cli import kanban_sync_client as ksc
         replicas = [(slug, ksc.shadow_path(slug)) for slug, _path in ksc.board_paths()]
-    from hermes_cli.kanban_session_activity import cached_ro  # lazy: that module imports this one
-    ph = ",".join("?" for _ in ids)
-    st = ",".join("?" for _ in statuses)
-    now = time.time()
+    profile = get_active_profile_name()
+    now = time.time() if now is None else now
+    stale_after = _stale_after_s()
+    owners: Optional[dict[tuple[str, str], list[tuple[str, str, str, bool]]]] = None
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for board, path in replicas:
-        if not path.exists():
-            continue
+        memo_key = (str(path), gateway, profile)
         try:
-            with cached_ro(path) as conn:
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(
-                    "SELECT t.id, t.title, t.status, t.assignee, t.created_at, t.started_at, t.priority, t.block_kind, "
-                    "t.human_request, t.created_on, l.chat_session, l.chat_profile, l.kind FROM task_chat_links l "
-                    f"JOIN tasks t ON t.id = l.task_id WHERE l.chat_gateway = ? AND l.released = 0 AND l.chat_session IN ({ph}) "
-                    f"AND t.status IN ({st}) AND t.created_on IS NOT NULL AND t.created_on != ?",
-                    (gateway, *ids, *statuses, gateway)).fetchall()
+            rows, pulled = _read_replica(path, gateway, profile)
+            _last_good[memo_key] = (rows, pulled)
+            stale = pulled is None or now - pulled > stale_after
         except sqlite3.Error as exc:
-            _log.info("kanban chat links: replica %s unreadable (%s)", path, exc)
-            continue
+            if unreadable_out is not None:
+                unreadable_out.append(board)
+            if not ledger_fallback:
+                continue
+            hit = _last_good.get(memo_key)
+            _log.info("kanban chat links: replica %s unreadable (%s); %s", path, exc,
+                      "keeping its last rows as stale" if hit else "falling back to the ledger, stale")
+            if hit is None:
+                for c in _ledger_fallback(board, gateway, profile, statuses):
+                    if ids is None or c["session"] in ids:
+                        out.setdefault((c["session"], c["key"]), c)
+                continue
+            rows, pulled = hit
+            stale = True
+        if owners is None and rows:
+            owners = _ledger_owners()
         for r in rows:
-            owner = r["created_on"]
-            key = f"{owner}/default/{board}/{r['id']}"
+            if ids is not None and r["chat_session"] not in ids:
+                continue
+            status = r["status"]
+            missing = r["task_row"] is None
+            unknown = missing or status in TERMINAL_STATUSES or status is None
+            if not unknown and status not in statuses:
+                continue
+            tid = str(r["id"])
+            owner, owner_profile = _owner_of((owners or {}).get((board, tid), []), r["created_on"], r["chat_session"])
+            if missing and owner == gateway:  # the ledger places the missing row on this gateway: a local card
+                continue
+            key = f"{owner or '?'}/{owner_profile}/{board}/{tid}"
             pair = (r["chat_session"], key)  # one row per chat and card: a card often has several chats
             if pair in out:
                 continue
             out[pair] = {
-                "title": r["title"], "status": r["status"], "assignee": r["assignee"], "created_at": r["created_at"],
-                "started_at": r["started_at"], "priority": r["priority"], "block_kind": r["block_kind"],
-                "human_request": r["human_request"], "id": r["id"], "board": board, "gateway": owner, "key": key,
-                "session": r["chat_session"], "session_id": r["chat_session"], "via": "origin" if r["kind"] == "created" else "shepherd",
-                "remote": True, "profile": "default", "owner_profile": "default", "origin_gateway": gateway,
-                "origin_profile": r["chat_profile"], "ownership_state": "qualified", "unfinished": True,
-                "released": False, "reported_status": r["status"], "synced_at": now, "stale": False,
+                "title": r["title"], "status": UNKNOWN if unknown else status, "assignee": r["assignee"],
+                "created_at": r["created_at"], "started_at": r["started_at"], "priority": r["priority"],
+                "block_kind": r["block_kind"], "human_request": r["human_request"], "id": tid, "board": board,
+                "gateway": owner, "key": key, "session": r["chat_session"], "session_id": r["chat_session"],
+                "via": "origin" if r["kind"] == "created" else "shepherd", "remote": True,
+                "profile": owner_profile, "owner_profile": owner_profile, "origin_gateway": gateway,
+                "origin_profile": r["chat_profile"],
+                "ownership_state": "qualified" if owner is not None else "unknown", "unfinished": True,
+                "released": False, "reported_status": status, "synced_at": pulled, "stale": stale,
                 "source": "replica",
             }
     return list(out.values())
 
 
+def _ledger_obligation(card: dict[str, Any], statuses: tuple[str, ...]) -> bool:
+    """An unreleased ledger row the sidebar counts: open, or ``unknown`` and unfinished (done, release unverified)."""
+    if card.get("released"):
+        return False
+    return card.get("status") in statuses or (card.get("status") == UNKNOWN and bool(card.get("unfinished")))
+
+
 def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[str, Any]:
-    """Per chat, the open remote cards the origin ledger lists against the ones the replicas list. Clean when the
-    two answers match for every chat either side knows."""
+    """Per chat, the remote obligations the origin ledger lists against the ones the replicas list, including
+    ``unknown`` unfinished rows (done cards without a verified release). Clean when the two answers match for
+    every chat either side knows."""
     from hermes_cli.kanban_session_activity import _remote_links
     ledger: dict[str, set[tuple[str, str, str]]] = {}
     for card in _remote_links():
         if card.get("origin_gateway") not in (None, gateway) or not card.get("session"):
             continue
-        if card.get("status") not in statuses or card.get("released"):
+        if not _ledger_obligation(card, statuses):
             continue
         ledger.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
-    sessions = set(ledger)
+    replica: dict[str, set[tuple[str, str, str]]] = {}
+    unreadable: list[str] = []
     from hermes_cli import kanban_sync_client as ksc
     replicas = [(slug, ksc.shadow_path(slug)) for slug, _path in ksc.board_paths()]
-    for _slug, path in replicas:
-        if path.exists():
-            with _kanban_lockguard.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2) as conn:
-                sessions |= {r[0] for r in conn.execute(
-                    "SELECT DISTINCT chat_session FROM task_chat_links WHERE chat_gateway = ? AND released = 0", (gateway,))}
-    replica: dict[str, set[tuple[str, str, str]]] = {}
-    for card in replica_cards(sessions, gateway, statuses, replicas):
+    for card in replica_cards(None, gateway, statuses, replicas, ledger_fallback=False, unreadable_out=unreadable):
         replica.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
+    # A replica that exists but cannot be read, or that is missing while the ledger has cards on its board, answers
+    # nothing: the diff is never clean while one does (readers must not switch on it). A missing replica of a board
+    # with no ledger cards has nothing to compare.
+    exists = {slug for slug, path in replicas if path.exists()}
+    ledger_boards = {b for cards in ledger.values() for _gw, b, _tid in cards}
+    unreadable = sorted({b for b in unreadable if b in exists or b in ledger_boards})
+    sessions = set(ledger) | set(replica)
     only_ledger = {s: sorted(ledger.get(s, set()) - replica.get(s, set())) for s in sessions}
     only_replica = {s: sorted(replica.get(s, set()) - ledger.get(s, set())) for s in sessions}
     only_ledger = {s: v for s, v in only_ledger.items() if v}
     only_replica = {s: v for s, v in only_replica.items() if v}
-    return {"clean": not only_ledger and not only_replica, "chats": len(sessions),
+    # An unreadable replica answers nothing (see above).
+    return {"clean": not only_ledger and not only_replica and not unreadable, "chats": len(sessions),
             "ledger_links": sum(len(v) for v in ledger.values()), "replica_links": sum(len(v) for v in replica.values()),
-            "only_in_ledger": only_ledger, "only_in_replica": only_replica}
+            "only_in_ledger": only_ledger, "only_in_replica": only_replica, "unreadable": unreadable}

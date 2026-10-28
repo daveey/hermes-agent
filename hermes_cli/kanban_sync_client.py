@@ -526,13 +526,18 @@ def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
     replica = open_shadow(slug, gateway)
     try:
         try:
-            return pull(replica, hub, slug, observers=False)
+            pulled = pull(replica, hub, slug, observers=False)
         except Resync:
             _log.warning("kanban sync: %s replica cursor below the retention floor; rebuilding from a snapshot", slug)
             replica.close()
             shadow_path(slug).unlink(missing_ok=True)
             replica = open_shadow(slug, gateway)
-            return resync(replica, hub, slug, observers=False)
+            pulled = resync(replica, hub, slug, observers=False)
+        try:  # readers derive the replica's staleness from this (kanban_chat_links); a failed stamp only ages it
+            sync.mark_pulled(replica)
+        except sqlite3.Error as exc:
+            _log.warning("kanban sync: %s replica pull not stamped (%s)", slug, exc)
+        return pulled
     finally:
         replica.close()
 

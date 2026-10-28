@@ -99,8 +99,13 @@ def test_replica_answers_a_chats_open_cards_on_other_gateways(tmp_path):
              [("t_open", ME, "s1", "shepherd", 0), ("t_done", ME, "s1", "shepherd", 0), ("t_mine", ME, "s1", "created", 0),
               ("t_released", ME, "s1", "shepherd", 1), ("t_theirs", "mini", "s1", "shepherd", 0)])
     got = links.replica_cards(["s1", "s0"], ME, replicas=[("default", rep)])
-    assert [(c["id"], c["gateway"], c["board"], c["via"], c["session_id"]) for c in got] == [("t_open", OTHER, "default", "shepherd", "s1")]
-    assert got[0]["title"] == "open card" and got[0]["source"] == "replica"
+    # A done card whose link is not released is still the chat's (unknown, unfinished): the sidebar counts it, so the
+    # list must too. Only a released link drops a card (t_released).
+    assert sorted((c["id"], c["gateway"], c["board"], c["via"], c["session_id"], c["status"]) for c in got) == [
+        ("t_done", OTHER, "default", "shepherd", "s1", "unknown"), ("t_open", OTHER, "default", "shepherd", "s1", "running")]
+    got = {c["id"]: c for c in got}
+    assert got["t_open"]["title"] == "open card" and got["t_open"]["source"] == "replica"
+    assert got["t_done"]["reported_status"] == "done" and got["t_done"]["unfinished"] is True
 
 
 def test_links_diff_is_clean_when_both_answers_match_and_lists_the_difference(kanban_home, monkeypatch, tmp_path):

@@ -46,6 +46,9 @@ _parked_sink = threading.local()  # .maps: (parked, held) or None; per thread, s
 # [daveey] Per session, parked cards whose agent-owned wait is older than kanban_wait_info.STALL_AFTER_S (amber
 # "stalled" in the sidebar), from the same snapshot as ``_cache``.
 _stalled_cache: list[dict[str, int]] = [{}]
+# [daveey] Per session, the remote cards counted (key, bucket, parked) from the same snapshot as ``_cache``: a
+# lineage whose sessions share a card (created in one, shepherded from another) counts it once, as the list shows it.
+_remote_keys_cache: list[dict[str, frozenset[tuple[str, str, bool]]]] = [{}]
 _pairs_lock = threading.Lock()
 # _all_counts single flight: held for a whole recompute; the generation bumps when one publishes.
 _counts_flight = threading.Lock()
@@ -482,8 +485,10 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
 
 # [daveey] The ONE origin-work association for cards on other gateways. The sidebar counts
 # (``kanban_active``/``kanban_blocked``, which also drive the archive guard) and the session task list
-# (``session_tasks``) both come from ``_remote_links``, so they can never disagree about which remote
-# cards a session observes or owns. Each link selects only its exact card. Created
+# (``session_tasks``) both come from ``_remote_cards``: the origin-ledger projection (``_remote_links``), or the
+# synced chat links (``kanban_chat_links.replica_cards``) when ``kanban.sync.links_reader`` is ``replica``. Never
+# read one source for the count and the other for the list: that split showed "Waiting on 14" over a 9-chip strip
+# (the replica list dropped done-but-unverified cards the ledger still counted). Each link selects only its exact card. Created
 # children count via their own inherited links. Gateway/profile/board/id identifies
 # a card; distinct qualified profiles stay separate. Historical unqualified aliases
 # do not add another count when a qualified record for the same card is available.
@@ -832,12 +837,26 @@ def _hub_content_signature(hub: Path) -> tuple:
     return signature
 
 
+def _replica_paths() -> list[Path]:
+    """The board replicas the counts read when ``kanban.sync.links_reader`` is ``replica`` (else none), so a pull
+    that changes a chat's cards invalidates the cached counts like a local board write does. [daveey]"""
+    try:
+        from hermes_cli import kanban_db_sync as _sync
+        if _sync.sync_config().get("links_reader") != "replica":
+            return []
+        from hermes_cli import kanban_sync_client as _ksc
+        return [_ksc.shadow_path(slug) for slug, _path in _ksc.board_paths()]
+    except Exception:  # health: allow BLE001 -- a fingerprint input; the TTL still bounds a missed change
+        return []
+
+
 def _activity_fingerprint() -> tuple:
     """Invalidate on cross-process commits, including WAL writes and board replacement. The hub replica counts by
     content (``_hub_content_signature``), the boards by stat."""
     paths = _board_db_paths()
     hub = _hub_db_path()
     signature = [_hub_content_signature(hub)] if hub is not None else []
+    paths.extend(_replica_paths())
     for db in paths:
         for path in (db, Path(str(db) + "-wal")):
             try:
@@ -1178,7 +1197,8 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
     waiting: dict[str, set[str]] = {}
     for sid, tid in pairs:
         waiting.setdefault(sid, set()).add(tid)
-    for card in _remote_links():
+    remote_keys: dict[str, set[tuple[str, str, bool]]] = {}
+    for card in _remote_cards(None, LISTED_STATUSES, False):
         bucket = _replica_bucket(card)
         into = active if bucket == "active" else blocked if bucket == "blocked" else None
         if into is None:
@@ -1187,8 +1207,10 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         into[sid] = into.get(sid, 0) + 1
         # A replica row has no parent links; its owner promotes a todo whose parents finished on the next tick, so a
         # replicated todo waits on a parent (parked). Held needs those links, so remote cards are never held.
-        if bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo"):
+        is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo")
+        if is_parked:
             parked[sid] = parked.get(sid, 0) + 1
+        remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))
         # Same status test as parked/blocked above: a legacy row whose live status is unknown (reported_status is
         # only its last report) is never counted stalled, so stalled can't exceed what the row shows parked.
         if card.get("status") != "unknown" and (_remote_wait(card) or {}).get("wait_state") == "stalled":
@@ -1203,6 +1225,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         _waiting_cache[0] = {sid: frozenset(ids) for sid, ids in waiting.items()}
         _parked_cache[0] = (parked, held)
         _stalled_cache[0] = stalled
+        _remote_keys_cache[0] = {sid: frozenset(keys) for sid, keys in remote_keys.items()}
     counts = (active, blocked, unseen, stale)
     return (*counts, {sid: frozenset(ids) for sid, ids in waiting.items()}) if include_waiting else counts
 
@@ -1464,9 +1487,10 @@ def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]
         found[task_id]["pr_url"] = url
 
 
-def _remote_cards(ids: list[str], statuses: tuple[str, ...], stale_ok: bool) -> list[dict[str, Any]]:
-    """Cards on other gateways linked to these chats: from the synced chat links in the replicas when
-    ``kanban.sync.links_reader`` is ``replica`` (RFC phase 5), else from the origin-ledger projection."""
+def _remote_cards(ids: list[str] | None, statuses: tuple[str, ...], stale_ok: bool) -> list[dict[str, Any]]:
+    """Cards on other gateways linked to these chats (``ids`` None = every chat): from the synced chat links in the
+    replicas when ``kanban.sync.links_reader`` is ``replica`` (RFC phase 5), else from the origin-ledger projection.
+    The sidebar counts and ``session_tasks`` both read this, so they are one projection in either mode. [daveey]"""
     from hermes_cli import kanban_db_sync as _sync
     if _sync.sync_config().get("links_reader") == "replica":
         from hermes_cli import kanban_chat_links as _links
@@ -1477,7 +1501,7 @@ def _remote_cards(ids: list[str], statuses: tuple[str, ...], stale_ok: bool) -> 
             gateway = None
         if gateway:
             return _links.replica_cards(ids, gateway, statuses)
-    return _remote_links(stale_ok=stale_ok)
+    return _remote_links(stale_ok=True) if stale_ok else _remote_links()
 
 
 def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED_STATUSES, *,
@@ -1625,6 +1649,25 @@ def _row_ids(row: dict[str, Any]) -> Iterable[str]:
             yield sid
 
 
+def _lineage_remote_duplicates(remote_keys: dict[str, frozenset[tuple[str, str, bool]]],
+                               ids: list[str]) -> dict[str, int]:
+    """How many remote cards the per-session counts add more than once across one lineage (a card created in one
+    session and shepherded from another), per row field, so the row counts each card once like ``session_tasks``
+    lists it. [daveey]"""
+    seen = [remote_keys.get(sid, frozenset()) for sid in ids]
+    if sum(1 for s in seen if s) < 2:
+        return {}
+    union = frozenset().union(*seen)
+    out: dict[str, int] = {}
+    for field, test in (("kanban_active", lambda k: k[1] == "active"), ("kanban_blocked", lambda k: k[1] == "blocked"),
+                        ("kanban_parked", lambda k: k[2])):
+        rows = sum(1 for s in seen for k in s if test(k))
+        cards = len({k[0] for k in union if test(k)})
+        if rows > cards:
+            out[field] = rows - cards
+    return out
+
+
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_waiting_on`` (local open card ids), ``kanban_unseen`` (finished cards whose result the
     session has not been handed yet) and ``kanban_attention`` (done cards a registered check flags) on each session row
@@ -1640,6 +1683,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         with _cache_lock:  # the snapshot that call just read or wrote: never a second projection
             parked, held = _parked_cache[0]
             stalled = _stalled_cache[0]
+            remote_keys = _remote_keys_cache[0]
         extra = _extra_waiting()
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
@@ -1662,9 +1706,10 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         row["kanban_observed_at"] = observed_at
         row.pop("kanban_unknown", None)
         ids = list(_row_ids(row))
+        dup = _lineage_remote_duplicates(remote_keys, ids)
         for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen),
                             ("kanban_attention", attention), ("kanban_remote_stale", remote_stale)):
-            n = sum(counts.get(sid, 0) for sid in ids)
+            n = sum(counts.get(sid, 0) for sid in ids) - dup.get(key, 0)
             if n:
                 row[key] = n
             else:
@@ -1677,7 +1722,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row["kanban_active"] = int(row.get("kanban_active") or 0) + len(pending)
         # [daveey] Parked/held are subsets of kanban_active. kanban_parked is stamped (even 0) whenever there is open
         # work, so the desktop can tell "none parked" from a backend that predates the field.
-        n_parked = sum(parked.get(sid, 0) for sid in ids)
+        n_parked = sum(parked.get(sid, 0) for sid in ids) - dup.get("kanban_parked", 0)
         n_held = sum(held.get(sid, 0) for sid in ids)
         if row.get("kanban_active"):
             row["kanban_parked"] = n_parked

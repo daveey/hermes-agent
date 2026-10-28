@@ -212,6 +212,8 @@ _SYNC_COLUMN_DDL = (
     ("kanban_sync_outbox", "retry_after", "retry_after INTEGER"),
     # 1 once repair_ms_timestamps ran on this file (the one-time repair of rows applied before the guard).
     ("kanban_sync_state", "seconds_repaired", "seconds_repaired INTEGER NOT NULL DEFAULT 0"),
+    # Wall time of the last successful feed pull into this file (replicas): readers derive staleness from it. [daveey]
+    ("kanban_sync_state", "pulled_at", "pulled_at REAL"),
 )
 
 # Resolved db paths whose triggers this process installed. Empty = no synced
@@ -541,6 +543,14 @@ def sync_state(conn: sqlite3.Connection) -> Optional[dict[str, Any]]:
     except sqlite3.OperationalError:
         return None
     return dict(row) if row else None
+
+
+def mark_pulled(conn: sqlite3.Connection, at: Optional[float] = None) -> None:
+    """Stamp a successful feed pull (``pulled_at``), so readers of a replica can tell a fresh copy from an old one
+    without asking the network. [daveey]"""
+    from hermes_cli.kanban_db_connect import write_txn
+    with write_txn(conn):
+        conn.execute("UPDATE kanban_sync_state SET pulled_at = ?", (time.time() if at is None else at,))
 
 
 def new_task_id(conn: sqlite3.Connection) -> str:
