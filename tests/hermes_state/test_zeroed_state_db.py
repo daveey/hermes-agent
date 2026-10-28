@@ -336,3 +336,21 @@ def test_live_connection_0_byte_not_quarantined_in_process(tmp_path, monkeypatch
         conn.commit()
     finally:
         conn.close()
+
+
+def test_preflight_ignores_file_quarantined_mid_check(tmp_path, monkeypatch):
+    """A concurrent opener renaming state.db away between the preflight's is_file() listing and its
+    access() probe must not read as "not writable" (flaky concurrent-quarantine failure)."""
+    import hermes_state_repair as hsr
+
+    db = tmp_path / "state.db"
+    db.write_bytes(bytes(4096))
+    real_access = hsr.os.access
+
+    def access_after_rename(path, mode):
+        if str(path) == str(db) and db.exists():
+            db.rename(tmp_path / "state.db.zeroed-x.bak")
+        return real_access(path, mode)
+
+    monkeypatch.setattr(hsr.os, "access", access_after_rename)
+    hsr.preflight_db_writability(db)  # must not raise

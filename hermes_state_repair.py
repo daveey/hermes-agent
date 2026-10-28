@@ -556,6 +556,10 @@ def preflight_db_writability(db_path: Path, *, db_label: str = "state.db") -> No
     for p, is_dir in [(db_path.parent, True), *((p, False) for p in (db_path, *sidecars) if p.is_file())]:
         if (is_dir and not p.is_dir()) or os.access(p, os.R_OK | os.W_OK):
             continue
+        if not p.exists():
+            # Vanished between the is_file() listing and access(): a concurrent opener quarantined
+            # (renamed) it. access() on a missing path is False, which is not a permission problem.
+            continue
         x = "x" if is_dir else ""
         in_scope = False
         with contextlib.suppress(OSError, ValueError):
