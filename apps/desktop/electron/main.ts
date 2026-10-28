@@ -72,7 +72,7 @@ import {
 } from './backend-claim'
 import { dashboardFallbackArgs, serveBackendArgs } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
-import { BackendDialClaims } from './backend-dial-claim'
+import { backendDialClaimKey, BackendDialClaims } from './backend-dial-claim'
 import type { HostBackendRecord } from './backend-discovery'
 import { buildDesktopBackendEnv, pooledProfileBackendEnv, profileBackendParentEnv } from './backend-env'
 import { createBackendExitRecoveryLatch } from './backend-exit-recovery'
@@ -214,6 +214,7 @@ import {
 } from './connection-registry'
 import type { RegistryConnection } from './connection-registry'
 import type { RosterProfileMetadata } from './connection-registry'
+import { createRegistryConnectionSanitizer } from './connection-registry-view'
 import { liveWindowState, overlayWindowState } from './connection-window-state'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import {
@@ -251,6 +252,7 @@ import { decodeResponseBody, displayTranscriptHeaders } from './display-transcri
 import { preReadyDockLaunchSteps } from './dock-launch-order'
 import { embedHostOrigin } from './embed-host'
 import { installEmbedReferer } from './embed-referer'
+import { EnvironmentRegistry } from './environment-registry'
 import { createAmbientClaimArbiter } from './event-dedupe'
 import { openExternalUrl as externalOpen, type ExternalOpenDeps, reportPreOpenStatFailure } from './external-open'
 import {
@@ -1951,7 +1953,7 @@ function registerMediaProtocol(): void {
     // reconnect dial for the same (connectionId, profile) scope; coalescing
     // here avoids bootstrapping a second SSH tunnel / remote dashboard.
     resolveRemoteConnection: ({ connectionId, profile }) =>
-      backendDialClaims.run(backendScopeKey(connectionId, profile), () =>
+      backendDialClaims.run(backendDialClaimKey(connectionId, profile), () =>
         connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)
       )
   })
@@ -8975,7 +8977,16 @@ function writeDesktopConnectionConfig(config) {
  * user who registered nothing and then pointed Settings -> Gateway at a remote,
  * and until that heals, every launch re-homes them onto a local backend.
  */
+const environmentRegistry = new EnvironmentRegistry({
+  url: process.env.HERMES_DESKTOP_REMOTE_URL,
+  token: process.env.HERMES_DESKTOP_REMOTE_TOKEN
+})
+
 function readDesktopConnectionsRegistry() {
+  return environmentRegistry.read(readStoredDesktopConnectionsRegistry())
+}
+
+function readStoredDesktopConnectionsRegistry() {
   let mtime = null
 
   try {
@@ -9086,6 +9097,7 @@ function preserveCorruptRegistrySidecar() {
 }
 
 function writeDesktopConnectionsRegistry(registry) {
+  registry = environmentRegistry.stored(registry, connectionRegistryCache || registry)
   fs.mkdirSync(path.dirname(DESKTOP_CONNECTIONS_REGISTRY_PATH), { recursive: true })
   // Owner-only for the same reason as connection.json: entries carry
   // safeStorage-encrypted tokens plus URLs and SSH host/user/keyPath.
@@ -9099,25 +9111,11 @@ function writeDesktopConnectionsRegistry(registry) {
  * boundary — the renderer gets a preview + set flag, mirroring
  * sanitizeDesktopConnectionConfig.
  */
-function sanitizeRegistryConnection(entry) {
-  const { token, headers, ...rest } = entry
-  const decrypted = decryptDesktopSecret(token)
-  // Last-known stable backend identity (from roster enumeration / Test) so
-  // Settings can hint "Same backend as <label>" on connections that are two
-  // addresses for one box. Display-only; absent until a probe has seen it.
-  const knownInstallId = connectionInstallIds.get(entry.id)?.id
-
-  return {
-    ...rest,
-    tokenSet: Boolean(decrypted),
-    tokenPreview: tokenPreview(decrypted),
-    ...(knownInstallId ? { installId: knownInstallId } : {}),
-    // Header VALUES are secrets (Cloudflare Access client secrets etc.) and
-    // never cross the IPC boundary — the renderer only needs the names to
-    // render the edit form.
-    headerNames: headers && typeof headers === 'object' ? Object.keys(headers) : []
-  }
-}
+const sanitizeRegistryConnection = createRegistryConnectionSanitizer({
+  decrypt: decryptDesktopSecret,
+  preview: tokenPreview,
+  installId: id => connectionInstallIds.get(id)?.id
+})
 
 function sanitizeConnectionsRegistry(registry = readDesktopConnectionsRegistry()) {
   // Same keyring signal the v1 sanitize exposes: lets the Connections panel
@@ -9155,6 +9153,7 @@ function sanitizeConnectionsRegistry(registry = readDesktopConnectionsRegistry()
  * (normalizeConnectionInput drops tokens on non-token entries).
  */
 async function saveRegistryConnection(input: any = {}) {
+  environmentRegistry.assertEditable(input.id)
   const registry = readDesktopConnectionsRegistry()
   const existing = input.id ? registry.connections.find(c => c.id === input.id) : null
   const incomingToken = typeof input.token === 'string' ? input.token.trim() : ''
@@ -9973,14 +9972,14 @@ async function ensureTerminalBackend(webContentsId: number) {
   // reconnect dial for the same (connectionId, profile) scope; coalescing
   // here avoids bootstrapping a second SSH tunnel / remote dashboard.
   if (windowRoute?.registryScoped && windowRoute.connectionId) {
-    return backendDialClaims.run(backendScopeKey(windowRoute.connectionId, windowRoute.profile), () =>
+    return backendDialClaims.run(backendDialClaimKey(windowRoute.connectionId, windowRoute.profile), () =>
       ensureRegistryBackend(windowRoute.connectionId, windowRoute.profile)
     )
   }
 
   const profile = windowRoute?.profile ?? primaryProfileKey()
 
-  return backendDialClaims.run(backendScopeKey(null, profile), () => ensureBackend(profile))
+  return backendDialClaims.run(backendDialClaimKey(null, profile), () => ensureBackend(profile))
 }
 
 // Loopback reach for the browser pane. Scoped to the SSH connection that
@@ -15600,7 +15599,7 @@ async function connectDesktopProfileRoute(
   let connection
 
   try {
-    connection = await backendDialClaims.run(scopeKey, () =>
+    connection = await backendDialClaims.run(backendDialClaimKey(route.connectionId, route.profile), () =>
       route.connectionId
         ? ensureRegistryBackend(route.connectionId, route.profile, '', { spawnPriority })
         : ensureBackend(route.profile, { spawnPriority })
@@ -15749,7 +15748,7 @@ function revalidatePool() {
 function redialPoolBackendAfterResume(poolKey: string) {
   const { connectionId, profile } = parseBackendScopeKey(poolKey)
 
-  return backendDialClaims.run(poolKey, () =>
+  return backendDialClaims.run(backendDialClaimKey(connectionId, profile), () =>
     connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)
   )
 }
@@ -16113,7 +16112,7 @@ ipcMain.handle('hermes:plugin-profile-routes', async (_event, rawProfileNames) =
   // Roster enumeration deliberately does not dial connect-on-demand SSH
   // sources. Publish one credential-free seed route so a plugin can be the
   // first caller that opens the tunnel.
-  const sshSeeds = undialedSshRouteSeeds(agents, registry.connections)
+  const sshSeeds = undialedSshRouteSeeds(agents, registry.connections.map(source => ({ ...source })))
 
   if (sshSeeds.length > 0) {
     agents = [
@@ -16166,7 +16165,7 @@ ipcMain.handle('hermes:plugin-profile-routes', async (_event, rawProfileNames) =
   return buildRegistryProfileRoutes({
     agents,
     primaryConnectionId: registry.primary,
-    sources: registry.connections
+    sources: registry.connections.map(source => ({ ...source }))
   })
 })
 ipcMain.handle('hermes:ssh-config:hosts', async () => ({ hosts: collectSshConfigHosts() }))
@@ -16238,6 +16237,7 @@ ipcMain.handle('hermes:connections:save', async (_event, payload) => {
   return { ok: true, connection: saved, registry: sanitizeConnectionsRegistry() }
 })
 ipcMain.handle('hermes:connections:remove', async (_event, id) => {
+  environmentRegistry.assertEditable(id)
   const key = String(id || '')
   managedConnectionUpdateGate.assertCanMutate(key)
   const registry = removeConnection(readDesktopConnectionsRegistry(), key)
@@ -16557,7 +16557,7 @@ async function enumerateRegistryAgentSources(registry = readDesktopConnectionsRe
             // bootstrapping a second SSH tunnel / remote dashboard.
             const descriptor: any = await withEnumerationDeadline(
               Promise.resolve(
-                backendDialClaims.run(backendScopeKey(connection.id, null), () =>
+                backendDialClaims.run(backendDialClaimKey(connection.id, null), () =>
                   ensureRegistryBackend(connection.id, null)
                 )
               ),
@@ -16798,7 +16798,7 @@ ipcMain.handle('hermes:connections:update-all', async (_event, payload) => {
 
         // Claim-guarded (#90812): coalesce with a concurrent renderer dial
         // for the same connection instead of bootstrapping a second backend.
-        const descriptor: any = await backendDialClaims.run(backendScopeKey(connection.id, null), () =>
+        const descriptor: any = await backendDialClaims.run(backendDialClaimKey(connection.id, null), () =>
           ensureRegistryBackend(connection.id, null)
         )
 
@@ -17638,7 +17638,7 @@ async function dispatchRegistryApiRequest(
 
   const connection: any = request?.passive
     ? await ensureRegistryBackend(registryConnectionId, routeProfile, '', { passive: true })
-    : await backendDialClaims.run(backendScopeKey(registryConnectionId, routeProfile), () =>
+    : await backendDialClaims.run(backendDialClaimKey(registryConnectionId, routeProfile), () =>
         ensureRegistryBackend(registryConnectionId, routeProfile, '', { spawnPriority })
       )
 
@@ -19555,7 +19555,7 @@ app.whenReady().then(() => {
   try {
     transcriptCacheHost = installTranscriptCache({
       backendFor: (connectionId, { passive }) =>
-        backendDialClaims.run(backendScopeKey(connectionId, null), () =>
+        backendDialClaims.run(backendDialClaimKey(connectionId, null), () =>
           ensureRegistryBackend(connectionId, null, '', { passive })
         ),
       getJson: (descriptor, requestPath, opts) => getJsonForBackend(descriptor, requestPath, opts),

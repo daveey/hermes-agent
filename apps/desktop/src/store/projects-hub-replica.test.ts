@@ -111,6 +111,26 @@ beforeEach(ctx => {
 })
 
 describe('remote project groups from the hub replica', () => {
+  it('does not wake a local backend for background trees, but reads one already running', async () => {
+    vi.mocked(activeGatewayConnectionId).mockReturnValue(conn)
+    $connectionsRegistry.set({connections:[{id:'local',kind:'local',label:'This device'},{id:conn,kind:'remote',label:'remote'}],primary:conn} as never)
+    vi.mocked(hubGatewayProjects).mockResolvedValue(null)
+    vi.mocked(hermesApi).mockRejectedValue(new Error('passive backend unavailable'))
+    await refreshProjectTree()
+    await flush()
+    expect(hermesApi).toHaveBeenCalledWith(expect.objectContaining({connectionId:'local',passive:true}))
+    expect(requestGatewayForAgent).not.toHaveBeenCalled()
+    const clock = vi.spyOn(Date,'now').mockReturnValue(Date.now() + 120_000)
+
+    try {
+      vi.mocked(hermesApi).mockResolvedValue({projects:[{...localTree[0],id:'p_warm',label:'warm-only'}],scoped_session_ids:[]})
+      await refreshProjectTree()
+      await flush()
+      expect($projectTree.get().some(node => node.id === 'gw:local:p_warm')).toBe(true)
+      expect(requestGatewayForAgent).not.toHaveBeenCalled()
+    } finally { clock.mockRestore() }
+  })
+
   it("draws an unreachable gateway's groups from the replica, renameable, rows owned by that connection", async () => {
     vi.mocked(hermesApi).mockRejectedValue(new Error('ssh: connect timed out'))
     vi.mocked(requestGatewayForAgent).mockRejectedValue(new Error('ssh: connect timed out'))

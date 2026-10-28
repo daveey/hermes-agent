@@ -19,6 +19,31 @@ from .method_ctx import bind_module
 _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
 
 
+def _resume_reuse_live_locked(ctx, sid: str, session: dict) -> dict:
+    """Warm resume recovery, with the caller holding _session_resume_lock."""
+    if (refusal := _reattach_refusal(ctx.rid, sid, session)) is not None:
+        return refusal
+    _cancel_ws_orphan_reap(sid)
+    payload = _live_session_payload(sid, session, cols=ctx.cols, touch=True, omit_messages=ctx.omit_messages,
+                                    transport=current_transport() or _stdio_transport,
+                                    inline_images=ctx.inline_images)
+    payload["resumed"] = ctx.target
+    # A boot sweep can race Desktop's mount or update hold. Retry on warm reuse too,
+    # but don't make stale code busy again before its replacement can take over.
+    if not ctx.lazy and not session.get("running") and not session.get("resume_hydrating"):
+        from tui_gateway.update_pause import _detect_skew
+        if _detect_skew() is None:
+            if (continuation := _maybe_schedule_auto_continue(sid, session, ctx.target)) is not None:
+                payload["auto_continue"] = continuation
+    if ctx.defer_history:
+        payload.update(messages=[], hydrating=bool(session.get("resume_hydrating")),
+                       message_count=int(session.get("resume_message_count") or payload["message_count"]))
+    # A lazy watch session never owns a run loop — overlay the child-run registry.
+    if session.get("agent") is None and _child_run_active(ctx.target, ctx.profile_home):
+        payload.update(running=True, status="streaming")
+    return _ok(ctx.rid, payload)
+
+
 def _auto_continue_config() -> tuple[bool, float, int]:
     """(enabled, freshness window in seconds, max attempts) from ``desktop.auto_continue`` in config.yaml."""
     desktop = _load_cfg().get("desktop")
@@ -43,6 +68,9 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
     cover a session_key that compression rotated mid-turn. A turn stopped by backend shutdown keeps its marker
     (``_stop_turns_before_exit`` flags it) so the next boot auto-continues it like a crash."""
     if session.get("_exit_keeps_turn_marker"):
+        return
+    # [daveey] A core-update pause keeps its marker: the next backend (or the in-place watcher) continues it.
+    if session.get("_update_pause_marker_key"):
         return
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
@@ -89,10 +117,19 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
-    if session.get("_auto_continue_scheduled"):
-        return None
-    session["_auto_continue_scheduled"] = True
-    attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
+    with session["history_lock"]:
+        if (session.get("_auto_continue_scheduled")
+                or session.get("_closing") or session.get("_finalized") or session.get("resume_hydrating")):
+            return None
+        session["_auto_continue_scheduled"] = True
+    # [daveey] A core-update pause is not a crash: no attempt is used and the note says the step finished.
+    paused = marker.get("reason") == "core_update_pause"
+    if paused:
+        from tui_gateway.update_pause import pause_note
+        attempt, text = marker["attempts"], pause_note(marker["prompt"])
+    else:
+        attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
+    pauses = int(marker.get("pauses") or 0)
 
     def kickoff() -> None:
         rid = f"__auto_continue__{int(time.time() * 1000)}"
@@ -125,12 +162,14 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             # Marker inputs read back by _run_prompt_submit: attempt count (crash breaker) and the ORIGINAL prompt (no
             # nested notes). Set here, not at schedule time, so a bail above leaves nothing for a racing user turn.
             session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
+            session["_auto_continue_pauses"] = pauses
         try:
             from gateway.warning_notifications import render_notification
             diagnostic = marker.get("notification_category") == "diagnostic"
             with _session_profile_runtime_scope(session):
                 def announce():
-                    _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
+                    _emit("status.update", sid, {"kind": "process", "text": "Resuming paused turn…" if paused
+                                                 else "Resuming interrupted turn…"})
                     _emit("message.start", sid)
                 render_notification(announce, platform="tui", diagnostic=diagnostic)
                 _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue",
@@ -141,8 +180,9 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if _start_session_work(kickoff, name=f"auto-continue-{sid}", home=session.get("profile_home")) is None:
         session["_auto_continue_scheduled"] = False
         return None
-    logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago, writer pid %s: %s, "
-                "reader pid %s)", session_key, attempt, age, marker.get("writer_pid"), writer_state, os.getpid())
+    logger.info("auto-continue scheduled for session %s (attempt %d%s, interrupted %.0fs ago, writer pid %s: %s, "
+                "reader pid %s)", session_key, attempt, ", core-update pause" if paused else "", age,
+                marker.get("writer_pid"), writer_state, os.getpid())
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
 
 

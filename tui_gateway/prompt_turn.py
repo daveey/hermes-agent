@@ -153,6 +153,9 @@ def _admit_prompt_turn(
             if _retain_unadmitted_submit_row(session["history"], staged):
                 session["history_version"] = int(session.get("history_version", 0)) + 1
         reason = getattr(ownership_refusal, "reason", None) or "SESSION_COORDINATION_UNAVAILABLE"
+        # [daveey] Read by the notification poller (_notif_after_submit): a synthesized turn refused for
+        # ownership backs off instead of re-running every poll (139 refusal cards in 110 s, 2026-10-28).
+        session["_turn_owner_refusal"] = reason
         _emit_terminal_turn_error(
             sid, session, str(ownership_refusal),
             error_surface={"layer": "gateway", "code": reason, "retryable": False})
@@ -160,6 +163,9 @@ def _admit_prompt_turn(
     with session["history_lock"]:
         if not owns(session):
             return None
+        # This process owns the chat again: any notification refusal backoff is over. [daveey]
+        for key in ("_turn_owner_refusal", "_notif_owner_refused_until", "_notif_owner_refusal_delay"):
+            session.pop(key, None)
         if session.get("_closing") or (
             queued_prompt_generation is not None
             and int(session.get("_queued_prompt_generation", 0)) != queued_prompt_generation):
@@ -210,12 +216,15 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     marker_home = _session_home(session)
     marker_key = str(session.get("session_key") or "")
     marker_attempt = int(session.pop("_auto_continue_attempt", 0) or 0)
+    marker_pauses = int(session.pop("_auto_continue_pauses", 0) or 0)
     marker_text = session.pop("_auto_continue_prompt", None) or text
+    # [daveey] A core-update pause kept the previous turn's marker; this turn owns (and retires) its own.
+    session.pop("_update_pause_marker_key", None)
     if isinstance(marker_text, str) and marker_text.strip():
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
         record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
-                          auto_continue=auto_continue,
+                          auto_continue=auto_continue, **({"pauses": marker_pauses} if marker_pauses else {}),
                           **({"notification_category": "diagnostic"}
                              if notification_category == "diagnostic" else {}))
         with session["history_lock"]:
@@ -869,6 +878,9 @@ def _invoke_agent(
     agent._on_session_title = lambda t, _src, _k=_title_key: _emit(
         "session.title", sid, {"session_id": _k, "title": t})
     _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
+    # [daveey] Core-update pause: consulted by the agent loop at each step boundary of this turn only.
+    from tui_gateway.update_pause import boundary_pause_hook
+    agent.step_boundary_pause = boundary_pause_hook(session, st.marker_key) if st.marker_key else None
     try:
         from agent.notification_presentation import notification_turn, event_presentation_muted
         with notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid):
@@ -880,6 +892,7 @@ def _invoke_agent(
             if submitted_row is not None and getattr(agent, "_pending_cli_user_message", None) is submitted_row:
                 agent._pending_cli_user_message = None
     finally:
+        agent.step_boundary_pause = None
         # Stop AND join before anything emits: a tick surviving past message.complete would
         # roll the client's usage back to a stale snapshot (unbounded join: same worst case).
         _usage_stop.set()
@@ -1270,6 +1283,10 @@ def _run_admitted_prompt(
             status_note = _absorb_turn_result(
                 sid, session, st, text, display_kind, display_metadata)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
+            paused_for_update = isinstance(st.result, dict) and bool(st.result.get("paused_for_update"))
+            if paused_for_update:
+                from tui_gateway.update_pause import announce_pause
+                announce_pause(sid, payload)
             # [daveey] A client Stop ended this turn: persist "Stopped by <login>" so the chat says why it
             # went quiet (methods_session_interrupt._record_stop_notice; a no-op for any other ending).
             _record_stop_notice(session, status)
@@ -1278,6 +1295,10 @@ def _run_admitted_prompt(
                 from tui_gateway.free_tier_task_done import note_task_done
                 note_task_done(session, st.result, st.agent, display_kind)
             _emit("message.complete", sid, payload)
+            if paused_for_update:
+                # The new backend continues it; if no update replaces this one, continue it here.
+                from tui_gateway import update_pause
+                update_pause.start_in_place_watcher(sid, session, st.marker_key)
             goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)
             if status == "complete":
                 _after_complete_turn(sid, session, st, raw)

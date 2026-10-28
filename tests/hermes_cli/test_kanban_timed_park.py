@@ -103,11 +103,16 @@ def test_needs_input_without_marker_still_blocks_for_a_human(kanban_home: Path) 
         assert (kb.get_task(conn, tid).status, kb.get_task(conn, tid).block_kind) == ("blocked", "needs_input")
 
 
-def test_shared_blocker_dependency_keeps_sticky_needs_input(kanban_home: Path) -> None:
+def test_shared_blocker_dependency_parks_with_a_wake(kanban_home: Path) -> None:
+    """A parent-less dependency behind a shared blocker used to land sticky needs_input with no
+    wake (nothing probed it); it now parks scheduled on the shared probe cadence. [daveey]"""
+    from hermes_cli.kanban_continuation import pending_wake
+
     with kbc.connect_closing() as conn:
         tid = _running(conn)
         assert kb.block_task(conn, tid, reason="CI billing", kind="dependency", blocker_id="gh-billing")
-        assert kb.get_task(conn, tid).block_kind == "needs_input"
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert (pending_wake(conn, tid) or {}).get("blocker_id") == "gh-billing"
 
 
 def test_kanban_block_tool_time_kind_on_goal_mode_card(kanban_home: Path, monkeypatch) -> None:

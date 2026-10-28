@@ -15,6 +15,7 @@ def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     expected_run_id: Optional[int] = None, wake_check: Optional[str] = None,
     check_every: Optional[int] = None, clock_only: bool = False, awaiting: Any = None,
+    clear_blocker: bool = False,
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable) until its wake
     (``SCHEDULED_UNTIL=`` in the reason, else ``kanban_timed_park.DEFAULT_WAKE_SECONDS``) or an
@@ -59,11 +60,15 @@ def schedule_task(
             params.append(int(expected_run_id))
         if conn.execute(sql, params).rowcount != 1:
             return False
+        # A card behind a shared blocker stays behind it: a park without the id says nothing about
+        # the wall (kanban_shared_blockers.run_effect) unless ``clear_blocker`` says it is gone.
+        meta = _kb._clear_meta(clear_blocker)
         run_id = _kb._end_or_synthesize_run(
-            conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
+            conn, task_id, outcome="scheduled", status="scheduled", summary=reason,
+            metadata=meta or None, synthesize=bool(reason or meta),
         )
         _kb._append_event(conn, task_id, "scheduled", {
-            **payload, **kwc.park_fields(wake_check, check_every, clock_only), "awaiting": record,
+            **payload, **kwc.park_fields(wake_check, check_every, clock_only), "awaiting": record, **meta,
         }, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check, check_every)
         return True

@@ -698,15 +698,29 @@ def heartbeat_current_worker_from_env() -> bool:
 
 # Live operator-note injection: poll the task for new comments and steer them in
 # OUT-OF-BAND, so a user can talk to a running task without block → comment → unblock.
-# Watermarked per task (seeded on first poll: that history is already in the context).
+# Watermarked per task, seeded on first poll at the run's start (earlier history is in the prompt).
 _COMMENT_POLL_MIN_INTERVAL_SECONDS = 6.0
 _comment_poll_last_attempt: float = 0.0
 _comment_watermark: dict[str, int] = {}
 
 
+def _comment_stamp(c: Any, own_identity: str) -> str:
+    """``default (another session) at 04:50 PDT``: who wrote the note and when, so a worker
+    can tell an operator note from its own even when both run as the same profile."""
+    author = (c.author or "").strip() or "operator"
+    who = f"{author} (another session)" if author == own_identity else author
+    try:
+        when = time.strftime("%H:%M %Z", time.localtime(int(c.created_at)))
+    except (TypeError, ValueError, OverflowError):
+        return who
+    return f"{who} at {when}"
+
+
 def inject_new_comments_from_env(agent: Any) -> bool:
     """Steer new operator comments on the worker's task into ``agent``; True iff a
-    steer was injected; never raises. Own comments (``_persisted_identity``) are skipped."""
+    steer was injected; never raises. Skipped as own: the comments THIS run wrote, by id
+    (``commented`` events carrying ``writer_run_id``; tool and CLI alike). A same-profile
+    chat's note is an operator note. Without a run id, falls back to the author filter."""
     global _comment_poll_last_attempt
     # Operator notes address the dispatcher-owned worker; a delegate_task child sharing
     # this process must neither receive them nor advance the shared watermark (#112817).
@@ -717,34 +731,55 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         return False
     _comment_poll_last_attempt = now
     seen = _comment_watermark.get(tid)
+    run_id = _worker_run_id(tid)
+    own_ids: set[int] = set()
     try:
         with _board(None, quiet_close=True) as (kb, conn):
+            if seen is None and run_id is not None:
+                # [daveey] Seed at the run's start, not "now": comments from before the run
+                # are in the prompt, but ones posted between spawn and this first poll are not.
+                seen = kb.comment_id_before_run_start(conn, tid, run_id)
+                if seen is not None:
+                    _comment_watermark[tid] = seen
             rows = kb.list_comments_after(conn, tid, after_id=seen or 0)
+            if seen is not None and rows and run_id is not None:
+                own_ids = (kb.own_comment_ids(conn, tid, run_id)
+                           | kb.delivered_comment_ids(conn, tid, run_id))
     except Exception:
         logger.debug("comment-inject: bridge failed", exc_info=True)
         return False
-    if seen is None:
+    if seen is None:  # no run to anchor on: everything so far counts as already seen
         _comment_watermark[tid] = max((c.id for c in rows), default=0)
     if seen is None or not rows:
         return False
     # Advance past everything read (including our own notes) so nothing is re-injected.
     _comment_watermark[tid] = max(c.id for c in rows)
-    # Same resolution the write side used, so a worker skips its OWN comments even
-    # when the dispatcher did not pin HERMES_PROFILE (echoed notes would otherwise
-    # re-enter the live turn as fake operator steering).
+    # Same resolution the write side used, for the stamp and the run-less fallback.
     own = _persisted_identity()
-    fresh = [c for c in rows if (c.author or "").strip() != own and (c.body or "").strip()]
+    if run_id is not None:
+        # [daveey] Own = written by this run (by id). Every actor usually shares one
+        # profile, so an author filter dropped every operator note from a same-profile chat.
+        fresh = [c for c in rows if c.id not in own_ids and (c.body or "").strip()]
+    else:
+        fresh = [c for c in rows if (c.author or "").strip() != own and (c.body or "").strip()]
     if not fresh:
         return False
-    lines = [f"- {c.author or 'operator'}: {c.body.strip()}" for c in fresh]
+    lines = [f"- {_comment_stamp(c, own)}: {c.body.strip()}" for c in fresh]
     note = ("New note" + ("s" if len(fresh) > 1 else "")
             + " on your kanban task from the operator (delivered mid-run). "
             + "Take it into account for the work you're doing right now:\n" + "\n".join(lines))
     try:
-        return bool(agent.steer(note))
+        delivered = bool(agent.steer(note))
     except Exception:
         logger.debug("comment-inject: steer failed", exc_info=True)
         return False
+    if delivered and run_id is not None:
+        try:
+            with _board(None, quiet_close=True) as (kb, conn):
+                kb.record_comment_delivery(conn, tid, run_id, [c.id for c in fresh])
+        except Exception:
+            logger.debug("comment-inject: delivery receipt failed", exc_info=True)
+    return delivered
 
 
 # Soft deadline: near ``max_runtime_seconds`` steer the running turn to checkpoint with
@@ -828,6 +863,8 @@ def _handle_show(args: dict, **kw) -> str:
                 {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
             "children": kb.child_ids(conn, tid),
             "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
+            # Posted during the live run, not written by it, not yet steered into it.
+            "undelivered_comments": [c.id for c in kb.undelivered_live_comments(conn, tid)],
             # Capped; full log via CLI.
             "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
             "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
@@ -987,6 +1024,14 @@ def _blocker_id_arg(args: dict) -> Optional[str]:
     return bid
 
 
+def _clear_blocker_arg(args: dict, blocker_id: Optional[str] = None) -> bool:
+    """Validated ``clear_blocker``: the caller saw the card's shared blocker gone. [daveey]"""
+    raw = args.get("clear_blocker", False)
+    _check(isinstance(raw, bool), "clear_blocker must be true or false")
+    _check(not (raw and blocker_id), "clear_blocker says the wall is gone; blocker_id says it still stands. Pass one")
+    return raw
+
+
 def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
     """``(wake_check, check_every, clock_only)`` from a park call, validated. [daveey]"""
     from hermes_cli import kanban_wake_check as kwc
@@ -1041,7 +1086,8 @@ def _park_guard(conn, tid: str, op: str, wake: tuple, **plan: Any) -> None:
     """Refuse a park that wakes > 2 h away with no wake_check and no clock_only. [daveey]"""
     from hermes_cli import kanban_wake_check as kwc
 
-    wake_at = kwc.planned_wake(conn, tid, op=op, **plan)
+    wake_at = kwc.planned_wake(conn, tid, op=op, **plan, **({"wake_check": wake[0], "clock_only": wake[2]}
+                                                            if op == "block" else {}))
     err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
     _check(err is None, f"kanban_{op} {err}", "invalid_args")
 
@@ -1144,6 +1190,7 @@ def _handle_block(args: dict, **kw) -> str:
                f"finished or cannot proceed for another reason, call kanban_complete instead — "
                f"the completion judge will evaluate it.")
         blocker_id = _blocker_id_arg(args)
+        clear_blocker = _clear_blocker_arg(args, blocker_id)
         wake = _wake_check_args(args)
         awaiting, wake = _awaiting_arg(args, wake)
         from hermes_cli.kanban_block_policy import ERROR_CODE, block_policy_error
@@ -1151,10 +1198,12 @@ def _handle_block(args: dict, **kw) -> str:
                                      clock_only=wake[2], blocker_id=blocker_id, reason=reason)
         _check(_policy is None, _policy or "", ERROR_CODE)
         _standing_wait_guard(kb, conn, tid, kind, args.get("human_request"), reason)
-        _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id)
+        _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id,
+                    human_request=args.get("human_request"))
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
-                           clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")))
+                           clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")),
+                           clear_blocker=clear_blocker)
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
         escalated = _escalated(kb, conn, tid)
         if escalated:
@@ -1168,10 +1217,14 @@ def _handle_block(args: dict, **kw) -> str:
             # A wait on time, not on a human: parked with a wake time (kanban_timed_park). [daveey]
             from hermes_cli.kanban_continuation import pending_wake
             parked = pending_wake(conn, tid) or {}
+            note = ("Parked as a timed wait (scheduled), not a human block: it wakes when "
+                    "wake_check exits 0, at wake_at, or earlier on `hermes kanban unblock`.")
+            if parked.get("blocker_wake"):
+                note = (f"Parked behind shared blocker `{blocker_id}` (scheduled): it wakes at wake_at "
+                        "(the shared probe interval) to probe the wall, or as soon as the blocker clears.")
             return _ok_landed(kb, conn, tid, "scheduled", requested_kind=kind, wake_at=parked.get("wake_at"),
-                              **_wake_check_echo(wake),
-                              note=("Parked as a timed wait (scheduled), not a human block: it wakes when "
-                                    "wake_check exits 0, at wake_at, or earlier on `hermes kanban unblock`."))
+                              **_wake_check_echo(wake), **({"blocker_id": blocker_id} if blocker_id else {}),
+                              note=note)
         if kind == "dependency" and landed_kind != kind:
             # block_task re-kinds a dependency wait that no open parent can satisfy.
             extra["requested_kind"] = kind
@@ -1203,10 +1256,12 @@ def _handle_schedule(args: dict, **kw) -> str:
                "the wake), or kanban_complete so the completion judge can evaluate it.")
         wake = _wake_check_args(args)
         awaiting, wake = _awaiting_arg(args, wake)
+        clear_blocker = _clear_blocker_arg(args)
         _park_guard(conn, tid, "schedule", wake, reason=reason)
         ok = kb.schedule_task(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid),
-            wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting)
+            wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting,
+            clear_blocker=clear_blocker)
         _check(ok, f"could not schedule {tid} (unknown id, not in todo/ready/running/blocked, or it "
                    "waits on a human answer: needs_input/capability asks stay blocked, never scheduled)")
         escalated = _escalated(kb, conn, tid)
@@ -1234,6 +1289,9 @@ def _handle_continue(args: dict, **kw) -> str:
     blocker_id = _blocker_id_arg(args)
     if blocker_id:
         metadata = {**(metadata or {}), "blocker_id": blocker_id}
+    if _clear_blocker_arg(args, blocker_id):
+        from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
+        metadata = {**(metadata or {}), CLEAR_FLAG: True}
     from hermes_cli.kanban_continuation import continue_task
     with _board(args.get("board")) as (kb, conn):
         wake = _wake_check_args(args)
@@ -1356,7 +1414,14 @@ def _handle_comment(args: dict, **kw) -> str:
     with _board(args.get("board")) as (kb, conn):
         cid = kb.add_comment(conn, tid, author=author, body=str(body))
         subscribed = _maybe_subscribe_on_touch(conn, str(tid))
-        return _ok(task_id=tid, comment_id=cid, **({"subscribed": True} if subscribed else {}))
+        live = kb.live_run_id(conn, str(tid))
+        extra: dict = {"live_run": live is not None}
+        if live is not None and _worker_run_id(str(tid)) != live:
+            extra["delivery"] = (
+                "the card has a live worker run: it gets this note at its next model call "
+                "(often a few minutes); a comment_delivered event on the card confirms it")
+        return _ok(task_id=tid, comment_id=cid, **extra,
+                   **({"subscribed": True} if subscribed else {}))
 
 
 def _store_attachment(board, tid, filename, data, content_type) -> str:

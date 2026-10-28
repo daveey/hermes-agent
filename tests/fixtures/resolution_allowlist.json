@@ -514,6 +514,16 @@
     "kind": "bare_which"
   },
   {
+    "path": "tools/checkpoint_manager.py",
+    "symbol": "_checkout_index",
+    "kind": "bare_which"
+  },
+  {
+    "path": "tools/checkpoint_manager.py",
+    "symbol": "_pack_from_repo",
+    "kind": "bare_which"
+  },
+  {
     "path": "tools/checkpoint_manager_profile_rename.py",
     "symbol": "migrate_profile_checkpoint_projects",
     "kind": "bare_which"

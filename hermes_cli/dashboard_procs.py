@@ -5,6 +5,8 @@ call time so imports stay one-way (both of those modules import this one lazily)
 """
 
 import contextlib
+import json
+import logging
 import os
 import subprocess
 import sys
@@ -12,6 +14,7 @@ from pathlib import Path
 
 from hermes_cli._startup_fast import is_desktop_ssh_backend_argv
 
+logger = logging.getLogger(__name__)
 _PS_RUN_KWARGS = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
@@ -593,6 +596,128 @@ def _kill_pids_posix(pids: list[int], killed: list[int], failed: list[tuple[int,
                   for pid in survivors)
 
 
+# [daveey] The update's stop goes through the backend's own retirement fence first
+# (``POST /api/health/retirement``, ``hermes_cli/backend_retirement.py``). A plain SIGTERM made the
+# serve finalize its sessions, and ``tui_gateway.session_lifecycle`` then cancelled a running
+# background review mid provider call. The drain window applies an update at the first idle gap
+# between turns, and a review starts right after every turn, so one is often in flight then
+# (David-MBP 2026-10-28 06:37:41, pid 91625). While the backend reports ``background_review:<n>``
+# the update keeps asking; the fence lets the review finish, asks it to stop between calls past
+# ``BACKGROUND_REVIEW_WAIT_S`` (300 s), and stops counting it past ``BACKGROUND_REVIEW_HARD_CAP_S``
+# (900 s), which is also this wait's own deadline. Every other answer (idle, another kind of busy,
+# an old backend with no fence, no token, no port) is stopped exactly as before.
+_REVIEW_RETIRE_POLL_S = 2.0
+_REVIEW_RETIRE_HTTP_TIMEOUT_S = 3.0
+
+
+def _review_retire_deadline_s() -> float:
+    from hermes_cli.backend_retirement import BACKGROUND_REVIEW_HARD_CAP_S
+    return float(BACKGROUND_REVIEW_HARD_CAP_S)
+
+
+def _retirement_endpoint(pid: int) -> tuple[str, int, str] | None:
+    """``(host, port, token)`` to reach *pid*'s retirement fence, or ``None`` when unknown.
+
+    Port: the spawn ledger (real port of a ``--port 0`` backend), the host rendezvous record that
+    names this pid, else a non-zero ``--port`` in its argv. Token: the session token in the
+    process's own environment (Desktop-local backends), else the rendezvous token of the record
+    that names this pid. Both are required; anything less falls back to the plain stop.
+    """
+    from hermes_cli import main_dashboard as _dash
+
+    host = port = token = None
+    if bind := _ledger_serve_binds().get(pid):
+        host, port = bind
+    with contextlib.suppress(Exception):
+        from gateway import host_rendezvous as _hr
+        for role in (_hr.ROLE_DESKTOP_SERVE, _hr.ROLE_SERVE):
+            record = _hr.read_record(role)
+            if record is not None and record.pid == pid and record.port:
+                if port is None:
+                    host, port = _hr.dial_host(record), int(record.port)
+                token = _hr.read_token(role) or None
+                break
+    if port is None:
+        argv = _dash._dashboard_cmdline_for_pid(pid) or []
+        raw = _flag_value(argv, "--port")
+        if raw and raw.isdigit() and int(raw) > 0:
+            host, port = _flag_value(argv, "--host") or "", int(raw)
+    env = _pid_environ(pid) or {}
+    token = env.get("HERMES_DASHBOARD_SESSION_TOKEN") or token
+    if not port or not token:
+        return None
+    if host in (None, "", "0.0.0.0", "::", "*", "localhost"):
+        host = "127.0.0.1"
+    return host, int(port), token
+
+
+def _retirement_request(endpoint: tuple[str, int, str], body: dict | None) -> dict | None:
+    """POST *body* to ``/api/health/retirement`` (``None`` body: GET ``/api/health/idle``)."""
+    import urllib.request
+
+    host, port, token = endpoint
+    netloc = f"[{host}]" if ":" in host else host
+    path = "/api/health/idle" if body is None else "/api/health/retirement"
+    request = urllib.request.Request(
+        f"http://{netloc}:{port}{path}", method="GET" if body is None else "POST",
+        data=None if body is None else json.dumps(body).encode(),
+        headers={"X-Hermes-Session-Token": token, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=_REVIEW_RETIRE_HTTP_TIMEOUT_S) as response:
+            payload = json.loads(response.read(65536).decode("utf-8", "replace"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _await_background_reviews(pids: list[int]) -> None:
+    """Hold the stop of each backend in *pids* while it runs a background review (see above)."""
+    import time as _time
+
+    pending = {pid: ep for pid in pids if (ep := _retirement_endpoint(pid)) is not None}
+    if not pending:
+        return
+    started = _time.monotonic()
+    deadline = started + _review_retire_deadline_s()
+    waited: set[int] = set()
+    while pending:
+        for pid, endpoint in list(pending.items()):
+            permit = _retirement_request(endpoint, {"action": "prepare"}) or {}
+            if permit.get("ok") is True and isinstance(permit.get("token"), str):
+                committed = (_retirement_request(endpoint, {"action": "commit", "token": permit["token"]})
+                             or {}).get("ok") is True
+                del pending[pid]
+                if pid in waited:
+                    msg = (f"PID {pid} finished its background review after "
+                           f"{_time.monotonic() - started:.0f}s; retirement fence "
+                           f"{'committed' if committed else 'not committed'}, stopping it")
+                    print(f"    ✓ {msg}")
+                    logger.warning("dashboard stop: %s", msg)
+                continue
+            detail = str(((_retirement_request(endpoint, None) or {}).get("detail")) or "")
+            if not detail.startswith("background_review:"):
+                del pending[pid]  # nothing a wait protects (or an old backend): stop as before
+                continue
+            if pid not in waited:
+                waited.add(pid)
+                from hermes_cli.backend_retirement import BACKGROUND_REVIEW_WAIT_S
+                msg = (f"PID {pid} is running a background review ({detail}); waiting for it before "
+                       f"stopping (asked to wind down between API calls after "
+                       f"{BACKGROUND_REVIEW_WAIT_S:.0f}s, at most {_review_retire_deadline_s():.0f}s)")
+                print(f"    ⏳ {msg}")
+                logger.warning("dashboard stop: %s", msg)
+        if not pending:
+            return
+        if _time.monotonic() >= deadline:
+            for pid in pending:
+                msg = (f"PID {pid} background review still running after "
+                       f"{_time.monotonic() - started:.0f}s; stopping it anyway")
+                print(f"    ⚠ {msg}")
+                logger.warning("dashboard stop: %s", msg)
+            return
+        _time.sleep(_REVIEW_RETIRE_POLL_S)
+
+
 def _kill_stale_dashboard_processes(
     reason: str = "the running backend no longer matches the updated frontend", *,
     restart_managed: bool = False, already_restarted_units: set[str] | None = None,
@@ -640,6 +765,7 @@ def _kill_stale_dashboard_processes(
     pid_launchd: dict[int, tuple[str, str, int | None]] = {}
     pid_cmdline: dict[int, list[str]] = {}
     pid_home: dict[int, str | None] = {}
+    pid_launcher: dict[int, tuple[int, tuple[str, ...]]] = {}
     # macOS: a backend supervised by a launchd job (LaunchAgent / LaunchDaemon) must come back
     # through launchd, never as a detached argv respawn — the respawn holds the job's port, the
     # job then fails every KeepAlive restart with "port already in use", and the running backend
@@ -661,7 +787,11 @@ def _kill_stale_dashboard_processes(
             if pid_service[pid]:
                 continue
             cmdline = _dash._dashboard_cmdline_for_pid(pid)
-            if job := _launchd_owner(pid, cmdline):
+            if supervisor := _launcher_supervisor(pid):
+                # [daveey] Checked before launchd: the job's live pid is the LAUNCHER, so a fresh launchd
+                # pid proves nothing about the backend, and an argv replay races the launcher's own child.
+                pid_launcher[pid] = supervisor
+            elif job := _launchd_owner(pid, cmdline):
                 pid_launchd[pid] = job
             elif cmdline:
                 # Manual process: exact argv + HERMES_HOME for the respawn and its profile cap.
@@ -677,9 +807,18 @@ def _kill_stale_dashboard_processes(
                 return _empty_result()
     elif sys.platform != "win32":
         for pid in pids:
-            if job := _launchd_owner(pid, _dash._dashboard_cmdline_for_pid(pid)):
+            if job := (_launchd_owner(pid, _dash._dashboard_cmdline_for_pid(pid))
+                       or _launcher_launchd_job(pid)):
                 pid_launchd[pid] = job
     print(f"\n⟲ Stopping {len(pids)} dashboard process(es) ({reason})")
+    if restart_managed:
+        # Update only: never cut a background review off mid-call (see _await_background_reviews).
+        # ``--stop`` is an explicit request and keeps its immediate stop.
+        try:
+            _await_background_reviews(list(pids))
+        except Exception:
+            logger.warning("dashboard stop: background-review wait failed; stopping as before",
+                           exc_info=True)
     killed: list[int] = []
     failed: list[tuple[int, str]] = []
     (_kill_pids_windows if sys.platform == "win32" else _kill_pids_posix)(pids, killed, failed)
@@ -689,7 +828,8 @@ def _kill_stale_dashboard_processes(
         print(f"    ✗ failed to stop PID {pid}: {err_msg}")
     if killed and restart_managed:
         unrecovered = _restart_killed_backends(
-            killed, pid_service, pid_cgroup, pid_cmdline, pid_home, pid_launchd=pid_launchd)
+            killed, pid_service, pid_cgroup, pid_cmdline, pid_home, pid_launchd=pid_launchd,
+            pid_launcher=pid_launcher)
     else:
         unrecovered = list(killed)
         # A stopped launchd job with KeepAlive restarts itself: say so instead of a misleading
@@ -706,8 +846,10 @@ def _kill_stale_dashboard_processes(
 def _restart_killed_backends(
     killed: list[int], pid_service: dict[int, str | None], pid_cgroup: dict[int, str | None],
     pid_cmdline: dict[int, list[str]], pid_home: dict[int, str | None], *,
-    pid_launchd: dict[int, tuple[str, str, int | None]] | None = None) -> list[int]:
-    """Update path: restart systemd units, kickstart launchd jobs (macOS), respawn manual argv
+    pid_launchd: dict[int, tuple[str, str, int | None]] | None = None,
+    pid_launcher: dict[int, tuple[int, tuple[str, ...]]] | None = None) -> list[int]:
+    """Update path: restart systemd units, kickstart launchd jobs (macOS), wait for a
+    ``hermes-gateway-launcher``'s successor child, respawn manual argv
     (detached, headless, logged to logs/dashboard-restart.log; one per profile, no ``--port 0``).
     Returns PIDs not brought back."""
     # Two categories: Without this, a remote backend (hermes serve) under Restart=on-failure never comes
@@ -719,10 +861,15 @@ def _restart_killed_backends(
     failed_restarts: list[tuple[str, str]] = []
     seen_services: set[str] = set()
     respawn_candidates: list[tuple[int, list[str], str | None]] = []
+    launcher_waits: dict[tuple[str, ...], list[int]] = {}
     for pid in killed:
         svc_name = pid_service.get(pid)
         launchd_job = (pid_launchd or {}).get(pid)
-        if svc_name:
+        if supervisor := (pid_launcher or {}).get(pid):
+            # [daveey] The launcher brings its child back (it exits with the child; launchd KeepAlive
+            # restarts it and it spawns a fresh child from the updated checkout). Never argv-respawn.
+            launcher_waits.setdefault(supervisor[1], []).append(pid)
+        elif svc_name:
             if svc_name in seen_services:
                 continue
             seen_services.add(svc_name)
@@ -753,6 +900,11 @@ def _restart_killed_backends(
             respawn_candidates.append((pid, pid_cmdline[pid], pid_home.get(pid)))
         else:
             unrecovered.append(pid)
+    if launcher_waits:
+        old_launchers: dict[tuple[str, ...], set[int]] = {}
+        for launcher_pid, tail in (pid_launcher or {}).values():
+            old_launchers.setdefault(tail, set()).add(launcher_pid)
+        unrecovered.extend(_await_launcher_successors(launcher_waits, set(killed), old_launchers))
     for svc, err in failed_restarts:
         print(f"    ⚠ {svc}: {err}")
     respawn_cmds = _filter_dashboard_respawn_candidates(respawn_candidates)
@@ -761,6 +913,118 @@ def _restart_killed_backends(
         unrecovered.extend(p for p in killed if pid_cmdline.get(p) in failed_cmds)
     if failed_restarts or unrecovered:
         print("  Restart anything not auto-restarted when you're ready:\n    hermes dashboard --port <port>")
+    return unrecovered
+
+
+# [daveey] Backends supervised by the core-update launcher (hermes-sync ``hermes-gateway-launcher``,
+# docs/core-update-safety.md). A launchd plist runs ``hermes-gateway-launcher --home H -- <cmd>``; the
+# launcher spawns <cmd> (e.g. ``redde-serve``, which execs ``hermes dashboard --port 9119``) and exits
+# with it, and KeepAlive restarts the launcher, which spawns a fresh child. Neither launchd lookup sees
+# the backend (the plist's ProgramArguments is the launcher; the child's XPC_SERVICE_NAME is ``0``), so
+# an unfenced ``hermes update`` replayed its argv detached on the job's port while the launcher brought
+# its own child up: EADDRINUSE or a duplicate, unsupervised backend (David-MBP 2026-10-28).
+# Successor wait: launchd ThrottleInterval (redde-serve: 15 s) + the launcher's 2 s lock poll + startup.
+_LAUNCHER_SUCCESSOR_TIMEOUT_SECONDS = 60.0
+_LAUNCHER_SUCCESSOR_POLL_SECONDS = 1.0
+_WRAPPER_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def _launcher_argv_tail(argv: list[str] | None) -> tuple[str, ...] | None:
+    """The supervised command (argv after ``--``) when *argv* runs ``hermes-gateway-launcher``, else None."""
+    from hermes_cli.gateway_launchd import GATEWAY_LAUNCHER_NAME
+    if not argv or "--" not in argv:
+        return None
+    split = argv.index("--")
+    if not any(os.path.basename(arg) == GATEWAY_LAUNCHER_NAME for arg in argv[:min(split, 3)]):
+        return None
+    return tuple(argv[split + 1:]) or None
+
+
+def _launcher_supervisor(pid: int) -> tuple[int, tuple[str, ...]] | None:
+    """``(launcher_pid, supervised_cmd)`` when *pid*'s death makes a live launcher exit and respawn it:
+    the launcher is its parent, or is reached through exec-less wrapper shells only. A backend some
+    other long-lived process spawned under a launcher-supervised tree (a gateway's child) is not
+    respawned by the launcher, so it is not claimed here."""
+    if sys.platform == "win32":
+        return None
+    from hermes_cli import main_dashboard as _dash
+    for ancestor in _process_ancestors(pid):
+        argv = _dash._dashboard_cmdline_for_pid(ancestor)
+        if tail := _launcher_argv_tail(argv):
+            return (ancestor, tail)
+        if not argv or os.path.basename(argv[0]).lstrip("-") not in _WRAPPER_SHELLS:
+            return None
+    return None
+
+
+def _launcher_launchd_job(pid: int) -> tuple[str, str, int | None] | None:
+    """[daveey] The launchd job of the ``hermes-gateway-launcher`` supervising *pid*, or None.
+
+    ``dashboard --stop`` of a launcher child: the launcher exits with its child and the job's KeepAlive
+    restarts it, which brings the backend straight back. The launcher (the job's live process) carries
+    ``XPC_SERVICE_NAME=<label>``; the child's is ``0``, so only the launcher's env names the job."""
+    if not (supervisor := _launcher_supervisor(pid)):
+        return None
+    from hermes_cli import main_dashboard as _dash
+    launcher_pid = supervisor[0]
+    return _dash._launchd_job_from_launch_env(launcher_pid, _process_ancestors(launcher_pid))
+
+
+def _launcher_children(tail: tuple[str, ...], exclude_launchers: frozenset[int] | set[int] = frozenset()) -> list[int]:
+    """Live children of every ``hermes-gateway-launcher`` process supervising *tail*, except
+    launchers in *exclude_launchers*."""
+    from hermes_cli import main_dashboard as _dash
+    from hermes_cli.gateway_launchd import GATEWAY_LAUNCHER_NAME
+    try:
+        result = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,command="], timeout=10, **_PS_RUN_KWARGS,
+                                check=False)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    rows: list[tuple[int, int, str]] = []
+    for line in (result.stdout or "").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    launchers = {pid for pid, _ppid, command in rows if GATEWAY_LAUNCHER_NAME in command
+                 and pid not in exclude_launchers
+                 and _launcher_argv_tail(_dash._dashboard_cmdline_for_pid(pid)) == tail}
+    return [pid for pid, ppid, _command in rows if ppid in launchers]
+
+
+def _await_launcher_successors(waits: dict[tuple[str, ...], list[int]], stopped: set[int],
+                               old_launchers: dict[tuple[str, ...], set[int]] | None = None) -> list[int]:
+    """Wait (bounded) until each launcher-supervised command has a fresh child; return the stopped
+    PIDs whose command never came back. A fresh child is one of a launcher that is NOT in
+    *old_launchers* (the launchers that supervised the stopped PIDs): the launcher exits with its child
+    and launchd restarts it under a new pid, while an exec-less wrapper ``sh`` can still be the old
+    launcher's child just after the kill and must not count as recovered. Inside a core-update fence held by an ancestor of this
+    update every launcher is parked until the fence owner releases it after this process exits, so
+    nothing can come back yet: recovery is the fence owner's to verify, not a failure here."""
+    import time as _time
+
+    from hermes_cli.update_gateway_fence import ancestor_fence_owner
+    if (owner := ancestor_fence_owner()) is not None:
+        for tail in waits:
+            print(f"    ⏸ {os.path.basename(tail[0])}: hermes-gateway-launcher restarts it when the "
+                  f"core-update fence (pid {owner}) is released")
+        return []
+    pending = dict(waits)
+    deadline = _time.monotonic() + _LAUNCHER_SUCCESSOR_TIMEOUT_SECONDS
+    while True:
+        for tail in list(pending):
+            fresh = [pid for pid in _launcher_children(tail, (old_launchers or {}).get(tail, set()))
+                     if pid not in stopped]
+            if fresh:
+                print(f"    ✓ hermes-gateway-launcher restarted {os.path.basename(tail[0])} (PID {fresh[0]})")
+                del pending[tail]
+        if not pending or _time.monotonic() >= deadline:
+            break
+        _time.sleep(_LAUNCHER_SUCCESSOR_POLL_SECONDS)
+    unrecovered: list[int] = []
+    for tail, pids in pending.items():
+        print(f"    ⚠ {os.path.basename(tail[0])}: hermes-gateway-launcher brought no fresh child up within "
+              f"{int(_LAUNCHER_SUCCESSOR_TIMEOUT_SECONDS)}s; check its launchd job (KeepAlive) and log")
+        unrecovered.extend(pids)
     return unrecovered
 
 

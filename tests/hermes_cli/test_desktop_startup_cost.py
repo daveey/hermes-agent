@@ -42,5 +42,10 @@ def test_current_packaged_launch_does_not_require_npm(tmp_path, monkeypatch):
         desktop.cmd_gui(args)
     assert exited.value.code == 0
     npm.assert_not_called()
-    run.assert_called_once()
+    # subprocess.run is the shared module attribute, so it also sees helper probes that
+    # are not part of the launch (e.g. update_lock's `ps -o lstart=` start-time fallback
+    # on a macOS interpreter without psutil). The contract is one launch, no build tools.
+    argvs = [list(c.args[0]) for c in run.call_args_list]
+    assert argvs.count([str(executable)]) == 1, argvs
+    assert not any(Path(a[0]).name in {"npm", "npx", "node"} for a in argvs), argvs
 

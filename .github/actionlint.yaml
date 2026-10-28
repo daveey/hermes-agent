@@ -16,6 +16,8 @@ self-hosted-runner:
     - ci-fast
     # bubblewrap-capable hub slots (tests.yml e2e-upgrade).
     - ci-bwrap
+    # Dedicated single-job macOS state-suite runner on the mini.
+    - hermes-state
 
 # fork (daveey/hermes): known findings that are not bugs. The lint runs in
 # .github/workflows/actionlint.yml. Keep each pattern narrow.

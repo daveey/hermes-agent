@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerTerminalContextMenu } from '@/app/right-sidebar/terminal/terminal-context-menu'
 import { setApiRequestConnection, setApiRequestProfile } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { adoptNewSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
+import { adoptNewSessionDraft, beginFreshChatSend, stashSessionDraft, takeSessionDraft } from '@/store/composer'
 import { $confirmRequest, runConfirm, settleConfirm } from '@/store/confirm'
 import { $hubInstalledOverride } from '@/store/hub-actions'
 import { requestMcpInstallFromDeepLink } from '@/store/mcp-deeplink-install'
@@ -218,6 +218,88 @@ describe('useDesktopIntegrations', () => {
       // The composer's scope swap may only carry the draft when the restore announced this key.
       expect(adoptNewSessionDraft('remembered-session')).toBe(true)
       expect(takeSessionDraft('remembered-session').text).toBe('typed while booting')
+    })
+
+    it('does not restore over a send already in flight from the fresh chat', () => {
+      window.localStorage.setItem('hermes.desktop.lastRoute.profile.default', '/remembered-session')
+      // Enter on the fresh chat as soon as the composer enabled; the session list lands mid-create.
+      const endSend = beginFreshChatSend()
+      const result = render({ profileReady: true, sessions: [] })
+
+      try {
+        result.rerender({
+          activeProfile: 'default',
+          locationPathname: '/',
+          profileReady: true,
+          resumeExhaustedSessionId: null,
+          resumeLastSession: true,
+          routedSessionId: null,
+          sessions: [session({ id: 'remembered-session', profile: 'default' })]
+        })
+
+        expect(navigate).not.toHaveBeenCalled()
+      } finally {
+        endSend()
+      }
+
+      // The latch is spent: a later list refresh never yanks the user off the chat they sent in.
+      result.rerender({
+        activeProfile: 'default',
+        locationPathname: '/',
+        profileReady: true,
+        resumeExhaustedSessionId: null,
+        resumeLastSession: true,
+        routedSessionId: null,
+        sessions: [session({ id: 'remembered-session', profile: 'default', title: 'again' })]
+      })
+      expect(navigate).not.toHaveBeenCalled()
+    })
+
+    it('does not restore over a draft typed into the fresh chat this launch', () => {
+      window.localStorage.setItem('hermes.desktop.lastRoute.profile.default', '/remembered-session')
+      const result = render({ profileReady: true, sessions: [] })
+
+      // Typed while the session list was still loading (Enter not yet accepted).
+      stashSessionDraft(null, 'typed before the list arrived', [])
+
+      try {
+        result.rerender({
+          activeProfile: 'default',
+          locationPathname: '/',
+          profileReady: true,
+          resumeExhaustedSessionId: null,
+          resumeLastSession: true,
+          routedSessionId: null,
+          sessions: [session({ id: 'remembered-session', profile: 'default' })]
+        })
+
+        expect(navigate).not.toHaveBeenCalled()
+        expect(takeSessionDraft(null).text).toBe('typed before the list arrived')
+      } finally {
+        stashSessionDraft(null, '', [])
+      }
+    })
+
+    it('still restores over a fresh draft left from an earlier launch (control)', () => {
+      window.localStorage.setItem('hermes.desktop.lastRoute.profile.default', '/remembered-session')
+      stashSessionDraft(null, 'left over from last week', [])
+
+      try {
+        render({ profileReady: true, sessions: [session({ id: 'remembered-session', profile: 'default' })] })
+
+        expect(navigate).toHaveBeenCalledWith('/remembered-session', { replace: true })
+      } finally {
+        stashSessionDraft(null, '', [])
+      }
+    })
+
+    it('still restores once a fresh-chat send has settled (control)', () => {
+      window.localStorage.setItem('hermes.desktop.lastRoute.profile.default', '/remembered-session')
+      beginFreshChatSend()()
+
+      render({ profileReady: true, sessions: [session({ id: 'remembered-session', profile: 'default' })] })
+
+      expect(navigate).toHaveBeenCalledWith('/remembered-session', { replace: true })
     })
 
     it('waits for sessions before validating a remembered session route', () => {

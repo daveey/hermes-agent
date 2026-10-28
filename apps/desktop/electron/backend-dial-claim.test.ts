@@ -1,10 +1,30 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { BackendDialClaims } from './backend-dial-claim'
+import { backendDialClaimKey, BackendDialClaims } from './backend-dial-claim'
 import { backendScopeKey, parseBackendScopeKey } from './connection-registry'
 import { resolveDesktopConnectionRequest } from './desktop-profile'
 
 describe('BackendDialClaims (#90812)', () => {
+  it.each([null, 'local'] as const)('does not substitute explicit local and primary descriptors (first: %s)', async firstId => {
+    const claims = new BackendDialClaims()
+    let finish!: (value: string) => void
+    const first = claims.run(backendDialClaimKey(firstId, 'default'), () => new Promise<string>(resolve => { finish = resolve }))
+    const secondId = firstId === null ? 'local' : null
+    const secondDial = vi.fn(async () => secondId === 'local' ? 'local' : 'remote')
+    const second = claims.run(backendDialClaimKey(secondId, 'default'), secondDial)
+    finish(firstId === 'local' ? 'local' : 'remote')
+    expect(await first).toBe(firstId === 'local' ? 'local' : 'remote')
+    expect(await second).toBe(secondId === 'local' ? 'local' : 'remote')
+    expect(secondDial).toHaveBeenCalledOnce()
+  })
+
+  it('normalizes equivalent explicit local dials without changing pool keys', () => {
+    expect(backendDialClaimKey('local', null)).toBe(backendDialClaimKey('local', 'default'))
+    expect(backendDialClaimKey(undefined, null)).toBe(backendDialClaimKey(null, 'default'))
+    expect(backendDialClaimKey('office', 'work')).toBe(backendScopeKey('office', 'work'))
+    expect(backendScopeKey('local', 'default')).toBe('default')
+  })
+
   it('coalesces two concurrent dials for the same (connectionId, profile) onto ONE backend spawn', async () => {
     const claims = new BackendDialClaims()
     let spawns = 0

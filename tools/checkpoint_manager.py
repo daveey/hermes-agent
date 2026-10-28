@@ -363,12 +363,14 @@ def _run_git(
     allowed_returncodes: Optional[set[int]] = None,
     index_file: Optional[Path] = None,
     extra_env: Optional[dict[str, str]] = None,
+    input_text: Optional[str] = None,
 ) -> tuple[bool, str, str]:
     """Run a git command against the shared store.  Returns (ok, stdout, stderr).
 
     ``allowed_returncodes`` suppresses error logging for known/expected non-zero
     exits while preserving the normal ``ok = (returncode == 0)`` contract.
     Example: ``git diff --cached --quiet`` returns 1 when changes exist.
+    ``input_text`` is written to git's stdin (otherwise stdin is closed).
     """
     normalized_working_dir = _normalize_path(working_dir)
     if not normalized_working_dir.exists():
@@ -393,14 +395,18 @@ def _run_git(
     try:
         # NUL-delimited git output contains literal filenames, not text lines.
         text_options = {} if "-z" in args else {"text": True, "encoding": "utf-8", "errors": "replace"}
+        if input_text is None:
+            stdin_options: dict = {"stdin": subprocess.DEVNULL}
+        else:
+            stdin_options = {"input": input_text if text_options else input_text.encode("utf-8")}
         result = subprocess.run(
             cmd,
             capture_output=True,
             **text_options,
+            **stdin_options,
             timeout=timeout,
             env=env,
             cwd=str(normalized_working_dir),
-            stdin=subprocess.DEVNULL,
             # Checkpoints fire several bare git calls per turn from the
             # console-less desktop/gateway backend; suppress the per-call
             # conhost flash on Windows (no-op on POSIX).
@@ -442,6 +448,101 @@ def _git_out(args: list[str], store: Path, working_dir: str, rc: Optional[set[in
     """stdout of a successful git call, else ``""``."""
     ok, out, _ = _run_git(args, store, working_dir, allowed_returncodes=rc)
     return out if ok else ""
+
+
+def _repo_git_env() -> dict:
+    """Env for git reading the checkout's OWN repository (not the store).
+
+    Same config isolation as the store (no user hooks, fsmonitor daemons or
+    prompts), no inherited repository overrides, and no lazy fetch: a blob a
+    partial clone lacks must fail the seed, not trigger a network fetch."""
+    from tools.environments.local import build_subprocess_env
+
+    env = selected_git_env(build_subprocess_env(scrub_secrets=False, inherit_profile_home=False))
+    for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_COMMON_DIR",
+              "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+        env.pop(k, None)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _checkout_index(working_dir: str) -> Optional[tuple[Path, Path]]:
+    """``(index file, common git dir)`` when ``working_dir`` is the top level of
+    a git checkout (a clone or a linked worktree) that has an index, else None."""
+    env = _repo_git_env()
+    git = shutil.which("git", path=env.get("PATH", ""))
+    if git is None:
+        return None
+    try:
+        result = subprocess.run(
+            [git, "rev-parse", "--path-format=absolute", "--show-toplevel",
+             "--git-path", "index", "--git-common-dir"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=env, cwd=working_dir, timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL, creationflags=windows_hide_flags(), check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = result.stdout.splitlines()
+    if result.returncode != 0 or len(lines) != 3:
+        return None
+    top, index, common = (Path(line) for line in lines)
+    try:
+        if top.resolve() != Path(working_dir).resolve() or not index.is_file():
+            return None
+    except OSError:
+        return None
+    return index, common
+
+
+def _pack_from_repo(working_dir: str, common_dir: Path, store: Path, shas: list[str]) -> tuple[bool, str]:
+    """Copy objects ``shas`` from the checkout's repository into the store as one pack.
+
+    ``pack-objects`` (in the repository, delta search off: stored data is
+    reused) writes into a temp file inside the store; the store's own
+    ``index-pack`` then verifies and installs it. Nothing is written into the
+    user's repository."""
+    env = _repo_git_env()
+    git = shutil.which("git", path=env.get("PATH", ""))
+    if git is None:
+        return False, "git is not installed or not on PATH"
+    pack_dir = store / "objects" / "pack"
+    tmp = pack_dir / f"tmp_pack_seed_{os.getpid()}"
+    try:
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "wb") as out:
+            result = subprocess.run(
+                [git, "pack-objects", "--stdout", "-q", "--window=0"],
+                input=("\n".join(shas) + "\n").encode(), stdout=out, stderr=subprocess.PIPE,
+                env=env, cwd=working_dir, timeout=_GIT_TIMEOUT,
+                creationflags=windows_hide_flags(), check=False,
+            )
+        if result.returncode != 0:
+            return False, f"pack-objects in {common_dir} failed: {result.stderr.decode(errors='replace').strip()}"
+        store_env = _git_env(store, working_dir)
+        with open(tmp, "rb") as src:
+            result = subprocess.run(
+                [git, "index-pack", "--stdin"],
+                stdin=src, capture_output=True,
+                env=store_env, cwd=working_dir, timeout=_GIT_TIMEOUT,
+                creationflags=windows_hide_flags(), check=False,
+            )
+        if result.returncode != 0:
+            return False, f"index-pack failed: {result.stderr.decode(errors='replace').strip()}"
+        return True, ""
+    except subprocess.TimeoutExpired as exc:
+        return False, f"copying {len(shas)} objects from {common_dir} timed out after {exc.timeout}s"
+    except OSError as exc:
+        return False, f"copying objects from {common_dir} failed: {exc}"
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def _ref_tip(store: Path, working_dir: str, ref: str) -> Optional[str]:
@@ -1490,11 +1591,21 @@ class CheckpointManager:
             # First snapshot for this project.
             index_file.parent.mkdir(parents=True, exist_ok=True)
 
+        # No snapshot to seed from: a git checkout's own index already carries
+        # the stat data and blob ids of every tracked file, so seed from it
+        # (copying the blobs the store lacks) and git hashes only what differs
+        # from that index instead of the whole tree.
+        seeded = False
+        if warm_since is None and not index_file.exists():
+            seeded = self._seed_from_repo_index(store, working_dir, index_file)
+
         # Price the add before running it: files under the cap still cost a
         # hash each, and a tree of them can outlast the timeout (a fresh source
         # checkout on a loaded laptop). Over budget, skip the add instead of
         # blocking the turn until git is killed.
-        over = self._over_staging_budget(store, working_dir, index_file, scan, warm_since)
+        over = self._over_staging_budget(
+            store, working_dir, index_file, scan, warm_since, precise=seeded,
+        )
         if over is not None:
             staging.mark_slow(store, working_dir)
             logger.warning(
@@ -1641,9 +1752,110 @@ class CheckpointManager:
                 logger.info("Checkpoint: removed %d partial file(s) left by the timed-out git add", len(removed))
         return ok, out, err
 
+    def _seed_from_repo_index(self, store: Path, working_dir: str, index_file: Path) -> bool:
+        """Seed a cold project index from the git checkout's own index.
+
+        A fresh checkout (a new worktree) has never been snapshotted, so every
+        file would be hashed and written as a new object: 37 s for a
+        hermes-agent worktree on a loaded hub, over the staging budget. The
+        checkout's own index already holds each tracked file's blob id and stat
+        data. Copying it lets ``git add -A`` rehash only files that differ from
+        it; the blobs the store lacks are copied from the repository as one pack
+        (``pack-objects`` reuses the stored data, ~2 s for that worktree), so the
+        checkpoint never depends on the repository's object store.
+
+        Only when ``working_dir`` is the checkout's top level and every entry is
+        a plain stage-0 entry (no conflicts, assume-unchanged or skip-worktree
+        bits, which would hide changes from ``git add``). Tracked files the
+        checkpoint excludes (``DEFAULT_EXCLUDES``, the project's .gitignore) are
+        dropped, so the snapshot matches a cold add. Any failure leaves no index
+        behind (the cold path then prices and stages as before). Callers hold
+        the checkpoint store lock.
+        """
+        repo = _checkout_index(working_dir)
+        if repo is None:
+            return False
+        repo_index, common_dir = repo
+
+        def abandon(why: str) -> bool:
+            logger.debug("Checkpoint: not seeding %s from its git index: %s", working_dir, why)
+            for leftover in (index_file, Path(f"{index_file}.lock")):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
+            return False
+
+        try:
+            index_file.parent.mkdir(parents=True, exist_ok=True)
+            # copy2 keeps the index mtime: git's racy-clean check is anchored to it.
+            shutil.copy2(repo_index, index_file)
+        except OSError as exc:
+            return abandon(f"copy failed: {exc}")
+
+        # Drop extensions tied to the checkout (untracked cache, fsmonitor); a
+        # split index fails here (its shared part is not in the store).
+        ok, _, err = _run_git(
+            ["-c", "core.untrackedCache=false", "-c", "core.fsmonitor=false",
+             "update-index", "--no-untracked-cache", "--no-fsmonitor"],
+            store, working_dir, index_file=index_file, allowed_returncodes={128},
+        )
+        if not ok:
+            return abandon(err or "update-index failed")
+
+        ok, out, err = _run_git(
+            ["ls-files", "-z", "--cached", "--ignored", "--exclude-standard"],
+            store, working_dir, index_file=index_file, allowed_returncodes={128},
+        )
+        if not ok:
+            return abandon(err or "ls-files failed")
+        excluded = [p for p in out.split("\x00") if p]
+        if excluded:
+            self._unstage(store, working_dir, index_file, excluded)
+
+        ok, out, err = _run_git(
+            ["ls-files", "-z", "-v", "--stage"],
+            store, working_dir, index_file=index_file, allowed_returncodes={128},
+        )
+        if not ok:
+            return abandon(err or "ls-files failed")
+        blobs: set[str] = set()
+        for record in filter(None, out.split("\x00")):
+            meta, _, _path = record.partition("\t")
+            parts = meta.split()
+            if len(parts) != 4:
+                return abandon(f"unexpected ls-files record {meta!r}")
+            tag, mode, sha, stage_no = parts
+            if tag != "H" or stage_no != "0":
+                return abandon(f"index entry flagged {tag}/{stage_no}")
+            if mode != "160000":  # a gitlink names a commit of another repo
+                blobs.add(sha)
+        if not blobs:
+            return abandon("empty index")
+
+        ok, out, err = _run_git(
+            ["cat-file", "--batch-check=%(objectname)"], store, working_dir,
+            input_text="\n".join(sorted(blobs)) + "\n",
+        )
+        if not ok:
+            return abandon(err or "cat-file failed")
+        missing = [line.split()[0] for line in out.splitlines() if line.endswith(" missing")]
+        if missing:
+            started = time.time()
+            ok, err = _pack_from_repo(working_dir, common_dir, store, missing)
+            if not ok:
+                staging.clear_timeout_debris(store, started, None)
+                return abandon(err)
+        logger.debug(
+            "Checkpoint: seeded %s from its git index (%d entries, %d blobs copied)",
+            working_dir, len(blobs), len(missing),
+        )
+        return True
+
     def _over_staging_budget(
         self, store: Path, working_dir: str, index_file: Path,
         scan: staging.TreeScan, warm_since: Optional[float],
+        *, precise: bool = False,
     ) -> Optional[staging.AddEstimate]:
         """The add's estimate when it would not finish inside the staging budget, else None.
 
@@ -1651,9 +1863,12 @@ class CheckpointManager:
         index; files modified since the last snapshot on a warm one). Only when
         that is over budget does git list what it would really hash
         (``ls-files -o -m``: new and stat-changed, gitignored files dropped),
-        which is a directory walk with no hashing."""
+        which is a directory walk with no hashing. ``precise`` (an index seeded
+        from the checkout's own) prices the free estimate as a cold index: that
+        index's mtime says nothing about files left dirty before it was written,
+        so only the listing may narrow it."""
         budget = staging.budget_s(_GIT_TIMEOUT * 2)
-        est = staging.estimate(scan, warm_since)
+        est = staging.estimate(scan, None if precise else warm_since)
         if est.seconds <= budget:
             return None
         ok, out, _ = _run_git(

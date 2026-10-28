@@ -38,6 +38,7 @@ import { $clarifyRequests, clearClarifyRequest } from '@/store/clarify'
 import {
   announceGoneSessionDraft,
   announceNewSessionDraftKey,
+  beginFreshChatSend,
   migrateSessionDraft,
   requestComposerDraftSync,
   rotateFreshDraftKeyUnlessPending
@@ -675,6 +676,8 @@ export function useSessionActions({
       const startingRouteToken = getRouteToken()
 
       creatingSessionRef.current = true
+      // Holds off the cold-start restore until this create settles (store/composer.ts).
+      const endFreshChatSend = beginFreshChatSend()
 
       try {
         // An explicit one-shot workspace target (null → detached, string → that
@@ -849,6 +852,8 @@ export function useSessionActions({
 
         return created.session_id
       } finally {
+        endFreshChatSend()
+
         // Keep the guard up while a navigate to the new stored id is pending;
         // otherwise clear immediately (abort, error, or create without stored id).
         if (!pendingCreatedStoredSessionIdRef.current) {

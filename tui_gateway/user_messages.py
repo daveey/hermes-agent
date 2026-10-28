@@ -36,6 +36,12 @@ _TURN_ERROR_CODE_COPY: dict[str, tuple[str, str]] = {
     # [daveey] Not a provider verdict: the turn's session lease was lost (another owner claimed it).
     "session_turn_lease_lost": ("Hermes stopped this turn because it lost ownership of the session",
                                 "Send /retry to run it again."),
+    # [daveey] Admission refusals: another live process (often another device's Desktop) holds the chat.
+    # They fell through to the gateway layer's "internal error" copy, which reads like a crash.
+    "SESSION_NOT_OWNED": ("This chat is open in another Hermes window or device",
+                          "Use it there, or start a new chat with /new."),
+    "SESSION_COORDINATION_UNAVAILABLE": ("Hermes could not check whether this chat is open somewhere else",
+                                         "Send /retry; type /logs for the trace."),
 }
 
 _TURN_ERROR_LAYER_COPY: dict[str, tuple[str, str]] = {

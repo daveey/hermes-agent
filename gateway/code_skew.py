@@ -34,6 +34,22 @@ def record_boot_fingerprint() -> None:
         _boot_fingerprint = _fingerprint()
 
 
+def install_boot_pinned_imports() -> None:
+    """After ``record_boot_fingerprint``: pin later first-time in-tree imports to the boot commit
+    once the checkout moves, so a lazy import never mixes revisions (``gateway.boot_pinned_imports``)."""
+    try:
+        from gateway.boot_pinned_imports import install
+        from hermes_cli.main import _read_git_revision_fingerprint
+
+        # Bind the reader and root now: later monkeypatches/reassignments must not flip the latch.
+        root = _PROJECT_ROOT
+        install(root, _boot_fingerprint, lambda: _read_git_revision_fingerprint(root))
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning("boot-pinned imports did not install", exc_info=True)
+
+
 def _short(fingerprint: str) -> str:
     """Render a ``git:<ref>:<sha>`` fingerprint as a compact label."""
     sha = fingerprint.rsplit(":", 1)[-1]

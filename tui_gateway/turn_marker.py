@@ -113,14 +113,19 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
 
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
-                      auto_continue: bool = True, notification_category: str | None = None) -> None:
+                      auto_continue: bool = True, notification_category: str | None = None,
+                      pauses: int = 0) -> None:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
-    this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume."""
+    this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume.
+    ``pauses`` = core-update pauses this logical turn already took (``mark_turn_paused``), counted apart
+    from crash attempts so a pause never uses one up."""
     if not session_key or not prompt:
         return
     now = time.time()
     entry = {"attempts": max(0, int(attempts)), "prompt": prompt[:_MAX_PROMPT_CHARS], "started_at": now,
              "auto_continue": bool(auto_continue), **_writer_identity()}
+    if pauses:
+        entry["pauses"] = max(0, int(pauses))
     if notification_category == "diagnostic":
         entry["notification_category"] = notification_category
     # Identity only — never the prompt: this log is read on crash triage and must not carry turn content.
@@ -132,6 +137,26 @@ def clear_turn_marker(home: Path | str, session_key: str) -> None:
     """Remove the marker once its turn concluded (any outcome the client saw)."""
     if session_key:
         _update(home, session_key, lambda e: {k: v for k, v in e.items() if k != session_key} if session_key in e else None, "clear")
+
+
+def mark_turn_paused(home: Path | str, session_key: str, reason: str) -> bool:
+    """[daveey] Stamp a live turn's marker as paused at a step boundary for a core update: ``reason``,
+    ``paused_at``, ``pauses`` + 1, and this process as its writer. ``auto_continue`` stays as recorded.
+    True when a marker existed to stamp."""
+    stamped = []
+
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not isinstance(entry, dict):
+            return None
+        entry.update(reason=str(reason), paused_at=time.time(), pauses=int(entry.get("pauses") or 0) + 1,
+                     **_writer_identity())
+        stamped.append(True)
+        return entries
+
+    if session_key:
+        _update(home, session_key, mutate, "pause")
+    return bool(stamped)
 
 
 def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | None:
@@ -146,8 +171,10 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
             return None
         return {"attempts": max(0, int(entry.get("attempts") or 0)), "prompt": prompt, "started_at": _started_at(entry),
                 "auto_continue": bool(entry.get("auto_continue", True)),
+                "pauses": max(0, int(entry.get("pauses") or 0)),
                 # Writer identity when present: extra keys only, so a marker written by an older build still reads.
                 **{k: entry[k] for k in ("writer_pid", "writer_start_time") if entry.get(k) is not None},
+                **({"reason": str(entry["reason"])} if entry.get("reason") else {}),
                 **({"notification_category": "diagnostic"}
                    if entry.get("notification_category") == "diagnostic" else {})}
     except Exception:

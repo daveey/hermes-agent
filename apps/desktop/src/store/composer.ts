@@ -590,6 +590,45 @@ export function migrateSessionDraft(fromKey: string | null | undefined, toKey: s
  */
 let announcedNewSessionDraftKey: string | null = null
 
+/**
+ * Sends from the fresh chat whose `session.create` is still in flight.
+ *
+ * The cold-start resume-last-session restore may only replace the fresh chat
+ * while the user has not acted on it: once they hit Send there, the send owns
+ * the window. Restoring mid-create moved the route under the send, which then
+ * aborted as a session switch and dropped the message (first-run E2E, launch 2:
+ * Enter as soon as the composer enabled, restore landing a second later).
+ */
+let freshChatSendsInFlight = 0
+
+/** Mark a fresh-chat send in flight; call the returned release once (idempotent). */
+export function beginFreshChatSend(): () => void {
+  freshChatSendsInFlight += 1
+  let released = false
+
+  return () => {
+    if (!released) {
+      released = true
+      freshChatSendsInFlight = Math.max(0, freshChatSendsInFlight - 1)
+    }
+  }
+}
+
+export const freshChatSendInFlight = (): boolean => freshChatSendsInFlight > 0
+
+/**
+ * The current fresh-chat draft as a comparable value (text + attachment ids).
+ * Fresh drafts persist across launches, so "has content" alone can't tell a
+ * draft typed this launch from one left over; compare against a baseline.
+ * Reads the stash: flush the editor first (`requestComposerDraftSync('flush')`)
+ * when the last keystrokes must count.
+ */
+export const freshDraftSignature = (): string => {
+  const draft = draftsBySession.get(freshDraftScope())
+
+  return draft ? JSON.stringify([draft.text, draft.attachments.map(attachment => attachment.id)]) : ''
+}
+
 export function announceNewSessionDraftKey(toKey: string | null | undefined): void {
   announcedNewSessionDraftKey = toKey?.trim() || null
 }

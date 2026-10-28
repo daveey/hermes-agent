@@ -5,21 +5,34 @@ pipeline down) ends its run with ``kanban_block(..., blocker_id="<slug>")`` or
 ``kanban_continue(..., blocker_id="<slug>")``. The id lands in that run's metadata
 (``blocker_id``); nothing else is stored, so the blocker's state is derived from run history:
 
-* a card is **behind** blocker X while its latest non-neutral closed run carries X;
+* a card is **behind** blocker X while its latest run that said anything about X carries X;
 * X was **asserted** at the newest ``ended_at`` of any run carrying X;
-* X was **cleared** at the newest ``ended_at`` of a run that followed an X-run on the same card
-  and did NOT carry X (it completed, handed off, or stopped on something else);
+* X was **cleared** only on evidence that the wall is gone, at the newest of:
+  - the ``ended_at`` of a run that followed an X-run on the same card and completed or handed
+    off (``CLEAR_OUTCOMES``);
+  - the ``ended_at`` of such a run that ended with ``clear_blocker: true`` in its metadata
+    (an explicit "the wall is gone", passed to kanban_block/kanban_schedule/kanban_continue);
+  - the ``ended_at`` of such a run that named a different blocker (the probe got past X and
+    hit another wall);
+  - a ``condition_met`` event (the card's wake_check exited 0) on a card behind X;
 * X is **open** while asserted > cleared.
+
+A re-park WITHOUT the id (``blocked``/``scheduled``/``continued`` with no ``clear_blocker``) says
+nothing about X: the card stays behind X and X stays open. It used to count as a clear, so a
+parent chat re-parking one card released every other card while the wall still stood
+(2026-10-28, t_e7dc822c run 5878 released t_01a1800921b1ff50).
 
 While X is open the dispatcher spawns at most one card behind it (the *probe*) per
 ``kanban.shared_blocker_probe_seconds``; the others are held with respawn guard reason
 ``shared_blocker`` instead of each re-discovering the same wall. A human unblock of a card lets
-that card probe at once (still one probe at a time). When a probe ends without re-asserting X,
-X clears: held ``ready`` cards dispatch normally and cards still ``blocked`` behind X are
-unblocked by :func:`release_cleared_blockers`.
+that card probe at once (still one probe at a time). Every card parked behind X keeps its own
+wake (``kanban_timed_park``: a blocker park with no wake is given one after the probe interval),
+so the probe still runs when no card behind X sits ``ready``. When X clears, held ``ready``
+cards dispatch normally and cards still ``blocked`` or ``scheduled`` behind X are woken by
+:func:`release_cleared_blockers`.
 
-Neutral outcomes (crash, timeout, reclaim, spawn failure, rate limit, give-up) say nothing about
-the external condition, so they neither assert nor clear a blocker.
+Neutral outcomes (crash, timeout, reclaim, spawn failure, rate limit, give-up, failure) say
+nothing about the external condition, so they neither assert nor clear a blocker.
 
 Matching on normalized error text was considered and left out: crash/timeout/protocol-violation
 errors share fixed preambles across unrelated cards (``_error_fingerprint`` keeps 80 chars), and
@@ -45,6 +58,27 @@ NEUTRAL_OUTCOMES = frozenset({
 })
 # Only blockers asserted this recently are considered (bounds the scan on old boards).
 _LOOKBACK_SECONDS = 14 * 86400
+# A run without the id that ended this way is evidence the wall is gone: the card finished,
+# or handed off to review / back from review.
+CLEAR_OUTCOMES = frozenset({"completed", "review_requested", "changes_requested"})
+# Run metadata / tool arg: the caller says the card's shared blocker is gone.
+CLEAR_FLAG = "clear_blocker"
+CONDITION_MET_EVENT = "condition_met"   # kanban_wake_check.CONDITION_MET_EVENT
+
+
+def run_effect(outcome: Optional[str], metadata) -> tuple[str, Optional[str]]:
+    """What one closed run says about the card's shared blocker: ``("assert", id)``,
+    ``("clear", None)`` (completed/handed off, or ``clear_blocker``), or ``("pass", None)``
+    (a neutral outcome or a re-park without the id: says nothing). [daveey]"""
+    from hermes_cli import kanban_db as kb
+
+    meta = kb._json_dict(metadata)
+    bid = normalize_blocker_id(meta.get("blocker_id"))
+    if bid is not None:
+        return "assert", bid
+    if meta.get(CLEAR_FLAG) is True or (outcome or "") in CLEAR_OUTCOMES:
+        return "clear", None
+    return "pass", None
 
 _ID_RE = re.compile(r"[^a-z0-9._-]+")
 
@@ -77,7 +111,8 @@ class BlockerState:
     blocker_id: str
     asserted_at: int = 0
     cleared_at: int = 0
-    cleared_by: Optional[tuple[str, int]] = None   # (task_id, run_id) of the clearing run
+    cleared_by: Optional[tuple[str, Optional[int]]] = None   # (task_id, run_id or None) that cleared it
+    cleared_via: str = ""                           # "run" or "condition_met"
     reason: str = ""                                # summary of the newest asserting run
     # task_id -> ended_at of the asserting run the card is still behind
     behind: dict[str, int] = field(default_factory=dict)
@@ -126,6 +161,7 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
             "WHERE task_id = ? ORDER BY id", (tid,),
         ).fetchall()
         current: Optional[tuple[str, int]] = None   # (blocker, asserting ended_at)
+        asserting_run: Optional[int] = None
         for run in runs:
             started = kb._to_epoch(run["started_at"]) or 0
             if current is not None and current[0] in states:
@@ -134,17 +170,28 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
             if run["ended_at"] is None:
                 continue
             ended = kb._to_epoch(run["ended_at"]) or 0
-            bid = _meta_blocker(kb, run["metadata"])
-            if bid is not None:
+            effect, bid = run_effect(run["outcome"], run["metadata"])
+            if effect == "assert" and bid is not None:
                 if current is not None and current[0] != bid and current[0] in states:
                     _mark_cleared(states[current[0]], tid, run["id"], ended)
-                current = (bid, ended)
+                current, asserting_run = (bid, ended), int(run["id"])
                 continue
-            if (run["outcome"] or "") in NEUTRAL_OUTCOMES:
+            if effect == "pass":
                 continue
             if current is not None and current[0] in states:
                 _mark_cleared(states[current[0]], tid, run["id"], ended)
             current = None
+        if current is not None and current[0] in states:
+            # The card's own wake_check exiting 0 after it parked behind X is evidence too.
+            # Ordered by event id after the asserting run's own events (same-second safe).
+            met = conn.execute(
+                "SELECT id, created_at FROM task_events WHERE task_id = ? AND kind = ? AND id > COALESCE("
+                "(SELECT MAX(id) FROM task_events WHERE task_id = ? AND run_id = ?), 0) "
+                "ORDER BY id DESC LIMIT 1", (tid, CONDITION_MET_EVENT, tid, asserting_run),
+            ).fetchone()
+            if met is not None:
+                _mark_cleared(states[current[0]], tid, None,
+                              max(kb._to_epoch(met["created_at"]) or 0, current[1]), via=CONDITION_MET_EVENT)
         if current is not None and live and current[0] in states:
             states[current[0]].behind[tid] = current[1]
     for st in states.values():
@@ -153,10 +200,12 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
     return states
 
 
-def _mark_cleared(st: BlockerState, task_id: str, run_id: int, ended: int) -> None:
+def _mark_cleared(st: BlockerState, task_id: str, run_id: Optional[int], ended: int, *,
+                  via: str = "run") -> None:
     if ended >= st.cleared_at:
         st.cleared_at = ended
-        st.cleared_by = (task_id, int(run_id))
+        st.cleared_by = (task_id, int(run_id) if run_id is not None else None)
+        st.cleared_via = via
 
 
 def blocker_for_task(states: dict[str, BlockerState], task_id: str) -> Optional[BlockerState]:
@@ -173,7 +222,7 @@ def _unblocked_since_assertion(conn: sqlite3.Connection, task_id: str, blocker_i
 
     newest = 0
     for row in conn.execute(
-        "SELECT id, payload FROM task_events WHERE kind IN ('blocked', 'continued', 'block_loop_detected') "
+        "SELECT id, payload FROM task_events WHERE kind IN ('blocked', 'scheduled', 'continued', 'block_loop_detected') "
         "AND payload LIKE ? ORDER BY id DESC LIMIT 50", (f'%"{blocker_id}"%',),
     ):
         if normalize_blocker_id(kb._json_dict(row["payload"]).get("blocker_id")) == blocker_id:
@@ -215,30 +264,39 @@ def shared_blocker_guard(
 
 
 def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:
-    """Unblock ``blocked`` cards behind a blocker a later probe cleared. Returns task ids."""
+    """Wake ``blocked`` and ``scheduled`` cards behind a blocker that later evidence cleared.
+    Returns task ids."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_wake_check as kwc
 
     released: list[str] = []
     for st in blocker_states(conn, now=now).values():
         if st.is_open or st.cleared_by is None:
             continue
+        by_task, by_run = st.cleared_by
         for tid, asserted in sorted(st.behind.items()):
-            if asserted >= st.cleared_at:
+            if asserted > st.cleared_at or tid == by_task:
                 continue
             row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
-            if row is None or row["status"] != "blocked":
+            if row is None or row["status"] not in ("blocked", "scheduled"):
                 continue
-            if not kb.unblock_task(conn, tid):
-                continue
-            by_task, by_run = st.cleared_by
+            payload = {"blocker_id": st.blocker_id, "cleared_by_task": by_task, "cleared_by_run": by_run,
+                       "cleared_via": st.cleared_via or "run"}
+            if row["status"] == "blocked":
+                if not kb.unblock_task(conn, tid):
+                    continue
+                with kb.write_txn(conn):
+                    kb._append_event(conn, tid, CLEARED_EVENT, payload)
+            else:
+                with kb.write_txn(conn):
+                    if kwc._wake(conn, tid, CLEARED_EVENT, payload) is None:
+                        continue
+            how = (f"{by_task}'s wake_check exited 0" if st.cleared_via == CONDITION_MET_EVENT
+                   else f"{by_task} run {by_run} ended without hitting it")
             with kb.write_txn(conn):
-                kb._append_event(conn, tid, CLEARED_EVENT, {
-                    "blocker_id": st.blocker_id, "cleared_by_task": by_task, "cleared_by_run": by_run,
-                })
                 kb._insert_comment(
                     conn, tid, "dispatcher",
-                    f"shared blocker `{st.blocker_id}` cleared: {by_task} run {by_run} ended without "
-                    "hitting it, so this card was unblocked automatically.",
+                    f"shared blocker `{st.blocker_id}` cleared: {how}, so this card was woken automatically.",
                     int(time.time()),
                 )
             released.append(tid)
@@ -306,7 +364,9 @@ def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
         lines.append("")
         lines.append(
             f"This run is the probe for `{mine.blocker_id}`. Check first whether it still holds. If it "
-            f"does, end again with `blocker_id: \"{mine.blocker_id}\"`. If it is gone, carry on: ending "
-            "without that id clears it and releases the other parked cards.")
+            f"does, end again with `blocker_id: \"{mine.blocker_id}\"`. If it is gone, carry on: "
+            "completing or handing off clears it and wakes the other parked cards. A park without the "
+            "id does NOT clear it; if you park for another reason and saw the wall gone, pass "
+            "`clear_blocker: true`.")
     lines.append("")
     return "\n".join(lines)

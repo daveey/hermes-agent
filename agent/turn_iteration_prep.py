@@ -349,6 +349,22 @@ class IterationStart:
     _turn_exit_reason: Any
 
 
+def _step_boundary_pause(agent: Any, messages: Any, api_call_count: Any) -> Any:
+    """The installed pause hook's reason, consulted only at a real step boundary: at least one model
+    call ran this turn and the transcript ends on a tool result. A failing hook never pauses."""
+    hook = getattr(agent, "step_boundary_pause", None)
+    if not callable(hook) or not api_call_count or not messages:
+        return None
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "tool":
+        return None
+    try:
+        return hook() or None
+    except Exception:
+        logger.debug("step boundary pause hook failed", exc_info=True)
+        return None
+
+
 def begin_iteration(
     agent: Any, *, messages: Any, conversation_history: Any, original_user_message: Any,
     api_call_count: Any, interrupted: Any, _turn_exit_reason: Any,
@@ -385,6 +401,18 @@ def begin_iteration(
         _turn_exit_reason = f"interrupted_by_system({_issuer})" if _issuer else "interrupted_by_user"
         if not agent.quiet_mode:
             agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
+        return _verdict("break")
+
+    # [daveey] Core-update pause (t_01a1827558218fed): the step boundary is here, after every tool
+    # result of the previous step is appended and before the next model call. The Desktop/TUI gateway
+    # installs ``step_boundary_pause`` per turn; a reason ends the turn as an interrupt it auto-continues
+    # on the updated backend. Persist first, so the next backend sees every finished tool result.
+    _pause = _step_boundary_pause(agent, messages, api_call_count)
+    if _pause:
+        agent._persist_session(messages, conversation_history)
+        agent._step_boundary_paused = _pause
+        interrupted = True
+        _turn_exit_reason = f"paused_for_update({_pause})"
         return _verdict("break")
 
     # Aggregate input budget for detached auxiliary forks bounds the whole review, not

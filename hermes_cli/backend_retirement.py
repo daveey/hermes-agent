@@ -23,9 +23,10 @@ BACKGROUND_REVIEW_HARD_CAP_S = 900.0
 class BackgroundReviewHold:
     """One running review's claim on the fence; ``wind_down`` asks the fork to stop between calls."""
 
-    def __init__(self, started_at):
+    def __init__(self, started_at, reservation=None):
         self.started_at = started_at
         self.wind_down = threading.Event()
+        self.reservation = reservation
 
 
 class RetirementFence:
@@ -66,20 +67,44 @@ class RetirementFence:
             return self._active
 
     def begin_background_review(self):
-        """Admit a background review, or None once retirement holds a permit (or is preparing)."""
+        """Admit a review under BOTH the process and cross-process update fences.
+
+        The sync drainer cannot see this process's review set. Keep a locked
+        admission reservation until the review thread exits, including mid-call
+        waits. A drain window closes new admissions and waits for this claim;
+        if the call outlasts the window, the window expires rather than killing it.
+        """
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+        from hermes_cli.admission_fence import reserve, SUPPORTED
+
+        pending = None
+        if SUPPORTED:
+            try:
+                pending = reserve(get_default_hermes_root(home=get_hermes_home()))
+            except (OSError, TimeoutError):
+                logging.getLogger(__name__).warning("Review update admission unavailable", exc_info=True)
+                return None
+            if pending is None:
+                return None
         with self._lock:
             self._expire()
             if self._preparing or self._token is not None:
+                if pending is not None:
+                    pending.close()
                 return None
-            hold = BackgroundReviewHold(self._now())
+            hold = BackgroundReviewHold(self._now(), pending)
             self._reviews.add(hold)
             return hold
 
     def end_background_review(self, hold):
         if hold is None:
             return
+        # Close outside the process lock. Reservation.close is idempotent and
+        # keeps the file locked until unlink, so there is no false-idle gap.
         with self._lock:
             self._reviews.discard(hold)
+        if hold.reservation is not None:
+            hold.reservation.close()
 
     def _blocking_reviews(self):
         now = self._now()

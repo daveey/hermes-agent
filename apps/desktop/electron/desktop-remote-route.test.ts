@@ -39,7 +39,7 @@ test('profile remote wins precedence and carries one exact registry id', () => {
   assert.equal(route?.connectionId, 'worker')
 })
 
-test('environment route wins over global but never claims a registry id', () => {
+test('environment route claims only the exact registry primary envelope', () => {
   const route = resolveDesktopRemoteRoute({
     config: { mode: 'remote', remote: { url: 'https://global.test', token: tokenB } },
     env: { url: 'https://env.test', token: 'token-a' },
@@ -47,7 +47,7 @@ test('environment route wins over global but never claims a registry id', () => 
   })
 
   assert.equal(route?.source, 'env')
-  assert.equal(route?.connectionId, undefined)
+  assert.equal(route?.connectionId, 'env')
   assert.equal(route?.kind === 'remote' ? route.url : null, 'https://env.test')
 })
 

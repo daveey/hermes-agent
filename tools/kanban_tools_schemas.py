@@ -256,6 +256,29 @@ HUMAN_REQUEST = {
 }
 
 
+_BLOCKER_ID_DESC = (
+    "Optional. Set ONLY when the wall is outside this card and would stop other "
+    "cards too (CI billing/quota refused, a provider or service outage, a release "
+    "pipeline down): a short slug such as 'github-actions-billing'. Reuse an id "
+    "from 'Open shared blockers' in your context when it is the same wall. The "
+    "dispatcher then holds every ready card behind it and runs one probe card per "
+    "interval. The blocker clears only on evidence the wall is gone: a card behind "
+    "it completes or hands off for review, a park passes clear_blocker=true, a run "
+    "names a different blocker_id, or a wake_check of a card behind it exits 0. "
+    "Then every parked card behind it wakes. A later park WITHOUT the id (by you or "
+    "a parent chat, via kanban_block, kanban_schedule or kanban_continue) does NOT "
+    "clear it: the card stays behind the blocker."
+)
+_CLEAR_BLOCKER_PROP = {
+    "clear_blocker": {"type": "boolean", "description": (
+        "Optional, default false. True records that the shared blocker this card is "
+        "parked behind is gone (you checked it), although this run parks for another "
+        "reason; that clears the blocker and wakes the other cards behind it. Never "
+        "combine with blocker_id."
+    )},
+}
+
+
 KANBAN_BLOCK_SCHEMA = _schema(
     "kanban_block",
     (
@@ -311,14 +334,13 @@ KANBAN_BLOCK_SCHEMA = _schema(
                 "(default 24h). The others surface to a human. Omit only if none apply."
             ),
         },
-        "blocker_id": _prop("string", (
-            "Optional. Set ONLY when the wall is outside this card and would stop other "
-            "cards too (CI billing/quota refused, a provider or service outage, a release "
-            "pipeline down): a short slug such as 'github-actions-billing'. Reuse an id "
-            "from 'Open shared blockers' in your context when it is the same wall. The "
-            "dispatcher then holds every card behind it and runs one probe card per "
-            "interval; a run that ends without the id clears it and releases the rest."
+        "blocker_id": _prop("string", _BLOCKER_ID_DESC + (
+            " With SCHEDULED_UNTIL, kind='time', wake_check or clock_only the card parks "
+            "'scheduled' with that wake and stays behind the blocker; with none of them it "
+            "parks 'scheduled' and wakes after the shared probe interval. With human_request "
+            "it stays a visible block."
         )),
+        **_CLEAR_BLOCKER_PROP,
         **_NEEDS_PROP,
         **_WAKE_CHECK_PROPS,
     },
@@ -340,7 +362,10 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
         "names the owner card doing it (create it on the gateway that holds the "
         "capability), and a wait on David is a kanban_block needs_input ask, never "
         "a park. A wait on another card on this board is a parent link "
-        "(kanban_link), not a park."
+        "(kanban_link), not a park. This tool takes no blocker_id: a card already "
+        "behind a shared blocker stays behind it when parked here (the park says "
+        "nothing about the wall), and the blocker stays open for every other card; "
+        "pass clear_blocker=true only when you saw the wall gone."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
@@ -348,6 +373,7 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
             "Optional reason or machine-readable wake-up marker recorded on "
             "the completed run and scheduled event."
         )),
+        **_CLEAR_BLOCKER_PROP,
         **_NEEDS_PROP,
         **_WAKE_CHECK_PROPS,
     },
@@ -392,14 +418,8 @@ KANBAN_CONTINUE_SCHEMA = _schema(
         "metadata": {"type": "object", "description": (
             "Optional machine-readable state (e.g. {\"pids\": [...], \"ci_run\": ...})."
         )},
-        "blocker_id": _prop("string", (
-            "Optional. Set ONLY when the wall is outside this card and would stop other "
-            "cards too (CI billing/quota refused, a provider or service outage, a release "
-            "pipeline down): a short slug such as 'github-actions-billing'. Reuse an id "
-            "from 'Open shared blockers' in your context when it is the same wall. The "
-            "dispatcher then holds every card behind it and runs one probe card per "
-            "interval; a run that ends without the id clears it and releases the rest."
-        )),
+        "blocker_id": _prop("string", _BLOCKER_ID_DESC),
+        **_CLEAR_BLOCKER_PROP,
     },
     ["checkpoint"],
 )

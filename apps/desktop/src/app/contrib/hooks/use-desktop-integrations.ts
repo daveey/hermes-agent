@@ -14,7 +14,12 @@ import { pathFromHermesDeepLink, resolveHermesOpenPath } from '@/lib/hermes-open
 import { canonicalizeCombo } from '@/lib/keybinds/combo'
 import { runBuiltinAction } from '@/lib/keybinds/plugin-actions'
 import { storedSessionIdForNotification } from '@/lib/session-ids'
-import { announceNewSessionDraftKey } from '@/store/composer'
+import {
+  announceNewSessionDraftKey,
+  freshChatSendInFlight,
+  freshDraftSignature,
+  requestComposerDraftSync
+} from '@/store/composer'
 import { recordAction } from '@/store/desktop-metrics'
 import { $comboIndex } from '@/store/keybinds'
 import { requestMcpInstallFromDeepLink } from '@/store/mcp-deeplink-install'
@@ -121,6 +126,20 @@ export function useDesktopIntegrations({
   }, [])
 
   const restoredRef = useRef(false)
+  // The fresh-chat draft as this launch found it; a different one later means the user typed.
+  const freshDraftBaselineRef = useRef<string | null>(null)
+
+  if (freshDraftBaselineRef.current === null) {
+    freshDraftBaselineRef.current = freshDraftSignature()
+  }
+
+  const freshChatTouched = () => {
+    // The stash lags the editor by the persist debounce; flush so the last keystrokes count.
+    requestComposerDraftSync('flush')
+
+    return freshDraftSignature() !== freshDraftBaselineRef.current
+  }
+
   const diskPluginsScanPending = useStore($diskPluginsScanPending)
 
   // Wait until boot has adopted the primary profile, then restore that profile's
@@ -151,6 +170,17 @@ export function useDesktopIntegrations({
         }
 
         if (!resumeLastSession) {
+          restoredRef.current = true
+
+          return
+        }
+
+        // The user already started on the fresh chat (typed into it, or hit
+        // Send as soon as the composer enabled) before the session list
+        // arrived: they are where they chose to be. Navigating now would
+        // abort an in-flight send as a session switch, or swap a just-typed
+        // draft out of the editor, and either way drop what they wrote.
+        if (freshChatSendInFlight() || freshChatTouched()) {
           restoredRef.current = true
 
           return

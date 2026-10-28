@@ -47,6 +47,8 @@ export interface PluginRestOptions {
   /** Single-file multipart upload (see HermesApiRequest.upload). */
   upload?: { filename: string; contentType?: string; bytes: ArrayBuffer }
   timeoutMs?: number
+  /** Read an already-running backend without starting one for a background probe. */
+  passive?: boolean
   /** [daveey] Send this call to ONE registry connection (its id) instead of
    *  the active gateway — for plugins that read every gateway at once (the
    *  Kanban board). The ambient profile is NOT carried: a profile name belongs
@@ -90,6 +92,7 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
     body: opts.body,
     upload: opts.upload,
     timeoutMs: opts.timeoutMs,
+    ...(opts.passive ? { passive: true } : {}),
     ...(opts.connectionId ? { connectionId: opts.connectionId } : {}),
     ...(opts.profile !== undefined ? profileScoped(opts.profile) : opts.connectionId ? {} : profileScoped())
   })

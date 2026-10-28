@@ -5718,8 +5718,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     apply_nofile_soft_limit()
 
     # Snapshot the revision while sys.modules matches disk so a later `git pull` is detected safely.
-    from gateway.code_skew import record_boot_fingerprint
+    from gateway.code_skew import install_boot_pinned_imports, record_boot_fingerprint
     record_boot_fingerprint()
+    install_boot_pinned_imports()
 
     # Multiplex-only: the ONE host gateway decides first. Attach to it, make it serve this profile,
     # replace it (--replace) or refuse — before anything below binds a port or claims a PID file.

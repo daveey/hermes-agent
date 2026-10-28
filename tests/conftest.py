@@ -472,6 +472,27 @@ def _reset_foreground_exit_fence():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_kanban_live_worker_procs():
+    """Give every test an empty ``kanban_db_dispatch._live_worker_procs`` and drop what it parked.
+
+    ``_default_spawn`` parks each ``subprocess.Popen`` handle in that module-global registry and
+    ``reap_worker_zombies`` later calls ``.poll()`` on every entry. A test that monkeypatches
+    ``subprocess.Popen`` with a minimal fake (no ``poll``) leaked the fake into the registry, so a
+    later dispatch test in the same process died with ``'_FakePopen' object has no attribute
+    'poll'`` (order-dependent CI flake). Clearing here covers every current and future fake.
+    """
+    mod = sys.modules.get("hermes_cli.kanban_db_dispatch")
+    saved = dict(mod._live_worker_procs) if mod is not None else {}
+    if mod is not None:
+        mod._live_worker_procs.clear()
+    yield
+    mod = sys.modules.get("hermes_cli.kanban_db_dispatch")
+    if mod is not None:
+        mod._live_worker_procs.clear()
+        mod._live_worker_procs.update(saved)
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_kanban_memory_guard(request, monkeypatch):
     """Pin the kanban dispatcher's memory guard to "no data" for every test.
 
