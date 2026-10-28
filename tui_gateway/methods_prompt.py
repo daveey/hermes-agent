@@ -852,6 +852,11 @@ def _(rid, params: dict) -> dict:
                 break
             if (err.get("error", {}).get("data") or {}).get("reason") == "turn_claim_busy":
                 continue
+            if (err.get("error", {}).get("code") == 5035 and not has_truncation and not internal_hosted_submit
+                    and (held := _queue_submit_behind_update_hold(
+                        rid, sid, session, text, busy_transport, turn_author=turn_author,
+                        display_kind=display_kind)) is not None):
+                return held
             return err
         if internal_hosted_submit:
             return _err(rid, 4091, "hosted room member session is busy")
