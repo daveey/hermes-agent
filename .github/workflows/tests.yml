@@ -314,7 +314,13 @@ jobs:
     # runs ~5-15 min. Sharded by suite directory (see e2e-upgrade-plan).
     name: e2e-upgrade (${{ matrix.shard }})
     needs: e2e-upgrade-plan
-    runs-on: [self-hosted, hermes-hub]
+    # [daveey] ci-bwrap: hub slots whose container can run bubblewrap (userns-remapped
+    # daemon, host AppArmor profile for /usr/bin/bwrap, Docker seccomp + namespace
+    # syscalls, unmasked /proc). A plain hermes-hub slot fails the bwrap probe below:
+    # Docker's default seccomp/AppArmor and masked /proc block bwrap, and the
+    # container cannot set the host's apparmor_restrict_unprivileged_userns.
+    # Runbook: hosts/hermes-ci-capacity/BWRAP.md in the hermes-sync repo.
+    runs-on: [self-hosted, hermes-hub, ci-bwrap]
     timeout-minutes: 60
     strategy:
       fail-fast: false

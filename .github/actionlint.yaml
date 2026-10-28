@@ -14,6 +14,8 @@ self-hosted-runner:
     - docker-ci
     - hermes-hub-poll
     - ci-fast
+    # bubblewrap-capable hub slots (tests.yml e2e-upgrade).
+    - ci-bwrap
 
 # fork (daveey/hermes): known findings that are not bugs. The lint runs in
 # .github/workflows/actionlint.yml. Keep each pattern narrow.

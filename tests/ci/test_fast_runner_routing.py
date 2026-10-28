@@ -89,3 +89,19 @@ def test_fast_label_is_known_and_checks_cannot_bypass_the_gate():
             callers = {key for key, value in workflows["ci.yaml"]["jobs"].items()
                        if value.get("uses") == f"./.github/workflows/{wf}"}
             assert callers and callers <= set(gate["needs"])
+
+
+def test_e2e_upgrade_runs_only_on_bwrap_capable_slots():
+    # Its probe step refuses to run the updater unsandboxed; a plain hermes-hub slot cannot
+    # start bubblewrap (Docker seccomp/AppArmor, masked /proc, host userns restriction).
+    workflows = _workflows()
+    job = workflows["tests.yml"]["jobs"]["e2e-upgrade"]
+    assert _labels(job) == ["self-hosted", "hermes-hub", "ci-bwrap"]
+    probe = [s for s in job["steps"] if s.get("name") == "Install bubblewrap"]
+    assert probe and "assert BWRAP_OK" in probe[0]["run"]
+    labels = YAML(typ="safe").load((ROOT / ".github" / "actionlint.yaml").read_text(encoding="utf-8"))
+    assert "ci-bwrap" in labels["self-hosted-runner"]["labels"]
+    for wf, data in workflows.items():
+        for name, j in data.get("jobs", {}).items():
+            if "ci-bwrap" in _labels(j):
+                assert (wf, name) == ("tests.yml", "e2e-upgrade")
