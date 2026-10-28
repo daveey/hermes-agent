@@ -935,9 +935,9 @@ class CheckpointManager:
 
         self._checkpointed_dirs.add(abs_dir)
 
-        backoff = staging.slow_remaining_s(_resolve_checkpoint_base(), abs_dir)
+        backoff = staging.slow_remaining_s(_store_path(), abs_dir)
         if backoff:
-            logger.debug("Checkpoint skipped: %s timed out staging; retry in %d min", abs_dir, backoff // 60 + 1)
+            logger.debug("Checkpoint skipped: %s is too slow to stage; retry in %d min", abs_dir, backoff // 60 + 1)
             return False
 
         try:
@@ -1440,6 +1440,10 @@ class CheckpointManager:
         # Seed the per-project index from the last checkpoint, if any, so the
         # diff/commit machinery sees only changes since then.  On first call,
         # clear the index so ``git add -A`` produces a clean tree.
+        # ``read-tree -m`` keeps the stat data of entries that still match the
+        # ref, so ``git add -A`` rehashes only files changed since the last
+        # snapshot (a plain read-tree made it rehash the whole tree every turn).
+        warm_since: Optional[float] = None
         if index_file.exists():
             # Reset index to current ref tip to avoid accumulating stale paths.
             ok_ref, ref_commit, _ = _run_git(
@@ -1448,12 +1452,35 @@ class CheckpointManager:
                 allowed_returncodes={128},
             )
             if ok_ref and ref_commit:
-                _run_git(
-                    ["read-tree", ref_commit],
+                try:
+                    index_mtime = index_file.stat().st_mtime
+                except OSError:
+                    index_mtime = None
+                ok_seed, _, _ = _run_git(
+                    ["read-tree", "-m", ref_commit],
                     store, working_dir,
                     index_file=index_file,
                     allowed_returncodes={128},
                 )
+                if ok_seed:
+                    warm_since = index_mtime
+                    if index_mtime is not None:
+                        # Keep the mtime of the last add's stat refresh: git
+                        # treats entries modified at or after it as racy and
+                        # rehashes them, and so does the estimate below. A
+                        # skipped or killed add then leaves the next turn's
+                        # estimate anchored to the last real snapshot.
+                        try:
+                            os.utime(index_file, (time.time(), index_mtime))
+                        except OSError:
+                            warm_since = None
+                else:
+                    _run_git(
+                        ["read-tree", ref_commit],
+                        store, working_dir,
+                        index_file=index_file,
+                        allowed_returncodes={128},
+                    )
             else:
                 try:
                     index_file.unlink()
@@ -1463,12 +1490,27 @@ class CheckpointManager:
             # First snapshot for this project.
             index_file.parent.mkdir(parents=True, exist_ok=True)
 
+        # Price the add before running it: files under the cap still cost a
+        # hash each, and a tree of them can outlast the timeout (a fresh source
+        # checkout on a loaded laptop). Over budget, skip the add instead of
+        # blocking the turn until git is killed.
+        over = self._over_staging_budget(store, working_dir, index_file, scan, warm_since)
+        if over is not None:
+            staging.mark_slow(store, working_dir)
+            logger.warning(
+                "Checkpoint of %s skipped before staging: %s, over the %.0fs budget "
+                "(biggest files: %s); not retried for %d min",
+                working_dir, over.text(), staging.budget_s(_GIT_TIMEOUT * 2),
+                scan.biggest_text(), staging._SLOW_DIR_BACKOFF_S // 60,
+            )
+            return False
+
         # Stage with per-project index; files over max_file_size_mb are
         # excluded before git reads them.
         ok, _, err = self._stage_all(store, working_dir, index_file, scan)
         if not ok:
             if err.startswith("git timed out"):
-                staging.mark_slow(_resolve_checkpoint_base(), working_dir)
+                staging.mark_slow(store, working_dir)
                 logger.warning(
                     "Checkpoint of %s timed out staging (biggest files: %s); not retried for %d min",
                     working_dir, scan.biggest_text(), staging._SLOW_DIR_BACKOFF_S // 60,
@@ -1598,6 +1640,31 @@ class CheckpointManager:
             if removed:
                 logger.info("Checkpoint: removed %d partial file(s) left by the timed-out git add", len(removed))
         return ok, out, err
+
+    def _over_staging_budget(
+        self, store: Path, working_dir: str, index_file: Path,
+        scan: staging.TreeScan, warm_since: Optional[float],
+    ) -> Optional[staging.AddEstimate]:
+        """The add's estimate when it would not finish inside the staging budget, else None.
+
+        A free estimate from the tree walk comes first (every file on a cold
+        index; files modified since the last snapshot on a warm one). Only when
+        that is over budget does git list what it would really hash
+        (``ls-files -o -m``: new and stat-changed, gitignored files dropped),
+        which is a directory walk with no hashing."""
+        budget = staging.budget_s(_GIT_TIMEOUT * 2)
+        est = staging.estimate(scan, warm_since)
+        if est.seconds <= budget:
+            return None
+        ok, out, _ = _run_git(
+            ["ls-files", "-z", "-o", "-m", "--exclude-standard"],
+            store, working_dir, index_file=index_file,
+        )
+        if not ok:
+            return est
+        listed = set(filter(None, out.split("\x00")))
+        est = staging.estimate(scan, None, only=listed)
+        return est if est.seconds > budget else None
 
     @staticmethod
     def _unstage(store: Path, working_dir: str, index_file: Path, paths: list[str]) -> None:

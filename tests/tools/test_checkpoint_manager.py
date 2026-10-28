@@ -1567,3 +1567,132 @@ class TestGitTimeoutRecovery:
         assert CheckpointManager(enabled=True).ensure_checkpoint(str(work_dir), "snap") is False
         msgs = [r.getMessage() for r in caplog.records if r.levelno >= 30]
         assert any("huge.sqlite" in m and str(work_dir.resolve()) in m for m in msgs), msgs
+
+
+class TestStagingBudget:
+    """Files under ``max_file_size_mb`` still cost a hash each: a tree of them can outlast the add
+    timeout (agent-23a0c3b69f came back after the size cap shipped, on a source checkout under
+    load). The add is priced before it runs, and the back-off survives a new process."""
+
+    @staticmethod
+    def _spy_adds(monkeypatch):
+        import tools.checkpoint_manager as cm
+        real_run = subprocess.run
+        adds = []
+
+        def spy(cmd, *a, **kw):
+            if len(cmd) > 1 and cmd[-2:] == ["add", "-A"]:
+                adds.append(cmd)
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(cm.subprocess, "run", spy)
+        return adds
+
+    @staticmethod
+    def _sub_cap_tree(root, n=400, size=64 * 1024):
+        for i in range(n):
+            d = root / f"pkg{i % 20}"
+            d.mkdir(exist_ok=True)
+            (d / f"mod{i}.bin").write_bytes(os.urandom(size))
+
+    @staticmethod
+    def _loaded(monkeypatch, factor):
+        # The MacBook hit ran at load ~56: the same tree costs that many times more there.
+        import tools.checkpoint_staging as staging
+        monkeypatch.setattr(staging, "load_factor", lambda: factor, raising=False)
+
+    def test_sub_cap_tree_over_budget_is_skipped_without_git_add(
+        self, work_dir, checkpoint_base, monkeypatch, caplog,
+    ):
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        self._sub_cap_tree(work_dir)  # 400 x 64 KB, every file under the 10 MB cap
+        self._loaded(monkeypatch, 40.0)
+        adds = self._spy_adds(monkeypatch)
+        caplog.set_level("DEBUG", logger="tools.checkpoint_manager")
+
+        mgr = CheckpointManager(enabled=True)
+        started = time.monotonic()
+        assert mgr.ensure_checkpoint(str(work_dir), "snap") is False
+        assert time.monotonic() - started < 5
+        assert adds == [], "git add ran on a tree priced over the staging budget"
+        msgs = [r.getMessage() for r in caplog.records if r.levelno >= 30]
+        assert any(str(work_dir.resolve()) in m and "budget" in m and "mod" in m for m in msgs), msgs
+
+        # The next turn backs off without walking the tree again.
+        mgr.new_turn()
+        assert mgr.ensure_checkpoint(str(work_dir), "snap-2") is False
+        assert adds == []
+
+    def test_same_tree_is_snapshotted_when_the_host_is_idle(self, work_dir, checkpoint_base, monkeypatch):
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        self._sub_cap_tree(work_dir)
+        self._loaded(monkeypatch, 1.0)
+        adds = self._spy_adds(monkeypatch)
+        assert CheckpointManager(enabled=True).ensure_checkpoint(str(work_dir), "snap") is True
+        assert len(adds) == 1
+
+    def test_warm_index_prices_only_changed_files(self, work_dir, checkpoint_base, monkeypatch):
+        """After a snapshot the index keeps stat data, so an unchanged heavy tree costs ~nothing:
+        the budget must not lock a big repo out once it has been snapshotted."""
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        self._sub_cap_tree(work_dir)
+        self._loaded(monkeypatch, 1.0)
+        mgr = CheckpointManager(enabled=True)
+        assert mgr.ensure_checkpoint(str(work_dir), "snap") is True
+        time.sleep(2.1)
+        self._loaded(monkeypatch, 40.0)
+        (work_dir / "main.py").write_text("print('changed')\n")
+        mgr.new_turn()
+        assert mgr.ensure_checkpoint(str(work_dir), "snap-2") is True
+        assert len(mgr.list_checkpoints(str(work_dir))) == 2
+
+    def test_gitignored_weight_does_not_count(self, work_dir, checkpoint_base, monkeypatch):
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        (work_dir / ".gitignore").write_text("cache/\n")
+        (work_dir / "cache").mkdir()
+        self._sub_cap_tree(work_dir / "cache")  # over budget, but git never stages it
+        self._loaded(monkeypatch, 40.0)
+        assert CheckpointManager(enabled=True).ensure_checkpoint(str(work_dir), "snap") is True
+
+    @pytest.mark.parametrize("cause", ["budget", "timeout"])
+    def test_back_off_survives_a_new_process(self, cause, work_dir, checkpoint_base, monkeypatch, tmp_path):
+        import sys
+        import tools.checkpoint_manager as cm
+        monkeypatch.setattr(cm, "CHECKPOINT_BASE", checkpoint_base)
+        if cause == "budget":
+            self._sub_cap_tree(work_dir)
+            self._loaded(monkeypatch, 40.0)
+        else:
+            TestGitTimeoutRecovery._timeout_add(monkeypatch, [], [])
+        assert CheckpointManager(enabled=True).ensure_checkpoint(str(work_dir), "snap") is False
+
+        # A fresh interpreter: no in-process registry, real load factor, the same store.
+        child = tmp_path / "child.py"
+        child.write_text(
+            "import json, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "import tools.checkpoint_manager as cm\n"
+            "cm.CHECKPOINT_BASE = Path(sys.argv[1])\n"
+            "adds = []\n"
+            "real = subprocess.run\n"
+            "def spy(cmd, *a, **kw):\n"
+            "    if cmd[-2:] == ['add', '-A']:\n"
+            "        adds.append(cmd)\n"
+            "    return real(cmd, *a, **kw)\n"
+            "cm.subprocess.run = spy\n"
+            "took = cm.CheckpointManager(enabled=True).ensure_checkpoint(sys.argv[2], 'child')\n"
+            "print(json.dumps({'took': took, 'adds': len(adds)}))\n"
+        )
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+        out = subprocess.run(
+            [sys.executable, str(child), str(checkpoint_base), str(work_dir)],
+            capture_output=True, text=True, env=env, cwd=str(Path(cm.__file__).parents[1]), timeout=120,
+            check=False,
+        )
+        assert out.returncode == 0, out.stderr
+        result = json.loads(out.stdout.strip().splitlines()[-1])
+        assert result == {"took": False, "adds": 0}, (result, out.stderr[-2000:])
