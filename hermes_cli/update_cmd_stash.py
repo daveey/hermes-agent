@@ -85,12 +85,63 @@ def _print_first_line(text: str) -> None:
         print(f"  {text.strip().splitlines()[0]}")
 
 
+def recover_flipped_bare_checkout(git_cmd: list[str], cwd: Path) -> bool:
+    """Reset ``core.bare`` on a work tree that ``git init --bare`` flipped. True if it reset.
+
+    A genuine bare repo has no ``.git`` inside the directory the updater is standing in
+    and is left alone. A checkout whose config says ``bare=true`` but still has a work
+    tree cannot ``git status`` (``fatal: this operation must be run in a work tree``).
+    On git 2.55 that flag is written by ``git init --bare`` with no path when ``GIT_DIR``,
+    or the cwd, names this repo's ``.git`` or a worktree gitdir under it
+    (``<repo>/.git/worktrees/<name>``). ``git init --bare <path>`` does not.
+    """
+    git_marker = cwd / ".git"
+    if not git_marker.exists():
+        return False
+    from hermes_cli.update_cmd_git import _git_run
+
+    probe = _git_run(git_cmd, ["rev-parse", "--is-bare-repository"], cwd)
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        return False
+    resolved = git_marker
+    if git_marker.is_file():
+        pointed = ""
+        for line in git_marker.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().lower().startswith("gitdir:"):
+                pointed = line.split(":", 1)[1].strip()
+                break
+        if not pointed:
+            logger.warning("checkout %s has core.bare=true but its .git file has no gitdir", cwd)
+            return False
+        raw = Path(pointed)
+        resolved = raw if raw.is_absolute() else (cwd / raw).resolve()
+    reset = _git_run(git_cmd, ["--git-dir", str(resolved), "config", "core.bare", "false"], cwd)
+    if reset.returncode != 0:
+        logger.warning(
+            "checkout %s has core.bare=true but resetting it failed: %s",
+            cwd, (reset.stderr or "").strip(),
+        )
+        return False
+    message = (
+        f"WARNING: {cwd} is a work tree whose git config said core.bare=true "
+        "(git init --bare with no path, when GIT_DIR or the cwd names this repo "
+        "or a worktree gitdir under it, writes that). Reset core.bare=false so "
+        "the update can run."
+    )
+    logger.warning(message)
+    print(f"  ⚠ {message}")
+    return True
+
+
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path, *, checkout_move=None) -> Optional[str]:
     """Stash local changes before the update moves the checkout; the stash commit, or None when clean.
     ``checkout_move`` binds the push (and its cleanup reset) to the paused gateways' tree gate."""
     global _pending_autostash
     from hermes_cli.update_cmd_git import _git_run, _no_move
     _pending_autostash = None
+    # A flipped core.bare makes the status below die with "must be run in a work tree"
+    # and aborts the update. Recover before the first work-tree command.
+    recover_flipped_bare_checkout(git_cmd, cwd)
     status = _git_run(git_cmd, ["status", "--porcelain", "-z"], cwd, check=True)
     if not status.stdout.strip():
         return None

@@ -82,7 +82,7 @@ from hermes_cli.update_cmd_stash import (
     _reject_unsafe_stash_restore, _resolve_stash_selector, _restore_stashed_changes,
     _restored_python_paths, _stash_apply_failed_only_on_existing_untracked,
     _stash_local_changes_if_needed, _unrestored_autostash_notice,
-    _warn_orphaned_update_autostashes)
+    _warn_orphaned_update_autostashes, recover_flipped_bare_checkout)
 from hermes_cli.update_cmd_config import (
     _LAST_SIBLING_SNAPSHOTS, _check_and_apply_config_migration, _migrate_sibling_profile_configs,
     _print_items, _reload_config_modules, _run_config_check_fresh, _run_migrate_config_fresh)
@@ -1871,6 +1871,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         return
 
     try:
+        recover_flipped_bare_checkout(git_cmd, _m().PROJECT_ROOT)
         _check.report_pack_tidy(_m().PROJECT_ROOT)
         # Shallow installer checkouts collect one `.git/shallow` graft per past depth-1 fetch
         # (#105951); stale grafts break merge-base and push this run into the divergence path.
