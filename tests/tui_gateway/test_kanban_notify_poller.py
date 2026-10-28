@@ -385,3 +385,33 @@ class TestPollerReadsOnlyItsOwnSubscriptions:
 
         assert fetched == [1]
         assert len(texts) == 1 and tid in texts[0] and "mine finished" in texts[0]
+
+
+class TestUnchangedBoardSkip:
+    """A live chat polls every board every 5 s; a board whose files have not moved since its last poll is skipped
+    (no writable open, no claim), and any commit (a completion) is picked up on the next tick."""
+
+    def test_unchanged_board_is_not_reopened_and_a_commit_is_delivered(self):
+        tid = _create_subscribed_task()
+        session = _session()
+        assert _collect_kanban_notifications(session) == []  # first poll: nothing yet, records the board signature
+        assert _collect_kanban_notifications(session) == []  # its own (empty) claim may move the files once
+        with patch.object(kbc, "connect", wraps=kbc.connect) as opened, \
+                patch.object(kbn, "count_notify_subs", wraps=kbn.count_notify_subs) as probed:
+            assert _collect_kanban_notifications(session) == []
+            assert opened.call_count == 0 and probed.call_count == 0
+        _complete(tid)
+        texts = _collect_kanban_notifications(session)
+        assert len(texts) == 1 and tid in texts[0]
+        assert session["_kb_board_seen"]
+
+    def test_skip_is_per_session(self):
+        tid = _create_subscribed_task()
+        quiet = _session()
+        _collect_kanban_notifications(quiet)
+        _collect_kanban_notifications(quiet)
+        _complete(tid)
+        # a different session (no recorded signature) still polls; the subscribed one delivers once
+        assert _collect_kanban_notifications(_session("someone-else")) == []
+        texts = _collect_kanban_notifications(quiet)
+        assert len(texts) == 1 and tid in texts[0]

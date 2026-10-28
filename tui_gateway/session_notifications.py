@@ -420,12 +420,48 @@ def _kb_board_key(_kb, board_meta) -> tuple[str, str]:
         return slug, f"slug:{slug}"
 
 
-def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None) -> list:
+def _kb_board_file_sig(db_path) -> tuple | None:
+    """(mtime_ns, size, inode) of a board's kanban.db and -wal: every commit (a new event, a claim) moves one of them."""
+    import os
+    out = []
+    for path in (str(db_path), f"{db_path}-wal"):
+        try:
+            st = os.stat(path)
+        except OSError:
+            out.append(None)
+            continue
+        out.append((st.st_mtime_ns, st.st_size, st.st_ino))
+    return tuple(out) if out[0] is not None else None
+
+
+def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None, seen: dict | None = None) -> list:
     """Claim + format this session's unseen events on one board. One poller per live session: the board is not opened
     writable unless it has a subscription owned by this exact session (a failed read-only probe — locked/corrupt DB —
-    falls through so delivery is preserved)."""
+    falls through so delivery is preserved).
+
+    *seen* (the session's ``{db path: file signature}``) skips a board whose files have not moved since this
+    session's last completed poll: no commit means no new event to claim. 21 open chats each probing every board
+    every 5 s, and opening it writable to re-claim nothing, kept the Desktop backend busy. The signature is taken
+    before the poll, so a commit during it is polled again next tick."""
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
+    db_path = sig = None
+    if seen is not None:
+        with contextlib.suppress(Exception):
+            db_path = str(_kb.kanban_db_path(board=slug))
+            sig = _kb_board_file_sig(db_path)
+        if sig is not None and seen.get(db_path) == sig:
+            from hermes_constants import get_hermes_home
+            from tui_gateway.kanban_consumer_health import polled
+            polled(get_hermes_home(), session_key, db_path)
+            return []
+    texts = _kb_poll_board_now(_kb, _kbc, _kbn, slug, session_key, claims)
+    if sig is not None:
+        seen[db_path] = sig
+    return texts
+
+
+def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: list | None) -> list:
     with contextlib.suppress(Exception):
         if _kbn.count_notify_subs(board=slug, platform="tui", chat_id=session_key) == 0:
             return []
@@ -499,7 +535,8 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
     unique = {}
     for slug, resolved in (_kb_board_key(_kb, board_meta) for board_meta in boards):
         unique.setdefault(resolved, slug)
-    return [t for slug in unique.values() for t in _kb_poll_board(_kb, slug, session_key, claims)]
+    seen = session.setdefault("_kb_board_seen", {})
+    return [t for slug in unique.values() for t in _kb_poll_board(_kb, slug, session_key, claims, seen)]
 
 
 def _notif_poll_kanban(sid: str, session: dict) -> None:
