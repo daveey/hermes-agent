@@ -77,8 +77,44 @@ def _mkprofile(home, name, env=""):
 
 
 def _served_record(home):
-    flush_runtime_status()
+    # Persistence is asynchronous; the production flush budget is too short on
+    # throttled CI workers. Wait for completion, not just submission, before reading.
+    assert flush_runtime_status(timeout=30), "runtime status did not persist"
     return json.loads((home / "gateway_state.json").read_text(encoding="utf-8")).get("served_profiles")
+
+
+def test_served_record_waits_for_slow_status_persistence(tmp_path, monkeypatch):
+    from gateway import status
+
+    _, home = _runner(tmp_path, monkeypatch)
+    released = threading.Event()
+    real_write = status._write_json_file
+
+    def slow_write(path, payload):
+        assert released.wait(timeout=30)
+        real_write(path, payload)
+
+    writer = status._RuntimeStatusWriter(write_fn=slow_write)
+    monkeypatch.setattr(status, "_runtime_status_writer", writer)
+    status.publish_runtime_status(served_profiles=["default", "alpha"])
+    # Model filesystem/scheduling delay beyond flush_runtime_status's production
+    # default. This is failure injection, not a sleep used to synchronize a test.
+    release = threading.Timer(3.0, released.set)
+    release.start()
+    try:
+        assert _served_record(home) == ["default", "alpha"]
+    finally:
+        released.set()
+        release.cancel()
+        release.join(timeout=30)
+        assert writer.flush(timeout=30)
+
+
+def test_served_record_reports_failed_persistence_before_reading(tmp_path, monkeypatch):
+    _, home = _runner(tmp_path, monkeypatch)
+    monkeypatch.setattr(f"{__name__}.flush_runtime_status", lambda **kwargs: False)
+    with pytest.raises(AssertionError, match="runtime status did not persist"):
+        _served_record(home)
 
 
 @pytest.mark.asyncio
