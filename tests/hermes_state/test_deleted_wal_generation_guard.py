@@ -12,6 +12,7 @@ import gc
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -563,3 +564,126 @@ def test_iter_darwin_judges_by_identity_not_by_pathname(tmp_path):
         assert any(target == os.path.realpath(str(sidecar)) for _pid, target in holders)
     finally:
         held.close()
+
+
+# ── darwin scan is bounded: one in flight per process, self-stopping past its deadline ──────────
+#
+# Under GIL pressure every libproc ctypes call waits for the GIL, so a pass that takes ~50 ms
+# uncontended outruns its 5 s budget while its thread keeps running. One abandoned thread per
+# caller piled up 4-5 live scans in a Desktop backend (2026-10-27). These drive the scan
+# machinery with a fake enumeration, so they run on every platform.
+
+@pytest.fixture
+def fake_darwin_scan(monkeypatch):
+    """Replace libproc enumeration with a controllable generator; count enumeration starts."""
+    import threading
+
+    state = {"calls": 0, "gate": threading.Event(), "yield": [], "endless": False}
+
+    def fake_targets():
+        state["calls"] += 1
+        if state["endless"]:
+            while True:
+                yield 1, 3, "/nowhere/unrelated.log", (0, 0)
+        state["gate"].wait(10)
+        yield from state["yield"]
+
+    monkeypatch.setattr(hermes_state_dbfile, "_iter_darwin_fd_targets", fake_targets)
+    monkeypatch.setattr(hermes_state_dbfile, "_DARWIN_SCAN_IN_FLIGHT", None)
+    monkeypatch.setattr(hermes_state_dbfile, "_darwin_clean_until", {})
+    yield state
+    state["gate"].set()
+
+
+def _scan_threads():
+    import threading
+
+    return [t for t in threading.enumerate()
+            if t.name == hermes_state_dbfile._DARWIN_FD_SCAN_THREAD_NAME and t.is_alive()]
+
+
+def test_darwin_concurrent_callers_during_slow_scan_share_one_scan_thread(tmp_path, fake_darwin_scan):
+    import threading
+
+    from tests.waiting import wait_until
+
+    path = tmp_path / "state.db"
+    sidecar = os.path.realpath(str(path) + "-wal")
+    Path(sidecar).write_bytes(b"current generation")
+    fake_darwin_scan["yield"] = [(4242, 7, sidecar, (0, 0))]  # identity != the linked file: retired
+    results: list = []
+
+    def caller():
+        results.append(hermes_state_dbfile._iter_darwin_sidecar_holders(path))
+
+    callers = [threading.Thread(target=caller) for _ in range(5)]
+    callers[0].start()
+    wait_until(lambda: fake_darwin_scan["calls"] == 1, what="first scan started")
+    for thread in callers[1:]:
+        thread.start()
+    wait_until(lambda: hermes_state_dbfile._DARWIN_SCAN_IN_FLIGHT.waiters == 5,
+               what="all five callers waiting on the in-flight scan")
+    assert len(_scan_threads()) == 1
+    assert fake_darwin_scan["calls"] == 1
+    fake_darwin_scan["gate"].set()
+    for thread in callers:
+        thread.join(10)
+    assert fake_darwin_scan["calls"] == 1, "joiners must not start their own enumeration"
+    assert results == [[(4242, sidecar)]] * 5, "every joiner gets the shared scan's verdict"
+
+
+def test_darwin_scan_timeout_fails_open_and_starts_no_second_thread(tmp_path, fake_darwin_scan, monkeypatch):
+    """A kernel-blocked (or GIL-starved) pass is abandoned fail-open; callers that arrive while it
+    is still alive wait on it instead of stacking another thread beside it."""
+    from hermes_state_dbfile import refuse_deleted_wal_generation
+
+    monkeypatch.setattr(hermes_state_dbfile, "_DARWIN_FD_SCAN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(hermes_state_dbfile.sys, "platform", "darwin")
+    path = tmp_path / "state.db"
+    assert hermes_state_dbfile._iter_darwin_sidecar_holders(path) == []
+    assert len(_scan_threads()) == 1, "the blocked pass is still alive"
+    # Its deadline has passed, so it can only end expired: later callers fail open at once
+    # instead of waiting out their own (here 30 s) budget on it.
+    monkeypatch.setattr(hermes_state_dbfile, "_DARWIN_FD_SCAN_TIMEOUT_SECONDS", 30.0)
+    started = time.monotonic()
+    assert iter_deleted_sqlite_sidecar_holders(path) == []
+    refuse_deleted_wal_generation(path)  # a timeout never refuses
+    assert time.monotonic() - started < 5.0, "callers waited on a pass already past its deadline"
+    assert fake_darwin_scan["calls"] == 1
+    assert len(_scan_threads()) == 1
+
+
+def test_darwin_scan_stops_itself_past_its_deadline(tmp_path, fake_darwin_scan, monkeypatch):
+    """A pass that is slow but not kernel-blocked checks its deadline and exits, so an abandoned
+    scan does not keep competing for the GIL."""
+    from tests.waiting import wait_until
+
+    monkeypatch.setattr(hermes_state_dbfile, "_DARWIN_FD_SCAN_TIMEOUT_SECONDS", 0.2)
+    fake_darwin_scan["endless"] = True
+    assert hermes_state_dbfile._iter_darwin_sidecar_holders(tmp_path / "state.db") == []
+    wait_until(lambda: not _scan_threads(), what="the over-deadline scan thread to exit")
+    assert hermes_state_dbfile._DARWIN_SCAN_IN_FLIGHT is None
+    # the next caller runs a fresh pass instead of reusing the abandoned one
+    fake_darwin_scan["endless"] = False
+    fake_darwin_scan["gate"].set()
+    assert hermes_state_dbfile._iter_darwin_sidecar_holders(tmp_path / "state.db") == []
+    assert fake_darwin_scan["calls"] == 2
+
+
+def test_darwin_clean_verdict_is_dropped_once_a_sidecar_is_unlinked(tmp_path, fake_darwin_scan):
+    """A cached clean verdict must not hide a generation retired after it: unlinking the WAL
+    (or any create/unlink in the directory) forces a fresh pass, while plain reuse does not."""
+    path = tmp_path / "state.db"
+    wal = Path(str(path) + "-wal")
+    wal.write_bytes(b"generation 1")
+    fake_darwin_scan["gate"].set()
+    assert hermes_state_dbfile._iter_darwin_sidecar_holders(path) == []
+    assert hermes_state_dbfile._iter_darwin_sidecar_holders(path) == []
+    assert fake_darwin_scan["calls"] == 1, "an unchanged directory reuses the clean verdict"
+    with wal.open("ab") as handle:
+        handle.write(b" more frames")  # a WAL write keeps the cache
+    assert hermes_state_dbfile._iter_darwin_sidecar_holders(path) == []
+    assert fake_darwin_scan["calls"] == 1
+    wal.unlink()
+    assert hermes_state_dbfile._iter_darwin_sidecar_holders(path) == []
+    assert fake_darwin_scan["calls"] == 2, "an unlinked sidecar must force a fresh pass"

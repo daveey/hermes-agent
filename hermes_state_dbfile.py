@@ -238,14 +238,21 @@ _DARWIN_LIBPROC = None
 # can bound it: the whole pass runs in a daemon thread and is abandoned on
 # expiry, failing open per the guard's contract.
 _DARWIN_FD_SCAN_TIMEOUT_SECONDS = 5.0
+# At most one pass runs per process: callers that arrive while one is alive (even one already
+# abandoned by its starter) wait on it instead of starting another. Uncontended a pass takes
+# ~50 ms, but under GIL pressure every ctypes call waits for the GIL, so passes outran the budget
+# and one abandoned thread per caller piled up (4-5 live scans in a Desktop backend, 2026-10-27).
+_DARWIN_FD_SCAN_THREAD_NAME = "hermes-wal-holder-scan"
+_DARWIN_SCAN_LOCK = threading.Lock()
+_DARWIN_SCAN_IN_FLIGHT = None
 
-# A clean (no holder) verdict is reused for this long, and only one scan runs at a time. Every
-# SessionDB open used to walk every fd of every process (~5 s of CPU, up to 5 s of abandoned
-# thread each on timeout); a busy Mac opening state.db from dozens of CLI/worker/wake_check
-# processes spent its cores on that. Positive verdicts are never cached.
+# A clean (no holder) verdict is reused for this long. Every SessionDB open used to walk every fd
+# of every process (~5 s of CPU, up to 5 s of abandoned thread each on timeout); a busy Mac opening
+# state.db from dozens of CLI/worker/wake_check processes spent its cores on that. Positive
+# verdicts are never cached. A cached verdict also holds only while the sidecars cannot have been
+# retired since: see :func:`_darwin_clean_key`.
 _DARWIN_FD_CLEAN_TTL_SECONDS = 30.0
-_darwin_scan_lock = threading.Lock()
-_darwin_clean_until: dict[str, float] = {}
+_darwin_clean_until: dict[str, tuple[float, tuple]] = {}
 
 
 def _darwin_libproc():
@@ -319,6 +326,88 @@ def _iter_darwin_fd_targets():
             yield pid, fd, target, identity
 
 
+def _darwin_clean_key(base: str) -> tuple:
+    """What a clean verdict for *base* depends on: the directory's mtime and the sidecars' identity.
+
+    A retired generation needs a sidecar path unlinked or replaced, and any create, unlink or
+    rename in the directory moves its mtime, so an unchanged key means no generation can have been
+    retired since the clean pass. WAL writes touch neither, so a busy database keeps its cache."""
+    key = []
+    for path, with_mtime in ((os.path.dirname(base), True), (base + "-wal", False), (base + "-shm", False)):
+        try:
+            st = os.stat(path)
+        except OSError:
+            key.append(None)
+            continue
+        key.append((st.st_dev, st.st_ino, st.st_mtime_ns if with_mtime else 0))
+    return tuple(key)
+
+
+def _darwin_clean_cached(base: str, key: tuple) -> bool:
+    cached = _darwin_clean_until.get(base)
+    return cached is not None and cached[0] > time.monotonic() and cached[1] == key
+
+
+class _DarwinFdScan:
+    """One libproc pass, shared by every caller that arrives while it runs.
+
+    It keeps only ``-wal`` / ``-shm`` vnodes (so callers watching different databases can share
+    it; each filters by its own paths) and stops itself at ``deadline``, so a pass that is slow
+    rather than kernel-blocked does not outlive the callers that gave up on it."""
+
+    def __init__(self, deadline: float):
+        self.deadline = deadline
+        self.done = threading.Event()
+        self.candidates: list[tuple[int, str, tuple[int, int]]] = []
+        self.error: BaseException | None = None
+        self.expired = False
+        self.waiters = 0
+
+    def run(self) -> None:
+        global _DARWIN_SCAN_IN_FLIGHT
+        try:
+            for pid, _fd, target, identity in _iter_darwin_fd_targets():
+                if time.monotonic() > self.deadline:
+                    self.expired = True
+                    break
+                if target.casefold().endswith(("-wal", "-shm")):
+                    self.candidates.append((pid, target, identity))
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            with _DARWIN_SCAN_LOCK:
+                if _DARWIN_SCAN_IN_FLIGHT is self:
+                    _DARWIN_SCAN_IN_FLIGHT = None
+            self.done.set()
+
+
+def _join_darwin_fd_scan() -> _DarwinFdScan | None:
+    """Wait for the in-flight pass, starting one only if none is alive; ``None`` on timeout."""
+    global _DARWIN_SCAN_IN_FLIGHT
+    timeout = _DARWIN_FD_SCAN_TIMEOUT_SECONDS
+    with _DARWIN_SCAN_LOCK:
+        scan = _DARWIN_SCAN_IN_FLIGHT
+        if scan is not None and time.monotonic() > scan.deadline:
+            return None  # stuck past its deadline (kernel-blocked): it can only end expired
+        if scan is None:
+            scan = _DarwinFdScan(time.monotonic() + timeout)
+            _DARWIN_SCAN_IN_FLIGHT = scan
+            try:
+                threading.Thread(target=scan.run, name=_DARWIN_FD_SCAN_THREAD_NAME, daemon=True).start()
+            except BaseException:
+                _DARWIN_SCAN_IN_FLIGHT = None
+                raise
+        scan.waiters += 1
+    try:
+        # ponytail: a kernel-blocked proc_pidfdinfo cannot be interrupted, so that one thread
+        # may outlive us; it is the only one, and it dies with the process.
+        finished = scan.done.wait(timeout)
+    finally:
+        with _DARWIN_SCAN_LOCK:
+            scan.waiters -= 1
+    return scan if finished and not scan.expired else None
+
+
 def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
     """The macOS leg of :func:`iter_deleted_sqlite_sidecar_holders`: libproc enumeration matched
     against the watched sidecar paths, judged by identity.
@@ -330,53 +419,28 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
     # APFS/HFS+ are case-insensitive by default and libproc reports the pathname as the opener
     # spelled it; ``os.path.normcase`` is the identity on darwin, so fold case here.
     watched = {path.casefold(): path for path in (base + "-wal", base + "-shm")}
-    now = time.monotonic()
-    if _darwin_clean_until.get(base, 0.0) > now:
+    key = _darwin_clean_key(base)  # taken before the pass, so a change during it invalidates
+    if _darwin_clean_cached(base, key):
         return []
-    # Single flight: a concurrent scan in this process is waited on (bounded), never duplicated.
-    if not _darwin_scan_lock.acquire(timeout=_DARWIN_FD_SCAN_TIMEOUT_SECONDS):
-        return []  # fail open, as for a scan timeout
-    try:
-        if _darwin_clean_until.get(base, 0.0) > time.monotonic():
-            return []
-        holders, completed = _scan_darwin_sidecar_holders(base, watched, db_path)
-        if completed and not holders:
-            _darwin_clean_until[base] = time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS
-        return holders
-    finally:
-        _darwin_scan_lock.release()
-
-
-def _scan_darwin_sidecar_holders(base, watched, db_path) -> tuple[list[tuple[int, str]], bool]:
-    """One bounded libproc pass; the flag is False when the pass timed out (fail-open, not a verdict)."""
-    holders: list[tuple[int, str]] = []
-    errors: list[BaseException] = []
-
-    def _scan() -> None:
-        try:
-            for pid, _fd, target, identity in _iter_darwin_fd_targets():
-                literal = watched.get(target.casefold())
-                if literal is not None and _identity_is_truly_unlinked(identity, literal):
-                    holders.append((pid, target))
-        except BaseException as exc:
-            errors.append(exc)
-
-    # ponytail: abandoned daemon thread per timed-out scan; a kernel-blocked
-    # proc_pidfdinfo cannot be interrupted, so expiry leaks one thread that
-    # dies with the process. Fail open: partial/empty holders, never a refusal.
-    worker = threading.Thread(target=_scan, daemon=True)
-    worker.start()
-    worker.join(_DARWIN_FD_SCAN_TIMEOUT_SECONDS)
-    if worker.is_alive():
+    scan = _join_darwin_fd_scan()
+    if scan is None:
+        # Fail open: an unfinished pass never yields a refusal, and is never cached.
         logger.warning(
             "deleted-WAL holder scan timed out after %.1fs for %s; continuing fail-open",
             _DARWIN_FD_SCAN_TIMEOUT_SECONDS,
             db_path,
         )
-        return [], False
-    if errors:
-        raise errors[0]
-    return holders, True
+        return []
+    if scan.error is not None:
+        raise scan.error
+    holders: list[tuple[int, str]] = []
+    for pid, target, identity in scan.candidates:
+        literal = watched.get(target.casefold())
+        if literal is not None and _identity_is_truly_unlinked(identity, literal):
+            holders.append((pid, target))
+    if not holders:
+        _darwin_clean_until[base] = (time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS, key)
+    return holders
 
 
 def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:

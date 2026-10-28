@@ -34,8 +34,10 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _fresh_scan_cache():
+def _fresh_scan_cache(monkeypatch):
     dbfile._darwin_clean_until.clear()
+    # A hung fake scan never leaves the in-flight slot; the next test must not join it.
+    monkeypatch.setattr(dbfile, "_DARWIN_SCAN_IN_FLIGHT", None)
     yield
     dbfile._darwin_clean_until.clear()
 
