@@ -669,6 +669,42 @@ def test_passthrough_ignore_drops_files_the_runner_hands_pytest_explicitly(
 
 
 
+def test_setup_errors_are_counted_on_the_summary_line(tmp_path: Path) -> None:
+    """A file whose tests error in setup must not read ``0 failed`` on the summary.
+
+    tests/pm/test_source_update_launch.py on a host without uv: 18 fixture errors, exit 1,
+    and ``=== Summary: 1 files, 1 tests passed, 0 failed``, which read as green.
+    """
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    (probe_dir / "test_probe_setup_error.py").write_text(
+        textwrap.dedent(
+            """
+            import pytest
+
+            @pytest.fixture
+            def broken():
+                raise RuntimeError("setup fails")
+
+            def test_ok():
+                assert True
+
+            def test_a(broken):
+                pass
+
+            def test_b(broken):
+                pass
+            """
+        )
+    )
+
+    proc = _run_runner(probe_dir, "--file-retries", "0")
+
+    assert proc.returncode != 0
+    summary = next(line for line in proc.stdout.splitlines() if line.startswith("=== Summary"))
+    assert "1 tests passed, 0 failed, 2 errored" in summary, summary
+
+
 @pytest.mark.platforms("posix")  # POSIX signal death; Windows has no SIGSEGV exit
 def test_interpreter_crash_is_reported_as_a_crash_not_as_no_tests_ran(tmp_path: Path) -> None:
     """A file whose interpreter dies by signal is classified as CRASHED (#113186).

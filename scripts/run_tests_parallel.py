@@ -1648,6 +1648,7 @@ def main() -> int:
     fail_count = 0
     tests_passed = 0
     tests_failed = 0
+    tests_errored = 0
     tests_skipped = 0
     skipped_files: list[tuple[Path, int]] = []
     # Every collected outcome, not just pass/fail: a legitimately all-skipped
@@ -1659,7 +1660,7 @@ def main() -> int:
     lock = threading.Lock()
 
     def _on_done(file: Path, started_at: float, fut: Future[tuple[Path, int, str, dict[str, int], float]]) -> None:
-        nonlocal files_done, tests_done, pass_count, fail_count, tests_passed, tests_failed, tests_skipped
+        nonlocal files_done, tests_done, pass_count, fail_count, tests_passed, tests_failed, tests_errored, tests_skipped
         nonlocal tests_collected, files_crashed
         n_tests = test_counts.get(file, 0)
         try:
@@ -1684,6 +1685,7 @@ def main() -> int:
             # Accumulate test-level counts from parsed summary.
             tests_passed += summary.get("passed", 0)
             tests_failed += summary.get("failed", 0)
+            tests_errored += summary.get("errors", 0)
             tests_skipped += summary.get("skipped", 0)
             if summary.get("skipped", 0):
                 skipped_files.append((fpath, summary["skipped"]))
@@ -1746,7 +1748,9 @@ def main() -> int:
         f", {files_crashed} file{'s' if files_crashed != 1 else ''} CRASHED"
         if files_crashed else ""
     )
-    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{crashed_note}{skipped_note} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
+    # Setup/teardown errors fail the run too; "0 failed" with exit 1 read as green.
+    errored_note = f", {tests_errored} errored" if tests_errored else ""
+    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{errored_note}{crashed_note}{skipped_note} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
 
     # Host-OS gating note: tests marked for another OS were skipped by the
     # conftest hook, not run. Say so explicitly — a green local run on Linux
