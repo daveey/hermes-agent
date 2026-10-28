@@ -31,7 +31,15 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
-from agent.interrupt_control import _REASON_USER_INTERRUPT, interrupt_skip_wording
+from agent.interrupt_control import _REASON_USER_INTERRUPT
+
+try:
+    from agent.interrupt_control import interrupt_skip_wording
+except ImportError:  # mid-update: an older process cached agent.interrupt_control and loads this file fresh
+    def interrupt_skip_wording(agent) -> str:
+        """Fallback for a pre-10-04 cached ``agent.interrupt_control`` (see interrupt_control.interrupt_skip_wording)."""
+        reason = getattr(agent, "_tool_interrupt_reason", None)
+        return "Turn interrupted" if not reason else str(reason).replace("_", " ").capitalize()
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.inline_tool_executors import (
     INLINE_TOOL_EXECUTORS,
