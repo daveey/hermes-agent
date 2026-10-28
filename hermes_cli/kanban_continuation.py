@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from typing import Any, Optional
+from typing import Callable, Any, Optional
 
 CONTINUED_OUTCOME = "continued"
 CONTINUATION_WOKEN_EVENT = "continuation_woken"
@@ -86,7 +86,7 @@ def continue_task(
     resume_after_seconds: int = 0, expected_run_id: Optional[int] = None,
     max_continuations: Optional[int] = None, metadata: Optional[dict] = None,
     wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
-    awaiting: Any = None,
+    awaiting: Any = None, in_txn: Optional[Callable[[sqlite3.Connection, int], None]] = None,
 ) -> dict[str, Any]:
     """End the running run as ``continued`` and re-queue the card.
 
@@ -94,6 +94,9 @@ def continue_task(
     reviewer run) at once; > 0 -> ``scheduled`` until ``wake_due_continuations`` promotes it.
     Returns ``{"ok": True, "status", "run_id", "continuation", "wake_at"}`` or
     ``{"ok": False, "error"}``. Never touches ``consecutive_failures`` / ``block_recurrences``.
+    ``in_txn(conn, run_id)`` runs inside the same write transaction once the run has ended
+    (:mod:`hermes_cli.kanban_move` rewrites ``runs_on`` there), so the re-queued card is never
+    visible with its old placement. [daveey]
     """
     from hermes_cli import kanban_db as kb
 
@@ -201,6 +204,8 @@ def continue_task(
             payload["awaiting"] = record
         kb._append_event(conn, task_id, CONTINUED_OUTCOME, payload, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check if wake_at is not None else None, check_every, now=now)
+        if in_txn is not None:
+            in_txn(conn, run_id)
     return {"ok": True, "status": new_status, "run_id": run_id,
             "continuation": streak + 1, "wake_at": wake_at}
 

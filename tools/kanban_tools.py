@@ -24,7 +24,7 @@ from tools.kanban_tools_placement import _placement_refused
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
-    KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
+    KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_MOVE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_ORIGIN_ADOPT_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_ARCHIVE_SCHEMA,
     KANBAN_UNLINK_SCHEMA)
@@ -117,7 +117,7 @@ def _check_kanban_orchestrator_mode() -> bool:
 # would silently skip the run-ownership CAS in kanban_db. Non-lifecycle tools
 # (heartbeat / attach / attach_url) do not terminate a run and are not gated.
 _RUN_LIFECYCLE_TOOLS = frozenset({
-    "kanban_complete", "kanban_block", "kanban_schedule", "kanban_continue",
+    "kanban_complete", "kanban_block", "kanban_schedule", "kanban_continue", "kanban_move",
     "kanban_request_review", "kanban_request_changes",
 })
 
@@ -1317,6 +1317,27 @@ def _handle_continue(args: dict, **kw) -> str:
                           wake_at=res.get("wake_at"), next=note)
 
 
+@_kanban_handler("kanban_move")
+def _handle_move(args: dict, **kw) -> str:
+    """[daveey] Checkpoint, end this run and re-queue the card with new runs_on labels (hermes_cli.kanban_move)."""
+    tid = _worker_guard("kanban_move", args)
+    checkpoint = _redact(_require_text(
+        args, "checkpoint", "checkpoint is required — write what is done, what is not portable and the next "
+        "steps so the run on the other machine can resume"))
+    reason = _require_text(args, "reason", "reason is required — say what this machine lacks")
+    runs_on = args.get("runs_on")
+    _check(isinstance(runs_on, list) and runs_on, "runs_on must be a non-empty list of labels, e.g. ['machine:worker-1']")
+    from hermes_cli.kanban_move import move_task
+    with _board(args.get("board")) as (kb, conn):
+        res = move_task(conn, tid, runs_on=runs_on, reason=reason, checkpoint=checkpoint,
+                        expected_run_id=_worker_run_id(tid), force=bool(args.get("force")))
+        _check(res.get("ok"), f"could not move {tid}: {res.get('error')}")
+        note = (f"Moved: the card is re-queued for {res['runs_on']} (eligible now: {', '.join(res['matches'])}); "
+                "this run is over. End your turn with a one-line reply; do not call more tools.")
+        return _ok_landed(kb, conn, tid, res["status"], runs_on=res["runs_on"], matches=res["matches"],
+                          move_no=res["move_no"], next=note)
+
+
 @_kanban_handler("kanban_request_review")
 def _handle_request_review(args: dict, **kw) -> str:
     """Move implementation into the first-class review phase."""
@@ -2104,6 +2125,7 @@ _TOOLS = (
     ("kanban_block", KANBAN_BLOCK_SCHEMA, _handle_block, "⏸"),
     ("kanban_schedule", KANBAN_SCHEDULE_SCHEMA, _handle_schedule, "⏰"),
     ("kanban_continue", KANBAN_CONTINUE_SCHEMA, _handle_continue, "⏭"),
+    ("kanban_move", KANBAN_MOVE_SCHEMA, _handle_move, "🚚"),
     ("kanban_request_review", KANBAN_REQUEST_REVIEW_SCHEMA, _handle_request_review, "👀"),
     ("kanban_request_changes", KANBAN_REQUEST_CHANGES_SCHEMA, _handle_request_changes, "↩"),
     ("kanban_heartbeat", KANBAN_HEARTBEAT_SCHEMA, _handle_heartbeat, "💓"),

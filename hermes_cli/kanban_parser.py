@@ -348,6 +348,20 @@ _SPECS = [
                   "--provider <name>). Cleared together with the model."),
     ], help="Set or clear a task's model/provider override (takes effect on the next dispatch)"),
     _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
+    _cmd("move", [
+        _TASK_ID,
+        _arg("--runs-on", dest="runs_on", required=True,
+             help="Comma-separated labels the next machine must have, e.g. machine:worker-1 or macos"),
+        _arg("--reason", required=True, help="Why the card must move (logged as a `moved` event)"),
+        _arg("--checkpoint", default=None,
+             help="Resume notes (required when a card's own worker moves its running card)"),
+        _arg("--force", action="store_true", help="Allow moving back to a machine the card already left"),
+        _arg("--reclaim", action="store_true",
+             help="The card is running here under another run: stop that run, then move it"),
+        _json_flag(),
+    ], help="Move a card to machines with other labels (runs_on): a worker moves its own running card, an operator "
+            "moves a queued one or (--reclaim) one running here. Guards: kanban.move.max_moves, no unknown or held "
+            "target, no ping-pong without --force"),
     _cmd("reassign", [
         _TASK_ID,
         _arg("profile", help="New profile name (or 'none' to unassign)"),

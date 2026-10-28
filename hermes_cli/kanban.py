@@ -247,7 +247,7 @@ def _profile_author() -> str:
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
-    "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
+    "init", "create", "swarm", "assign", "reclaim", "move", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
@@ -785,6 +785,37 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
     return _ok_or_err(ok, f"cannot reclaim {args.task_id} (not running or unknown id)",
                       f"Reclaimed {args.task_id}")
 
+
+def _cmd_move(args: argparse.Namespace) -> int:
+    """[daveey] ``hermes kanban move``: the card's own worker (HERMES_KANBAN_TASK + run id) moves its running card;
+    otherwise a queued card is relabelled, or with --reclaim a card running here is stopped first."""
+    from hermes_cli import kanban_move as km
+    labels = [x.strip() for x in str(args.runs_on).split(",") if x.strip()]
+    own_run = os.environ.get("HERMES_KANBAN_TASK") == args.task_id and os.environ.get("HERMES_KANBAN_RUN_ID")
+    with kbc.connect_closing() as conn:
+        status = (conn.execute("SELECT status FROM tasks WHERE id = ?", (args.task_id,)).fetchone() or {"status": None})
+        if own_run and not (args.checkpoint or "").strip():
+            res = {"ok": False, "reason_code": "checkpoint_required",
+                   "error": "--checkpoint is required when a worker moves its own running card"}
+        elif own_run:
+            res = km.move_task(conn, args.task_id, runs_on=labels, reason=args.reason, checkpoint=args.checkpoint,
+                               expected_run_id=int(os.environ["HERMES_KANBAN_RUN_ID"]), force=args.force)
+        elif status["status"] == "running":
+            if not args.reclaim:
+                res = {"ok": False, "reason_code": "running",
+                       "error": f"{args.task_id} is running: its worker moves it (kanban_move), or pass --reclaim"}
+            else:
+                res = km.move_reclaim(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force)
+        else:
+            res = km.move_queued(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force)
+    if getattr(args, "json", False):
+        print(json.dumps(res))
+    elif res.get("ok"):
+        print(f"Moved {args.task_id} to {res['runs_on']} (eligible: {', '.join(res['matches'])}; "
+              f"move {res['move_no']}; now {res['status']})")
+    else:
+        print(f"kanban move: {res.get('error')} [{res.get('reason_code')}]", file=sys.stderr)
+    return 0 if res.get("ok") else 1
 
 def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
@@ -1742,7 +1773,7 @@ _HANDLERS = {
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show, "wait-check": _cmd_wait_check,
     "capabilities": _cmd_capabilities,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
-    "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
+    "reclaim": _cmd_reclaim, "move": _cmd_move, "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,
     "comment": _cmd_comment, "attach": _cmd_attach,

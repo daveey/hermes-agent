@@ -18,13 +18,16 @@ FENCED = {"status", "current_run_uid", "result", "started_at", "completed_at"}
 
 
 class FakeService:
-    def __init__(self, *, lease_runs: bool = False) -> None:
+    def __init__(self, *, lease_runs: bool = False, machines: Optional[dict] = None) -> None:
         self.boards: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str, Any]] = []
         self.offline = False
         # Like transitions.ts grantLease/releaseTask: a grant writes the card running plus its run row, a release
         # ends that run and returns the card to ready. Off by default (the older tests count rows).
         self.lease_runs = lease_runs
+        # Opt-in placement, like transitions.ts checkPlacement's runs_on rule: a grant needs every runs_on label
+        # on the claiming machine ({name: {"labels": [...]}}; machine:<name> is implicit). None = no check.
+        self.machines = machines
 
     def board(self, bid: str) -> dict[str, Any]:
         return self.boards.setdefault(bid, {"seq": 0, "floor": 0, "changes": [], "rows": {}, "applied": {}, "leases": {}})
@@ -80,6 +83,11 @@ class FakeService:
             for k in won:
                 clocks[k] = op["hlc"]
             row = self._put(b, table, uid, won, gw, op["client_op_id"], op["hlc"])
+            # As rows.ts: the holder moving its card out of `running` ends the lease (opt-in with lease_runs).
+            if self.lease_runs and lease and lease["holder"] == gw and "status" in won and won["status"] != "running":
+                b["leases"].pop(uid, None)  # clearLease: the lease row and the task's lease mirror
+                row = self._put(b, table, uid, {"lease_holder": None, "lease_expires": None}, gw, op["client_op_id"],
+                                op["hlc"])
             return {"status": "applied" if len(won) == len(f) else "merged", "row": row}
         return {"status": "applied", "row": self._put(b, table, uid, f, gw, op["client_op_id"], op["hlc"])}
 
@@ -144,6 +152,12 @@ class FakeHub:
         if body["action"] == "grant":
             if cur and cur["holder"] != self.gateway:
                 return {"status": "rejected", "reason": "lease_held", "lease": cur}
+            card = b["rows"].get("tasks", {}).get(task) or {}
+            if self.svc.machines is not None and card.get("runs_on"):
+                want = json.loads(card["runs_on"]) if isinstance(card["runs_on"], str) else card["runs_on"]
+                mine = set((self.svc.machines.get(self.gateway) or {}).get("labels") or []) | {f"machine:{self.gateway}"}
+                if set(want or []) - mine:
+                    return {"status": "rejected", "reason": "labels_mismatch", "lease": cur}
             b["leases"][task] = {"task_id": task, "holder": self.gateway, "run_uid": run, "expires": 9_999_999_999_999}
             if self.svc.lease_runs and task in b["rows"].get("tasks", {}):
                 self.svc._put(b, "task_runs", run, {"task_id": task, "status": "running", "started_at": 1,
