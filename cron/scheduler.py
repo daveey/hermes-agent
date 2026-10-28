@@ -1499,7 +1499,7 @@ def _job_doc_header(job_name: str, job_id: str, now_iso: str, mode: str) -> str:
         f"# Cron Job: {job_name}\n\n"
         f"**Job ID:** {job_id}\n"
         f"**Run Time:** {now_iso}\n"
-        f"**Mode:** {mode}\n"
+        f"**Mode:** {mode}\n**Runner:** {cron_runner_label()}\n"
     )
 
 
@@ -2247,7 +2247,7 @@ def _run_doc_header(job: dict, title: str, job_id: str, prompt: str, *, prompt_s
     return (
         f"# Cron Job: {title}\n\n"
         f"**Job ID:** {job_id}\n"
-        f"**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n**Runner:** {cron_runner_label()}\n"
         f"**Schedule:** {job.get('schedule_display', 'N/A')}\n\n"
         f"{prompt_stamp}{_PROMPT_HEADING}{prompt}{_PROMPT_SEPARATOR}"
     )
@@ -2586,7 +2586,7 @@ def run_job(
     from run_agent import AIAgent
 
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
-    logger.info("Running job '%s' (ID: %s)", job_name, job_id)
+    logger.info("Running job '%s' (ID: %s) on %s", job_name, job_id, cron_runner_label())
     logger.info("Prompt: %s", prompt[:100])
 
     agent = None
@@ -3748,11 +3748,11 @@ def _launch_external_cron_worker(job: dict) -> bool:
     with _fire_secret_scope():
         # No restore_managed_env here: the worker re-runs load_hermes_dotenv -> _apply_managed_env at
         # import, and strip_launch_profile_env leaves managed keys in place.
-        worker_env = strip_launch_profile_env(build_subprocess_env(
+        worker_env = with_sane_path(strip_launch_profile_env(build_subprocess_env(
             scrub_secrets=multiplex_active,
             inherit_profile_home=True,
             extra={"HERMES_HOME": str(profile_home)},
-        ))
+        )))
     worker_env = systemd_user_bus_env(worker_env)
     # Unattended worker: the gateway sets HERMES_EXEC_ASK at startup (interactive launches set
     # the other two), and an inherited presence var makes every env-fallback consumer in the
@@ -4430,6 +4430,7 @@ from cron.scheduler_delivery import (
 )
 from cron.scheduler_script import (
     _get_session_db_timeout, _run_job_script_with_claim_heartbeat, _start_heartbeat_thread,
+    cron_runner_label, with_sane_path,
 )
 from cron.scheduler_prompt import (
     _PROMPT_FRAME, _PROMPT_HEADING, _PROMPT_SEPARATOR, _RESPONSE_FRAME, _RESPONSE_HEADING,

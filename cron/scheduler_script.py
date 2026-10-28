@@ -429,6 +429,33 @@ def _script_argv(
     return [python_exe, str(path)], env_overlay, None
 
 
+def with_sane_path(env: dict) -> dict:
+    """*env* with the terminal tool's PATH normalisation: missing standard dirs, managed runtimes
+    and ``~/.local/bin`` appended, the caller's own entries kept first. Whichever process wins the
+    cron tick lock (gateway, a Desktop-over-SSH ``hermes serve`` whose non-login shell PATH lacks
+    ``~/.local/bin``, the dashboard) must hand its children the same PATH, or a script that calls a
+    ``~/.local/bin`` CLI fails only on the runs that process picked up (hermes-hub, token-broker).
+    Windows env blocks are left as they are (the helper is a POSIX no-op there)."""
+    from tools.environments.local import _append_missing_sane_path_entries
+    if "PATH" in env:
+        env["PATH"] = _append_missing_sane_path_entries(env["PATH"])
+    return env
+
+
+def cron_runner_label() -> str:
+    """Which process runs this cron job, e.g. ``serve pid 123``: recorded in the run document and
+    agent.log so a failure that depends on the process that won the tick lock is visible."""
+    from cron.worker_bootstrap import WORKER_MARKER
+    from hermes_cli.update_cmd import _hermes_holder_subcommand
+    if os.environ.get(WORKER_MARKER):
+        kind = "cron-worker"
+    else:
+        # sys.argv[1:] are the entry point's own arguments for ``hermes X``, ``-m hermes_cli.main X``
+        # and the ``python -c <bootstrap> X`` launcher alike; argv[0] differs between them.
+        kind = _hermes_holder_subcommand(" ".join(["hermes", *sys.argv[1:]])) or "other"
+    return f"{kind} pid {os.getpid()}"
+
+
 def _run_job_script(
     script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, interpreter: Optional[str] = None,
@@ -478,8 +505,9 @@ def _run_job_script(
         # semantics) before the sanitizer, which also overlays the names the owning profile declares
         # in terminal.env_passthrough from that scope (#114209). The factory snapshots the process
         # env itself — no raw copy at the spawn site (test_subprocess_env_guard).
-        env = build_subprocess_env(strip_launch_profile=True)
+        env = with_sane_path(build_subprocess_env(strip_launch_profile=True))
         env.update(env_overlay)
+        logger.info("Cron script %s running on %s", path.name, cron_runner_label())
         # Subprocess cwd only (default: scripts-dir parent). NEVER os.chdir() the process.
         # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
         # parent (back-compat). NEVER mutate the Python process cwd — that would leak into concurrent
