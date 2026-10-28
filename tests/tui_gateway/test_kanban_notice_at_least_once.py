@@ -219,6 +219,39 @@ def test_ack_keeps_an_earlier_outstanding_claim_in_flight():
         conn.close()
 
 
+def test_compacting_session_keeps_the_notice_and_lands_it_in_the_new_tip(gate, sdb, monkeypatch):
+    """Compaction closes the parent while the notice is being written: the claim stays in flight, and the next
+    poll writes it into the compressed child (the live agent's session), once."""
+    from types import SimpleNamespace
+
+    from hermes_state_errors import CompressionSessionClosedError
+
+    real = sdb.record_kanban_notice
+
+    def _closed(session_id, *a, **k):
+        raise CompressionSessionClosedError(session_id)
+
+    monkeypatch.setattr(sdb, "record_kanban_notice", _closed)
+    tid = _task()
+    before = _sub(tid)["last_event_id"]
+    _complete(tid)
+    session = _session()
+
+    server._notif_poll_kanban_scoped("ui", session)
+    assert gate["submitted"] == [] and len(session["_kanban_pending"]) == 1
+    assert _sub(tid)["inflight_from"] == before
+
+    child = KEY + "_child"
+    sdb.create_session(child, "desktop", parent_session_id=KEY)
+    session["agent"] = SimpleNamespace(session_id=child)  # the compression published a new tip
+    monkeypatch.setattr(sdb, "record_kanban_notice", real)
+    server._notif_poll_kanban_scoped("ui", session)
+
+    rows = [m for m in sdb.get_messages(child) if m.get("display_kind") == "kanban_notice"]
+    assert len(rows) == 1 and tid in rows[0]["content"] and _notices(sdb) == []
+    assert len(gate["submitted"]) == 1 and _sub(tid)["inflight_from"] is None
+
+
 def test_unloaded_sweep_recovers_an_orphaned_claim(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_UNLOADED_WAKE", "0")
     d = SessionDB(tmp_path / "state.db")
