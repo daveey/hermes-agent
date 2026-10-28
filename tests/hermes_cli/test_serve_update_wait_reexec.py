@@ -58,6 +58,8 @@ _CHILD = textwrap.dedent("""
     vi._git_version_info = lambda _d: info(head.read_text().strip())
     vi._reset_version_info_cache()  # importing main already cached the real tree's identity:
     vi.get_version_info()  # cache it from the fake HEAD, as the fireworks plugin import does
+    if sys.argv[4:] == ["moved-before-gate"]:  # an update moved the checkout and finished already
+        head.write_text(sys.argv[3]); stamp.write_text(sys.argv[3])
 
     import hermes_cli.serve_update_wait as suw
     suw.update_live = marker.exists
@@ -107,7 +109,7 @@ _CHILD = textwrap.dedent("""
 """)
 
 
-def _run_serve(tmp_path, *, update_running: bool, new: str = NEW):
+def _run_serve(tmp_path, *, update_running: bool, new: str = NEW, moved_before_gate: bool = False):
     state = tmp_path / "state"
     state.mkdir()
     (state / "HEAD").write_text(OLD)
@@ -120,7 +122,8 @@ def _run_serve(tmp_path, *, update_running: bool, new: str = NEW):
     home.mkdir()
     env = {k: v for k, v in os.environ.items() if k != "HERMES_SERVE_REEXEC_COUNT"}
     env.update(HERMES_HOME=str(home), HERMES_SERVE_UPDATE_POLL_S="0.05")
-    proc = subprocess.run([sys.executable, str(script), str(REPO), str(state), new],
+    proc = subprocess.run([sys.executable, str(script), str(REPO), str(state), new,
+                           *(["moved-before-gate"] if moved_before_gate else [])],
                           env=env, capture_output=True, text=True, timeout=120, check=False)
     assert proc.returncode == 0, proc.stderr[-4000:]
     result = json.loads((state / "result.json").read_text())
@@ -152,6 +155,20 @@ def test_serve_with_no_update_does_not_reexec(tmp_path):
     assert "re-executing" not in stderr
 
 
+@pytest.mark.skipif(os.name == "nt", reason="re-exec in place is POSIX only")
+def test_serve_whose_identity_went_stale_before_the_gate_reexecs(tmp_path):
+    # Identity cached at OLD, then an update moved the checkout to NEW and finished before
+    # cmd_dashboard reached the gate: no wait ("clear"), yet the serve must not report OLD.
+    result, incarnations, token_reads, stderr = _run_serve(
+        tmp_path, update_running=False, moved_before_gate=True)
+    # The re-exec'd image runs the same child script, so it moves nothing: HEAD stays NEW.
+    assert result["health_commit"] == result["head"] == NEW
+    assert result["boot"].rsplit(":", 1)[-1] == NEW
+    assert len(incarnations) == 2 and len(set(incarnations)) == 1
+    assert token_reads == incarnations[:1]
+    assert "cached code identity" in stderr
+
+
 # ── the decision itself ───────────────────────────────────────────────────────────────────────
 
 FP_OLD, FP_NEW = f"git:refs/heads/main:{OLD}", f"git:refs/heads/main:{NEW}"
@@ -180,10 +197,44 @@ def test_checkout_moved_or_identity_stale_reexecs(monkeypatch, launch, cached):
     assert any("re-executing" in line for line in lines)
 
 
-@pytest.mark.parametrize("result", ["clear", "update-timeout", "hold-timeout"])
-def test_no_reexec_unless_the_wait_saw_the_update_finish(monkeypatch, result):
+@pytest.mark.parametrize("result", ["update-timeout", "hold-timeout"])
+def test_no_reexec_while_the_update_is_still_running(monkeypatch, result):
     out, calls, _ = _decide(result, FP_OLD, FP_NEW, OLD, monkeypatch)
     assert out is False and calls == []
+
+
+def test_clear_reexecs_when_the_cached_identity_is_not_head(monkeypatch):
+    # The identity was cached at import (OLD), then an update moved the checkout to NEW and
+    # finished before the gate ran: no wait ("clear"), but /api/health would report OLD.
+    monkeypatch.setattr(os, "name", "posix")
+    out, calls, lines = _decide("clear", FP_NEW, FP_NEW, OLD, monkeypatch)
+    assert out is True and len(calls) == 1 and calls[0][0] == sys.executable
+    assert os.environ[suw.REEXEC_ENV] == "1"
+    assert any("cached code identity" in line for line in lines)
+
+
+def test_clear_does_not_reexec_when_the_cached_identity_is_head(monkeypatch):
+    monkeypatch.setattr(os, "name", "posix")
+    assert _decide("clear", FP_NEW, FP_NEW, NEW, monkeypatch)[:2] == (False, [])
+    assert _decide("clear", FP_NEW, FP_NEW, None, monkeypatch)[:2] == (False, [])
+    # On "clear" the launch-vs-now fingerprint is not a reason: nothing was waited out.
+    assert _decide("clear", FP_OLD, FP_NEW, NEW, monkeypatch)[:2] == (False, [])
+
+
+def test_clear_reexec_is_capped(monkeypatch):
+    monkeypatch.setattr(os, "name", "posix")
+    out, calls, lines = _decide("clear", FP_NEW, FP_NEW, OLD, monkeypatch, count=suw.MAX_REEXECS)
+    assert out is False and calls == []
+    assert any("starting anyway" in line for line in lines)
+
+
+@pytest.mark.parametrize("source,expected", [("git", OLD), ("ci", None), ("build", None)])
+def test_only_a_git_identity_is_compared_with_head(monkeypatch, source, expected):
+    from hermes_cli import version_info as vi
+
+    monkeypatch.setattr(vi, "_cached_version_info",
+                        vi.VersionInfo("0.0.0", "0.0.0", 0, OLD, "main", source, False, None))
+    assert suw._cached_commit() == expected
 
 
 def test_no_reexec_when_nothing_moved_or_no_checkout(monkeypatch):

@@ -173,12 +173,18 @@ def checkout_fingerprint() -> Optional[str]:
 
 
 def _cached_commit() -> Optional[str]:
-    """The commit ``get_version_info()`` already cached, without filling the cache."""
+    """The commit ``get_version_info()`` already cached, without filling the cache.
+
+    Only a ``source: git`` identity (a git stamp, or ``git rev-parse``) tracks the checkout's HEAD;
+    a ci/build/nix stamp names the commit it was built from, which need not be HEAD, so comparing
+    it would re-exec every launch (up to the cap) for nothing."""
     try:
         from hermes_cli import version_info as vi
 
         cached = vi._cached_version_info
-        return cached.commit if cached is not None else None
+        if cached is None or cached.source != "git":
+            return None
+        return cached.commit
     except Exception:
         return None
 
@@ -204,16 +210,21 @@ def reexec_if_checkout_moved(result: str, launch_fingerprint: Optional[str], *,
                              log: Optional[Callable[[str], None]] = None) -> bool:
     """After :func:`wait_for_update_clear`: re-exec this serve if the code it loaded is stale.
 
-    Only a wait that ended because the update finished (``"cleared"``) re-execs: with nothing to
-    wait for nothing moved, and after a timeout the update is still running, so a new image would
-    only wait again. Returns False when no re-exec happened (``execv`` replaces the process
+    A wait that ended because the update finished (``"cleared"``) re-execs when the checkout moved
+    during the wait or the cached identity is not HEAD. With nothing to wait for (``"clear"``) only
+    the cached-identity check applies: the identity can be cached at import (fireworks plugin,
+    startup update-debt check) just before an update moves the checkout and finishes, all before
+    this gate runs. After a timeout the update is still running, so a new image would only wait
+    again. Returns False when no re-exec happened (``execv`` replaces the process
     otherwise; a stub ``execv`` in tests returns True)."""
     try:
         count = int(os.environ.pop(REEXEC_ENV, "0") or 0)  # never leaks into the agent's children
     except ValueError:
         count = 0
-    if result != "cleared":
+    if result not in ("cleared", "clear"):
         return False
+    if result == "clear":
+        launch_fingerprint = None  # nothing was waited out: only the cached-identity check applies
     emit = log or _stderr
     why = stale_after_wait(launch_fingerprint, (current_fingerprint or checkout_fingerprint)(),
                            (cached_commit or _cached_commit)())
