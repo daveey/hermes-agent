@@ -6,7 +6,6 @@ same way the `hermes model` CLI picker does.
 """
 
 from threading import Event
-from time import monotonic
 
 import pytest
 
@@ -108,16 +107,38 @@ def test_apply_pricing_omits_sale_when_original_not_cheaper(monkeypatch):
 
 
 def test_model_options_cold_pricing_fetch_runs_off_the_request_path(monkeypatch):
-    """A cold pricing endpoint must not delay the first picker payload."""
+    """A cold pricing endpoint (or a cold models.dev cache) must not delay the first picker payload.
+
+    Event/thread based, not wall-clock: any blocking pricing fetch or network lookup made on the
+    request thread is recorded, and the background prewarm is awaited on an Event."""
+    import socket
+    import threading
+
+    request_thread = threading.get_ident()
+    on_request_path: list[str] = []
     fetch_started = Event()
     release_fetch = Event()
 
-    def fake_pricing(_slug, *, force_refresh=False, cached_only=False):
+    def fake_pricing(slug, *, force_refresh=False, cached_only=False):
         if cached_only:
             return {}
+        if threading.get_ident() == request_thread:
+            on_request_path.append(f"pricing fetch: {slug}")
+            return {}
         fetch_started.set()
-        release_fetch.wait(timeout=5)
+        release_fetch.wait(timeout=30)
         return {}
+
+    real_getaddrinfo = socket.getaddrinfo
+
+    def guarded_getaddrinfo(host, *args, **kwargs):
+        # Every outbound fetch resolves its host first (requests/urllib3, hermes_bootstrap's
+        # happy-eyeballs connect). A cold models.dev registry fetched in the foreground by
+        # providers.is_aggregator() blocked a CI picker for 7-10s here.
+        if threading.get_ident() == request_thread:
+            on_request_path.append(f"network lookup: {host}")
+            raise OSError("network is off the request path in this test")
+        return real_getaddrinfo(host, *args, **kwargs)
 
     row = {
         "slug": "openrouter",
@@ -137,9 +158,15 @@ def test_model_options_cold_pricing_fetch_runs_off_the_request_path(monkeypatch)
     monkeypatch.setattr(inv, "_apply_capabilities", lambda _rows, **_kwargs: None)
     monkeypatch.setattr(inv, "_apply_featured", lambda _rows, **_kwargs: None)
     monkeypatch.setattr(inv, "_pricing_prewarm_threads", {})
+    # Cold models.dev: no memory cache, no disk cache in the sandboxed HERMES_HOME.
+    from agent import models_dev
+
+    monkeypatch.setattr(models_dev, "_models_dev_cache", {})
+    monkeypatch.setattr(models_dev, "_models_dev_cache_time", 0)
+    monkeypatch.setattr(models_dev, "_models_dev_retry_after", 0)
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
 
     try:
-        started_at = monotonic()
         payload = inv.build_model_options_payload(
             inv.ConfigContext(
                 current_provider="openrouter",
@@ -149,16 +176,15 @@ def test_model_options_cold_pricing_fetch_runs_off_the_request_path(monkeypatch)
                 custom_providers=[],
             )
         )
-        elapsed = monotonic() - started_at
         assert payload["providers"][0]["slug"] == "openrouter"
         assert "pricing" not in payload["providers"][0]
-        assert elapsed < 2.0, f"cold picker blocked for {elapsed:.2f}s"
-        assert fetch_started.wait(timeout=1), "pricing should prewarm in the background"
+        assert on_request_path == [], f"cold picker blocked on: {on_request_path}"
+        assert fetch_started.wait(timeout=30), "pricing should prewarm in the background"
     finally:
         threads = list(inv._pricing_prewarm_threads.values())
         release_fetch.set()
         for thread in threads:
-            thread.join(timeout=2)
+            thread.join(timeout=30)
 
 
 def test_cold_nous_entitlement_keeps_models_unselectable(monkeypatch):

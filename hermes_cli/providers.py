@@ -260,11 +260,15 @@ def get_label(provider_id: str) -> str:
 
 
 def is_aggregator(provider: str) -> bool:
-    """Return True when the provider is a multi-model aggregator."""
+    """Return True when the provider is a multi-model aggregator.
+
+    Never touches the network: the flag comes from ``HERMES_OVERLAYS`` (models.dev carries no
+    aggregator field), so a cold models.dev cache must not turn this predicate into a blocking
+    foreground fetch on read paths such as the picker payload (``_strip_aggregator_overlaps``)."""
     provider_norm = normalize_provider(provider or "")
     if provider_norm.startswith("custom:"):
         return True
-    pdef = get_provider(provider_norm)
+    pdef = get_provider(provider_norm, allow_network=False)
     return pdef.is_aggregator if pdef else False
 
 

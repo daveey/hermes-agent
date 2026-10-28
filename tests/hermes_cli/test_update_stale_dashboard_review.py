@@ -51,9 +51,17 @@ _BACKEND = textwrap.dedent(
     token = os.environ["HERMES_DASHBOARD_SESSION_TOKEN"]
     state = {"in_call": False, "running": True, "events": []}
 
+    log_lock = threading.Lock()
+
     def log(event):
-        state["events"].append(event)
-        out.with_suffix(".events").write_text(json.dumps(state["events"]))
+        # Review thread, HTTP handler threads and the SIGTERM handler all log: serialize the
+        # append+write (no lost update) and publish atomically (the test never reads a torn file).
+        with log_lock:
+            state["events"].append(event)
+            path = out.with_suffix(".events")
+            tmp = path.with_suffix(".events.tmp")
+            tmp.write_text(json.dumps(state["events"]))
+            os.replace(tmp, path)
 
     hold = fence.begin_background_review() if calls else None
 
@@ -271,3 +279,57 @@ def test_control_backend_without_a_reachable_fence_is_stopped_as_today(tmp_path,
             proc.kill()
     assert result["killed"] == [proc.pid]
     assert elapsed < 5, elapsed
+
+
+def test_review_ending_between_prepare_and_idle_probe_still_commits_the_fence(monkeypatch, fast_poll):
+    """The review can end between the update's refused ``prepare`` and its idle probe. That idle
+    answer must not turn into an unfenced stop: the update re-prepares and commits, so no new
+    turn or review can start between the review's end and the SIGTERM (scripted, no timing)."""
+    endpoint = ("127.0.0.1", 1, "tok")
+    answers = iter([
+        ({"action": "prepare"}, {"ok": False, "idle": False}),   # review running
+        (None, {"ok": True, "idle": False, "detail": "background_review:1"}),
+        ({"action": "prepare"}, {"ok": False, "idle": False}),   # review still running ...
+        (None, {"ok": True, "idle": True, "detail": None}),       # ... and ends right here
+        ({"action": "prepare"}, {"ok": True, "idle": True, "token": "permit"}),
+        ({"action": "commit", "token": "permit"}, {"ok": True}),
+    ])
+    seen = []
+
+    def scripted(ep, body):
+        assert ep == endpoint
+        expected, reply = next(answers)
+        assert body == expected, (body, expected)
+        seen.append(body)
+        return reply
+
+    monkeypatch.setattr(dashboard_procs, "_retirement_endpoint", lambda pid: endpoint)
+    monkeypatch.setattr(dashboard_procs, "_retirement_request", scripted)
+    dashboard_procs._await_background_reviews([4242])
+    assert seen[-1] == {"action": "commit", "token": "permit"}, seen
+
+
+def test_a_backend_that_stays_unpreparable_after_its_review_is_stopped_as_before(monkeypatch, fast_poll):
+    """The re-prepare is one retry, not a loop: a fence that keeps refusing while the backend reports
+    something other than a review is stopped the old way (no 900 s hang)."""
+    endpoint = ("127.0.0.1", 1, "tok")
+    answers = iter([
+        ({"action": "prepare"}, {"ok": False, "idle": False}),
+        (None, {"ok": True, "idle": False, "detail": "background_review:1"}),
+        ({"action": "prepare"}, {"ok": False, "idle": False}),
+        (None, {"ok": True, "idle": False, "detail": "turn_in_flight"}),
+        ({"action": "prepare"}, {"ok": False, "idle": False}),
+        (None, {"ok": True, "idle": False, "detail": "turn_in_flight"}),
+    ])
+    seen = []
+
+    def scripted(ep, body):
+        expected, reply = next(answers)
+        assert body == expected, (body, expected)
+        seen.append(body)
+        return reply
+
+    monkeypatch.setattr(dashboard_procs, "_retirement_endpoint", lambda pid: endpoint)
+    monkeypatch.setattr(dashboard_procs, "_retirement_request", scripted)
+    dashboard_procs._await_background_reviews([4242])
+    assert len(seen) == 6 and {"action": "commit", "token": "permit"} not in seen

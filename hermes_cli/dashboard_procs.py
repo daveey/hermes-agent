@@ -680,6 +680,11 @@ def _await_background_reviews(pids: list[int]) -> None:
     started = _time.monotonic()
     deadline = started + _review_retire_deadline_s()
     waited: set[int] = set()
+    # A refused prepare followed by a non-review idle answer, after a review was seen: the review
+    # most likely ended between the two requests (or the idle GET timed out). Re-prepare on the
+    # next pass instead of stopping unfenced, so the commit still bars a new turn/review from
+    # starting before the stop. One retry per non-review answer; a review answer re-arms it.
+    retried: set[int] = set()
     while pending:
         for pid, endpoint in list(pending.items()):
             permit = _retirement_request(endpoint, {"action": "prepare"}) or {}
@@ -696,8 +701,12 @@ def _await_background_reviews(pids: list[int]) -> None:
                 continue
             detail = str(((_retirement_request(endpoint, None) or {}).get("detail")) or "")
             if not detail.startswith("background_review:"):
+                if pid in waited and pid not in retried:
+                    retried.add(pid)
+                    continue
                 del pending[pid]  # nothing a wait protects (or an old backend): stop as before
                 continue
+            retried.discard(pid)
             if pid not in waited:
                 waited.add(pid)
                 from hermes_cli.backend_retirement import BACKGROUND_REVIEW_WAIT_S

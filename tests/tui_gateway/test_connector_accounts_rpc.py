@@ -17,6 +17,11 @@ from tui_gateway import server
 def _gate(monkeypatch):
     live.reset_for_tests()
     monkeypatch.setattr("tools.connectors.connectors_available", lambda: True)
+    # An account-owned connect first ensures a guest identity; in the sandboxed home there is none,
+    # so unstubbed it minted one LIVE against portal.nousresearch.com on the RPC worker, and a
+    # slow portal in CI meant "no reply" inside _rpc's 5s wait. These tests are about alias
+    # routing, not provisioning (tests/hermes_cli/test_anon_* cover that).
+    monkeypatch.setattr("tools.connectors.ensure_guest_identity", lambda: None)
     yield
     live.reset_for_tests()
 

@@ -28,6 +28,15 @@ def client(monkeypatch, _isolate_hermes_home):
     from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
 
     monkeypatch.setattr("hermes_cli.model_cost_guard.expensive_model_warning", lambda *_a, **_k: None)
+    # The sandboxed home has no models.dev cache, so switch_model's catalog lookups
+    # (get_label, get_model_capabilities/get_model_info with allow_network=True) fetch it live
+    # inside the writer's lock span. A slow models.dev in CI kept the first writer from reaching
+    # save_config within the race helper's 30s wait. These tests are about lock serialization:
+    # run them offline (fetch fails fast, the catalog backoff arms, nothing else changes).
+    def _offline(*_a, **_k):
+        raise OSError("models.dev is offline in this test")
+
+    monkeypatch.setattr("agent.models_dev._fetch_models_dev_from_network", _offline)
     cfg = load_config()
     cfg["model"] = {"provider": "openrouter", "default": "openai/gpt-5.5"}
     save_config(cfg)
