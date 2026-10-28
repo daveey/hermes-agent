@@ -145,6 +145,26 @@ describe('offlineSessionsFromReplica', () => {
     expect(ids(rows)).toEqual(['ok'])
   })
 
+  it('skips delegate_task children the owner stamped is_internal_child, whatever their source', () => {
+    // A delegate child keeps its parent's source ('desktop'), so the source rule
+    // let "Subagent: …" rows into Home; the owner's collector stamps the flag.
+    const records = [
+      rec('child', { is_internal_child: true, source: 'desktop', title: 'Subagent: do a thing' }),
+      rec('parent', { is_internal_child: false })
+    ]
+
+    expect(ids(offlineSessionsFromReplica(records, connFor))).toEqual(['parent'])
+  })
+
+  it('keeps delegate children out of the boot snapshot of this gateway too', () => {
+    const records = [
+      rec('child', { is_internal_child: true, local: true }),
+      rec('mine', { local: true })
+    ]
+
+    expect(ids(offlineSessionsFromReplica(records, connFor, undefined, { includeLocal: true }))).toEqual(['mine'])
+  })
+
   it('skips gateways this Desktop has no connection for (gateway selection needs a registry id)', () => {
     expect(offlineSessionsFromReplica([rec('x', { gateway: 'ghost' })], connFor)).toEqual([])
   })

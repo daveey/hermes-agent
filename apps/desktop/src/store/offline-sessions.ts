@@ -37,6 +37,8 @@ export interface OfflineReplicaRecord {
   end_reason?: null | string
   ended_at?: null | number
   hidden?: boolean
+  /** Owner-stamped: a delegate_task child (`_delegate_from`), hidden like the local list hides it. */
+  is_internal_child?: boolean
   message_count?: null | number
   model?: null | string
   parent_session_id?: null | string
@@ -203,7 +205,7 @@ const recordKey = (record: OfflineReplicaRecord, id: string) =>
 
 const isCompressionAncestor = (record: OfflineReplicaRecord) => record.end_reason === 'compression'
 
-/** The normal recents rule: no excluded source, not empty/archived/hidden, has a title. */
+/** The normal recents rule: no excluded source or delegate child, not empty/archived/hidden, has a title. */
 function isRecentsEligible(record: OfflineReplicaRecord, excluded: ReadonlySet<string>, includeLocal: boolean): boolean {
   const source = normalizeSessionSource(record.source)
 
@@ -211,6 +213,7 @@ function isRecentsEligible(record: OfflineReplicaRecord, excluded: ReadonlySet<s
     (record.local && !includeLocal) ||
     record.archived ||
     record.hidden ||
+    record.is_internal_child === true ||
     (source && excluded.has(source)) ||
     (record.message_count ?? 0) < 1 ||
     !record.title?.trim()
