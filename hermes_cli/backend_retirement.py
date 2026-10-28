@@ -66,6 +66,12 @@ class RetirementFence:
         with self._lock:
             return self._active
 
+    def retiring(self):
+        """A retirement is preparing or holds a live/committed permit: admission is closed or closing."""
+        with self._lock:
+            self._expire()
+            return self._preparing or self._token is not None
+
     def begin_background_review(self):
         """Admit a review under BOTH the process and cross-process update fences.
 

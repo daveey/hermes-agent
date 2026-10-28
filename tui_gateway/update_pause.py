@@ -11,6 +11,11 @@ crash-resume attempt is used. Pauses are counted apart (``MAX_PAUSES`` per turn)
 
 A turn the next backend would not auto-continue is never paused. A paused turn whose window ends without
 an update (expired, apply refused) continues in place (``start_in_place_watcher``), so it never hangs.
+When the update did move the checkout, the turn is left for a successor only while one is coming: this
+process's skew watchdog runs and its idle proof holds (or a retirement is already under way). A backend
+kept busy by other work for ``NO_REPLACEMENT_S``, or one no watchdog retires, continues the turn here.
+The retirement fence makes the two exclusive: in-place work is admitted through it, so once retirement
+prepares or commits, the turn is left to the successor's startup sweep.
 """
 
 from __future__ import annotations
@@ -32,8 +37,14 @@ UPDATE_MARGIN_S = 600.0
 WATCH_POLL_S = 5.0
 WATCH_MAX_S = 6 * 3600.0
 # A skewed backend normally retires once idle and its successor continues the turn. One that is still
-# here this long after the checkout moved has no retirement path (e.g. a stdio TUI): continue in place.
-LEAVE_GRACE_S = 900.0
+# here this long after the checkout moved has no working retirement path: continue in place (backstop).
+LEAVE_GRACE_S = 300.0
+# [daveey] t_01a18300e42c3364: the skew watchdog retires a backend only through the idle proof, so a
+# backend with other work in flight (another chat's turn, a pending prompt, an unreadable ledger) is
+# not replaced while that lasts, and one with no watchdog (a stdio TUI) is never replaced. A paused
+# turn used to wait the whole grace (900 s) for that successor. Now it waits only while a replacement
+# is actually on its way; once none has been for this long, it continues here.
+NO_REPLACEMENT_S = 60.0
 
 
 def _now() -> float:
@@ -145,37 +156,74 @@ def in_place_resume_action(session: dict, marker_key: str, *, skew: Callable[[],
         held = True
     if held:
         return "wait"
-    if (skew or _detect_skew)() is not None:
-        return "leave"
+    # Settled first: a turn the user (or another path) already moved on is never handed off or resumed.
     with session["history_lock"]:
-        busy = bool(session.get("running") or session.get("_closing") or session.get("_finalized"))
+        busy = bool(session.get("running") or session.get("_closing") or session.get("_finalized")
+                    or session.get("_auto_continue_scheduled"))
     if busy:
         return "done"
     marker = read_turn_marker(_home(session), marker_key)
     if not marker or marker.get("reason") != PAUSE_REASON:
         return "done"
+    if (skew or _detect_skew)() is not None:
+        return "leave"
     return "resume"
 
 
+def replacement_outlook() -> str:
+    """Whether a successor backend is on its way for a skewed process: ``coming`` (a retirement is
+    preparing/committed, or the skew watchdog runs and the idle proof it retires through holds),
+    ``blocked`` (the watchdog runs but other work or an unreadable ledger keeps this process up) or
+    ``none`` (nothing in this process will retire it)."""
+    from hermes_cli.backend_retirement import retirement
+    from hermes_cli.web_server_skew_exit import skew_watchdog_armed
+    if retirement.retiring():
+        return "coming"
+    if not skew_watchdog_armed():
+        return "none"
+    from hermes_cli.web_server_skew_exit import _update_in_progress
+    if _update_in_progress():
+        return "blocked"  # the watchdog never retires while an update marker or checkout lock is live
+    from hermes_cli.web_server_idle_proof import idle_proof
+    try:
+        idle = idle_proof()["idle"]
+    except Exception:
+        idle = None
+    return "coming" if idle is True else "blocked"
+
+
 def start_in_place_watcher(sid: str, session: dict, marker_key: str) -> threading.Thread:
-    """Bounded daemon: continue the paused turn here when its window ends without an update."""
+    """Bounded daemon: continue the paused turn here when its window ends without an update, or when
+    the checkout moved but no successor backend is coming to continue it."""
 
     def run() -> None:
         from tui_gateway import server
-        started, left_at = time.monotonic(), None
+        started, left_at, blocked_since = time.monotonic(), None, None
         while time.monotonic() - started < WATCH_MAX_S:
             time.sleep(WATCH_POLL_S)
             try:
                 action = in_place_resume_action(session, marker_key)
                 if action == "leave":
+                    now = time.monotonic()
                     if left_at is None:
-                        left_at = time.monotonic()
+                        left_at = now
                         logger.info("core-update pause: checkout moved; session %s continues on the next backend",
                                     marker_key)
-                    if time.monotonic() - left_at < LEAVE_GRACE_S:
+                    outlook = replacement_outlook()
+                    if outlook == "coming":
+                        blocked_since = None
+                    elif blocked_since is None:
+                        blocked_since = now
+                    blocked_for = 0.0 if blocked_since is None else now - blocked_since
+                    if outlook == "none" or blocked_for >= NO_REPLACEMENT_S:
+                        logger.info("core-update pause: no backend replacement is coming (%s); continuing session "
+                                    "%s here", "no retirement watchdog" if outlook == "none" else
+                                    f"backend kept busy for {blocked_for:.0f}s", marker_key)
+                    elif now - left_at >= LEAVE_GRACE_S:
+                        logger.info("core-update pause: backend still not replaced after %.0fs; continuing session "
+                                    "%s here", LEAVE_GRACE_S, marker_key)
+                    else:
                         continue
-                    logger.info("core-update pause: backend still not replaced after %.0fs; continuing session "
-                                "%s here", LEAVE_GRACE_S, marker_key)
                     action = "resume"
                 if action == "wait":
                     continue

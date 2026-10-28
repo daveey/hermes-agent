@@ -217,3 +217,29 @@ def test_the_backoff_never_holds_a_code_revision_retirement(tmp_path):
                              runtime_key=lambda: "8d94c4a7dd14f7b1", clock=lambda: 1010.0,
                              fence=_Fence(idle=True), poll_s=0.01, max_polls=4).join(timeout=5)
     assert server.should_exit is True
+
+
+def test_watchdog_reports_armed_while_polling_and_not_after_it_stops():
+    """A core-update-paused turn asks whether anything will retire this backend (update_pause)."""
+    import threading
+
+    from hermes_cli import web_server_skew_exit as m
+    from hermes_cli.backend_retirement import RetirementFence
+
+    release = threading.Event()
+    server = _Server()
+    thread = start_code_skew_watchdog(server, skew_fn=lambda: (release.wait(5), None)[1],
+                                      update_probe=lambda: False, fence=_Fence(idle=False),
+                                      poll_s=0.01, max_polls=1)
+    assert m.skew_watchdog_armed() is True
+    release.set()
+    thread.join(5)
+    assert m.skew_watchdog_armed() is False
+    # The fence says when a retirement is under way, so the paused turn hands off instead.
+    fence = RetirementFence()
+    assert fence.retiring() is False
+    fence._now = lambda: 0.0
+    with fence._lock:
+        fence._token, fence._expires_at = "t", 30.0
+    assert fence.retiring() is True
+    assert fence.commit("t")["ok"] and fence.retiring() is True
