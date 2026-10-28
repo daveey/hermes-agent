@@ -61,7 +61,7 @@ _REMOTE_CONFIRMED: dict[tuple[str, str], tuple[float, str]] = {}
 HIDDEN_ASK = re.compile(
     r"\b(?:david|the user|a human)\b(?:['\u2019]s)?\W+(?:\w+\W+){0,6}?(?:decision|approval|answer|reply|confirmation|"
     r"go-ahead|sign-?off)\b|\bdon['\u2019]?t re-?ask\b|\balready asked (?:him|david|in chat)\b|"
-    r"\bwaiting (?:on|for) (?:david|the user|a human)\b", re.I)
+    r"\bwaiting (?:on|for) (?:david|the user|a human)\b", re.IGNORECASE)
 AGENT_WALL = re.compile(
     r"\bdenied\b|\bunauthorizedoperation\b|\baccess ?denied|\bnot authori[sz]ed to perform\b|"
     r"\b(?:missing|needs?|lacks?|without|insufficient)\s+(?:the\s+|a\s+)?(?:[\w:.*/-]+\s+){0,2}permissions?\b|"
@@ -69,14 +69,14 @@ AGENT_WALL = re.compile(
     r"\blacks? (?:the )?(?:access|role|scope|credential)|"
     r"\bneeds? (?:the |a )?(?:scoped )?(?:grant|access|credentials?|role)\b|"
     r"\bgrant\b[^.]{0,80}\bappl|\bsupervisor owns\b|\bsupervisor\b[^.;]{0,60}\bgrant|"
-    r"\bapply the iam\b|\biam change\b", re.I)
+    r"\bapply the iam\b|\biam change\b", re.IGNORECASE)
 _NEGATED = re.compile(r"\b(no|not|never|without|nor)\b")
 _ANSWERED = re.compile(r"\b(recorded|made|given|answered|received|resolved|done|obtained|approved)\b")
 # Only unambiguous citations of a decision already made; "once/after/with David's approval" is still pending.
 _PAST_CITE = re.compile(r"\b(per|following|given|as)\s*$")
 _WALL_CLEARED = re.compile(r"\b(fixed|resolved|earlier|previously|no longer|used to)\b|"
                            r"\b(?:was|were|been|got|is now)\s+(?:fixed|resolved|granted|applied|cleared|lifted)\b|"
-                           r"\bno\b[^.;]{0,40}\b(needed|required)\b", re.I)
+                           r"\bno\b[^.;]{0,40}\b(needed|required)\b", re.IGNORECASE)
 _STOPWORDS = frozenset("about after again already being before could david their there these those which while "
                        "would should waiting until where other parked approval decision status".split())
 

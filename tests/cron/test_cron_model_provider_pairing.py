@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from tests.cron.test_cron_provider_pin import _base_job, _run  # noqa: E402
+from tests.cron.test_cron_provider_pin import _base_job, _run
 
 
 def test_pinned_job_without_provider_uses_its_models_provider_not_cron_model_provider(tmp_path):

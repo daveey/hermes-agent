@@ -246,7 +246,7 @@ def refresh(cfg: Optional[dict] = None, *, now: Optional[float] = None) -> dict:
 
 def read_local() -> Optional[dict]:
     try:
-        data = json.loads(registry_path().read_text(encoding="utf-8"))
+        data = json.loads(registry_path().read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) and data.get("schema") == SCHEMA else None
     except (OSError, ValueError):
         return None

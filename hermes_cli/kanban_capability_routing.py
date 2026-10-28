@@ -92,8 +92,8 @@ def _owner_assignee() -> str:
 
 def _default_runner(argv: list[str]) -> tuple[int, str]:
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=HUB_TIMEOUT, check=False,
-                           stdin=subprocess.DEVNULL, encoding="utf-8", errors="replace")
+        p = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=HUB_TIMEOUT, check=False, stdin=subprocess.DEVNULL)
         return p.returncode, (p.stdout or "").strip() + ("\n" + p.stderr.strip() if p.stderr else "")
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, str(exc)
