@@ -369,3 +369,81 @@ def test_kanban_show_lists_undelivered_live_run_comments(worker_home, monkeypatc
     assert kt.inject_new_comments_from_env(agent) is True
     shown = json.loads(kt._handle_show({"task_id": tid}))
     assert shown["undelivered_comments"] == []
+
+
+# --- First poll: the watermark is seeded at the run's start, not at "now" ---
+#
+# Comments from before the run started are in the worker's prompt; ones posted between
+# spawn and the first activity tick are not, so the first poll must deliver them.
+
+
+def _backdate_comment(cid, seconds):
+    conn = kbc.connect()
+    try:
+        conn.execute("UPDATE task_comments SET created_at = created_at - ? WHERE id = ?", (seconds, cid))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _post_as_operator(tid, body):
+    def post():
+        conn = kbc.connect()
+        try:
+            return kb.add_comment(conn, tid, author="default", body=body)
+        finally:
+            conn.close()
+    return _as_other_session(post)
+
+
+def test_comment_after_run_start_before_first_poll_is_injected(worker_home, monkeypatch):
+    tid, run_id = _running_worker(monkeypatch)
+    cid = _post_as_operator(tid, "reply EARLY-ACK in a kanban_comment")
+    agent = FakeAgent()
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is True
+    assert "EARLY-ACK" in agent.steers[0]
+    conn = kbc.connect()
+    try:
+        delivered = [e for e in kb.list_events(conn, tid) if e.kind == "comment_delivered"]
+    finally:
+        conn.close()
+    assert [e.payload for e in delivered] == [{"comment_ids": [cid], "run_id": run_id}]
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is False
+    assert len(agent.steers) == 1
+
+
+def test_comment_before_run_start_is_not_injected_on_first_poll(worker_home, monkeypatch):
+    tid, _run = _running_worker(monkeypatch)
+    cid = _post_as_operator(tid, "old note already in the prompt")
+    _backdate_comment(cid, 60)
+    agent = FakeAgent()
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is False
+    assert agent.steers == []
+    assert kt._comment_watermark[tid] == cid
+
+
+def test_own_comment_before_first_poll_is_not_injected(worker_home, monkeypatch):
+    tid, _run = _running_worker(monkeypatch)
+    out = json.loads(kt._handle_comment({"task_id": tid, "body": "my own early progress note"}))
+    assert out["ok"]
+    agent = FakeAgent()
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is False
+    assert agent.steers == []
+
+
+def test_first_poll_skips_comments_already_delivered_to_this_run(worker_home, monkeypatch):
+    tid, run_id = _running_worker(monkeypatch)
+    cid = _post_as_operator(tid, "delivered by an earlier process of this run")
+    conn = kbc.connect()
+    try:
+        kb.record_comment_delivery(conn, tid, run_id, [cid])
+    finally:
+        conn.close()
+    agent = FakeAgent()
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is False
+    assert agent.steers == []

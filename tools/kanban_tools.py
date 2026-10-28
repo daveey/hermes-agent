@@ -698,7 +698,7 @@ def heartbeat_current_worker_from_env() -> bool:
 
 # Live operator-note injection: poll the task for new comments and steer them in
 # OUT-OF-BAND, so a user can talk to a running task without block → comment → unblock.
-# Watermarked per task (seeded on first poll: that history is already in the context).
+# Watermarked per task, seeded on first poll at the run's start (earlier history is in the prompt).
 _COMMENT_POLL_MIN_INTERVAL_SECONDS = 6.0
 _comment_poll_last_attempt: float = 0.0
 _comment_watermark: dict[str, int] = {}
@@ -735,13 +735,20 @@ def inject_new_comments_from_env(agent: Any) -> bool:
     own_ids: set[int] = set()
     try:
         with _board(None, quiet_close=True) as (kb, conn):
+            if seen is None and run_id is not None:
+                # [daveey] Seed at the run's start, not "now": comments from before the run
+                # are in the prompt, but ones posted between spawn and this first poll are not.
+                seen = kb.comment_id_before_run_start(conn, tid, run_id)
+                if seen is not None:
+                    _comment_watermark[tid] = seen
             rows = kb.list_comments_after(conn, tid, after_id=seen or 0)
             if seen is not None and rows and run_id is not None:
-                own_ids = kb.own_comment_ids(conn, tid, run_id)
+                own_ids = (kb.own_comment_ids(conn, tid, run_id)
+                           | kb.delivered_comment_ids(conn, tid, run_id))
     except Exception:
         logger.debug("comment-inject: bridge failed", exc_info=True)
         return False
-    if seen is None:
+    if seen is None:  # no run to anchor on: everything so far counts as already seen
         _comment_watermark[tid] = max((c.id for c in rows), default=0)
     if seen is None or not rows:
         return False
