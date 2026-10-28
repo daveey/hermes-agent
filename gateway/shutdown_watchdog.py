@@ -41,6 +41,12 @@ DEFAULT_LOOP_WATCHDOG_TIMEOUT_S = 10.0
 # the loop it monitors) is fixed at the root by the off-loop heartbeat write + two-witness probe (#90502),
 # so the default stays tight for genuine wedges.
 DEFAULT_LOOP_WATCHDOG_MAX_STRIKES = 3
+# os._exit kills the background status writer, so a timed-out wait drops the
+# degraded stamp and readers keep seeing "running" (#113372). 0.25s expired
+# under CPU throttle before the snapshot was durable. Wait on the writer's
+# completion: this returns as soon as the write lands, and a wedged filesystem
+# can postpone the restart by at most this long.
+_STATUS_STAMP_WAIT_S = 10.0
 _HEARTBEAT_RELATIVE = ("state", "gateway.heartbeat")
 _WATCHDOG_DUMP_RELATIVE = ("logs", "gateway-shutdown-watchdog.log")
 
@@ -172,7 +178,8 @@ def _mark_exited_quietly(exit_code: int, reason: str) -> None:
         # operator intent (a restart-drain that wedged is still a requested restart) untouched.
         restart = {"restart_requested": True} if exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE else {}
         write_runtime_status(
-            gateway_state="degraded", exit_reason=reason, wait_timeout=0.25, **restart)
+            gateway_state="degraded", exit_reason=reason,
+            wait_timeout=_STATUS_STAMP_WAIT_S, **restart)
 
 
 def _process_hermes_home() -> Path:
