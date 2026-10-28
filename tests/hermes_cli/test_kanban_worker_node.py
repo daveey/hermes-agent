@@ -169,7 +169,12 @@ def test_tool_create_runs_on_and_placement_to_an_enrolled_machine(gws, monkeypat
     tid = out["task_id"]
     row = hub.conn.execute("SELECT runs_on, created_on FROM tasks WHERE id = ?", (tid,)).fetchone()
     assert json.loads(row["runs_on"]) == ["machine:worker-1"]  # created here, runs only there
+    # The response says so, so a caller doesn't read the pin as ignored and re-create the card.
+    assert out["runs_on"] == ["machine:worker-1"]
+    assert out["placement"] == {"where": "local", "runs_on": ["machine:worker-1"], "machine": WORKER}
+    assert "runs on " + WORKER + " via the board lease" in out["note"] and tid in out["note"]
     out = _tool_create({"title": "explicit", "assignee": "default", "runs_on": ["linux"]})
+    assert out["runs_on"] == ["linux"] and "placement" not in out
     assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?",
                                        (out["task_id"],)).fetchone()[0]) == ["linux"]
 

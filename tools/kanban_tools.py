@@ -1643,9 +1643,11 @@ def _handle_create(args: dict, **kw) -> str:
             runs_on = _wn.normalize_runs_on(args.get("runs_on"))
         except ValueError as exc:
             return tool_error(str(exc))
+        pinned_machine = None
         if runs_on is None and origin_intent is None:
             runs_on = _wn.placement_runs_on(conn, args.get("placement"))
             if runs_on is not None:
+                pinned_machine = str(args.get("placement")).strip()
                 args = {**args, "placement": "local"}
         if origin_intent is None and origin is None:
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
@@ -1722,6 +1724,14 @@ def _handle_create(args: dict, **kw) -> str:
             if placed:
                 extra["capability_placement"] = placed
                 landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
+        if runs_on is not None:
+            # Say where the card runs: a pin rewritten to runs_on otherwise reads like an ignored pin,
+            # and a caller that archives and re-creates it makes a duplicate. [daveey]
+            extra["runs_on"] = runs_on
+            if pinned_machine:
+                extra["placement"] = {"where": "local", "runs_on": runs_on, "machine": pinned_machine}
+                extra["note"] = (f"Created here as {new_tid}; it runs on {pinned_machine} via the board lease "
+                                 f"(runs_on={runs_on}). The pin was honoured: do not re-create it.")
         if origin_intent is not None:
             return json.dumps({"ok": False, "created": True, "code": "origin_bind_pending",
                                "task_id": new_tid, **landed, **gate,
