@@ -5,6 +5,8 @@ call time so imports stay one-way (both of those modules import this one lazily)
 """
 
 import contextlib
+import json
+import logging
 import os
 import subprocess
 import sys
@@ -12,6 +14,7 @@ from pathlib import Path
 
 from hermes_cli._startup_fast import is_desktop_ssh_backend_argv
 
+logger = logging.getLogger(__name__)
 _PS_RUN_KWARGS = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
@@ -593,6 +596,128 @@ def _kill_pids_posix(pids: list[int], killed: list[int], failed: list[tuple[int,
                   for pid in survivors)
 
 
+# [daveey] The update's stop goes through the backend's own retirement fence first
+# (``POST /api/health/retirement``, ``hermes_cli/backend_retirement.py``). A plain SIGTERM made the
+# serve finalize its sessions, and ``tui_gateway.session_lifecycle`` then cancelled a running
+# background review mid provider call. The drain window applies an update at the first idle gap
+# between turns, and a review starts right after every turn, so one is often in flight then
+# (David-MBP 2026-10-28 06:37:41, pid 91625). While the backend reports ``background_review:<n>``
+# the update keeps asking; the fence lets the review finish, asks it to stop between calls past
+# ``BACKGROUND_REVIEW_WAIT_S`` (300 s), and stops counting it past ``BACKGROUND_REVIEW_HARD_CAP_S``
+# (900 s), which is also this wait's own deadline. Every other answer (idle, another kind of busy,
+# an old backend with no fence, no token, no port) is stopped exactly as before.
+_REVIEW_RETIRE_POLL_S = 2.0
+_REVIEW_RETIRE_HTTP_TIMEOUT_S = 3.0
+
+
+def _review_retire_deadline_s() -> float:
+    from hermes_cli.backend_retirement import BACKGROUND_REVIEW_HARD_CAP_S
+    return float(BACKGROUND_REVIEW_HARD_CAP_S)
+
+
+def _retirement_endpoint(pid: int) -> tuple[str, int, str] | None:
+    """``(host, port, token)`` to reach *pid*'s retirement fence, or ``None`` when unknown.
+
+    Port: the spawn ledger (real port of a ``--port 0`` backend), the host rendezvous record that
+    names this pid, else a non-zero ``--port`` in its argv. Token: the session token in the
+    process's own environment (Desktop-local backends), else the rendezvous token of the record
+    that names this pid. Both are required; anything less falls back to the plain stop.
+    """
+    from hermes_cli import main_dashboard as _dash
+
+    host = port = token = None
+    if bind := _ledger_serve_binds().get(pid):
+        host, port = bind
+    with contextlib.suppress(Exception):
+        from gateway import host_rendezvous as _hr
+        for role in (_hr.ROLE_DESKTOP_SERVE, _hr.ROLE_SERVE):
+            record = _hr.read_record(role)
+            if record is not None and record.pid == pid and record.port:
+                if port is None:
+                    host, port = _hr.dial_host(record), int(record.port)
+                token = _hr.read_token(role) or None
+                break
+    if port is None:
+        argv = _dash._dashboard_cmdline_for_pid(pid) or []
+        raw = _flag_value(argv, "--port")
+        if raw and raw.isdigit() and int(raw) > 0:
+            host, port = _flag_value(argv, "--host") or "", int(raw)
+    env = _pid_environ(pid) or {}
+    token = env.get("HERMES_DASHBOARD_SESSION_TOKEN") or token
+    if not port or not token:
+        return None
+    if host in (None, "", "0.0.0.0", "::", "*", "localhost"):
+        host = "127.0.0.1"
+    return host, int(port), token
+
+
+def _retirement_request(endpoint: tuple[str, int, str], body: dict | None) -> dict | None:
+    """POST *body* to ``/api/health/retirement`` (``None`` body: GET ``/api/health/idle``)."""
+    import urllib.request
+
+    host, port, token = endpoint
+    netloc = f"[{host}]" if ":" in host else host
+    path = "/api/health/idle" if body is None else "/api/health/retirement"
+    request = urllib.request.Request(
+        f"http://{netloc}:{port}{path}", method="GET" if body is None else "POST",
+        data=None if body is None else json.dumps(body).encode(),
+        headers={"X-Hermes-Session-Token": token, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=_REVIEW_RETIRE_HTTP_TIMEOUT_S) as response:
+            payload = json.loads(response.read(65536).decode("utf-8", "replace"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _await_background_reviews(pids: list[int]) -> None:
+    """Hold the stop of each backend in *pids* while it runs a background review (see above)."""
+    import time as _time
+
+    pending = {pid: ep for pid in pids if (ep := _retirement_endpoint(pid)) is not None}
+    if not pending:
+        return
+    started = _time.monotonic()
+    deadline = started + _review_retire_deadline_s()
+    waited: set[int] = set()
+    while pending:
+        for pid, endpoint in list(pending.items()):
+            permit = _retirement_request(endpoint, {"action": "prepare"}) or {}
+            if permit.get("ok") is True and isinstance(permit.get("token"), str):
+                committed = (_retirement_request(endpoint, {"action": "commit", "token": permit["token"]})
+                             or {}).get("ok") is True
+                del pending[pid]
+                if pid in waited:
+                    msg = (f"PID {pid} finished its background review after "
+                           f"{_time.monotonic() - started:.0f}s; retirement fence "
+                           f"{'committed' if committed else 'not committed'}, stopping it")
+                    print(f"    ✓ {msg}")
+                    logger.warning("dashboard stop: %s", msg)
+                continue
+            detail = str(((_retirement_request(endpoint, None) or {}).get("detail")) or "")
+            if not detail.startswith("background_review:"):
+                del pending[pid]  # nothing a wait protects (or an old backend): stop as before
+                continue
+            if pid not in waited:
+                waited.add(pid)
+                from hermes_cli.backend_retirement import BACKGROUND_REVIEW_WAIT_S
+                msg = (f"PID {pid} is running a background review ({detail}); waiting for it before "
+                       f"stopping (asked to wind down between API calls after "
+                       f"{BACKGROUND_REVIEW_WAIT_S:.0f}s, at most {_review_retire_deadline_s():.0f}s)")
+                print(f"    ⏳ {msg}")
+                logger.warning("dashboard stop: %s", msg)
+        if not pending:
+            return
+        if _time.monotonic() >= deadline:
+            for pid in pending:
+                msg = (f"PID {pid} background review still running after "
+                       f"{_time.monotonic() - started:.0f}s; stopping it anyway")
+                print(f"    ⚠ {msg}")
+                logger.warning("dashboard stop: %s", msg)
+            return
+        _time.sleep(_REVIEW_RETIRE_POLL_S)
+
+
 def _kill_stale_dashboard_processes(
     reason: str = "the running backend no longer matches the updated frontend", *,
     restart_managed: bool = False, already_restarted_units: set[str] | None = None,
@@ -686,6 +811,14 @@ def _kill_stale_dashboard_processes(
                        or _launcher_launchd_job(pid)):
                 pid_launchd[pid] = job
     print(f"\n⟲ Stopping {len(pids)} dashboard process(es) ({reason})")
+    if restart_managed:
+        # Update only: never cut a background review off mid-call (see _await_background_reviews).
+        # ``--stop`` is an explicit request and keeps its immediate stop.
+        try:
+            _await_background_reviews(list(pids))
+        except Exception:
+            logger.warning("dashboard stop: background-review wait failed; stopping as before",
+                           exc_info=True)
     killed: list[int] = []
     failed: list[tuple[int, str]] = []
     (_kill_pids_windows if sys.platform == "win32" else _kill_pids_posix)(pids, killed, failed)
