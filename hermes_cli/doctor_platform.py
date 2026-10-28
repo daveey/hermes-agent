@@ -184,10 +184,12 @@ def _check_s6_supervision(issues: list[str]) -> None:
     """Under our s6 /init, report static services and the ONE host gateway slot; no-op elsewhere.
     Counterpart to :func:`_check_gateway_service_linger` (systemd-on-host)."""
     try:
-        from hermes_cli.service_manager import S6ServiceManager, detect_service_manager
+        from hermes_cli.service_manager import S6ServiceManager, _s6_running
     except Exception:
         return
-    if detect_service_manager() != "s6":
+    # Only "is s6 PID 1?" matters here. detect_service_manager() would go on to probe
+    # `systemctl is-system-running` in containers, and doctor must not call a service manager.
+    if not _s6_running():
         return
     _section("s6 Supervision")
     mgr = S6ServiceManager()
@@ -262,10 +264,10 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         from hermes_cli.gateway import (
             _SERVICE_BASE, get_systemd_linger_status, get_systemd_unit_path, is_linux,
             user_systemd_unit_dir)
-        from hermes_cli.service_manager import detect_service_manager
+        from hermes_cli.service_manager import _s6_running
     except Exception as e:
         return check_warn("Gateway service linger", f"(could not import gateway helpers: {e})")
-    if not is_linux() or detect_service_manager() == "s6":
+    if not is_linux() or _s6_running():  # not detect_service_manager(): see _check_s6_supervision
         return
     host_unit = user_systemd_unit_dir() / f"{_SERVICE_BASE}.service"
     if not (get_systemd_unit_path().exists() or host_unit.exists()):

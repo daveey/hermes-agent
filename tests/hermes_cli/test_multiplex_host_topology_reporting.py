@@ -77,7 +77,7 @@ def test_doctor_reports_the_single_host_gateway_not_per_profile_slots(served_hos
         def list_profile_gateways(self):
             return ["default", "served", "legacy"]
 
-    monkeypatch.setattr("hermes_cli.service_manager.detect_service_manager", lambda: "s6")
+    monkeypatch.setattr("hermes_cli.service_manager._s6_running", lambda: True)
     monkeypatch.setattr("hermes_cli.service_manager.S6ServiceManager", _Mgr)
     issues: list[str] = []
     doctor_platform._check_s6_supervision(issues)
@@ -103,7 +103,7 @@ def test_doctor_raises_an_issue_when_nothing_owns_the_gateway_role(served_host, 
             return ["default", "served", "legacy"]
 
     monkeypatch.setattr("gateway.host_topology.host_gateway_topology", lambda: None)
-    monkeypatch.setattr("hermes_cli.service_manager.detect_service_manager", lambda: "s6")
+    monkeypatch.setattr("hermes_cli.service_manager._s6_running", lambda: True)
     monkeypatch.setattr("hermes_cli.service_manager.S6ServiceManager", _Mgr)
     issues: list[str] = []
     doctor_platform._check_s6_supervision(issues)
@@ -128,7 +128,7 @@ def test_doctor_checks_host_unit_linger_under_a_served_profile(served_host, tmp_
     else:
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setattr("hermes_cli.gateway.is_linux", lambda: True)
-    monkeypatch.setattr("hermes_cli.service_manager.detect_service_manager", lambda: "systemd")
+    monkeypatch.setattr("hermes_cli.service_manager._s6_running", lambda: False)
     monkeypatch.setattr("hermes_cli.gateway.get_systemd_linger_status", lambda *a, **k: (False, "off"))
 
     issues: list[str] = []
