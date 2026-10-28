@@ -51,7 +51,9 @@ def test_refused_input_commits_failed_mailbox_receipt(tmp_path):
         mailbox.complete_delivery(tmp_path, queued["id"], status=outcome["status"],
                                   error=outcome.get("error", ""))
     assert submit(None, "live", session, "refused input", terminal_callback=terminal)
-    session["_run_thread"].join(timeout=5)
+    # The turn thread lazily imports ``tui_gateway.server`` (seconds on a CPU-throttled runner); join returns as
+    # soon as it ends, and a timeout here would strand a half-imported module that errors every later fixture.
+    session["_run_thread"].join(timeout=180)
     assert not session["_run_thread"].is_alive()
     assert mailbox.read_delivery_result(tmp_path, queued["id"])["status"] == "failed"
     assert retired and session["running"] is False
