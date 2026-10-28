@@ -3193,6 +3193,33 @@ def edit_task(
     return True
 
 
+def _has_probe(wake_check: Optional[str], clock_only: bool) -> bool:
+    return bool(wake_check and str(wake_check).strip()) or bool(clock_only)
+
+
+def _probe_parks(kind: Optional[str], wake_check: Optional[str], clock_only: bool,
+                 human_request: Optional[dict]) -> bool:
+    """An agent-owned block (no kind, capability, transient, needs_input) with no human ask that
+    brings a wake_check / clock_only is a wait on that probe: park it scheduled so the probe runs.
+    [daveey]"""
+    from hermes_cli.kanban_block_policy import AGENT_OWNED_KINDS
+    return _has_probe(wake_check, clock_only) and not human_request and kind in AGENT_OWNED_KINDS
+
+
+def _refuse_untimed_probe(kind: Optional[str], wake_check: Optional[str], clock_only: bool) -> None:
+    """A wake_check / clock_only only means something on a park. On a block that lands
+    ``blocked`` (a human ask, an assignment, a dependency on an open parent) it would be dropped
+    and nothing would run it, so refuse instead. [daveey]"""
+    if not _has_probe(wake_check, clock_only):
+        return
+    what = "wake_check" if wake_check and str(wake_check).strip() else "clock_only"
+    raise ValueError(
+        f"refused: {what} only applies to a timed park (kind='time', a SCHEDULED_UNTIL=<ISO8601> "
+        f"reason, or an agent-owned block with no human_request). This block (kind={kind!r}) would "
+        f"land '{'todo' if kind == 'dependency' else 'blocked'}' and drop the {what}, so nothing "
+        "would run it. Use kind='time' to wait on it, or drop it for a human ask.")
+
+
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
@@ -3243,11 +3270,16 @@ def block_task(
             # [daveey] Park untyped clock waits as scheduled too, not blocked + kind=time;
             # otherwise Desktop lists them under "For you" with an unblock button.
             from hermes_cli import kanban_timed_park as ktp
-            if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=_parents_satisfied(conn, task_id)):
+            from hermes_cli.kanban_shared_blockers import normalize_blocker_id
+            if (ktp.is_timed_park(kind, reason, parents_satisfied=_parents_satisfied(conn, task_id),
+                                  blocker_id=blocker_id)
+                    or _probe_parks(kind, wake_check, clock_only, human_request)):
                 reject_timed_request(human_request)
                 return ktp.park(conn, task_id, reason=reason, requested_kind=kind, source_status="ready",
                                 from_untyped_block=True, wake_check=wake_check,
-                                check_every=check_every, clock_only=clock_only, awaiting=awaiting)
+                                check_every=check_every, clock_only=clock_only, awaiting=awaiting,
+                                blocker_id=normalize_blocker_id(blocker_id))
+            _refuse_untimed_probe(kind, wake_check, clock_only)
             requested_kind, rekind_reason = kind, None
             if kind == "assignment":
                 kind, rekind_reason = assignment_routing.classify(get_task(conn, task_id), kind, reason, human_request=human_request)
@@ -3274,11 +3306,17 @@ def block_task(
         kind, rekind_reason, exhausted_budget = classify_stop(conn, task_id, kind, reason, blocker_id, human_request=human_request)
         no_open_parent = _parents_satisfied(conn, task_id)
         from hermes_cli import kanban_timed_park as ktp
-        if not blocker_id and ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent):
+        from hermes_cli.kanban_shared_blockers import normalize_blocker_id
+        # A timed park keeps its wake time and wake check behind a shared blocker too; the
+        # blocker id rides on the closed run, so the card still counts as behind it. [daveey]
+        if (ktp.is_timed_park(kind, reason, parents_satisfied=no_open_parent, blocker_id=blocker_id)
+                or _probe_parks(requested_kind, wake_check, clock_only, human_request)):
             reject_timed_request(human_request)
             return ktp.park(conn, task_id, reason=reason, requested_kind=kind,
                             source_status=source_status, expected_run_id=expected_run_id,
-                            wake_check=wake_check, check_every=check_every, clock_only=clock_only, awaiting=awaiting)
+                            wake_check=wake_check, check_every=check_every, clock_only=clock_only, awaiting=awaiting,
+                            blocker_id=normalize_blocker_id(blocker_id))
+        _refuse_untimed_probe(kind, wake_check, clock_only)
         # Parent-less ``dependency`` behind a shared blocker: sticky ``needs_input`` (todo would respawn it).
         if kind == "dependency" and no_open_parent:
             kind = "needs_input"
@@ -3299,7 +3337,6 @@ def block_task(
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
-        from hermes_cli.kanban_shared_blockers import normalize_blocker_id
         blocker_id = normalize_blocker_id(blocker_id)
         if blocker_id:
             payload["blocker_id"] = blocker_id

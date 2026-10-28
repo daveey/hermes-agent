@@ -202,6 +202,9 @@ class DispatchResult:
     shared_blocker_released: list[str] = field(default_factory=list)
     """Blocked task ids unblocked because a probe cleared the shared blocker
     they were parked behind (``kanban_shared_blockers``). [daveey]"""
+    shared_blocker_probed: list[str] = field(default_factory=list)
+    """Blocked task ids unblocked as the probe of an open shared blocker that had no
+    ready/running card behind it (``probe_stranded_blockers``). [daveey]"""
     quota_block_released: list[str] = field(default_factory=list)
     """Guard-hold blocks on a quota wall released once another card completed after them
     (``kanban_db_dispatch_quota.release_recovered_quota_blocks``). [daveey]"""
@@ -2430,11 +2433,15 @@ def _run_reclaim_phase(
     from hermes_cli.kanban_continuation import wake_due_continuations
     result.woken_continuations = wake_due_continuations(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
-    from hermes_cli.kanban_shared_blockers import release_cleared_blockers
+    from hermes_cli.kanban_shared_blockers import probe_stranded_blockers, release_cleared_blockers
     try:
         result.shared_blocker_released = release_cleared_blockers(conn)
     except Exception:
         _kb._log.warning("kanban: releasing cleared shared blockers failed", exc_info=True)
+    try:
+        result.shared_blocker_probed = probe_stranded_blockers(conn)
+    except Exception:
+        _kb._log.warning("kanban: probing stranded shared blockers failed", exc_info=True)
     try:
         from hermes_cli import kanban_provider_walls as _walls
         _walls.alert_on_storm(conn, board=board)

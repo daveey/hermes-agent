@@ -73,9 +73,13 @@ def implied_wake(payload: dict, event_at: int) -> int:
     return scheduled_until(reason if isinstance(reason, str) else None, now=event_at) or event_at + DEFAULT_WAKE_SECONDS
 
 
-def is_timed_park(kind: Optional[str], reason: Optional[str], *, parents_satisfied: bool) -> bool:
-    """Whether a ``block_task`` call is really a wait on time, not on a human."""
-    if kind == TIME_KIND or (kind == "dependency" and parents_satisfied):
+def is_timed_park(kind: Optional[str], reason: Optional[str], *, parents_satisfied: bool,
+                  blocker_id: Optional[str] = None) -> bool:
+    """Whether a ``block_task`` call is really a wait on time, not on a human.
+    Behind a shared blocker (``blocker_id``) a parent-less ``dependency`` is a wait on that
+    blocker (its probe wakes it), not on time; ``kind='time'`` and a ``SCHEDULED_UNTIL=``
+    marker still park with their wake. [daveey]"""
+    if kind == TIME_KIND or (kind == "dependency" and parents_satisfied and not blocker_id):
         return True
     return _MARKER.search(reason or "") is not None
 
@@ -84,11 +88,14 @@ def park(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str], requested_kind: Optional[str],
     source_status: str = "ready", expected_run_id: Optional[int] = None, from_untyped_block: bool = False,
     wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
-    awaiting=None,
+    awaiting=None, blocker_id: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``scheduled`` with a wake time. Caller holds the write txn.
     ``from_untyped_block``: an untyped ``blocked`` card with no live run (classify-in-place) instead.
-    ``awaiting`` names the producer (``kanban_awaiting.gate``: refused or escalated otherwise). [daveey]"""
+    ``awaiting`` names the producer (``kanban_awaiting.gate``: refused or escalated otherwise).
+    ``blocker_id`` (a shared external blocker, ``kanban_shared_blockers``) is stamped on the closed
+    run's metadata and the event, so the card still counts as behind that blocker while it keeps
+    its own wake time and wake check. [daveey]"""
     from hermes_cli import kanban_awaiting as kaw
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
@@ -115,12 +122,15 @@ def park(
     if conn.execute(sql, params).rowcount != 1:
         return False
     run_id = kb._end_or_synthesize_run(
-        conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
+        conn, task_id, outcome="scheduled", status="scheduled", summary=reason,
+        metadata={"blocker_id": blocker_id} if blocker_id else None,
+        synthesize=bool(reason or blocker_id),
     )
     kb._append_event(conn, task_id, "scheduled", {
         "reason": reason, "timed_park": True, "requested_kind": requested_kind,
         "wake_at": wake_at, "resume_status": source_status,
         **kwc.park_fields(wake_check, check_every, clock_only), "awaiting": record,
+        **({"blocker_id": blocker_id} if blocker_id else {}),
     }, run_id=run_id)
     kwc.set_check(conn, task_id, wake_check, check_every, now=now)
     return True

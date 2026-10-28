@@ -171,8 +171,8 @@ def planned_wake(conn: sqlite3.Connection, task_id: str, *, op: str, reason: Opt
     if op == "schedule":
         return ktp.scheduled_payload(reason, now=now)["wake_at"]
     if op == "block":
-        if blocker_id or not ktp.is_timed_park(
-                kind, reason, parents_satisfied=kb._parents_satisfied(conn, task_id)):
+        if not ktp.is_timed_park(
+                kind, reason, parents_satisfied=kb._parents_satisfied(conn, task_id), blocker_id=blocker_id):
             return None
         return ktp.scheduled_until(reason, now=now) or now + ktp.DEFAULT_WAKE_SECONDS
     if op == "continue":

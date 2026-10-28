@@ -112,6 +112,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             ],
             "rate_limited": res.rate_limited,
             "shared_blocker_released": res.shared_blocker_released,
+            "shared_blocker_probed": res.shared_blocker_probed,
             "skipped_locked": res.skipped_locked,
             "skipped_owned": res.skipped_owned,
             "dispatch_owner": res.dispatch_owner,
@@ -161,6 +162,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Rate-limited (released to ready, no failure counted): {', '.join(res.rate_limited)}")
     if res.shared_blocker_released:
         print(f"Released (shared blocker cleared): {', '.join(res.shared_blocker_released)}")
+    if res.shared_blocker_probed:
+        print(f"Released (probe for an idle shared blocker): {', '.join(res.shared_blocker_probed)}")
     if res.skipped_locked:
         print("Skipped: another dispatcher holds this board's lock (no writes this tick)")
     if res.skipped_owned:

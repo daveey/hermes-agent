@@ -1259,6 +1259,9 @@ def _guarded_park(conn, op: str, wake, refused: dict, park, awaiting=None, **pla
         except kaw.AwaitingError as exc:
             refused[tid] = f"cannot {op} {tid}: {exc}"
             return False
+        except ValueError as exc:   # e.g. a wake_check on a block that is not a timed park
+            refused[tid] = f"cannot {op} {tid}: {exc}"
+            return False
     return run
 
 

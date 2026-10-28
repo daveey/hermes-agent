@@ -210,3 +210,110 @@ def test_block_tool_validates_and_reports_blocker(kanban_home, monkeypatch):
     assert out.get("blocker_id") == BID
     assert ksb.normalize_blocker_id("A b/C") == "a-b-c"
     assert ksb.normalize_blocker_id("x" * 100) == "x" * 64
+
+
+# --- a park with blocker_id must keep a way to wake (t_01a18246d7ae8a78) -------------------------
+
+def _future_iso(seconds: int) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(int(time.time()) + seconds, tz=timezone.utc).isoformat()
+
+
+def test_timed_park_with_blocker_keeps_wake_and_probe(kanban_home):
+    with kbc.connect_closing() as conn:
+        other = _blocked_behind(conn, "other")
+        tid = kb.create_task(conn, title="waits on CI window", assignee="default")
+        kb.claim_task(conn, tid)
+        reason = f"SCHEDULED_UNTIL={_future_iso(36 * 3600)} watcher wakes it"
+        assert kb.block_task(conn, tid, reason=reason, kind="time", blocker_id=BID, wake_check="exit 1")
+        task = kb.get_task(conn, tid)
+        assert task.status == "scheduled"
+        ev = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'scheduled' "
+                          "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+        payload = json.loads(ev["payload"])
+        assert payload["wake_at"] > time.time() + 30 * 3600
+        assert payload["blocker_id"] == BID
+        row = conn.execute("SELECT cmd FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone()
+        assert row is not None and row["cmd"] == "exit 1"
+        st = ksb.blocker_states(conn)[BID]
+        assert st.is_open and set(st.behind) == {tid, other}
+
+
+def test_planned_wake_counts_blocker_parks(kanban_home):
+    from hermes_cli import kanban_wake_check as kwc
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="default")
+        kb.claim_task(conn, tid)
+        wake = kwc.planned_wake(conn, tid, op="block", kind="time", blocker_id=BID,
+                                reason=f"SCHEDULED_UNTIL={_future_iso(5 * 3600)}")
+        assert wake is not None and wake > time.time() + 4 * 3600
+
+
+def test_wake_check_on_agent_owned_block_is_honored_not_dropped(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="default")
+        kb.claim_task(conn, tid)
+        assert kb.block_task(conn, tid, reason="billing", kind="capability", blocker_id=BID,
+                             wake_check="exit 1")
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert conn.execute("SELECT cmd FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone()["cmd"] == "exit 1"
+        assert tid in ksb.blocker_states(conn)[BID].behind
+
+
+def test_wake_check_on_human_ask_block_is_refused_not_dropped(kanban_home):
+    hr = {"action": "raise the GitHub spending limit", "why_human": "billing owner",
+          "interaction": "approval", "scope": "org billing", "evidence": "job annotation"}
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="default")
+        kb.claim_task(conn, tid)
+        with pytest.raises(ValueError, match="wake_check"):
+            kb.block_task(conn, tid, reason="billing", kind="needs_input", blocker_id=BID,
+                          wake_check="exit 1", human_request=hr)
+        assert kb.get_task(conn, tid).status == "running"
+        assert conn.execute("SELECT 1 FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone() is None
+
+
+def test_lone_blocked_card_behind_open_blocker_is_probed_after_interval(kanban_home, spawns):
+    _spawned, fake_spawn = spawns
+    with kbc.connect_closing() as conn:
+        tid = _blocked_behind(conn, "alone")
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert _spawned_ids(res) == []                 # within the interval: stays blocked
+        assert kb.get_task(conn, tid).status == "blocked"
+        _age_runs(conn, 1900)
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert _spawned_ids(res) == [tid]               # the interval passed: it is the probe
+        assert conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = ?",
+                            (tid, ksb.PROBE_RELEASED_EVENT)).fetchone()
+
+
+def test_all_blocked_behind_blocker_get_exactly_one_probe(kanban_home, spawns):
+    _spawned, fake_spawn = spawns
+    with kbc.connect_closing() as conn:
+        cards = [_blocked_behind(conn, f"c{i}") for i in range(3)]
+        _age_runs(conn, 1900)
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert len(_spawned_ids(res)) == 1
+        probe = _spawned_ids(res)[0]
+        assert [kb.get_task(conn, t).status for t in cards if t != probe] == ["blocked", "blocked"]
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)    # probe in flight: nothing more
+        assert _spawned_ids(res) == []
+        # The probe re-asserts: no new probe until the interval passes again.
+        assert kb.block_task(conn, probe, reason="still refused", kind="capability", blocker_id=BID)
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert _spawned_ids(res) == []
+
+
+def test_human_ask_behind_blocker_is_not_auto_probed(kanban_home, spawns):
+    _spawned, fake_spawn = spawns
+    hr = {"action": "raise the GitHub spending limit", "why_human": "billing owner",
+          "interaction": "approval", "scope": "org billing", "evidence": "job annotation"}
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="needs David", assignee="default")
+        kb.claim_task(conn, tid)
+        assert kb.block_task(conn, tid, reason="billing", kind="needs_input", blocker_id=BID,
+                             human_request=hr)
+        _age_runs(conn, 1900)
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert _spawned_ids(res) == []
+        assert kb.get_task(conn, tid).status == "blocked"
