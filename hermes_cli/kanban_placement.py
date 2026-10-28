@@ -27,6 +27,12 @@ A card stays local when any of these holds:
 A worker on the target that still hits a local-only wall blocks with ``needs=[...]``; capability
 routing (:mod:`hermes_cli.kanban_capability_routing`) then opens an owner card back here.
 
+After queuing the card, ``kanban_create`` waits up to ``wait_seconds`` (default 10) for the target's
+answer (:func:`await_task_id`) and returns its task id like a local create. Still pending, it returns
+``status: "queued"`` with a note that the card IS created: a chat model that read ``task_id: null``
+as "not created" once called kanban_create again and made a duplicate card. An identical retry
+maps to the same request id (:func:`request_id`) and is never sent twice.
+
 Unset ``route`` (upstream default) never places anything remotely.
 """
 from __future__ import annotations
@@ -188,6 +194,20 @@ def hub_carries_options(hub_cli: str) -> bool:
     return ok
 
 
+def hub_has_outcomes(hub_cli: str) -> bool:
+    """True when the client has ``hermes-hub outcomes`` (1.9.1+): a one-second outcome fetch. Older
+    clients only learn a request's result in a full ``sync`` (~30 s on a busy Mac). Cached like
+    :func:`hub_carries_options`."""
+    key = (hub_cli, "outcomes")
+    hit = _help_cache.get(key)
+    if hit and time.monotonic() - hit[0] < HELP_CACHE_SECONDS:
+        return hit[1]
+    rc, out, _ = hub_runner([hub_cli, "--help"])
+    ok = rc == 0 and re.search(r"\boutcomes\b", out) is not None
+    _help_cache[key] = (time.monotonic(), ok)
+    return ok
+
+
 def _hub_cli(c: _Cfg) -> str:
     return reg.hub_cli_path(c.raw.get("hub_cli"))
 
@@ -325,17 +345,27 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
         return {"where": "local", "why": f"placement check failed: {exc}"}
 
 
-def _default_runner(argv: list[str]) -> tuple[int, str, str]:
+def _default_runner(argv: list[str], timeout: float = HUB_TIMEOUT) -> tuple[int, str, str]:
     try:
         p = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=HUB_TIMEOUT, check=False, stdin=subprocess.DEVNULL)
+                           timeout=timeout, check=False, stdin=subprocess.DEVNULL)
         return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, "", str(exc)
 
 
-# Tests replace this with a fake that records argv.
+def _default_spawn(argv: list[str]) -> None:
+    """Start ``argv`` detached: it finishes (and records its result) even after the tool call returns."""
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
+# Tests replace these with fakes that record argv.
 hub_runner: Callable[[list[str]], tuple[int, str, str]] = _default_runner
+hub_spawn: Callable[[list[str]], None] = _default_spawn
 
 
 def request_id(self_gw: str, args: dict, origin_session: str, options: Optional[dict] = None) -> str:
@@ -375,6 +405,10 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     carried = hub_carries_options(hub_cli)
     options = carried_options(args) if carried else {}
     rid = request_id(self_gw, args, origin_session or "", options)
+    prior = remote_state(rid)
+    if prior in ("queued", "sent", "done"):
+        # An identical earlier call already sent this request: never send it again, return it as is.
+        return {"ok": True, "request_id": rid, "queued_only": False, "retry": True}
     argv = [hub_cli, "create-task", target, str(args.get("title") or "untitled").strip()[:300],
             "--body", remote_body(args, self_gw=self_gw, target=target, carried=carried),
             "--assignee", str(args.get("assignee") or "default"), "--id", rid]
@@ -393,20 +427,112 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     return {"ok": False, "request_id": rid, "rc": rc, "error": (err or out)[-400:]}
 
 
-def remote_task_id(rid: str) -> Optional[str]:
-    """The target's task id once the request is done (None while pending/unknown)."""
+def _sent_row(rid: str) -> Optional[tuple]:
     try:
         db = reg._ro(reg.hub_db_path())
     except Exception:
         return None
     try:
-        row = db.execute("SELECT state, result FROM sent WHERE id = ?", (rid,)).fetchone()
-        if not row or row[0] != "done":
-            return None
-        res = json.loads(row[1] or "{}")
-        tid = res.get("task_id") or res.get("task") if isinstance(res, dict) else None
-        return tid if isinstance(tid, str) else None
+        return db.execute("SELECT state, result FROM sent WHERE id = ?", (rid,)).fetchone()
     except Exception:
         return None
     finally:
         db.close()
+
+
+def remote_state(rid: str) -> Optional[str]:
+    """The request's state in this gateway's hermes-hub replica (local/queued/done/...), None if unknown."""
+    row = _sent_row(rid)
+    return row[0] if row else None
+
+
+_OUTPUT_ID = re.compile(r'"id"\s*:\s*"(t_[A-Za-z0-9_]+)"')
+
+
+def remote_task_id(rid: str) -> Optional[str]:
+    """The target's task id once the request is done (None while pending/unknown)."""
+    row = _sent_row(rid)
+    if not row or row[0] != "done":
+        return None
+    try:
+        res = json.loads(row[1] or "{}")
+    except Exception:
+        return None
+    return _task_id_in(res)
+
+
+def _task_id_in(res) -> Optional[str]:
+    if not isinstance(res, dict):
+        return None
+    tid = res.get("task_id") or res.get("task")
+    if isinstance(tid, str):
+        return tid
+    # A plain (unbound) create returns the owner's `hermes kanban create --json` text as "output",
+    # truncated by the hub, so read the id with a pattern rather than a JSON parse.
+    m = _OUTPUT_ID.search(res.get("output") or "") if isinstance(res.get("output"), str) else None
+    return m.group(1) if m else None
+
+
+def _owner_card(stdout: str) -> tuple[Optional[str], Optional[str]]:
+    """(task id, status) from ``hermes-hub outcomes --id`` output when the hub already holds the owner's
+    card: an origin-bound create stays ``waiting`` until this gateway's next full sync accepts the
+    binding, but the card exists from the moment the owner posts it."""
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            out = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(out, dict) and out.get("remote_state") in ("waiting", "done"):
+            res = out.get("remote_result")
+            st = res.get("status") if isinstance(res, dict) else None
+            return _task_id_in(res), st if isinstance(st, str) else None
+        return None, None
+    return None, None
+
+
+def remote_status(rid: str) -> Optional[str]:
+    """The created card's status on the target (``ready``, ``triage``...) when its result names one."""
+    row = _sent_row(rid)
+    try:
+        res = json.loads(row[1] or "{}") if row and row[0] == "done" else {}
+    except Exception:
+        return None
+    st = res.get("status") if isinstance(res, dict) else None
+    return st if isinstance(st, str) else None
+
+
+def await_task_id(rid: str, *, hub_cli: str, budget: float, clock: Callable[[], float] = time.monotonic,
+                  sleep: Callable[[float], None] = time.sleep) -> tuple[Optional[str], Optional[str]]:
+    """Wait up to ``budget`` seconds for the target to make the card of request ``rid``.
+
+    Returns (task id, status on the target), (None, None) while still pending.
+
+    The result only reaches this gateway when its hermes-hub client fetches outcomes. A client with
+    ``hermes-hub outcomes`` is asked about once a second; an older one gets ONE detached ``sync``
+    (it outlives this wait, so a late result is still recorded) while the replica is polled."""
+    tid = remote_task_id(rid)
+    if tid or budget <= 0:
+        return tid, remote_status(rid) if tid else None
+    deadline = clock() + budget
+    fast = hub_has_outcomes(hub_cli)
+    if not fast:
+        hub_spawn([hub_cli, "sync", "--quiet"])
+    while True:
+        if fast:
+            left = max(1.0, min(5.0, deadline - clock()))
+            argv = [hub_cli, "outcomes", "--id", rid, "--wait", f"{left:.1f}"]
+            # Bound the call itself too (the client's HTTP timeout is 60 s); a test fake takes argv only.
+            _, out, _ = (hub_runner(argv) if hub_runner is not _default_runner
+                         else _default_runner(argv, timeout=left + 5))
+            tid, st = _owner_card(out)
+            if tid:
+                return tid, st
+        tid = remote_task_id(rid)
+        if tid:
+            return tid, remote_status(rid)
+        if clock() >= deadline:
+            return None, None
+        sleep(1.0)

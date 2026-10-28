@@ -1457,22 +1457,29 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             if kp.explicit_foreign_pin(view, reg.self_gateway()):
                 return _placement_refused(target, f"{target} refused the card: {placed.get('error')}")
             return None
-        tid = None
-        deadline = time.monotonic() + float(cfg.get("wait_seconds", 8) or 0)
-        while not placed.get("queued_only"):
-            tid = kp.remote_task_id(placed["request_id"])
-            if tid or time.monotonic() >= deadline:
-                break
-            time.sleep(1.0)
-        note = (f"Created on {target}, not here: {decision['why']} (kanban.placement). It runs there and "
-                + ("shows in this chat's tasks once the hub applies it. " if session_id else "")
-                + (f"Read it with cross_task @task:default@{target}/{tid} or `hermes-hub tasks --gw {target}`."
-                   if tid else f"The task id appears once {target} applies request {placed['request_id']} "
-                   "(`hermes-hub requests`)."))
-        return _ok(task_id=tid, placed={"gateway": target, "request_id": placed["request_id"],
-                                        "task_id": tid, "origin_session": session_id,
-                                        "queued_only": bool(placed.get("queued_only"))},
-                   note=note)
+        rid = placed["request_id"]
+        # A chat model reads task_id null as "not created" and calls kanban_create again, which made a
+        # duplicate card (10-27 drill). Fetch the target's answer for a bounded wait so the id comes
+        # back like a local create's; otherwise say plainly that the card exists. [daveey]
+        tid, remote_status = (None, None) if placed.get("queued_only") else kp.await_task_id(
+            rid, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")), budget=float(cfg.get("wait_seconds", 10) or 0))
+        retry = ("This identical kanban_create call was already made, so no second card was sent; this is "
+                 "the same card. " if placed.get("retry") else "")
+        fields = {"placed": {"gateway": target, "request_id": rid, "task_id": tid, "origin_session": session_id,
+                             "queued_only": bool(placed.get("queued_only")), "retry": bool(placed.get("retry"))}}
+        if tid:
+            shows = " and shows in this chat's tasks" if session_id else ""
+            note = (f"{retry}Created on {target} as {tid}, not here: {decision['why']} (kanban.placement). It runs "
+                    f"there{shows}. Read it with cross_task @task:default@{target}/{tid} or "
+                    f"`hermes-hub tasks --gw {target}`.")
+            return _ok(task_id=tid, status=remote_status or "created", **fields, note=note)
+        note = (f"{retry}The card IS created: it is queued on {target} as request {rid} and {target} makes the "
+                f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
+                "for this card: an identical call returns this same request, and any changed call creates a "
+                f"second, duplicate card. Its task id appears once {target} applies the request "
+                + ("(this chat's tasks, " if session_id else "(")
+                + "`hermes-hub requests`).")
+        return _ok(task_id=None, status="queued", **fields, note=note)
     except Exception as exc:
         logger.warning("kanban placement failed", exc_info=True)
         try:
