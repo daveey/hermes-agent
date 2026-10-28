@@ -436,7 +436,7 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None)
     texts: list = []
     with contextlib.closing(conn):
         try:
-            subs = _kbn.list_notify_subs(conn)
+            subs = _kbn.list_notify_subs(conn, platform="tui", chat_id=session_key)
         except Exception:
             return []
         for sub in subs:

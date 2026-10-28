@@ -347,3 +347,41 @@ class TestNotificationPollerLoopKanbanWiring:
         assert any(tid in text for text in submits), submits
         assert session["_kanban_pending"] == []
         assert session["running"] is True
+
+
+class TestPollerReadsOnlyItsOwnSubscriptions:
+    """Every open chat's poller polls the board every 5 s. It used to fetch every subscription row on the board
+    and filter in Python: 2,465 rows per poll, each row re-taking the GIL, from ~20 pollers at once, which kept a
+    Desktop backend at ~200% system CPU in a GIL convoy (2026-10-27)."""
+
+    def test_list_notify_subs_filters_platform_and_chat_in_sql(self):
+        mine = _create_subscribed_task(platform="TUI")
+        _create_subscribed_task(chat_id="someone-else")
+        _create_subscribed_task(platform="telegram")
+        conn = kbc.connect()
+        try:
+            rows = kbn.list_notify_subs(conn, platform="tui", chat_id=SESSION_KEY)
+            everything = kbn.list_notify_subs(conn)
+        finally:
+            conn.close()
+        assert [r["task_id"] for r in rows] == [mine]
+        assert len(everything) == 3
+
+    def test_poller_fetches_only_this_sessions_rows_and_still_delivers(self):
+        tid = _create_subscribed_task()
+        for n in range(40):
+            _create_subscribed_task(chat_id=f"other-chat-{n}")
+        _complete(tid, summary="mine finished")
+        fetched: list = []
+        real = kbn.list_notify_subs
+
+        def _spy(conn, *args, **kwargs):
+            rows = real(conn, *args, **kwargs)
+            fetched.append(len(rows))
+            return rows
+
+        with patch.object(kbn, "list_notify_subs", _spy):
+            texts = _collect_kanban_notifications(_session())
+
+        assert fetched == [1]
+        assert len(texts) == 1 and tid in texts[0] and "mine finished" in texts[0]

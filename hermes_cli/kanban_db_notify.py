@@ -169,12 +169,18 @@ def list_notify_subs(
     *,
     notifier_profiles: Optional[Iterable[str]] = None,
     include_unowned: bool = False,
+    platform: Optional[str] = None,
+    chat_id: Optional[str] = None,
 ) -> list[dict]:
     """List subscriptions, optionally restricted to notifier profile owners.
 
     No ``notifier_profiles`` -> all subscriptions. Gateway notifiers pass the
     profiles they own so they cannot claim another gateway's events;
     ``include_unowned`` (dispatch owner) covers legacy rows without a stamp.
+    ``platform`` (case-insensitive) and ``chat_id`` (exact) filter in SQL, as
+    :func:`count_notify_subs` does: a per-chat poller that fetched every row and
+    filtered in Python stepped thousands of rows each poll, re-taking the GIL per
+    row, from every open chat at once. [daveey]
     """
     owner_where, owner_params = _notify_profile_filter(
         notifier_profiles, include_unowned=include_unowned,
@@ -187,6 +193,10 @@ def list_notify_subs(
     if owner_where:
         where.append(owner_where)
         params.extend(owner_params)
+    for clause, value in (("LOWER(platform) = LOWER(?)", platform), ("chat_id = ?", chat_id)):
+        if value is not None:
+            where.append(clause)
+            params.append(value)
     sql = "SELECT * FROM kanban_notify_subs"
     if where:
         sql += " WHERE " + " AND ".join(f"({clause})" for clause in where)
