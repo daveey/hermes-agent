@@ -360,15 +360,22 @@ def _rule_prose_phantom_refs(task, events, runs, now, cfg) -> list[Diagnostic]:
     hits = _active_hallucination_events(events, "suspected_hallucinated_references")
     if not hits:
         return []
+    # Re-resolve at read time: ids that were unknown when the summary landed may be real cards on another
+    # gateway (hub replica), so old false warnings clear. Unknown/stale replica = don't flag.
+    from hermes_cli.kanban_db import unresolved_after_replica
+    phantom = unresolved_after_replica(_unique_payload_ids(hits, "phantom_refs"))
+    if not phantom:
+        return []
     return [Diagnostic(
         kind="prose_phantom_refs", severity="warning",
         title="Completion summary references unknown task ids",
-        detail="The completion summary mentions task ids that don't resolve in this board's database. "
+        detail="The completion summary mentions task ids that don't resolve on this board or in the hub replica "
+               "of other gateways. "
                "The completion itself succeeded, but downstream consumers parsing the summary may be "
                "pointed at cards that never existed.",
         actions=_generic_recovery_actions(task, running=_is_running(task)),
         first_seen_at=_event_ts(hits[0]), last_seen_at=_event_ts(hits[-1]), count=len(hits),
-        data={"phantom_refs": _unique_payload_ids(hits, "phantom_refs")},
+        data={"phantom_refs": phantom},
     )]
 
 

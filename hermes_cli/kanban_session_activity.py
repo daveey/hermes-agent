@@ -427,6 +427,36 @@ def _hub_db_path() -> Path | None:
     return path if path.is_file() else None
 
 
+def replica_task_resolution(ids: list[str], now: float | None = None) -> tuple[set[str], bool]:
+    """Which ``t_<hex>`` ids exist as tasks in the hermes-hub replica of any gateway (same file ``_remote_links``
+    reads; replica keys are ``[profile/]board/<id>``, so qualified ``@task:p@gw/<id>`` refs resolve by id).
+
+    Returns ``(found, authoritative)``. ``authoritative`` is False when a replica exists but cannot answer
+    (unreadable, offline, or not synced within ``HUB_STALE_AFTER_S``): an id absent from it is then *unknown*,
+    not missing, and callers must not flag it. No replica at all (no hub installed) is authoritative: nothing
+    exists beyond the local board."""
+    path = _hub_db_path()
+    if path is None or not ids:
+        return set(), True
+    try:
+        conn = _open_ro(path)
+        try:
+            offline = _meta_float(conn, "offline_since")
+            synced = max(filter(None, (_meta_float(conn, "last_ok"), _meta_float(conn, "last_digest"))), default=None)
+            found = {
+                tid for tid in ids
+                if conn.execute("SELECT 1 FROM replica WHERE coll = 'tasks' AND substr(key, -?) = ? LIMIT 1",
+                                (len(tid) + 1, "/" + tid)).fetchone()
+            }
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return set(), False
+    now = time.time() if now is None else now
+    fresh = offline is None and synced is not None and now - synced <= HUB_STALE_AFTER_S
+    return found, fresh
+
+
 def _open_ro(path: Path, check_same_thread: bool = True) -> sqlite3.Connection:
     """Read-only open that survives a WAL db whose -wal/-shm were just removed (plain ``mode=ro`` then fails);
     never creates the file."""
