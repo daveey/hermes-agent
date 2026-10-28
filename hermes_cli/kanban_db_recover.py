@@ -149,7 +149,7 @@ def recovery_lock(db_path: Path) -> Iterator[bool]:
             yield False
             return
         with contextlib.suppress(OSError):
-            _pid_path(db_path).write_text(f"{os.getpid()}\n")
+            _pid_path(db_path).write_text(f"{os.getpid()}\n", encoding="utf-8")
         yield True
     finally:
         handle.close()
@@ -161,7 +161,7 @@ def _pid_path(db_path: Path) -> Path:
 
 def recovery_lock_holder(db_path: Path) -> Optional[str]:
     try:
-        return _pid_path(db_path).read_text().strip() or None
+        return _pid_path(db_path).read_text(encoding="utf-8-sig").strip() or None
     except OSError:
         return None
 
@@ -684,7 +684,7 @@ def recover(db_path: Path, *, fill: bool = True, file_card: bool = True, reconci
         if file_card and result.status in ("recovered", "installed_unverified"):
             result.card_id = _file_card(path, result)
         if result.report_path:
-            Path(result.report_path).write_text(json.dumps(result.to_dict(), indent=2, default=str))
+            Path(result.report_path).write_text(json.dumps(result.to_dict(), indent=2, default=str), encoding="utf-8")
     except Exception as exc:  # health: allow BLE001 -- the result carries the failure and the status says what was written
         if result.status not in ("recovered", "installed_unverified"):
             result.status = "failed"  # nothing was written to the live board
@@ -703,7 +703,7 @@ def _invalidate_init_cache(path: Path) -> None:
 
 def _write_report(path: Path, result: RecoveryResult, stamp: str) -> Path:
     report = path.with_name(f"{path.name}.recovery-{stamp}.json")
-    report.write_text(json.dumps(result.to_dict(), indent=2, default=str))
+    report.write_text(json.dumps(result.to_dict(), indent=2, default=str), encoding="utf-8")
     return report
 
 
@@ -852,7 +852,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         def _timed_out(_signum, _frame):
             raise TimeoutError(f"recovery exceeded {args.timeout}s")
 
-        signal.signal(signal.SIGALRM, _timed_out)
+        signal.signal(signal.SIGALRM, _timed_out)  # windows-footgun: ok — guarded by hasattr above
         signal.alarm(args.timeout)
     result = recover(Path(args.db), fill=not args.no_fill, file_card=not args.no_card,
                      reconcile_sync=not args.no_sync, dry_run=args.dry_run)

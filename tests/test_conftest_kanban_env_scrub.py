@@ -28,6 +28,6 @@ def test_worker_kanban_pins_never_reach_collection(tmp_path):
     done = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist",
          f"{Path(__file__).resolve()}::test_collection_time_env_has_no_kanban_pins"],
-        cwd=root, env=env, capture_output=True, text=True, timeout=240)
+        cwd=root, env=env, capture_output=True, text=True, timeout=240, check=False)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-2000:]
     assert not live.exists(), "nothing may create the pinned board"

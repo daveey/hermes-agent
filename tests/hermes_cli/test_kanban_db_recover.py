@@ -512,7 +512,7 @@ def test_the_child_timeout_cleans_up_its_work_dir(home):
     repo = str(Path(rec.__file__).resolve().parents[1])
     env["PYTHONPATH"] = repo
     done = subprocess.run([sys.executable, str(probe), "--db", str(path), "--json", "--no-card", "--no-sync",
-                           "--timeout", "3"], capture_output=True, text=True, timeout=60, env=env, cwd=repo)
+                           "--timeout", "3"], capture_output=True, text=True, timeout=60, env=env, cwd=repo, check=False)
     payload = json.loads(done.stdout.strip().splitlines()[-1])
     assert done.returncode == 1 and payload["status"] == "failed" and "TimeoutError" in payload["reason"]
     assert not list(home.glob("kanban-recover-*")), "the rebuild work dir leaked"

@@ -119,11 +119,18 @@ def test_fragmented_resume_obeys_connection_limit(tmp_path):
                     maximum = max(maximum, active)
                     entered.set()
                 release.wait(timeout=8)
-            try:
+            if is_probe:
                 self.wfile.write(payload[start:end + 1])
-            finally:
-                if not is_probe:
-                    with lock:
+            else:
+                # Once the bytes reach the client it can start the next
+                # request, even before this handler is scheduled again.
+                # Make delivery and bookkeeping atomic to new handlers;
+                # the pending-response wait above stays outside the lock
+                # so genuinely concurrent requests are still counted.
+                with lock:
+                    try:
+                        self.wfile.write(payload[start:end + 1])
+                    finally:
                         active -= 1
 
         def log_message(self, *args):
@@ -203,13 +210,17 @@ def test_processes_share_partial_ownership_without_losing_destinations(tmp_path)
                     if active > 1:
                         both.set()
                 release.wait(timeout=15)
-            try:
+            if probe:
                 self.wfile.write(payload[start:end + 1])
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            finally:
-                if not probe:
-                    with lock:
+            else:
+                # Count pending responses, not a completed handler waiting
+                # to be scheduled for its final bookkeeping (see above).
+                with lock:
+                    try:
+                        self.wfile.write(payload[start:end + 1])
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    finally:
                         active -= 1
 
         def log_message(self, *args):
