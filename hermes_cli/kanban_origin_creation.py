@@ -17,6 +17,22 @@ def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _subscribe_origin(conn, task_id: str, origin: dict) -> None:
+    """Subscribe the bound origin chat to its card (platform 'hub', ``<gw>/<profile>/<session>``) in the
+    caller's transaction. [daveey] The courier path stored the binding but no subscription, so the origin
+    chat on another gateway was never linked to the card and never got its done notice. Only the legacy
+    ``kanban_origin.bind`` path subscribed. The chat comes from the binding, never from a process env var.
+    Same row shape as ``kanban_db_notify.add_notify_sub``, which opens its own non-nested txn."""
+    import time
+
+    chat_id = f"{origin['gateway']}/{origin['profile']}/{origin['session']}"
+    conn.execute(
+        "INSERT OR IGNORE INTO kanban_notify_subs (task_id, platform, chat_id, thread_id, chat_type, "
+        "notifier_profile, delivery_mode, created_at, last_event_id) VALUES (?, 'hub', ?, '', 'dm', ?, 'notify', ?, "
+        "COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0))",
+        (task_id, chat_id, origin["profile"], int(time.time()), task_id))
+
+
 def create_with_origin(conn, intent: dict, options: dict) -> str:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_origin_ledger import validate_binding
@@ -66,6 +82,7 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
                   "task_record_key": f"{intent['owner']['profile']}/{intent['owner']['board']}/{task_id}"}
         conn.execute("INSERT INTO origin_creation_intents VALUES (?,?,?,?,?)",
                      (intent["request_id"], immutable, task_id, _json(marker), "origin-bind-" + secrets.token_hex(16)))
+        _subscribe_origin(conn, task_id, intent["origin"])
         return task_id
 
 
@@ -125,4 +142,5 @@ def adopt_with_origin(conn, intent: dict, *, board: str) -> str:
         marker["binding_id"] = "binding-" + secrets.token_hex(16)
         conn.execute("INSERT INTO origin_creation_intents VALUES (?,?,?,?,?)",
                      (intent["request_id"], immutable, task_id, _json(marker), "origin-bind-" + secrets.token_hex(16)))
+        _subscribe_origin(conn, task_id, intent["origin"])
         return task_id

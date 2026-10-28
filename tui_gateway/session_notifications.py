@@ -591,7 +591,67 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
     for slug, resolved in (_kb_board_key(_kb, board_meta) for board_meta in boards):
         unique.setdefault(resolved, slug)
     seen = session.setdefault("_kb_board_seen", {})
-    return [t for slug in unique.values() for t in _kb_poll_board(_kb, slug, session_key, claims, seen)]
+    texts = [t for slug in unique.values() for t in _kb_poll_board(_kb, slug, session_key, claims, seen)]
+    return texts + _collect_remote_kanban_notifications(session_key, claims)
+
+
+def _session_lineage(session_key: str, limit: int = 8) -> tuple:
+    """Earlier ids of this chat (compaction parents): a remote card stays linked to the id that created it."""
+    out: list = []
+    with contextlib.suppress(Exception):
+        import sqlite3
+        from pathlib import Path
+        from hermes_constants import get_hermes_home
+        path = Path(get_hermes_home()) / "state.db"
+        if not path.is_file():
+            return ()
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+        try:
+            sid = session_key
+            for _ in range(limit):
+                row = conn.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (sid,)).fetchone()
+                if not row or not row[0] or row[0] in out:
+                    break
+                sid = str(row[0])
+                out.append(sid)
+        finally:
+            conn.close()
+    return tuple(out)
+
+
+def _forwarded_locally(remote_task_id: str) -> bool:
+    """True when a deferred-placement placeholder on this board forwarded to ``remote_task_id``: it reports the
+    result through its own tui subscription, so a remote notice would repeat it. Called only for a fresh,
+    not-yet-claimed remote state (rare), so the unindexed event scan stays off the hot poll path."""
+    try:
+        from hermes_cli import kanban_db_connect as _kbc
+        from hermes_cli.kanban_placement_forward import FORWARDED
+        with _kbc.connect_closing() as conn:
+            return conn.execute("SELECT 1 FROM task_events WHERE kind = ? AND payload LIKE ? LIMIT 1",
+                                (FORWARDED, f'%"{remote_task_id}"%')).fetchone() is not None
+    except Exception:
+        return False
+
+
+def _collect_remote_kanban_notifications(session_key: str, claims: list | None) -> list:
+    """Done/blocked notices for cards on other gateways linked to this chat (``kanban_remote_notices``). [daveey]"""
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        from tui_gateway import kanban_remote_notices as _krn
+        if not _krn.hub_db_path().is_file():
+            return []
+        found = _krn.collect(session_key, get_active_profile_name() or "default",
+                             lineage=_session_lineage(session_key), skip=_forwarded_locally)
+    except Exception as exc:
+        _notif_log_failure("remote kanban notification poll failed", exc)
+        return []
+    texts = []
+    for item in found:
+        text = _KanbanText(item["text"])
+        texts.append(text)
+        if claims is not None:
+            claims.append({"remote": item, "texts": [text]})
+    return texts
 
 
 def _notif_poll_kanban(sid: str, session: dict) -> None:
@@ -625,6 +685,13 @@ def _kb_rewind_refused(session: dict, batch: list) -> None:
     for claim in reversed(claims):
         texts = claim.get("texts") or []
         if texts and all(id(t) in refused for t in texts):
+            if claim.get("remote"):
+                from tui_gateway import kanban_remote_notices as _krn
+                if _krn.release(claim["remote"]):
+                    continue
+                keep_back.update(id(t) for t in texts if id(t) in refused)
+                remaining.append(claim)
+                continue
             try:
                 conn = _kbc.connect(board=claim["board"])
                 with contextlib.closing(conn):
