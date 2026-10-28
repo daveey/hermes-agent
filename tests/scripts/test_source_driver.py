@@ -167,7 +167,7 @@ def test_pm_observer_accepts_ready_fixture_and_leaves_failed_fixture_untouched(t
     assert node
     setup = '''import sys
 from pathlib import Path
-root, store, node, deps = map(Path, sys.argv[1:])
+root, store, node, deps, runtime = map(Path, sys.argv[1:])
 sys.path.insert(0, str(root))
 from pm.lock import Facts, Lockfile
 from pm.packages import Venv
@@ -176,7 +176,7 @@ from hermes_cli._launchers import ensure_install_launchers
 lock = Lockfile(root / 'pm/lock.json')
 lock.set_pin('node', 'fixture', {})
 lock.save()
-for name, executable in [('python', Path(sys.executable)), ('node', node)]:
+for name, executable in [('python', runtime), ('node', node)]:
     binary = store / name / 'bin' / ('python3' if name == 'python' else name)
     binary.parent.mkdir(parents=True)
     binary.symlink_to(executable)
@@ -190,8 +190,13 @@ site.symlink_to(deps, target_is_directory=True)
 Facts(runtime_facts_path(root)).record_state('venv', Venv(root).expected_stamp([]), [], environment=selected)
 ensure_install_launchers(root, root / '.hermes/bin')
 '''
+    # The store's python must be a self-contained runtime: a venv interpreter only finds its
+    # stdlib through the pyvenv.cfg beside it, and a copied venv binary (macOS) linked from
+    # the store has none, so link the base interpreter the venv was made from.
+    base = getattr(sys, "_base_executable", None)
+    runtime = os.path.realpath(base if base and os.path.isfile(base) else sys.executable)
     subprocess.run([sys.executable, "-I", "-B", "-c", setup, str(root), str(store), node,
-                    sysconfig.get_path("purelib")], env=env, cwd=tmp_path, check=True, timeout=60)
+                    sysconfig.get_path("purelib"), runtime], env=env, cwd=tmp_path, check=True, timeout=60)
     build = root / "scripts/build"
     build.mkdir(parents=True)
     for name in ("freshness.mjs", "frontend-common.mjs"):
