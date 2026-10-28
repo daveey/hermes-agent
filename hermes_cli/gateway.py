@@ -4660,7 +4660,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
 
     import atexit as _atexit
     import traceback as _traceback
-    from hermes_cli.gateway_exit_diag import make_exit_diag
+    from hermes_cli.gateway_exit_diag import make_exit_diag, nonzero_exit_record
     _exit_diag = make_exit_diag()
     _exit_diag(
         "gateway.start", replace=replace, argv=sys.argv, stdin_is_tty=stdin_is_tty,
@@ -4695,13 +4695,9 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         _exit_diag("asyncio.run.exception", exc_type=type(e).__name__, exc_repr=repr(e), traceback=_traceback.format_exc())
         raise
     if not success:
-        # An unplanned stop signal (bootout, kickstart -k, systemctl stop) exits 1 on purpose so the
-        # service manager revives us: record which signal and parent, not a bare failure.
-        from gateway.run_shutdown import last_signal_exit
-        if (sig := last_signal_exit()) is not None:
-            _exit_diag("gateway.exit_signal", **sig)
-        else:
-            _exit_diag("gateway.exit_nonzero")
+        # Unplanned stop signal / refused start / anything else: see nonzero_exit_record().
+        tag, extra = nonzero_exit_record()
+        _exit_diag(tag, **extra)
         _hard_exit_after_gateway_teardown(1)
     _exit_diag("gateway.exit_clean")
     _hard_exit_after_gateway_teardown(0)

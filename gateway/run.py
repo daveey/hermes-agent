@@ -46,6 +46,7 @@ from agent.session_activity import ActivityProvenance
 from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get
 from hermes_cli.fallback_config import pre_agent_fallback_notice
 from gateway.turn_executor import _UnboundedThreadExecutor
+from gateway.run_exit_reason import note_start_refused
 
 # Per-session AIAgent cache bounds (agents are heavy); see _enforce_agent_cache_cap/_session_housekeeping_watcher.
 _AGENT_CACHE_MAX_SIZE = 128
@@ -5026,6 +5027,7 @@ async def _start_gateway_replace_existing_instance(existing_pid: int, replace: b
             f"   (an older build, or an unwritable lock directory).\n"
             f"   Take the host over:  hermes gateway run --replace\n"
             f"   Or stop it first:    hermes gateway stop\n")
+        note_start_refused("already_running", owner_pid=existing_pid)
         return False
 
     # Never signal a process not provably ours (a poisoned PID record → cross-profile restart loop).
@@ -5231,15 +5233,18 @@ def _start_gateway_claim_pid_file(force: bool = False) -> bool:
     if _current_pid is not None and _current_pid != os.getpid():
         logger.error("Another gateway instance (PID %d) started during our startup. "
                      "Exiting to avoid double-running.", _current_pid)
+        note_start_refused("pid_claim", owner_pid=_current_pid, detail="running_pid")
         return False
     if not acquire_gateway_runtime_lock():
         logger.error("Gateway runtime lock is already held by another instance. Exiting.")
+        note_start_refused("pid_claim", owner_pid=get_running_pid(), detail="runtime_lock")
         return False
     try:
         write_pid_file()
     except FileExistsError:
         release_gateway_runtime_lock()
         logger.error("PID file race lost to another gateway instance. Exiting.")
+        note_start_refused("pid_claim", owner_pid=get_running_pid(), detail="pid_race")
         return False
     atexit.register(remove_pid_file)
     atexit.register(release_gateway_runtime_lock)
@@ -5468,6 +5473,7 @@ async def _host_attach_or_none(replace: bool, force: bool = False) -> Optional[b
         logger.error("Refusing to start a second gateway on this host: %s",
                      decision.owner.describe() if decision.owner else "unknown")
         print(decision.message)
+        note_start_refused("host_refused", owner_pid=decision.owner.pid if decision.owner else None)
         return False
     if decision.outcome == REPLACE_HOST and decision.owner is not None:
         # decide() only targets an owner that serves this profile or has not published its served set.
@@ -5774,14 +5780,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     # Windows has no add_signal_handler, so `hermes gateway stop`'s SIGTERM would never drain; poll the
     # planned-stop marker (written BEFORE the kill) instead. Runs everywhere so masked-SIGTERM drains.
-    # Windows fallback: asyncio.add_signal_handler raises NotImplementedError on Windows, so `hermes gateway
-    # stop`'s SIGTERM (which Python maps to TerminateProcess on Windows) never invokes
-    # shutdown_signal_handler. That means the drain loop never runs, mark_resume_pending never fires, and
-    # sessions are silently lost across restarts (issue #33778). The fix is a marker-polling thread: `hermes
-    # gateway stop` writes the planned-stop marker BEFORE killing, and this thread notices it and drives the
-    # same shutdown path the signal handler would have. Runs on every platform (cheap, defensive) so
-    # non-signal-bearing environments (Windows native, sandboxed CI runners that mask SIGTERM) still get a
-    # clean drain.
+    # Without it no drain / mark_resume_pending ran and sessions were lost across restarts (#33778).
     _planned_stop_watcher_stop = threading.Event()
     _planned_stop_watcher_thread = threading.Thread(
         target=_run_planned_stop_watcher,

@@ -14,8 +14,9 @@ import sys
 from datetime import UTC, datetime
 
 # An unplanned stop signal (launchctl bootout, kickstart -k, systemctl stop) is logged as
-# ``gateway.exit_signal`` (info, with signal + parent); a bare non-zero return is a warning; only an
-# escaped exception or a failing SystemExit is an error.
+# ``gateway.exit_signal`` (info, with signal + parent), a start refused because another gateway owns
+# this home/host as ``gateway.start_refused`` (info, with reason + owner pid/liveness); a bare
+# non-zero return is a warning; only an escaped exception or a failing SystemExit is an error.
 _TAG_LEVELS = {"asyncio.run.exception": "error", "gateway.exit_nonzero": "warning"}
 
 
@@ -26,6 +27,20 @@ def _record_level(tag: str, extra: dict[str, object]) -> str:
         from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
         return "info" if extra.get("code") in (None, 0, GATEWAY_SERVICE_RESTART_EXIT_CODE) else "error"
     return "info"
+
+
+def nonzero_exit_record() -> tuple[str, dict]:
+    """Tag + fields for a False ``start_gateway()`` return. An unplanned stop signal (bootout,
+    kickstart -k, systemctl stop) exits 1 on purpose so the service manager revives us, and a start
+    refused because another gateway owns this home/host exits 1 too: neither is a crash, so each
+    names its cause. Only an unexplained False is a bare ``gateway.exit_nonzero``."""
+    from gateway.run_exit_reason import last_start_refusal
+    from gateway.run_shutdown import last_signal_exit
+    if (sig := last_signal_exit()) is not None:
+        return "gateway.exit_signal", sig
+    if (refusal := last_start_refusal()) is not None:
+        return "gateway.start_refused", refusal
+    return "gateway.exit_nonzero", {}
 
 
 def make_exit_diag():
