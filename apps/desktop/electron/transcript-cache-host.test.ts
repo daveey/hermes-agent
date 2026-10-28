@@ -86,9 +86,22 @@ describe('[daveey] open Inbox cards in prefetch', () => {
       { gateway: 'mini', id: 's1', profile: 'default' }
     ]
 
-    const marked = markInboxSessions(records, new Set(['hub\u0000default\u0000s1', 'hub\u0000default\u0000s2']))
+    const marked = markInboxSessions(records, [
+      { gateway: 'hub', profile: 'default', session_id: 's1' },
+      { gateway: 'hub', profile: 'default', session_id: 's2' }
+    ])
 
-    expect(marked.map(record => Boolean(record.inbox))).toEqual([true, false, false])
+    expect(marked.slice(0, 3).map(record => Boolean(record.inbox))).toEqual([true, false, false])
+  })
+
+  it('adds a record for a card whose session the list left out (archived sessions are not listed)', () => {
+    const marked = markInboxSessions(
+      [{ gateway: 'hub', id: 's1', profile: 'default' }],
+      [{ created_at: 7, gateway: 'hub', profile: 'default', session_id: 'archived-card' }]
+    )
+
+    expect(marked).toContainEqual({ activity: 7, gateway: 'hub', id: 'archived-card', inbox: true, profile: 'default' })
+    expect(marked).toHaveLength(2)
   })
 
   it('reads the replica Inbox on the primary and fetches a card\'s session first', async () => {

@@ -58,6 +58,19 @@ describe('prefetch selection', () => {
     expect(targets[0].inbox).toBe(true)
   })
 
+  it('[daveey] prefetches a hidden or archived session when an open Inbox card points at it, and only then', () => {
+    const records = [
+      record('hub', 'card', 1, { hidden: true, inbox: true }),
+      record('hub', 'archived-card', 2, { archived: true, inbox: true }),
+      record('hub', 'hidden-chat', 9, { hidden: true }),
+      record('hub', 'chat', 5)
+    ]
+
+    const targets = selectPrefetchTargets(records, gateway => CONNECTIONS[gateway])
+
+    expect(targets.map(target => target.key.sessionId)).toEqual(['archived-card', 'card', 'chat'])
+  })
+
   it('caps each gateway separately', () => {
     const records = [
       ...Array.from({ length: 250 }, (_, index) => record('mini', `m${index}`, index)),
