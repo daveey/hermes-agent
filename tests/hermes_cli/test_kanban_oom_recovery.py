@@ -35,9 +35,9 @@ def test_oom_run_doubles_cap_and_caps_at_12gib(kanban_home, monkeypatch):
     monkeypatch.setattr(scope, "mem_available_bytes", lambda: 40 * GiB)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="x", assignee="a")
-        assert scope.apply_oom_recovery(ARGV, tid) == ARGV          # no OOM yet
+        assert f"MemoryMax={8 * GiB}" in scope.apply_oom_recovery(ARGV, tid)   # first run: 2x base, no OOM needed
         _run(conn, tid, "oom_killed")
-    assert f"MemoryMax={8 * GiB}" in scope.apply_oom_recovery(ARGV, tid)
+    assert f"MemoryMax={12 * GiB}" in scope.apply_oom_recovery(ARGV, tid)
     with kbc.connect() as conn:
         _run(conn, tid, "oom_killed")
         _run(conn, tid, "oom_killed")
@@ -84,3 +84,14 @@ def test_detector_opens_one_card_then_comments(kanban_home):
     with kbc.connect() as conn:
         assert len(kb.list_comments(conn, alert)) == 1
         assert conn.execute("SELECT COUNT(*) FROM tasks WHERE idempotency_key='worker-oom-rate-alert'").fetchone()[0] == 1
+
+
+def test_first_run_base_uplift_is_admission_bounded(kanban_home, monkeypatch):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="a")
+    monkeypatch.setattr(scope, "mem_available_bytes", lambda: 40 * GiB)
+    assert f"MemoryMax={8 * GiB}" in scope.apply_oom_recovery(ARGV, tid)
+    monkeypatch.setattr(scope, "mem_available_bytes", lambda: 7 * GiB)   # 7-4 reserve < base: stay 4 GiB
+    assert scope.apply_oom_recovery(ARGV, tid) == ARGV
+    monkeypatch.setattr(scope, "mem_available_bytes", lambda: None)
+    assert scope.apply_oom_recovery(ARGV, tid) == ARGV

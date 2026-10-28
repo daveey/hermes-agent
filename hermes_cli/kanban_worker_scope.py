@@ -179,10 +179,14 @@ def consecutive_oom_runs(task_id: str, board: str | None = None) -> int:
 
 
 def apply_oom_recovery(argv: list[str], task_id: str, board: str | None = None) -> list[str]:
-    """Rewrite the scope's MemoryMax property after prior OOM kills; no-op otherwise."""
+    """Rewrite the scope's MemoryMax property for a kanban worker.
+
+    Every worker starts at 2x the registry base cap (4 GiB -> 8 GiB) when MemAvailable admits it:
+    a fixed 4 GiB first-run cap OOM-killed fresh workers before recovery could ever apply
+    (3 kills/24h after the typed-recovery deploy, all first runs). Each consecutive OOM-killed
+    run then doubles again, bounded by the 12 GiB ceiling and MemAvailable admission.
+    """
     n = consecutive_oom_runs(task_id, board)
-    if not n:
-        return argv
     for i, arg in enumerate(argv):
         if arg == "--":
             break
@@ -191,7 +195,7 @@ def apply_oom_recovery(argv: list[str], task_id: str, board: str | None = None) 
                 base = int(arg[len(_MEMORY_MAX_PROP):])
             except ValueError:
                 return argv
-            new = raised_memory_max(base, n, mem_available_bytes())
+            new = raised_memory_max(base, n + 1, mem_available_bytes())
             if new > base:
                 argv = list(argv)
                 argv[i] = f"{_MEMORY_MAX_PROP}{new}"
