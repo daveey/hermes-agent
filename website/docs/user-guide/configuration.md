@@ -3132,3 +3132,14 @@ kanban:
 ```
 
 `kanban.strong_model` names the model dispatched for strong-tier cards; `kanban.strong_provider` optionally pins its provider, otherwise it is inferred from the model name.
+
+## Kanban default placement
+
+```yaml
+kanban:
+  placement:
+    route:
+      macbook: hub   # cards created on gateway "macbook" run on gateway "hub"
+```
+
+`kanban.placement` (default `{}`: every card is created locally) lets a gateway send cards that have no local-only need to another gateway. `kanban_create` creates such a card on the `route` target via `hermes-hub create-task` and binds it to the chat that asked for it. A card stays local when the caller passes `placement="local"`, when it uses options a remote create can't carry (parents, a project, a `dir`/`worktree` workspace, a model pin and similar), when it needs a capability only this gateway holds, when its text matches a local marker (`local_markers` replaces the built-in list, `extra_local_markers` extends it), or when the target isn't live. Other keys: `creator_session`, `local_skill_markers`, `assignees`, `hub_live_seconds`, `wait_seconds`, `hub_cli`.
