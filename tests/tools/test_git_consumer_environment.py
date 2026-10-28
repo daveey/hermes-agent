@@ -78,8 +78,16 @@ def test_git_consumers_fall_back_to_system_git(tmp_path, monkeypatch, consumer, 
             raise RuntimeError("unsupported architecture")
         raise pm.InstallError("git", "managed Git unavailable")
 
-    boundary = "current_target" if failure == "unsupported-target" else "_installed_location"
-    monkeypatch.setattr(resolver, boundary, unavailable)
+    if failure == "unsupported-target":
+        # pm.client's in-process target-gap check reads pm.store.current_target
+        # before any pm.install boundary, so the target probe fails there too.
+        monkeypatch.setattr(resolver, "current_target", unavailable)
+        monkeypatch.setattr(importlib.import_module("pm.store"), "current_target", unavailable)
+    else:
+        # Model a target with no deliberate git gap (POSIX's gap would refuse
+        # before acquisition is ever attempted), so acquisition itself fails.
+        monkeypatch.setattr(importlib.import_module("pm.client"), "_raise_target_gap", lambda package: None)
+        monkeypatch.setattr(resolver, "_installed_location", unavailable)
     monkeypatch.setattr(checkpoint_manager, "CHECKPOINT_BASE", tmp_path / "checkpoints")
     if consumer == "checkpoint":
         manager = checkpoint_manager.CheckpointManager(enabled=True)
