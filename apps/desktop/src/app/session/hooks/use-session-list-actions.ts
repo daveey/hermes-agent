@@ -9,7 +9,7 @@ import {
   SIDEBAR_EXCLUDED_SOURCES
 } from '@/lib/session-source'
 import { markSidebarLive } from '@/store/boot-snapshot'
-import { gatewayActivationEpoch, primaryGatewayConnectionId, primaryGatewayConnectionPin } from '@/store/gateway'
+import { gatewayActivationEpoch, primaryGatewayConnectionId } from '@/store/gateway'
 import {
   $pinnedSessionIds,
   $sessionsLimit,
@@ -425,7 +425,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
         do {
           activationEpoch = gatewayActivationEpoch()
           primaryConnection = primaryGatewayConnectionId()
-          const primaryPin = primaryGatewayConnectionPin()
+          const primaryPin = primaryGatewayConnectionId('pin')
           result = await fetchPage()
 
           if (!owns()) { return }

@@ -574,21 +574,9 @@ export function pendingSessionReplay(runtimeId: string): Promise<boolean> | unde
   return pending.length ? Promise.all(pending).then(results => results.every(Boolean)) : undefined
 }
 
-/** Owner of untagged unified-list rows, never the foreground secondary. */
-export function primaryGatewayConnectionId(): string {
-  return g.primaryConnectionId ?? 'local'
-}
-
-/**
- * The primary's registry connection id when it HAS one, else null. Unlike
- * primaryGatewayConnectionId() this is safe to send as a request pin: its
- * 'local' fallback names the "This device" registry entry, which Electron
- * force-spawns a local backend for when the window's primary is a remote
- * (env override / legacy global remote) — so a window talking to a remote
- * would start a second, local `hermes serve` the user never asked for.
- */
-export function primaryGatewayConnectionPin(): null | string {
-  return g.primaryConnectionId
+/** Untagged-row owner. `'pin'` omits the 'local' fallback that force-spawns a local serve. */
+export function primaryGatewayConnectionId(mode?: 'pin'): null | string {
+  return mode === 'pin' ? g.primaryConnectionId : (g.primaryConnectionId ?? 'local')
 }
 
 /**
