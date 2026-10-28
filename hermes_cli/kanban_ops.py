@@ -117,6 +117,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "dispatch_owner": res.dispatch_owner,
             "ownership_error": res.ownership_error,
             "memory_pressure": res.memory_pressure,
+            # A full host/board cap is the usual reason for zero spawns; without it a
+            # bare "spawned: []" reads as a stuck dispatcher. [daveey]
+            "at_capacity": res.at_capacity,
         }, ascii=True)
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
@@ -133,6 +136,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             print(f"  {', '.join(items)}")
     print(f"Promoted:     {res.promoted}")
     print(f"Spawned:      {len(res.spawned)}")
+    if res.at_capacity:  # name the full cap so "Spawned: 0" is not misread as stuck [daveey]
+        print(f"At capacity:  {res.at_capacity} (ready work waits for a running worker to finish)")
     tag = " (dry)" if args.dry_run else ""
     for tid, who, ws in res.spawned:
         print(f"  - {tid}  ->  {who}  @ {ws or '-'}{tag}")

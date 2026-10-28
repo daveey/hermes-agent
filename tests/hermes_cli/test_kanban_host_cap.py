@@ -431,3 +431,50 @@ def test_cli_daemon_does_not_warn_stuck_when_cap_is_full(kanban_home, monkeypatc
 
 def test_cli_daemon_still_warns_stuck_when_nothing_holds_spawns(kanban_home, monkeypatch, capsys):
     assert "dispatcher stuck" in _daemon_stderr(monkeypatch, capsys, kb.DispatchResult())
+
+
+# ---------------------------------------------------------------------------
+# 5. ``hermes kanban dispatch`` names a full cap instead of a bare "Spawned: 0" [daveey]
+# ---------------------------------------------------------------------------
+
+
+def _cli_dispatch_with_full_host_cap(monkeypatch, capsys, *, as_json):
+    """Run ``_cmd_dispatch`` against a real board whose host cap (max_in_progress=2) is full."""
+    import argparse
+    from hermes_cli import kanban_ops
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config", lambda: {"kanban": {"max_in_progress": 2}},
+    )
+    with kbc.connect() as conn:
+        for title in ("busy-1", "busy-2"):
+            assert kb.claim_task(conn, kb.create_task(conn, title=title, assignee="alice")) is not None
+        kb.create_task(conn, title="waits", assignee="alice")
+    args = argparse.Namespace(dry_run=True, max=None, failure_limit=2, json=as_json)
+    assert kanban_ops._cmd_dispatch(args) == 0
+    return capsys.readouterr().out
+
+
+def test_cli_dispatch_text_names_full_host_cap(kanban_home, all_assignees_spawnable, monkeypatch, capsys):
+    out = _cli_dispatch_with_full_host_cap(monkeypatch, capsys, as_json=False)
+    assert "Spawned:      0" in out
+    assert "At capacity:  max_in_progress=2/2" in out
+
+
+def test_cli_dispatch_json_names_full_host_cap(kanban_home, all_assignees_spawnable, monkeypatch, capsys):
+    import json
+
+    payload = json.loads(_cli_dispatch_with_full_host_cap(monkeypatch, capsys, as_json=True))
+    assert payload["spawned"] == []
+    assert payload["at_capacity"] == "max_in_progress=2/2"
+
+
+def test_cli_dispatch_text_omits_capacity_line_under_cap(kanban_home, all_assignees_spawnable, monkeypatch, capsys):
+    import argparse
+    from hermes_cli import kanban_ops
+
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"kanban": {"max_in_progress": 2}})
+    with kbc.connect() as conn:
+        kb.create_task(conn, title="runs", assignee="alice")
+    assert kanban_ops._cmd_dispatch(argparse.Namespace(dry_run=True, max=None, failure_limit=2, json=False)) == 0
+    assert "At capacity" not in capsys.readouterr().out
