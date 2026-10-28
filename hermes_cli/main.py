@@ -2795,6 +2795,14 @@ def cmd_dashboard(args):
 
     apply_nofile_soft_limit()
 
+    if _headless_backend:
+        # [daveey] Never boot a backend on a tree a core update is about to swap: wait out a live
+        # update or hermes-sync's admission hold (bounded, logged) before the one-shot SSH token is
+        # consumed and before the agent stack is imported (hermes_cli/serve_update_wait.py).
+        from hermes_cli.serve_update_wait import wait_for_update_clear
+
+        wait_for_update_clear()
+
     _ssh_session_token = _read_ssh_session_token_file(_token_file) if _token_file else None
     _mcp_discovery_after_bind = _dashboard_prepare_runtime(args, _headless_backend)
 
