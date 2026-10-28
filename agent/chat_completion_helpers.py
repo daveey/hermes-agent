@@ -1553,6 +1553,11 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
 
 
 def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | None = None) -> dict:
+    # Every request shape (main turn, compression summary, Codex flush) is built here: an agent
+    # constructed before managed enforcement was enabled adopts its approved tuple before the
+    # credential-dependent shaping below (OAuth system/beta handling), or raises before any send.
+    from agent.model_routing_agent import adopt_managed_policy
+    adopt_managed_policy(agent)
     # One-shot continuation override — consumed exactly once, on the FIRST
     # request this call builds (only one api_mode branch runs per invocation).
     reasoning_config = _reasoning_config_for_wire(agent)

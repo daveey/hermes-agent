@@ -135,6 +135,72 @@ def try_class_fallback(agent):
     return True
 
 
+def adopt_managed_policy(agent):
+    """Bring an agent built before managed enforcement was switched on under the policy.
+
+    ``enforce_subscription_only`` is read live, but subscription provenance is only minted when
+    an agent is constructed, so every agent already alive when an operator enables the policy
+    (gateway caches, Desktop sessions, running Kanban workers) would fail closed at its next
+    request with "lacks verified subscription provenance". Before a request is shaped, re-resolve
+    the agent's own concrete tuple as a managed exact pin and rebuild its client from the fenced
+    runtime. Unapproved tuples (paid keys, aggregators, unknown models) still raise before any
+    send, and a paid credential the legacy agent held is replaced by the subscription pool.
+    Returns True only when provenance was adopted by this call.
+    """
+    if getattr(agent, "model_routing", None):
+        return False
+    if isinstance(getattr(agent, "_one_turn_runtime", None), dict):
+        return False  # a temporary switch owns the runtime; its own guards apply
+    from agent.model_routing_managed import managed_config, resolve_managed_runtime
+    config = managed_config()
+    if config is None:
+        return False
+    from agent.agent_init import _build_client, _snapshot_primary_runtime
+    from agent.agent_runtime_helpers import sync_credential_pool_entry_id
+
+    requirements = dict(getattr(agent, "_model_routing_requirements", None) or {"tools": True, "streaming": True})
+    old_client = getattr(agent, "client", None)
+    old_anthropic_client = getattr(agent, "_anthropic_client", None)
+    previous = vars(agent).copy()
+
+    def prepare(runtime):
+        agent.model, agent.provider = runtime["model"], runtime["provider"]
+        agent.base_url, agent.api_mode = runtime["base_url"], runtime["api_mode"]
+        agent._credential_pool = runtime["credential_pool"]
+        _build_client(agent, runtime["api_key"], runtime["base_url"], [])
+
+    try:
+        runtime = resolve_managed_runtime(agent.model, agent.provider, config=config,
+                                          session_id=agent.session_id, requirements=requirements,
+                                          prepare_runtime=prepare)
+    except BaseException:
+        vars(agent).clear()
+        vars(agent).update(previous)
+        raise
+    agent.model_routing = runtime["model_routing"]
+    agent._model_routing_requirements = requirements
+    agent._fallback_chain = []
+    agent._fallback_model = None
+    if old_client is not None and old_client is not agent.client:
+        agent._retire_shared_openai_client(old_client, reason="managed_policy_adoption")
+    if old_anthropic_client is not None and old_anthropic_client is not getattr(agent, "_anthropic_client", None):
+        import logging
+        try:
+            old_anthropic_client.close()
+        except Exception:
+            logging.getLogger(__name__).debug("Retired legacy client close failed", exc_info=True)
+    sync_credential_pool_entry_id(agent)
+    if hasattr(agent, "_transport_cache"):
+        agent._transport_cache.clear()
+    _snapshot_primary_runtime(agent)
+    persist_class_metadata(agent)
+    import logging
+    logging.getLogger(__name__).info(
+        "Adopted managed subscription policy for live agent session=%s route=%s/%s",
+        agent.session_id, agent.provider, agent.model)
+    return True
+
+
 def link_compression_route(agent, parent_session_id, child_session_id):
     """Only compression publication/adoption may join main-agent allocations."""
     from agent.agent_runtime_once import standing_runtime

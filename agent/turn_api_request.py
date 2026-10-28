@@ -103,7 +103,10 @@ def build_api_request(
     )
 
     # Check original multimodal input before provider adapters can replace images
-    # with auxiliary descriptions or strip unsupported content.
+    # with auxiliary descriptions or strip unsupported content. An agent built before managed
+    # enforcement was enabled adopts its approved tuple first (raises for unapproved pins).
+    from agent.model_routing_agent import adopt_managed_policy
+    adopt_managed_policy(agent)
     from agent.model_routing_request import validate_class_request
     if getattr(agent, "model_routing", None):
         validate_class_request(agent, {

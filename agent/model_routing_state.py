@@ -91,7 +91,7 @@ class RoutingState:
                 raise ModelRoutingError("Exact pinned route cannot fail over")
         if not candidates:
             raise ModelRoutingError(f"No eligible {level} routes under billing/capability policy")
-        route = self._choose(db, level, candidates, version)
+        route = self._choose(db, level, candidates, version, kind=_allocation_kind(root))
         metadata = {"requested_class": level, "policy_version": version,
                     "selected_provider": route["provider"], "selected_model": route["model"],
                     "billing_group": route["billing"], "reason": "same-class-failover" if row else "allocation"}
@@ -116,7 +116,7 @@ class RoutingState:
         return root
 
     @staticmethod
-    def _choose(db, level, candidates, version):
+    def _choose(db, level, candidates, version, kind="main"):
         # Provider weights, not route/account counts, determine traffic share.
         subscriptions = [r for r in candidates if r["billing"] == "subscription"]
         candidates = subscriptions or candidates
@@ -124,9 +124,19 @@ class RoutingState:
         for route in candidates:
             groups.setdefault(route["provider"], []).append(route)
         cycle = [p for p in sorted(groups) for _ in range(groups[p][0]["weight"])]
-        pool = json.dumps([version, level, [(p, groups[p][0]["weight"]) for p in sorted(groups)]])
+        key = [version, level, [(p, groups[p][0]["weight"]) for p in sorted(groups)]]
+        # Main sessions and auxiliary owners keep separate cycles. A shared counter interleaved
+        # one main + one aux allocation per session, so with two providers every main session
+        # landed on the same provider (and every aux call on the other). The main key is
+        # unchanged so existing counters keep their position.
+        pool = json.dumps(key if kind == "main" else key + [kind])
         row = db.execute("SELECT position FROM counters WHERE pool=?", (pool,)).fetchone()
         position = row[0] if row else 0
         provider = cycle[position % len(cycle)]
         db.execute("INSERT OR REPLACE INTO counters VALUES (?, ?)", (pool, position + 1))
         return sorted(groups[provider], key=lambda r: r["model"])[0]
+
+
+def _allocation_kind(root):
+    """Auxiliary owners are allocated under ``aux:<owner>:<task>:<class>`` roots."""
+    return "aux" if str(root).startswith("aux:") else "main"
