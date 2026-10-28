@@ -112,11 +112,15 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             ],
             "rate_limited": res.rate_limited,
             "shared_blocker_released": res.shared_blocker_released,
+            "shared_blocker_probed": res.shared_blocker_probed,
             "skipped_locked": res.skipped_locked,
             "skipped_owned": res.skipped_owned,
             "dispatch_owner": res.dispatch_owner,
             "ownership_error": res.ownership_error,
             "memory_pressure": res.memory_pressure,
+            # A full host/board cap is the usual reason for zero spawns; without it a
+            # bare "spawned: []" reads as a stuck dispatcher. [daveey]
+            "at_capacity": res.at_capacity,
         }, ascii=True)
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
@@ -133,6 +137,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             print(f"  {', '.join(items)}")
     print(f"Promoted:     {res.promoted}")
     print(f"Spawned:      {len(res.spawned)}")
+    if res.at_capacity:  # name the full cap so "Spawned: 0" is not misread as stuck [daveey]
+        print(f"At capacity:  {res.at_capacity} (ready work waits for a running worker to finish)")
     tag = " (dry)" if args.dry_run else ""
     for tid, who, ws in res.spawned:
         print(f"  - {tid}  ->  {who}  @ {ws or '-'}{tag}")
@@ -156,6 +162,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Rate-limited (released to ready, no failure counted): {', '.join(res.rate_limited)}")
     if res.shared_blocker_released:
         print(f"Released (shared blocker cleared): {', '.join(res.shared_blocker_released)}")
+    if res.shared_blocker_probed:
+        print(f"Released (probe for an idle shared blocker): {', '.join(res.shared_blocker_probed)}")
     if res.skipped_locked:
         print("Skipped: another dispatcher holds this board's lock (no writes this tick)")
     if res.skipped_owned:

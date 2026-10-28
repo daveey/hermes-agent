@@ -97,11 +97,38 @@ def test_stale_lock_reclaim_survives_the_echo_of_the_runs_earlier_push(live, kan
 def test_orphan_sweep_survives_the_echo_of_the_runs_earlier_push(live, kanban_home, svc):
     tid, uid = _claimed(live, kanban_home, svc, "orphan")
     _round(kanban_home, svc)
-    live.execute("UPDATE tasks SET claim_lock = NULL, worker_pid = NULL WHERE id = ?", (tid,))
+    # A dead claimer long ago: no local claim and a lease mirror that already lapsed (a live one we hold
+    # means a claim may still be in flight, which the sweep leaves alone).
+    live.execute("UPDATE tasks SET claim_lock = NULL, worker_pid = NULL, lease_expires = ? WHERE id = ?",
+                 (int(time.time() - 5) * 1000, tid))
+    live.execute("UPDATE task_events SET created_at = created_at - 3600 WHERE task_id = ? AND kind = 'claimed'",
+                 (tid,))
     assert kd.reconcile_orphaned_running(live) == [tid]
     _round(kanban_home, svc)
     _round(kanban_home, svc)
     _assert_ended(live, svc, uid, "reclaimed")
+
+
+def test_board_grant_row_mid_claim_is_not_reconciled(live, kanban_home, svc):
+    """The MacBook incident (t_01a18189ff87b1c1, 10-28): the Board's lease grant writes the card
+    ``running``; the feed applied that row before the local claim landed (the claim was refused by the
+    update admission hold and its lease released). Locally the card read ``running`` with no claim and
+    no worker, the orphan sweep requeued the review card to ``ready``, and an implementation worker ran
+    it again. A card whose Board lease this gateway still holds has a claim in flight: leave it."""
+    tid = kb.create_task(live, title="review mid-claim", assignee="worker")
+    live.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (tid,))
+    live.commit()
+    _round(kanban_home, svc)
+    gate = sync.claim_gate(live, tid, int(time.time()) + 900, lane="review")
+    assert gate.lease is not None and gate.lease.granted
+    _round(kanban_home, svc)  # the grant's row reaches us: running, our lease, no local claim
+    row = live.execute("SELECT status, claim_lock, lease_holder FROM tasks WHERE id = ?", (tid,)).fetchone()
+    assert (row["status"], row["claim_lock"], row["lease_holder"]) == ("running", None, ME)
+
+    assert kd.reconcile_orphaned_running(live) == []
+    assert live.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "running"
+    assert not [e for e in kb.list_events(live, tid) if e.kind == "reconciled"]
+    gate.__exit__(None, None, None)  # the unused lease is released, as the refused claim does
 
 
 def test_a_run_that_ends_before_its_first_push_survives_the_grants_own_run_row(live, kanban_home, svc):

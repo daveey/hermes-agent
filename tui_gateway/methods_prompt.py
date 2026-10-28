@@ -779,6 +779,10 @@ def _(rid, params: dict) -> dict:
     # whitelisted to "hidden" — this RPC must not mint kinds.
     display_kind = "hidden" if params.get("display_kind") == "hidden" else None
     display_metadata = _submit_display_metadata(params)
+    # [daveey] Stamp the last human-typed prompt (local and desktop-ssh clients) before any refusal: hermes-sync
+    # opens core-update drain windows only while the user is away (tui_gateway/human_input.py).
+    from tui_gateway.human_input import note_submit
+    note_submit(rid, params, raw_text)
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
     if params.get("interrupted"):

@@ -36,6 +36,7 @@ from typing import Optional
 
 GUARD_REASON = "shared_blocker"
 CLEARED_EVENT = "shared_blocker_cleared"
+PROBE_RELEASED_EVENT = "shared_blocker_probe_released"
 DEFAULT_PROBE_SECONDS = 1800
 MAX_BLOCKER_ID_CHARS = 64
 # Outcomes that prove nothing about an external condition.
@@ -244,6 +245,47 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
     return released
 
 
+def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = None,
+                            interval: Optional[int] = None) -> list[str]:
+    """Unblock ONE ``blocked`` card per open blocker that nothing else would probe. Returns task ids.
+
+    :func:`shared_blocker_guard` only spaces out ``ready`` cards, so a blocker whose cards are all
+    ``blocked`` (a lone card, or every card re-asserted) was never probed and never cleared: the
+    cards sat forever (t_e7dc822c). When no card behind the blocker is ``ready`` or ``running`` and
+    the probe interval has passed since the newest assertion or probe start, the card whose
+    assertion is oldest is unblocked; it then spawns as the probe. Cards carrying a human ask
+    (``human_request``) are left for the human. [daveey]"""
+    from hermes_cli import kanban_db as kb
+
+    now = int(time.time()) if now is None else int(now)
+    if interval is None:
+        interval = probe_interval_seconds()
+    probed: list[str] = []
+    for st in blocker_states(conn, now=now).values():
+        if not st.is_open or not st.behind:
+            continue
+        ids = sorted(st.behind)
+        marks = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"SELECT id, status, human_request FROM tasks WHERE id IN ({marks})", ids).fetchall()
+        if any(r["status"] in ("ready", "running") for r in rows):
+            continue   # the ready-card guard already spaces those probes
+        last = max([st.asserted_at, *st.probe_starts.values()])
+        if now - last < interval:
+            continue
+        candidates = sorted((st.behind[r["id"]], r["id"]) for r in rows
+                            if r["status"] == "blocked" and not r["human_request"])
+        for _asserted, tid in candidates:
+            if not kb.unblock_task(conn, tid):
+                continue
+            with kb.write_txn(conn):
+                kb._append_event(conn, tid, PROBE_RELEASED_EVENT, {
+                    "blocker_id": st.blocker_id, "idle_seconds": now - last})
+            probed.append(tid)
+            break
+    return probed
+
+
 def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
     """Worker-context section naming open blockers so workers reuse the same id."""
     states = [s for s in blocker_states(conn).values() if s.is_open]
@@ -252,7 +294,9 @@ def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
     lines = ["## Open shared blockers on this board",
              "External walls other cards already hit. If yours is one of them, stop early and end "
              "with kanban_block/kanban_continue passing the same `blocker_id` instead of rediscovering "
-             "it; only one card probes a blocker at a time."]
+             "it; only one card probes a blocker at a time. A timed wait (kind='time' or a "
+             "SCHEDULED_UNTIL= reason) keeps its wake time and wake_check when it also passes "
+             "blocker_id."]
     mine = None
     for st in sorted(states, key=lambda s: -s.asserted_at):
         if task_id in st.behind:

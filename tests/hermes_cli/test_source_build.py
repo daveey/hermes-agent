@@ -579,6 +579,51 @@ def test_update_swaps_in_a_prebuilt_from_an_ancestor_with_unchanged_desktop_inpu
 
 
 @pytest.mark.platforms("macos")
+def test_defer_desktop_swap_leaves_a_running_desktop_alone(tmp_path, monkeypatch, capsys):
+    """[daveey] HERMES_UPDATE_DEFER_DESKTOP_SWAP=1 (hermes-sync, while Desktop is open): the core update
+    lands but the bundle is neither built nor swapped, so the running Desktop is never stopped
+    (t_01a1825a82e472f6). hermes-sync swaps it on the next quit or while the user is away."""
+    from hermes_cli import main_desktop
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, desktop_dir, built = _prebuilt_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_UPDATE_DEFER_DESKTOP_SWAP", "1")
+    monkeypatch.setattr(main_desktop, "_desktop_main_launches", lambda _d: {4242: []})
+    stopped = []
+    monkeypatch.setattr(main_desktop, "_stop_desktop_processes_locking_build",
+                        lambda *a, **k: stopped.append(a) or [4242])
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert built == [] and stopped == []
+    assert (desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes").read_text() == "previous app"
+    assert "desktop app swap deferred" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.platforms("macos")
+def test_defer_desktop_swap_still_installs_when_desktop_is_not_running(tmp_path, monkeypatch):
+    """With the flag but no Desktop main process (it quit), the swap runs as usual."""
+    from hermes_cli import main_desktop
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, desktop_dir, _built = _prebuilt_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_UPDATE_DEFER_DESKTOP_SWAP", "1")
+    monkeypatch.setattr(main_desktop, "_desktop_main_launches", lambda _d: {})
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert (desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes").read_text() == "prebuilt app"
+
+
+@pytest.mark.platforms("macos")
+def test_without_the_defer_flag_a_running_desktop_is_swapped_as_upstream(tmp_path, monkeypatch):
+    from hermes_cli import main_desktop
+    from hermes_cli.source_build import _build_desktop_product
+
+    root, desktop_dir, _built = _prebuilt_fixture(tmp_path, monkeypatch)
+    monkeypatch.delenv("HERMES_UPDATE_DEFER_DESKTOP_SWAP", raising=False)
+    monkeypatch.setattr(main_desktop, "_desktop_main_launches", lambda _d: {4242: []})
+    _build_desktop_product(root, {"PATH": os.environ["PATH"]}, lambda _label: None)
+    assert (desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes").read_text() == "prebuilt app"
+
+
+@pytest.mark.platforms("macos")
 @pytest.mark.parametrize("change", ["apps/desktop/src/a.ts", "apps/shared/src/x.ts", "package-lock.json"])
 def test_update_builds_when_a_desktop_input_changed_since_the_prebuilt_commit(tmp_path, monkeypatch, capsys, change):
     from hermes_cli.source_build import _build_desktop_product
@@ -588,3 +633,111 @@ def test_update_builds_when_a_desktop_input_changed_since_the_prebuilt_commit(tm
     assert len(built) == 1
     assert (desktop_dir / "release/mac-arm64/Hermes.app/Contents/MacOS/Hermes").read_text() == "previous app"
     assert "not used" in capsys.readouterr().out
+
+
+def _record_packaged_desktop(source, app, *, builder=None):
+    """[daveey] Pack-shaped desktop product: ``builder`` (a checkout with prepared inputs) compiles
+    into ``app``'s Resources/app.asar.unpacked/dist and records its receipt there, and the bundle
+    carries the baked stamp as Resources/install-stamp.json (electron-builder extraResources)."""
+    builder = builder or source
+    build = builder / "apps/desktop/build"
+    prepared = {"icons": str(builder / "apps/desktop/public"), "nativeDeps": str(build / "native-deps"),
+                "stamp": str(build / "install-stamp.json")}
+    dist = app / "Contents/Resources/app.asar.unpacked/dist"
+    dist.mkdir(parents=True)
+    (dist / "main.js").write_text("main", encoding="utf-8")
+    clock = json.loads(Path(prepared["stamp"]).read_text(encoding="utf-8"))["builtAt"]
+    script = (builder / "scripts/build/freshness.mjs").as_uri()
+    subprocess.run([shutil.which("node"), "--input-type=module", "-e",
+                    f"import {{recordProduct, buildInputs}} from {json.dumps(script)};"
+                    "const [source, out, prepared, stampClock] = process.argv.slice(1);"
+                    "recordProduct({source, product: 'desktop', out,"
+                    " inputs: buildInputs(source, 'desktop', JSON.parse(prepared)), stampClock});",
+                    str(builder), str(dist), json.dumps(prepared), clock], check=True)
+    shutil.copy2(prepared["stamp"], app / "Contents/Resources/install-stamp.json")
+    return dist
+
+
+def _desktop_checkout(root, commit, clock):
+    copy_freshness_scripts(root)
+    for rel, text in {"apps/desktop/src/a.ts": "a", "apps/desktop/public/icon.png": "icon",
+                      "apps/desktop/build/native-deps/pty.node": "pty", "package.json": "{}"}.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
+    _write_stamp(root / "apps/desktop/build/install-stamp.json", commit, clock)
+    return root
+
+
+def _write_stamp(path, commit, clock):
+    path.write_text(json.dumps({"schemaVersion": 1, "commit": commit, "builtAt": clock}), encoding="utf-8")
+
+
+def test_installed_prebuilt_desktop_stays_current_after_the_stage_moves(tmp_path, monkeypatch):
+    """[daveey] hermes-sync packs the next origin/main in its stage worktree, so a prebuilt app's
+    receipt names prepared inputs (icons, native deps, the baked stamp) in that stage. Once the
+    app is installed in the live checkout, the stage moving on to another commit must not make it
+    read stale: the bundle's own Resources/install-stamp.json is the stamp it shipped. A changed
+    desktop input in the live checkout, or a bundle stamp whose clock is not the baked one
+    (#123308), still reads stale."""
+    from hermes_cli.source_build import source_product_current
+
+    use_host_node_as_pm_node(monkeypatch)
+    live = _desktop_checkout(tmp_path / "live", "a" * 40, "2026-01-01T00:00:00.000Z")
+    stage = _desktop_checkout(tmp_path / "stage", "b" * 40, "2026-01-02T00:00:00.000Z")
+    app = live / "apps/desktop/release/mac-arm64/Hermes.app"
+    dist = _record_packaged_desktop(live, app, builder=stage)
+
+    def current():
+        return source_product_current(live, "desktop", dist)
+
+    assert current()
+    # The stage checks out and stamps a newer commit, regenerating its prepared inputs.
+    _write_stamp(stage / "apps/desktop/build/install-stamp.json", "c" * 40, "2026-01-03T00:00:00.000Z")
+    (stage / "apps/desktop/public/icon.png").write_text("new icon", encoding="utf-8")
+    (stage / "apps/desktop/build/native-deps/pty.node").write_text("new pty", encoding="utf-8")
+    assert current()
+    shutil.rmtree(stage)  # pruned altogether
+    assert current()
+
+    # The bundle's shipped stamp still has to be the one the build baked.
+    shipped = app / "Contents/Resources/install-stamp.json"
+    original = shipped.read_bytes()
+    _write_stamp(shipped, "b" * 40, "2026-01-09T00:00:00.000Z")
+    assert not current()
+    _write_stamp(shipped, "d" * 40, "2026-01-02T00:00:00.000Z")
+    assert not current()  # same clock, different provenance
+    shipped.unlink()
+    assert not current()
+    shipped.write_bytes(original)
+    assert current()
+
+    # A desktop input that changed in the live checkout still means rebuild.
+    (live / "apps/desktop/src/a.ts").write_text("changed", encoding="utf-8")
+    assert not current()
+
+
+def test_in_place_packaged_desktop_still_tracks_its_own_prepared_inputs(tmp_path, monkeypatch):
+    """[daveey] Control: an app packed in the live checkout itself keeps re-hashing that checkout's
+    prepared inputs, as before."""
+    from hermes_cli.source_build import source_product_current
+
+    use_host_node_as_pm_node(monkeypatch)
+    live = _desktop_checkout(tmp_path / "live", "a" * 40, "2026-01-01T00:00:00.000Z")
+    dist = _record_packaged_desktop(live, live / "apps/desktop/release/mac-arm64/Hermes.app")
+    assert source_product_current(live, "desktop", dist)
+    (live / "apps/desktop/build/native-deps/pty.node").write_text("new pty", encoding="utf-8")
+    assert not source_product_current(live, "desktop", dist)
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_product_freshness_reads_through_a_symlinked_checkout(tmp_path, monkeypatch):
+    """[daveey] freshness.mjs only runs its CLI when argv[1] is its real path, so a checkout reached
+    through a symlink (/var vs /private/var) used to read as never current."""
+    from hermes_cli.source_build import source_product_current
+
+    use_host_node_as_pm_node(monkeypatch)
+    live = _desktop_checkout(tmp_path / "live", "a" * 40, "2026-01-01T00:00:00.000Z")
+    dist = _record_packaged_desktop(live, live / "apps/desktop/release/mac-arm64/Hermes.app")
+    link = tmp_path / "link"
+    link.symlink_to(live, target_is_directory=True)
+    assert source_product_current(link, "desktop", link / dist.relative_to(live))

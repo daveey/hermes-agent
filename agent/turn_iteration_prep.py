@@ -399,6 +399,18 @@ def begin_iteration(
             )
         return _verdict("break")
 
+    # [daveey] A backend retiring while this review fork runs asks it to stop before the next
+    # provider call (backend_retirement.BACKGROUND_REVIEW_WAIT_S), so the shutdown never cuts a
+    # review off mid-call; writes from the calls that already ran have landed.
+    _hold = getattr(agent, "_retirement_review_hold", None)
+    _wind_down = getattr(_hold, "wind_down", None)
+    if _wind_down is not None and _wind_down.is_set():
+        _turn_exit_reason = "review_retirement_wind_down"
+        if not agent.quiet_mode:
+            agent._safe_print("\n⏹️  Backend is retiring — stopping the review before the next "
+                              "provider call.", diagnostic=True)
+        return _verdict("break")
+
     api_call_count += 1
     agent._api_call_count = api_call_count
     agent._touch_activity(f"starting API call #{api_call_count}")

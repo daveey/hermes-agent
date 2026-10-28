@@ -311,4 +311,7 @@ def test_cli_block_agent_owned_allowed_with_wake_check(kanban_home):
     out = kc.run_slash(f"block {tid} disk full --kind transient --wake-check 'test -f /tmp/x'")
     assert "agent_owned_block" not in out
     with kbc.connect_closing() as conn:
-        assert kb.get_task(conn, tid).status in ("blocked", "scheduled")
+        # The probe is honored (a scheduled park with its wake row), never silently dropped.
+        assert kb.get_task(conn, tid).status == "scheduled"
+        row = conn.execute("SELECT cmd FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone()
+        assert row is not None and row["cmd"] == "test -f /tmp/x"

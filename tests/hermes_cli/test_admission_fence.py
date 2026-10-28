@@ -150,6 +150,40 @@ def test_hold_blocks_kanban_claims_without_mutation(tmp_path, monkeypatch, revie
         conn.close()
 
 
+@pytest.mark.parametrize("review", [False, True])
+def test_hold_skips_board_service_lease_before_claiming(tmp_path, monkeypatch, review):
+    """[daveey] A held fence must refuse BEFORE the Board-service lease: acquiring one and releasing it on
+    refusal records a claimed+released run on the service per ready card per tick (1129 junk runs over one
+    11-minute drain window on 2026-10-28)."""
+    from hermes_cli import kanban_db as kb
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    conn = kbc.connect(tmp_path / "kanban.db")
+    gates = []
+    real_gate = kb._sync.claim_gate
+
+    def counting_gate(*args, **kwargs):
+        gates.append(args[1] if len(args) > 1 else kwargs.get("task_id"))
+        return real_gate(*args, **kwargs)
+
+    monkeypatch.setattr(kb._sync, "claim_gate", counting_gate)
+    try:
+        task = kb.create_task(conn, title="held", assignee="default")
+        status = "review" if review else "ready"
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, task))
+        claim = kb.claim_review_task if review else kb.claim_task
+        af.set_hold(tmp_path)
+        for _ in range(3):
+            assert claim(conn, task) is None
+        assert gates == []
+        af.clear_hold(tmp_path)
+        assert claim(conn, task).status == "running"
+        assert gates == [task]
+    finally:
+        conn.close()
+
+
 def test_claim_rejects_nested_transaction_before_waiting(tmp_path, monkeypatch):
     from hermes_cli import kanban_db as kb
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

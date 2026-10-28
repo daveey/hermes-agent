@@ -24,8 +24,9 @@ HUB, WORKER, BOARD = "hub", "worker-1", "default"
 MACHINES = {
     HUB: {"name": HUB, "state": "active", "labels": ["linux"], "pinned_only": False, "max_card_runs": None,
           "hold": False},
+    # worker-1 runs with kanban.sync.pickup on and advertises it; hub and macbook say nothing (= no pickup).
     WORKER: {"name": WORKER, "state": "active", "labels": ["linux"], "pinned_only": False, "max_card_runs": 12,
-             "hold": False},
+             "hold": False, "pickup": "all"},
     "macbook": {"name": "macbook", "state": "active", "labels": ["macos"], "pinned_only": True,
                 "max_card_runs": None, "hold": False},
 }
@@ -169,9 +170,71 @@ def test_tool_create_runs_on_and_placement_to_an_enrolled_machine(gws, monkeypat
     tid = out["task_id"]
     row = hub.conn.execute("SELECT runs_on, created_on FROM tasks WHERE id = ?", (tid,)).fetchone()
     assert json.loads(row["runs_on"]) == ["machine:worker-1"]  # created here, runs only there
+    # The response says so, so a caller doesn't read the pin as ignored and re-create the card.
+    assert out["runs_on"] == ["machine:worker-1"]
+    assert out["placement"] == {"where": "local", "runs_on": ["machine:worker-1"], "machine": WORKER}
+    assert "runs on " + WORKER + " via the board lease" in out["note"] and tid in out["note"]
     out = _tool_create({"title": "explicit", "assignee": "default", "runs_on": ["linux"]})
+    assert out["runs_on"] == ["linux"] and "placement" not in out
     assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?",
                                        (out["task_id"],)).fetchone()[0]) == ["linux"]
+
+
+def _route_self_to_hub(monkeypatch, worker, *, hub_pickup=None):
+    """worker-1 routes kanban_create to gateway `hub` (kanban.placement.route), and `hub` is also an active
+    machine in the registry: the MacBook's setup on 10-28."""
+    worker.enter()
+    from hermes_cli import kanban_placement as kp
+    entry = {**MACHINES[HUB], **({"pickup": hub_pickup} if hub_pickup is not None else {})}
+    wn.set_registry_fetch(lambda: {"me": WORKER, "machines": [entry, MACHINES[WORKER], MACHINES["macbook"]]})
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: WORKER)
+    monkeypatch.setattr(kp, "config", lambda: {"route": {WORKER: HUB}})
+    monkeypatch.setattr(kp, "target_live", lambda *a, **k: None)
+    sent = []
+    monkeypatch.setattr(kp, "create_remote", lambda view, **kw: sent.append(kw["target"]) or {
+        "ok": True, "request_id": "req-1", "queued_only": True})
+    return sent
+
+
+@pytest.mark.parametrize("hub_pickup", [None, False, "off"])
+def test_a_routed_gateway_pin_to_a_machine_without_pickup_takes_the_gateway_route(gws, monkeypatch, hub_pickup):
+    """MacBook 10-28: placement='hub' became runs_on=[machine:hub] on the MacBook board, and the hub (pickup off)
+    never took it. A machine that does not advertise pickup gets no runs_on card; the routed pin goes through
+    _place_remote as before 6d29976569."""
+    _, worker = gws
+    sent = _route_self_to_hub(monkeypatch, worker, hub_pickup=hub_pickup)
+    before = worker.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    out = _tool_create({"title": "for the hub", "assignee": "default", "placement": HUB})
+    assert sent == [HUB], out
+    assert out["placed"]["gateway"] == HUB and "runs_on" not in out, out
+    assert out["runs_where"] == HUB
+    assert worker.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before  # nothing stranded here
+
+
+def test_a_routed_gateway_pin_to_a_machine_with_pickup_still_gets_runs_on(gws, monkeypatch):
+    _, worker = gws
+    sent = _route_self_to_hub(monkeypatch, worker, hub_pickup="explicit")
+    out = _tool_create({"title": "for the hub", "assignee": "default", "placement": HUB})
+    assert sent == [] and out["runs_on"] == ["machine:hub"], out
+    assert json.loads(worker.conn.execute("SELECT runs_on FROM tasks WHERE id = ?",
+                                          (out["task_id"],)).fetchone()[0]) == ["machine:hub"]
+    assert "machine:hub" in out["runs_where"]
+
+
+def test_placement_runs_on_needs_advertised_pickup(gws):
+    hub, _ = gws
+    hub.enter()
+    assert wn.placement_runs_on(hub.conn, WORKER) == ["machine:worker-1"]
+    assert wn.placement_runs_on(hub.conn, "macbook") is None  # active, but no pickup field
+
+
+def test_a_plain_local_create_says_it_runs_here(gws, monkeypatch):
+    hub, _ = gws
+    hub.enter()
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
+    out = _tool_create({"title": "here", "assignee": "default"})
+    assert out["ok"] and "placed" not in out and "runs_on" not in out, out
+    assert out["runs_where"] == f"here ({HUB})"
 
 
 def test_tool_placement_to_an_unknown_gateway_still_refuses(gws, monkeypatch):

@@ -35,6 +35,8 @@ class _BackgroundReviewRun:
         self._lock = threading.Lock()
         self._review_agent = None
         self._request_finished = self._cancel_dispatched = False
+        # backend_retirement.BackgroundReviewHold while this review holds the retirement fence.
+        self.retirement_hold: Any = None
 
     def begin_request(self, review_agent: Any) -> bool:
         """Atomically admit the first provider-capable review phase."""
@@ -1152,6 +1154,7 @@ def _run_review_fork(
     st.review_agent, _rt, _routed = build_cache_parity_fork(
         agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS)
     st.review_agent._review_attended = explicit
+    st.review_agent._retirement_review_hold = getattr(review_run, "retirement_hold", None)
     _track_review_fork(agent, st.review_agent, register=True)
     from hermes_cli.plugins import set_thread_tool_whitelist, clear_thread_tool_whitelist
     review_whitelist, configured_extra_tools = _review_tool_whitelist(st.review_agent, task_cfg, review_memory)

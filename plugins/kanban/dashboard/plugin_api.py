@@ -15,7 +15,6 @@ import json
 import logging
 import re
 import sqlite3
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
@@ -305,27 +304,6 @@ def _managing_sessions(conn: sqlite3.Connection) -> dict[str, str]:
     return {str(r[0]): str(r[1]) for r in rows}
 
 
-# Desktop polls GET /board continuously; on a busy board one read is ~1.3 s CPU (diagnostics over every task's
-# events and runs, init_db's health guard, a 6.5 MB payload) and kept the Desktop backend near a core on 2026-10-27.
-# Reuse the last result while the board's kanban.db and -wal are unchanged (every commit moves their mtime_ns, size
-# or inode), at most _BOARD_CACHE_TTL_S old: diagnostics also depend on the clock and config.
-_BOARD_CACHE_TTL_S = 15.0
-_board_cache: dict[tuple, tuple] = {}
-_board_cache_lock = threading.Lock()
-
-
-def _board_file_sig(path: str) -> Optional[tuple]:
-    out = []
-    for candidate in (path, f"{path}-wal"):
-        try:
-            st = Path(candidate).stat()
-        except OSError:
-            out.append(None)
-            continue
-        out.append((st.st_mtime_ns, st.st_size, st.st_ino))
-    return tuple(out) if out[0] is not None else None
-
-
 def get_board(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
@@ -333,26 +311,26 @@ def get_board(
     workflow_template_id: Optional[str] = Query(None, description="Restrict to tasks using this workflow template id"),
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key")):
     """Full board grouped by status column; omitting ``board`` uses the active board
-    (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``)."""
+    (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``).
+
+    A signature hit is reused. A miss that already has a snapshot returns it and
+    refreshes off this request so a slow read cannot time out the Desktop poll.
+    """
+    from plugins.kanban.dashboard.board_snapshot import file_sig, serve
+
     resolved = _resolve_board(board)
     sig = key = None
     try:
         path = str(kanban_db.kanban_db_path(board=resolved))
         key = (path, tenant, include_archived, workflow_template_id, current_step_key)
-        sig = _board_file_sig(path)  # before the read: a commit during it is read again next time
+        sig = file_sig(path)  # before the read: a commit during it is read again next time
     except Exception:
         pass
-    now = time.monotonic()
-    if sig is not None:
-        with _board_cache_lock:
-            hit = _board_cache.get(key)
-        if hit is not None and hit[0] == sig and now - hit[1] < _BOARD_CACHE_TTL_S:
-            return dict(hit[2], now=int(time.time()))
-    result = _get_board_uncached(tenant, include_archived, resolved, workflow_template_id, current_step_key)
-    if sig is not None:
-        with _board_cache_lock:
-            _board_cache[key] = (sig, now, result)
-    return result
+
+    def read():
+        return _get_board_uncached(tenant, include_archived, resolved, workflow_template_id, current_step_key)
+
+    return serve(key, sig, read, now=time.monotonic())
 
 
 def _get_board_uncached(tenant, include_archived, board, workflow_template_id, current_step_key):

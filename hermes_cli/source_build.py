@@ -15,6 +15,9 @@ def source_product_current(project_root: Path, product: str, out: Path) -> bool:
     if installed is None or installed.binary is None:
         return False  # Only PM's Node may run the receipt reader; never the user's PATH copy.
     node, env = str(installed.binary), env_for("node")
+    # [daveey] freshness.mjs runs its CLI only when argv[1] is its real path (isMain), so a
+    # checkout reached through a symlink (/var vs /private/var) would print nothing: read "stale".
+    project_root = Path(project_root).resolve()
     try:
         result = subprocess.run(
             [node, str(project_root / "scripts/build/freshness.mjs"),
@@ -229,6 +232,23 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
         raise ProductBuildError(failures)
 
 
+# [daveey] Set by hermes-sync for updates it applies while a Desktop is open: leave the running app's
+# bundle in place (no build, no swap, no stop/relaunch). Unset = upstream behaviour.
+DEFER_DESKTOP_SWAP_ENV = "HERMES_UPDATE_DEFER_DESKTOP_SWAP"
+
+
+def _defer_desktop_swap(desktop_dir: Path) -> bool:
+    """True when the caller asked to defer the swap and a Desktop main process runs from this release tree."""
+    if os.environ.get(DEFER_DESKTOP_SWAP_ENV, "").strip().lower() not in ("1", "true", "yes"):
+        return False
+    from hermes_cli import main_desktop
+
+    try:
+        return bool(main_desktop._desktop_main_launches(desktop_dir))
+    except Exception:  # health: allow BLE001 -- unknown process table: swap as upstream does
+        return False
+
+
 def _build_desktop_product(project_root: Path, env: dict, publish_stage) -> None:
     from hermes_cli.main_desktop import (
         DESKTOP_PREBUILT_APP_ENV, _packaged_desktop_current_for_head, _refresh_installed_desktop_apps,
@@ -237,6 +257,12 @@ def _build_desktop_product(project_root: Path, env: dict, publish_stage) -> None
     desktop_dir = project_root / "apps/desktop"
     if _packaged_desktop_current_for_head(desktop_dir, project_root):
         print("  ✓ Desktop app is up to date")
+    elif _defer_desktop_swap(desktop_dir):
+        # [daveey] The swap would stop the running Desktop (UI relaunch) under the user. hermes-sync
+        # swaps the bundle on the next quit or while the user is away (t_01a1825a82e472f6).
+        print("  ⓘ Desktop app swap deferred: the desktop app is running (HERMES_UPDATE_DEFER_DESKTOP_SWAP); "
+              "the rebuilt app is installed after it quits")
+        return
     else:
         publish_stage("Building the desktop app")
         # The desktop build mutates checkout-scoped node_modules and

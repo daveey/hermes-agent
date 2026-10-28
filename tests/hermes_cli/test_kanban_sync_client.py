@@ -613,6 +613,64 @@ def test_rows_written_in_a_capture_gap_are_queued_on_the_next_install(live, kanb
         other.close()
 
 
+def _gap_wake(live, tid):
+    """kanban_wake_check._wake landing in a capture gap: a raw status UPDATE plus an event, no trigger."""
+    with kbc.write_txn(live):
+        sync.drop_triggers(live)
+        live.execute("UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'scheduled'", (tid,))
+        live.execute("INSERT INTO task_events (task_id, kind, payload, created_at) "
+                     "VALUES (?, 'wake_check_broken', '{}', 1)", (tid,))
+
+
+def _service_task(svc, tid):
+    return svc.board(BOARD)["rows"]["tasks"][tid]
+
+
+@pytest.mark.parametrize("mode", ["shadow", "primary"])
+def test_a_status_change_in_a_capture_gap_reaches_the_service_with_its_event(live, svc, kanban_home, mode):
+    # Hub incident 2026-10-28 (t_01a180daf776c25e): the gap heal queued the uid-less event but never the tasks row,
+    # so the service kept 'scheduled' and refused every lease as not_claimable while the board said 'ready'.
+    sync.set_mode(live, mode)
+    tid = kb.create_task(live, title="parked", assignee="worker")
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET status = 'scheduled' WHERE id = ?", (tid,))
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)  # feed settled: board and replica agree on the version, as on the hub
+    assert _service_task(svc, tid)["status"] == "scheduled"
+    _gap_wake(live, tid)
+    _reinstall(kanban_home).close()  # the next process heals the gap
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    kinds = {c["fields"]["kind"] for c in svc.board(BOARD)["changes"]
+             if c["table"] == "task_events" and c["fields"] and c["fields"].get("task_id") == tid}
+    assert "wake_check_broken" in kinds
+    assert _service_task(svc, tid)["status"] == "ready"
+    shadow = _shadow()
+    try:
+        assert ksc.diff(live, shadow, ME)["field_mismatch"] == {}
+    finally:
+        shadow.close()
+
+
+@pytest.mark.parametrize("mode", ["shadow", "primary"])
+def test_divergence_repair_leaves_an_unpulled_remote_edit_alone(live, svc, kanban_home, mode):
+    sync.set_mode(live, mode)
+    tid = kb.create_task(live, title="mine", assignee="worker")
+    _round(kanban_home, svc)
+    other = svc.hub(OTHER)
+    other.ops(BOARD, [{"client_op_id": "o-1", "op": "upsert", "table": "tasks", "uid": tid,
+                       "hlc": f"{int(time.time() * 1000) + 60_000:013d}-0000-{OTHER}", "fields": {"title": "renamed"}}])
+    _round(kanban_home, svc)  # the replica pulls the remote edit; this board never wrote it
+    shadow = _shadow()
+    try:
+        assert ksc.repair_divergence(live, shadow, ME) == {}  # versions differ: an edit not applied here, not a gap
+    finally:
+        shadow.close()
+    _round(kanban_home, svc)
+    assert _service_task(svc, tid)["title"] == "renamed"
+    assert not _pending(live)
+
+
 def test_rows_from_before_the_first_attach_are_left_to_import(kanban_home):
     support.write_sync_config(kanban_home, True)
     conn = kbc.connect(kanban_home / "kanban.db")  # never attached: board_id is local:…

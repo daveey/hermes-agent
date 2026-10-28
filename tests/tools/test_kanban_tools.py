@@ -1659,10 +1659,21 @@ def test_block_agent_owned_is_rejected_with_typed_error(worker_env, kind):
 
 def test_block_agent_owned_allowed_with_wake_check_routes_scheduled(worker_env):
     from tools import kanban_tools as kt
-    d = json.loads(kt._handle_block({
+    from hermes_cli import kanban_db_connect as kbc
+    # A probe with no producer is refused with the reason (it was silently dropped before).
+    refused = json.loads(kt._handle_block({
         "reason": "waiting on disk", "kind": "transient",
         "wake_check": "test -f /tmp/never", "check_every": 600}))
-    assert d.get("ok") is True
+    assert "opaque_probe_wait" in refused.get("error", ""), refused
+    d = json.loads(kt._handle_block({
+        "reason": "waiting on disk", "kind": "transient",
+        "wake_check": "test -f /tmp/never", "check_every": 600,
+        "awaiting": {"kind": "external", "ref": "disk vendor ticket 42", "why": "vendor is resizing the volume"}}))
+    assert d.get("ok") is True, d
+    assert d.get("status") == "scheduled"
+    with kbc.connect_closing() as conn:
+        row = conn.execute("SELECT cmd FROM task_wake_checks WHERE task_id = ?", (worker_env,)).fetchone()
+    assert row is not None and row["cmd"] == "test -f /tmp/never"
 
 
 def test_block_capability_with_human_request_allowed():

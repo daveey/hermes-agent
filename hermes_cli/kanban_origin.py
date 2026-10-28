@@ -23,10 +23,11 @@ from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import os
 import re
+import shlex
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 ENV = "HERMES_ORIGIN_SESSION"
 
@@ -142,6 +143,116 @@ def resolve(explicit: Optional[str] = None) -> Optional[Origin]:
                           f"gateway {origin.gateway!r} is not a hermes-hub gateway (known: {', '.join(sorted(known))}); "
                           "use the hermes-hub gateway name in the origin ref")
     return origin
+
+
+def _replica_task_owners(task_id: str, board: str) -> list[tuple[str, str]]:
+    """``(gateway, profile)`` of every hermes-hub replica task record keyed ``<profile>/<board>/<task_id>``."""
+    path = _hub_db()
+    if path is None:
+        return []
+    try:
+        conn = _ro(path)
+        try:
+            rows = conn.execute("SELECT gw, key FROM replica WHERE coll = 'tasks' AND key LIKE ? ESCAPE '\\'",
+                                ("%/" + re.sub(r"([%_\\])", r"\\\1", f"{board}/{task_id}"),)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+    owners = []
+    for gw, key in rows:
+        parts = str(key or "").split("/")
+        if len(parts) == 3 and parts[1:] == [board, task_id] and gw:
+            owners.append((str(gw), parts[0]))
+    return sorted(set(owners))
+
+
+def _request_id(task_id: str, session: str) -> str:
+    return f"adopt:{task_id}:{session}"[:128]
+
+
+# One name in a hermes-hub route (gateway, profile, board, task, session), as hermes-hub validates it; it is
+# also what keeps the command shell-safe unquoted and never parsed as a flag (no leading '-').
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
+
+
+def _safe(value: Any, placeholder: str) -> str:
+    text = str(value or "").strip()
+    return text if _SAFE_NAME.match(text) else placeholder
+
+
+def adopt_next_step(task_id: str, board: str, *, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
+    """The supported way to attach an existing card to a chat, for a ``kanban_origin_adopt`` call that has no
+    courier context. That tool only runs inside a courier-delivered adoption; a chat (or a worker) gets the
+    exact ``hermes-hub adopt-task`` command instead, filled from args, the hub replica and the session env.
+
+    Returns ``{next_step, run_on, complete, message}`` plus ``delegate`` for a worker whose origin chat is on
+    another gateway: a ``hermes-hub create-task`` that gets the command run there. Unknown or unsafe parts stay
+    ``<placeholders>`` and ``complete`` is False: such a command must be filled in before it is run.
+    """
+    env = os.environ if env is None else env
+    me, _ = gateway_names()
+    me = _safe(me, "")
+    task_id = _safe(task_id, "<task-id>")
+    board = _safe(board, "<board>")
+    try:
+        from hermes_cli.profiles import current_profile_name
+        my_profile = _safe(current_profile_name("default"), "default")
+    except (ImportError, OSError, ValueError):
+        my_profile = "default"
+    worker = bool((env.get("HERMES_KANBAN_TASK") or "").strip())
+    if worker:
+        # The card lives here; the adoption request must be queued FROM the origin chat's gateway.
+        owner_gw, owner_profile = me or "<owner-gateway>", my_profile
+        try:
+            origin = parse_origin(ambient_origin_ref()) if ambient_origin_ref() else None
+        except OriginError:
+            origin = None
+        run_on = _safe(origin and origin.gateway, "<origin-gateway>")
+        session = _safe(origin and origin.session, "<origin-session-id>")
+        origin_profile = _safe(origin and origin.profile, "<origin-profile>")
+        unknown_owner = False
+    else:
+        owners = _replica_task_owners(task_id, board)
+        unknown_owner = len(owners) != 1
+        owner_gw, owner_profile = ((_safe(owners[0][0], "<owner-gateway>"), _safe(owners[0][1], "<owner-profile>"))
+                                   if len(owners) == 1 else ("<owner-gateway>", "<owner-profile>"))
+        run_on = me or "<this-gateway>"
+        session = _safe(env.get("HERMES_SESSION_ID"), "<origin-session-id>")
+        # "custom" = a HERMES_HOME outside ~/.hermes: no profile name to pass; the CLI resolves its own.
+        origin_profile = my_profile if my_profile != "custom" else ""
+    if me and owner_gw == me and (not worker or run_on == me):
+        # Card and chat on the same gateway: a tui subscription binds them, no courier involved.
+        pflag = "" if owner_profile == my_profile else f"-p {owner_profile} "
+        step = f"hermes {pflag}kanban --board {board} notify-subscribe {task_id} --platform tui --chat-id {session}"
+        who = ("A worker is fenced from that on its own board: report to the chat with cross_session instead, or "
+               "have the chat run it:" if worker else "Bind this chat to it by running in a terminal here:")
+        return {"next_step": step, "run_on": me, "complete": "<" not in step,
+                "message": f"{task_id} and the chat are both on this gateway ({me}); kanban_origin_adopt is only for "
+                           f"a courier-delivered adoption. {who} {step}"}
+    step = (f"hermes-hub adopt-task {owner_gw} {owner_profile}/{board}/{task_id} --origin-session {session} "
+            + (f"--origin-profile {origin_profile} " if origin_profile else "")
+            + f"--id {_request_id(task_id, session)}")
+    out: dict[str, Any] = {"next_step": step, "run_on": run_on, "complete": "<" not in step}
+    if worker:
+        title = f"Attach {owner_gw} card {task_id} to chat {session}"
+        body = (f"Run on this gateway: {step}  Then confirm with: hermes-hub links {session} "
+                f"--expect {owner_gw}/{owner_profile}/{board}/{task_id}")
+        out["delegate"] = (f"hermes-hub create-task {run_on} {shlex.quote(title)} --body {shlex.quote(body)} "
+                           "--assignee default --origin-session ''")
+        out["message"] = (
+            "kanban_origin_adopt only runs inside a courier-delivered adoption; a worker cannot attach its card to "
+            f"a chat with it. The origin chat's gateway ({run_on}) must queue the request: {step} . From this "
+            f"worker, get it run there with: {out['delegate']} (do not ask a human to call kanban_origin_adopt).")
+    else:
+        out["message"] = (
+            "kanban_origin_adopt only runs inside a courier-delivered adoption, never from a chat. Attach the card "
+            f"to this chat by running in a terminal on this gateway ({run_on}): {step}"
+            + (f" ({task_id} on board {board!r} is not in this gateway's hermes-hub replica, so fill in the owner "
+               "gateway and profile: `hermes-hub tasks --all` lists them.)" if unknown_owner else ""))
+    if not out["complete"]:
+        out["message"] += " Replace every <placeholder> before running it."
+    return out
 
 
 def bind(conn: Any, task_id: str, origin: Origin, *, board: Optional[str] = None) -> dict[str, Any]:

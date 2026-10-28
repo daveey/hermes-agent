@@ -356,6 +356,13 @@ def _launchd_job_from_launch_env(
     label = str((_pid_environ(pid) or {}).get("XPC_SERVICE_NAME") or "").strip()
     if not label or label == "0":
         return None
+    if label.startswith("application."):
+        # A LaunchServices app instance (Hermes Desktop, a terminal app), not a backend supervisor:
+        # every child inherits its name and has the app as an ancestor, so the ancestor match below
+        # claimed the Desktop's own ``serve --port 0`` for the app job. The update then waited for
+        # launchd to report a fresh pid for the APP, booked the backend unrecovered and owed a false
+        # ``gateway_restart`` (David-MBP 2026-10-28 04:37 PDT) while Desktop had already respawned it.
+        return None
     uid = os.getuid()  # windows-footgun: ok — darwin-only branch
     for domain in (f"gui/{uid}", f"user/{uid}"):
         try:

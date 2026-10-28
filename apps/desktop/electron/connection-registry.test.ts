@@ -785,6 +785,23 @@ test('registry local route: v1 REMOTE global mode forces a genuinely-local backe
   assert.notEqual(route.poolKey, backendScopeKey(LOCAL_CONNECTION_ID, 'default'))
 })
 
+test('registry local route: the env remote pins the app while local is still the registry primary', () => {
+  // HERMES_DESKTOP_REMOTE_URL never enters the registry, so 'local' stays its primary and every primary-routed
+  // renderer call (hub-sync replica, config, sidebar) arrives as an explicit 'local'. Forcing a local child for it
+  // spawned a backend on a client the env pinned to a remote (e2e remote-topology: "the client spawned no backend").
+  assert.deepEqual(resolveRegistryLocalRoute('default', { envRemotePrimary: true, globalRemote: true }), {
+    delegate: true,
+    poolKey: 'default'
+  })
+  assert.deepEqual(resolveRegistryLocalRoute(null, { envRemotePrimary: true, globalRemote: true }), {
+    delegate: true,
+    poolKey: 'default'
+  })
+  // Control: without the env pin (a migrated v1-remote user, remote is the registry primary) 'local' still
+  // forces a genuinely local child.
+  assert.equal(resolveRegistryLocalRoute('default', { envRemotePrimary: false, globalRemote: true }).delegate, false)
+})
+
 test('registry local route: a per-profile remote override delegates to the override (#90477)', () => {
   // The per-profile SSH/remote override is the authoritative route for that
   // profile. Forcing local here made the roster list the profile via its
