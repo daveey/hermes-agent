@@ -207,8 +207,9 @@ export class RemotePrewarmer {
           state.nextAttemptAt = 0
         } catch (error: any) {
           const failedAt = (this.#deps.now ?? Date.now)()
-          // A remote paused for its own update (remote-update-pause.ts) names when its one probe may run; follow
-          // that schedule instead of a second backoff, so prewarm is the probe that sees the update finish.
+          // A remote the dial gate remembers (remote-update-pause.ts: its own update, or unreachable) names when its
+          // one probe may run; follow that schedule instead of a second backoff, so prewarm is the probe that sees
+          // the remote come back.
           const retryAt = Number(error?.retryAt)
 
           const delay = Number.isFinite(retryAt)

@@ -10091,7 +10091,8 @@ async function effectiveSshConfigFingerprint(sshConfig) {
   return crypto.createHash('sha256').update(output).digest('hex')
 }
 
-// Remembers a remote install's own-update refusal so requests and prewarm stop redialing (remote-update-pause.ts).
+// Remembers a remote install's own-update refusal, or that it cannot be dialed at all, so requests and prewarm stop
+// redialing per call (remote-update-pause.ts). Explicit user retries clear it.
 const remoteUpdatePause = new RemoteUpdatePause({ log: line => rememberLog(line) })
 
 async function bootstrapSshConnection(
@@ -10120,7 +10121,8 @@ async function bootstrapSshConnection(
     return start()
   }
 
-  // While the remote runs its own update, fail fast instead of dialing per request (remote-update-pause.ts).
+  // While the remote runs its own update or cannot be dialed, fail fast instead of dialing per request
+  // (remote-update-pause.ts).
   return remoteUpdatePause.run(remoteUpdatePauseKey(resolvedConfig), start)
 }
 
@@ -15964,6 +15966,7 @@ ipcMain.handle('hermes:bootstrap:reset', async () => {
   // reset connection state so the next startHermes() call restarts the
   // full backend flow (including a fresh runBootstrap pass).
   rememberLog('[bootstrap] reset requested by renderer; clearing latched failure')
+  remoteUpdatePause.clear('reload and retry')
   await teardownPrimaryBackendAndWait()
   bootstrapFailure = null
   backendStartFailure = null
@@ -16032,6 +16035,7 @@ ipcMain.handle('hermes:bootstrap:repair', async (): Promise<{ ok: boolean; bundl
   backendStartFailure = null
   remoteReauthFailure = null
   getFirstRunSetupGate().resetForRepair()
+  remoteUpdatePause.clear('repair')
   await teardownPrimaryBackendAndWait()
 
   return { ok: true }
@@ -16216,6 +16220,7 @@ const registryReconnectService = wireRegistryReconnect({
 ipcMain.handle('hermes:connections:list', async () => sanitizeConnectionsRegistry())
 ipcMain.handle('hermes:connections:save', async (_event, payload) => {
   const saved = await saveRegistryConnection(payload)
+  remoteUpdatePause.clear('connection saved')
 
   return { ok: true, connection: saved, registry: sanitizeConnectionsRegistry() }
 })
@@ -16279,6 +16284,7 @@ ipcMain.handle('hermes:connections:test', async (_event, id) => {
     })
 
     if (result?.reachable) {
+      remoteUpdatePause.clear('reachable connection test')
       sshInventoryAttemptedAt.delete(entry.id)
       sshRosterCache.delete(entry.id)
       await probeSshProfileInventory(entry)
@@ -17074,6 +17080,7 @@ ipcMain.handle('hermes:connection-config:save', async (_event, payload) => {
 })
 ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
   assertCanMutateManagedPrimaryRouting()
+  remoteUpdatePause.clear('connection applied')
   const previousConfig = readDesktopConnectionConfig()
   const previousRegistry = readDesktopConnectionsRegistry()
   const config = coerceDesktopConnectionConfig(payload, previousConfig)
