@@ -24,7 +24,7 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_ORIGIN_ADOPT_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
-    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
+    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_ARCHIVE_SCHEMA)
 
 logger = logging.getLogger(__name__)
 
@@ -1425,11 +1425,14 @@ def _placement_refused(pin: str, why: str) -> str:
         code="placement_unavailable", placement=pin, created=False)
 
 
-def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id) -> Optional[str]:
+def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id
+                  ) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
 
-    Returns the tool result when the card was queued there, None to create it locally (no route,
-    a local-only need, the target not live, or hermes-hub refused). Never raises.
+    Returns ``(tool_result, None)`` when the card was queued there or the pin was refused,
+    ``(None, None)`` to create it locally for any other reason, or ``(None, placement)`` when a
+    text marker kept it here. ``placement`` is ``{where, why, remedy}`` so the create result can
+    say so. Never raises.
     """
     try:
         from hermes_cli import kanban_placement as kp
@@ -1441,11 +1444,15 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         decision = kp.decide(view)
         target = decision["where"]
         if target == "refuse":
-            return _placement_refused(decision["pin"], decision.get("why", ""))
+            return _placement_refused(decision["pin"], decision.get("why", "")), None
         if target == "local":
-            if decision.get("why", "").startswith(("local marker", "placement pinned", "needs ")):
-                logger.debug("kanban placement: local (%s)", decision["why"])
-            return None
+            why = decision.get("why") or ""
+            if why.startswith("local marker"):
+                logger.info("kanban placement: local (%s)", why)
+                return None, {"where": "local", "why": why, "remedy": kp.LOCAL_MARKER_REMEDY}
+            if why.startswith(("placement pinned", "needs ")):
+                logger.debug("kanban placement: local (%s)", why)
+            return None, None
         self_gw = reg.self_gateway() or "local"
         cfg = kp.config()
         placed = kp.create_remote(view, target=target, origin_session=session_id,
@@ -1455,8 +1462,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             logger.warning("kanban placement: %s refused the card (%s)",
                            target, placed.get("error"))
             if kp.explicit_foreign_pin(view, reg.self_gateway()):
-                return _placement_refused(target, f"{target} refused the card: {placed.get('error')}")
-            return None
+                return _placement_refused(target, f"{target} refused the card: {placed.get('error')}"), None
+            return None, None
         rid = placed["request_id"]
         # A chat model reads task_id null as "not created" and calls kanban_create again, which made a
         # duplicate card (10-27 drill). Fetch the target's answer for a bounded wait so the id comes
@@ -1472,14 +1479,14 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             note = (f"{retry}Created on {target} as {tid}, not here: {decision['why']} (kanban.placement). It runs "
                     f"there{shows}. Read it with cross_task @task:default@{target}/{tid} or "
                     f"`hermes-hub tasks --gw {target}`.")
-            return _ok(task_id=tid, status=remote_status or "created", **fields, note=note)
+            return _ok(task_id=tid, status=remote_status or "created", **fields, note=note), None
         note = (f"{retry}The card IS created: it is queued on {target} as request {rid} and {target} makes the "
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
                 "for this card: an identical call returns this same request, and any changed call creates a "
                 f"second, duplicate card. Its task id appears once {target} applies the request "
                 + ("(this chat's tasks, " if session_id else "(")
                 + "`hermes-hub requests`).")
-        return _ok(task_id=None, status="queued", **fields, note=note)
+        return _ok(task_id=None, status="queued", **fields, note=note), None
     except Exception as exc:
         logger.warning("kanban placement failed", exc_info=True)
         try:
@@ -1490,8 +1497,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             pin = str(args.get("placement") or "").strip().lower()
             pin = "" if pin in ("", "auto", "local", "here") else pin
         if pin:
-            return _placement_refused(pin, f"placement failed: {exc}")
-        return None
+            return _placement_refused(pin, f"placement failed: {exc}"), None
+        return None, None
 
 
 @_kanban_handler("kanban_create")
@@ -1564,10 +1571,12 @@ def _handle_create(args: dict, **kw) -> str:
         if project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
+        marker_placement = None
         if origin_intent is None and origin is None:
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
-            remote = _place_remote(args, assignee=str(assignee), skills=skills, parents=parents,
-                                   project_id=project_id, session_id=session_id)
+            remote, marker_placement = _place_remote(
+                args, assignee=str(assignee), skills=skills, parents=parents,
+                project_id=project_id, session_id=session_id)
             if remote is not None:
                 return remote
         elif origin_intent is None and args.get("placement"):
@@ -1617,6 +1626,9 @@ def _handle_create(args: dict, **kw) -> str:
             }}
         if origin is not None:
             extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
+        if marker_placement:
+            extra["placement"] = {"where": marker_placement["where"], "why": marker_placement["why"]}
+            extra["remedy"] = marker_placement["remedy"]
         if origin_intent is None and args.get("requires"):
             # Placement preflight: declared gateway needs this gateway lacks are owned first. [daveey]
             from hermes_cli.kanban_capability_routing import preflight
@@ -1771,6 +1783,22 @@ def _handle_unblock(args: dict, **kw) -> str:
                    **({"subscribed": True} if subscribed else {}))
 
 
+@_kanban_handler("kanban_archive")
+def _handle_archive(args: dict, **kw) -> str:
+    """Archive an unclaimed card this worker's task created, or any card for an orchestrator."""
+    _reject_delegated_child_mutation("kanban_archive")
+    tid = args.get("task_id")
+    _check(tid, "task_id is required")
+    tid = str(tid)
+    with _board(args.get("board")) as (kb, conn):
+        from hermes_cli.kanban import worker_may_archive
+        refusal = worker_may_archive(conn, tid)
+        if refusal:
+            raise _Reject(refusal)
+        _check(kb.archive_task(conn, tid), f"cannot archive {tid}")
+        return _ok(task_id=tid, status="archived")
+
+
 @_kanban_handler("kanban_link")
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact (cycles/self-links/running
@@ -1834,7 +1862,8 @@ _TOOLS = (
     ("kanban_create", KANBAN_CREATE_SCHEMA, _handle_create, "➕"),
     ("kanban_origin_adopt", KANBAN_ORIGIN_ADOPT_SCHEMA, _handle_origin_adopt, "🔗"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
-    ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"))
+    ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"),
+    ("kanban_archive", KANBAN_ARCHIVE_SCHEMA, _handle_archive, "🗄"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:
     _gate = _check_kanban_orchestrator_mode if _name in _ORCHESTRATOR_TOOLS else _check_kanban_mode

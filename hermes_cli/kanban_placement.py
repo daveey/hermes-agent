@@ -20,7 +20,9 @@ A card stays local when any of these holds:
 * it declares a ``requires`` capability this gateway holds and the target does not;
 * its title, body or skills match a local marker (``kanban.placement.local_markers`` replaces the
   built-in list, ``extra_local_markers`` extends it): Chrome, Keychain, TCC, Apple apps, launchd,
-  the Desktop app, this Mac, the mini, AWS SSO profiles...;
+  the Desktop app, a Desktop DOM/CDP readback, this Mac's Keychain... A bare host name (MacBook,
+  the mini) pins only when it is the subject of the title. A body mention — a repro, or "verify
+  live on the hub and the MacBook" — is not a local-only need;
 * the target is not live: this gateway's hermes-hub sync has not succeeded recently, or the
   target's capability record is stale.
 
@@ -57,11 +59,20 @@ DEFAULT_LOCAL_MARKERS = (
     r"\bphotos\.app\b", r"\bimessage\b", r"\bfind ?my\b", r"\bremindctl\b", r"\bshortcuts? app\b",
     r"\blaunchd\b", r"\blaunchctl\b", r"launchagents", r"~/library/", r"\bhermes\.app\b",
     r"\bhermes desktop\b", r"\bdesktop (app|backend|backends|renderer|window|chat|chats|sidebar|ui)\b",
+    r"\bdesktop\s+dom\b",
     r"\bmacbook\b", r"\bmac ?os\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
     r"\bbaby ?bear\b", r"\bxcode\b", r"\bsimulator\b", r"\bwhatsapp\b", r"\bscreen ?shot",
     r"\bsoftmax-org\b", r"\bdavid-bloomin-sso\b", r"--profile softmax",
 )
-# Skills whose presence alone pins a card to a Mac.
+# Host names that mean "the work is on that machine" only when they are the subject of the
+# title. A body mention is a repro or a verification step ("verify live on the hub and the
+# MacBook"), which is not a reason to keep a core-code card on the laptop. A caller who replaces
+# ``local_markers`` owns the list and every pattern scans the whole text.
+TITLE_ONLY_LOCAL_MARKERS = frozenset({
+    r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
+})
+LOCAL_MARKER_REMEDY = (
+    "if the work doesn't need this machine, archive and re-create with placement='hub'")
 DEFAULT_LOCAL_SKILL_MARKERS = (
     r"^apple", r"^imessage$", r"^findmy$", r"^macos-", r"^mac-", r"^invisible-chrome-agent$",
     r"^local-chrome-remote-debugging$", r"^computer-use$", r"^babybear", r"^bb-", r"^ios-",
@@ -135,11 +146,16 @@ def config() -> dict:
         return {}
 
 
-def _local_marker(text: str, skills, cfg: _Cfg) -> Optional[str]:
+def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
+    """The first local-only hit, or None. Host-name markers (see
+    :data:`TITLE_ONLY_LOCAL_MARKERS`) scan the title only, unless the caller replaced the list."""
+    full = f"{title or ''}\n{body or ''}"
+    replaced = isinstance(cfg.raw.get("local_markers"), list)
     for rx in cfg.markers():
-        m = rx.search(text or "")
+        text = (title or "") if (not replaced and rx.pattern in TITLE_ONLY_LOCAL_MARKERS) else full
+        m = rx.search(text)
         if m:
-            return f"mentions {m.group(0)!r}"
+            return f"mentions {m.group(0).lower()!r}"
     for s in skills or []:
         for rx in cfg.skill_markers():
             if rx.search(str(s)):
@@ -357,7 +373,7 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             if not on_target:
                 return {"where": "local", "why": f"needs {need}, which {target} does not hold"}
         if not explicit:
-            hit = _local_marker(f"{args.get('title') or ''}\n{args.get('body') or ''}",
+            hit = _local_marker(args.get("title") or "", args.get("body") or "",
                                 args.get("skills"), c)
             if hit:
                 return {"where": "local", "why": f"local marker: {hit}"}

@@ -785,3 +785,21 @@ KANBAN_LINK_SCHEMA = _schema(
     },
     ["parent_id", "child_id"],
 )
+
+KANBAN_ARCHIVE_SCHEMA = _schema(
+    "kanban_archive",
+    (
+        "Archive a card. A dispatcher worker may archive an unclaimed card "
+        "its own task created (creator_task_id is the caller's task) — the "
+        "cleanup when kanban_create kept a card local because of a text "
+        "marker and the work does not need this machine. Re-create it with "
+        "placement='hub'. A claimed card, a card another task created, and "
+        "the worker's own assigned task are refused. With no "
+        "HERMES_KANBAN_TASK (an orchestrator or a human) any card may be "
+        "archived."
+    ),
+    {
+        "task_id": _prop("string", "Task id to archive. Required; does not default to the assigned task."),
+    },
+    ["task_id"],
+)

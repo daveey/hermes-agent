@@ -661,3 +661,55 @@ def test_identity_lookup_failure_without_a_pin_still_creates_locally(mac, monkey
     out = json.loads(kt._handle_create({"title": "unpinned card"}))
     assert out["ok"] and out["task_id"] and "placed" not in out, out
     assert _local_count() == 1
+
+
+# --- marker tuning: a passing MacBook mention is not a local-only need [daveey] ---
+
+_SIDEBAR_TITLE = (
+    "Fix sidebar count vs task strip split under kanban.sync.links_reader=replica (Upkeep 14 vs 9)")
+_SIDEBAR_BODY = (Path(__file__).parent / "fixtures" / "t_01a180aae388e142_body.txt").read_text()
+_MARKER_REMEDY = "if the work doesn't need this machine, archive and re-create with placement='hub'"
+
+
+def test_marker_cases_a_through_e():
+    """The five cases the marker tune is pinned to, verbatim."""
+    # (a) the work itself is a live verify on the MacBook.
+    a = decide({"title": "Verify 57094b7a60 live on the MacBook"})
+    assert a["where"] == "local" and a["why"].startswith("local marker"), a
+    assert "macbook" in a["why"].lower()
+    # (b) a hermes_cli fix that only names the MacBook as a verification step.
+    b = decide({"title": "Fix the hermes_cli session-activity projection",
+                "body": "Ship the hermes_cli fix, then verify live on the hub and the MacBook."})
+    assert b["where"] == "hub", b
+    # (c) Desktop DOM, CDP readback, or Chrome still needs this machine.
+    for text in ("Needs a Desktop DOM readback of the composer",
+                 "Needs a CDP readback of the sidebar",
+                 "Sign in with Chrome and read the cookie"):
+        c = decide({"title": "Read the live UI", "body": text})
+        assert c["where"] == "local" and c["why"].startswith("local marker"), (text, c)
+    # (d) t_01a180aae388e142 title and body, verbatim.
+    d = decide({"title": _SIDEBAR_TITLE, "body": _SIDEBAR_BODY})
+    assert d["where"] == "hub", d
+    # (e) a local-only skill still pins, even with no marker in the text.
+    e = decide({"title": "Weekly digest", "skills": ["apple-notes"]})
+    assert e["where"] == "local" and "skill apple-notes" in e["why"], e
+
+
+def test_local_marker_decision_is_in_the_create_result(mac):
+    """Auto-placement that stays local because of a text marker says so, with the remedy."""
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({
+        "title": "Verify 57094b7a60 live on the MacBook",
+        "body": "Read the live sidebar on this machine.",
+    }))
+    assert out["ok"] and out.get("task_id") and _local_count() == 1, out
+    assert out["placement"] == {
+        "where": "local",
+        "why": "local marker: mentions 'macbook'",
+    }, out
+    assert out["remedy"] == _MARKER_REMEDY
+    # A card that goes to the hub, and one kept local for a structural reason, do not get that note.
+    hub = json.loads(kt._handle_create({"title": "Fix the flaky lint", "body": "Push it."}))
+    assert hub.get("placed", {}).get("gateway") == "hub" and "placement" not in hub, hub
+    structural = json.loads(kt._handle_create({"title": "Keep this one here", "goal_mode": True}))
+    assert structural["ok"] and "placed" not in structural and "placement" not in structural, structural
