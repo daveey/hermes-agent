@@ -15,6 +15,9 @@ def source_product_current(project_root: Path, product: str, out: Path) -> bool:
     if installed is None or installed.binary is None:
         return False  # Only PM's Node may run the receipt reader; never the user's PATH copy.
     node, env = str(installed.binary), env_for("node")
+    # [daveey] freshness.mjs runs its CLI only when argv[1] is its real path (isMain), so a
+    # checkout reached through a symlink (/var vs /private/var) would print nothing: read "stale".
+    project_root = Path(project_root).resolve()
     try:
         result = subprocess.run(
             [node, str(project_root / "scripts/build/freshness.mjs"),

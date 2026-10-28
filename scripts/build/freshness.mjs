@@ -1,7 +1,7 @@
 // Product receipts belong to the compilers, not PM dependency receipts or profiles.
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { isMain } from './frontend-common.mjs'
 
@@ -175,10 +175,65 @@ function hostReceipt(out, product) {
     && saved.node === process.versions.node ? saved : null
 }
 
+// [daveey] A packaged desktop product can be compiled in a different checkout than the one it is
+// later judged against: hermes-sync packs the next origin/main in its own stage worktree and
+// `hermes update` swaps that bundle into the live checkout (HERMES_DESKTOP_PREBUILT_APP). Its
+// receipt then names prepared inputs inside the stage, which moves on to the next commit and
+// would make the installed app read stale. For such foreign prepared inputs of a packaged bundle
+// (``out`` is <Resources>/app.asar.unpacked/dist):
+//  - the stamp is judged by the bundle's own Resources/install-stamp.json, the extraResources copy
+//    of the stamp the build baked (identity hash AND stampClock, so the #123308 race guard holds);
+//  - icons and native deps are taken as recorded: the install verified the bundle (signature,
+//    outputHash, sourceHash against the live checkout) and they live in the signed bundle now.
+// Prepared inputs inside ``source`` (an in-place pack) are re-hashed exactly as before.
+function bundleStamp(out) {
+  const dist = resolve(out)
+  if (basename(dirname(dist)) !== 'app.asar.unpacked') return null
+  const stamp = join(dirname(dirname(dist)), 'install-stamp.json')
+  return existsSync(stamp) ? stamp : null
+}
+
+function realOr(path) {
+  try { return realpathSync(path) } catch { return resolve(path) }
+}
+
+function within(root, path) {
+  return [resolve(root), realOr(root)].some(base => {
+    for (const candidate of [resolve(path), realOr(path)]) {
+      const rel = relative(base, candidate)
+      if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return true
+    }
+    return false
+  })
+}
+
+/** ``saved``'s prepared inputs as this host would record them now, plus the stamp to read the
+ *  baked clock from. */
+function currentPrepared({ source, product, out, saved, prepared }) {
+  if (prepared) return { inputs: buildInputs(source, product, prepared), clockPaths: prepared }
+  const paths = preparedPaths(saved.inputs)
+  const shipped = product === 'desktop' ? bundleStamp(out) : null
+  const foreign = new Set(shipped
+    ? saved.inputs.prepared.filter(({ path }) => !within(source, path)).map(({ name }) => name) : [])
+  if (!foreign.size) return { inputs: buildInputs(source, product, paths), clockPaths: paths }
+  const local = Object.fromEntries(Object.entries(paths).filter(([name]) => !foreign.has(name)))
+  const fresh = buildInputs(source, product, local)
+  const byName = Object.fromEntries(fresh.prepared.map(entry => [entry.name, entry]))
+  return {
+    inputs: {
+      ...fresh,
+      prepared: saved.inputs.prepared.map(entry => !foreign.has(entry.name) ? byName[entry.name]
+        : entry.name === 'stamp' ? { ...entry, hash: stampContentHash(shipped) }
+        : entry),
+    },
+    clockPaths: foreign.has('stamp') ? { stamp: shipped } : paths,
+  }
+}
+
 export function productCurrent({ source, product, out, prepared }) {
   try {
     const saved = hostReceipt(out, product)
-    const paths = saved && (prepared ?? preparedPaths(saved.inputs))
+    const now = saved && currentPrepared({ source, product, out, saved, prepared })
     return !!saved
       // The pre-build gate, unlike recordProduct, must also see the clock. A restamp
       // that lands after the build (a racing write-build-stamp, or a second builder
@@ -189,8 +244,8 @@ export function productCurrent({ source, product, out, prepared }) {
       // packaging hole: the release path (scripts/bundles/desktop.py) never consults
       // this gate, it always stamps and compiles, and the source launchers that do
       // consult it reuse the dist already on disk rather than packaging a new bundle.
-      && (saved.stampClock === undefined || saved.stampClock === stampClock(paths))
-      && JSON.stringify(saved.inputs) === JSON.stringify(buildInputs(source, product, paths))
+      && (saved.stampClock === undefined || saved.stampClock === stampClock(now.clockPaths))
+      && JSON.stringify(saved.inputs) === JSON.stringify(now.inputs)
       && saved.outputHash === outputHash(out)
   } catch { return false }
 }
