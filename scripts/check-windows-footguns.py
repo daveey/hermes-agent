@@ -140,6 +140,61 @@ class Footgun:
     post_filter: Callable[..., Any] | None = None
 
 
+# A real open() mode. The regex stops at the first comma, so
+# open(os.path.join(a, b), "rb") captures "b"'s sibling argument, not the mode.
+_FILE_MODE = re.compile(r"^[rwaxbtU+]*$")
+_BINARY_MODE_LIT = re.compile(r"""['"][rwaxutU+]*b[rwaxutU+]*['"]""")
+
+
+def _code_before_comment(line: str) -> str:
+    """Drop a trailing # comment. Quotes are tracked so a '#' inside a string stays."""
+    out: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for ch in line:
+        if quote:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+            out.append(ch)
+            continue
+        if ch == "#":
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+def _bare_text_open(match, line: str) -> bool:
+    """True when this open()/fdopen() match is text mode with no encoding=.
+
+    Nested calls make the regex capture an inner argument as the mode
+    (open(os.path.join(sys.prefix, "pyvenv.cfg"), "rb") captured
+    "pyvenv.cfg"). A capture that is not a file mode, plus a binary-mode
+    literal in the code, is binary — flagging it blocks CI on a correct
+    read of bytes.
+    """
+    if "encoding=" in line or "encoding =" in line or "**" in line:
+        return False
+    stripped = line.lstrip()
+    if stripped.startswith(("def ", "async def ")):
+        return False
+    mode = match.group("mode") or ""
+    if _FILE_MODE.fullmatch(mode) and "b" in mode:
+        return False
+    # Empty or non-mode capture means the regex stopped inside a nested call
+    # (open(os.path.join(a, b), "rb") leaves mode unset when b is an identifier).
+    if (not mode or not _FILE_MODE.fullmatch(mode)) and _BINARY_MODE_LIT.search(_code_before_comment(line)):
+        return False
+    return True
+
+
 FOOTGUNS: list[Footgun] = [
     Footgun(
         name="open() without encoding= on text mode",
@@ -166,20 +221,9 @@ FOOTGUNS: list[Footgun] = [
             "reads: open(path, 'r', encoding='utf-8-sig')  writes: "
             "open(path, 'w', encoding='utf-8')"
         ),
-        # Filter: only flag if mode is missing-or-text AND the line doesn't
-        # already pass encoding=. Skip binary mode (contains "b").
-        post_filter=lambda m, line: (
-            "b" not in (m.group("mode") or "")
-            and "encoding=" not in line
-            and "encoding =" not in line
-            # Skip `def open(` and `async def open(` (method definitions)
-            and not line.lstrip().startswith("def ")
-            and not line.lstrip().startswith("async def ")
-            # Skip open(path, **kwargs) patterns — encoding may be in the dict.
-            # Too expensive to trace; require the author to set encoding in
-            # the dict and trust them (or they can add a # windows-footgun: ok).
-            and "**" not in line
-        ),
+        # Filter: only flag text mode with no encoding=. Skip binary mode,
+        # including when a nested call's comma hid the real mode argument.
+        post_filter=_bare_text_open,
     ),
     Footgun(
         name="os.fdopen() without encoding= on text mode",
@@ -201,12 +245,7 @@ FOOTGUNS: list[Footgun] = [
             "reads: os.fdopen(fd, 'r', encoding='utf-8-sig')  writes: "
             "os.fdopen(fd, 'w', encoding='utf-8')  binary: mode 'rb'/'wb'"
         ),
-        post_filter=lambda m, line: (
-            "b" not in (m.group("mode") or "")
-            and "encoding=" not in line
-            and "encoding =" not in line
-            and "**" not in line
-        ),
+        post_filter=_bare_text_open,
     ),
     Footgun(
         name="os.kill(pid, 0)",

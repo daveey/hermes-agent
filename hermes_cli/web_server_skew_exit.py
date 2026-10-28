@@ -91,7 +91,7 @@ class RuntimeRetireLedger:
         import json
 
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             return {}
         return data if isinstance(data, dict) else {}

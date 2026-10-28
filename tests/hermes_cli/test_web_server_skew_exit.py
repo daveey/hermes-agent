@@ -197,6 +197,15 @@ def test_the_respawned_backend_does_not_retire_again_inside_the_backoff_window(t
     assert late.should_exit is True and after.committed is True
 
 
+def test_runtime_retire_ledger_reads_a_bom_prefixed_file(tmp_path):
+    """A PowerShell-written ledger still holds the backoff. utf-8 (not utf-8-sig) makes json.loads raise and the guard looks empty."""
+    from hermes_cli.web_server_skew_exit import RuntimeRetireLedger
+
+    path = tmp_path / "ledger.json"
+    path.write_bytes(b"\xef\xbb\xbf" + b'{"8d94c4a7dd14f7b1": 1000.0}\n')
+    assert RuntimeRetireLedger(path).last("8d94c4a7dd14f7b1") == 1000.0
+
+
 def test_the_backoff_never_holds_a_code_revision_retirement(tmp_path):
     from hermes_cli.web_server_skew_exit import RuntimeRetireLedger
 
