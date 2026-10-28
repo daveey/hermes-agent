@@ -31,7 +31,7 @@ from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db_sync as _sync
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
-from hermes_cli.kanban_admission import claim_transaction, claim_and_open_run
+from hermes_cli.kanban_admission import admission_hold_set, claim_transaction, claim_and_open_run
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
 
@@ -2207,6 +2207,9 @@ def claim_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+    # [daveey] Refuse a held fence before the Board-service lease, not after it.
+    if admission_hold_set():
+        return None
     gate = _sync.claim_gate(conn, task_id, expires)
     if gate.deferred:
         return None
@@ -2245,6 +2248,8 @@ def claim_review_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+    if admission_hold_set():  # [daveey] before the Board-service lease (see claim_task)
+        return None
     gate = _sync.claim_gate(conn, task_id, expires, lane="review")
     if gate.deferred:
         return None

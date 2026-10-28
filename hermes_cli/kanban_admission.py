@@ -1,6 +1,7 @@
 """Kanban claim publication boundary for the POSIX updater fence."""
 import contextlib
 import logging
+from pathlib import Path
 
 
 def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, event_extra=None, gate=None):
@@ -41,6 +42,22 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
         {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {})}, run_id=run_id,
     )
     return run_id
+
+
+def admission_hold_set():
+    """[daveey] Lock-free early read of the updater hold, for callers to check BEFORE side effects that
+    precede ``claim_transaction`` (the Board-service lease). Advisory only: ``claim_transaction`` still
+    re-checks under admission.lock, so a hold set after this read is still honoured. An unreadable
+    fence reads as "not set" here and is decided by that authoritative check."""
+    from hermes_constants import get_default_hermes_root
+    from hermes_cli.admission_fence import is_held, SUPPORTED
+
+    if not SUPPORTED:
+        return False
+    try:
+        return is_held(Path(get_default_hermes_root()) / "core-update")
+    except OSError:
+        return False
 
 
 @contextlib.contextmanager
