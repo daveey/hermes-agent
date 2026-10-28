@@ -166,3 +166,22 @@ def test_unchanged_inventory_is_written_once(replica):
     activity._legacy_remote_links()
     activity._legacy_remote_links()
     assert len(writes) == 1
+
+
+def test_dropped_link_on_fresh_replica_expires_ghost(replica, monkeypatch):
+    _, _, card = replica
+    card.update(gateway='owner', board='work', id='t_one')
+    activity._legacy_remote_links()
+    def read(path, owners_out=None, **kw):
+        owners_out.add(('owner', 'work', 't_one'))
+        return []
+    monkeypatch.setattr(activity, '_read_remote_links', read)
+    assert activity._legacy_remote_links() == []
+
+
+def test_missing_owner_keeps_stale_ghost(replica, monkeypatch):
+    _, _, card = replica
+    card.update(gateway='owner', board='work', id='t_one')
+    activity._legacy_remote_links()
+    monkeypatch.setattr(activity, '_read_remote_links', lambda path, **kw: [])
+    assert [c['stale'] for c in activity._legacy_remote_links()] == [True]

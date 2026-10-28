@@ -511,7 +511,8 @@ def _decode_replica_task(record_key: str, data: Any) -> tuple[dict[str, Any], st
 
 
 def _read_remote_links(path: Path, now: float | None = None, *,
-                       qualified_out: set | None = None) -> list[dict[str, Any]]:
+                       qualified_out: set | None = None,
+                       owners_out: set | None = None) -> list[dict[str, Any]]:
     """Replica cards linked to a session on this gateway, one row per (session, card).
 
     Open and unproven cards come back ``unfinished``; cards their owner attests closed
@@ -570,6 +571,10 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                 t = {**t, 'reported_status': t.get('status'), 'status': 'unknown', 'unfinished': True}
             tasks[key] = t
     _replica_decoded = decoded
+    if owners_out is not None and not stale:
+        # A fresh replica that still carries the owner row is authoritative about its links: a remembered
+        # (session, card) pair absent from it is a dropped link, not an unreadable replica.
+        owners_out.update((gw, board, tid) for gw, _, board, tid in tasks)
     blank_before = {key for key in tasks if key[1] is None}
     _fold_legacy_aliases(tasks, raw)
     # Only a proven-identity alias is the same card as its qualified twin (folded above, links carried
@@ -864,7 +869,8 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
         if path is None:
             raise FileNotFoundError("no hub.db")
         qualified: set[tuple[str, str, str]] = set()
-        cards = _read_remote_links(path, qualified_out=qualified)
+        owners: set[tuple[str, str, str]] = set()
+        cards = _read_remote_links(path, qualified_out=qualified, owners_out=owners)
     except Exception as exc:  # a broken replica must never break the sidebar
         if previous is None:
             if path is not None:
@@ -888,6 +894,8 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                  # Successful reads migrate graph-inferred cache entries only.
                  # Receipt-backed obligations remain in the separate ledger.
                  and c.get("via") != "descendant"
+                 # Fresh replica + owner row present but this session's link gone: expire the ghost.
+                 and (c.get("gateway"), c.get("board"), c.get("id")) not in owners
                  and not (c.get("ownership_state") == "unknown"
                           and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now))
     if _snapshot_saved != (scope, cards):
