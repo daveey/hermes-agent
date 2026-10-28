@@ -33,7 +33,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
 
@@ -749,8 +749,10 @@ def _row_uid(table: str, row: sqlite3.Row) -> str:
     return row["uid"]
 
 
-def import_board(conn: sqlite3.Connection, *, tables: Iterable[str] = IMPORT_ORDER) -> dict[str, int]:
-    """Queue every existing row of a synced board for upload (idempotent: the service keys rows by uid)."""
+def import_board(conn: sqlite3.Connection, *, tables: Iterable[str] = IMPORT_ORDER,
+                 only: Optional[Mapping[str, set[str]]] = None) -> dict[str, int]:
+    """Queue every existing row of a synced board for upload (idempotent: the service keys rows by uid).
+    ``only`` restricts each table to those row uids (``reconcile`` re-sends just what the service lacks)."""
     from hermes_cli.kanban_db_connect import write_txn
     if sync.board_mode(conn) == "off":
         raise SyncUnavailable("this board does not sync (kanban.sync.enabled / kanban.sync.boards / mode off)")
@@ -758,13 +760,20 @@ def import_board(conn: sqlite3.Connection, *, tables: Iterable[str] = IMPORT_ORD
     now = time.time_ns() // 1_000_000
     with write_txn(conn):
         # Rows the service refused before the import (edits of cards it had not seen) are superseded by the full rows.
-        counts["cleared_rejected"] = conn.execute("DELETE FROM kanban_sync_outbox WHERE state = 'rejected'").rowcount
+        counts["cleared_rejected"] = (0 if only is not None else
+                                      conn.execute("DELETE FROM kanban_sync_outbox WHERE state = 'rejected'").rowcount)
         for table in tables:
+            wanted = None if only is None else only.get(table, set())
+            if wanted is not None and not wanted:
+                counts[table] = 0
+                continue
             order = "created_at, id" if table == "tasks" else ("parent_id, child_id" if table == "task_links" else "id")
             n = 0
             # The service drops events older than its retention window; importing them would only churn the feed.
             where = f" WHERE created_at >= {int(time.time()) - EVENT_IMPORT_WINDOW_S}" if table == "task_events" else ""
             for row in conn.execute(f"SELECT * FROM {table}{where} ORDER BY {order}").fetchall():
+                if wanted is not None and _row_uid(table, row) not in wanted:
+                    continue
                 op = "import" if table == "tasks" else "upsert"
                 conn.execute(
                     "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
@@ -774,6 +783,97 @@ def import_board(conn: sqlite3.Connection, *, tables: Iterable[str] = IMPORT_ORD
                 n += 1
             counts[table] = n
     return counts
+
+
+# --- reconcile after a recovery -------------------------------------------------------------------
+
+def _live_uids(conn: sqlite3.Connection, table: str) -> set[str]:
+    if table == "tasks":
+        return {str(r[0]) for r in conn.execute("SELECT id FROM tasks")}
+    if table == "task_links":
+        return {f"{p}>{c}" for p, c in conn.execute("SELECT parent_id, child_id FROM task_links")}
+    where = f" AND created_at >= {int(time.time()) - EVENT_IMPORT_WINDOW_S}" if table == "task_events" else ""
+    return {str(r[0]) for r in conn.execute(f"SELECT uid FROM {table} WHERE uid IS NOT NULL{where}")}
+
+
+def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None) -> dict[str, Any]:
+    """Bring a board and the service back in step after its file lost rows (a corruption rebuild, a
+    restore from backup) — including the unsent outbox, which a rebuild cannot recover.
+
+    Reads the service snapshot of every table once. Rows this board has and the service lacks are
+    queued for upload (tasks as ``import``, which the service refuses for an id it already holds) and
+    pushed. On a ``primary`` board, rows of this gateway's cards that the service has and the file
+    lost are applied back from the snapshot; rows the file still has are never overwritten, so local
+    edits whose outbox entry was lost are not reverted. Returns counts and the post-reconcile ``diff``."""
+    from hermes_cli import kanban_db
+    ident = load_identity() if hub is None else hub.ident
+    hub = hub or Hub(ident)
+    if path is None:
+        path = dict(board_paths()).get(slug) or kanban_db.kanban_db_path(board=slug)
+    live = _connect(Path(path))
+    try:
+        mode = sync.board_mode(live)
+        if mode == "off":
+            return {"board": slug, "mode": "off"}
+        ensure_identity(live, slug, ident.gateway)
+        # Send what is already pending first (a delete waiting in the outbox must reach the service before
+        # its snapshot is compared, or the row would be "restored" here), then refresh the replica: rows the
+        # service deleted on purpose (its event GC of done cards, deletes) come back as tombstones there.
+        push(live, hub, slug, ident.gateway, primary=mode == "primary")
+        _pull_replica(slug, hub, ident.gateway)
+        shadow = open_shadow(slug, ident.gateway)
+        try:
+            tombstoned: dict[str, set[str]] = {}
+            for table, uid in shadow.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones"):
+                tombstoned.setdefault(str(table), set()).add(str(uid))
+        finally:
+            shadow.close()
+        # Never restore a row this file deleted itself (local tombstone) or still has an unanswered op for.
+        held_back: set[tuple[str, str]] = {(str(t), str(u)) for t, u in live.execute(
+            "SELECT table_name, row_uid FROM kanban_sync_tombstones")}
+        held_back |= {(str(t), str(u)) for t, u in live.execute(
+            "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state = 'pending'")}
+        live_uids = {table: _live_uids(live, table) for table in IMPORT_ORDER}
+        service_uids: dict[str, set[str]] = {table: set() for table in IMPORT_ORDER}
+        restored: dict[str, int] = {}
+        for table in IMPORT_ORDER:
+            after = ""
+            while True:
+                page = hub.snapshot_page(slug, table, after)
+                rows = page.get("rows", [])
+                service_uids[table].update(str(r["uid"]) for r in rows)
+                if mode == "primary":
+                    candidates = [r for r in rows if str(r["uid"]) not in live_uids[table]]
+                    # Rows written locally since live_uids was read reached the service meanwhile: re-check.
+                    now_live = _live_uids(live, table) if candidates else set()
+                    lost = own_partition(live, [_row_change(table, r) for r in candidates
+                                                if str(r["uid"]) not in now_live
+                                                and (table, str(r["uid"])) not in held_back], ident.gateway)
+                    if lost:
+                        cursor = int((sync.sync_state(live) or {}).get("cursor") or 0)
+                        sync.apply_remote_changes(live, lost, new_cursor=cursor, board=slug, observers=False)
+                        restored[table] = restored.get(table, 0) + len(lost)
+                if not page.get("more"):
+                    break
+                after = str(page["next"])
+        missing = {table: live_uids[table] - service_uids[table] - tombstoned.get(table, set())
+                   for table in IMPORT_ORDER}
+        queued = import_board(live, only=missing)
+        queued.pop("cleared_rejected", None)
+        pushed = push(live, hub, slug, ident.gateway, primary=mode == "primary")
+        _pull_replica(slug, hub, ident.gateway)
+        shadow = open_shadow(slug, ident.gateway)
+        try:
+            report = diff(live, shadow, ident.gateway)
+        finally:
+            shadow.close()
+        return {"board": slug, "mode": mode, "queued": {k: v for k, v in queued.items() if v},
+                "restored": restored, "pushed": pushed.sent, "rejected": pushed.rejected,
+                "deferred": pushed.deferred, "clean": report.get("clean"),
+                "field_mismatch": len(report.get("field_mismatch") or {}),
+                "missing_in_shadow": len(report.get("missing_in_shadow") or [])}
+    finally:
+        live.close()
 
 
 # --- status and diff ------------------------------------------------------------------------------

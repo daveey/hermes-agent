@@ -328,4 +328,17 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "WHATSAPP_REQUIRE_MENTION",
     "DINGTALK_REQUIRE_MENTION",
     "MATRIX_REQUIRE_MENTION",
+    # systemd unit markers. pytest started from a Kanban worker, a gateway
+    # terminal or a systemd-hosted runner inherits these, and production code
+    # branches on them: INVOCATION_ID flips restart_safe_gateway_child_argv()
+    # into scope/degraded mode (Kanban spawn tests raised "cannot create
+    # restart-safe systemd scope ... no current run id" only on hosts), and
+    # NOTIFY_SOCKET/WATCHDOG_* would make sd_notify() talk to the REAL unit.
+    # Tests that exercise systemd behavior set them explicitly.
+    "INVOCATION_ID",
+    "NOTIFY_SOCKET",
+    "WATCHDOG_USEC",
+    "WATCHDOG_PID",
+    "JOURNAL_STREAM",
+    "MANAGERPID",
 })

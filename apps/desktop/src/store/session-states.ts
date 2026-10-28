@@ -395,7 +395,7 @@ export function isLiveTurnAwaitingEvents(state: ClientSessionState | undefined):
 export type LiveTurnVerdict = 'ended' | 'running' | 'unknown'
 
 interface LiveTurnStatusResponse {
-  sessions?: { id?: string; status?: string }[]
+  sessions?: { id?: string; last_active?: number | null; status?: string }[]
 }
 
 /** What one `session.active_list` snapshot says about `runtimeId`'s turn. A
@@ -418,11 +418,56 @@ export function liveTurnVerdict(
   return status === 'starting' || status === 'waiting' || status === 'working' ? 'running' : 'unknown'
 }
 
-async function checkLiveTurn(runtimeId: string): Promise<LiveTurnVerdict> {
+/** [daveey] When `runtimeId`'s turn last did anything, per the backend (ms), or
+ *  null when the snapshot doesn't say (older backend, runtime absent). */
+export function liveTurnLastActiveMs(
+  response: LiveTurnStatusResponse | null | undefined,
+  runtimeId: string
+): null | number {
+  const lastActive = response?.sessions?.find(session => session.id?.trim() === runtimeId)?.last_active
+  const ms = Number(lastActive) * 1000
+
+  return lastActive != null && Number.isFinite(ms) && ms > 0 ? ms : null
+}
+
+/** [daveey] The backend's activity decides the quiet hint for a running turn.
+ *  The renderer watchdog only measures events reaching THIS window, and a turn
+ *  no pane streams (resumed by the backend after a restart, a background chat)
+ *  sends none: it painted red `stuck` on turns active seconds ago. Fresh →
+ *  clear the hint and restart the watchdog; quiet past the window → stalled,
+ *  the same rule `rehydrateLiveSessionStatuses` applies. No timestamp leaves
+ *  the renderer watchdog in charge. */
+function applyBackendActivity(runtimeId: string, lastActiveMs: null | number) {
+  if (lastActiveMs === null) {
+    return
+  }
+
+  const current = $sessionStates.get()[runtimeId]
+
+  if (!current?.busy) {
+    return
+  }
+
+  if (Date.now() - lastActiveMs >= SESSION_WATCHDOG_TIMEOUT_MS) {
+    setSessionStalled(current.storedSessionId, true)
+
+    return
+  }
+
+  setSessionStalled(current.storedSessionId, false)
+  armWatchdog(runtimeId)
+}
+
+interface LiveTurnCheck {
+  lastActiveMs: null | number
+  verdict: LiveTurnVerdict
+}
+
+async function checkLiveTurn(runtimeId: string): Promise<LiveTurnCheck> {
   const backend = liveTurnBackend
 
   if (!backend) {
-    return 'unknown'
+    return { lastActiveMs: null, verdict: 'unknown' }
   }
 
   try {
@@ -437,9 +482,9 @@ async function checkLiveTurn(runtimeId: string): Promise<LiveTurnVerdict> {
       LIVE_TURN_PROBE_TIMEOUT_MS
     )
 
-    return liveTurnVerdict(response, runtimeId)
+    return { lastActiveMs: liveTurnLastActiveMs(response, runtimeId), verdict: liveTurnVerdict(response, runtimeId) }
   } catch {
-    return 'unknown'
+    return { lastActiveMs: null, verdict: 'unknown' }
   }
 }
 
@@ -577,7 +622,7 @@ async function onEventSilence(runtimeId: string) {
 
   const check = {}
   silentTurnChecks.set(runtimeId, check)
-  const verdict = await checkLiveTurn(runtimeId)
+  const { lastActiveMs, verdict } = await checkLiveTurn(runtimeId)
 
   if (silentTurnChecks.get(runtimeId) !== check) {
     return
@@ -586,6 +631,10 @@ async function onEventSilence(runtimeId: string) {
   silentTurnChecks.delete(runtimeId)
 
   if (verdict !== 'ended') {
+    if (verdict === 'running') {
+      applyBackendActivity(runtimeId, lastActiveMs)
+    }
+
     noteSessionEvent(runtimeId)
 
     return

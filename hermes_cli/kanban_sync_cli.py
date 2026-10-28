@@ -5,6 +5,8 @@
 - ``import``  queue every existing row for upload (idempotent; run once after the first attach).
 - ``diff``    this gateway's live cards against the shadow copy of the service (exit 1 when not clean).
 - ``run``     one sync round now (the gateway runs it continuously while ``kanban.sync.enabled`` is on).
+- ``reconcile`` after the board file lost rows: upload what the service lacks, restore this gateway's rows the
+  file lost, then diff (``hermes kanban recover`` runs it after a rebuild).
 """
 
 from __future__ import annotations
@@ -139,14 +141,21 @@ def _links_diff(args: argparse.Namespace) -> int:
     return 0 if report["clean"] else 1
 
 
+def _reconcile(args: argparse.Namespace) -> int:
+    slug = _board(args)
+    report = ksc.reconcile(slug, _path(slug))
+    _print(report, args.json)
+    return 0 if report.get("clean") or report.get("mode") == "off" else 1
+
+
 _ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run,
-            "links": _links, "links-diff": _links_diff}
+            "links": _links, "links-diff": _links_diff, "reconcile": _reconcile}
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
     action = getattr(args, "sync_action", None)
     if action not in _ACTIONS:
-        print("usage: hermes kanban sync {status,attach,import,diff,run,links,links-diff} [--board B]")
+        print("usage: hermes kanban sync {status,attach,import,diff,run,links,links-diff,reconcile} [--board B]")
         return 2
     try:
         return _ACTIONS[action](args)

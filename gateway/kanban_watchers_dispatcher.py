@@ -134,6 +134,7 @@ class _KanbanDispatcher:
         self.settings = settings
         self.successful_scopes: list = []
         self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
+        self._rr_offset = 0  # round-robin start board for spawning ticks (_fair_board_order)
 
     def _board_slugs(self) -> list:
         return _board_slugs(self.kb)
@@ -218,6 +219,7 @@ class _KanbanDispatcher:
                     "then run `hermes kanban init` if you need a fresh board.",
                     slug, fingerprint[0],
                 )
+                self._start_auto_recovery(slug, fingerprint[0])
                 return None
             logger.exception("kanban dispatcher: tick failed on board %s", slug)
             return None
@@ -226,11 +228,42 @@ class _KanbanDispatcher:
                 with contextlib.suppress(Exception):
                     conn.close()
 
+    @staticmethod
+    def _start_auto_recovery(slug: str, db_path: str) -> None:
+        """A board with table b-tree damage stays down until it is rebuilt: start the rebuild now
+        (``hermes_cli.kanban_db_recover``) instead of waiting for someone to notice. It runs in a
+        detached child (this process may itself be stranded on deleted sidecars, and its raw reads
+        would cancel its own locks), re-checks the damage from a clean process, holds the board's
+        recovery lock, and writes the board back in place, which changes the fingerprint and
+        lifts this pause. Rate-limited per board; ``kanban.auto_recover_corruption: false`` opts out."""
+        try:
+            from hermes_cli import kanban_db_recover as rec
+            if db_path and rec.auto_recover_enabled():
+                rec.spawn_recovery(Path(db_path))
+        except Exception:  # health: allow BLE001 -- the pause and its ERROR log above still stand
+            logger.exception("kanban dispatcher: could not start automatic recovery of board %s", slug)
+
+    def _fair_board_order(self) -> list:
+        """Boards for this tick, rotated one place per tick (round-robin start). [daveey]
+
+        ``kanban.max_in_progress`` is a HOST-wide budget that boards draw on in
+        tick order. A fixed order (``default`` first, then alphabetical) let a
+        standing backlog on ``default`` take every slot freed after a core-update
+        drain hold or a worker exit, so ready cards on other boards waited behind
+        it indefinitely. Rotating the start gives each board first pick in turn.
+        """
+        slugs = list(self._board_slugs())
+        if len(slugs) < 2:
+            return slugs
+        start = self._rr_offset % len(slugs)
+        self._rr_offset += 1
+        return slugs[start:] + slugs[:start]
+
     def tick_once(self, *, suppress_spawn: bool = False) -> list[tuple[str, Optional[object]]]:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""
         self.successful_scopes = []
         if not suppress_spawn:
-            return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
+            return [(slug, self.tick_once_for_board(slug)) for slug in self._fair_board_order()]
         return [(slug, self.tick_once_for_board(slug, suppress_spawn=True)) for slug in self._board_slugs()]
 
     @staticmethod

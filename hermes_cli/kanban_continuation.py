@@ -152,6 +152,9 @@ def continue_task(
                 return {"ok": True, "status": "todo", "run_id": None, "continuation": streak,
                         "wake_at": None, "escalated_to": owner}
             wake_check = wake_check or kaw.card_probe(record)
+            why = kaw.park_cycle_error(conn, task_id, record, wake_check)
+            if why:
+                return {"ok": False, "error": why, "reason_code": kaw.INVALID_AWAITING}
         try:
             wake_check, check_every = kwc.validate_park(
                 wake_at=wake_at, wake_check=wake_check,

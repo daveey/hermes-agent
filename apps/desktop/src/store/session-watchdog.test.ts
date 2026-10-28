@@ -226,6 +226,66 @@ describe('live turn event silence', () => {
     expect(card('rt-quiet')).toBeUndefined()
   })
 
+  // [daveey] A turn this window gets no events for (resumed by the backend after a restart, or run in a
+  // chat no pane streams) is silent HERE while the backend shows it busy. The silence check already asks the
+  // backend every window; its `last_active` decides the quiet hint, not the renderer's own silence. Red
+  // `stuck` on a turn that was active seconds ago was the sidebar auditor's false_red.
+  it('keeps a turn the backend reports recently active out of the quiet hint', async () => {
+    publishSessionState('rt-bgturn', partial('resumed turn', { storedSessionId: 's-bgturn' }))
+    backend(async () => ({
+      sessions: [{ id: 'rt-bgturn', last_active: Date.now() / 1000, session_key: 's-bgturn', status: 'working' }]
+    }))
+    noteSessionEvent('rt-bgturn')
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS * 3)
+
+    expect($workingSessionIds.get()).toContain('s-bgturn')
+    expect($stalledSessionIds.get()).not.toContain('s-bgturn')
+  })
+
+  it('clears a quiet hint the moment the backend reports fresh activity', async () => {
+    let lastActive = Date.now() / 1000
+    publishSessionState('rt-revive', partial('quiet tool call', { storedSessionId: 's-revive' }))
+    backend(async () => ({
+      sessions: [{ id: 'rt-revive', last_active: lastActive, session_key: 's-revive', status: 'working' }]
+    }))
+    noteSessionEvent('rt-revive')
+
+    // Backend quiet too: the hint is right.
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS + SILENCE_MS)
+    expect($stalledSessionIds.get()).toContain('s-revive')
+
+    // The backend's turn moves again; the next check clears the hint.
+    lastActive = Date.now() / 1000
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+    expect($stalledSessionIds.get()).not.toContain('s-revive')
+    expect($workingSessionIds.get()).toContain('s-revive')
+  })
+
+  it('still paints a turn quiet on the backend as stalled', async () => {
+    const startedAt = Date.now() / 1000
+    publishSessionState('rt-hung', partial('hung tool call', { storedSessionId: 's-hung' }))
+    backend(async () => ({
+      sessions: [{ id: 'rt-hung', last_active: startedAt, session_key: 's-hung', status: 'working' }]
+    }))
+    noteSessionEvent('rt-hung')
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS + SILENCE_MS)
+
+    expect($workingSessionIds.get()).toContain('s-hung')
+    expect($stalledSessionIds.get()).toContain('s-hung')
+  })
+
+  it('keeps the renderer watchdog when the backend reports no last_active', async () => {
+    publishSessionState('rt-old', partial('older backend', { storedSessionId: 's-old' }))
+    backend(async () => listing('rt-old', 'working'))
+    noteSessionEvent('rt-old')
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_MS)
+
+    expect($stalledSessionIds.get()).toContain('s-old')
+  })
+
   it('keeps the turn when the check fails, and asks again next window', async () => {
     publishSessionState('rt-down', partial('partial', { storedSessionId: 's-down' }))
 

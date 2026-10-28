@@ -456,3 +456,36 @@ class TestProjectTreeCli:
         tree = self._tree(capsys)
         assert tree["worker"]["ok"] is False and tree["worker"]["nodes"] == []
         assert tree["default"]["ok"] is True
+
+
+def test_sidebar_slices_share_one_kanban_read(client, profiles_on_disk, monkeypatch):
+    """[daveey] The three slices stamp from one read of the kanban counts and waiting sources (a board write between
+    slices made each one recompute everything), and stamp what an unscoped annotation of the same rows stamps."""
+    from hermes_cli import kanban_session_activity as ksa
+
+    home = profiles_on_disk["default"]
+    _seed_session(home, "s_recent", source="cli")
+    _seed_session(home, "s_cron", source="cron")
+    _seed_session(home, "s_tg", source="telegram")
+    calls = {"counts": 0, "extra": 0}
+    real = ksa._all_counts
+
+    def counts(**kw):
+        calls["counts"] += 1
+        with ksa._cache_lock:
+            ksa._cache = None  # every unscoped call would recompute
+        return real(**kw)
+
+    def extra():
+        calls["extra"] += 1
+        return {sid: {f"t_{sid}"} for sid in ("s_recent", "s_cron", "s_tg")}
+
+    monkeypatch.setattr(ksa, "_all_counts", counts)
+    monkeypatch.setattr(ksa, "_extra_waiting", extra)
+    payload = client.get("/api/profiles/sessions/sidebar").json()
+    assert calls == {"counts": 1, "extra": 1}
+    for name, sid in (("recents", "s_recent"), ("cron", "s_cron"), ("messaging", "s_tg")):
+        row = next(r for r in payload[name]["sessions"] if r["id"] == sid)
+        alone = ksa.annotate_kanban_activity([{"id": sid}])[0]
+        assert row["kanban_waiting_on"] == alone["kanban_waiting_on"] == [f"t_{sid}"]
+        assert row["kanban_active"] == alone["kanban_active"] == 1

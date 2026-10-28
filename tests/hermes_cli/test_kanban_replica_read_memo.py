@@ -177,3 +177,36 @@ def test_extending_the_returned_list_never_reaches_the_memo(hub):
     put('t_one')
     activity._read_remote_links(path).append({'bogus': True})
     assert [r['id'] for r in activity._read_remote_links(path)] == ['t_one']
+
+
+def test_a_new_hub_pull_alone_serves_the_memo(hub):
+    """[daveey] ``last_ok`` moves on every pull (~2 s); with the task rows unchanged, the stale verdict and every
+    card's ``synced_at`` (min of owner rows' update time and ``last_ok``) are unchanged, so is the answer."""
+    path, put, statements, clock = hub
+    put('t_one')
+    first = activity._read_remote_links(path)
+    assert first[0]['synced_at'] == 1000.0
+    for pull in (1002, 1004, 1010):
+        with sqlite3.connect(path) as db:
+            db.execute("UPDATE meta SET v = ? WHERE k = 'last_ok'", (str(pull),))
+        clock['now'] = pull + 0.5
+        statements.clear()
+        assert activity._read_remote_links(path) == first
+        assert row_reads(statements) == 0
+        live, fresh, owners_live, owners_fresh = live_and_fresh(path, clock)
+        assert live == fresh and owners_live == owners_fresh
+
+
+def test_a_pull_that_moves_a_cards_synced_at_rereads(hub):
+    """An owner whose rows carry no update time is stamped with ``last_ok`` itself: a pull changes its cards."""
+    path, put, statements, clock = hub
+    put('t_one')
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE replica SET updated_at = 0")
+    assert activity._read_remote_links(path)[0]['synced_at'] == 1000.0
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE meta SET v = '1002' WHERE k = 'last_ok'")
+    clock['now'] = 1002.5
+    statements.clear()
+    live, fresh, _, _ = live_and_fresh(path, clock)
+    assert row_reads(statements) == 2 and live == fresh and live[0]['synced_at'] == 1002.0

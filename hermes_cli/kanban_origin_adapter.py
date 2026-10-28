@@ -34,11 +34,13 @@ def _gateway(replica: Path) -> str:
     return gateway
 
 
-def _resolve_session(path: Path, session: str) -> str:
+def _resolve_session(path: Path, session: str, conn: sqlite3.Connection | None = None) -> str:
     # Use the canonical continuation predicate but refuse cycles/cap exhaustion;
     # the UI convenience get_compression_chain intentionally truncates both.
+    # [daveey] ``conn``: a caller's read-only connection to ``path``, reused across lookups (a projection resolves
+    # ~24 sessions; one open of the large state.db each cost ~1 ms). Left open, its read transaction ended.
     from hermes_state_compression import _CHAIN_CAP, _CHAIN_STEP_SQL
-    db = _ro(path)
+    db = _ro(path) if conn is None else conn
     try:
         db.execute('BEGIN')
         if not db.execute('SELECT 1 FROM sessions WHERE id=?', (session,)).fetchone():
@@ -54,7 +56,10 @@ def _resolve_session(path: Path, session: str) -> str:
             seen.add(session)
         raise ValueError('origin_lineage_invalid')
     finally:
-        db.close()
+        if conn is None:
+            db.close()
+        else:
+            db.rollback()
 
 
 def receive(request: dict) -> dict:

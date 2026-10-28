@@ -120,7 +120,7 @@ def _first_field(task, primary: str, legacy: str, default=None):
     return v if v is not None else _task_field(task, legacy, default)
 
 
-def _latest_event_ts(events: Iterable[Any], kinds: set[str]) -> int:
+def _latest_event_ts(events: Iterable[Any], kinds: set[str] | frozenset[str]) -> int:
     """Max ``created_at`` over events whose kind is in ``kinds`` (0 if none)."""
     return max([0, *(_event_ts(ev) for ev in events if _event_kind(ev) in kinds)])
 
@@ -360,15 +360,22 @@ def _rule_prose_phantom_refs(task, events, runs, now, cfg) -> list[Diagnostic]:
     hits = _active_hallucination_events(events, "suspected_hallucinated_references")
     if not hits:
         return []
+    # Re-resolve at read time: ids that were unknown when the summary landed may be real cards on another
+    # gateway (hub replica), so old false warnings clear. Unknown/stale replica = don't flag.
+    from hermes_cli.kanban_db import unresolved_after_replica
+    phantom = unresolved_after_replica(_unique_payload_ids(hits, "phantom_refs"))
+    if not phantom:
+        return []
     return [Diagnostic(
         kind="prose_phantom_refs", severity="warning",
         title="Completion summary references unknown task ids",
-        detail="The completion summary mentions task ids that don't resolve in this board's database. "
+        detail="The completion summary mentions task ids that don't resolve on this board or in the hub replica "
+               "of other gateways. "
                "The completion itself succeeded, but downstream consumers parsing the summary may be "
                "pointed at cards that never existed.",
         actions=_generic_recovery_actions(task, running=_is_running(task)),
         first_seen_at=_event_ts(hits[0]), last_seen_at=_event_ts(hits[-1]), count=len(hits),
-        data={"phantom_refs": _unique_payload_ids(hits, "phantom_refs")},
+        data={"phantom_refs": phantom},
     )]
 
 
@@ -694,6 +701,22 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
     )]
 
 
+# Events after which a now-ready, unclaimed task must have (re-)entered ready:
+# the classic ready transitions plus every claim/park/wake on the way back.
+_READY_WAIT_FLOOR_KINDS = frozenset({
+    "created", "promoted", "reclaimed", "unblocked",
+    "claimed", "spawned", "continuation_woken", "condition_met",
+})
+
+
+def _last_ready_entry_ts(events: Iterable[Any]) -> int:
+    """Latest ready-entry floor; a ``continued`` checkpoint counts only when it resumed straight to ready."""
+    events = list(events)
+    continued_ready = [_event_ts(ev) for ev in events
+                       if _event_kind(ev) == "continued" and _parse_payload(ev).get("status") == "ready"]
+    return max([_latest_event_ts(events, _READY_WAIT_FLOOR_KINDS), *continued_ready])
+
+
 def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Assigned, unclaimed, ``ready`` for >= cfg["stranded_threshold_seconds"]
     (default 30 min). Deliberately age-based and identity-agnostic so it
@@ -713,7 +736,11 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     # Most recent event that put the task into ready; with none (old task /
     # truncated events) fall back to created_at — over-flagging an ancient
     # task beats missing a stranded one.
-    last_ready_ts = _latest_event_ts(events, {"created", "promoted", "reclaimed", "unblocked"})
+    # A task that is ready and unclaimed NOW re-entered ready after its last
+    # claim/park, so those events bound the wait from below too. Without them a
+    # card cycling claim -> scheduled -> condition_met -> ready all day read as
+    # "ready 18h with no worker" from its first promotion. [daveey]
+    last_ready_ts = _last_ready_entry_ts(events)
     if last_ready_ts == 0:
         last_ready_ts = int(_task_field(task, "created_at", default=0) or 0)
     if last_ready_ts == 0:

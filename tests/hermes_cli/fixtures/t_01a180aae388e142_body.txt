@@ -1,0 +1,25 @@
+Found by the MacBook acceptance run for hub t_b11f0591 (card t_159f0063, run 5380, 2026-10-27 ~21:00 PDT). The evidence is on the hub at /home/ubuntu/.hermes/kanban/evidence/upkeep-system-20261022/t159f0063-run5380/ (READBACK.md first, neutral-review.log has the independent Opus confirmation).
+
+## Repro (live, MacBook, build 23b3a53bf3, which contains 236b07480e)
+- MacBook ~/.hermes/config.yaml has kanban.sync.links_reader: replica (RFC phase 5, core da1a3a8443).
+- Origin chat 20261022_204322_4d8ce1 (Upkeep): the sidebar row says kanban_active 14, "Waiting on 14 cards". GET /api/session-kanban-tasks returns 9 rows, and the session-tasks plugin's sessionTaskChips() turns those into 9 chips.
+- The 5 counted but unlisted cards are origin-ledger rows (via=origin, status unknown, reported_status done, unfinished=True, no verified release): hub t_ea3ff077, t_dcd9d210, t_23947fd6, t_1d83c05d, t_37fb8c09. All 5 are done on hub.
+- Read-only repro command on the MacBook: `cd ~/.hermes/hermes-agent && venv/bin/python -c "from hermes_cli import kanban_session_activity as k; s='20261022_204322_4d8ce1'; print(k._all_counts()[0].get(s), len(k.session_tasks([s])))"` prints `14 9`.
+- Fabric 20261023_231233_1ccf1c agrees (count 1+1 blocked, 2 rows). It has no done-unverified rows.
+- The neutral review counted 20 unknown+unfinished ledger rows across all chats. Each one is counted but never listed.
+
+## Root mechanism (file:line in core hermes_cli)
+1. kanban_session_activity._recompute_all_counts counts _remote_links(), the origin-ledger projection (~L1063). _replica_bucket counts unknown+unfinished as active (L466-467).
+2. session_tasks() reads _remote_cards() (L1347-1360). Under links_reader=replica, _remote_cards returns kanban_chat_links.replica_cards(), which filters `t.status IN (statuses)` (kanban_chat_links.py:135). A done-unverified card therefore never gets the `unknown` status that would keep it listed. The comment at L474-476 says both readers come from _remote_links and "can never disagree"; since da1a3a8443 that is false.
+3. Why it wasn't caught: links_diff (kanban_chat_links.py:167), the gate for switching the reader, skips ledger rows whose status is not open. It drops unknown+unfinished rows and reported clean (771/771). No test compares counts with the list in replica mode.
+4. Related replica-mode gaps, found by reading the source: replica_cards hard-codes stale=False and synced_at=now (L153), so an offline or old replica shows as fresh. It silently skips an unreadable replica (L136-138), so rows vanish instead of going stale. It hard-codes profile "default" in the key (L142), so the same id on two profiles of one gateway would collide.
+
+## Required fix (decided; do not re-litigate)
+- Counts and list must come from ONE projection for each links_reader mode. Either route the counts through the same reader, or keep the ledger's unknown+unfinished obligations in the replica path. The non-negotiable invariant: a done-without-verified-release card stays an `unknown` chip AND counts in both places, or (after verified release) disappears from both.
+- links_diff must compare unknown+unfinished rows, so it can't report clean while counts and list disagree.
+- replica_cards must mark rows stale from the replica's real sync age, mark an unreadable replica stale/unknown instead of dropping its rows, and carry the owner profile in the key.
+- Tests (RED first): counts vs session_tasks parity under links_reader=replica for every case: 1 active + 12 todo; blocked for review; done-unverified; offline/old replica; unreadable replica; same task id on two gateways and on two profiles; compression lineage; verified release; another chat still turns done.
+- Ship through the normal core patch-mirror/CI route and get the exact-head CI green. After it is installed on the MacBook, the readback must show the Upkeep count equal to the API row count.
+
+## After shipping
+Comment on t_159f0063 on the MacBook (cross_task) with the merged head, so the MacBook acceptance can rerun the live readback, the rendered-strip check and the final send. Do not close t_b11f0591 or tracker t_0d7a7294.

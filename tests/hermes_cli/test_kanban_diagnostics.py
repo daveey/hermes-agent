@@ -249,3 +249,37 @@ def test_overdue_wake_ignores_kanban_schedule_parks():
     assert "overdue_wake" not in kinds
     # A park with no wake is its own signal now (the dispatcher wakes it at the implied time). [daveey]
     assert kinds == ["scheduled_without_wake"]
+
+
+def test_stranded_in_ready_measures_from_last_wake_not_first_promotion():
+    """A card that cycled claim -> scheduled -> condition_met -> ready all day is
+    only stranded since its last wake, not since its first promotion (runners
+    t_8aa95edb read "ready 18.2h" while it had 14 runs in that window). [daveey]"""
+    now = 100_000
+    task = _task(status="ready", assignee="bb-tuner", claim_lock=None)
+    events = [
+        _event("promoted", ts=now - 18 * 3600),
+        _event("claimed", ts=now - 3 * 3600),
+        _event("spawned", ts=now - 3 * 3600),
+        _event("scheduled", ts=now - 3 * 3600 + 60),
+        _event("condition_met", ts=now - 10 * 60),
+    ]
+    assert [d for d in kd.compute_task_diagnostics(task, events, [], now=now)
+            if d.kind == "stranded_in_ready"] == []
+    # Still flagged once the post-wake wait itself passes the threshold, aged from the wake.
+    stranded = [d for d in kd.compute_task_diagnostics(task, events, [], now=now + 50 * 60)
+                if d.kind == "stranded_in_ready"]
+    assert len(stranded) == 1 and stranded[0].data["age_seconds"] == 60 * 60
+    # A continuation wake counts the same way.
+    woken = events[:4] + [_event("continuation_woken", ts=now - 5 * 60)]
+    assert [d for d in kd.compute_task_diagnostics(task, woken, [], now=now)
+            if d.kind == "stranded_in_ready"] == []
+
+
+def test_stranded_in_ready_counts_a_continue_that_resumed_straight_to_ready():
+    now = 100_000
+    task = _task(status="ready", assignee="bb-tuner", claim_lock=None)
+    events = [_event("promoted", ts=now - 18 * 3600), _event("claimed", ts=now - 3 * 3600),
+              _event("continued", ts=now - 5 * 60, status="ready", resume_status="ready")]
+    assert [d for d in kd.compute_task_diagnostics(task, events, [], now=now)
+            if d.kind == "stranded_in_ready"] == []

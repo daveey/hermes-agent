@@ -2590,10 +2590,26 @@ _TASK_ID_PROSE_RE = re.compile(r"\bt_[a-f0-9]{8,}\b")
 
 
 def _scan_prose_for_phantom_ids(conn: sqlite3.Connection, text: str) -> list[str]:
-    """``t_<hex>`` references in ``text`` that don't resolve to a task (deduped; advisory)."""
+    """``t_<hex>`` references in ``text`` that resolve neither to a local task nor to a card in the hermes-hub
+    replica of other gateways (deduped; advisory). An unreadable/stale replica leaves them unflagged."""
     if not text:
         return []
-    return _missing_task_ids(conn, dict.fromkeys(_TASK_ID_PROSE_RE.findall(text)))
+    missing = _missing_task_ids(conn, dict.fromkeys(_TASK_ID_PROSE_RE.findall(text)))
+    return unresolved_after_replica(missing)
+
+
+def unresolved_after_replica(missing: list[str]) -> list[str]:
+    """``missing`` (not on the local board) minus ids the hub replica knows; [] when the replica cannot say."""
+    if not missing:
+        return []
+    try:
+        from hermes_cli.kanban_session_activity import replica_task_resolution
+        found, authoritative = replica_task_resolution(missing)
+    except Exception:  # health: allow BLE001 -- advisory scan; an unusable replica means "unknown", never a flag
+        return []
+    if not authoritative:
+        return []
+    return [p for p in missing if p not in found]
 
 
 class HallucinatedCardsError(ValueError):

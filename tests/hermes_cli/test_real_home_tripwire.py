@@ -216,6 +216,27 @@ def test_payload_manifest_beside_a_guarded_checkout_is_readable_not_writable():
         guard.check(PROJECT_ROOT.parent / "manifest.json.bak")
 
 
+def test_checkout_identity_probes_are_readable_not_writable():
+    """pm.environments.store_root walks the checkout and every ancestor for ``install-stamp.json``;
+    owning_home_root reads ``<checkout parent>/installs/<key>/facts.json``. With the checkout in a
+    guarded root (a worktree under the scratch TMPDIR, or the live install) those reads are the
+    checkout's own probes: allowed. Writes and other siblings stay refused."""
+    from tests.home_io_guard import HomeIOGuard
+
+    guard = HomeIOGuard(lambda: [PROJECT_ROOT.parent])
+    stamp = PROJECT_ROOT.parent / "install-stamp.json"
+    facts = PROJECT_ROOT.parent / "installs" / "abc123" / "facts.json"
+    guard.check(stamp)
+    guard.check(facts)
+    for path in (stamp, facts):
+        with pytest.raises(AssertionError, match="REAL hermes home"):
+            guard.check(path, destructive=True)
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(PROJECT_ROOT.parent / "installs" / "abc123" / "other.json")
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(PROJECT_ROOT.parent / "install-stamp.json.bak")
+
+
 def test_hermes_exported_scratch_tmp_is_not_the_test_temp_root(tmp_path):
     """A Hermes-launched shell hands pytest TMPDIR=<home>/cache/scratch (tagged by
     HERMES_SCRATCH_DIR). With that home guarded, honoring it would put the session

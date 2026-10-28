@@ -252,25 +252,52 @@ def mac(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     calls: list[list[str]] = []
     result = {"rc": 0, "help": "usage: hermes-hub create-task [--id ID]"}  # pre-1.8.0 client by default
 
+    def apply(rid=None):
+        rows = [rid] if rid else [r[0] for r in hub.execute("SELECT id FROM sent WHERE state != 'done'")]
+        for r in rows:
+            hub.execute("UPDATE sent SET state='done', result=? WHERE id=?",
+                        (json.dumps({"ok": True, "task_id": "t_hub0001", "status": "ready"}), r))
+        hub.commit()
+
     def fake_hub(argv):
         if argv[1:] == ["create-task", "--help"]:
             return 0, result["help"], ""
+        if argv[1:] == ["--help"]:
+            return 0, result.get("top_help", "{sync,status,requests,create-task}"), ""
+        if argv[1] in ("sync", "outcomes"):
+            refreshes.append(argv[1:])
+            if result.get("apply_on") == argv[1]:
+                apply()
+            if result.get("apply_on") == "remote_waiting" and argv[1] == "outcomes":
+                # hermes-hub 1.9.1: the owner made the card; the request waits on our binding acceptance.
+                rid = argv[argv.index("--id") + 1]
+                return 0, json.dumps({"id": rid, "state": "queued", "result": None, "remote_state": "waiting",
+                                      "remote_result": {"ok": True, "task_id": "t_hub0002", "status": "ready",
+                                                        "handoff_complete": False}}), ""
+            return 0, "", ""
         calls.append(argv)
         rid = argv[argv.index("--id") + 1]
         if result["rc"] in (0, 3):
             hub.execute("INSERT OR IGNORE INTO sent (id, body, state, created_at) VALUES (?, ?, 'sent', ?)",
                         (rid, json.dumps({"id": rid, "to_gw": argv[2]}), time.time()))
-            if result.get("apply"):
-                hub.execute("UPDATE sent SET state='done', result=? WHERE id=?",
-                            (json.dumps({"ok": True, "task_id": "t_hub0001"}), rid))
             hub.commit()
+            if result.get("apply"):
+                apply(rid)
         return result["rc"], rid, "" if result["rc"] == 0 else "boom"
 
+    def fake_spawn(argv):
+        spawned.append(argv[1:])
+        if result.get("apply_on") == "spawn":
+            apply()
+
+    refreshes: list[list[str]] = []
+    spawned: list[list[str]] = []
     monkeypatch.setattr(kp, "hub_runner", fake_hub)
+    monkeypatch.setattr(kp, "hub_spawn", fake_spawn, raising=False)
     monkeypatch.setattr(kp, "_help_cache", {})
     monkeypatch.setattr(kp, "config", lambda: {**ROUTE, "wait_seconds": 0})
     kb.init_db()
-    yield {"hub": hub, "calls": calls, "result": result}
+    yield {"hub": hub, "calls": calls, "result": result, "refreshes": refreshes, "spawned": spawned}
     hub.close()
 
 
@@ -360,6 +387,75 @@ def test_hub_task_id_is_returned_once_the_hub_applies_it(mac, monkeypatch):
     mac["result"]["apply"] = True
     out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "session_id": "20261027_183000_abc123"}))
     assert out["task_id"] == "t_hub0001" and out["placed"]["task_id"] == "t_hub0001", out
+
+
+def test_task_id_comes_back_once_the_outcome_fetch_sees_the_hub_apply_it(mac, monkeypatch):
+    """10-27 drill: the request was applied on the hub, but its result reached the MacBook only on a
+    later sync, so kanban_create returned task_id null and the chat created a second card."""
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**ROUTE, "wait_seconds": 5})
+    mac["result"].update(top_help="{sync,requests,create-task,outcomes}", apply_on="outcomes")
+    out = json.loads(kt._handle_create({"title": "Placement drill", "session_id": "20261027_183000_abc123"}))
+    assert out["ok"] and out["task_id"] == "t_hub0001" and out["status"] == "ready", out
+    assert out["placed"]["task_id"] == "t_hub0001" and "IS created" not in out["note"]
+    assert mac["refreshes"][0][0] == "outcomes" and mac["spawned"] == []
+
+
+def test_task_id_comes_back_while_the_origin_binding_is_still_waiting(mac, monkeypatch):
+    """Live shape: the hub made the card within seconds, but the request stays 'waiting' on the hub
+    until the MacBook's next full sync accepts the binding (~1-4 min on 10-27)."""
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**ROUTE, "wait_seconds": 5})
+    mac["result"].update(top_help="{sync,requests,create-task,outcomes}", apply_on="remote_waiting")
+    out = json.loads(kt._handle_create({"title": "Placement drill", "session_id": "20261027_183000_abc123"}))
+    assert out["task_id"] == "t_hub0002" and out["status"] == "ready", out
+    rid = out["placed"]["request_id"]
+    assert mac["refreshes"][0] == ["outcomes", "--id", rid, "--wait", mac["refreshes"][0][-1]]
+
+
+def test_old_client_gets_one_detached_sync_and_the_task_id(mac, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**ROUTE, "wait_seconds": 5})
+    mac["result"]["apply_on"] = "spawn"
+    out = json.loads(kt._handle_create({"title": "Placement drill", "session_id": "20261027_183000_abc123"}))
+    assert out["task_id"] == "t_hub0001", out
+    assert mac["spawned"] == [["sync", "--quiet"]] and mac["refreshes"] == []
+
+
+def test_still_queued_after_the_wait_says_the_card_is_created_and_not_to_call_again(mac, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**ROUTE, "wait_seconds": 1})
+    out = json.loads(kt._handle_create({"title": "Placement drill", "session_id": "20261027_183000_abc123"}))
+    assert out["ok"] is True and out["task_id"] is None and out["status"] == "queued", out
+    note = out["note"]
+    assert "The card IS created" in note and out["placed"]["request_id"] in note
+    assert "Do NOT call kanban_create again" in note and "duplicate" in note
+    assert len(mac["spawned"]) == 1  # one bounded sync, never one per poll
+
+
+def test_identical_retry_returns_the_same_request_and_sends_no_second_card(mac):
+    from tools import kanban_tools as kt
+    args = {"title": "Placement drill", "body": "Run hostname.", "session_id": "20261027_183000_abc123"}
+    first = json.loads(kt._handle_create(dict(args)))
+    again = json.loads(kt._handle_create(dict(args)))
+    assert len(mac["calls"]) == 1, mac["calls"]  # create-task ran once
+    assert again["placed"]["request_id"] == first["placed"]["request_id"]
+    assert again["placed"]["retry"] is True and first["placed"]["retry"] is False
+    assert "already made" in again["note"] and _local_count() == 0
+    mac["result"]["apply"] = False
+    mac["hub"].execute("UPDATE sent SET state='done', result=? WHERE id=?",
+                       (json.dumps({"ok": True, "task_id": "t_hub0001"}), first["placed"]["request_id"]))
+    mac["hub"].commit()
+    assert json.loads(kt._handle_create(dict(args)))["task_id"] == "t_hub0001"
+    assert len(mac["calls"]) == 1
+
+
+def test_remote_task_id_reads_a_plain_create_output(mac):
+    """An unbound create's result is the owner's truncated `kanban create --json` text."""
+    mac["hub"].execute("INSERT INTO sent (id, body, state, result) VALUES ('placement:macbook:x1', '{}', 'done', ?)",
+                       (json.dumps({"output": '{\n  "id": "t_01a180ef6421a3f0",\n  "title": "Shrink\u2026'}),))
+    mac["hub"].commit()
+    assert kp.remote_task_id("placement:macbook:x1") == "t_01a180ef6421a3f0"
 
 
 def test_unpersisted_session_creates_an_unbound_hub_card(mac):
@@ -506,3 +602,114 @@ def test_exception_while_placing_a_pinned_card_is_refused(mac, monkeypatch):
     out = json.loads(kt._handle_create({"title": "x", "placement": "hub"}))
     assert not out.get("ok") and out["code"] == "placement_unavailable", out
     assert _local_count() == 0
+
+
+def _identity_raises():
+    raise RuntimeError("identity lookup failed")
+
+
+def test_decide_refuses_explicit_pin_when_identity_lookup_raises(monkeypatch):
+    """A raise before pin checking must not turn an explicit pin into a local card."""
+    monkeypatch.setattr(reg, "self_gateway", _identity_raises)
+    refused = kp.decide({"title": "x", "placement": "mini"}, cfg={})
+    assert refused["where"] == "refuse" and refused["pin"] == "mini" and "failed" in refused["why"], refused
+    # The fixture's own name is not "known" when the lookup itself raised.
+    assert kp.decide({"title": "x", "placement": "MacBook"}, cfg={})["where"] == "refuse"
+    for pin in (None, "local", "here", "auto", "LOCAL", " Here "):
+        args = {"title": "x"} if pin is None else {"title": "x", "placement": pin}
+        assert kp.decide(args, cfg={})["where"] == "local", pin
+    # Courier creation is local by contract; the tool layer refuses an origin-bound pin itself.
+    courier = kp.decide({"title": "x", "placement": "mini"}, cfg={}, origin_intent={"request_id": "r"})
+    assert courier["where"] == "local", courier
+
+
+def test_decide_keeps_a_known_own_gateway_local_when_a_later_step_raises(monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("pin check failed")
+    monkeypatch.setattr(kp, "explicit_foreign_pin", boom)
+    own = kp.decide({"title": "x", "placement": "Hub"}, self_gw="hub", cfg={})
+    assert own["where"] == "local", own
+    foreign = kp.decide({"title": "x", "placement": "mini"}, self_gw="hub", cfg={})
+    assert foreign["where"] == "refuse" and foreign["pin"] == "mini", foreign
+
+
+@pytest.mark.parametrize("pin", ["mini", "macbook", "MacBook"])
+def test_identity_lookup_failure_refuses_explicit_pin_and_creates_no_row(mac, monkeypatch, pin):
+    """Tool-level: self_gateway raising must not write a local row for an explicit pin."""
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(reg, "self_gateway", _identity_raises)
+    out = json.loads(kt._handle_create({"title": "MacBook-only drill", "placement": pin}))
+    assert not out.get("ok"), out
+    assert out["code"] == "placement_unavailable" and out["created"] is False
+    assert out["placement"] == pin.strip().lower()
+    assert "placement='local'" in out["error"]
+    assert mac["calls"] == [] and _local_count() == 0
+
+
+@pytest.mark.parametrize("pin", ["local", "here", "LOCAL", " Here "])
+def test_identity_lookup_failure_still_creates_local_and_here(mac, monkeypatch, pin):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(reg, "self_gateway", _identity_raises)
+    out = json.loads(kt._handle_create({"title": "stay here", "placement": pin}))
+    assert out["ok"] and out["task_id"] and "placed" not in out, out
+    assert mac["calls"] == [] and _local_count() == 1
+
+
+def test_identity_lookup_failure_without_a_pin_still_creates_locally(mac, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(reg, "self_gateway", _identity_raises)
+    out = json.loads(kt._handle_create({"title": "unpinned card"}))
+    assert out["ok"] and out["task_id"] and "placed" not in out, out
+    assert _local_count() == 1
+
+
+# --- marker tuning: a passing MacBook mention is not a local-only need [daveey] ---
+
+_SIDEBAR_TITLE = (
+    "Fix sidebar count vs task strip split under kanban.sync.links_reader=replica (Upkeep 14 vs 9)")
+_SIDEBAR_BODY = (Path(__file__).parent / "fixtures" / "t_01a180aae388e142_body.txt").read_text()
+_MARKER_REMEDY = "if the work doesn't need this machine, archive and re-create with placement='hub'"
+
+
+def test_marker_cases_a_through_e():
+    """The five cases the marker tune is pinned to, verbatim."""
+    # (a) the work itself is a live verify on the MacBook.
+    a = decide({"title": "Verify 57094b7a60 live on the MacBook"})
+    assert a["where"] == "local" and a["why"].startswith("local marker"), a
+    assert "macbook" in a["why"].lower()
+    # (b) a hermes_cli fix that only names the MacBook as a verification step.
+    b = decide({"title": "Fix the hermes_cli session-activity projection",
+                "body": "Ship the hermes_cli fix, then verify live on the hub and the MacBook."})
+    assert b["where"] == "hub", b
+    # (c) Desktop DOM, CDP readback, or Chrome still needs this machine.
+    for text in ("Needs a Desktop DOM readback of the composer",
+                 "Needs a CDP readback of the sidebar",
+                 "Sign in with Chrome and read the cookie"):
+        c = decide({"title": "Read the live UI", "body": text})
+        assert c["where"] == "local" and c["why"].startswith("local marker"), (text, c)
+    # (d) t_01a180aae388e142 title and body, verbatim.
+    d = decide({"title": _SIDEBAR_TITLE, "body": _SIDEBAR_BODY})
+    assert d["where"] == "hub", d
+    # (e) a local-only skill still pins, even with no marker in the text.
+    e = decide({"title": "Weekly digest", "skills": ["apple-notes"]})
+    assert e["where"] == "local" and "skill apple-notes" in e["why"], e
+
+
+def test_local_marker_decision_is_in_the_create_result(mac):
+    """Auto-placement that stays local because of a text marker says so, with the remedy."""
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({
+        "title": "Verify 57094b7a60 live on the MacBook",
+        "body": "Read the live sidebar on this machine.",
+    }))
+    assert out["ok"] and out.get("task_id") and _local_count() == 1, out
+    assert out["placement"] == {
+        "where": "local",
+        "why": "local marker: mentions 'macbook'",
+    }, out
+    assert out["remedy"] == _MARKER_REMEDY
+    # A card that goes to the hub, and one kept local for a structural reason, do not get that note.
+    hub = json.loads(kt._handle_create({"title": "Fix the flaky lint", "body": "Push it."}))
+    assert hub.get("placed", {}).get("gateway") == "hub" and "placement" not in hub, hub
+    structural = json.loads(kt._handle_create({"title": "Keep this one here", "goal_mode": True}))
+    assert structural["ok"] and "placed" not in structural and "placement" not in structural, structural

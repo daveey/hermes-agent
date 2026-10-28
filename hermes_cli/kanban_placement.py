@@ -20,12 +20,20 @@ A card stays local when any of these holds:
 * it declares a ``requires`` capability this gateway holds and the target does not;
 * its title, body or skills match a local marker (``kanban.placement.local_markers`` replaces the
   built-in list, ``extra_local_markers`` extends it): Chrome, Keychain, TCC, Apple apps, launchd,
-  the Desktop app, this Mac, the mini, AWS SSO profiles...;
+  the Desktop app, a Desktop DOM/CDP readback, this Mac's Keychain... A bare host name (MacBook,
+  the mini) pins only when it is the subject of the title. A body mention — a repro, or "verify
+  live on the hub and the MacBook" — is not a local-only need;
 * the target is not live: this gateway's hermes-hub sync has not succeeded recently, or the
   target's capability record is stale.
 
 A worker on the target that still hits a local-only wall blocks with ``needs=[...]``; capability
 routing (:mod:`hermes_cli.kanban_capability_routing`) then opens an owner card back here.
+
+After queuing the card, ``kanban_create`` waits up to ``wait_seconds`` (default 10) for the target's
+answer (:func:`await_task_id`) and returns its task id like a local create. Still pending, it returns
+``status: "queued"`` with a note that the card IS created: a chat model that read ``task_id: null``
+as "not created" once called kanban_create again and made a duplicate card. An identical retry
+maps to the same request id (:func:`request_id`) and is never sent twice.
 
 Unset ``route`` (upstream default) never places anything remotely.
 """
@@ -51,11 +59,20 @@ DEFAULT_LOCAL_MARKERS = (
     r"\bphotos\.app\b", r"\bimessage\b", r"\bfind ?my\b", r"\bremindctl\b", r"\bshortcuts? app\b",
     r"\blaunchd\b", r"\blaunchctl\b", r"launchagents", r"~/library/", r"\bhermes\.app\b",
     r"\bhermes desktop\b", r"\bdesktop (app|backend|backends|renderer|window|chat|chats|sidebar|ui)\b",
+    r"\bdesktop\s+dom\b",
     r"\bmacbook\b", r"\bmac ?os\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
     r"\bbaby ?bear\b", r"\bxcode\b", r"\bsimulator\b", r"\bwhatsapp\b", r"\bscreen ?shot",
     r"\bsoftmax-org\b", r"\bdavid-bloomin-sso\b", r"--profile softmax",
 )
-# Skills whose presence alone pins a card to a Mac.
+# Host names that mean "the work is on that machine" only when they are the subject of the
+# title. A body mention is a repro or a verification step ("verify live on the hub and the
+# MacBook"), which is not a reason to keep a core-code card on the laptop. A caller who replaces
+# ``local_markers`` owns the list and every pattern scans the whole text.
+TITLE_ONLY_LOCAL_MARKERS = frozenset({
+    r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
+})
+LOCAL_MARKER_REMEDY = (
+    "if the work doesn't need this machine, archive and re-create with placement='hub'")
 DEFAULT_LOCAL_SKILL_MARKERS = (
     r"^apple", r"^imessage$", r"^findmy$", r"^macos-", r"^mac-", r"^invisible-chrome-agent$",
     r"^local-chrome-remote-debugging$", r"^computer-use$", r"^babybear", r"^bb-", r"^ios-",
@@ -129,11 +146,16 @@ def config() -> dict:
         return {}
 
 
-def _local_marker(text: str, skills, cfg: _Cfg) -> Optional[str]:
+def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
+    """The first local-only hit, or None. Host-name markers (see
+    :data:`TITLE_ONLY_LOCAL_MARKERS`) scan the title only, unless the caller replaced the list."""
+    full = f"{title or ''}\n{body or ''}"
+    replaced = isinstance(cfg.raw.get("local_markers"), list)
     for rx in cfg.markers():
-        m = rx.search(text or "")
+        text = (title or "") if (not replaced and rx.pattern in TITLE_ONLY_LOCAL_MARKERS) else full
+        m = rx.search(text)
         if m:
-            return f"mentions {m.group(0)!r}"
+            return f"mentions {m.group(0).lower()!r}"
     for s in skills or []:
         for rx in cfg.skill_markers():
             if rx.search(str(s)):
@@ -185,6 +207,20 @@ def hub_carries_options(hub_cli: str) -> bool:
     rc, out, _ = hub_runner([hub_cli, "create-task", "--help"])
     ok = rc == 0 and "--option" in out
     _help_cache[hub_cli] = (time.monotonic(), ok)
+    return ok
+
+
+def hub_has_outcomes(hub_cli: str) -> bool:
+    """True when the client has ``hermes-hub outcomes`` (1.9.1+): a one-second outcome fetch. Older
+    clients only learn a request's result in a full ``sync`` (~30 s on a busy Mac). Cached like
+    :func:`hub_carries_options`."""
+    key = (hub_cli, "outcomes")
+    hit = _help_cache.get(key)
+    if hit and time.monotonic() - hit[0] < HELP_CACHE_SECONDS:
+        return hit[1]
+    rc, out, _ = hub_runner([hub_cli, "--help"])
+    ok = rc == 0 and re.search(r"\boutcomes\b", out) is not None
+    _help_cache[key] = (time.monotonic(), ok)
     return ok
 
 
@@ -249,6 +285,19 @@ def explicit_foreign_pin(args: dict, self_gw: Optional[str]) -> str:
     return pin
 
 
+def _raw_explicit_pin(args: dict) -> str:
+    """Explicit pin when identity is unknown: not auto/local/here, else ''.
+
+    Same fallback ``tools.kanban_tools._place_remote`` uses when ``self_gateway()`` itself
+    fails. A name is not treated as this gateway — that needs a successful identity lookup.
+    """
+    try:
+        pin = str(args.get("placement") or "").strip().lower()
+    except Exception:
+        return ""
+    return "" if pin in ("", "auto", "local", "here") else pin
+
+
 def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
            self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
            locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None) -> dict:
@@ -256,10 +305,14 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
 
     Any local outcome for such a pin (no route to that gateway, a structural limit, target not live)
     becomes ``{"where": "refuse", "why": ..., "pin": <gateway>}``, which ``kanban_create`` returns as a
-    typed error. Never raises.
+    typed error. If identity lookup (or the pin check) raises before that rule runs, an explicit name
+    other than auto/local/here is refused the same way; local/here and a pin already known to be this
+    gateway stay local. Never raises.
     """
+    known = ""
     try:
         sg = reg.self_gateway() if self_gw is None else self_gw
+        known = sg.strip().lower() if isinstance(sg, str) else ""
         out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
                       locate=locate, carries=carries)
         pin = explicit_foreign_pin(args, sg)
@@ -267,7 +320,14 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
             return {"where": "refuse", "why": out.get("why", ""), "pin": pin}
         return out
     except Exception as exc:
-        return {"where": "local", "why": f"placement check failed: {exc}"}
+        why = f"placement check failed: {exc}"
+        # Do not accept a foreign pin in this catch-all. Identity may have failed before we
+        # could tell own-gateway from a name; only a pin we already resolved as ours stays local.
+        if origin_intent is None:
+            raw = _raw_explicit_pin(args)
+            if raw and raw != known:
+                return {"where": "refuse", "why": why, "pin": raw}
+        return {"where": "local", "why": why}
 
 
 def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
@@ -313,7 +373,7 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             if not on_target:
                 return {"where": "local", "why": f"needs {need}, which {target} does not hold"}
         if not explicit:
-            hit = _local_marker(f"{args.get('title') or ''}\n{args.get('body') or ''}",
+            hit = _local_marker(args.get("title") or "", args.get("body") or "",
                                 args.get("skills"), c)
             if hit:
                 return {"where": "local", "why": f"local marker: {hit}"}
@@ -325,17 +385,27 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
         return {"where": "local", "why": f"placement check failed: {exc}"}
 
 
-def _default_runner(argv: list[str]) -> tuple[int, str, str]:
+def _default_runner(argv: list[str], timeout: float = HUB_TIMEOUT) -> tuple[int, str, str]:
     try:
         p = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=HUB_TIMEOUT, check=False, stdin=subprocess.DEVNULL)
+                           timeout=timeout, check=False, stdin=subprocess.DEVNULL)
         return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, "", str(exc)
 
 
-# Tests replace this with a fake that records argv.
+def _default_spawn(argv: list[str]) -> None:
+    """Start ``argv`` detached: it finishes (and records its result) even after the tool call returns."""
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
+# Tests replace these with fakes that record argv.
 hub_runner: Callable[[list[str]], tuple[int, str, str]] = _default_runner
+hub_spawn: Callable[[list[str]], None] = _default_spawn
 
 
 def request_id(self_gw: str, args: dict, origin_session: str, options: Optional[dict] = None) -> str:
@@ -375,6 +445,10 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     carried = hub_carries_options(hub_cli)
     options = carried_options(args) if carried else {}
     rid = request_id(self_gw, args, origin_session or "", options)
+    prior = remote_state(rid)
+    if prior in ("queued", "sent", "done"):
+        # An identical earlier call already sent this request: never send it again, return it as is.
+        return {"ok": True, "request_id": rid, "queued_only": False, "retry": True}
     argv = [hub_cli, "create-task", target, str(args.get("title") or "untitled").strip()[:300],
             "--body", remote_body(args, self_gw=self_gw, target=target, carried=carried),
             "--assignee", str(args.get("assignee") or "default"), "--id", rid]
@@ -393,20 +467,112 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     return {"ok": False, "request_id": rid, "rc": rc, "error": (err or out)[-400:]}
 
 
-def remote_task_id(rid: str) -> Optional[str]:
-    """The target's task id once the request is done (None while pending/unknown)."""
+def _sent_row(rid: str) -> Optional[tuple]:
     try:
         db = reg._ro(reg.hub_db_path())
     except Exception:
         return None
     try:
-        row = db.execute("SELECT state, result FROM sent WHERE id = ?", (rid,)).fetchone()
-        if not row or row[0] != "done":
-            return None
-        res = json.loads(row[1] or "{}")
-        tid = res.get("task_id") or res.get("task") if isinstance(res, dict) else None
-        return tid if isinstance(tid, str) else None
+        return db.execute("SELECT state, result FROM sent WHERE id = ?", (rid,)).fetchone()
     except Exception:
         return None
     finally:
         db.close()
+
+
+def remote_state(rid: str) -> Optional[str]:
+    """The request's state in this gateway's hermes-hub replica (local/queued/done/...), None if unknown."""
+    row = _sent_row(rid)
+    return row[0] if row else None
+
+
+_OUTPUT_ID = re.compile(r'"id"\s*:\s*"(t_[A-Za-z0-9_]+)"')
+
+
+def remote_task_id(rid: str) -> Optional[str]:
+    """The target's task id once the request is done (None while pending/unknown)."""
+    row = _sent_row(rid)
+    if not row or row[0] != "done":
+        return None
+    try:
+        res = json.loads(row[1] or "{}")
+    except Exception:
+        return None
+    return _task_id_in(res)
+
+
+def _task_id_in(res) -> Optional[str]:
+    if not isinstance(res, dict):
+        return None
+    tid = res.get("task_id") or res.get("task")
+    if isinstance(tid, str):
+        return tid
+    # A plain (unbound) create returns the owner's `hermes kanban create --json` text as "output",
+    # truncated by the hub, so read the id with a pattern rather than a JSON parse.
+    m = _OUTPUT_ID.search(res.get("output") or "") if isinstance(res.get("output"), str) else None
+    return m.group(1) if m else None
+
+
+def _owner_card(stdout: str) -> tuple[Optional[str], Optional[str]]:
+    """(task id, status) from ``hermes-hub outcomes --id`` output when the hub already holds the owner's
+    card: an origin-bound create stays ``waiting`` until this gateway's next full sync accepts the
+    binding, but the card exists from the moment the owner posts it."""
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            out = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(out, dict) and out.get("remote_state") in ("waiting", "done"):
+            res = out.get("remote_result")
+            st = res.get("status") if isinstance(res, dict) else None
+            return _task_id_in(res), st if isinstance(st, str) else None
+        return None, None
+    return None, None
+
+
+def remote_status(rid: str) -> Optional[str]:
+    """The created card's status on the target (``ready``, ``triage``...) when its result names one."""
+    row = _sent_row(rid)
+    try:
+        res = json.loads(row[1] or "{}") if row and row[0] == "done" else {}
+    except Exception:
+        return None
+    st = res.get("status") if isinstance(res, dict) else None
+    return st if isinstance(st, str) else None
+
+
+def await_task_id(rid: str, *, hub_cli: str, budget: float, clock: Callable[[], float] = time.monotonic,
+                  sleep: Callable[[float], None] = time.sleep) -> tuple[Optional[str], Optional[str]]:
+    """Wait up to ``budget`` seconds for the target to make the card of request ``rid``.
+
+    Returns (task id, status on the target), (None, None) while still pending.
+
+    The result only reaches this gateway when its hermes-hub client fetches outcomes. A client with
+    ``hermes-hub outcomes`` is asked about once a second; an older one gets ONE detached ``sync``
+    (it outlives this wait, so a late result is still recorded) while the replica is polled."""
+    tid = remote_task_id(rid)
+    if tid or budget <= 0:
+        return tid, remote_status(rid) if tid else None
+    deadline = clock() + budget
+    fast = hub_has_outcomes(hub_cli)
+    if not fast:
+        hub_spawn([hub_cli, "sync", "--quiet"])
+    while True:
+        if fast:
+            left = max(1.0, min(5.0, deadline - clock()))
+            argv = [hub_cli, "outcomes", "--id", rid, "--wait", f"{left:.1f}"]
+            # Bound the call itself too (the client's HTTP timeout is 60 s); a test fake takes argv only.
+            _, out, _ = (hub_runner(argv) if hub_runner is not _default_runner
+                         else _default_runner(argv, timeout=left + 5))
+            tid, st = _owner_card(out)
+            if tid:
+                return tid, st
+        tid = remote_task_id(rid)
+        if tid:
+            return tid, remote_status(rid)
+        if clock() >= deadline:
+            return None, None
+        sleep(1.0)

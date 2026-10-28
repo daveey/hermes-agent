@@ -1395,13 +1395,17 @@ class SessionSessionsMixin:
             # rows; MAX over the chain gives effective_last_active in SQL. Do NOT
             # require child.started_at >= parent.ended_at: races insert the
             # continuation before ended_at is written.
-            outer_where, id_params = self._chain_search_where(
-                where_sql, (id_query or "").strip().lower(), (search_query or "").strip().lower(),
+            search_where, id_params = self._chain_search_where(
+                "", (id_query or "").strip().lower(), (search_query or "").strip().lower(),
             )
             # The page is picked first and the preview projected onto it afterwards:
             # SQLite computes every result column for each admitted row before
             # ORDER BY ... LIMIT, so an inline preview read one message per session
             # in the store, not per listed row. OFFSET keeps ``page`` unflattened.
+            # [daveey] Same for the columns and ``last_active``: the sort picks ids from
+            # ``chain_max`` (its roots are exactly the rows ``where_sql`` admitted, so the
+            # filter runs once, not again per session) and the page joins back for the rest.
+            # Each pass over every session cost ~10 ms (filter) and ~10 ms (message MAX).
             query = f"""
                 WITH RECURSIVE chain(root_id, cur_id) AS (
                     SELECT s.id, s.id FROM sessions s {where_sql}
@@ -1426,17 +1430,22 @@ class SessionSessionsMixin:
                 SELECT page.*, {_sql_preview_raw("page.id")}
                 FROM (
                     {select_cols}{_sql_session_last_active("s")} AS last_active,
-                        COALESCE(cm.effective_last_active, {_sql_in_window("s.started_at")}) AS _effective_last_active
-                    FROM sessions s
-                    LEFT JOIN chain_max cm ON cm.root_id = s.id
+                        pick._effective_last_active
+                    FROM (
+                        SELECT s.id AS _pick_id,
+                            COALESCE(cm.effective_last_active, {_sql_in_window("s.started_at")}) AS _effective_last_active
+                        FROM chain_max cm
+                        JOIN sessions s ON s.id = cm.root_id
+                        {search_where}
+                        ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
+                        LIMIT ? OFFSET ?
+                    ) pick
+                    JOIN sessions s ON s.id = pick._pick_id
                     {prompt_join}
-                    {outer_where}
-                    ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
-                    LIMIT ? OFFSET ?
                 ) page
                 ORDER BY page._effective_last_active DESC, page.started_at DESC, page.id DESC
             """
-            params = params + params + id_params + [limit, offset]  # WHERE binds twice (seed + outer)
+            params = params + id_params + [limit, offset]  # WHERE binds once (the chain seed)
         else:
             query = f"""
                 {select_head}{_sql_session_last_active("s")} AS last_active
@@ -1463,9 +1472,13 @@ class SessionSessionsMixin:
                 pinned_clauses.append("s.hidden = 0")
             pinned_clauses.append("s.pinned = 1")
             pinned_where = _where_sql(pinned_clauses)
+            # [daveey] Driven from the (few) pinned ids: planned as a full ``sessions`` walk in started_at
+            # order, the filter ran on every row (~14 ms on 7.7k sessions, per slice) for a handful of pins.
             pinned_query = f"""
                 {select_head}{_sql_session_last_active("s")} AS last_active
-                {from_sessions}
+                FROM (SELECT id AS _pin_id FROM sessions WHERE pinned = 1) pin
+                CROSS JOIN sessions s ON s.id = pin._pin_id
+                {prompt_join}
                 {pinned_where}
                 ORDER BY s.started_at DESC
             """

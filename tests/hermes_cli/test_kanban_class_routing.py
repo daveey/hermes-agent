@@ -17,6 +17,13 @@ routing_home = test_model_routing_agent.routing_home
 streaming_route = test_model_routing_agent.streaming_route
 
 
+@pytest.fixture
+def routable(monkeypatch):
+    """These tests are about which class a card gets on a host that can route every class.
+    The unroutable-host fallback is covered in test_kanban_class_unroutable.py."""
+    monkeypatch.setattr(tier, "class_unroutable_reason", lambda model, config=None: None)
+
+
 def worker_args(task, monkeypatch):
     monkeypatch.setattr(dispatch, "_resolve_hermes_argv", lambda: ["hermes"])
     monkeypatch.setattr(dispatch, "_resolve_worker_cli_toolsets", lambda home: None)
@@ -24,7 +31,7 @@ def worker_args(task, monkeypatch):
 
 
 @pytest.mark.parametrize("case", ["review", "skill", "failure", "pattern", "routine"])
-def test_class_tiers_keep_strong_work_deep(board, monkeypatch, case):
+def test_class_tiers_keep_strong_work_deep(board, routable, monkeypatch, case):
     cfg = {"default_model": "class:standard", "default_model_keep_patterns": ["security"]}
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="security" if case == "pattern" else "routine", assignee="default")
@@ -43,7 +50,7 @@ def test_class_tiers_keep_strong_work_deep(board, monkeypatch, case):
     assert argv[argv.index("--provider") + 1] == "auto"
 
 
-def test_dispatch_tick_reads_class_default_and_keeps_review_deep(board, monkeypatch):
+def test_dispatch_tick_reads_class_default_and_keeps_review_deep(board, routable, monkeypatch):
     from tests.hermes_cli.test_kanban_model_tier import _write_cfg
     _write_cfg(board, default_model="class:standard", default_provider="auto")
     seen = {}

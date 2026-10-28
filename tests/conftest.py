@@ -153,6 +153,15 @@ if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
     os.environ["HERMES_TEST_SANDBOX_HOME"] = _SESSION_HERMES_HOME
     atexit.register(shutil.rmtree, _SESSION_HERMES_HOME, True)
 
+# Kanban board pins. A Kanban worker that runs pytest hands it HERMES_KANBAN_DB=<the LIVE
+# ~/.hermes/kanban.db>, HERMES_KANBAN_BOARD, HERMES_KANBAN_HOME, ... and kanban_db_path() resolves
+# HERMES_KANBAN_DB before HERMES_HOME. The per-test env filter blanks them, but only once fixtures
+# run: collection-time imports, module-level code and subprocesses started before that saw the
+# production board (hub incident 2026-10-28 put the suite under suspicion; this closes the window).
+# Tests that exercise these variables set them themselves.
+for _key in [k for k in os.environ if k.startswith("HERMES_KANBAN_")]:
+    del os.environ[_key]
+
 # PYTHONPYCACHEPREFIX is a bytecode-mirror escape hatch: when set (the
 # bundled desktop app exports it as %LOCALAPPDATA%\hermes\pycache),
 # importlib/pytest write .pyc files to <prefix>/<absolute source path>
@@ -296,6 +305,15 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     monkeypatch.setattr(
         hermes_constants, "_get_platform_default_hermes_home", isolated_platform_default
     )
+    # 3a. The profile-alias wrapper dir is ``Path.home()/.local/bin`` and HOME is deliberately
+    #     not redirected, so ``profiles.list`` (build_alias_map) would open every entry of the
+    #     developer's real ~/.local/bin. On a host where those are symlinks into the real
+    #     ~/.hermes (hub: bb-land -> ~/.hermes/bin/bb-land) the real-home tripwire fires and
+    #     the RPC returns an error envelope. Point the wrapper dir at the sandbox; tests that
+    #     exercise wrappers patch ``_get_wrapper_dir`` themselves (later, so they win).
+    import hermes_cli.profiles as _profiles_mod
+
+    monkeypatch.setattr(_profiles_mod, "_get_wrapper_dir", lambda: tmp_path / "wrapper_bin")
     fake_hermes_home = tmp_path / "hermes_test"
     fake_hermes_home.mkdir()
     (fake_hermes_home / "sessions").mkdir()

@@ -30,7 +30,7 @@ from hermes_cli.kanban_output import (
 )
 from hermes_cli.kanban_boards import _dispatch_boards
 from hermes_cli.kanban_ops import (
-    _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
+    _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_recover, _cmd_repair, _cmd_tail, _cmd_watch,
 )
 from hermes_cli.kanban_parser import build_parser
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
@@ -194,6 +194,9 @@ def kanban_command(args: argparse.Namespace) -> int:
         # KanbanDbCorruptError, which would turn every repair into "could not initialize database".
         if action == "repair":
             return _cmd_repair(args)
+        # `recover` too: it exists for boards init refuses.
+        if action == "recover":
+            return _cmd_recover(args)
         # init_db is idempotent (one sqlite_master SELECT when tables exist) and prevents
         # "no such table: tasks" on first use from a fresh HERMES_HOME.
         try:
@@ -242,7 +245,7 @@ def _profile_author() -> str:
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
-    "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
+    "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
     "gc", "origin-bind", "origin-create", "origin-adopt", "sync",
@@ -990,6 +993,48 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
         return None
 
 
+def _creator_task_id(conn, task_id: str) -> Optional[str]:
+    """The task that created ``task_id``, from the created-event payload (not a column)."""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created' "
+        "ORDER BY id ASC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        return json.loads(row[0]).get("creator_task_id")
+    except (TypeError, ValueError):
+        return None
+
+
+def worker_may_archive(conn, task_id: str) -> Optional[str]:
+    """None if this process may archive ``task_id``, else the refusal.
+
+    A dispatcher worker may archive an unclaimed card its own task created
+    (``creator_task_id`` is ``HERMES_KANBAN_TASK``). Every other foreign card is
+    refused — that is the "scoped worker can't archive it" wall. No env task
+    (a human or an orchestrator) may archive any card, as before.
+    """
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    if not env_tid:
+        return None
+    if env_tid == task_id:
+        return ("refusing to archive the assigned task; finish it with kanban_complete")
+    task = kb.get_task(conn, task_id)
+    if task is None:
+        return f"no such task: {task_id}"
+    if _creator_task_id(conn, task_id) != env_tid:
+        return (f"worker is scoped to task {env_tid}; refusing to archive {task_id}. "
+                "A worker may archive only an unclaimed card its own task created.")
+    if task.status == "running" or task.claim_lock or task.worker_pid:
+        return (f"cannot archive {task_id}: it is claimed (status={task.status}). "
+                "A worker may archive only an unclaimed card its own task created.")
+    if task.status in ("done", "archived"):
+        return f"cannot archive {task_id}: status={task.status}"
+    return None
+
+
 def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
                                  handoff_tool: str = "kanban_complete", *, verified=None):
     """Goal judge for every terminal worker handoff (including review).
@@ -1406,6 +1451,10 @@ def _cmd_archive(args: argparse.Namespace) -> int:
         if purge_ids:
             return _bulk_apply(purge_ids, lambda tid: kb.delete_archived_task(conn, tid), lambda tid: f"Deleted {tid}",
                                lambda tid: f"cannot delete {tid} (must already be archived)")
+        for tid in ids:
+            refusal = worker_may_archive(conn, tid)
+            if refusal:
+                return _err(refusal)
         return _bulk_apply(ids, lambda tid: kb.archive_task(conn, tid),
                            lambda tid: f"Archived {tid}", lambda tid: f"cannot archive {tid}")
 

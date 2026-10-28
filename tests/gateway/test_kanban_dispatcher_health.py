@@ -219,3 +219,28 @@ def test_slow_later_board_does_not_rejuvenate_earlier_scope(owner, monkeypatch):
     producer.publish(dispatcher.successful_scopes)
     assert not health.available(root, kb.kanban_db_path("default"), "alice", "ready")
     assert health.available(root, kb.kanban_db_path("later"), "alice", "ready")
+
+
+def test_spawning_ticks_rotate_board_order_so_default_cannot_starve_others(tmp_path, monkeypatch):
+    """max_in_progress is host-wide and boards draw on it in tick order; a fixed
+    default-first order let default's backlog take every freed slot. [daveey]"""
+    from gateway.kanban_watchers_dispatcher import _KanbanDispatcher, _resolve_dispatcher_settings
+    from hermes_cli import kanban_db as kb
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    dispatcher = _KanbanDispatcher(kb, _resolve_dispatcher_settings({}, kb))
+    monkeypatch.setattr(dispatcher, "_board_slugs", lambda: ["default", "runners", "uc"])
+    order: list = []
+    monkeypatch.setattr(dispatcher, "tick_once_for_board", lambda slug, **kw: order.append(slug))
+    firsts = []
+    for _ in range(6):
+        order.clear()
+        dispatcher.tick_once()
+        assert sorted(order) == ["default", "runners", "uc"]  # every board still ticks once
+        firsts.append(order[0])
+    assert firsts == ["default", "runners", "uc", "default", "runners", "uc"]
+    # Drain-hold (suppress_spawn) ticks claim nothing, so they keep the plain order.
+    order.clear()
+    dispatcher.tick_once(suppress_spawn=True)
+    assert order == ["default", "runners", "uc"]
