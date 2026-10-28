@@ -547,6 +547,7 @@ import { resolveRemoteOauthTicket, rosterSourceEnumerationTimeoutMs } from './re
 import { createRemoteOwnerCache } from './remote-owner-cache'
 import { prewarmTargets, RecentRemoteProfiles, RemotePrewarmer } from './remote-prewarm'
 import { remoteSessionCookies } from './remote-session-cookies'
+import { RemoteUpdatePause, remoteUpdatePauseKey } from './remote-update-pause'
 import {
   attachRemoteRequestHeaderListener,
   collectRemoteHeaderSources,
@@ -10090,6 +10091,9 @@ async function effectiveSshConfigFingerprint(sshConfig) {
   return crypto.createHash('sha256').update(output).digest('hex')
 }
 
+// Remembers a remote install's own-update refusal so requests and prewarm stop redialing (remote-update-pause.ts).
+const remoteUpdatePause = new RemoteUpdatePause({ log: line => rememberLog(line) })
+
 async function bootstrapSshConnection(
   profile,
   sshConfig,
@@ -10103,12 +10107,21 @@ async function bootstrapSshConnection(
   const resolvedConfig = { ...sshConfig, effectiveConfigFingerprint }
   const fingerprint = sshConfigFingerprint(scope, resolvedConfig)
 
-  return sshBootstrapCoordinator.start(
-    scope,
-    fingerprint,
-    lease => bootstrapSshConnectionInner(profile, resolvedConfig, reuseToken, source, metadata, fingerprint, lease),
-    metadata
-  )
+  const start = () =>
+    sshBootstrapCoordinator.start(
+      scope,
+      fingerprint,
+      lease => bootstrapSshConnectionInner(profile, resolvedConfig, reuseToken, source, metadata, fingerprint, lease),
+      metadata
+    )
+
+  // A managed update restore owns its own gate and dials right after updating the install itself.
+  if (metadata?.managedUpdateCorrelation) {
+    return start()
+  }
+
+  // While the remote runs its own update, fail fast instead of dialing per request (remote-update-pause.ts).
+  return remoteUpdatePause.run(remoteUpdatePauseKey(resolvedConfig), start)
 }
 
 // Tear down a bootstrap result whose publication lost the managed-update

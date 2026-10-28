@@ -206,10 +206,18 @@ export class RemotePrewarmer {
           state.failures = 0
           state.nextAttemptAt = 0
         } catch (error: any) {
-          const delay = PREWARM_BACKOFF_MS[Math.min(state.failures, PREWARM_BACKOFF_MS.length - 1)]
+          const failedAt = (this.#deps.now ?? Date.now)()
+          // A remote paused for its own update (remote-update-pause.ts) names when its one probe may run; follow
+          // that schedule instead of a second backoff, so prewarm is the probe that sees the update finish.
+          const retryAt = Number(error?.retryAt)
+
+          const delay = Number.isFinite(retryAt)
+            ? Math.max(0, retryAt - failedAt)
+            : PREWARM_BACKOFF_MS[Math.min(state.failures, PREWARM_BACKOFF_MS.length - 1)]
+
           state.warm = false
           state.failures += 1
-          state.nextAttemptAt = (this.#deps.now ?? Date.now)() + delay
+          state.nextAttemptAt = failedAt + delay
           this.#deps.log(
             `[remote-prewarm] ${id} unavailable (${error?.message || error}); retry ${state.failures} in ${delay} ms`
           )
