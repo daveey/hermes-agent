@@ -1,0 +1,84 @@
+"""Last-snapshot reads for GET /board.
+
+Desktop polls the board continuously. One uncached read of a busy board is about
+1.3s of CPU, and every kanban commit moves the db/-wal signature, so the
+signature cache misses on almost every poll. Waiting for that read on the
+request timed the poll out (6-30s) and held an AnyIO worker. Serve the last
+snapshot and refresh off the caller.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+from typing import Callable, Optional
+
+CACHE_TTL_S = 15.0
+_cache: dict[tuple, tuple] = {}
+_cache_lock = threading.Lock()
+_refresh_lock = threading.Lock()
+_refresh_thread: Optional[threading.Thread] = None
+
+
+def file_sig(path: str) -> Optional[tuple]:
+    out = []
+    for candidate in (path, f"{path}-wal"):
+        try:
+            st = Path(candidate).stat()
+        except OSError:
+            out.append(None)
+            continue
+        out.append((st.st_mtime_ns, st.st_size, st.st_ino))
+    return tuple(out) if out[0] is not None else None
+
+
+def _publish(key, sig, now, result) -> None:
+    with _cache_lock:
+        _cache[key] = (sig, now, result)
+
+
+def join_refresh(timeout: float = 5) -> None:
+    thread = _refresh_thread
+    if thread is not None:
+        thread.join(timeout)
+
+
+def _schedule(read: Callable[[], dict], key, sig, now) -> None:
+    global _refresh_thread
+
+    def run() -> None:
+        try:
+            result = read()
+            _publish(key, sig, now, result)
+        finally:
+            _refresh_lock.release()
+
+    if not _refresh_lock.acquire(blocking=False):
+        return
+    thread = threading.Thread(target=run, daemon=True, name="kanban-board-refresh")
+    _refresh_thread = thread
+    thread.start()
+
+
+def serve(key, sig, read: Callable[[], dict], now: Optional[float] = None) -> dict:
+    """Return a board payload.
+
+    A fresh signature hit is reused. A miss that already has a snapshot returns
+    that snapshot and refreshes off the caller. The first read (no snapshot)
+    runs on the caller.
+    """
+    if now is None:
+        now = time.monotonic()
+    if key is None or sig is None:
+        return read()
+    with _cache_lock:
+        hit = _cache.get(key)
+    if hit is not None and hit[0] == sig and now - hit[1] < CACHE_TTL_S:
+        return dict(hit[2], now=int(time.time()))
+    if hit is not None:
+        _schedule(read, key, sig, now)
+        return dict(hit[2], now=int(time.time()))
+    result = read()
+    _publish(key, sig, now, result)
+    return result
