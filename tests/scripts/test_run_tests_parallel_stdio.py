@@ -28,6 +28,8 @@ def _load_runner():
 def test_silent_child_failure_reports_exit_code(tmp_path, monkeypatch):
     from types import SimpleNamespace
     mod = _load_runner()
+    # No host slot: the slot lookup reads ~/.hermes/config.yaml, which the home I/O guard refuses.
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "0")
     child = SimpleNamespace(pid=123, returncode=23, communicate=lambda **kwargs: ("", None))
     monkeypatch.setattr(mod.subprocess, "Popen", lambda *args, **kwargs: child)
     monkeypatch.setattr(mod, "_kill_tree", lambda *args, **kwargs: None)

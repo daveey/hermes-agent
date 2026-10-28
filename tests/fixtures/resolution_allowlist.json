@@ -238,6 +238,11 @@
     "kind": "bare_which"
   },
   {
+    "path": "hermes_cli/kanban_capability_registry.py",
+    "symbol": "hub_cli_path",
+    "kind": "bare_which"
+  },
+  {
     "path": "hermes_cli/kanban_db_dispatch.py",
     "symbol": "_resolve_hermes_argv",
     "kind": "bare_which"
