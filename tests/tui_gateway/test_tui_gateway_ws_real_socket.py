@@ -1,0 +1,239 @@
+"""handle_ws over a REAL starlette WebSocket (not a FakeWS).
+
+starlette flips ``application_state`` to DISCONNECTED when a send fails or we close the socket, and its
+``receive_text`` then raises ``RuntimeError('... Need to call "accept" first.')`` instead of
+``WebSocketDisconnect``. A FakeWS never models that state, which is how the read loop came to log a normal
+peer drop as an ERROR "ws receive failed" with a traceback (self-heal desktop-2d2f8e30ac).
+"""
+
+import asyncio
+import json
+import logging
+
+import pytest
+from starlette.websockets import WebSocket
+
+from tui_gateway import server
+from tui_gateway import ws as ws_mod
+
+
+@pytest.fixture
+def quiet_server(monkeypatch):
+    """Stub every live side effect handle_ws reaches (sweepers, watchers, session teardown)."""
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+    for name in ("_start_backend_heartbeat_refresher", "_schedule_startup_orphan_sweep",
+                 "_start_kanban_unloaded_sweeper", "_ensure_skin_watcher", "_ensure_lease_watcher"):
+        monkeypatch.setattr(server, name, lambda *a, **k: None)
+    monkeypatch.setattr(server, "register_live_transport", lambda t: None)
+    monkeypatch.setattr(server, "unregister_live_transport", lambda t: None)
+    monkeypatch.setattr(server, "_close_sessions_for_transport", lambda t, end_reason=None: (0, 0))
+    monkeypatch.setattr(server, "_release_wake_for_transport", lambda t: None)
+    monkeypatch.setattr(server, "resolve_skin", dict)
+    monkeypatch.setattr(ws_mod, "_note_dashboard_client_activity", lambda *a, **k: None)
+
+    def dispatch(req, transport):
+        # A pooled handler streaming an event through the thread-safe write path (prompt.submit does this).
+        transport.write({"jsonrpc": "2.0", "method": "event", "params": {"type": "status", "payload": {}}})
+
+    monkeypatch.setattr(server, "dispatch", dispatch)
+
+
+def _frame(i):
+    return {"type": "websocket.receive",
+            "text": json.dumps({"jsonrpc": "2.0", "id": f"r{i}", "method": "x", "params": {}})}
+
+
+def _run(scope_receive, scope_send, caplog):
+    scope = {"type": "websocket", "path": "/api/ws", "headers": [], "client": ("127.0.0.1", 60154)}
+    caplog.set_level(logging.DEBUG, logger="tui_gateway.ws")
+
+    async def main():
+        await asyncio.wait_for(ws_mod.handle_ws(WebSocket(scope, scope_receive(), scope_send())), 10)
+
+    asyncio.run(main())
+    closed = [r.getMessage() for r in caplog.records if r.getMessage().startswith("ws closed")]
+    assert len(closed) == 1, closed
+    return closed[0]
+
+
+def test_send_failure_then_read_is_a_disconnect_not_a_crash(quiet_server, caplog):
+    """The peer goes away while a pooled event write is in flight; the read loop then reads again.
+
+    Deterministic order: frame r0 is dispatched, its event write fails (starlette marks the socket
+    DISCONNECTED), only then does the peer deliver r1, so the loop's next receive_text hits the
+    DISCONNECTED state. Before the fix that logged ERROR "ws receive failed" + traceback.
+    """
+    state: dict = {}
+
+    def make_receive():
+        state["send_failed"] = send_failed = asyncio.Event()
+        inbound = [{"type": "websocket.connect"}, _frame(0)]
+
+        async def receive():
+            if inbound:
+                return inbound.pop(0)
+            await send_failed.wait()  # r1 arrives only after the write to the vanished peer failed
+            if not state.get("gave_r1"):
+                state["gave_r1"] = True
+                return _frame(1)
+            await asyncio.Event().wait()  # a starlette read in DISCONNECTED state never gets here
+
+        return receive
+
+    def make_send():
+        sent = {"n": 0}
+
+        async def send(msg):
+            if msg["type"] == "websocket.send":
+                sent["n"] += 1
+                if sent["n"] > 1:  # 1st send = gateway.ready; after that the peer is gone
+                    state["send_failed"].set()
+                    raise OSError("peer gone")
+
+        return send
+
+    closed = _run(make_receive, make_send, caplog)
+
+    errors = [(r.getMessage(), r.exc_info) for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == [], errors
+    assert "reason=receive_failed" not in closed
+    assert "reason=send_failed" in closed
+    assert "send_failures=1" in closed
+
+
+def test_send_failure_under_a_pending_read_is_a_disconnect(quiet_server, caplog):
+    """The read is already parked in receive() when the event write to the gone peer fails, and the server
+    library then raises a plain error from that read (not WebSocketDisconnect): still a send_failed end."""
+    state: dict = {}
+
+    def make_receive():
+        state["send_failed"] = send_failed = asyncio.Event()
+        inbound = [{"type": "websocket.connect"}, _frame(0)]
+
+        async def receive():
+            if inbound:
+                return inbound.pop(0)
+            await send_failed.wait()
+            raise OSError("connection reset by peer")
+
+        return receive
+
+    def make_send():
+        sent = {"n": 0}
+
+        async def send(msg):
+            if msg["type"] == "websocket.send":
+                sent["n"] += 1
+                if sent["n"] > 1:
+                    state["send_failed"].set()
+                    raise OSError("peer gone")
+
+        return send
+
+    closed = _run(make_receive, make_send, caplog)
+
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert "reason=send_failed" in closed and "send_failures=1" in closed
+
+
+def test_fanout_overflow_close_ends_read_loop_as_server_closed(quiet_server, caplog, monkeypatch):
+    """Our own overflow close (transport.abort) flips starlette to DISCONNECTED; the read loop must end
+    as server_closed(fanout_overflow), not as a receive crash, and it is not a send failure."""
+    state: dict = {}
+
+    def dispatch(req, transport):
+        transport.abort()
+
+    monkeypatch.setattr(server, "dispatch", dispatch)
+
+    def make_receive():
+        state["closed"] = closed_evt = asyncio.Event()
+        inbound = [{"type": "websocket.connect"}, _frame(0)]
+
+        async def receive():
+            if inbound:
+                return inbound.pop(0)
+            await closed_evt.wait()  # the peer's next frame lands after our close went out
+            if not state.get("gave_r1"):
+                state["gave_r1"] = True
+                return _frame(1)
+            await asyncio.Event().wait()
+
+        return receive
+
+    def make_send():
+        async def send(msg):
+            if msg["type"] == "websocket.close":
+                state["closed"].set()
+
+        return send
+
+    closed = _run(make_receive, make_send, caplog)
+
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert "reason=server_closed(fanout_overflow)" in closed and "send_failures=0" in closed
+
+
+def test_failed_response_send_is_counted_once(quiet_server, caplog, monkeypatch):
+    """An inline response whose send fails ends the dispatcher with send_failed_after_response; the read
+    loop must keep that reason and count the failure once, not re-record it or crash on the next read."""
+    state: dict = {}
+    monkeypatch.setattr(server, "dispatch", lambda req, transport: {"jsonrpc": "2.0", "result": {}, "id": req["id"]})
+
+    def make_receive():
+        state["send_failed"] = send_failed = asyncio.Event()
+        inbound = [{"type": "websocket.connect"}, _frame(0)]
+
+        async def receive():
+            if inbound:
+                return inbound.pop(0)
+            await send_failed.wait()
+            if not state.get("gave_r1"):
+                state["gave_r1"] = True
+                return _frame(1)
+            await asyncio.Event().wait()
+
+        return receive
+
+    def make_send():
+        sent = {"n": 0}
+
+        async def send(msg):
+            if msg["type"] == "websocket.send":
+                sent["n"] += 1
+                if sent["n"] > 1:
+                    state["send_failed"].set()
+                    raise OSError("peer gone")
+
+        return send
+
+    closed = _run(make_receive, make_send, caplog)
+
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert "reason=send_failed_after_response" in closed and "send_failures=1" in closed
+
+
+def test_unexpected_receive_error_still_logs_error(quiet_server, caplog, monkeypatch):
+    """A read error while OUR side still holds the socket open is a real fault: keep ERROR + traceback."""
+
+    def make_receive():
+        inbound = [{"type": "websocket.connect"}]
+
+        async def receive():
+            if inbound:
+                return inbound.pop(0)
+            return {"type": "websocket.bogus"}  # starlette: KeyError on the missing "text"/"bytes"
+
+        return receive
+
+    def make_send():
+        async def send(msg):
+            return None
+
+        return send
+
+    closed = _run(make_receive, make_send, caplog)
+
+    failed = [r for r in caplog.records if r.levelno == logging.ERROR and "ws receive failed" in r.getMessage()]
+    assert len(failed) == 1 and failed[0].exc_info is not None
+    assert "reason=receive_failed" in closed
