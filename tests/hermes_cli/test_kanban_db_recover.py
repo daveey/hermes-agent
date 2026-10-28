@@ -375,3 +375,145 @@ def test_quarantine_rotation_keeps_manual_and_recovery_copies(tmp_path):
     kbc._prune_corrupt_backups(tmp_path, base.name)
     assert manual.exists(), "a quarantine burst must not delete a manual forensic copy"
     assert len(list(tmp_path.glob("kanban.db.corrupt.*.bak"))) == kbc._CORRUPT_BACKUP_RETENTION + 1
+
+
+def _delete_behind_the_indexes(path: Path, ids: list[int]) -> None:
+    """Delete ``task_events`` rows while its named indexes are hidden from the schema, so those index
+    b-trees keep listing the deleted rows (index pages older than the table pages, as in the incident)."""
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA writable_schema=ON")
+    hidden = conn.execute("SELECT type, name, tbl_name, rootpage, sql FROM sqlite_master "
+                          "WHERE type='index' AND tbl_name='task_events' AND sql IS NOT NULL").fetchall()
+    assert hidden, "task_events must have a named index"
+    conn.execute("DELETE FROM sqlite_master WHERE type='index' AND tbl_name='task_events' AND sql IS NOT NULL")
+    conn.commit()
+    conn.close()
+    conn = sqlite3.connect(path)
+    conn.execute(f"DELETE FROM task_events WHERE id IN ({','.join('?' * len(ids))})", ids)
+    conn.commit()
+    conn.execute("PRAGMA writable_schema=ON")
+    conn.executemany("INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql) VALUES (?, ?, ?, ?, ?)", hidden)
+    version = conn.execute("PRAGMA schema_version").fetchone()[0]
+    conn.execute(f"PRAGMA schema_version={version + 1}")
+    conn.commit()
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    conn.close()
+
+
+def test_stale_index_entries_of_deleted_rows_are_not_filled_back_in(home):
+    """An index that still lists deleted rows must not make the backup fill resurrect them."""
+    path = home / "kanban.db"
+    _make_board(path)
+    shutil.copy2(path, path.with_name(path.name + ".corrupt.0123456789abcdef.bak"))
+    conn = sqlite3.connect(path)
+    deleted = [r[0] for r in conn.execute("SELECT id FROM task_events ORDER BY id DESC LIMIT 40")]
+    conn.close()
+    _delete_behind_the_indexes(path, deleted)
+    before = _payloads(path)
+    assert not set(deleted) & set(before)
+    lost = _damage_table(path, "task_events")
+    assert not set(lost) & set(deleted)
+
+    result = rec.recover(path, file_card=False, reconcile_sync=False)
+
+    assert result.status == "recovered", result.reason
+    events = result.tables["task_events"]
+    assert events.filled_from_backup == len(lost) and events.stale_index_entries >= len(deleted)
+    after = _payloads(path)
+    assert not set(deleted) & set(after), "rows deleted after the backup came back"
+    assert after == before
+
+
+def test_writes_during_every_pass_install_nothing(home, monkeypatch):
+    """A board written through all rebuild passes is left as is (status contended), never overwritten."""
+    path = home / "kanban.db"
+    _make_board(path)
+    _damage_table(path, "task_events")
+    real_build, calls = rec._build, []
+
+    def build_then_write(*args, **kwargs):
+        calls.append(1)
+        real_build(*args, **kwargs)
+        writer = sqlite3.connect(path)
+        writer.execute("UPDATE tasks SET title = ? WHERE rowid = 1", (f"write {len(calls)}",))
+        writer.commit()
+        writer.close()
+
+    monkeypatch.setattr(rec, "_build", build_then_write)
+    result = rec.recover(path, file_card=False, reconcile_sync=False)
+
+    assert result.status == "contended" and result.concurrent_writes, result
+    assert len(calls) == rec._MAX_SALVAGE_PASSES
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT title FROM tasks WHERE rowid = 1").fetchone()[0] == f"write {len(calls)}"
+    conn.close()
+    assert rec.classify(path)[0] == "corrupt", "nothing was installed"
+    assert result.report_path and Path(result.report_path).exists()
+    assert not list(home.glob("kanban-recover-*")), "the work dir is cleaned up"
+
+
+def test_stranded_holders_finds_processes_on_deleted_sidecars(tmp_path):
+    db = tmp_path / "kanban.db"
+    db.write_bytes(b"")
+    proc = tmp_path / "proc"
+    for pid, target in ((101, f"{db.resolve()}-wal (deleted)"), (102, f"{db.resolve()}-wal"),
+                        (103, f"{db.resolve()}-shm (deleted)"), (104, "/elsewhere/kanban.db-wal (deleted)")):
+        (proc / str(pid) / "fd").mkdir(parents=True)
+        os.symlink(target, proc / str(pid) / "fd" / "7")
+    assert rec.stranded_holders(db, proc_root=proc) == [101, 103]
+
+
+def test_a_process_on_deleted_sidecars_blocks_the_install(home, monkeypatch):
+    path = home / "kanban.db"
+    _make_board(path)
+    _damage_table(path, "task_events")
+    digest = path.read_bytes()
+    monkeypatch.setattr(rec, "stranded_holders", lambda p: [4242])
+    result = rec.recover(path, file_card=False, reconcile_sync=False)
+    assert result.status == "stranded_holders" and "4242" in result.reason
+    assert result.stranded_pids == [4242]
+    assert path.read_bytes() == digest
+    assert json.loads(Path(result.report_path).read_text())["status"] == "stranded_holders"
+
+
+def test_installed_unverified_still_writes_the_report(home, monkeypatch):
+    path = home / "kanban.db"
+    _make_board(path)
+    _damage_table(path, "task_events")
+
+    def bad_install(rebuilt, live):
+        raise rec.InstalledUnverified("installed board fails integrity_check: ['x']")
+
+    monkeypatch.setattr(rec, "_install", bad_install)
+    result = rec.recover(path, file_card=False, reconcile_sync=False)
+    assert result.status == "installed_unverified"
+    report = json.loads(Path(result.report_path).read_text())
+    assert report["status"] == "installed_unverified" and "task_events" in report["tables"]
+
+
+def test_the_child_timeout_cleans_up_its_work_dir(home):
+    """SIGALRM raises instead of killing the child, so ``recover``'s cleanup runs."""
+    import subprocess
+    import sys
+    path = home / "kanban.db"
+    _make_board(path)
+    _damage_table(path, "task_events")
+    probe = home / "slow_recover.py"
+    probe.write_text(
+        "import sys, time\n"
+        "from hermes_cli import kanban_db_recover as rec\n"
+        "real = rec._build\n"
+        "def slow(*a, **k):\n"
+        "    real(*a, **k)\n"
+        "    time.sleep(30)\n"
+        "rec._build = slow\n"
+        "sys.exit(rec.main(sys.argv[1:]))\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_KANBAN")}
+    repo = str(Path(rec.__file__).resolve().parents[1])
+    env["PYTHONPATH"] = repo
+    done = subprocess.run([sys.executable, str(probe), "--db", str(path), "--json", "--no-card", "--no-sync",
+                           "--timeout", "3"], capture_output=True, text=True, timeout=60, env=env, cwd=repo)
+    payload = json.loads(done.stdout.strip().splitlines()[-1])
+    assert done.returncode == 1 and payload["status"] == "failed" and "TimeoutError" in payload["reason"]
+    assert not list(home.glob("kanban-recover-*")), "the rebuild work dir leaked"
+    assert rec.classify(path)[0] == "corrupt"
