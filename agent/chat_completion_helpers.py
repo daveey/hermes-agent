@@ -75,9 +75,23 @@ _STREAM_5XX_PROBE_WINDOW_S = 60.0
 
 
 def _context_thread_target(callback):
-    """Bind a no-argument thread target to the caller's ContextVars."""
+    """Bind a no-argument thread target to the caller's ContextVars and log session tag.
+
+    [daveey] The session id that tags log lines (``[<sid>]``) is a thread-local, not a ContextVar,
+    so without carrying it the API worker's errors (``Streaming failed before delivery``) reached
+    errors.log untagged and the errors signal could not name the session (agent-1572c64e24).
+    """
     context = contextvars.copy_context()
-    return lambda: context.run(callback)
+    from hermes_logging import _session_context, set_session_context
+
+    session_id = getattr(_session_context, "session_id", None)
+
+    def _run():
+        if session_id:
+            set_session_context(session_id)
+        return context.run(callback)
+
+    return _run
 
 
 def _join_worker_for_relay_teardown(worker, *, label: str) -> None:

@@ -351,7 +351,7 @@ class TestBuildApiKwargsNousPortal:
             monkeypatch,
             "nous",
             base_url="https://inference-api.nousresearch.com/v1",
-            model="gpt-5",
+            model="openai/gpt-5",
         )
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)

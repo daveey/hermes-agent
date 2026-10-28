@@ -2434,6 +2434,9 @@ def init_agent(
     _setup_logging(agent)
     _set_defaults(agent, _STREAM_STATE)
     _build_client(agent, api_key, base_url, fallback_model)
+    # [daveey] The provider is final only now (routed/fallback clients rewrite it).
+    from agent.model_provider_guard import check_model_matches_provider
+    check_model_matches_provider(agent)
     _init_fallback_chain(agent, fallback_model)
     _load_tools(agent, enabled_toolsets, disabled_toolsets)
     _init_session_state(
