@@ -13,6 +13,8 @@ describe('plugin REST qualified owner', () => {
   })
 
   it.each([
+    { opts: { connectionId: 'local', passive: true }, expected: { connectionId: 'local', passive: true } },
+    { opts: { connectionId: 'local', passive: false }, expected: { connectionId: 'local' } },
     { opts: {}, expected: { connectionId: 'ambient-gw', profile: 'ambient' } },
     { opts: { connectionId: 'owner' }, expected: { connectionId: 'owner' } },
     { opts: { connectionId: 'owner', profile: null }, expected: { connectionId: 'owner' } },

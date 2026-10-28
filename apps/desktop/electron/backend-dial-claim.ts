@@ -1,8 +1,18 @@
+import { backendScopeKey } from './connection-registry'
+
+/** An omitted owner follows primary routing; explicit local must never join it. */
+export function backendDialClaimKey(connectionId: null | string | undefined, profile: null | string | undefined): string {
+  const id = String(connectionId ?? '').trim()
+
+  return id === 'local' ? `conn:local::${String(profile ?? '').trim() || 'default'}` : backendScopeKey(id, profile)
+}
+
 /**
  * backend-dial-claim.ts
  *
- * Single-owner reconnect/dial claim for backend spawns, keyed by the pool
- * scope key from backendScopeKey(connectionId, profile) (#90812).
+ * Single-owner reconnect/dial claim for backend spawns, keyed by
+ * backendDialClaimKey(connectionId, profile). Unlike pool scope, an omitted
+ * connection can resolve remotely and must not alias an explicit local dial.
  *
  * Why this exists: reconnectGateway()'s in-flight lock lives at renderer
  * module scope, so it only dedupes reconnects INSIDE one window. Two windows

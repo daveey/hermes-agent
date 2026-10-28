@@ -67,6 +67,7 @@ import {
 import { $hiddenGatewayIds } from './gateway-visibility'
 import { hubGatewayForConnection, hubGatewayProjects, hubRequest, learnHubGatewayName } from './hub-sync'
 import { type OfflineReplicaRecord, offlineSessionsFromReplica } from './offline-sessions'
+import { fetchRemoteProjectTree, type ProjectTreePayload } from './project-tree-background'
 
 // First-class, per-profile Projects (named, multi-folder workspaces). State is
 // served by the live gateway's `projects.*` JSON-RPC methods, which wrap the
@@ -455,12 +456,6 @@ export async function refreshProjects(): Promise<void> {
   }
 }
 
-interface ProjectTreePayload {
-  projects: SidebarProjectTree[]
-  active_id: null | string
-  scoped_session_ids: string[]
-}
-
 // Expanded previews need the complete existing tree window before the renderer
 // finds its two recency groups. Keep the normal three-row payload unchanged.
 const projectTreePreviewLimit = () => ($sidebarShowAllSessions.get() ? 2000 : 3)
@@ -549,29 +544,6 @@ function reapplyLastProjectTree(): void {
   }
 }
 
-// A remote's sessions live in every profile it serves (nous-1 keeps none in
-// `default`), so read its all-profiles REST tree: each row carries its own
-// `profile`, which with the connection stamp is the exact owner a click
-// resumes on. An older gateway without that route answers with the one
-// profile `projects.tree` serves.
-async function fetchRemoteProjectTree(connectionId: string, profile: string): Promise<ProjectTreePayload> {
-  try {
-    return await hermesApi<ProjectTreePayload>({
-      connectionId,
-      path: `/api/profiles/projects/tree?preview_limit=${projectTreePreviewLimit()}`,
-      timeoutMs: REMOTE_TREE_TIMEOUT_MS
-    })
-  } catch {
-    return requestGatewayForAgent<ProjectTreePayload>(
-      connectionId,
-      profile,
-      'projects.tree',
-      { preview_limit: projectTreePreviewLimit() },
-      REMOTE_TREE_TIMEOUT_MS
-    )
-  }
-}
-
 // [daveey] The hub replica's copy of a remote's tree (hermes-hub >= 1.9.0): what the overview shows for a gateway
 // this run hasn't reached yet (cold start) or can't reach (asleep), so its groups never vanish and a shared rename
 // made while it sleeps shows. Null when the replica has nothing for it (no hub-sync, older client, unknown name).
@@ -623,7 +595,7 @@ async function refreshRemoteProjectTree(connectionId: string, profile: string): 
       await fillFromReplica(connectionId, entry)
     }
 
-    const res = await fetchRemoteProjectTree(connectionId, profile)
+    const res = await fetchRemoteProjectTree(connectionId, profile, projectTreePreviewLimit(), REMOTE_TREE_TIMEOUT_MS)
 
     entry.projects = res.projects ?? []
     entry.fetchedAt = Date.now()

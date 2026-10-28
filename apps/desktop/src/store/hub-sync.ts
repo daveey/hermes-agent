@@ -203,6 +203,7 @@ export async function hubGet<T extends object>(
   try {
     const result = await pluginRest<T & { available?: boolean }>(HUB_SYNC_PLUGIN, path, {
       connectionId,
+      passive: true,
       timeoutMs: READ_TIMEOUT_MS
     })
 

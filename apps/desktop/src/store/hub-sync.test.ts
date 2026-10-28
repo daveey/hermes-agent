@@ -54,6 +54,17 @@ afterEach(() => {
 })
 
 describe('gateway names', () => {
+  it('uses passive reads before registry hydration and for non-primary probes', async () => {
+    $connectionsRegistry.set(null)
+    rest.handler = () => new Error('backend not running')
+    expect(await learnHubGatewayName('local')).toBe(false)
+    expect(pluginRest).toHaveBeenLastCalledWith('hub-sync', '/status', expect.objectContaining({connectionId: 'local', passive: true}))
+    registry({id:'local'}, {id:'remote'})
+    rest.handler = () => ({gateway:'remote',available:true})
+    expect(await learnHubGatewayName('remote')).toBe(true)
+    expect(pluginRest).toHaveBeenLastCalledWith('hub-sync', '/status', expect.objectContaining({connectionId: 'remote', passive: true}))
+  })
+
   it('learns a connection\'s hub name from its own /status and persists it', async () => {
     registry({ id: 'local' }, { id: 'conn-7', label: 'Studio' })
     rest.handler = (path, opts) => (path === '/status' && opts.connectionId === 'conn-7' ? { available: true, gateway: 'mini' } : new Error('x'))
@@ -97,6 +108,7 @@ describe('gateway names', () => {
 describe('hubSessionOwner', () => {
   it('maps the replica owner to its registry connection; own records map to the primary', async () => {
     registry({ id: 'local' }, { id: 'conn-mini', label: 'mini' })
+
     rest.handler = (path, opts) => {
       expect(opts.connectionId).toBe('local') // reads always go to the window's own gateway
 

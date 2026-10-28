@@ -130,7 +130,14 @@ export function resolveDesktopRemoteRoute({
       )
     }
 
-    return { authMode: 'token', kind: 'remote', source: 'env', token: envToken, url: envUrl }
+    return withConnectionId(
+      { authMode: 'token' as const, kind: 'remote' as const, source: 'env' as const, token: envToken, url: envUrl },
+      matchingConnectionId(
+        registry,
+        { authMode: 'token', kind: 'remote', token: { encoding: 'plain', value: envToken }, url: envUrl },
+        'primary'
+      )
+    )
   }
 
   if (config.mode === 'ssh') {
