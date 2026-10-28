@@ -13,7 +13,9 @@ import sqlite3
 import time
 from typing import Optional
 
-AGENT_OWNED_KINDS = (None, "capability", "transient")
+# needs_input is agent-owned when it carries no human_request: the sidebar only shows a block as
+# blocked when needs_human() holds, so an ask-less needs_input looks like work in progress.
+AGENT_OWNED_KINDS = (None, "capability", "transient", "needs_input")
 AGENT_BLOCK_GRACE_SECONDS = 2 * 3600
 ERROR_CODE = "agent_owned_block"
 _DECISION_TITLE = re.compile(r"^\s*(for you\s*:|choose\b|decide\b|approve\b)", re.IGNORECASE)
@@ -28,6 +30,17 @@ def block_policy_error(kind, *, human_request=None, wake_check=None, clock_only=
         return None
     if reason and "SCHEDULED_UNTIL=" in reason:
         return None
+    if kind == "needs_input":
+        return (
+            f"{ERROR_CODE}: kind='needs_input' with no human_request is invisible to David (the "
+            "sidebar shows it as active) and nothing wakes it. Pick one: (1) a step only David can "
+            "take -> pass human_request (action, why_human, interaction, scope, evidence); (2) a "
+            "file, permission or tool another gateway holds -> declare the capability need "
+            "(needs=['host:<gateway>'] or the exact capability, e.g. 'ssh:mini') so an owner card "
+            "is opened on that gateway, or kanban_create the owner card there and park on it "
+            "(kind='time', awaiting={kind:'card', ref, gateway}); (3) a timed wait -> kind='time' "
+            "with awaiting plus wake_check (or clock_only=true)."
+        )
     return (
         f"{ERROR_CODE}: kind={kind!r} with no human_request, wake_check or clock_only leaves the "
         "card with no owner and nothing to wake it. Pick one: (1) a decision/action only David can "
@@ -63,7 +76,7 @@ def sweep_agent_owned_blocks(conn: sqlite3.Connection, *, now: Optional[int] = N
     escalated: list[str] = []
     rows = conn.execute(
         "SELECT id, block_kind FROM tasks WHERE status = 'blocked' AND human_request IS NULL "
-        "AND current_run_id IS NULL AND (block_kind IS NULL OR block_kind IN ('capability','transient'))"
+        "AND current_run_id IS NULL AND (block_kind IS NULL OR block_kind IN ('capability','transient','needs_input'))"
     ).fetchall()
     for row in rows:
         tid = row["id"]

@@ -435,7 +435,10 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
 
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
-    out = kt._handle_block({"reason": "need clarification", "kind": "needs_input"})
+    out = kt._handle_block({"reason": "need clarification", "kind": "needs_input",
+                            "human_request": {"action": "clarify", "why_human": "ambiguous spec",
+                                              "interaction": "reply", "scope": "worker-test",
+                                              "evidence": "spec has two readings"}})
     d = json.loads(out)
     assert d["ok"] is True
     from hermes_cli import kanban_db as kb
@@ -1665,7 +1668,7 @@ def test_block_agent_owned_allowed_with_wake_check_routes_scheduled(worker_env):
 def test_block_capability_with_human_request_allowed():
     from hermes_cli.kanban_block_policy import block_policy_error
     assert block_policy_error("capability", human_request={"action": "x"}) is None
-    assert block_policy_error("needs_input") is None
+    assert block_policy_error("needs_input", human_request={"action": "x"}) is None
     assert block_policy_error("assignment") is None
     assert block_policy_error("capability", clock_only=True) is None
     assert block_policy_error("transient", blocker_id="gh-billing") is None
