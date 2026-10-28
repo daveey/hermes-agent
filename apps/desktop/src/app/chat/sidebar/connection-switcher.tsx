@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
-import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,6 +12,9 @@ import {
   dropdownMenuRow,
   DropdownMenuSearch,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 import type { DesktopRegistryConnection } from '@/global'
@@ -118,10 +120,18 @@ export function ConnectionSwitcher({ compact = false, onConnect }: { compact?: b
     })()
   }
 
-  // [daveey] Right-click a gateway → "Use for new sessions". It only saves the
-  // app-wide default route (Electron-persisted); it never switches what is on
-  // screen, and opening a session elsewhere never changes it.
-  const makeNewSessionTarget = async (connection: DesktopRegistryConnection) => {
+  // [daveey] "New sessions on ▸" picks the gateway new sessions start on. It only
+  // saves the app-wide default route (Electron-persisted); it never switches what
+  // is on screen, and opening a session elsewhere never changes it.
+  const newSessionConnection = connections.find(connection => connection.id === newSessionConnectionId)
+
+  const makeNewSessionTarget = async (connectionId: string) => {
+    const connection = connections.find(candidate => candidate.id === connectionId)
+
+    if (!connection || connectionId === newSessionConnectionId) {
+      return
+    }
+
     try {
       await setDefaultProfile({ connectionId: connection.id, profile: 'default' })
       notify({
@@ -230,43 +240,46 @@ export function ConnectionSwitcher({ compact = false, onConnect }: { compact?: b
                 const isNewSessionTarget = connection.id === newSessionConnectionId
 
                 return (
-                  <ContextMenu key={connection.id}>
-                    <ContextMenuTrigger asChild>
-                      <DropdownMenuRadioItem
-                        className={cn('min-w-0', searchable && dropdownMenuRow)}
-                        data-new-session-target={isNewSessionTarget ? '' : undefined}
-                        value={connection.id}
-                      >
-                        <ConnectionLabel connection={connection} />
-                        {isNewSessionTarget && (
-                          <span
-                            aria-label={t.profiles.newSessionsStartHere}
-                            className="ml-auto flex shrink-0 items-center text-(--ui-text-tertiary)"
-                            role="img"
-                            title={t.profiles.newSessionsStartHere}
-                          >
-                            <Codicon aria-hidden="true" name="home" size="0.75rem" />
-                          </span>
-                        )}
-                      </DropdownMenuRadioItem>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent aria-label={connection.label} className="min-w-44">
-                      <ContextMenuItem
-                        disabled={isNewSessionTarget || !window.hermesDesktop?.profile?.setDefault}
-                        onSelect={() => void makeNewSessionTarget(connection)}
-                      >
-                        <Codicon name={isNewSessionTarget ? 'check' : 'home'} size="0.875rem" />
-                        <span>
-                          {isNewSessionTarget ? t.profiles.newSessionsStartHere : t.profiles.useForNewSessions}
-                        </span>
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
+                  <DropdownMenuRadioItem
+                    className={cn('min-w-0', searchable && dropdownMenuRow)}
+                    data-new-session-target={isNewSessionTarget ? '' : undefined}
+                    key={connection.id}
+                    value={connection.id}
+                  >
+                    <ConnectionLabel connection={connection} />
+                    {isNewSessionTarget && <NewSessionTargetMark label={t.profiles.newSessionsStartHere} />}
+                  </DropdownMenuRadioItem>
                 )
               })
             )}
           </DropdownMenuRadioGroup>
           <DropdownMenuSeparator className={searchable ? 'm-0' : undefined} />
+          {typeof window.hermesDesktop?.profile?.setDefault === 'function' && (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className={searchable ? dropdownMenuRow : undefined}>
+                <span className="flex min-w-0 items-center gap-1.5 text-(--ui-text-secondary)">
+                  <Codicon aria-hidden="true" name="home" size="0.875rem" />
+                  <span className="truncate">
+                    {newSessionConnection
+                      ? `${t.profiles.newSessionsOn}: ${newSessionConnection.label}`
+                      : t.profiles.newSessionsOn}
+                  </span>
+                </span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="min-w-44 max-w-72">
+                <DropdownMenuRadioGroup
+                  onValueChange={connectionId => void makeNewSessionTarget(connectionId)}
+                  value={newSessionConnectionId ?? ''}
+                >
+                  {connections.map(connection => (
+                    <DropdownMenuRadioItem className="min-w-0" key={connection.id} value={connection.id}>
+                      <ConnectionLabel connection={connection} />
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          )}
           <DropdownMenuItem className={searchable ? dropdownMenuRow : undefined} onSelect={onConnect}>
             <ManageGatewaysLabel label={t.profiles.connectGateway} />
           </DropdownMenuItem>
@@ -331,6 +344,19 @@ function ConnectionLabel({ connection }: { connection: DesktopRegistryConnection
     <span className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden" title={connectionTooltip(connection)}>
       <ConnectionGlyph connection={connection} />
       <span className="truncate">{connection.label}</span>
+    </span>
+  )
+}
+
+function NewSessionTargetMark({ label }: { label: string }) {
+  return (
+    <span
+      aria-label={label}
+      className="ml-auto flex shrink-0 items-center text-(--ui-text-tertiary)"
+      role="img"
+      title={label}
+    >
+      <Codicon aria-hidden="true" name="home" size="0.75rem" />
     </span>
   )
 }

@@ -2576,7 +2576,7 @@ export interface Translations extends NoticeTranslations {
     defaultSet: (name: string) => string
     defaultDescription: string
     failedSetDefault: string
-    useForNewSessions: string
+    newSessionsOn: string
     newSessionsStartHere: string
     newSessionsSet: (name: string) => string
     newSessionsDescription: string

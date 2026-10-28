@@ -2951,7 +2951,7 @@ export const en: Translations = {
     defaultSet: name => `${name} is now the default`,
     defaultDescription: 'Used when Hermes opens and for new chats. Existing sessions stay in their profiles.',
     failedSetDefault: 'Could not set the default profile',
-    useForNewSessions: 'Use for new sessions',
+    newSessionsOn: 'New sessions on',
     newSessionsStartHere: 'New sessions start here',
     newSessionsSet: name => `New sessions will start on ${name}`,
     newSessionsDescription: 'Opening a session on another gateway does not change this.',

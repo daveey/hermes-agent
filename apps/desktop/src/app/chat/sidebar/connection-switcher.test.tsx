@@ -37,7 +37,7 @@ vi.mock('@/i18n', () => ({
         newSessionsDescription: 'Opening a session on another gateway does not change this.',
         newSessionsSet: (name: string) => `New sessions will start on ${name}`,
         newSessionsStartHere: 'New sessions start here',
-        useForNewSessions: 'Use for new sessions'
+        newSessionsOn: 'New sessions on'
       },
       settings: {
         connections: {
@@ -256,9 +256,9 @@ describe('ConnectionSwitcher', () => {
     expect(screen.getByRole('menuitemradio', { name: 'W2Probe' })).toBeTruthy()
   })
 
-  // [daveey] Right-click a gateway → "Use for new sessions": saves the app-wide
+  // [daveey] "New sessions on ▸" in the device menu: saves the app-wide
   // new-session route without switching what is on screen.
-  it('right-click saves a gateway for new sessions without switching to it', async () => {
+  it('the New sessions on submenu saves a gateway without switching to it', async () => {
     const setDefault = vi.fn(async (route: { connectionId: null | string; profile: string }) => route)
     window.hermesDesktop = { profile: { setDefault } } as never
     $connectionsRegistry.set(
@@ -270,25 +270,32 @@ describe('ConnectionSwitcher', () => {
     )
     render(<ConnectionSwitcher onConnect={onConnect} />)
 
-    fireEvent.pointerDown(screen.getByRole('button', { name: 'Registered gateways: This device' }), {
-      button: 0,
-      pointerType: 'mouse'
-    })
-    fireEvent.contextMenu(screen.getByRole('menuitemradio', { name: 'hub (EC2)' }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Use for new sessions' }))
+    const trigger = screen.getByRole('button', { name: 'Registered gateways: This device' })
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
+
+    // The existing menu is unchanged: the gateways, then the new choice, then Manage.
+    expect(screen.getAllByRole('menuitemradio').map(item => item.textContent)).toEqual([
+      'This device',
+      'hub (EC2)',
+      'mac-mini'
+    ])
+    const sub = screen.getByRole('menuitem', { name: 'New sessions on' })
+    expect(screen.getByRole('menuitem', { name: 'Manage gateways…' })).toBeTruthy()
+
+    fireEvent.keyDown(sub, { key: 'ArrowRight' })
+    const hubChoice = (await screen.findAllByRole('menuitemradio', { name: 'hub (EC2)' })).at(-1)!
+    fireEvent.click(hubChoice)
 
     await waitFor(() => expect($defaultProfileRoute.get()).toEqual({ connectionId: 'hermes-hub', profile: 'default' }))
     expect(setDefault).toHaveBeenCalledWith({ connectionId: 'hermes-hub', profile: 'default' })
     expect(selectConnection).not.toHaveBeenCalled()
     expect($activeConnectionId.get()).toBe('local')
 
-    // The saved row is marked, and its own right-click item is the checked state.
-    const hubRow = screen.getByRole('menuitemradio', { name: /hub \(EC2\)/ })
-    expect(hubRow.hasAttribute('data-new-session-target')).toBe(true)
-    expect(screen.getByRole('menuitemradio', { name: 'mac-mini' }).hasAttribute('data-new-session-target')).toBe(false)
-    fireEvent.contextMenu(hubRow)
-    expect(
-      (await screen.findByRole('menuitem', { name: 'New sessions start here' })).getAttribute('aria-disabled')
-    ).toBe('true')
+    // Reopened: the trigger names the target and its gateway row is marked.
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
+    expect(screen.getByRole('menuitem', { name: 'New sessions on: hub (EC2)' })).toBeTruthy()
+    const marked = screen.getAllByRole('menuitemradio').filter(item => item.hasAttribute('data-new-session-target'))
+    expect(marked.map(item => item.textContent)).toEqual(['hub (EC2)'])
   })
 })

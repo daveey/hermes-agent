@@ -2275,7 +2275,7 @@
   "zones.newSessionTab": ["ar"],
   "zones.newTab": ["ar","ru"],
   "zones.zoneMenuLabel": ["ja","zh-hant"],
-  "profiles.useForNewSessions": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "profiles.newSessionsOn": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "profiles.newSessionsStartHere": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "profiles.newSessionsSet": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "profiles.newSessionsDescription": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
