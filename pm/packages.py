@@ -336,11 +336,13 @@ def uv_cache_dir() -> Path:
     from it is near-free (probed: 0.4s vs 1.2s cold) — the blow-away-
     on-update contract depends on it. uv's default cache location is
     per-user/platform-opinionated and never used by pm."""
-    from hermes_constants import get_default_hermes_root
+    from hermes_constants import ensure_spotlight_noindex_dir, get_default_hermes_root
 
     from pm.paths import repo_root, store_root
 
     machine_cache = get_default_hermes_root() / "cache" / "uv"
+    # [daveey] a symlink to cache/uv.noindex on macOS, so uv's churn stays out of Spotlight
+    ensure_spotlight_noindex_dir(machine_cache)
     marker = machine_cache / ".seeded"
     # The marker names the lock whose payload was merged. An update ships a new payload cache for
     # a new lock; a bare "done" marker skipped it forever, so plugin rebuilds fetched the new pins

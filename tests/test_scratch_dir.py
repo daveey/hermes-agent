@@ -387,3 +387,61 @@ def test_prune_releases_git_worktree_registration_of_idle_entry(tmp_path):
     listing = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=repo, capture_output=True,
                              text=True, stdin=subprocess.DEVNULL, check=True).stdout
     assert str(tree) not in listing and not tree.exists()
+
+
+@pytest.mark.platforms("posix")  # symlinks
+class TestSpotlightNoindexScratch:
+    """[daveey] On macOS the scratch dir's real home is ``cache/scratch.noindex`` (Spotlight skips
+    ``*.noindex``) and ``cache/scratch`` is a symlink to it, so TMPDIR churn is never indexed while
+    every ``cache/scratch`` path keeps working."""
+
+    def test_fresh_home_gets_noindex_dir_and_symlink(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.delenv("HERMES_SPOTLIGHT_INDEX_CACHE", raising=False)
+        scratch = get_scratch_dir(tmp_path, prune=False)
+        assert scratch == tmp_path / "cache" / "scratch"
+        assert scratch.is_symlink() and os.readlink(scratch) == "scratch.noindex"
+        assert (tmp_path / "cache" / "scratch.noindex").is_dir()
+        (scratch / "f").write_text("x", encoding="utf-8")
+        assert (tmp_path / "cache" / "scratch.noindex" / "f").read_text(encoding="utf-8") == "x"
+
+    def test_existing_real_dir_is_moved_keeping_its_contents_and_open_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.delenv("HERMES_SPOTLIGHT_INDEX_CACHE", raising=False)
+        old = tmp_path / "cache" / "scratch"
+        (old / "lane").mkdir(parents=True)
+        fh = open(old / "lane" / "log", "w", encoding="utf-8")
+        scratch = get_scratch_dir(tmp_path, prune=False)
+        fh.write("still writing")
+        fh.close()
+        assert scratch.is_symlink()
+        assert (tmp_path / "cache" / "scratch.noindex" / "lane" / "log").read_text(encoding="utf-8") == "still writing"
+        assert (scratch / "lane" / "log").is_file()
+        # idempotent; the reaper still sees entries through the link
+        assert get_scratch_dir(tmp_path, prune=False).is_symlink()
+        idle = scratch / "idle"
+        idle.mkdir()
+        ancient = time.time() - 30 * 3600
+        os.utime(idle, (ancient, ancient))
+        assert prune_scratch_dir(scratch) == 1 and not idle.exists() and scratch.is_symlink()
+
+    def test_dangling_link_is_repaired_and_conflicts_are_left_alone(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.delenv("HERMES_SPOTLIGHT_INDEX_CACHE", raising=False)
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        os.symlink("scratch.noindex", cache / "scratch")
+        assert get_scratch_dir(tmp_path, prune=False).is_dir()
+        assert (cache / "scratch.noindex").is_dir()
+        # a real dir next to an existing .noindex sibling: never merged or moved
+        other = tmp_path / "o"
+        (other / "cache" / "scratch").mkdir(parents=True)
+        (other / "cache" / "scratch.noindex").mkdir()
+        assert not get_scratch_dir(other, prune=False).is_symlink()
+
+    def test_other_platforms_and_opt_out_keep_a_plain_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert not get_scratch_dir(tmp_path / "a", prune=False).is_symlink()
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setenv("HERMES_SPOTLIGHT_INDEX_CACHE", "1")
+        assert not get_scratch_dir(tmp_path / "b", prune=False).is_symlink()
