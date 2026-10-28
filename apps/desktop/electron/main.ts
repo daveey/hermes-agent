@@ -535,6 +535,7 @@ import {
   type QuitTeardownTask
 } from './quit-teardown'
 import { createSshReuseProbe, wireRegistryReconnect } from './registry-reconnect-wiring'
+import { dispatchThroughRemoteDownGate, RemoteDownGate } from './remote-down-gate'
 import * as remoteLifecycle from './remote-lifecycle'
 import {
   attachPowerResumeRemoteRevalidation,
@@ -2002,6 +2003,9 @@ const pooledRemoteLiveness = new RemoteLivenessTracker(undefined, REMOTE_POOLED_
 
 const remoteRevalidation = new RemoteRevalidationCoordinator()
 const registryDispatchRevalidation = new RemoteRevalidationCoordinator()
+// [daveey] Per pool key: a remote backend that just reset/refused/failed its dispatch probe fails its requests fast
+// until a backoff trial answers again (remote-down-gate.ts).
+const remoteDownGate = new RemoteDownGate()
 // Single-owner reconnect/dial claim (#90812): reconnectGateway()'s in-flight
 // lock is per-renderer, so two windows racing one wake can both invoke the
 // backend ensure IPC and double-dial a pooled SSH backend. Main owns backend
@@ -11355,6 +11359,7 @@ async function ensureRegistryBackend(
           rememberLog(
             `Pooled remote backend "${key}" failed its dispatch probe (${error?.message || error}); reconnecting on demand.`
           )
+          remoteDownGate.markDown(key, `dispatch probe failed: ${error?.message || error}`)
           await stopPoolBackend(key, 'revalidate')
 
           if (source.kind === 'ssh') {
@@ -17637,26 +17642,65 @@ async function dispatchRegistryApiRequest(
   // passive read would otherwise inherit its "no warm backend" rejection.
   const spawnPriority = spawnPriorityFrom(request?.priority)
 
-  const connection: any = request?.passive
-    ? await ensureRegistryBackend(registryConnectionId, routeProfile, '', { passive: true })
-    : await backendDialClaims.run(backendDialClaimKey(registryConnectionId, routeProfile), () =>
-        ensureRegistryBackend(registryConnectionId, routeProfile, '', { spawnPriority })
-      )
+  const connect = (): Promise<any> =>
+    request?.passive
+      ? ensureRegistryBackend(registryConnectionId, routeProfile, '', { passive: true })
+      : backendDialClaims.run(backendDialClaimKey(registryConnectionId, routeProfile), () =>
+          ensureRegistryBackend(registryConnectionId, routeProfile, '', { spawnPriority })
+        )
 
-  const requestPath = pathForRegistryBackendRequest(request.path, requestProfile, connection)
+  let requestPath = ''
+  let connection: any = null
 
-  const response = await fetchJsonForBackend(connection, requestPath, {
-    method: request?.method,
-    body: request?.body,
-    upload: request?.upload,
-    timeoutMs: resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
-  })
+  const send = (descriptor: any) => {
+    connection = descriptor
+    requestPath = pathForRegistryBackendRequest(request.path, requestProfile, descriptor)
+
+    return fetchJsonForBackend(descriptor, requestPath, {
+      method: request?.method,
+      body: request?.body,
+      upload: request?.upload,
+      timeoutMs: resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+    })
+  }
+
+  // [daveey] Remote (non-local) connections go through the down gate: while the pooled backend is known down
+  // (reset, refused, failed dispatch probe) its requests reject at once instead of each burning a 4-10 s timeout.
+  const gateKey = remoteDownGateKey(registryConnectionId, routeProfile)
+
+  const response = gateKey
+    ? await dispatchThroughRemoteDownGate({
+        gate: remoteDownGate,
+        key: gateKey,
+        connect,
+        request: send,
+        forgetAnswer: baseUrl => remoteAnswerLedger.forget(baseUrl),
+        log: rememberLog
+      })
+    : await send(await connect())
 
   desktopProfilePreferences.afterProfileRequest(registryConnectionId, request, response, connection.mode)
 
   return (request?.method || 'GET').toUpperCase() === 'GET'
     ? tagRegistrySessionResponse(requestPath, response, registryConnectionId)
     : response
+}
+
+// Pool key the down gate tracks for a registry request, or null when the request stays on this machine.
+function remoteDownGateKey(connectionId, profile): null | string {
+  try {
+    const registry = readDesktopConnectionsRegistry()
+    const id = registryDialConnectionId(connectionId, registry.primary)
+    const source = registry.connections.find(c => c.id === id)
+
+    if (!source || source.kind === 'local') {
+      return null
+    }
+
+    return backendScopeKey(id, profile)
+  } catch {
+    return null
+  }
 }
 
 function registryConnectionKind(connectionId) {

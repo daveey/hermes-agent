@@ -25,7 +25,12 @@ export function formatApiRequestFailure(
   const path = String(request?.path ?? '(no path)').slice(0, 500)
   const conn = clampToken(request?.connectionId) || 'primary'
   const profile = clampToken(request?.profile)
-  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+  // A fast-fail from the remote down gate is expected while a remote restarts: one line, no stack.
+  const expectedFastFail = (error as { code?: unknown } | null)?.code === 'REMOTE_BACKEND_DOWN'
+
+  const detail =
+    error instanceof Error ? (expectedFastFail ? error.message : (error.stack ?? error.message)) : String(error)
+
   const route = `conn=${conn}${profile ? ` profile=${profile}` : ''}`
 
   return `[hermes:api ${method} ${path}] ${route} ${detail}`.slice(0, 6000)

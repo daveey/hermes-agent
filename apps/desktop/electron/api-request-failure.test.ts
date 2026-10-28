@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { formatApiRequestFailure } from './api-request-failure'
+import { RemoteBackendDownError } from './remote-down-gate'
 
 const timeout = new Error('Timed out connecting to Hermes backend after 4000ms')
 
@@ -38,5 +39,13 @@ describe('formatApiRequestFailure', () => {
 
     expect(line.length).toBeLessThanOrEqual(6000)
     expect(line).toContain(`conn=${'c'.repeat(120)} `)
+  })
+  it('logs a remote-down fast-fail as one line without a stack', () => {
+    const fastFail = new RemoteBackendDownError('conn:hermes-hub::default', 'read ECONNRESET', 3000, 1000)
+    const line = formatApiRequestFailure({ connectionId: 'hermes-hub', path: '/api/plugins/hub-sync/status' } as any, fastFail)
+
+    expect(line).toContain('conn=hermes-hub Remote backend "conn:hermes-hub::default" is down')
+    expect(line).not.toContain('\n')
+    expect(line).not.toContain('Timed out connecting')
   })
 })
