@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { asleepOpenFor, clearAsleepOpen } from '@/store/asleep-session'
+import { _resetBootSnapshotForTests, applyBootSnapshot } from '@/store/boot-snapshot'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $pinnedSessionIds, $sidebarShowAutomated } from '@/store/layout'
 import { $notifications } from '@/store/notifications'
@@ -91,6 +92,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  _resetBootSnapshotForTests()
   _resetOfflineSessionsForTests()
   $sessions.set([])
   $profiles.set([])
@@ -213,6 +215,65 @@ describe('ChatSidebar offline fallback rows', () => {
     expect(asleepOpenFor('busy')).toBeNull()
     expect($notifications.get().map(n => n.message).join(' ')).toMatch(/^mini is not responding/)
     clearTranscriptTails()
+  })
+
+  // [daveey] The boot snapshot carries this Mac's own replica rows. One asleep at boot must not turn a live local row
+  // into a refused/read-only cached row when a later local list fails (2026-10-27 incident through the boot path).
+  it.each([
+    ['no connection_id', undefined],
+    ["connection_id 'local'", 'local']
+  ])(
+    'a local row with an asleep boot-snapshot copy still opens live when the local list fails (%s)',
+    (_, connectionId) => {
+      $sessions.set([
+        makeSessionInfo({
+          connection_id: connectionId,
+          id: 'live-1',
+          last_active: 9_000,
+          source: 'desktop',
+          title: 'Live one'
+        })
+      ])
+      const asleepAtBoot = rec('live-1', { gateway: 'macbook', local: true, synced_at: 1, title: 'Live one' })
+      applyBootSnapshot(
+        () =>
+          ({
+            appStartMs: 1_000,
+            hub: { available: true, gateway: 'macbook', sessions: [asleepAtBoot], stale: false, synced_at: 1 },
+            readMs: 1,
+            tree: null
+          }) as never
+      )
+      act(() => recordSessionGatewayUnavailable('local'))
+      const resume = vi.fn()
+      mount(resume)
+
+      expect(screen.getAllByText('Live one')).toHaveLength(1)
+      expect(screen.getByTestId('session-row-offline').getAttribute('aria-label')).toBe(
+        'Not responding · This computer, showing its last list'
+      )
+
+      fireEvent.click(screen.getByText('Live one'))
+
+      expect(resume).toHaveBeenCalledWith('live-1', expect.objectContaining({ id: 'live-1', offline_stale_list: true }))
+      expect(asleepOpenFor('live-1')).toBeNull()
+      const notices = $notifications.get().map(n => n.message).join(' ')
+      expect(notices).toMatch(/This computer is not responding/)
+      expect(notices).not.toMatch(/is offline/)
+    }
+  )
+
+  it('a remote row whose replica says its owner is asleep stays refused when its list fails too', () => {
+    $sessions.set([makeSessionInfo({ connection_id: 'conn-mini', id: 'a', source: 'desktop', title: 'Chat a' })])
+    setCached([rec('a')])
+    act(() => recordSessionGatewayUnavailable('conn-mini'))
+    const resume = vi.fn()
+    mount(resume)
+
+    fireEvent.click(screen.getByText('Chat a'))
+
+    expect(resume).not.toHaveBeenCalled()
+    expect($notifications.get().map(n => n.message).join(' ')).toMatch(/mini is offline/)
   })
 
   it('opens a live row normally', () => {
