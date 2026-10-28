@@ -567,6 +567,65 @@ def rewind_notify_cursor(
     return cur.rowcount > 0
 
 
+def _inherit_notify_subs(
+    conn: sqlite3.Connection, child_id: str, parents: Iterable[str], *,
+    created_at: Optional[int] = None,
+) -> None:
+    """Moved from ``kanban_db`` (file-size cap). Copy parents' notify subscriptions to a child, cursor caught up to the
+    child's current event so a late ``link_tasks`` never replays history.
+
+    Single owner of inheritance (create_task, link_tasks, decompose). It must
+    copy EVERY routing/delivery column: dropping ``chat_type`` made DM-originated
+    completions wake a fresh group session instead of the originating DM.
+
+    Omitting columns here silently degrades routing: a DM-originated child completion falls back to
+    chat_type='group' and wakes a fresh group-scoped session instead of the originating DM (issue #73030).
+
+    Only OWNING subscriptions are inherited (``_owning_sub_clause``). Observer subs (``shepherd``: explicit
+    ``notify-subscribe`` incl. hermes-hub's shepherd action; ``touch``: a comment/unblock/link) watch THAT card,
+    not the program under it: copying them made every chat that ever watched a shepherd card own all of its
+    descendants (runners-panel chat d48ade owned 4 foreign cards via t_82f80db4's 44 subs). [daveey]
+    """
+    parent_ids = tuple(dict.fromkeys(p for p in parents if p))
+    if not parent_ids:
+        return
+    row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events WHERE task_id = ?", (child_id,),
+    ).fetchone()
+    cursor = int(row["cursor"] if row is not None else 0)
+    placeholders = ",".join("?" * len(parent_ids))
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO kanban_notify_subs
+            (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
+             chat_type, notifier_profile, delivery_mode, delivery_metadata,
+             created_at, last_event_id)
+        SELECT ?, s.platform, s.chat_id, s.thread_id, s.user_id, s.user_id_alt,
+               COALESCE(s.chat_type, 'dm'), s.notifier_profile,
+               COALESCE(s.delivery_mode, 'notify'), s.delivery_metadata, ?, ?
+          FROM kanban_notify_subs s
+          LEFT JOIN tasks p ON p.id = s.task_id
+         WHERE s.task_id IN ({placeholders}) AND {_owning_sub_clause()}
+        """,
+        (child_id, int(created_at if created_at is not None else time.time()), cursor, *parent_ids),
+    )
+
+
+def _owning_sub_clause() -> str:
+    """SQL predicate (aliases ``s`` = sub, ``p`` = its task) for a subscription a child inherits.
+
+    Stamped provenance (``delivery_metadata.reason``) decides: ``shepherd``/``touch`` are observers and never
+    inherit; ``create``/``origin`` (and any other value) do. Legacy 'hub' rows are stamped once at board open
+    (``kanban_db_notify.stamp_legacy_hub_sub_provenance``); a 'hub' row still unstamped (written by an older
+    process since) counts as the origin binding only when written at creation (``LEGACY_ORIGIN_BIND_WINDOW_S``).
+    Every other unstamped row keeps the old inherit-everything behaviour (gateway DM subs carry no reason)."""
+    observers = ", ".join(f"'{r}'" for r in OBSERVER_SUB_REASONS)
+    reason = ("CASE WHEN json_valid(s.delivery_metadata) "
+              "THEN json_extract(s.delivery_metadata, '$.reason') END")
+    return (f"COALESCE({reason} IN ({observers}), 0) = 0 AND ({reason} IS NOT NULL OR s.platform != 'hub' "
+            f"OR s.created_at <= COALESCE(p.created_at, 0) + {LEGACY_ORIGIN_BIND_WINDOW_S})")
+
+
 # Late-bound origin namespace (see module docstring); imported LAST so this
 # module is fully populated before ``kanban_db`` imports from it.
 from hermes_cli import kanban_db as _kb
