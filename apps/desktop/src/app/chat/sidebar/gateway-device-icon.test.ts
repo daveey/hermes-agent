@@ -20,4 +20,33 @@ describe('gatewayDevice', () => {
     expect(gatewayDevice({ host: 'davids-mac-mini-1', id: 'm', kind: 'ssh', label: 'home' }, null)).toBe('mini')
     expect(gatewayDevice({ id: 'box', kind: 'ssh', label: 'workstation' }, null)).toBe('desktop')
   })
+
+  it('shows remote cloud/server gateways as cloud, not a desktop', () => {
+    // The hub: an EC2 box reached over SSH at a bare tailnet IP.
+    expect(
+      gatewayDevice(
+        {
+          host: '100.104.201.88',
+          id: 'hermes-hub',
+          kind: 'ssh',
+          label: 'hub (EC2)',
+          remoteHermesPath: '/home/ubuntu/.local/bin/hermes',
+          user: 'ubuntu'
+        },
+        null
+      )
+    ).toBe('cloud')
+    expect(gatewayDevice({ host: '10.0.0.5', id: 'g', kind: 'ssh', label: 'gpu', user: 'ubuntu' }, null)).toBe('cloud')
+    expect(
+      gatewayDevice({ host: '10.0.0.6', id: 'v', kind: 'ssh', label: 'box', remoteHermesPath: '/root/.local/bin/hermes' }, null)
+    ).toBe('cloud')
+    expect(gatewayDevice({ id: 'r', kind: 'remote', label: 'aws-worker' }, null)).toBe('cloud')
+    // A Mac reached over SSH stays a Mac.
+    expect(
+      gatewayDevice(
+        { host: 'davids-mac-mini-1', id: 'mac-mini', kind: 'ssh', label: 'mac-mini', user: 'daveey', remoteHermesPath: '/Users/daveey/code/hermes-agent/.venv/bin/hermes' },
+        null
+      )
+    ).toBe('mini')
+  })
 })

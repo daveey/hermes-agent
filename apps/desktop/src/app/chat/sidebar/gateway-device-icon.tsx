@@ -15,9 +15,38 @@ export type GatewayDevice = 'cloud' | 'desktop' | 'laptop' | 'mini'
 
 const LAPTOP_RE = /macbook|laptop|\bmbp\b|book/i
 const MINI_RE = /mac-?mini|\bmini\b|-mini|mini-/i
+// Remote servers: a cloud-ish name, or a Linux box (home under /home or
+// /root, or a stock cloud login) — a bare IP otherwise reads as a desktop.
+const CLOUD_RE = /\bec2\b|\baws\b|cloud|\bgcp\b|azure|\bvps\b|droplet|server|\bhub\b/i
+const CLOUD_USERS = new Set(['admin', 'ec2-user', 'root', 'ubuntu'])
+
+function looksLikeServer(
+  connection: Pick<DesktopRegistryConnection, 'kind' | 'label'> & {
+    host?: string
+    id?: string
+    remoteHermesPath?: string
+    user?: string
+  }
+): boolean {
+  if (connection.kind === 'local') {
+    return false
+  }
+
+  const name = [connection.label, connection.host, connection.id].filter(Boolean).join(' ')
+
+  return (
+    CLOUD_RE.test(name) ||
+    /^\/(home|root)\//.test(connection.remoteHermesPath ?? '') ||
+    CLOUD_USERS.has(connection.user ?? '')
+  )
+}
 
 export function gatewayDevice(
-  connection: Pick<DesktopRegistryConnection, 'id' | 'kind' | 'label'> & { host?: string },
+  connection: Pick<DesktopRegistryConnection, 'id' | 'kind' | 'label'> & {
+    host?: string
+    remoteHermesPath?: string
+    user?: string
+  },
   localHostname: null | string
 ): GatewayDevice {
   if (connection.kind === 'cloud') {
@@ -35,6 +64,10 @@ export function gatewayDevice(
 
   if (LAPTOP_RE.test(name)) {
     return 'laptop'
+  }
+
+  if (looksLikeServer(connection)) {
+    return 'cloud'
   }
 
   return 'desktop'
