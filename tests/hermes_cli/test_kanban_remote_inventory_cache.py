@@ -65,7 +65,7 @@ def test_a_store_change_reprojects(projection):
 
 def test_ttl_expiry_reprojects(projection, monkeypatch):
     calls, _ = projection
-    monkeypatch.setattr(activity, '_CACHE_TTL_S', 0.0)
+    monkeypatch.setattr(activity, '_LINKS_MAX_AGE_S', 0.0)  # the projection's own max age, not the counts TTL
     activity._remote_links()
     activity._remote_links()
     assert calls['n'] == 2

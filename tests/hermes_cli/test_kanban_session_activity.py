@@ -831,3 +831,62 @@ def test_concurrent_sidebar_reads_share_one_recompute_while_the_board_keeps_chan
     assert len(results) == 8
     assert all(active == {"s_live": 1} for active in results)
     assert len(reads) <= 2, f"{len(reads)} recomputes for 8 concurrent readers"
+
+
+def _replica_write(path: Path, gw: str, coll: str, key: str, seq: int, data: str = "{}") -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT OR REPLACE INTO replica VALUES (?, ?, ?, 1, ?, ?, 0)", (gw, coll, key, seq, data))
+
+
+def test_hub_session_rows_do_not_invalidate_the_remote_links_projection(kanban_root, monkeypatch):
+    """hub-sync rewrites ~10k replica ``sessions`` rows continuously. The projection reads only ``tasks`` and
+    ``gateway`` rows, so a sessions write must not force every reader to re-project (2026-10-27: ~19% of a Desktop
+    backend's GIL time); a tasks or gateway write still must."""
+    path = _make_replica(kanban_root / "hub-state", "macbook", [
+        {"_gw": "hub", "id": "t_r1", "status": "running", "sessions": [_shep("s_mac")]}])
+    projections: list[int] = []
+    real = ksa._project_remote_links
+    monkeypatch.setattr(ksa, "_project_remote_links", lambda: projections.append(1) or real())
+    monkeypatch.setattr(ksa, "_CACHE_TTL_S", 300.0)  # isolate the fingerprint from the TTL
+
+    first = ksa._remote_links()
+    for n in range(5):
+        _replica_write(path, "mini", "sessions", f"s_{n}", seq=10 + n)
+        assert ksa._remote_links() == first
+    assert len(projections) == 1
+
+    _replica_write(path, "hub", "gateway", "info", seq=20, data='{"seen": 1}')
+    ksa._remote_links()
+    assert len(projections) == 2
+    _replica_write(path, "hub", "tasks", "default/default/t_r1", seq=21,
+                   data=_json.dumps({"id": "t_r1", "status": "done", "profile": "default", "board": "default",
+                                     "sessions": [_shep("s_mac")], "children": [], "parents": []}))
+    ksa._remote_links()
+    assert len(projections) == 3
+
+
+def test_hub_signature_is_reused_until_the_file_changes_and_falls_back_on_old_replicas(kanban_root, tmp_path, monkeypatch):
+    path = _make_replica(kanban_root / "hub-state", "macbook", [])
+    queries: list[str] = []
+    real_open = ksa._open_ro
+
+    def _spy_open(p, *a, **k):
+        queries.append(str(p))
+        return real_open(p, *a, **k)
+
+    monkeypatch.setattr(ksa, "_open_ro", _spy_open)
+    a = ksa._hub_content_signature(path)
+    b = ksa._hub_content_signature(path)
+    assert a == b and len(queries) == 1  # unchanged file: the memo answers
+    _replica_write(path, "mini", "sessions", "s_x", seq=5)
+    assert ksa._hub_content_signature(path) == a and len(queries) == 2  # file moved: re-queried, same content
+
+    old = tmp_path / "old-hub.db"
+    with sqlite3.connect(old) as conn:  # pre-seq replica: no seq column, so the signature is the file stat
+        conn.executescript("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);"
+                           "CREATE TABLE replica (gw TEXT, coll TEXT, key TEXT, data TEXT, updated_at INTEGER);")
+    sig = ksa._hub_content_signature(old)
+    with sqlite3.connect(old) as conn:
+        conn.execute("INSERT INTO replica VALUES ('mini', 'sessions', 's', '{}', 0)")
+    assert ksa._hub_content_signature(old) != sig
+

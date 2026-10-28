@@ -794,13 +794,50 @@ def _park_of(task: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+_HUB_SIGNATURE_SQL = ("SELECT coll, COUNT(*), MAX(seq), TOTAL(seq) FROM replica WHERE coll IN ('tasks', 'gateway') "
+                      "GROUP BY coll")
+_hub_signature_memo: tuple | None = None  # ((path, stat key), signature)
+
+
+def _hub_content_signature(hub: Path) -> tuple:
+    """What the remote-links projection reads from the hub replica (``tasks`` and ``gateway`` rows, ``meta``
+    gateway), not the file's stat: hub-sync rewrites ~10k ``sessions`` rows continuously, so a stat-keyed
+    fingerprint changed on nearly every read and every caller re-projected 2.4k cards (~19% of a Desktop
+    backend's GIL time, 2026-10-27). ``seq`` is the replica's global write sequence, so COUNT + MAX + TOTAL of it
+    moves on any insert, update or delete of those rows. The query (~10 ms) re-runs only when the file's stat
+    moves; an unreadable replica falls back to the stat itself. [daveey]"""
+    global _hub_signature_memo
+    stat_key = []
+    for path in (hub, Path(str(hub) + "-wal")):
+        try:
+            st = path.stat()
+            stat_key.append((st.st_ino, st.st_size, st.st_mtime_ns))
+        except FileNotFoundError:
+            stat_key.append(None)
+    memo_key = (str(hub), tuple(stat_key))
+    memo = _hub_signature_memo
+    if memo is not None and memo[0] == memo_key:
+        return memo[1]
+    try:
+        conn = _open_ro(hub)
+        try:
+            rows = tuple(tuple(r) for r in conn.execute(_HUB_SIGNATURE_SQL).fetchall())
+            meta = conn.execute("SELECT v FROM meta WHERE k = 'gateway'").fetchone()
+        finally:
+            conn.close()
+        signature = (str(hub), stat_key[0][0] if stat_key[0] else None, rows, meta[0] if meta else None)
+    except (sqlite3.Error, OSError):
+        signature = memo_key
+    _hub_signature_memo = (memo_key, signature)
+    return signature
+
+
 def _activity_fingerprint() -> tuple:
-    """Invalidate on cross-process commits, including WAL writes and board replacement."""
+    """Invalidate on cross-process commits, including WAL writes and board replacement. The hub replica counts by
+    content (``_hub_content_signature``), the boards by stat."""
     paths = _board_db_paths()
     hub = _hub_db_path()
-    if hub is not None:
-        paths.append(hub)
-    signature = []
+    signature = [_hub_content_signature(hub)] if hub is not None else []
     for db in paths:
         for path in (db, Path(str(db) + "-wal")):
             try:
@@ -891,6 +928,12 @@ _links_lock = threading.Lock()
 _links_cache: tuple[float, tuple, tuple, list[dict[str, Any]]] | None = None  # (expires, scope, fingerprint, cards)
 
 
+# The links projection's fingerprint covers every store it reads except state.db (compression alias tips), so its
+# max age only bounds how late a rotated alias tip shows. Re-projecting every _CACHE_TTL_S (3 s) for that alone cost
+# a busy Desktop backend ~10% of a core. [daveey]
+_LINKS_MAX_AGE_S = 15.0
+
+
 def _links_fingerprint() -> tuple:
     """Every store the remote inventory reads except state.db (alias tips), which the TTL bounds instead."""
     from hermes_constants import get_hermes_home
@@ -909,7 +952,7 @@ def _links_fingerprint() -> tuple:
 def _remote_links(stale_ok: bool = False) -> list[dict[str, Any]]:
     """Shared origin-ledger projection, with preserved legacy associations.
 
-    One projection per scope serves every reader (counts, session task lists, plugins) for ``_CACHE_TTL_S`` while
+    One projection per scope serves every reader (counts, session task lists, plugins) for ``_LINKS_MAX_AGE_S`` while
     no store it reads has changed. Single-flight: concurrent readers wait for the running projection and share it
     instead of each rebuilding. Failures are never cached.
 
@@ -940,7 +983,7 @@ def _store_links(scope: tuple, fingerprint: tuple) -> list[dict[str, Any]]:
     change during the projection leaves the cache stale and triggers another rebuild."""
     global _links_cache
     cards = _project_remote_links()
-    _links_cache = (time.monotonic() + _CACHE_TTL_S, scope, fingerprint, cards)
+    _links_cache = (time.monotonic() + _LINKS_MAX_AGE_S, scope, fingerprint, cards)
     return list(cards)
 
 
@@ -1660,7 +1703,9 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     global _cache, _attention_cache, _remote_last, _links_cache, _snapshot_saved, _remote_read_memo
+    global _hub_signature_memo
     _remote_read_memo = None
+    _hub_signature_memo = None
     with _links_lock:
         _links_cache = None
     with _cache_lock:
