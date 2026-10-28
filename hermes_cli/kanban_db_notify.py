@@ -25,6 +25,13 @@ if TYPE_CHECKING:
 # Notifier reaction to a terminal event: "notify" = passive adapter.send only
 # (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only.
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
+# Subscription provenance (``delivery_metadata.reason``). Owning subs belong to the chat that created the
+# card (``create``: kanban_create's auto-sub; ``origin``: the cross-gateway origin binding) and are inherited
+# by its children; observer subs only watch that one card and are not (``kanban_db._inherit_notify_subs``).
+# ``shepherd`` = explicit notify-subscribe (incl. hermes-hub's shepherd action), ``touch`` = comment/unblock/link.
+# [daveey]
+OWNING_SUB_REASONS = ("create", "origin")
+OBSERVER_SUB_REASONS = ("shepherd", "touch")
 
 _SCALAR_TYPES = (str, int, float, bool)
 
@@ -107,6 +114,11 @@ def add_notify_sub(
         merged_metadata = dict(existing_metadata)
         if delivery_metadata:
             merged_metadata.update(delivery_metadata)
+            # Provenance only ever upgrades: re-subscribing the creating chat as a shepherd must not turn
+            # its owning sub into an observer that children stop inheriting. [daveey]
+            if (existing_metadata.get("reason") in OWNING_SUB_REASONS
+                    and merged_metadata.get("reason") not in OWNING_SUB_REASONS):
+                merged_metadata["reason"] = existing_metadata["reason"]
         metadata_json = _encode_notify_delivery_metadata(merged_metadata) if merged_metadata else None
         conn.execute(
             """

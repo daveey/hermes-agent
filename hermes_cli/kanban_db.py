@@ -1422,6 +1422,11 @@ def _inherit_notify_subs(
 
     Omitting columns here silently degrades routing: a DM-originated child completion falls back to
     chat_type='group' and wakes a fresh group-scoped session instead of the originating DM (issue #73030).
+
+    Only OWNING subscriptions are inherited (``_owning_sub_clause``). Observer subs (``shepherd``: explicit
+    ``notify-subscribe`` incl. hermes-hub's shepherd action; ``touch``: a comment/unblock/link) watch THAT card,
+    not the program under it: copying them made every chat that ever watched a shepherd card own all of its
+    descendants (runners-panel chat d48ade owned 4 foreign cards via t_82f80db4's 44 subs). [daveey]
     """
     parent_ids = tuple(dict.fromkeys(p for p in parents if p))
     if not parent_ids:
@@ -1437,14 +1442,36 @@ def _inherit_notify_subs(
             (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
              chat_type, notifier_profile, delivery_mode, delivery_metadata,
              created_at, last_event_id)
-        SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt,
-               COALESCE(chat_type, 'dm'), notifier_profile,
-               COALESCE(delivery_mode, 'notify'), delivery_metadata, ?, ?
-          FROM kanban_notify_subs
-         WHERE task_id IN ({placeholders})
+        SELECT ?, s.platform, s.chat_id, s.thread_id, s.user_id, s.user_id_alt,
+               COALESCE(s.chat_type, 'dm'), s.notifier_profile,
+               COALESCE(s.delivery_mode, 'notify'), s.delivery_metadata, ?, ?
+          FROM kanban_notify_subs s
+          LEFT JOIN tasks p ON p.id = s.task_id
+         WHERE s.task_id IN ({placeholders}) AND {_owning_sub_clause()}
         """,
         (child_id, int(created_at if created_at is not None else time.time()), cursor, *parent_ids),
     )
+
+
+# A legacy (unstamped) 'hub' sub written within this many seconds of its card's creation is the origin
+# binding (``kanban_origin.bind`` runs in the creating tool call); later ones are hermes-hub shepherds. [daveey]
+LEGACY_ORIGIN_BIND_WINDOW_S = 120
+
+
+def _owning_sub_clause() -> str:
+    """SQL predicate (aliases ``s`` = sub, ``p`` = its task) for a subscription a child inherits.
+
+    Stamped provenance (``delivery_metadata.reason``) decides: ``shepherd``/``touch`` are observers and never
+    inherit; ``create``/``origin`` (and any other value) do. Unstamped rows predate stamping: a 'hub' row is the
+    origin binding only when written at creation (``LEGACY_ORIGIN_BIND_WINDOW_S``), every other platform keeps
+    the old inherit-everything behaviour (gateway DM subs carry no reason)."""
+    from hermes_cli.kanban_db_notify import OBSERVER_SUB_REASONS
+
+    observers = ", ".join(f"'{r}'" for r in OBSERVER_SUB_REASONS)
+    reason = ("CASE WHEN json_valid(s.delivery_metadata) "
+              "THEN json_extract(s.delivery_metadata, '$.reason') END")
+    return (f"COALESCE({reason} IN ({observers}), 0) = 0 AND ({reason} IS NOT NULL OR s.platform != 'hub' "
+            f"OR s.created_at <= COALESCE(p.created_at, 0) + {LEGACY_ORIGIN_BIND_WINDOW_S})")
 
 
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
