@@ -105,6 +105,14 @@ def _emergency_cleanup_all_sessions():
     # Safe even if we never used the browser — owner_pid liveness protects daemons
     # owned by other live hermes processes.
     _best_effort("Orphan reap on exit", _reap_orphaned_browser_sessions)
+    # [daveey] Harness daemons are not in _active_sessions on the CDP-override/local routes, so the
+    # cleanup above skips them: drop this process's owner stamps and stop daemons no live owner holds.
+    _best_effort("Harness daemon reap on exit", _reap_harness_daemons_on_exit)
+
+
+def _reap_harness_daemons_on_exit() -> None:
+    from tools.browser_use_cli import reap_orphaned_harness_daemons
+    reap_orphaned_harness_daemons(drop_own=True)
 
 
 @contextlib.contextmanager

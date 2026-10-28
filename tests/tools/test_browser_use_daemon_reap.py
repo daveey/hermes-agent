@@ -1,0 +1,174 @@
+"""Named browser-harness daemons stop once their owner process is gone or they sit idle."""
+import os
+import signal
+import subprocess
+import sys
+import textwrap
+import time
+
+import pytest
+
+from tools import browser_use_cli as bu
+
+
+@pytest.fixture
+def runtime(tmp_path, monkeypatch):
+    rt = tmp_path / "runtime"
+    monkeypatch.setattr(bu, "_read_browser_cfg", dict)
+    monkeypatch.setattr(bu, "_last_reap", 0.0)
+    reloads = []
+
+    def run(cmd, code, env, timeout):
+        if "--reload" in cmd:
+            reloads.append(env["BU_NAME"])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(bu, "_find_cli", lambda: [sys.executable, "-m", "browser_harness.run"])
+    monkeypatch.setattr(bu, "_run_cli_killing_process_group", run)
+    return {"env": {"BH_RUNTIME_DIR": str(rt)}, "dir": rt / bu._OWNERS_DIR, "reloads": reloads}
+
+
+def _dead_pid():
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def test_live_owner_keeps_daemon_dead_owner_reaps_it(runtime):
+    bu.record_daemon_owner(runtime["env"], "mine")
+    (runtime["dir"] / "orphan").mkdir(parents=True)
+    (runtime["dir"] / "orphan" / f"{_dead_pid()}-123").touch()
+
+    assert bu.reap_orphaned_harness_daemons(runtime["env"]) == ["orphan"]
+    assert runtime["reloads"] == ["orphan"]
+    assert not (runtime["dir"] / "orphan").exists()
+    assert (runtime["dir"] / "mine").is_dir()
+
+
+def test_recycled_pid_with_other_start_time_is_dead(runtime):
+    (runtime["dir"] / "recycled").mkdir(parents=True)
+    (runtime["dir"] / "recycled" / f"{os.getpid()}-1").touch()  # this pid, but not this start
+    assert bu.reap_orphaned_harness_daemons(runtime["env"]) == ["recycled"]
+
+
+def test_default_daemon_is_never_stamped(runtime):
+    bu.record_daemon_owner(runtime["env"], "default")
+    bu.record_daemon_owner(runtime["env"], "")
+    assert not runtime["dir"].exists()
+
+
+def test_idle_daemon_is_reaped_even_with_live_owner(runtime, monkeypatch):
+    monkeypatch.setattr(bu, "_read_browser_cfg", lambda: {"harness_daemon_idle_s": 60})
+    bu.record_daemon_owner(runtime["env"], "stale")
+    assert bu.reap_orphaned_harness_daemons(runtime["env"], now=time.time() + 30) == []
+    assert bu.reap_orphaned_harness_daemons(runtime["env"], now=time.time() + 120) == ["stale"]
+
+
+def test_exit_drops_own_stamp_but_keeps_daemon_a_live_sibling_holds(runtime):
+    sibling = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        from gateway.status import get_process_start_time
+        bu.record_daemon_owner(runtime["env"], "solo")
+        bu.record_daemon_owner(runtime["env"], "shared")
+        (runtime["dir"] / "shared" / f"{sibling.pid}-{get_process_start_time(sibling.pid)}").touch()
+
+        assert bu.reap_orphaned_harness_daemons(runtime["env"], drop_own=True) == ["solo"]
+        assert [p.name for p in (runtime["dir"] / "shared").iterdir()] == [
+            f"{sibling.pid}-{get_process_start_time(sibling.pid)}"]
+    finally:
+        sibling.kill()
+        sibling.wait()
+
+
+def test_browser_exec_stamps_its_named_daemon(runtime, monkeypatch):
+    monkeypatch.setattr(bu, "_base_subprocess_env", lambda: dict(runtime["env"]))
+    monkeypatch.setattr(bu, "_resolve_exec_route", lambda *a: (None, None))
+    monkeypatch.setattr(bu, "_attach_vault_supervisor", lambda env, task_id: None)
+    monkeypatch.setattr(bu, "_workspace_dir", lambda task_id: None)
+    bu.browser_exec("print(1)", session="research", task_id="t")
+    from gateway.status import get_process_start_time
+    assert [p.name for p in (runtime["dir"] / "research").iterdir()] == [
+        f"{os.getpid()}-{get_process_start_time(os.getpid())}"]
+
+
+# A real owner process drives a named daemon through browser_exec, is SIGKILLed (no atexit, as for a
+# scope-killed Kanban worker), and the next process's reaper stops the daemon it left behind. The "CLI"
+# is a stand-in that, like browser-harness, spawns a detached daemon (start_new_session) on a normal call
+# and stops it from its pid file on --reload.
+_FAKE_CLI = textwrap.dedent("""
+    import os, signal, subprocess, sys, time
+    rt, name = os.environ["BH_RUNTIME_DIR"], os.environ.get("BU_NAME", "default")
+    pid_file = os.path.join(rt, f"bu-{name}.pid")
+    if sys.argv[1:] == ["--reload"]:
+        try:
+            os.kill(int(open(pid_file).read()), signal.SIGTERM)
+            os.unlink(pid_file)
+        except (OSError, ValueError):
+            pass
+        sys.exit(0)
+    sys.stdin.read()
+    if not os.path.exists(pid_file):
+        d = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        open(pid_file, "w").write(str(d.pid))
+    print("ok")
+""")
+
+_OWNER = textwrap.dedent("""
+    import sys, time
+    from tools import browser_use_cli as bu
+    cli, rt = sys.argv[1], sys.argv[2]
+    bu._find_cli = lambda: [sys.executable, cli]
+    bu._base_subprocess_env = lambda: {"BH_RUNTIME_DIR": rt, "PATH": "/usr/bin:/bin"}
+    bu._resolve_exec_route = lambda *a: (None, None)
+    bu._attach_vault_supervisor = lambda env, task_id: None
+    bu._workspace_dir = lambda task_id: None
+    bu._read_browser_cfg = lambda: {}
+    print(bu.browser_exec("print(1)", session="leaky", task_id="t"), flush=True)
+    time.sleep(600)
+""")
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # A reaped-but-unwaited child of launchd/init is gone; a zombie of ours would still answer kill 0.
+    out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False).stdout.strip()
+    return bool(out) and not out.startswith("Z")
+
+
+@pytest.mark.platforms("posix")
+def test_sigkilled_owner_leaves_daemon_the_next_reap_stops(tmp_path, monkeypatch):
+    rt = tmp_path / "rt"
+    rt.mkdir()
+    cli = tmp_path / "fake_cli.py"
+    cli.write_text(_FAKE_CLI)
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    owner = subprocess.Popen([sys.executable, "-c", _OWNER, str(cli), str(rt)], cwd=repo,
+                             env={**os.environ, "PYTHONPATH": repo}, stdout=subprocess.PIPE, text=True)
+    daemon_pid = None
+    try:
+        assert '"success": true' in owner.stdout.readline()
+        daemon_pid = int((rt / "bu-leaky.pid").read_text())
+        assert _alive(daemon_pid)
+
+        owner.send_signal(signal.SIGKILL)
+        owner.wait(10)
+        time.sleep(0.5)
+        assert _alive(daemon_pid), "the detached daemon outlives its SIGKILLed owner (the leak)"
+
+        monkeypatch.setattr(bu, "_find_cli", lambda: [sys.executable, str(cli)])
+        monkeypatch.setattr(bu, "_read_browser_cfg", dict)
+        assert bu.reap_orphaned_harness_daemons({"BH_RUNTIME_DIR": str(rt), "PATH": "/usr/bin:/bin"}) == ["leaky"]
+        deadline = time.time() + 10
+        while _alive(daemon_pid) and time.time() < deadline:
+            time.sleep(0.1)
+        assert not _alive(daemon_pid)
+        assert not (rt / bu._OWNERS_DIR / "leaky").exists()
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+        if daemon_pid and _alive(daemon_pid):
+            os.kill(daemon_pid, signal.SIGKILL)
