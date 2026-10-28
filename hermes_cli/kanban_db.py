@@ -1215,7 +1215,7 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
-    validate_workspace: bool = False,
+    validate_workspace: bool = False, validate_skills: bool = False,
     human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None,
     requires: Optional[list[str]] = None,
@@ -1226,10 +1226,9 @@ def create_task(
     ``lint_blocked=False`` is for internal trackers parked blocked without a human ask
     (swarm root); everything else must pass ``human_request`` with ``initial_status='blocked'``.
     ``origin_intent`` atomically persists the task and receipt intent, not origin readback.
-    ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project
-    ``worktree`` workspace that could never resolve at spawn with
-    ``WorktreeWorkspaceConfigError`` naming the fix, instead of letting the
-    dispatcher discover it later. [daveey]
+    ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project ``worktree`` workspace
+    that could never resolve at spawn (``WorktreeWorkspaceConfigError``); ``validate_skills=True`` rejects
+    a pinned skill the assignee cannot load (``UnknownSkillError``). [daveey]
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
     forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
@@ -1312,9 +1311,10 @@ def create_task(
         from hermes_cli.kanban_db_workspace import (
             WorktreeWorkspaceConfigError, worktree_workspace_problem,
         )
-        problem = worktree_workspace_problem(workspace_path, board=board)
-        if problem:
+        if problem := worktree_workspace_problem(workspace_path, board=board):
             raise WorktreeWorkspaceConfigError(problem)
+    from hermes_cli.kanban_skill_check import check_task_skills
+    check_task_skills(skills_list, assignee, enabled=validate_skills)
 
     now = int(time.time())
 

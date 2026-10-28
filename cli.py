@@ -1027,11 +1027,15 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
         skills_prompt, loaded_skills, missing_skills = result
         if missing_skills:
             from agent.skill_commands import format_missing_skills
-            # A typo'd name must not crash a kanban worker; only a fully-missing set fails loudly.
-            if not loaded_skills:
+            from hermes_cli.kanban_skill_check import missing_pin_note
+            # A typo'd name must not crash a kanban worker: it starts with a note naming the missing pins
+            # (#119619). Outside a worker, a fully-missing set still fails loudly.
+            note = missing_pin_note(missing_skills)
+            if not loaded_skills and not note:
                 raise ValueError(format_missing_skills(missing_skills))
             logger.warning("Skipping %s. Continuing with: %s. List available skills with `hermes skills list`.",
-                           format_missing_skills(missing_skills), ", ".join(loaded_skills))
+                           format_missing_skills(missing_skills), ", ".join(loaded_skills) or "no pinned skills")
+            skills_prompt = "\n\n".join(p for p in (skills_prompt, note) if p)
         if skills_prompt:
             self.system_prompt = "\n\n".join(p for p in (self.system_prompt, skills_prompt) if p).strip()
         self.preloaded_skills += [name for name in loaded_skills if name not in self.preloaded_skills]

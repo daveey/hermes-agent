@@ -31,9 +31,6 @@ pytestmark = [
 KNOWN: dict[str, tuple[str, str]] = {
     "outside": (r"card done with its declared outside-workspace artifact never attached",
                 "#120647 kanban_complete artifact outside the workspace is silently never attached"),
-    "test_worker_with_unresolvable_pinned_skill_still_starts_its_session": (
-        r"worker died before its session \(exits=",
-        "#119619 dispatcher-owned worker with a stale --skill pin exits rc=1 before its session"),
 }
 
 _TASK_RE = re.compile(r"work kanban task (t_[0-9a-f]+)")

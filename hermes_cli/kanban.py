@@ -430,6 +430,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_capabilities import CapabilityMismatchError
         from hermes_cli.kanban_pin_provider import PinProviderUnresolvedError
         from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
+        from hermes_cli.kanban_skill_check import UnknownSkillError
         try:
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
@@ -452,11 +453,11 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 human_request=getattr(args, "human_request", None),
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
-                validate_workspace=True,
+                validate_workspace=True, validate_skills=True,
             )
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)
-        except CapabilityMismatchError as exc:
+        except (CapabilityMismatchError, UnknownSkillError) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
         except (PinProviderUnresolvedError, ModelProviderMismatchError) as exc:
             return _err(f"kanban: {exc}", 2)

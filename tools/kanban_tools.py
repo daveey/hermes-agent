@@ -231,6 +231,10 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                     return tool_error(str(e), code=e.code)
                 if isinstance(e, CapabilityMismatchError):
                     return tool_error(str(e), code=e.code, assignee=e.assignee, missing=e.missing)
+                from hermes_cli.kanban_skill_check import UnknownSkillError
+                if isinstance(e, UnknownSkillError):  # the worker could never load it: refuse, don't create [daveey]
+                    return tool_error(str(e), code=e.code, rejection="invalid_args", assignee=e.assignee,
+                                      unknown_skills=e.missing, suggestions=e.suggestions)
 
                 if not isinstance(e, ValueError):
                     logger.exception(f"{tool_name} failed")
@@ -1648,7 +1652,7 @@ def _handle_create(args: dict, **kw) -> str:
             origin_intent=origin_intent,
             # Reject a worktree path the dispatcher could never resolve now, to the
             # creator, instead of burning spawn retries on it later. [daveey]
-            validate_workspace=True)
+            validate_workspace=True, validate_skills=True)
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
         wait = [e for e in kb.list_events(conn, new_tid) if e.kind == "dependency_wait"]
         gate = {"gated": True, "gated_by": wait[-1].payload["parent"]} if wait else {"gated": False}

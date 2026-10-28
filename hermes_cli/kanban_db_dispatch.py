@@ -1215,8 +1215,8 @@ class _DeadWorker:
     protocol_violation: bool = False
     rate_limited: bool = False
     terminal_provider: bool = False
-    """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
-    credential/model — trips the breaker on this first occurrence."""
+    """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's credential/model — trips at once."""
+    unknown_skill: bool = False  # died of ``Unknown skill(s)``: blocked as ``assignment`` at once [daveey]
 
     @property
     def run_outcome(self) -> str:
@@ -1252,6 +1252,7 @@ def _classify_dead_worker(
         if worker_output:
             dead.error_text += f" Worker's last output: {worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
+            dead.unknown_skill = dead.kind == "nonzero_exit" and "Unknown skill(s):" in worker_output
     return dead
 
 
@@ -1459,11 +1460,8 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                     "protocol_violation_limit": violation_limit,
                 },
             )
-        elif dead.terminal_provider:
-            # A retry cannot heal a revoked credential or a missing model, so
-            # the whole ``failure_limit`` budget would be spent on identical
-            # failures. ``force_trip`` blocks now, sticky: ``recompute_ready``
-            # must not auto-resume it before the operator fixes the provider.
+        elif dead.terminal_provider or dead.unknown_skill:
+            # No retry heals a revoked credential, a gone model or a missing pinned skill: block now, sticky.
             tripped = _record_task_failure(
                 conn, tid,
                 error=error_text,
@@ -1471,7 +1469,9 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 force_trip=True,
                 release_claim=False,
                 end_run=False,
-                event_payload_extra={"pid": pid, "claimer": claimer, "terminal_provider": True},
+                event_payload_extra={"pid": pid, "claimer": claimer,
+                                     "unknown_skill" if dead.unknown_skill else "terminal_provider": True},
+                block_kind="assignment" if dead.unknown_skill else "transient",
             )
         else:
             is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
@@ -1540,7 +1540,7 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
-    infrastructure: bool = False,
+    infrastructure: bool = False, block_kind: str = "transient",
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
@@ -1614,15 +1614,15 @@ def _record_task_failure(
         # Spawn path (release_claim) is still running and also clears claim
         # state; the timeout/crash path already did.
         conn.execute(
-            "UPDATE tasks SET status = 'triage', block_kind = 'transient', human_request = NULL, "
+            "UPDATE tasks SET status = 'triage', block_kind = ?, human_request = NULL, "
             + ("claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
                if release_claim else "")
             + "consecutive_failures = ?, last_failure_error = ? "
             "WHERE id = ? AND status IN ('running', 'ready', 'review')",
-            (failures, error, task_id),
+            (block_kind, failures, error, task_id),
         )
         payload = {
-            "kind": "transient",
+            "kind": block_kind,
             "reason_code": "worker_failures_exhausted",
             "failures": failures,
             "effective_limit": effective_limit,
