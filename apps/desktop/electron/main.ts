@@ -246,6 +246,7 @@ import {
   type UninstallSummaryDetails
 } from './desktop-uninstall'
 import { describeDevCdpDecision, resolveDevCdpPort } from './dev-cdp'
+import { decodeResponseBody, displayTranscriptHeaders } from './display-transcript'
 import { preReadyDockLaunchSteps } from './dock-launch-order'
 import { embedHostOrigin } from './embed-host'
 import { installEmbedReferer } from './embed-referer'
@@ -5663,6 +5664,8 @@ function fetchJson(url, token, options: any = {}) {
             method: options.method || 'GET',
             headers: {
               ...headersForRemoteRequest(url),
+              // [daveey] Transcript pages: slim + gzip when the backend supports it (display-transcript.ts).
+              ...displayTranscriptHeaders(options.method, url),
               ...(options.headers || {}),
               'Content-Type': contentType,
               'X-Hermes-Session-Token': token,
@@ -5680,7 +5683,15 @@ function fetchJson(url, token, options: any = {}) {
             res.on('error', reject)
             res.on('data', chunk => chunks.push(chunk))
             res.on('end', () => {
-              const text = Buffer.concat(chunks).toString('utf8')
+              let text: string
+
+              try {
+                text = decodeResponseBody(Buffer.concat(chunks), res.headers['content-encoding'])
+              } catch (error) {
+                reject(error)
+
+                return
+              }
 
               if ((res.statusCode || 500) >= 400) {
                 reject(httpStatusError(res.statusCode, text, res.statusMessage))
