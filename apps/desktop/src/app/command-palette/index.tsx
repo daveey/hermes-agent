@@ -59,6 +59,7 @@ import {
   Wrench,
   Zap
 } from '@/lib/icons'
+import { runBuiltinAction } from '@/lib/keybinds/plugin-actions'
 import { getServers } from '@/lib/mcp-servers'
 import { normalize } from '@/lib/text'
 import { rollbackSentence } from '@/lib/update-copy'
@@ -959,7 +960,12 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
             id: 'nav-new',
             keywords: ['chat', 'create'],
             label: cc.nav.newChat.title,
-            run: go(NEW_CHAT_ROUTE)
+            // [daveey] Same as ⌘N: the saved new-session gateway, not the one on screen.
+            run: () => {
+              if (!runBuiltinAction('session.new')) {
+                go(NEW_CHAT_ROUTE)()
+              }
+            }
           },
           ...(canOpenNewWindow()
             ? [

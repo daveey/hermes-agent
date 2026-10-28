@@ -7,6 +7,7 @@ import { setTerminalTakeover } from '@/app/right-sidebar/store'
 import { toggleTerminalPane } from '@/app/right-sidebar/terminal/reveal-focus'
 import { closeActiveTerminal, createTerminal, cycleTerminal } from '@/app/right-sidebar/terminal/terminals'
 import { appViewForPath, isOverlayView } from '@/app/routes'
+import { defaultNewSessionTarget, prepareDefaultNewSession } from '@/app/session/new-session-route'
 import {
   activateTreeTabSlot,
   cycleTreeTabInFocusedZone,
@@ -336,9 +337,21 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'nav.cron': () => navigate(CRON_ROUTE),
     'nav.agents': () => navigate(AGENTS_ROUTE),
 
-    // Fork ⌘N: new chat on This device — re-homes onto the local gateway when
-    // another one is selected (the switch re-homes the fresh draft).
+    // Fork ⌘N: new chat on the saved new-session gateway (right-click a gateway
+    // in the device switcher → "Use for new sessions"), like the sidebar's New
+    // session row. Opening a session elsewhere never moves it. With no saved
+    // target: This device — re-homes onto the local gateway when another one is
+    // selected (the switch re-homes the fresh draft).
     'session.new': () => {
+      if (defaultNewSessionTarget()) {
+        setWorkspaceScope('sessions')
+        prepareDefaultNewSession()
+        deps.startFreshSession()
+        window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
+
+        return
+      }
+
       startNewSessionHere()
       void selectThisDeviceForNewChat().catch((error: unknown) =>
         notifyError(error, translateNow('profiles.switchConnectionFailed', thisDeviceLabel()))

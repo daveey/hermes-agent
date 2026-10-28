@@ -2576,6 +2576,13 @@ export interface Translations extends NoticeTranslations {
     defaultSet: (name: string) => string
     defaultDescription: string
     failedSetDefault: string
+    useForNewSessions: string
+    newSessionsStartHere: string
+    newSessionsSet: (name: string) => string
+    newSessionsDescription: string
+    newSessionTargetUnreachable: (name: string) => string
+    newSessionTargetUnreachableDetail: string
+    createOnThisDevice: (name: string) => string
     setColor: (color: string) => string
     autoColor: string
     noProfiles: string

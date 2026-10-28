@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { isMacPlatform } from '@/lib/platform'
 import type * as Connections from '@/store/connections'
+import { $defaultProfileRoute } from '@/store/default-profile'
 import { resetBinding } from '@/store/keybinds'
+import { $newChatRoute, ensureGatewayAgent } from '@/store/profile'
 
 import { useKeybinds } from './use-keybinds'
 
@@ -18,6 +20,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/store/connections', async importOriginal => ({
   ...(await importOriginal<ConnectionsModule>()),
   selectThisDeviceForNewChat: mocks.selectThisDeviceForNewChat
+}))
+
+vi.mock('@/store/profile', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  ensureGatewayAgent: vi.fn(async () => undefined)
 }))
 
 vi.mock('@/themes/context', () => ({
@@ -65,6 +72,9 @@ describe('⌘N / ⌘⇧N new session gateway targeting', () => {
     resetBinding('session.newSameGateway')
     deps.startFreshSession.mockReset()
     mocks.selectThisDeviceForNewChat.mockClear()
+    $defaultProfileRoute.set(null)
+    $newChatRoute.set(null)
+    vi.mocked(ensureGatewayAgent).mockClear()
   })
 
   it('⌘N starts a new session and switches the gateway to This device', () => {
@@ -81,5 +91,28 @@ describe('⌘N / ⌘⇧N new session gateway targeting', () => {
     expect(event.defaultPrevented).toBe(true)
     expect(deps.startFreshSession).toHaveBeenCalledOnce()
     expect(mocks.selectThisDeviceForNewChat).not.toHaveBeenCalled()
+  })
+
+  // [daveey] A gateway saved with "Use for new sessions" wins over This device.
+  it('⌘N starts the new session on the saved new-session gateway instead of This device', () => {
+    $defaultProfileRoute.set({ connectionId: 'hermes-hub', profile: 'default' })
+
+    const event = pressN(false)
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(deps.startFreshSession).toHaveBeenCalledOnce()
+    expect(mocks.selectThisDeviceForNewChat).not.toHaveBeenCalled()
+    expect($newChatRoute.get()).toEqual({ connectionId: 'hermes-hub', profile: 'default' })
+    expect(ensureGatewayAgent).toHaveBeenCalledWith('hermes-hub', 'default')
+  })
+
+  it('⌘⇧N still starts on the gateway on screen when a new-session gateway is saved', () => {
+    $defaultProfileRoute.set({ connectionId: 'hermes-hub', profile: 'default' })
+
+    pressN(true)
+
+    expect(deps.startFreshSession).toHaveBeenCalledOnce()
+    expect($newChatRoute.get()).toBeNull()
+    expect(ensureGatewayAgent).not.toHaveBeenCalled()
   })
 })

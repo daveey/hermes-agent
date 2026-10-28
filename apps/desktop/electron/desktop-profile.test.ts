@@ -214,3 +214,22 @@ test.each([null, 'local'])(
     }
   }
 )
+
+// [daveey] The device switcher's "Use for new sessions" saves this route; it must
+// survive a relaunch and later workspace switches (remember) in any window.
+test('a gateway saved for new sessions survives relaunch and workspace switches', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-profile-new-session-'))
+  const target = path.join(root, 'active-profile.json')
+  const hub = { connectionId: 'hermes-hub', profile: 'default' }
+
+  try {
+    const first = createDesktopProfilePreferences(target)
+
+    first.setDefault(hub)
+    first.remember('other')
+
+    assert.deepEqual(createDesktopProfilePreferences(target).getDefault(), hub)
+  } finally {
+    fs.rmSync(root, { force: true, recursive: true })
+  }
+})

@@ -2274,5 +2274,12 @@
   "zones.closeRunningTitle": ["ja","zh-hant"],
   "zones.newSessionTab": ["ar"],
   "zones.newTab": ["ar","ru"],
-  "zones.zoneMenuLabel": ["ja","zh-hant"]
+  "zones.zoneMenuLabel": ["ja","zh-hant"],
+  "profiles.useForNewSessions": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "profiles.newSessionsStartHere": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "profiles.newSessionsSet": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "profiles.newSessionsDescription": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "profiles.newSessionTargetUnreachable": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "profiles.newSessionTargetUnreachableDetail": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "profiles.createOnThisDevice": ["ar","de","es","fr","ja","ru","zh","zh-hant"]
 }

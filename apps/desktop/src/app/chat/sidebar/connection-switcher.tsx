@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,8 +27,9 @@ import { triggerHaptic } from '@/lib/haptics'
 import { Loader2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $activeConnectionId, $connectionsRegistry, $pendingConnectionId, selectConnection } from '@/store/connections'
+import { $defaultProfileRoute, setDefaultProfile } from '@/store/default-profile'
 import { closeFindBar } from '@/store/find-in-page'
-import { notifyError } from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 
 import { ConnectionGlyph } from './connection-glyph'
 import { useLocalDeviceSwitch } from './local-device-switch'
@@ -37,6 +39,7 @@ export function ConnectionSwitcher({ compact = false, onConnect }: { compact?: b
   const registry = useStore($connectionsRegistry)
   const activeConnectionId = useStore($activeConnectionId)
   const pendingConnectionId = useStore($pendingConnectionId)
+  const newSessionConnectionId = useStore($defaultProfileRoute)?.connectionId ?? null
   const [searchQuery, setSearchQuery] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const connectionListRef = useRef<HTMLDivElement>(null)
@@ -113,6 +116,22 @@ export function ConnectionSwitcher({ compact = false, onConnect }: { compact?: b
         notifyError(error, t.profiles.switchConnectionFailed(connection?.label ?? connectionId))
       )
     })()
+  }
+
+  // [daveey] Right-click a gateway → "Use for new sessions". It only saves the
+  // app-wide default route (Electron-persisted); it never switches what is on
+  // screen, and opening a session elsewhere never changes it.
+  const makeNewSessionTarget = async (connection: DesktopRegistryConnection) => {
+    try {
+      await setDefaultProfile({ connectionId: connection.id, profile: 'default' })
+      notify({
+        kind: 'success',
+        title: t.profiles.newSessionsSet(connection.label),
+        message: t.profiles.newSessionsDescription
+      })
+    } catch (error) {
+      notifyError(error, t.profiles.failedSetDefault)
+    }
   }
 
   return (
@@ -207,15 +226,44 @@ export function ConnectionSwitcher({ compact = false, onConnect }: { compact?: b
                 {t.settings.connections.noSearchResults}
               </div>
             ) : (
-              displayedConnections.map(connection => (
-                <DropdownMenuRadioItem
-                  className={cn('min-w-0', searchable && dropdownMenuRow)}
-                  key={connection.id}
-                  value={connection.id}
-                >
-                  <ConnectionLabel connection={connection} />
-                </DropdownMenuRadioItem>
-              ))
+              displayedConnections.map(connection => {
+                const isNewSessionTarget = connection.id === newSessionConnectionId
+
+                return (
+                  <ContextMenu key={connection.id}>
+                    <ContextMenuTrigger asChild>
+                      <DropdownMenuRadioItem
+                        className={cn('min-w-0', searchable && dropdownMenuRow)}
+                        data-new-session-target={isNewSessionTarget ? '' : undefined}
+                        value={connection.id}
+                      >
+                        <ConnectionLabel connection={connection} />
+                        {isNewSessionTarget && (
+                          <span
+                            aria-label={t.profiles.newSessionsStartHere}
+                            className="ml-auto flex shrink-0 items-center text-(--ui-text-tertiary)"
+                            role="img"
+                            title={t.profiles.newSessionsStartHere}
+                          >
+                            <Codicon aria-hidden="true" name="home" size="0.75rem" />
+                          </span>
+                        )}
+                      </DropdownMenuRadioItem>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent aria-label={connection.label} className="min-w-44">
+                      <ContextMenuItem
+                        disabled={isNewSessionTarget || !window.hermesDesktop?.profile?.setDefault}
+                        onSelect={() => void makeNewSessionTarget(connection)}
+                      >
+                        <Codicon name={isNewSessionTarget ? 'check' : 'home'} size="0.875rem" />
+                        <span>
+                          {isNewSessionTarget ? t.profiles.newSessionsStartHere : t.profiles.useForNewSessions}
+                        </span>
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                )
+              })
             )}
           </DropdownMenuRadioGroup>
           <DropdownMenuSeparator className={searchable ? 'm-0' : undefined} />

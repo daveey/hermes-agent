@@ -6,6 +6,8 @@ import { registerTerminalContextMenu } from '@/app/right-sidebar/terminal/termin
 import { DirectiveContent } from '@/components/assistant-ui/directive-text'
 import { ContextMenu, ContextMenuTrigger, HERMES_CONTEXT_MENU_TRIGGER_ATTR } from '@/components/ui/context-menu'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
+import { en } from '@/i18n/en'
+import { registerBuiltinActionRunner } from '@/lib/keybinds/plugin-actions'
 import { $previewTabs, closeRightRail } from '@/store/preview'
 import { $connection } from '@/store/session'
 
@@ -19,6 +21,7 @@ import {
 } from './store'
 import { resolveDomTarget } from './target'
 
+const NEW_CHAT_LABEL = en.commandCenter.nav.newChat.title
 const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDesktop'] }
 
 function installBridge(partial: Partial<Window['hermesDesktop']> = {}) {
@@ -377,6 +380,22 @@ describe('AppContextMenu', () => {
     fireEvent.contextMenu(host.querySelector('p')!)
 
     expect(await screen.findByText('Settings')).toBeTruthy()
+  })
+
+  // [daveey] The shell menu's New chat is ⌘N: it lands on the saved new-session
+  // gateway (session.new), not whichever gateway is on screen.
+  it('runs the session.new action from the shell New chat item', async () => {
+    installBridge()
+    const runner = vi.fn(() => true)
+    const unregister = registerBuiltinActionRunner(runner)
+    mountMenu()
+    const host = attach('<div><p>plain chrome</p></div>')
+
+    fireEvent.contextMenu(host.querySelector('p')!)
+    fireEvent.click(await screen.findByText(NEW_CHAT_LABEL))
+
+    expect(runner).toHaveBeenCalledWith('session.new')
+    unregister()
   })
 
   it('skips plain right-clicks inside a skip-marked surface, but not links in it', async () => {

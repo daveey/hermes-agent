@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router'
 import { toggleTargetZoneTabStrip } from '@/components/pane-shell/tree/store'
 import { type MenuKit, renderActionItem } from '@/components/ui/actions-menu'
 import { type Translations, useI18n } from '@/i18n'
+import { runBuiltinAction } from '@/lib/keybinds/plugin-actions'
 import { openCommandPalette } from '@/store/command-palette'
 import { toggleProfileRailVisible } from '@/store/profile-rail-prefs'
 import { toggleStatusbarVisible } from '@/store/statusbar-prefs'
@@ -23,7 +24,12 @@ function shellSections(
     icon: 'add',
     key: 'shell-new-chat',
     label: t.commandCenter.nav.newChat.title,
-    onSelect: () => navigateToWorkspacePage(navigate, NEW_CHAT_ROUTE)
+    // [daveey] Same as ⌘N: the saved new-session gateway, not the one on screen.
+    onSelect: () => {
+      if (!runBuiltinAction('session.new')) {
+        navigateToWorkspacePage(navigate, NEW_CHAT_ROUTE)
+      }
+    }
   })
 
   const settings = renderActionItem(kit, {

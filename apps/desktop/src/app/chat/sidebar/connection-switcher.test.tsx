@@ -3,6 +3,7 @@ import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { DesktopConnectionsRegistry } from '@/global'
+import { $defaultProfileRoute } from '@/store/default-profile'
 import { $findInPage } from '@/store/find-in-page'
 
 import { ConnectionSwitcher } from './connection-switcher'
@@ -31,7 +32,12 @@ vi.mock('@/i18n', () => ({
       profiles: {
         switchConnectionFailed: (name: string) => `Could not connect to ${name}`,
         switchToConnection: (name: string) => `Switch to ${name}`,
-        connectGateway: 'Manage gateways…'
+        connectGateway: 'Manage gateways…',
+        failedSetDefault: 'Could not set the default profile',
+        newSessionsDescription: 'Opening a session on another gateway does not change this.',
+        newSessionsSet: (name: string) => `New sessions will start on ${name}`,
+        newSessionsStartHere: 'New sessions start here',
+        useForNewSessions: 'Use for new sessions'
       },
       settings: {
         connections: {
@@ -76,6 +82,7 @@ afterEach(() => {
   $connectionsRegistry.set(null)
   $activeConnectionId.set('local')
   $pendingConnectionId.set(null)
+  $defaultProfileRoute.set(null)
   $findInPage.set({ active: false, query: '', matchOrdinal: 0, matchCount: 0, focusRequest: 0 })
 })
 
@@ -247,5 +254,41 @@ describe('ConnectionSwitcher', () => {
 
     fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
     expect(screen.getByRole('menuitemradio', { name: 'W2Probe' })).toBeTruthy()
+  })
+
+  // [daveey] Right-click a gateway → "Use for new sessions": saves the app-wide
+  // new-session route without switching what is on screen.
+  it('right-click saves a gateway for new sessions without switching to it', async () => {
+    const setDefault = vi.fn(async (route: { connectionId: null | string; profile: string }) => route)
+    window.hermesDesktop = { profile: { setDefault } } as never
+    $connectionsRegistry.set(
+      registry([
+        connection('local', 'This device', 'local'),
+        connection('mac-mini', 'mac-mini'),
+        connection('hermes-hub', 'hub (EC2)')
+      ])
+    )
+    render(<ConnectionSwitcher onConnect={onConnect} />)
+
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Registered gateways: This device' }), {
+      button: 0,
+      pointerType: 'mouse'
+    })
+    fireEvent.contextMenu(screen.getByRole('menuitemradio', { name: 'hub (EC2)' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Use for new sessions' }))
+
+    await waitFor(() => expect($defaultProfileRoute.get()).toEqual({ connectionId: 'hermes-hub', profile: 'default' }))
+    expect(setDefault).toHaveBeenCalledWith({ connectionId: 'hermes-hub', profile: 'default' })
+    expect(selectConnection).not.toHaveBeenCalled()
+    expect($activeConnectionId.get()).toBe('local')
+
+    // The saved row is marked, and its own right-click item is the checked state.
+    const hubRow = screen.getByRole('menuitemradio', { name: /hub \(EC2\)/ })
+    expect(hubRow.hasAttribute('data-new-session-target')).toBe(true)
+    expect(screen.getByRole('menuitemradio', { name: 'mac-mini' }).hasAttribute('data-new-session-target')).toBe(false)
+    fireEvent.contextMenu(hubRow)
+    expect(
+      (await screen.findByRole('menuitem', { name: 'New sessions start here' })).getAttribute('aria-disabled')
+    ).toBe('true')
   })
 })

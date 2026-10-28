@@ -1,6 +1,10 @@
+import { LOCAL_CONNECTION_ID } from '@hermes/shared'
+
 import { NO_PROJECT_ID } from '@/app/chat/sidebar/projects/workspace-groups'
+import { translateNow } from '@/i18n/runtime'
+import { $connectionsRegistry, thisDeviceLabel } from '@/store/connections'
 import { $defaultProfileRoute } from '@/store/default-profile'
-import { notifyError } from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 import {
   $newChatProfile,
   $newChatRoute,
@@ -8,6 +12,7 @@ import {
   captureNewChatSource,
   ensureGatewayAgent,
   ensureGatewayProfile,
+  newSessionInAgent,
   pinLegacyNewChatProfile
 } from '@/store/profile'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
@@ -65,6 +70,38 @@ export function prepareDefaultNewSession(): void {
     : ensureGatewayProfile(target.profile, { forceLegacyRoute: true })
 
   void activation.catch(error => {
-    notifyError(error, `Failed to open profile "${target.profile}"`)
+    if (target.route) {
+      notifyNewSessionTargetUnreachable(target.route, error)
+    } else {
+      notifyError(error, `Failed to open profile "${target.profile}"`)
+    }
+  })
+}
+
+/** [daveey] The saved new-session gateway did not answer. The draft stays
+ *  bound to it (session.create never falls back to another gateway on its
+ *  own); the notice offers this one session on This device instead, without
+ *  changing the saved target. */
+export function notifyNewSessionTargetUnreachable(route: AgentProfileRoute, error: unknown): string {
+  const label =
+    $connectionsRegistry.get()?.connections.find(connection => connection.id === route.connectionId)?.label ??
+    route.connectionId
+
+  const reason = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
+
+  return notify({
+    id: `new-session-target-unreachable:${route.connectionId}`,
+    kind: 'warning',
+    title: translateNow('profiles.newSessionTargetUnreachable', label),
+    message: translateNow('profiles.newSessionTargetUnreachableDetail'),
+    ...(reason ? { detail: reason } : {}),
+    ...(route.connectionId === LOCAL_CONNECTION_ID
+      ? {}
+      : {
+          action: {
+            label: translateNow('profiles.createOnThisDevice', thisDeviceLabel()),
+            onClick: () => newSessionInAgent({ connectionId: LOCAL_CONNECTION_ID, profile: 'default' })
+          }
+        })
   })
 }
