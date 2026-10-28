@@ -208,7 +208,8 @@ FOOTGUNS: list[Footgun] = [
         # explicit builtins-style open() call.  Path.open() is rare in the
         # codebase compared to open() and can be audited separately.
         pattern=re.compile(
-            r"""(?:^|[\s\(,;=])(?<![.\w])open\s*\(\s*[^,)]+\s*(?:,\s*['"](?P<mode>[^'"]*)['"])?"""
+            # The path may itself be a call (open(os.path.join(a, b), "rb")): one paren level.
+            r"""(?:^|[\s\(,;=])(?<![.\w])open\s*\(\s*(?:[^,()]|\([^()]*\))+\s*(?:,\s*['"](?P<mode>[^'"]*)['"])?"""
         ),
         message=(
             "open() without an explicit encoding= uses the platform default "
