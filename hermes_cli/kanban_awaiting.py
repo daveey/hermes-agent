@@ -21,10 +21,16 @@ Each park now carries ``awaiting = {kind, ref, why}`` on its parking event:
 
 A park with no explicit ``awaiting`` is classified from its text: a pending step for a human is
 refused (``human_wait``), and a wall only an agent action clears (grant, permission, access) is
-refused (``agent_action_wait``) unless the producing card is declared. Anything else is recorded
+refused (``agent_action_wait``) unless the producing card is declared. A card's own worker parking it
+on a wake check that names no card or CI run (an opaque probe: "python3 -c ...", "test -f ...") is
+refused too
+(``opaque_probe_wait``): a probe proves only that something polls, which is what the read side
+(``kanban_wait_info``) already reports as a stall; on 10-27 a card waited 9 h on a KeepAlive browser
+nobody would stop. Short continues (<= 2 h, pacing a job) are exempt. Anything else is recorded
 as an inferred ``clock`` / ``external`` wait so the checker can tell legacy guesses from declared
 producers. The third park in a row on one premise is not parked again: it becomes one
-agent-owned owner card for a supervisor and the card waits on it (``repark_escalated``).
+agent-owned owner card for a supervisor and the card waits on it (``repark_escalated``). A park
+on the same opaque probe counts as the same premise however its reason is worded.
 """
 from __future__ import annotations
 
@@ -43,7 +49,8 @@ KINDS = ("card", "ci", "deploy", "external", "clock", "human")
 AGENT_ACTION_WAIT = "agent_action_wait"
 HUMAN_WAIT = "human_wait"
 INVALID_AWAITING = "invalid_awaiting"
-CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING)
+OPAQUE_PROBE_WAIT = "opaque_probe_wait"
+CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT)
 # Parks in a row on one premise before the next one escalates instead (the 3rd park = 2nd re-park).
 REPARK_LIMIT = 2
 ESCALATION_PREFIX = "repark-escalation:"
@@ -371,10 +378,41 @@ def _live_card_ref(conn: sqlite3.Connection, task_id: str, text: str) -> Optiona
     return None
 
 
+def _short_continue(op: str, wake_in: Optional[int]) -> bool:
+    return op == "continue" and (wake_in or 0) <= CONTINUE_TEXT_GUARD_SECONDS
+
+
+def opaque_probe(wake_check: Optional[str]) -> Optional[str]:
+    """The probe's name when a wake check names no card or CI run, else None. Same classifier as the
+    read side (``kanban_wait_info``), so the gate refuses exactly what the checker would call a stall."""
+    from hermes_cli.kanban_wait_info import producer_from_wake_check
+    found = producer_from_wake_check(wake_check)
+    return found[1] if found and found[0] == "probe" else None
+
+
+def parked_by_own_worker(task_id: str) -> bool:
+    """True when the card's own worker parks it (tool or CLI inside the worker process, which carries
+    ``HERMES_KANBAN_TASK``). An operator on the dashboard or a terminal is accountable for the probe it
+    sets; a worker parking itself on one is the 10-27 orphan shape."""
+    return bool(task_id) and os.environ.get("HERMES_KANBAN_TASK") == task_id
+
+
+def opaque_probe_error(probe: str) -> AwaitingError:
+    return AwaitingError(OPAQUE_PROBE_WAIT, (
+        f"this park waits on probe {probe!r} and names no producer. A probe proves only that something "
+        "polls, not that anything will ever make it pass. Say who changes that state: "
+        "awaiting={kind:'external', ref:'<who or what changes it>', why:'<evidence it will>'} (or "
+        "kind 'card'/'ci'/'deploy' when a card or run produces it). If only an action changes it (stop a "
+        "service, free a resource, retire tabs), that is work, not a wait: do it now, or create the owner "
+        "card and park with awaiting={kind:'card', ref:'<owner id>'}. If it needs David, "
+        "kanban_block(kind='needs_input', human_request={...}) instead."))
+
+
 def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dict:
     text = reason or ""
     producer = _live_card_ref(conn, task_id, f"{text} {wake_check or ''}")
-    if not (op == "continue" and (wake_in or 0) <= CONTINUE_TEXT_GUARD_SECONDS):
+    short = _short_continue(op, wake_in)
+    if not short:
         wall = text_wall(text)
         # A visible ask on the card waited on is not hidden; an agent wall needs a DECLARED owner card.
         if wall and not (wall[0] == HUMAN_WAIT and producer):
@@ -382,13 +420,26 @@ def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dic
     if producer:
         return {"kind": "card", "ref": producer, "inferred": True}
     if wake_check and not clock_only:
+        probe = None if short or not parked_by_own_worker(task_id) else opaque_probe(wake_check)
+        if probe:
+            raise opaque_probe_error(probe)
         return {"kind": "external", "ref": wake_check[:200], "inferred": True}
     return {"kind": "clock", "inferred": True}
 
 
-def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str) -> int:
-    """Trailing parks of this card on ``premise``, newest first, stopping at the first other
-    premise or at the last escalation (the supervisor acted since)."""
+def probe_premise(wake_check: Optional[str], *, op: str = "schedule", wake_in: Optional[int] = None) -> Optional[str]:
+    """Premise key of an opaque probe (whitespace-normalised command), so re-parks on one probe count
+    as one premise whatever the reason says. None for card/CI probes and short pacing continues."""
+    if _short_continue(op, wake_in) or not opaque_probe(wake_check):
+        return None
+    basis = "probe|" + " ".join(str(wake_check).split())
+    return hashlib.sha256(basis.encode()).hexdigest()[:16]
+
+
+def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
+                       probe: Optional[str] = None) -> int:
+    """Trailing parks of this card on ``premise`` (or on the same opaque ``probe``), newest first,
+    stopping at the first other premise or at the last escalation (the supervisor acted since)."""
     count = 0
     for kind, payload in conn.execute(
             "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued',?) "
@@ -396,12 +447,12 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str) -> 
         if kind == ESCALATED_EVENT:
             break
         try:
-            got = (json.loads(payload or "{}").get("awaiting") or {}).get("premise")
+            got = json.loads(payload or "{}").get("awaiting") or {}
         except (ValueError, AttributeError):
-            got = None
-        if got is None:
+            got = {}
+        if not isinstance(got, dict) or got.get("premise") is None:
             continue  # a continuation with no wait, or a legacy park
-        if got != premise:
+        if got["premise"] != premise and not (probe and got.get("probe") == probe):
             break
         count += 1
     return count
@@ -419,7 +470,10 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     if record["kind"] == "card" or (record["kind"] == "clock" and record.get("inferred")):
         return record
     record["premise"] = premise_hash(record, reason)
-    if prior_same_premise(conn, task_id, record["premise"]) >= REPARK_LIMIT:
+    probe = probe_premise(wake_check, op=op, wake_in=wake_in)
+    if probe:
+        record["probe"] = probe
+    if prior_same_premise(conn, task_id, record["premise"], probe=probe) >= REPARK_LIMIT:
         raise RepeatedPark(record)
     return record
 

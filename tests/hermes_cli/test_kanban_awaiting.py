@@ -231,10 +231,11 @@ def test_replay_tracker_card_that_produces_nothing_is_refused(kanban_home, monke
     "David's decision recorded 23:06 (design A); waiting for TestFlight processing build 412.",
 ])
 def test_ordinary_park_prose_is_not_a_wall(kanban_home, monkeypatch, reason) -> None:
+    # clock_only: an opaque "exit 1" probe with no producer is now refused on its own (opaque_probe_wait).
     with kbc.connect_closing() as conn:
         tid = _running(conn)
         _as_worker(monkeypatch, conn, tid)
-        out = _tool("schedule", {"reason": reason, "wake_check": "exit 1"})
+        out = _tool("schedule", {"reason": reason, "clock_only": True})
         assert out.get("status") == "scheduled", out
 
 
@@ -458,3 +459,103 @@ def test_unrelated_ledger_topics_do_not_match(kanban_home) -> None:
     c.commit()
     c.close()
     assert kaw.answered_ask("t_x", "Waiting on David's approval for the hub restart; card status blocked") is None
+
+
+# -- opaque probes: a probe alone is not a producer (kanban-92e96c16fd) ------------------------------
+
+# macbook t_3b031dd1, run 5175 (10-27 17:33 UTC): parked 9 h on a probe nobody would ever make pass. The
+# agent Chrome is a launchd KeepAlive job in active use, and the plan forbids closing unknown tabs.
+CHROME_PROBE_REASON = ("SCHEDULED_UNTIL=2099-01-01T00:00:00Z \u2014 tab-ownership + idle-shutdown code is shipped; "
+                       "the legacy agent Chrome (KeepAlive supervisor 85897, browser 85920) still holds 26 pages. "
+                       "Wakes when the exact agent browser and both listeners (9333/9334) are absent.")
+CHROME_PROBE = ("python3 -c \"import socket,sys; sys.exit(0 if all(socket.socket().connect_ex(('127.0.0.1', p)) "
+                "for p in (9333, 9334)) else 1)\"")
+
+
+@pytest.mark.parametrize("op,args", [
+    ("schedule", {"reason": CHROME_PROBE_REASON, "wake_check": CHROME_PROBE}),
+    ("block", {"reason": CHROME_PROBE_REASON, "kind": "time", "wake_check": CHROME_PROBE}),
+    ("continue", {"checkpoint": CHROME_PROBE_REASON, "resume_after_seconds": 86400, "wake_check": CHROME_PROBE}),
+    ("schedule", {"reason": "Waiting for the queue file to change.",
+                  "wake_check": "test \"$(sha256sum QUEUE.md | cut -d ' ' -f 1)\" != ec94660442"}),
+])
+def test_opaque_probe_with_no_producer_is_refused(kanban_home, monkeypatch, op, args) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool(op, args)
+        assert "opaque_probe_wait" in (out.get("code"), out.get("rejection")), out
+        # The refusal says how to name the producer, and what to do when nobody else produces it.
+        assert "awaiting={kind:'external'" in out["error"] and "owner card" in out["error"], out
+        assert "needs_input" in out["error"], out
+        assert kb.get_task(conn, tid).status == "running" and kwc.get_state(conn, tid) is None
+
+
+def test_opaque_probe_with_a_declared_external_producer_parks(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": CHROME_PROBE_REASON, "wake_check": CHROME_PROBE, "awaiting": {
+            "kind": "external", "ref": "launchd com.example.agent-chrome",
+            "why": "the 02:00 maintenance job unloads it nightly (log line 'agent-chrome unloaded')"}})
+        assert out.get("status") == "scheduled", out
+        rec = _park_payload(conn, tid)["awaiting"]
+        assert rec["kind"] == "external" and not rec.get("inferred")
+        assert kwc.get_state(conn, tid)["cmd"] == CHROME_PROBE
+
+
+@pytest.mark.parametrize("op,args", [
+    ("schedule", {"reason": "Waiting for CI run 40443505012 to finish.",
+                  "wake_check": "gh run view 40443505012 --json status | grep -q completed"}),
+    ("schedule", {"reason": "Owner card builds the image.", "wake_check": "hermes kanban wait-check task {owner}"}),
+    ("continue", {"checkpoint": "Build still running; check again.", "resume_after_seconds": 600,
+                  "wake_check": "! ps -p 3966721 >/dev/null"}),
+    ("block", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z \u2014 24h soak window.", "kind": "time",
+               "clock_only": True}),
+])
+def test_named_producers_and_short_continues_still_park(kanban_home, monkeypatch, op, args) -> None:
+    with kbc.connect_closing() as conn:
+        owner, tid = _running(conn), _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        args = {k: (v.format(owner=owner) if k == "wake_check" else v) for k, v in args.items()}
+        out = _tool(op, args)
+        assert out.get("status") == "scheduled", out
+
+
+def test_same_probe_reparked_with_new_wording_escalates(kanban_home, monkeypatch) -> None:
+    """The premise was a hash of the reason text, so a re-worded re-park on the same probe never counted."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        outs = []
+        for n, why in enumerate(("listeners still up", "browser 85920 still alive, 26 tabs", "KeepAlive respawned")):
+            outs.append(_repark(conn, monkeypatch, tid, "schedule", {
+                "reason": f"park {n}: {why}", "wake_check": CHROME_PROBE,
+                "awaiting": {"kind": "external", "ref": "agent Chrome on the MacBook", "why": why}}))
+        assert [o.get("status") for o in outs[:2]] == ["scheduled", "scheduled"], outs
+        assert outs[2].get("code") == kaw.ESCALATED_EVENT and outs[2].get("status") == "todo", outs[2]
+        assert kb.get_task(conn, outs[2]["owner_task_id"]) is not None
+
+
+def test_worker_cli_park_on_its_own_card_is_refused_but_an_operator_park_is_not(kanban_home, monkeypatch,
+                                                                               capsys) -> None:
+    """Entry paths: the worker's own `hermes kanban schedule` (CLI) and an operator (dashboard/terminal,
+    no worker env). The operator's opaque park still records an inferred wait, so the checker flags it."""
+    from hermes_cli import kanban as kcli
+
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    kcli.build_parser(parser.add_subparsers(dest="command"))
+
+    def run(*argv):
+        return kcli.kanban_command(parser.parse_args(["kanban", *argv]))
+
+    with kbc.connect_closing() as conn:
+        mine, other = _running(conn), _running(conn)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", mine)
+    assert run("schedule", mine, CHROME_PROBE_REASON, "--wake-check", CHROME_PROBE) != 0
+    assert kaw.OPAQUE_PROBE_WAIT in capsys.readouterr().err
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, mine).status == "running" and not kb.list_comments(conn, mine)
+        assert kb.schedule_task(conn, other, reason=CHROME_PROBE_REASON, wake_check=CHROME_PROBE)
+        rec = _park_payload(conn, other)["awaiting"]
+        assert rec["kind"] == "external" and rec["inferred"] is True

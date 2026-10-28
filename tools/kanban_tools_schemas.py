@@ -195,7 +195,9 @@ _WAKE_CHECK_PROPS = {
         "at once (its stdout reaches the next run), exit 1 = not yet. Any other exit 3 times in "
         "a row wakes the card to fix the probe. REQUIRED for a wait on any readable fact (a DB "
         "row, a git tag, a file, a log line, a service state) that wakes more than 2 h out, e.g. "
-        "`gh api repos/O/R/tags --jq '.[].name' | grep -q '^v2'`. A wait on another card on "
+        "`gh api repos/O/R/tags --jq '.[].name' | grep -q '^v2'`. A probe alone is not a producer: "
+        "one that names no card or CI run is refused (opaque_probe_wait) unless `awaiting` says who "
+        "will make it pass. A wait on another card on "
         "this board is a parent link (kanban_link), not a park."
     )),
     "check_every": {"type": "integer", "description": (

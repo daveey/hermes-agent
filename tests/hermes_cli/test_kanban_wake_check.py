@@ -54,6 +54,10 @@ def _probe(flag: Path) -> str:
     return f"test -f {flag} && cat {flag} || exit 1"
 
 
+# A worker parking its own card on an opaque probe names who makes it pass (kanban_awaiting opaque_probe_wait).
+BUILD = {"kind": "external", "ref": "release build 559", "why": "the build job writes the flag when it lands"}
+
+
 def _assert_condition_wake(conn, tid, flag: Path) -> None:
     park = _events(conn, tid, "scheduled")[-1].payload
     assert park["wake_check"] == _probe(flag) and park["check_every"] == 300
@@ -86,7 +90,7 @@ def test_kanban_schedule_wake_check_wakes_when_probe_passes(kanban_home, tmp_pat
         _worker_env(monkeypatch, conn, tid)
         out = json.loads(kt._handle_schedule({
             "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting for build 559",
-            "wake_check": _probe(flag), "check_every": 300}))
+            "wake_check": _probe(flag), "check_every": 300, "awaiting": BUILD}))
         assert out.get("status") == "scheduled", out
         _assert_condition_wake(conn, tid, flag)
 
@@ -102,7 +106,7 @@ def test_kanban_block_time_wake_check_wakes_when_probe_passes(kanban_home, tmp_p
         _worker_env(monkeypatch, conn, tid)
         out = json.loads(kt._handle_block({
             "reason": "waiting for build 559", "kind": "time",
-            "wake_check": _probe(flag), "check_every": 300}))
+            "wake_check": _probe(flag), "check_every": 300, "awaiting": BUILD}))
         assert out.get("status") == "scheduled", out
         _assert_condition_wake(conn, tid, flag)
 
@@ -155,7 +159,7 @@ def test_kanban_continue_long_wait_needs_wake_check(kanban_home, tmp_path, monke
         out = json.loads(kt._handle_continue({"checkpoint": "waiting on CI", "resume_after_seconds": 43200}))
         assert "error" in out and kb.get_task(conn, tid).status == "running"
         out = json.loads(kt._handle_continue({"checkpoint": "waiting on CI", "resume_after_seconds": 43200,
-                                              "wake_check": _probe(flag), "check_every": 300}))
+                                              "wake_check": _probe(flag), "check_every": 300, "awaiting": BUILD}))
         assert out.get("status") == "scheduled", out
         assert _events(conn, tid, "continued")[-1].payload["wake_check"] == _probe(flag)
         flag.write_text("ci green\n")
