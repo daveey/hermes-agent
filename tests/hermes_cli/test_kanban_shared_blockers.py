@@ -228,8 +228,8 @@ def test_block_tool_validates_and_reports_blocker(kanban_home, monkeypatch):
 # --- a park with blocker_id must keep a way to wake (t_01a18246d7ae8a78) -------------------------
 
 def _future_iso(seconds: int) -> str:
-    from datetime import datetime, timezone
-    return datetime.fromtimestamp(int(time.time()) + seconds, tz=timezone.utc).isoformat()
+    from datetime import UTC, datetime
+    return datetime.fromtimestamp(int(time.time()) + seconds, tz=UTC).isoformat()
 
 
 def test_timed_park_with_blocker_keeps_wake_and_probe(kanban_home):
