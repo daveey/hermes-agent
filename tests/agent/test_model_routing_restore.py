@@ -111,8 +111,10 @@ def test_incomplete_exact_tuple_fails_closed(provider):
 def test_restored_pin_is_not_managed_authorization(routing_home, tmp_path):
     routing_home["model_routing"]["enforce_subscription_only"] = True
     atomic_config_write(tmp_path / "config.yaml", routing_home)
-    model, provider = restore_route("paid", {"model_routing": {
-        "selected_model": "paid", "selected_provider": "openrouter", "requested_class": "deep", "exact_pin": True}})
+    # A persisted pin the policy refuses is history: resume drops it (the session runs on its configured
+    # default) instead of replaying it, and an explicit request for the same tuple still refuses unallocated.
+    assert restore_route("paid", {"model_routing": {
+        "selected_model": "paid", "selected_provider": "openrouter", "requested_class": "deep", "exact_pin": True}}) is None
     with pytest.raises(ModelRoutingError, match="rejects"):
-        resolve_runtime_provider(requested=provider, target_model=model, routing_session_id="stale")
+        resolve_runtime_provider(requested="openrouter", target_model="paid", routing_session_id="stale")
     assert not (tmp_path / "model-routing.sqlite3").exists()

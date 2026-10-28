@@ -12,7 +12,10 @@ routing_home = fixtures.routing_home
 streaming_route = fixtures.streaming_route
 
 
-def test_desktop_saved_paid_override_never_sends(managed, monkeypatch, tmp_path):
+def test_desktop_saved_paid_override_resumes_on_the_default(managed, monkeypatch, tmp_path):
+    """A Desktop row saved on a paid route is history, not authorization: resume drops the stale override and the
+    real builder runs the configured default (class:deep) with no paid fallback. Nothing is sent, and an explicit
+    request for the paid tuple still refuses."""
     monkeypatch.chdir(tmp_path)
     from hermes_cli.config import load_config
     monkeypatch.setattr(server, '_load_cfg', load_config)
@@ -21,9 +24,12 @@ def test_desktop_saved_paid_override_never_sends(managed, monkeypatch, tmp_path)
     monkeypatch.setattr(server, '_load_enabled_toolsets', lambda platform: [])
     monkeypatch.setattr(server, '_startup_system_prompt', lambda *a: '')
     monkeypatch.setattr(server, '_get_db', lambda: None)
-    overrides = server._stored_session_runtime_overrides({
-        'model': 'vendor/paid', 'model_config': {'model': 'vendor/paid', 'provider': 'openrouter'}})
+    paid = {'model': 'vendor/paid', 'provider': 'openrouter'}
+    overrides = server._stored_session_runtime_overrides({'model': 'vendor/paid', 'model_config': dict(paid)})
+    assert 'model_override' not in overrides and 'provider_override' not in overrides
     with patch('httpx.Client.send') as send, patch('model_tools.get_tool_definitions', return_value=[]):
+        agent = server._make_agent('ui', 'stale-paid', **overrides)
+        assert (agent.model, agent.provider, agent._fallback_chain) == ('anthropic-deep', 'anthropic', [])
         with pytest.raises(ModelRoutingError):
-            server._make_agent('ui', 'stale-paid', **overrides)
+            server._make_agent('ui', 'explicit-paid', model_override=dict(paid), provider_override='openrouter')
         send.assert_not_called()

@@ -1963,11 +1963,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _stored_session_model(self, session: Any) -> Optional[str]:
         """The model persisted on a session row, minus the virtual alias (replaying
-        "hermes-agent" upstream as a provider model id 400s)."""
+        "hermes-agent" upstream as a provider model id 400s) and minus a tuple the managed
+        subscription policy no longer approves (history, not a request; replaying it fails closed)."""
         stored = session.get("model") if isinstance(session, dict) else None
         if not stored or stored == self._model_name:
             return None
-        return stored
+        from agent.model_routing_restore import stale_session_pin
+        return None if stale_session_pin(session) else stored
 
     @staticmethod
     def _clean_runtime_id(value: Any, *, max_len: int = 200) -> str:

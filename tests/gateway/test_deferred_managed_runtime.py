@@ -6,7 +6,6 @@ import pytest
 import run_agent  # bootstrap discovery before the isolated-home guard
 
 from agent.i18n import t
-from agent.model_routing import ModelRoutingError
 from gateway.run import GatewayRunner
 from gateway.session import Platform, SessionSource
 from hermes_cli.config import atomic_config_write
@@ -113,17 +112,40 @@ async def test_background_deferred_route_sends_native(managed, runner, native_tr
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('surface', ['compression', 'background'])
-async def test_restored_paid_pin_still_hits_billing_guard(managed, runner, native_transport, surface):
+async def test_restored_paid_pin_resumes_on_the_default_route(managed, runner, native_transport, surface):
+    """A persisted pin the policy now refuses is history, not authorization: deferred work runs on the
+    configured default (class:deep) and nothing reaches the paid route or the configured paid fallback."""
     restore(runner, 'paid')
+    built = []
+
+    def compress(agent, messages, request, **kwargs):
+        built.append((agent.model, agent.provider, bool(agent.model_routing.get('exact_pin')), agent._fallback_chain))
+        return SimpleNamespace(status='nothing_to_do')
+
+    real_resolve = runner._resolve_session_agent_runtime
+
+    def resolve(**kwargs):
+        result = real_resolve(**kwargs)
+        runner._session_db = None
+        return result
+
     with patch('gateway.run._load_gateway_config', return_value=managed):
         if surface == 'compression':
-            with pytest.raises(ModelRoutingError, match='Managed subscription policy'):
-                await runner._run_manual_compression(source(), SimpleNamespace(session_id='pin'), [], None)
+            with patch('agent.conversation_compression_manual.compress_now', side_effect=compress):
+                result = await runner._run_manual_compression(
+                    source(), SimpleNamespace(session_id='pin'), [{'role': 'user', 'content': 'hi'}], None)
+            assert result == t('gateway.compress.nothing_to_do')
+            assert built == [('anthropic-deep', 'anthropic', False, [])]
         else:
+            runner._resolve_session_agent_runtime = resolve
             await runner._run_background_task_inner('Say ok', source(), 'job')
-            runner._delivery_adapter_for(source()).emit_warning.assert_awaited_once()
-            runner._delivery_adapter_for(source()).send.assert_not_awaited()
-    assert native_transport == []
+            adapter = runner._delivery_adapter_for(source())
+            adapter.emit_warning.assert_not_awaited()
+            assert 'ok' in adapter.send.call_args.kwargs['content']
+            assert native_transport
+    assert all(body['model'] == 'anthropic-deep' and url.startswith('https://api.anthropic.com/')
+               and headers.get('authorization', '').startswith('Bearer sk-ant-oat')
+               for url, headers, body in native_transport)
 
 
 @pytest.mark.asyncio
