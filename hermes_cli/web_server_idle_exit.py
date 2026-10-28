@@ -102,7 +102,8 @@ def _session_work_in_flight(session: dict) -> bool:
 
 
 def busy_ledger() -> Optional[str]:
-    """Name the ledger that holds work — ``"retirement_admission"``, ``"session:<id>"``,
+    """Name the ledger that holds work — ``"retirement_admission"``, ``"background_review:<n>"``,
+    ``"session:<id>"``,
     ``"delegation"``, ``"cron:<job ids>"`` — ``""`` when every ledger is empty, ``None`` when one
     cannot be read. The Desktop's idle probe reports this so a backend that will not retire says
     WHICH work it is protecting, instead of an opaque "turn in flight".
@@ -119,6 +120,9 @@ def busy_ledger() -> Optional[str]:
 
         if retirement.active_count():
             return "retirement_admission"
+        reviews = retirement.background_review_count()
+        if reviews:
+            return f"background_review:{reviews}"
         with gateway._sessions_lock:
             busy_sessions = [sid for sid, s in gateway._sessions.items() if _session_work_in_flight(s)]
         if busy_sessions:

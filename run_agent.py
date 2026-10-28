@@ -805,6 +805,16 @@ class AIAgent(
         review_run = prepare_background_review_run(self)
         if review_run is None:
             return
+        # [daveey] The review holds the backend retirement fence for its whole run, so a skew/idle
+        # retirement waits for it instead of hard-interrupting it mid-call; a backend that already
+        # holds a retirement permit skips the review cleanly (it would be cut off at shutdown).
+        from hermes_cli.backend_retirement import retirement
+        hold = retirement.begin_background_review()
+        if hold is None:
+            logger.info("Background review skipped: this backend is retiring")
+            finish_background_review_run(self, review_run)
+            return
+        review_run.retirement_hold = hold
         try:
             target, _prompt = spawn_background_review_thread(
                 self, messages_snapshot, review_memory=review_memory, review_skills=review_skills,
@@ -812,7 +822,10 @@ class AIAgent(
             )
 
             def _target_with_requeue() -> None:
-                target()
+                try:
+                    target()
+                finally:
+                    retirement.end_background_review(hold)
                 self._maybe_requeue_preempted_review(review_run, dict(
                     messages_snapshot=messages_snapshot, review_memory=review_memory, review_skills=review_skills,
                     focus=focus, task_cfg=task_cfg, _requeue_attempts=_requeue_attempts + 1,
@@ -822,6 +835,7 @@ class AIAgent(
             # right profile.
             threading.Thread(target=propagate_context_to_thread(_target_with_requeue), daemon=True, name="bg-review").start()
         except Exception:
+            retirement.end_background_review(hold)
             finish_background_review_run(self, review_run)
             raise
 

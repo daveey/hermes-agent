@@ -10,6 +10,23 @@ import secrets
 import threading
 import time
 
+# [daveey] Background reviews (the post-turn memory/skill review fork) run on a daemon thread with
+# no session turn lease and no admission reservation, so the idle proof read a backend mid-review
+# as idle and retirement hard-interrupted the review mid-call (2026-10-28 04:38, two reviews lost).
+# A running review now holds the fence. Inside BACKGROUND_REVIEW_WAIT_S it is left to finish; past it
+# a pending retirement asks it to stop before its next provider call (never mid-call); past
+# BACKGROUND_REVIEW_HARD_CAP_S a wedged review no longer holds retirement, so it cannot starve it.
+BACKGROUND_REVIEW_WAIT_S = 300.0
+BACKGROUND_REVIEW_HARD_CAP_S = 900.0
+
+
+class BackgroundReviewHold:
+    """One running review's claim on the fence; ``wind_down`` asks the fork to stop between calls."""
+
+    def __init__(self, started_at):
+        self.started_at = started_at
+        self.wind_down = threading.Event()
+
 
 class RetirementFence:
     """Exclusive 30-second prepare permit; commit closes admission permanently.
@@ -26,6 +43,7 @@ class RetirementFence:
         self._committed = False
         self._expires_at = 0.0
         self._now = time.monotonic
+        self._reviews = set()
 
     def _expire(self):
         if self._token is not None and not self._committed and self._now() >= self._expires_at:
@@ -46,6 +64,31 @@ class RetirementFence:
     def active_count(self):
         with self._lock:
             return self._active
+
+    def begin_background_review(self):
+        """Admit a background review, or None once retirement holds a permit (or is preparing)."""
+        with self._lock:
+            self._expire()
+            if self._preparing or self._token is not None:
+                return None
+            hold = BackgroundReviewHold(self._now())
+            self._reviews.add(hold)
+            return hold
+
+    def end_background_review(self, hold):
+        if hold is None:
+            return
+        with self._lock:
+            self._reviews.discard(hold)
+
+    def _blocking_reviews(self):
+        now = self._now()
+        return [h for h in self._reviews if now - h.started_at < BACKGROUND_REVIEW_HARD_CAP_S]
+
+    def background_review_count(self):
+        """Running reviews that still hold retirement (younger than the hard cap)."""
+        with self._lock:
+            return len(self._blocking_reviews())
 
     @contextmanager
     def work(self):
@@ -98,6 +141,13 @@ class RetirementFence:
             if self._committed:
                 return {"ok": True, "idle": True, "token": self._token}
             if self._preparing or self._token is not None or self._active:
+                return {"ok": False, "idle": False}
+            reviews = self._blocking_reviews()
+            if reviews:
+                now = self._now()
+                if any(now - h.started_at >= BACKGROUND_REVIEW_WAIT_S for h in reviews):
+                    for hold in reviews:
+                        hold.wind_down.set()
                 return {"ok": False, "idle": False}
             self._preparing = True
         # No admissions can cross the freeze. Do not hold our lock while reading ledgers:
