@@ -96,6 +96,9 @@ def resolve_source_target(channel: str, git_cmd=None, cwd=None, *, repository=No
     return target
 
 
+_LOCAL_GIT_TIMEOUT = 60
+
+
 def _head_containing(git_cmd, cwd, commit: str, repository: str) -> str | None:
     """HEAD's sha unless HEAD is PROVEN not to contain ``commit``, then None.
 
@@ -105,19 +108,26 @@ def _head_containing(git_cmd, cwd, commit: str, repository: str) -> str | None:
     from hermes_cli.source_check import _github_compare, source_git_env
 
     def run(*args):
+        # Local git on a loaded host (CI shards, cold caches) can take well over 10s.
         return subprocess.run(
             [*git_cmd, *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=10, stdin=subprocess.DEVNULL, env=source_git_env(), check=False)
+            errors="replace", timeout=_LOCAL_GIT_TIMEOUT, stdin=subprocess.DEVNULL, env=source_git_env(),
+            check=False)
 
     head = run("rev-parse", "HEAD").stdout.strip()
     if not _SHA.fullmatch(head):
         return None
-    ancestry = run("merge-base", "--is-ancestor", commit, head).returncode
-    if ancestry == 0:
+    try:
+        ancestry = run("merge-base", "--is-ancestor", commit, head).returncode
+        if ancestry == 0:
+            return head
+        # A shallow boundary makes exit 1 a guess; full history makes it proof.
+        if ancestry == 1 and run("rev-parse", "--is-shallow-repository").stdout.strip() == "false":
+            return None
+    except subprocess.TimeoutExpired:
+        # An unanswered ancestry question is an unknown relation, which keeps HEAD
+        # (see the docstring); it must not fail the whole channel lookup.
         return head
-    # A shallow boundary makes exit 1 a guess; full history makes it proof.
-    if ancestry == 1 and run("rev-parse", "--is-shallow-repository").stdout.strip() == "false":
-        return None
     status = (_github_compare(commit, head, repository) or {}).get("status")
     return None if status in ("behind", "diverged") else head
 
