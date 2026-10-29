@@ -1,6 +1,8 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+import { assertShmLargeEnough } from '../shm-preflight'
+
 import { seedInstall, UPDATE_ROOT } from './harness'
 
 /**
@@ -38,6 +40,7 @@ function assertIsolated(): void {
  */
 export default function globalSetup(): void {
   assertIsolated()
+  assertShmLargeEnough()
 
   if (process.env.HERMES_E2E_UPDATE_REUSE === '1' && fs.existsSync(path.join(UPDATE_ROOT, 'install.json'))) {
     return

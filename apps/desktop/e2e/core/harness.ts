@@ -471,8 +471,15 @@ export function composer(page: Page) {
   return page.locator('[data-slot="composer-root"] [contenteditable="true"]').filter({ visible: true }).first()
 }
 
-/** Composer mounted, no full-viewport overlay above it, window visible. */
-export async function waitForInteractive(app: ElectronApplication, page: Page, timeout = 180_000): Promise<void> {
+/**
+ * Composer mounted, no full-viewport overlay above it, window visible.
+ *
+ * The default stays well under the core lane's 180 s test timeout (a green
+ * core test, boot included, finishes in 10-34 s): when it equals the test timeout, the test
+ * timeout fires first and the "never became interactive" diagnosis below
+ * (route, center element chain, main-process log) is never produced.
+ */
+export async function waitForInteractive(app: ElectronApplication, page: Page, timeout = 90_000): Promise<void> {
   try {
     await expect(composer(page)).toBeVisible({ timeout })
     await page.waitForFunction(
