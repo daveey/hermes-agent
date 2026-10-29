@@ -3125,6 +3125,10 @@ kanban:
 
 `kanban.sync.enabled` is off by default. When enabled, boards opened afterwards gain the sync tables and outbox triggers used by the central-sync client seams. Existing boards are unaffected until reopened.
 
+## Kanban duplicate-work check
+
+`kanban.create_overlap_check` (default `true`) makes `kanban_create` check open cards across local boards and other gateways' replicated boards before creating another owner for overlapping work. A match refuses creation with `code=create_overlap` and identifies the existing cards. For genuinely separate work, pass `distinct_from` with those card IDs and a `distinct_reason`; set this configuration key to `false` to disable the check entirely. Missing or unreadable remote replicas are skipped and logged rather than blocking creation.
+
 ## Kanban strong model tier
 
 ```yaml
