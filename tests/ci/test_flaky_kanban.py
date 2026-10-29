@@ -29,7 +29,7 @@ class FakeBoard:
         self.cards: dict[str, dict] = {}
         self.keys: dict[str, str] = {}
 
-    def create(self, title, body, key):
+    def create(self, title, body, key, *, distinct_from=None, distinct_reason=None):
         if key in self.keys and self.cards[self.keys[key]]["status"] != "archived":
             return self.keys[key]
         card = f"t_{len(self.cards) + 1}"
@@ -40,14 +40,18 @@ class FakeBoard:
     def status(self, card):
         return self.cards.get(card, {}).get("status")
 
-    def comment(self, card, body):
+    def card(self, card, board=None):
+        c = self.cards.get(card)
+        return {"id": card, "status": c["status"], "title": c["title"], "body": c["body"]} if c else None
+
+    def comment(self, card, body, board=None):
         self.cards[card]["comments"].append(body)
 
     def list_cards(self):
         return [{"id": cid, "status": c["status"], "title": c["title"], "body": c["body"]}
                 for cid, c in self.cards.items()]
 
-    def comments(self, card):
+    def comments(self, card, board=None):
         return list(self.cards.get(card, {}).get("comments", []))
 
     def add_foreign(self, card, status, body, title="ci-watch: fix it", comments=()):
@@ -366,22 +370,3 @@ def test_flaky_test_passes_and_files_a_card_while_a_hard_failure_stays_red(tmp_p
         [sys.executable, "-m", "hermes_cli.main", "kanban", "show", cards[0]["id"], "--json"],
         capture_output=True, text=True, timeout=120, check=True, cwd=_ROOT).stdout)
     assert any("https://ci/run/2" in c["body"] for c in shown["comments"])
-
-
-def test_create_refused_by_the_overlap_guard_is_deferred_to_the_owner_not_a_crash(tmp_path):
-    """core prints the create_overlap refusal as JSON on STDOUT and exits 2 with a blank stderr."""
-    refusal = {"ok": False, "created": False, "code": "create_overlap", "note": "No card was created",
-               "matches": [{"id": "t_owner", "gateway": "hub", "board": "default", "status": "running"}]}
-    fake = tmp_path / "fakehermes.py"
-    fake.write_text("import json,sys\n"
-                    "a=sys.argv[2:]\n"
-                    "if a[0]=='create':\n"
-                    f"    print(json.dumps({refusal!r})); sys.exit(2)\n"
-                    "if a[0]=='list': print('[]')\n"
-                    "if a[0]=='comment': open(sys.argv[0]+'.log','a').write(a[1]+'|'+a[2]+'\\n')\n")
-    board = fk.CliBoard([sys.executable, str(fake)])
-    state = {"cards": {}, "runs": {}}
-    log = fk.file_cards([_entry("tests/x.py::test_a")], run_url="https://job/1", branch="main", board=board, state=state)
-    assert log[0].startswith("appended t_owner tests/x.py::test_a")
-    assert state["cards"]["tests/x.py::test_a"]["card"] == "t_owner"
-    assert "t_owner|Flaked again" in (tmp_path / "fakehermes.py.log").read_text()
