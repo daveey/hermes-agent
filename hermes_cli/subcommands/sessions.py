@@ -331,6 +331,8 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     sessions_move.add_argument("--to", required=True, help="Target gateway (a key of sessions.move.hosts)")
     sessions_move.add_argument("--reason", required=True, help="Why the chat must move (recorded on the Board)")
     _flag(sessions_move, "--after-turn", help="Wait (up to 10 min) for a running turn to end instead of refusing")
+    _flag(sessions_move, "--force", help="Move even though open cards on other gateways notify this chat "
+                                         "(their notices reach the archived copy here)")
     sessions_import_lineage = sessions_subparsers.add_parser(
         "import-lineage", help="Import an exported session lineage (JSON; the target side of `sessions move`)")
     sessions_import_lineage.add_argument("file", help="Payload file, or - for stdin")

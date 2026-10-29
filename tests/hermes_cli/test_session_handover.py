@@ -406,3 +406,16 @@ def test_transport_argv_templates():
     cfg = {"sessions": {"move": {"transport": ["env", "X=1", "{args}"], "remote_hermes": "py -m hermes_cli.main"}}}
     assert sh.transport_argv("u@h", ["sessions", "reveal", "s 1"], cfg) == [
         "env", "X=1", "py", "-m", "hermes_cli.main", "sessions", "reveal", "s 1"]
+
+
+def test_open_cards_on_other_gateways_refuse_the_move_unless_forced(gw, monkeypatch):
+    """Cards another gateway owns cannot be re-pointed from here: their notices would reach the archived copy."""
+    from hermes_cli import kanban_chat_links as kcl
+    rows = [{"id": "t_remote", "gateway": OTHER, "status": "running"}, {"id": "t_old", "gateway": OTHER, "status": "done"}]
+    monkeypatch.setattr(kcl, "replica_cards", lambda ids, me, statuses=None, **kw: rows)
+    res = sh.move_session(SID, DST, "needs the hub", db=gw.db)
+    assert not res["moved"] and res["code"] == "remote_cards" and f"{OTHER}/t_remote" in res["error"], res
+    assert res["cards"] == [{"id": "t_remote", "gateway": OTHER, "status": "running"}]  # a done card is no obligation
+    assert not gw.db.get_session(SID)["archived"]
+    res = sh.move_session(SID, DST, "needs the hub", db=gw.db, force=True)
+    assert res["moved"], res

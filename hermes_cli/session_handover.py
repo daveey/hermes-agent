@@ -10,6 +10,10 @@ A chat session moves to another gateway while this one (its current owner) is al
 6. archive the copy here (``end_reason='moved_to_gateway:<gw>'``);
 7. re-point this gateway's open cards that notify the chat to the new gateway's copy (:func:`repoint_links`).
 
+Open cards owned by OTHER gateways that notify the chat (``kanban_chat_links.replica_cards``) cannot be re-pointed
+from here: their notices would reach the archived copy. Such a move is refused (``remote_cards``, naming them)
+unless ``--force``; wait for those cards to finish, or force and read their results on their own gateway.
+
 If the CAS fails after the push, the hidden target copy is deleted through the transport and the move reports it.
 
 Transport (config ``sessions.move``)::
@@ -315,7 +319,7 @@ def _segments_and_counts(db, session_id: str, home: str) -> tuple[dict, dict[str
     return payload, {s["id"]: len(s.get("messages") or []) for s in segments}
 
 
-def move_session(session_id: str, to: str, reason: str, *, after_turn: bool = False, db=None,
+def move_session(session_id: str, to: str, reason: str, *, after_turn: bool = False, force: bool = False, db=None,
                  cfg: Optional[dict] = None, wait_s: float = AFTER_TURN_WAIT_S, poll_s: float = POLL_S,
                  sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     """Run the move; returns the report (``moved`` True/False, plus ``code`` and ``error`` when refused)."""
@@ -336,7 +340,7 @@ def move_session(session_id: str, to: str, reason: str, *, after_turn: bool = Fa
         db = db or _open_db()
         try:
             return _move(db, session_id, to, reason, me=me, target=hosts[to], after_turn=after_turn, cfg=cfg,
-                         wait_s=wait_s, poll_s=poll_s, sleep=sleep)
+                         wait_s=wait_s, poll_s=poll_s, sleep=sleep, force=force)
         finally:
             if own:
                 db.close()
@@ -344,8 +348,19 @@ def move_session(session_id: str, to: str, reason: str, *, after_turn: bool = Fa
         return {"session_id": session_id, "to": to, "moved": False, "code": exc.code, "error": str(exc), **exc.extra}
 
 
+def remote_open_cards(lineage: list[str], me: str) -> list[dict[str, Any]]:
+    """Open cards created on other gateways that this lineage's chats are linked to (from the board replicas)."""
+    from hermes_cli import kanban_chat_links as kcl
+    try:
+        rows = kcl.replica_cards(lineage, me, statuses=OPEN_STATUSES)
+    except Exception:  # health: allow BLE001 -- no replica (sync off): nothing known on other gateways
+        return []
+    return [{"id": r.get("id"), "gateway": r.get("gateway") or r.get("owner_gateway") or "?", "status": r.get("status")}
+            for r in rows if r.get("status") in OPEN_STATUSES]
+
+
 def _move(db, session_id: str, to: str, reason: str, *, me: str, target: str, after_turn: bool, cfg,
-          wait_s: float, poll_s: float, sleep) -> dict[str, Any]:
+          wait_s: float, poll_s: float, sleep, force: bool = False) -> dict[str, Any]:
     from hermes_cli import session_owner as so
     resolved = db.resolve_session_id(session_id) if hasattr(db, "resolve_session_id") else session_id
     if not resolved or not db.get_session(resolved):
@@ -358,6 +373,11 @@ def _move(db, session_id: str, to: str, reason: str, *, me: str, target: str, af
     rec = so.owner(root)
     if rec and rec.get("gateway") != me:
         raise MoveError("not_owner", f"this chat is owned by {rec.get('gateway')}, not {me}", owner=rec)
+    remote = remote_open_cards(lineage, me)
+    if remote and not force:
+        raise MoveError("remote_cards", f"{len(remote)} open card(s) on other gateways notify this chat and cannot be "
+                        "re-pointed from here: " + ", ".join(f"{c['gateway']}/{c['id']}" for c in remote[:10])
+                        + "; wait for them to finish or pass --force", cards=remote)
     if turn_running(db, root):
         if not after_turn:
             raise MoveError("turn_running", "a turn is running in this chat; retry when it ends (or --after-turn)")
@@ -438,7 +458,8 @@ def cmd_discard_hidden(args) -> int:
 
 
 def cmd_move(args) -> int:
-    res = move_session(args.session_id, args.to, args.reason or "", after_turn=bool(args.after_turn))
+    res = move_session(args.session_id, args.to, args.reason or "", after_turn=bool(args.after_turn),
+                       force=bool(getattr(args, "force", False)))
     _print(res)
     return 0 if res.get("moved") and res.get("revealed", True) else 1
 
