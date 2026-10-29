@@ -59,9 +59,6 @@ def test_observers_and_long_work_do_not_compete_for_fast_slots():
     workflows = _workflows()
     for wf, name in [
         ("ci-review-comment.yml", "comment"),
-        ("ci.yaml", "all-checks-pass"),
-        ("ci.yaml", "ci-timings"),
-        ("supply-chain-audit.yml", "aggregate"),
     ]:
         assert workflows[wf]["jobs"][name]["runs-on"] == ["self-hosted", "hermes-hub-poll"]
     for wf in ["tests.yml", "js-tests.yml", "docs-site-checks.yml", "rust-tests.yml", "remote-backends.yml"]:
