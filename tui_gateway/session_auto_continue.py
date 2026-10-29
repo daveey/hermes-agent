@@ -182,6 +182,9 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     with session["history_lock"]:
         if (session.get("_auto_continue_scheduled")
                 or (marker.get("reason") == "core_update_pause" and session.get("running"))
+                # A warm resume (renderer reload) of the backend that queued it: the live queue still holds the
+                # prompt and drains it when the hold lifts; replaying the marker too sent it twice.
+                or (marker.get("reason") == UPDATE_HOLD_QUEUE_REASON and session.get("queued_prompt"))
                 or time.monotonic() < float(session.get("_auto_continue_retry_after") or 0)
                 or session.get("_closing") or session.get("_finalized") or session.get("resume_hydrating")):
             return None
