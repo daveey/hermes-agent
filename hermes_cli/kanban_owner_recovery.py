@@ -34,7 +34,9 @@ def _admission_row(receipt):
     if not receipt:
         return None
     try:
-        with closing(sqlite3.connect(Path(receipt['db']).as_uri() + '?mode=ro', uri=True)) as owner:
+        # The owner's state.db (session_admissions), not a Kanban board: the board guard does not apply.
+        owner_uri = Path(receipt['db']).as_uri() + '?mode=ro'
+        with closing(sqlite3.connect(owner_uri, uri=True)) as owner:  # noqa: kanban-lockguard
             row = owner.execute('SELECT status,outcome FROM session_admissions WHERE target_session_id=? AND request_id=?',
                                 (receipt['session_id'], receipt['request_id'])).fetchone()
     except (OSError, KeyError, TypeError, ValueError, sqlite3.Error):
