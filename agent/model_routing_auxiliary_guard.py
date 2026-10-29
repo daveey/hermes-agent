@@ -28,7 +28,12 @@ def verify_sdk_request(client, request, runtime):
     elif client.api_key != expected:
         raise ModelRoutingError("Managed auxiliary SDK credential changed")
     headers = {str(k).lower(): v for k, v in client.default_headers.items()}
-    if headers.get("authorization") != "Bearer " + expected:
+    # openai>=2.5x sends the key from ``auth_headers`` at request time instead of folding it into
+    # ``default_headers``; a custom Authorization header still lands in (and wins from) the latter.
+    auth = headers.get("authorization")
+    if auth is None:
+        auth = {str(k).lower(): v for k, v in (getattr(client, "auth_headers", None) or {}).items()}.get("authorization")
+    if auth != "Bearer " + expected:
         raise ModelRoutingError("Managed auxiliary SDK authorization header changed")
     if any(headers.get(k) for k in ("x-api-key", "api-key", "host")):
         raise ModelRoutingError("Managed auxiliary SDK has conflicting authentication headers")
