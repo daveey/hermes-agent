@@ -44,10 +44,13 @@ def test_a_link_inside_a_profile_does_not_hide_the_roster(monkeypatch, tmp_path)
 
 
 def test_a_nested_home_reads_the_identity_of_its_install_root(monkeypatch, tmp_path):
+    # Fork: only the native home and its ``profiles/<name>`` belong to the native root (a scratch
+    # home elsewhere below ~/.hermes is its own installation, hermes_constants._hermes_root_of), so
+    # the nested home here is a profile home rather than upstream's arbitrary ``native/work``.
     native = tmp_path / "native"
-    (native / "work").mkdir(parents=True)
+    (native / "profiles" / "work").mkdir(parents=True)
     (native / "install_id").write_text("A" * 32 + "\n")
     monkeypatch.setattr(hermes_constants, "_get_platform_default_hermes_home", lambda: native)
-    monkeypatch.setenv("HERMES_HOME", str(native / "work"))
+    monkeypatch.setenv("HERMES_HOME", str(native / "profiles" / "work"))
 
     assert dispatch(["inventory"])["installId"] == "a" * 32
