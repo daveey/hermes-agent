@@ -140,3 +140,34 @@ def test_termux_assembly_permissions_run_on_docker_ci_and_fail_on_skip():
     assert "--fail-on-skip" in run["run"]
     assert "tests/scripts/test_termux_assembly_permissions.py" in run["run"]
     assert steps[-1].get("uses") == "./.github/actions/check-clean-worktree"
+
+
+def test_python_slices_match_their_matrix():
+    # The slice count is the matrix size: HERMES_TEST_SLICE and the job name read strategy.job-total,
+    # so a planner that sizes the matrix can never skip or double-run files.
+    wf = _workflows()["tests.yml"]
+    job = wf["jobs"]["test"]
+    assert job["strategy"]["matrix"]["slice"] == "${{ fromJSON(inputs.python_slices) }}"
+    default = wf["on"]["workflow_call"]["inputs"]["python_slices"]["default"]
+    assert default == "[1, 2]"
+    run = next(step for step in job["steps"] if step.get("name") == "Run tests")
+    assert run["env"]["HERMES_TEST_SLICE"] == "${{ matrix.slice }}/${{ strategy.job-total }}"
+    assert "${{ matrix.slice }}/${{ strategy.job-total }}" in job["name"]
+    assert job["runs-on"] == ["self-hosted", "hermes-hub"]
+
+
+def test_pull_requests_pass_their_affected_plan_to_the_slices():
+    ci = _workflows()["ci.yaml"]["jobs"]
+    outputs = ci["detect"]["outputs"]
+    assert outputs["python_changed"] == "${{ steps.python-plan.outputs.changed }}"
+    assert outputs["python_slices"] == "${{ steps.python-plan.outputs.slices }}"
+    plan = next(step for step in ci["detect"]["steps"] if step.get("id") == "python-plan")
+    script = plan["run"]
+    # Only a pull request with a usable changed-file list narrows the run.
+    for full in ('"$EVENT_NAME" != "pull_request"', '"$FULL_LABEL" = "true"', '-eq 0', '-ge 300'):
+        assert full in script
+    assert ci["tests"]["with"]["python_changed"] == "${{ needs.detect.outputs.python_changed }}"
+    assert ci["tests"]["with"]["python_slices"] == "${{ needs.detect.outputs.python_slices }}"
+    run = next(step for step in _workflows()["tests.yml"]["jobs"]["test"]["steps"] if step.get("name") == "Run tests")
+    assert run["env"]["PYTHON_CHANGED"] == "${{ inputs.python_changed }}"
+    assert "affected_tests.py --changed" in run["run"] and "--files-from" in run["run"]

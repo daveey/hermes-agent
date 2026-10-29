@@ -149,4 +149,6 @@ runs:
 
         echo "Changed files:"
         printf '%s\n' "${CHANGED:-(none)}"
+        # The Python test planner (ci.yaml detect, scripts/ci/affected_tests.py) reads the same list.
+        printf '%s\n' "${CHANGED:-}" > "$RUNNER_TEMP/detect-changed-files.txt"
         printf '%s\n' "${CHANGED:-}" | python3 scripts/ci/classify_changes.py
