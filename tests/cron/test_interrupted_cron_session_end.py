@@ -161,3 +161,39 @@ def test_cleanup_thread_keeps_profile_scoped_hermes_home(monkeypatch, tmp_path):
         db.close()
     finally:
         reset_hermes_home_override(token)
+
+
+def _bare_session(db, sid, started):
+    db.create_session(sid, source="cron")
+    db._execute_write(lambda c: c.execute("UPDATE sessions SET started_at=? WHERE id=?", (started, sid)))
+
+
+def test_orphan_sweep_ends_old_rows_without_a_live_attempt(monkeypatch, env):
+    """Rows whose ledger attempt was pruned (or settled without finalizing) are ended by the sweep."""
+    import time
+
+    import cron.interrupted_sessions as mod
+
+    _executions, db, _ = env
+    old = "cron_gone1_20261028_010708"
+    young = "cron_gone2_20261029_020000"
+    _bare_session(db, old, time.time() - 3 * 3600)
+    _bare_session(db, young, time.time() - 60)
+
+    assert mod.end_orphaned_cron_sessions(days=1) == 1
+    row = db.get_session(old)
+    assert row["end_reason"] == "cron_interrupted" and row["title"].endswith("(interrupted)")
+    assert db.get_session(young)["ended_at"] is None
+    assert mod.end_orphaned_cron_sessions(days=1) == 0
+
+
+def test_orphan_sweep_spares_a_row_a_live_attempt_may_own(monkeypatch, env):
+    import cron.interrupted_sessions as mod
+
+    executions, db, _ = env
+    rec = executions.create_execution("busy", source="builtin")
+    executions.mark_execution_running(rec["id"])  # same process: still live
+    sid = _session_for(db, rec, "busy")
+
+    assert mod.end_orphaned_cron_sessions(days=1, min_age_seconds=0) == 0
+    assert db.get_session(sid)["ended_at"] is None

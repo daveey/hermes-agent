@@ -217,4 +217,72 @@ def backfill_interrupted_cron_sessions(
         logger.warning("cron interrupted-session backfill: ledger read failed: %s", exc)
         return 0
     rows = [r for r in rows if (_ts(r.get("claimed_at")) or 0) >= cutoff]
-    return end_interrupted_cron_sessions(rows, db_path=db_path, timeout_seconds=timeout_seconds)
+    ended = end_interrupted_cron_sessions(rows, db_path=db_path, timeout_seconds=timeout_seconds)
+    return ended + end_orphaned_cron_sessions(days=days, db_path=db_path)
+
+
+def _job_id_of(session_id: str) -> str:
+    # cron_<job_id>_<YYYYmmdd>_<HHMMSS>
+    return session_id[len("cron_"):].rsplit("_", 2)[0]
+
+
+def end_orphaned_cron_sessions(
+    *, days: float = 7.0, min_age_seconds: float = 3600.0, db_path: Optional[Path] = None,
+) -> int:
+    """End unended ``cron_*`` session rows that no live attempt can still own.
+
+    Covers rows whose ledger attempt was already pruned, or settled without the owner finalizing
+    the session. A row is left alone when it is younger than *min_age_seconds* or when its job has
+    a ``claimed``/``running`` attempt claimed at or before the row started (that attempt may still
+    be writing it). Manual/one-shot repair; never raises.
+    """
+    from cron import executions
+    from hermes_state import SessionDB
+
+    try:
+        now = executions._hermes_now().timestamp()
+        with executions._transaction() as conn:
+            live = [dict(r) for r in conn.execute(
+                "SELECT job_id, claimed_at FROM executions WHERE status IN ('claimed','running')")]
+    except _STORAGE_ERRORS as exc:
+        logger.warning("cron orphan-session sweep: ledger read failed: %s", exc)
+        return 0
+    live_claims: dict[str, list[float]] = {}
+    for r in live:
+        ts = _ts(r.get("claimed_at"))
+        if ts is not None:
+            live_claims.setdefault(str(r["job_id"]), []).append(ts)
+    ended = 0
+    try:
+        db = SessionDB(db_path=db_path)
+    except _STORAGE_ERRORS as exc:
+        logger.warning("cron orphan-session sweep: state.db open failed: %s", exc)
+        return 0
+    try:
+        rows = [dict(r) for r in db._read_all(
+            "SELECT id, started_at, title FROM sessions WHERE id LIKE 'cron\\_%' ESCAPE '\\' "
+            "AND ended_at IS NULL AND started_at >= ? AND started_at < ?",
+            (now - days * 86400, now - min_age_seconds))]
+        for row in rows:
+            sid, started = row["id"], float(row["started_at"])
+            job_id = _job_id_of(sid)
+            if any(c - _CLAIM_SKEW_SECONDS <= started for c in live_claims.get(job_id, [])):
+                continue
+            try:
+                if not row.get("title"):
+                    _title_interrupted(db, sid, job_id, started)
+                n = _end_one(db, sid)
+            except _STORAGE_ERRORS as exc:
+                logger.warning("cron orphan-session sweep: %s: %s", sid, exc)
+                continue
+            if n:
+                ended += n
+                logger.info("Job '%s': ended orphaned cron session %s", job_id, sid)
+    except _STORAGE_ERRORS as exc:
+        logger.warning("cron orphan-session sweep failed: %s", exc)
+    finally:
+        try:
+            db.close()
+        except (sqlite3.Error, OSError) as exc:
+            logger.debug("cron orphan-session sweep: state.db close failed: %s", exc)
+    return ended
