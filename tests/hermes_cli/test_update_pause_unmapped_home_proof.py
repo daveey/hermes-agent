@@ -41,6 +41,19 @@ def homes_and_spawn(tmp_path):
     def spawn(home) -> subprocess.Popen:
         proc = subprocess.Popen(argv, env={**os.environ, "HERMES_HOME": str(home)})
         procs.append(proc)
+        # Popen returns once the child's mm is replaced (vfork), which is before the kernel has
+        # published its /proc cmdline and environ. A throttled runner can be preempted in that
+        # window, and the readiness predicate then reads an empty cmdline/environ and matches nothing.
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                p = psutil.Process(proc.pid)
+                if list(p.cmdline()) == argv and p.environ().get("HERMES_HOME") == str(home):
+                    break
+            except (psutil.Error, OSError):
+                pass
+            assert time.monotonic() < deadline, "spawned stub never exposed its cmdline/environ"
+            time.sleep(0.01)
         return proc
 
     yield home_a, home_b, spawn
