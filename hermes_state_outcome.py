@@ -46,7 +46,8 @@ _NOTICE_KIND = "kanban_notice"
 _PROGRESS_OPENERS = ("let me ", "i'll ", "i will ", "now i", "next, i", "next i ", "working on")
 
 ProviderFn = Callable[[str], Optional[dict]]
-JudgeFn = Callable[[str, str], Optional[bool]]
+# ``fn(sid, text, *, source=None)``; a judge without the ``source`` keyword is called as ``fn(sid, text)``.
+JudgeFn = Callable[..., Optional[bool]]
 
 _providers: dict[str, ProviderFn] = {}
 _judge: list[Optional[JudgeFn]] = [None]
@@ -64,8 +65,9 @@ def register_outcome_provider(name: str, fn: ProviderFn) -> None:
 
 
 def register_outcome_judge(fn: Optional[JudgeFn]) -> None:
-    """Set the summary judge ``fn(sid, last_assistant_text) -> True | False | None`` (None = can't tell,
-    use the heuristic). One judge per process; ``None`` clears it."""
+    """Set the summary judge ``fn(sid, last_assistant_text, *, source=None) -> True | False | None`` (None =
+    can't tell, use the heuristic; ``source`` is the row's ``sessions.source``, and a judge that does not take
+    it is called without it). One judge per process; ``None`` clears it."""
     if fn is not None and not callable(fn):
         raise ValueError("register_outcome_judge needs a callable")
     _judge[0] = fn
@@ -194,7 +196,7 @@ def _parse(raw: Any) -> Optional[dict[str, Any]]:
 
 
 def _row(db: Any, sid: str) -> Optional[dict[str, Any]]:
-    row = db._read_one("SELECT id, outcome_json, outcome_at, muted FROM sessions WHERE id = ?", (sid,))
+    row = db._read_one("SELECT id, source, outcome_json, outcome_at, muted FROM sessions WHERE id = ?", (sid,))
     return dict(row) if row is not None else None
 
 
@@ -378,17 +380,34 @@ def looks_like_summary(text: str) -> bool:
     return not text.splitlines()[-1].rstrip().endswith("?")
 
 
-def _is_summary(sid: str, text: str) -> bool:
+def _call_judge(judge: JudgeFn, sid: str, text: str, source: Optional[str]) -> Optional[bool]:
+    try:
+        return judge(sid, text, source=source)
+    except TypeError:  # a judge written before ``source`` was passed
+        return judge(sid, text)
+
+
+def _judge_summary(sid: str, text: str, source: Optional[str]) -> Optional[bool]:
+    """The registered judge's verdict, or None when there is none or it can't tell."""
     judge = _judge[0]
-    if judge is not None:
-        try:
-            verdict = judge(sid, text)
-        except Exception:
-            logger.warning("session outcome judge failed for %s; using the heuristic", sid, exc_info=True)
-            verdict = None
-        if verdict is True or verdict is False:
-            return verdict
-    return looks_like_summary(text)
+    if judge is None:
+        return None
+    try:
+        verdict = _call_judge(judge, sid, text, source)
+    except Exception:
+        logger.warning("session outcome judge failed for %s; using the heuristic", sid, exc_info=True)
+        return None
+    return verdict if verdict is True or verdict is False else None
+
+
+def _prior_verdict(stored: Optional[dict], msg_id: Any) -> Optional[bool]:
+    """A judge's earlier verdict on this same last assistant message, kept by a refresh that has no judge (the
+    CLI ``outcome-audit --refresh``, the web ``?refresh=1``): the heuristic never overrides it."""
+    if not stored or msg_id is None or not stored.get("judged") or stored.get("judged_msg") != msg_id:
+        return None
+    if stored.get("kind") == "done":
+        return True
+    return False if stored.get("reason") == "no_summary" else None
 
 
 def _outcome(kind: str, now: float, **fields: Any) -> dict[str, Any]:
@@ -434,9 +453,16 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
     if reason:
         return _outcome("unresolved", now, reason=reason, **carry)
     text = _text(tail[0].get("content"))
-    if _is_summary(sid, text):
-        return _outcome("done", now, summary=text[:SUMMARY_CHARS], **carry)
-    return _outcome("unresolved", now, reason="no_summary", **carry)
+    msg_id = tail[0].get("id")
+    verdict = _judge_summary(sid, text, row.get("source"))
+    if verdict is None:
+        verdict = _prior_verdict(stored, msg_id)
+    judged = {"judged": True, "judged_msg": msg_id} if verdict is not None and msg_id is not None else {}
+    if verdict is None:
+        verdict = looks_like_summary(text)
+    if verdict:
+        return _outcome("done", now, summary=text[:SUMMARY_CHARS], **judged, **carry)
+    return _outcome("unresolved", now, reason="no_summary", **judged, **carry)
 
 
 def _same(a: Optional[dict], b: Optional[dict]) -> bool:
