@@ -37,9 +37,16 @@ _STOP_NOTICE_KIND = "turn_stopped"
 
 
 def _stop_issuer_label(transport) -> str:
-    """The login that sent a Stop (``basic:redde`` -> ``redde``), or ``Desktop`` for the local credential."""
-    auth = _transport_auth_user_id(transport)
-    return auth.split(":", 1)[-1] if auth else "Desktop"
+    """The login that sent a Stop (``basic:redde`` -> ``redde``), or ``Desktop`` for the local credential.
+
+    Read from the transport's own login, not ``_transport_auth_user_id``: since the upstream merge that
+    names the row OWNER (the host owner's OS subject for every login), which would label every remote
+    Stop ``uid:<n>`` instead of the person who pressed it."""
+    from gateway.session_identity import is_authenticated_identity
+    identity = getattr(transport, "auth_identity", None)
+    if not is_authenticated_identity(identity):
+        return "Desktop"
+    return str((identity or {}).get("user_id")).strip()
 
 
 def _note_stop_issuer(sid: str, session: dict, transport) -> None:
