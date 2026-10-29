@@ -510,9 +510,8 @@ def _update_trigger(table: str, columns: list[str]) -> str:
 
 def _delete_trigger(table: str) -> str:
     when = _NOT_APPLYING
-    if table == "task_links":  # links removed by a task delete ride on the task's tombstone
-        when += (" AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.parent_id)"
-                 " AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.child_id)")
+    if table == "task_links":  # foreign parents are absent locally; the child owns the edge
+        when += " AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.child_id)"
     elif table == "task_attachments":
         when += " AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)"
     uid = _row_uid_sql(table, "OLD")

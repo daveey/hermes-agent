@@ -613,6 +613,8 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
                 resync(live, hub, slug, observers=True, partition=gateway)
         replica = open_shadow(slug, gateway)
         try:
+            from hermes_cli.kanban_sync_partition_repair import repair_partition_links
+            repair_partition_links(live, replica, gateway)
             if mode == "primary" and sync.refresh_remote_parents(live, replica):
                 sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
             result.repaired = repair_divergence(live, replica, gateway)
