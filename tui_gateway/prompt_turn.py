@@ -552,6 +552,22 @@ def _dispatch_claimed_followup(rid, sid, session, prompt, what, *, on_done=None,
         _notif_release_turn(session)
 
 
+def _goal_waits_for_paused_turn(session: dict) -> bool:
+    """[daveey] A /goal continuation must not run ahead of a turn paused for a core update. It claims the session
+    directly (not through ``_notif_claim_turn``) and is a real turn, so it would record its own marker over the
+    paused one and retire it: the paused request was replaced, not continued. Skip the tick instead; the paused
+    turn's continuation (or the user's next message) ends with its own goal evaluation."""
+    with session["history_lock"]:
+        pending = bool(session.get("_paused_marker_carried") or session.get("_update_pause_marker_key"))
+    if not pending:
+        from tui_gateway.update_pause import continuation_due
+        pending = continuation_due(session)
+    if pending:
+        logger.info("core-update pause: goal continuation for %s waits for the paused turn",
+                    session.get("session_key") or "")
+    return pending
+
+
 def _run_post_turn_followups(
     rid, sid: str, session: dict, result: Any, goal_followup: str | None) -> None:
     """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
@@ -564,6 +580,8 @@ def _run_post_turn_followups(
             _enqueue_prompt(session, steer, session.get("transport"))
     if _drain_queued_prompt(rid, sid, session):
         return
+    if goal_followup and _goal_waits_for_paused_turn(session):
+        goal_followup = None  # the paused turn's own end runs the goal judge again
     if goal_followup:
         with _session_turn_admission(session) as admitted:
             if not admitted or session.get("running"):
