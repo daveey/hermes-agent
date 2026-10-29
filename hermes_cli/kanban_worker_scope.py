@@ -125,6 +125,210 @@ def release_failure(metadata: dict) -> None:
         _systemctl("reset-failed", unit)
 
 
+# --- Stop a finished run's scope ------------------------------------------------
+# A worker's scope outlives the worker: anything it left behind (a background
+# pytest whose wrapper the agent pkill'ed, ``ssh-agent -s``, a ``nohup … &``)
+# stays in ``hermes-worker-kanban-<task>-run-<n>.scope`` and nothing stopped the
+# scope, so orphans held hub test slots for hours and scopes piled up for days.
+# Each dispatch tick now stops the scope of every run of this board that ended
+# more than ``RUN_SCOPE_STOP_GRACE_SECONDS`` ago and whose worker is gone.
+# Jobs the worker started with ``persist_on_release`` (recorded in any profile's
+# ``processes.json``) and their descendants are spared: such a scope gets every
+# other process signalled instead of a unit stop. [daveey]
+RUN_SCOPE_STOP_GRACE_SECONDS = 600
+RUN_SCOPE_SWEEP_INTERVAL_SECONDS = 300
+_SCOPE_UNIT_PREFIX = "hermes-worker-kanban-"
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+_last_scope_sweep: dict[str, float] = {}
+
+
+def _parse_scope_unit(unit: str) -> tuple[str, int] | None:
+    import re
+
+    m = re.fullmatch(r"hermes-worker-kanban-(?P<task>.+)-run-(?P<run>\d+)\.scope", unit)
+    return (m.group("task"), int(m.group("run"))) if m else None
+
+
+def _active_run_scopes() -> list[str] | None:
+    proc = _systemctl("list-units", "--type=scope", "--state=active", "--plain",
+                      "--no-legend", "--no-pager", _SCOPE_UNIT_PREFIX + "*")
+    if proc is None or proc.returncode:
+        return None
+    return [line.split()[0] for line in proc.stdout.splitlines()
+            if line.split() and line.split()[0].startswith(_SCOPE_UNIT_PREFIX)]
+
+
+def _scope_pids(unit: str) -> list[int] | None:
+    proc = _systemctl("show", unit, "-p", "ControlGroup", "--value")
+    if proc is None or proc.returncode or not proc.stdout.strip():
+        return None
+    try:
+        raw = (_CGROUP_ROOT / proc.stdout.strip().lstrip("/") / "cgroup.procs").read_text(encoding="utf-8-sig")
+    except OSError:
+        return None
+    return [int(p) for p in raw.split() if p.isdecimal()]
+
+
+def _proc_stat(pid: int) -> tuple[int, int] | None:
+    """(ppid, start ticks) from /proc/<pid>/stat, or None when the pid is gone."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8-sig")
+        fields = stat[stat.rindex(")") + 2:].split()
+        return int(fields[1]), int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _cmdline(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+            "utf-8", "replace").strip()[:200]
+    except OSError:
+        return ""
+
+
+def _persisted_pids() -> set[int]:
+    """Live pids of ``persist_on_release`` jobs from every profile's process checkpoint."""
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    homes = {get_hermes_home()}
+    try:
+        root = get_default_hermes_root()
+        homes.add(root)
+        homes.update(p for p in (root / "profiles").iterdir() if p.is_dir())
+    except OSError:
+        pass
+    pids: set[int] = set()
+    for home in homes:
+        try:
+            entries = json.loads((home / "processes.json").read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or not entry.get("persist_on_release"):
+                continue
+            pid, start = entry.get("pid"), entry.get("host_start_time")
+            if type(pid) is not int or pid <= 1:
+                continue
+            stat = _proc_stat(pid)
+            if stat is not None and (type(start) is not int or stat[1] == start):
+                pids.add(pid)
+    return pids
+
+
+def _is_spared(pid: int, persisted: set[int]) -> bool:
+    seen = 0
+    while pid > 1 and seen < 64:
+        if pid in persisted:
+            return True
+        stat = _proc_stat(pid)
+        if stat is None:
+            return False
+        pid, seen = stat[0], seen + 1
+    return False
+
+
+def _signal_unspared(pids: list[int]) -> None:
+    import signal
+    import time
+
+    def send(sig: int, targets: list[int]) -> None:
+        for pid in targets:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+
+    send(signal.SIGTERM, pids)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and any(_proc_stat(p) is not None for p in pids):
+        time.sleep(0.1)
+    send(getattr(signal, "SIGKILL", signal.SIGTERM), [p for p in pids if _proc_stat(p) is not None])
+
+
+def stop_ended_run_scopes(
+    conn: sqlite3.Connection, *, board: str | None = None,
+    grace_seconds: int = RUN_SCOPE_STOP_GRACE_SECONDS, force: bool = False,
+) -> list[dict]:
+    """Stop the systemd scopes of this board's runs that ended ``grace_seconds`` ago.
+
+    Throttled to one sweep per ``RUN_SCOPE_SWEEP_INTERVAL_SECONDS`` per board unless
+    ``force``. A run whose row is not on this board, whose retained worker is still
+    alive (``reap_terminal_workers`` owns that), or whose scope holds this process is
+    left alone. Returns one record per scope acted on (also logged and booked as a
+    ``run_scope_stopped`` event). Never raises.
+    """
+    import logging
+    import time
+
+    log = logging.getLogger(__name__)
+    key = board or "default"
+    if not force and time.monotonic() - _last_scope_sweep.get(key, float("-inf")) < RUN_SCOPE_SWEEP_INTERVAL_SECONDS:
+        return []
+    _last_scope_sweep[key] = time.monotonic()
+    stopped: list[dict] = []
+    try:
+        units = _active_run_scopes()
+        if not units:
+            return []
+        from hermes_cli import kanban_db as kb
+
+        cutoff = int(time.time()) - grace_seconds
+        persisted: set[int] | None = None
+        for unit in units:
+            parsed = _parse_scope_unit(unit)
+            if parsed is None:
+                continue
+            task_id, run_id = parsed
+            row = conn.execute(
+                "SELECT ended_at, worker_pid FROM task_runs WHERE id = ? AND task_id = ?",
+                (run_id, task_id)).fetchone()
+            if row is None or row[0] is None or int(row[0]) > cutoff:
+                continue
+            if row[1] is not None and kb._pid_alive(int(row[1])):
+                continue
+            pids = _scope_pids(unit)
+            if not pids or os.getpid() in pids:
+                continue
+            if persisted is None:
+                persisted = _persisted_pids()
+            spared = [p for p in pids if _is_spared(p, persisted)]
+            doomed = [p for p in pids if p not in spared]
+            if not doomed:
+                continue
+            record = {
+                "systemd_unit": unit, "run_id": run_id, "task_id": task_id,
+                "mode": "signal" if spared else "stop", "spared": spared,
+                "killed": [{"pid": p, "cmd": _cmdline(p)} for p in doomed],
+            }
+            if spared:
+                _signal_unspared(doomed)
+            else:
+                proc = _systemctl("stop", "--no-block", unit)
+                if proc is None or proc.returncode:
+                    log.warning("kanban: could not stop scope %s: %s", unit,
+                                (proc.stderr.strip() if proc is not None else "no user bus"))
+                    continue
+            log.info("kanban: stopped scope %s of ended run %s (%s): killed %s, spared %s",
+                     unit, run_id, record["mode"],
+                     [f"{k['pid']}:{k['cmd'][:60]}" for k in record["killed"]], spared)
+            try:
+                with kb.write_txn(conn):
+                    kb._append_event(conn, task_id, "run_scope_stopped",
+                                     {k: v for k, v in record.items() if k != "task_id"}, run_id=run_id)
+            except Exception:
+                log.debug("kanban: booking run_scope_stopped for %s failed", unit, exc_info=True)
+            stopped.append(record)
+    except Exception:
+        log.warning("kanban: stopping ended run scopes failed", exc_info=True)
+    return stopped
+
+
+def stopped_scope_units(conn: sqlite3.Connection, *, board: str | None = None) -> list[str]:
+    """Dispatch-tick entry: :func:`stop_ended_run_scopes`, reduced to the unit names."""
+    return [r["systemd_unit"] for r in stop_ended_run_scopes(conn, board=board)]
+
+
 # --- Typed OOM recovery -------------------------------------------------------
 # An ``oom_killed`` run is a resource failure, not a generic crash: the retry
 # gets a doubled MemoryMax (bounded by MemAvailable admission) instead of dying

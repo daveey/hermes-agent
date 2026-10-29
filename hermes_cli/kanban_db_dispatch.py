@@ -161,11 +161,10 @@ class DispatchResult:
     reclaimed: int = 0
     promoted: int = 0
     reconciled_orphans: list[str] = field(default_factory=list)
-    """``running`` cards requeued by :func:`reconcile_orphaned_running` (broken
-    claim bookkeeping, dead/gone worker)."""
+    """``running`` cards requeued by :func:`reconcile_orphaned_running` (broken claim bookkeeping, dead/gone worker)."""
     reaped_terminal_workers: list[str] = field(default_factory=list)
-    """Task ids whose worker outlived its closed run and was terminated by
-    :func:`reap_terminal_workers`."""
+    """Task ids whose worker outlived its closed run and was terminated by :func:`reap_terminal_workers`."""
+    stopped_run_scopes: list[str] = field(default_factory=list)  # ended runs' scopes stopped (kanban_worker_scope) [daveey]
     spawned: list[tuple[str, str, str]] = field(default_factory=list)
     """``(task_id, assignee, workspace_path)`` triples."""
     skipped_unassigned: list[str] = field(default_factory=list)
@@ -2485,6 +2484,7 @@ def _run_reclaim_phase(
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
     reap_worker_zombies()
     result.reaped_terminal_workers = reap_terminal_workers(conn)
+    result.stopped_run_scopes = _worker_scope.stopped_scope_units(conn, board=board)  # orphans of ended runs [daveey]
     # Stop requests another gateway sent for cards this gateway runs under its own Board lease (kanban_archive of a
     # card running on this machine). Before the reclaim sweeps, so they see the archived card. [daveey]
     from hermes_cli.kanban_remote_stop import apply_stop_requests
