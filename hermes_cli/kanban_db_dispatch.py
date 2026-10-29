@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING
 
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 from hermes_cli import kanban_db_dispatch_guard_notice as _guard_notice
+from hermes_cli.kanban_db_stale_claims import _defer_reclaim_for_live_worker
+from hermes_cli.kanban_suspend_ledger import awake_seconds as _awake_seconds, record_dispatch_pass as _record_dispatch_pass
 from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as _guard_hold_started_at
 from hermes_cli import kanban_db_dispatch_quota as _kbq
 from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code_kind
@@ -732,39 +734,6 @@ def _worker_survived_termination(termination: dict) -> bool:
     )
 
 
-def _defer_reclaim_for_live_worker(
-    conn: sqlite3.Connection,
-    task_id: str,
-    claim_lock: Optional[str],
-    now: int,
-    termination: dict,
-    *,
-    reason: str,
-) -> None:
-    """Hold a claim whose worker survived termination instead of releasing it.
-
-    Extends ``claim_expires`` by ``RECLAIM_DEFER_GRACE_SECONDS`` so the task
-    stays ``running`` (no duplicate spawn) and records ``reclaim_deferred``.
-    The next tick retries the kill; not spawning a duplicate is what lets the
-    throttled worker finally die.
-    """
-    grace = now + _kb.RECLAIM_DEFER_GRACE_SECONDS
-    with _kb.write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET claim_expires = ? "
-            "WHERE id = ? AND status = 'running' AND claim_lock IS ?",
-            (grace, task_id, claim_lock),
-        )
-        if cur.rowcount != 1:
-            return
-        run_id = _kb._current_run_id(conn, task_id)
-        if run_id is not None:
-            conn.execute("UPDATE task_runs SET claim_expires = ? WHERE id = ?", (grace, run_id))
-        payload = {"reason": reason, "claim_lock": claim_lock, "claim_expires_now": grace}
-        payload.update(termination)
-        _kb._append_event(conn, task_id, "reclaim_deferred", payload, run_id=run_id)
-
-
 def heartbeat_worker(
     conn: sqlite3.Connection,
     task_id: str,
@@ -834,7 +803,8 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
             continue
         # Runtime is per attempt: ``tasks.started_at`` records the FIRST start,
         # so retries must be measured from the active task_runs row.
-        elapsed = now - (_kb._to_epoch(row["active_started_at"]) or now)  # unreadable clock: never kill
+        # [daveey] Awake time only: a host suspend (``kanban_suspend_ledger``) is not runtime.
+        elapsed = _awake_seconds(conn, _kb._to_epoch(row["active_started_at"]) or now, now)  # unreadable: never kill
         limit = int(row["max_runtime_seconds"])
         if elapsed < limit:
             continue
@@ -939,12 +909,15 @@ def detect_stale_running(
     for row in rows:
         if row["active_started_at"] is None:
             continue
-        elapsed = now - (_kb._to_epoch(row["active_started_at"]) or now)  # unreadable clock: never reclaim
+        # [daveey] Awake time only (``kanban_suspend_ledger``): a host suspend is neither runtime
+        # nor heartbeat silence, else the first pass after a long lid-close kills every live worker.
+        active_started = _kb._to_epoch(row["active_started_at"]) or now  # unreadable clock: never reclaim
+        elapsed = _awake_seconds(conn, active_started, now)
         if elapsed < stale_timeout_seconds:
             continue
 
         last_hb = _kb._to_epoch(row["last_heartbeat_at"])
-        hb_age = (now - last_hb) if last_hb is not None else None
+        hb_age = _awake_seconds(conn, max(last_hb, active_started), now) if last_hb is not None else None
         if hb_age is not None and hb_age < _STALE_HEARTBEAT_GAP_SECONDS:
             continue
 
@@ -2483,6 +2456,9 @@ def _run_reclaim_phase(
         result.remote_archived = apply_stop_requests(conn)
     except Exception:
         _kb._log.warning("kanban: applying remote stop requests failed", exc_info=True)
+    # [daveey] Before any stale check: a long gap since the last pass is a host suspend, which the
+    # heartbeat backstop, the stale sweep and max_runtime must not count (``kanban_suspend_ledger``).
+    _record_dispatch_pass(conn)
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
