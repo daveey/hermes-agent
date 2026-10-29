@@ -770,16 +770,19 @@ def heartbeat_expiry(conn: sqlite3.Connection, task_id: str, expires: int) -> in
         return expires
     lease_expires = row["lease_expires"]
     ttl_s = max(expires - int(time.time()), 1)
-    if _renewal_due(task_id, lease_expires, ttl_s):
-        lease_expires = _renew(conn, task_id, row["run_uid"], ttl_s) or lease_expires
+    # [daveey] No current run (it just ended continued/blocked): there is no run uid to renew under and the Board
+    # refuses an empty one (400 "run_uid required"), so make no call; the bound below still applies.
+    if row["run_uid"] and _renewal_due(task_id, lease_expires, ttl_s):
+        lease_expires = _renew(conn, task_id, row["run_uid"], ttl_s, lease_expires) or lease_expires
     return min(expires, lease_expires // 1000 - LEASE_SAFETY_MARGIN_SECONDS)
 
 
-def _renew(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str], ttl_s: int) -> Optional[int]:
+def _renew(conn: sqlite3.Connection, task_id: str, run_uid: str, ttl_s: int,
+           old_expires_ms: Optional[int] = None) -> Optional[int]:
     from hermes_cli.kanban_db_connect import write_txn
     state = _state(conn)
     try:
-        lease = _client().renew(board_id=state["board_id"], task_uid=task_id, run_uid=run_uid or "",
+        lease = _client().renew(board_id=state["board_id"], task_uid=task_id, run_uid=run_uid,
                                 gateway_id=state["gateway_id"], ttl_s=ttl_s)
     except _CLIENT_ERRORS as exc:
         _log.warning("kanban sync: lease renewal for %s failed (%s: %s)", task_id, type(exc).__name__, exc)
@@ -789,6 +792,11 @@ def _renew(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str], ttl_s
             conn.execute("UPDATE tasks SET lease_expires = ?, "
                          "lease_version = COALESCE(?, lease_version) WHERE id = ?",
                          (lease.expires_ms, lease.version, task_id))
+            # [daveey] A renewal that rescues a lapsed lease (the first heartbeat after macOS sleep) is the only
+            # evidence that path ran; log it like the session-turn lease does.
+            left_s = None if old_expires_ms is None else old_expires_ms / 1000 - time.time()
+            if left_s is not None and left_s <= LEASE_SAFETY_MARGIN_SECONDS:
+                _log.info("kanban sync: lease of %s renewed %ds after it lapsed", task_id, max(0, int(-left_s)))
             return lease.expires_ms
         _log.warning("kanban sync: lease for %s lost to %s (%s)", task_id, lease.holder, lease.reason)
         conn.execute("UPDATE tasks SET lease_holder = ? WHERE id = ?", (lease.holder, task_id))

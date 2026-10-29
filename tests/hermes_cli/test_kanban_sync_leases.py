@@ -247,6 +247,58 @@ def test_first_heartbeat_after_sleep_renews_a_lapsed_lease(primary, lease_client
     assert conn.execute("SELECT claim_expires FROM tasks WHERE id = ?", (tid,)).fetchone()[0] > time.time() + 600
 
 
+def test_heartbeat_with_no_current_run_makes_no_renewal_call(primary, lease_client, caplog):
+    """A heartbeat that lands after the run ended (continued/blocked, ``current_run_id`` NULL) has no run uid to
+    renew under; the Board refuses an empty one (hub 400 "run_uid required"), so no call and no warning."""
+    conn = primary
+    tid = kb.create_task(conn, title="run ended", assignee="worker")
+    lock = "host:1"
+    kb.claim_task(conn, tid, ttl_seconds=900, claimer=lock)
+    lease_ms = int((time.time() + 200) * 1000)  # a third of the lease used up: a renewal would be due
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET current_run_id = NULL, lease_expires = ? WHERE id = ?", (lease_ms, tid))
+    lease_client.renew_mode = "offline"  # what the hub's 400 surfaces as, should a call slip through
+    with caplog.at_level(logging.INFO, logger="hermes_cli.kanban_db_sync"):
+        kb.heartbeat_claim(conn, tid, ttl_seconds=900, claimer=lock)
+    assert lease_client.count("renew") == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    claim_expires = conn.execute("SELECT claim_expires FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+    assert claim_expires <= lease_ms // 1000 - sync.LEASE_SAFETY_MARGIN_SECONDS  # still bounded by the lease
+
+
+def _renewal_logs(caplog):
+    return [r.getMessage() for r in caplog.records if "renewed" in r.getMessage() and "lapsed" in r.getMessage()]
+
+
+def test_renewal_of_a_lapsed_lease_logs_how_long_it_had_lapsed(primary, lease_client, caplog):
+    conn = primary
+    tid = kb.create_task(conn, title="slept", assignee="worker")
+    lock = "host:1"
+    kb.claim_task(conn, tid, ttl_seconds=900, claimer=lock)
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (int((time.time() - 338) * 1000), tid))
+    with caplog.at_level(logging.INFO, logger="hermes_cli.kanban_db_sync"):
+        assert kb.heartbeat_claim(conn, tid, ttl_seconds=900, claimer=lock)
+    assert lease_client.count("renew") == 1
+    [msg] = _renewal_logs(caplog)
+    assert msg in (f"kanban sync: lease of {tid} renewed {n}s after it lapsed" for n in (338, 339))
+    [rec] = [r for r in caplog.records if r.getMessage() == msg]
+    assert rec.levelno == logging.INFO
+
+
+def test_renewal_inside_the_normal_window_logs_nothing(primary, lease_client, caplog):
+    conn = primary
+    tid = kb.create_task(conn, title="on time", assignee="worker")
+    lock = "host:1"
+    kb.claim_task(conn, tid, ttl_seconds=900, claimer=lock)
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (int((time.time() + 400) * 1000), tid))
+    with caplog.at_level(logging.INFO, logger="hermes_cli.kanban_db_sync"):
+        assert kb.heartbeat_claim(conn, tid, ttl_seconds=900, claimer=lock)
+    assert lease_client.count("renew") == 1
+    assert [r.getMessage() for r in caplog.records if r.name == "hermes_cli.kanban_db_sync"] == []
+
+
 def test_live_worker_with_a_valid_lease_keeps_its_claim(primary, lease_client):
     """Control for the test above: same stale claim, lease still valid -> extended."""
     conn = primary
