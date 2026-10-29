@@ -1,5 +1,6 @@
 """Toolset helpers: get/resolve/validate named tool groups (static TOOLSETS + registry-registered)."""
 
+import copy
 from typing import Dict, List, Any, Set, Optional, Tuple
 
 
@@ -255,6 +256,9 @@ TOOLSET_SESSION_PLATFORMS = {name: spec["platforms"] for name, spec in TOOLSETS.
 # these names, so a plugin, MCP server or custom toolset name never leaves the machine.
 BUILTIN_TOOL_NAMES = frozenset(tool for spec in TOOLSETS.values() for tool in spec["tools"])
 BUILTIN_TOOLSET_NAMES = frozenset(TOOLSETS)
+# The whole built-in table, so a recorded plugin discovery can tell whether loading plugins
+# changed any definition (hermes_cli.plugins_snapshot.builtin_collision). [daveey]
+_STATIC_TOOLSETS = copy.deepcopy(TOOLSETS)
 
 
 def _registry():

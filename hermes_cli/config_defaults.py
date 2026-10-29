@@ -16,8 +16,8 @@ LEGACY_SANDBOX_IMAGE = LEGACY_SANDBOX_IMAGES[0]
 DEFAULT_VERCEL_IMAGE = "vercel/sandbox/universal:latest"
 LEGACY_VERCEL_RUNTIME = "node24"  # the seeded pre-49 default, never a user choice
 
-
 from hermes_cli.config_defaults_aux import auxiliary_defaults as _aux
+from hermes_cli.config_env_registry import EnvVarRegistry as _EnvVarRegistry
 from hermes_cli.config_defaults_routing import routing_defaults
 
 
@@ -2865,7 +2865,7 @@ def _base_url(name, prompt_name=None):
 # Optional environment variables that enhance functionality. Feeds the dashboard keys page and setup
 # checklists; category: provider|tool|skill|messaging|setting, advanced=True hides from checklists,
 # tools=[...] lists the model tools the key unlocks.
-OPTIONAL_ENV_VARS = {
+OPTIONAL_ENV_VARS = _EnvVarRegistry({  # its import-time additions run on first use [daveey]
     # ── Provider (handled in provider selection, not shown in checklists) ──
     "NOUS_BASE_URL": _base_url("Nous Portal"),
     "HERMES_ANON_API_SECRET": _env(
@@ -3279,4 +3279,4 @@ OPTIONAL_ENV_VARS = {
     "HERMES_EPHEMERAL_SYSTEM_PROMPT": _setting(
         "Ephemeral system prompt injected at API-call time (never persisted to sessions)",
         "Ephemeral system prompt", None),
-}
+})
