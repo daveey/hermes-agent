@@ -58,11 +58,11 @@ def _connect(db: Path) -> sqlite3.Connection:
     if not db.is_file():
         raise sqlite3.OperationalError(f"not a readable board: {db}")
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)  # noqa: kanban-lockguard (read-only, short-lived startup probe)
         conn.execute("select 1 from sqlite_master limit 1")
         return conn
     except sqlite3.OperationalError:
-        conn = sqlite3.connect(f"file:{db}?mode=rw", uri=True, timeout=2)
+        conn = sqlite3.connect(f"file:{db}?mode=rw", uri=True, timeout=2)  # noqa: kanban-lockguard (query_only)
         conn.execute("PRAGMA query_only=ON")
         return conn
 
