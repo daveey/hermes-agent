@@ -18,7 +18,7 @@ on:
         description: JSON list of slice numbers, 1..N (ci.yaml detect sizes it from test_durations.json).
         type: string
         required: false
-        default: '[1, 2]'
+        default: '[1, 2, 3, 4, 5, 6, 7, 8]'
       # The E2E jobs below are slow lanes (scripts/ci/classify_changes.py).
       # ci.yaml passes the classifier's answer; a caller that passes nothing
       # gets every job.
@@ -50,24 +50,22 @@ concurrency:
 
 jobs:
   test:
-    # Two 32-core slices instead of one box: on one runner the suite is ~10 min of
-    # nearly fully packed work, and a single bigger runner (96-core) scaled ~1.8x for
-    # 3x the price because files contend for the shared machine. Separate machines
-    # scale linearly. run_tests_parallel.py partitions from the checkout alone, so
-    # both slices agree on the split without a planning job.
-    #
-    # The ~10 min figure assumes a dedicated 32-core box per slice. The
-    # self-hosted hermes-hub runners are 6 runner services on ONE 16-core host
-    # (load average ~80 when busy), so a slice gets a fraction of that and
-    # takes ~60-70 min under contention. 30 min cancelled both slices at
-    # 45%/78% (run 39732864100). 120 leaves headroom; revisit if the hub
-    # gets more cores.
+    # Eight slices, each on its own autoscaled VM (tfgar-tests: one on-demand
+    # c7a.2xlarge per job, terminated after it; metta#29975, runner session).
+    # Measured 2026-10-29 with two slices on the shared hermes-hub pool: 42 min
+    # run + 19 min p50 queue per slice, ~75% of all CI runner-hours. The suite is
+    # ~7.2 h of per-file wall time; split 8 ways by run_tests_parallel.py's LPT on
+    # test_durations.json that is ~55 min of files per slice, ~7 min at -j 16
+    # (2 x nproc on 8 vCPU; the VM is not in a shared CPU slice, so
+    # test_workers.py falls back to 2 x nproc). run_tests_parallel.py partitions
+    # from the checkout alone, so all slices agree on the split.
     #
     # Pull requests usually run one slice of affected files (ci.yaml detect sizes the
-    # matrix, scripts/ci/affected_tests.py); every other event runs both.
+    # matrix, scripts/ci/affected_tests.py); every other event runs all eight.
     name: Run tests (${{ inputs.python_changed != '' && 'affected, ' || '' }}${{ matrix.slice }}/${{ strategy.job-total }})
-    runs-on: [self-hosted, hermes-hub]
-    timeout-minutes: 120
+    runs-on: [self-hosted, tfgar-tests]
+    # ~10 min expected; 30 leaves room for a cold cache or a dilated file.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
