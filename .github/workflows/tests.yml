@@ -195,21 +195,6 @@ jobs:
           test-environment: 'true'
           prune-python-cache: true
 
-      - name: Diagnose bind-mount visibility
-        if: always()
-        env:
-          HERMES_TEST_DOCKER_MOUNT_ROOT: ${{ runner.temp }}/termux-assembly
-        run: |
-          set +e
-          IMG=python@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
-          P="$HERMES_TEST_DOCKER_MOUNT_ROOT/diag2"; mkdir -p "$P"
-          A="$(mktemp -d "$P/.environments-XXXXXX")"; mkdir "$A/tools"
-          ls -lad "$A" "$A/tools"
-          docker run --rm --user 0:0 --entrypoint sh -v "$A:/assembly" $IMG -c 'id; ls -lan /assembly; stat /assembly/tools; chown 1000:1000 /assembly /assembly/tools; echo rc=$?'
-          chmod 755 "$A"
-          docker run --rm --user 0:0 --entrypoint sh -v "$A:/assembly" $IMG -c 'ls -lan /assembly; chown 1000:1000 /assembly /assembly/tools; echo rc755=$?'
-          true
-
       - name: Run assembly permission tests
         # --fail-on-skip: a missing daemon or image must not go green.
         # Bind-mount sources must live where the docker daemon can see them.
