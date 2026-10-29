@@ -43,6 +43,17 @@ class FakeBoard:
     def comment(self, card, body):
         self.cards[card]["comments"].append(body)
 
+    def list_cards(self):
+        return [{"id": cid, "status": c["status"], "title": c["title"], "body": c["body"]}
+                for cid, c in self.cards.items()]
+
+    def comments(self, card):
+        return list(self.cards.get(card, {}).get("comments", []))
+
+    def add_foreign(self, card, status, body, title="ci-watch: fix it", comments=()):
+        """A card some other worker filed: not in the cron's state, no deflake key."""
+        self.cards[card] = {"title": title, "body": body, "status": status, "comments": list(comments), "key": None}
+
 
 def _entry(test_id, excerpt="AssertionError: boom"):
     return {"test_id": test_id, "file": test_id.split("::")[0], "retried": "tests",
@@ -79,6 +90,85 @@ def test_flake_after_the_card_was_closed_opens_a_linked_new_card():
     assert board.cards[second]["key"] == f"deflake:{a}#1"
     assert first in board.cards[second]["body"]
     assert board.cards[first]["comments"] == []
+
+
+def test_job_url_a_done_foreign_card_already_cites_is_not_refiled():
+    """Regression: t_01a185af6885ba83 refiled job 123202653589, which done card t_01a1858daf93c588
+    (filed by the CI-watch worker, so absent from the cron's state) had already fixed."""
+    board, state = FakeBoard(), fk.load_state(Path("/nonexistent/state.json"))
+    a = "tests/x.py::test_a"
+    board.add_foreign("t_fixed", "done", f"`{a}` failed in https://job/9 ; fixed by abc123")
+
+    log = fk.file_cards([_entry(a)], run_url="https://job/9", branch="main", board=board, state=state)
+    assert list(board.cards) == ["t_fixed"]                     # nothing new opened
+    assert board.cards["t_fixed"]["comments"] == []
+    assert log == [f"skipped {a}: https://job/9 already cited by t_fixed (done)"]
+    assert state["cards"][a] == {"card": "t_fixed", "generation": 0}
+
+    # A later flake from a different job, after that fix, is a new generation linking the old card.
+    log = fk.file_cards([_entry(a)], run_url="https://job/99", branch="main", board=board, state=state)
+    new = state["cards"][a]["card"]
+    assert new != "t_fixed" and log == [f"opened {new} {a}"]
+    assert board.cards[new]["key"] == f"deflake:{a}#1"
+    assert "t_fixed" in board.cards[new]["body"] and "https://job/99" in board.cards[new]["body"]
+
+
+def test_github_run_url_plus_job_id_counts_as_citing_the_job_url():
+    """The real done card cited `.../runs/40798982916 ... job 123202653589`, not the job URL."""
+    run = "https://github.com/daveey/hermes/actions/runs/40798982916"
+    a = "tests/tui_gateway/test_process_consumer_health.py::test_refused_turn_never_certifies[None]"
+    board, state = FakeBoard(), fk.load_state(Path("/nonexistent/state.json"))
+    board.add_foreign("t_fixed", "done", f"Fix flake in {a}. Observed push {run} head 5e206f07aa job 123202653589 on gw.")
+    board.add_foreign("t_other_job", "done", f"Fix flake in {a}. Observed {run} job 123202653580.")
+
+    log = fk.file_cards([_entry(a)], run_url=f"{run}/job/123202653589", branch="main", board=board, state=state)
+    assert log == [f"skipped {a}: {run}/job/123202653589 already cited by t_fixed (done)"]
+    assert sorted(board.cards) == ["t_fixed", "t_other_job"]
+
+    log = fk.file_cards([_entry(a)], run_url=f"{run}/job/123202653999", branch="main", board=board, state=state)
+    assert log[0].startswith("opened ")          # same run, a different job: not the same incident
+
+
+def test_job_url_cited_only_in_a_done_cards_comment_is_not_refiled():
+    board, state = FakeBoard(), fk.load_state(Path("/nonexistent/state.json"))
+    a = "tests/x.py::test_a"
+    board.add_foreign("t_fixed", "done", f"investigating `{a}`", comments=["also seen in https://job/9"])
+    board.add_foreign("t_open_old", "ready", f"older triage of {a}", comments=["seen in https://job/1"])
+
+    log = fk.file_cards([_entry(a)], run_url="https://job/9", branch="main", board=board, state=state)
+    assert sorted(board.cards) == ["t_fixed", "t_open_old"]
+    assert log == [f"skipped {a}: https://job/9 already cited by t_fixed (done)"]
+    assert board.cards["t_open_old"]["comments"] == ["seen in https://job/1"]  # the job match wins
+    assert state["cards"][a] == {"card": "t_fixed", "generation": 0}
+
+
+def test_job_url_cited_by_an_open_card_appends_there():
+    board, state = FakeBoard(), fk.load_state(Path("/nonexistent/state.json"))
+    a = "tests/x.py::test_a"
+    board.add_foreign("t_open", "running", f"CI red: https://job/9 ({a})", title="ci-watch: main red")
+    board.add_foreign("t_sibling", "ready", "Deflake `tests/x.py::test_b` from https://job/9")  # same job, other id
+
+    log = fk.file_cards([_entry(a, "new tail")], run_url="https://job/9", branch="main", board=board, state=state)
+    assert sorted(board.cards) == ["t_open", "t_sibling"]
+    assert board.cards["t_sibling"]["comments"] == []
+    assert log == [f"appended t_open {a}"]
+    assert "new tail" in board.cards["t_open"]["comments"][-1]
+    assert state["cards"][a] == {"card": "t_open", "generation": 0}
+
+
+def test_open_foreign_card_for_the_test_id_is_commented_not_duplicated():
+    board, state = FakeBoard(), fk.load_state(Path("/nonexistent/state.json"))
+    a = "tests/x.py::test_a"
+    board.add_foreign("t_other", "ready", f"Deflake `{a}` (seen in https://job/1)")
+    board.add_foreign("t_prefix", "ready", "Deflake `tests/x.py::test_ab`")   # different test id
+    board.add_foreign("t_closed", "done", f"old fix for {a}")                  # closed, no job match
+
+    log = fk.file_cards([_entry(a)], run_url="https://job/2", branch="main", board=board, state=state)
+    assert sorted(board.cards) == ["t_closed", "t_other", "t_prefix"]
+    assert log == [f"appended t_other {a}"]
+    assert "https://job/2" in board.cards["t_other"]["comments"][0]
+    assert board.cards["t_prefix"]["comments"] == []
+    assert state["cards"][a]["card"] == "t_other"
 
 
 def test_annotations_round_trip_through_the_github_poll(monkeypatch):
@@ -172,6 +262,43 @@ def test_state_round_trips_and_rejects_unknown_report_versions(tmp_path):
     assert fk.load_state(path)["cards"]["t"]["card"] == "t_1"
     with pytest.raises(ValueError):
         fk.read_report(json.dumps({"version": 2, "flaky": []}))
+
+
+@pytest.mark.platforms("posix")
+def test_cli_board_skips_a_job_a_done_card_already_cites(tmp_path, monkeypatch):
+    """CliBoard.list_cards/comments on a real isolated board (through `hermes kanban`, not its DB)."""
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    for var in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_HOME", "HERMES_KANBAN_TASK",
+                "HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_DELEGATED_CHILD_OWNER", "HERMES_SESSION_ID",
+                "HERMES_SESSION_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    cli = [sys.executable, "-m", "hermes_cli.main", "kanban"]
+
+    def run(*args, stdin=None):
+        return subprocess.run([*cli, *args], input=stdin, capture_output=True, text=True, timeout=120,
+                              check=True, cwd=_ROOT).stdout
+
+    a, b = "tests/x.py::test_a", "tests/x.py::test_b"
+    fixed = json.loads(run("create", "ci-watch: main red", "--body-file", "-", "--json",
+                           stdin=f"`{a}` failed in https://job/9"))["id"]
+    run("complete", fixed, "--summary", "fixed")
+    noted = json.loads(run("create", f"triage {b}", "--body-file", "-", "--json", stdin="flaky"))["id"]
+    run("comment", noted, "also seen in https://job/9")
+    run("complete", noted, "--summary", "fixed")
+
+    board = fk.CliBoard([sys.executable, "-m", "hermes_cli.main"])
+    state = fk.load_state(tmp_path / "state.json")
+    log = fk.file_cards([_entry(a), _entry(b)], run_url="https://job/9", branch="main", board=board, state=state)
+    assert log == [f"skipped {a}: https://job/9 already cited by {fixed} (done)",
+                   f"skipped {b}: https://job/9 already cited by {noted} (done)"]
+    assert len(json.loads(run("list", "--archived", "--json"))) == 2
+
+    log = fk.file_cards([_entry(a)], run_url="https://job/99", branch="main", board=board, state=state)
+    assert log[0].startswith("opened ")
+    new = state["cards"][a]["card"]
+    assert fixed in json.loads(run("show", new, "--json"))["task"]["body"]
 
 
 @pytest.mark.platforms("posix")
