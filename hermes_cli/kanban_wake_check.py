@@ -367,6 +367,7 @@ def _run_probe(key: tuple[str, str], cmd: str, cwd: str, env: dict) -> tuple[Any
     try:
         proc = subprocess.Popen(
             ["bash", "-lc", cmd], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+            # detached-spawn: ok — awaited with PROBE_TIMEOUT_SECONDS; _kill ends the whole group on timeout [daveey]
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
     except OSError as exc:
         return 127, f"could not start probe: {exc}"

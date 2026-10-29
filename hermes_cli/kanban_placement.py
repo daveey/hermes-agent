@@ -590,6 +590,7 @@ def _default_spawn(argv: list[str]) -> None:
     """Start ``argv`` detached: it finishes (and records its result) even after the tool call returns."""
     try:
         subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         # detached-spawn: ok — the placement forwarder must outlive the tool call that starts it and record its result [daveey]
                          start_new_session=True)
     except OSError:
         pass

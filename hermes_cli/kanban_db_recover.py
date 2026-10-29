@@ -876,6 +876,7 @@ def spawn_recovery(db_path: Path, *, wait: bool = False, timeout: float = RECOVE
         log = Path(key).with_name(Path(key).name + ".recover.log")
         with open(log, "ab") as out:
             subprocess.Popen(cmd, stdout=out, stderr=out, stdin=subprocess.DEVNULL, env=env,
+                             # detached-spawn: ok — board recovery must finish its backup/swap even if the process that noticed the damage dies [daveey]
                              cwd=repo_root, start_new_session=True)
         _log.error("kanban board %s has table b-tree damage; started automatic recovery (log %s)", key, log)
         return None

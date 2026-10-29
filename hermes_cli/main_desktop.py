@@ -519,6 +519,7 @@ def _relaunch_stopped_desktops(desktop_dir: Path, launches: list[list[str]]) -> 
             cmd = [str(exe), *args]
         try:
             subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             # detached-spawn: ok — the reopened desktop app must outlive the update that relaunched it [daveey]
                              stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
                              env=launch_env)
         except OSError as exc:

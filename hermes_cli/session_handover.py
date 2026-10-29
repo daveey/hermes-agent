@@ -495,6 +495,7 @@ def spawn_after_turn_move(session_id: str, to: str, reason: str) -> int:
         p = subprocess.Popen(
             [sys.executable, "-m", "hermes_cli.main", "sessions", "move", session_id, "--to", to,
              "--reason", reason, "--after-turn"],
+            # detached-spawn: ok — the after-turn move must outlive the turn (and agent) that requested it [daveey]
             cwd=repo, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
             env=build_subprocess_env(scrub_secrets=False, inherit_profile_home=False))
     finally:
