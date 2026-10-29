@@ -1096,7 +1096,9 @@ def test_dispatcher_spawns_the_forwarder_for_a_deferred_card(mac, monkeypatch):
             kdd._default_spawn(claimed, str(Path(os.environ["HERMES_HOME"])))
     assert "hermes_cli.kanban_placement_forward" in spawned[child], spawned[child]
     tail = spawned[child][spawned[child].index("--") + 1:]
-    assert "chat" in tail  # the worker it execs on fallback
+    # Fork: the worker the forwarder execs on fallback is upstream's owner client
+    # (``-m hermes_cli.kanban_worker_client``), no longer ``hermes ... chat -q``.
+    assert "hermes_cli.kanban_worker_client" in tail  # the worker it execs on fallback
     assert "hermes_cli.kanban_placement_forward" not in spawned[plain]
 
 
