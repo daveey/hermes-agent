@@ -79,15 +79,16 @@ class RoutingState:
             identity = previous["selected_provider"], previous["selected_model"]
             allowed = any((r["provider"], r["model"]) == identity and
                           r["billing"] == previous["billing_group"] for r in candidates)
-            if identity not in excluded:
-                if not allowed:
-                    raise ModelRoutingError("Sticky route is no longer eligible; explicit failure selection required")
+            if allowed and identity not in excluded:
                 if exact_pin and not previous.get("exact_pin"):
                     previous["exact_pin"] = True
                     db.execute("UPDATE routes SET metadata=? WHERE root=? AND class=?",
                                (json.dumps(previous), root, level))
                 return previous
-            if previous.get("exact_pin"):
+            # A sticky class selection is a preference, not an exact-model pin.
+            # Re-select only from the current class's filtered candidates; prepare
+            # still runs before commit, so failed credentials cannot publish it.
+            if previous.get("exact_pin") or exact_pin:
                 raise ModelRoutingError("Exact pinned route cannot fail over")
         if not candidates:
             raise ModelRoutingError(f"No eligible {level} routes under billing/capability policy")
