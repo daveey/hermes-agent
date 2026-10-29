@@ -48,7 +48,17 @@ def _first_positional(argv: Sequence[str]) -> str:
 
 
 def scrub_for_top_level_launch(argv: Sequence[str]) -> list[str]:
-    """Scrub ``os.environ`` when ``argv`` (``sys.argv[1:]``) launches a top-level surface."""
+    """Scrub ``os.environ`` when ``argv`` (``sys.argv[1:]``) launches a top-level surface.
+
+    Also drops a finished run's identity on every launch, before the command gate,
+    so chat and kanban do not inherit a dead worker. [daveey]
+    """
+    try:
+        from hermes_cli.kanban_identity import drop_finished_kanban_identity
+        drop_finished_kanban_identity()
+    except Exception:  # health: allow BLE001 -- a board-read failure must not abort startup
+        import logging
+        logging.getLogger(__name__).debug("finished-run identity drop failed", exc_info=True)
     if _first_positional(argv) not in TOP_LEVEL_COMMANDS:
         return []
     # Name the dead lineage while the pins still exist (the scrub removes them). [daveey]

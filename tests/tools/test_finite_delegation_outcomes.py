@@ -233,8 +233,12 @@ def test_nonfinite_marker_preserves_background_dispatch(harness, monkeypatch, ma
     assert result["status"] == "dispatched", result
     assert result["mode"] == "background"
     assert "results" not in result
-    event = process_registry.completion_queue.get(timeout=5)
+    # Queue.get times out on wall clock (time.time). A CPU-throttled runner can
+    # burn a 5s budget after the children have already finished, before the
+    # post-child persist publishes the event. 60s still returns as soon as the
+    # event is queued; only a real hang waits it out.
+    event = process_registry.completion_queue.get(timeout=60)
     assert event["type"] == "async_delegation"
     if api_history:
         assert event["origin_session_id"] == "history-session"
-    assert all(child.closed.wait(2) for child in children)
+    assert all(child.closed.wait(60) for child in children)

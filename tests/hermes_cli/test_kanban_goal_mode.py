@@ -249,18 +249,22 @@ class TestCLIJudgeGate:
         )
         # Match the real judge_goal contract:
         # (verdict, reason, parse_failed, wait_directive, transport_failed)
-        monkeypatch.setattr(
-            "hermes_cli.goals.judge_goal",
-            lambda **kw: (verdict, reason, False, None, False),
-        )
+        judge_calls: list = []
 
-        args = argparse.Namespace(task_ids=["t1"], summary=summary, result=None, metadata=None)
-        return _cmd_complete(args), complete_calls
+        def fake_judge(**kw):
+            judge_calls.append(kw)
+            return (verdict, reason, False, None, False)
+
+        monkeypatch.setattr("hermes_cli.goals.judge_goal", fake_judge)
+
+        args = argparse.Namespace(task_ids=["t_plain0001"], summary=summary, result=None, metadata=None)
+        return _cmd_complete(args), complete_calls, judge_calls
 
     def test_judge_rejects_premature_completion(self, monkeypatch):
-        rc, complete_calls = self._run(
+        rc, complete_calls, judge_calls = self._run(
             monkeypatch, verdict="continue", reason="criteria not met"
         )
+        assert len(judge_calls) == 1, "rejection must come from the judge, not an earlier refusal"
         assert rc != 0, "judge rejection must produce non-zero exit code"
         assert complete_calls == [], (
             "complete_task must NOT be invoked when the judge rejects"
@@ -269,9 +273,10 @@ class TestCLIJudgeGate:
 
     def test_non_goal_mode_task_skips_gate(self, monkeypatch):
         """Plain (non-goal_mode) tasks are never sent to the judge."""
-        rc, complete_calls = self._run(monkeypatch, goal_mode=False)
+        rc, complete_calls, judge_calls = self._run(monkeypatch, goal_mode=False)
         assert rc == 0
-        assert complete_calls == ["t1"]
+        assert judge_calls == [], "plain tasks must never reach the judge"
+        assert complete_calls == ["t_plain0001"]
 
     def test_judge_blocked_verdict_rejects_completion(self, monkeypatch):
         """#100954: an unachievable goal must not complete silently.
@@ -279,10 +284,11 @@ class TestCLIJudgeGate:
         The judge's ``blocked`` verdict is a refusal, not a completion —
         ``complete_task`` must never run.
         """
-        rc, complete_calls = self._run(
+        rc, complete_calls, judge_calls = self._run(
             monkeypatch,
             verdict="blocked",
             reason="the target repository does not exist",
         )
+        assert len(judge_calls) == 1, "rejection must come from the judge, not an earlier refusal"
         assert rc != 0, "blocked verdict must reject the completion"
         assert complete_calls == [], "an unachievable goal must never reach complete_task"
