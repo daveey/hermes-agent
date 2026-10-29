@@ -370,3 +370,10 @@ def test_flaky_test_passes_and_files_a_card_while_a_hard_failure_stays_red(tmp_p
         [sys.executable, "-m", "hermes_cli.main", "kanban", "show", cards[0]["id"], "--json"],
         capture_output=True, text=True, timeout=120, check=True, cwd=_ROOT).stdout)
     assert any("https://ci/run/2" in c["body"] for c in shown["comments"])
+
+
+def test_card_body_requires_merge_before_done():
+    """A deflake card is done when the fix is merged and green on main, not when a PR is opened."""
+    body = fk._card_body({"test_id": "tests/x.py::test_a", "first_attempt_excerpt": "boom"}, "https://r/1", "main", None)
+    assert "Done when the PR is merged to main and the test passes on main's next CI run." in body
+    assert "Do not call\nkanban_complete while the PR is open." in body
