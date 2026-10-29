@@ -371,7 +371,12 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
       setSessions([remoteRow({ connection_id: undefined })])
       $projectTree.set([{ previewSessions: [remoteRow()], repos: [] } as never])
     }],
-    ['no list has a row but its owner is remembered', () => setSessionOwnerHint('hub-1', hub)]
+    ['no list has a row but its owner is remembered', () => setSessionOwnerHint('hub-1', hub)],
+    // The sidebar paints the chat from the hub-sync replica (outside the first
+    // Recents page, or while the hub's pooled backend reconnects) and no owner
+    // hint was ever recorded on this Desktop.
+    ['only the sidebar hub-replica row lists it', () =>
+      $offlineSessions.set([remoteRow({ offline_cached: false, offline_gateway: 'hub', offline_version: 7 })])]
   ])('archives an idle hub chat without a warning when %s', async (_case, seed) => {
     seed()
     api.mockImplementation(desktopApi('up'))
