@@ -35,14 +35,16 @@ def _write(home, routing, providers=None):
 
 
 def _tick(monkeypatch):
-    """One dispatch tick: {task_id: worker argv} as the spawn fn saw them."""
-    monkeypatch.setattr(dispatch, "_resolve_hermes_argv", lambda: ["hermes"])
-    monkeypatch.setattr(dispatch, "_resolve_worker_cli_toolsets", lambda home: None)
+    """One dispatch tick: {task_id: (in-memory override, (model, provider) the owner runs)}.
+
+    Fork: upstream moved card execution to the profile owner (the worker argv is now just
+    ``-m hermes_cli.kanban_worker_client``), so the model the worker runs is the owner's
+    ``owner_model_pin`` of the re-read card, not ``-m``/``--provider`` in the argv."""
     seen = {}
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="routine", assignee="default")
         dispatch.dispatch_once(conn, dry_run=False, spawn_fn=lambda task, ws: seen.update(
-            {task.id: (task.model_override, dispatch._worker_argv(task, "default", None))}))
+            {task.id: (task.model_override, tier.owner_model_pin(conn, kb.get_task(conn, task.id)))}))
         events = [e.payload for e in kb.list_events(conn, tid) if e.kind == "model_tier"]
     return seen[tid], events
 
@@ -55,19 +57,18 @@ def _tick(monkeypatch):
 ])
 def test_unroutable_class_tier_keeps_profile_model(board, monkeypatch, routing, providers, why):
     _write(board, routing, providers)
-    (override, argv), events = _tick(monkeypatch)
+    (override, pin), events = _tick(monkeypatch)
     assert override is None
-    assert "class:standard" not in argv  # the worker runs on its profile's model, not a dead class
+    assert pin == (None, None)  # the worker runs on its profile's model, not a dead class
     assert events[-1]["reason"] == f"default+unroutable:class:standard:{why}"
     assert events[-1]["model"] is None
 
 
 def test_routable_class_tier_is_kept(board, monkeypatch):
     _write(board, {"enabled": True, "routes": {"standard": [ROUTE]}})
-    (override, argv), events = _tick(monkeypatch)
+    (override, pin), events = _tick(monkeypatch)
     assert override == "class:standard"
-    assert argv[argv.index("-m") + 1] == "class:standard"
-    assert argv[argv.index("--provider") + 1] == "auto"
+    assert pin == ("class:standard", "auto")
     assert events[-1]["reason"] == "default"
 
 

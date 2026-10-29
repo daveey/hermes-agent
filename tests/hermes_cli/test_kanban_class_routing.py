@@ -1,4 +1,11 @@
-"""Class-tier dispatch must retain deep review/retry and native worker credentials."""
+"""Class-tier dispatch must retain deep review/retry and native worker credentials.
+
+Fork: upstream moved card execution to the profile owner. The dispatcher's worker is now
+``-m hermes_cli.kanban_worker_client`` (no ``-m <model> --provider <p>`` argv); the owner re-reads the
+card and builds the turn's policy from ``kanban_model_tier.owner_model_pin`` (gateway.session_kanban),
+then the gateway builds the agent (``tui_gateway`` ``_make_agent``). These tests assert the same intent
+(class tiers, deep review/retry, provider ``auto``, native subscription wire) on that path.
+"""
 from unittest.mock import patch
 
 import pytest
@@ -24,10 +31,25 @@ def routable(monkeypatch):
     monkeypatch.setattr(tier, "class_unroutable_reason", lambda model, config=None: None)
 
 
-def worker_args(task, monkeypatch):
-    monkeypatch.setattr(dispatch, "_resolve_hermes_argv", lambda: ["hermes"])
-    monkeypatch.setattr(dispatch, "_resolve_worker_cli_toolsets", lambda home: None)
-    return dispatch._worker_argv(task, "default", None)
+def owner_pin(task, conn=None):
+    """``(model, provider)`` the profile owner runs *task* with (formerly the worker argv's -m/--provider)."""
+    if conn is not None:
+        return tier.owner_model_pin(conn, task)
+    with kbc.connect_closing() as own:
+        return tier.owner_model_pin(own, task)
+
+
+def gateway_agent(monkeypatch, model, provider):
+    """Build the agent the gateway runs the owner's turn on, from the pinned ``(model, provider)``."""
+    from hermes_cli.config import load_config
+    from tui_gateway import server
+    monkeypatch.setattr(server, "_load_cfg", load_config)
+    monkeypatch.setattr(server, "_agent_cbs", lambda sid: {})
+    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda platform: [])
+    monkeypatch.setattr(server, "_startup_system_prompt", lambda *a: "")
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    return server._make_agent("kanban-ui", "kanban-worker-session", model_override=model,
+                              provider_override=provider)
 
 
 @pytest.mark.parametrize("case", ["review", "skill", "failure", "pattern", "routine"])
@@ -45,9 +67,9 @@ def test_class_tiers_keep_strong_work_deep(board, routable, monkeypatch, case):
             task.skills = ["sdlc-review"]
         tier.apply_model_tier(conn, task, lane="review" if case == "review" else "ready", cfg=cfg)
         assert kb.get_task(conn, tid).model_override is None
-    argv = worker_args(task, monkeypatch)
-    assert argv[argv.index("-m") + 1] == ("class:standard" if case == "routine" else "class:deep")
-    assert argv[argv.index("--provider") + 1] == "auto"
+        model, provider = owner_pin(task, conn)
+    assert model == ("class:standard" if case == "routine" else "class:deep")
+    assert provider == "auto"
 
 
 def test_dispatch_tick_reads_class_default_and_keeps_review_deep(board, routable, monkeypatch):
@@ -59,14 +81,13 @@ def test_dispatch_tick_reads_class_default_and_keeps_review_deep(board, routable
         review = kb.create_task(conn, title="review", assignee="default")
         kb.claim_task(conn, review)
         kb.request_review(conn, review, summary="ready")
-        dispatch.dispatch_once(conn, dry_run=False,
-                               spawn_fn=lambda task, workspace: seen.update({task.id: worker_args(task, monkeypatch)}))
+        dispatch.dispatch_once(conn, dry_run=False, spawn_fn=lambda task, workspace: seen.update({task.id: task}))
         assert kb.get_task(conn, routine).model_override is None
         assert kb.get_task(conn, review).model_override is None
+        # The owner re-reads the card from the board (not the dispatcher's in-memory task).
+        pins = {tid: owner_pin(kb.get_task(conn, tid), conn) for tid in seen}
     for tid, model in ((routine, "class:standard"), (review, "class:deep")):
-        argv = seen[tid]
-        assert argv[argv.index("-m") + 1] == model
-        assert argv[argv.index("--provider") + 1] == "auto"
+        assert pins[tid] == (model, "auto")
 
 
 def test_explicit_pin_survives_review_class_default(board, monkeypatch):
@@ -74,51 +95,40 @@ def test_explicit_pin_survives_review_class_default(board, monkeypatch):
         task = kb.get_task(conn, kb.create_task(conn, title="review", assignee="default",
                             model_override="unknown-exact-model", provider_override="custom"))
         tier.apply_model_tier(conn, task, lane="review", cfg={"default_model": "class:standard"})
-    argv = worker_args(task, monkeypatch)
-    assert argv[argv.index("-m") + 1] == "unknown-exact-model"
-    assert argv[argv.index("--provider") + 1] == "custom"
+        assert owner_pin(task, conn) == ("unknown-exact-model", "custom")
 
 
 def test_invalid_class_provider_refused_before_launch(board, monkeypatch):
     with kbc.connect() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title="routine", assignee="default"))
-    task.model_override, task.provider_override = "class:deep", "openrouter"
-    with pytest.raises(ValueError, match="auto"):
-        worker_args(task, monkeypatch)
+        task.model_override, task.provider_override = "class:deep", "openrouter"
+        with pytest.raises(ValueError, match="auto"):
+            owner_pin(task, conn)
 
 
 @pytest.mark.parametrize("exhausted", [False, True])
 def test_worker_generated_args_reach_native_wire(routing_home, streaming_route, native_transport,
                                                 monkeypatch, tmp_path, exhausted):
     from types import SimpleNamespace
-    from hermes_state import SessionDB
-    task = SimpleNamespace(id="card", skills=[], reasoning_effort=None,
+    from agent.model_routing import ModelRoutingError
+    monkeypatch.chdir(tmp_path)
+    task = SimpleNamespace(id="card", skills=[], reasoning_effort=None, current_run_id=None,
                            model_override="class:deep", provider_override=None)
-    argv = worker_args(task, monkeypatch)
-    model = argv[argv.index("-m") + 1]
-    provider = argv[argv.index("--provider") + 1]
+    model, provider = owner_pin(task)
+    assert (model, provider) == ("class:deep", "auto")
     if exhausted:
         monkeypatch.setattr("agent.credential_pool.CredentialPool.has_available", lambda *a, **k: False)
-    db = SessionDB(tmp_path / "worker.db")
-    with patch("cli._prepare_deferred_agent_startup"), \
-         patch("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build"), \
-         patch("model_tools.get_tool_definitions", return_value=[]):
-        shell = cli.HermesCLI(model=model, provider=provider, compact=True)
-        shell.session_id = "kanban-worker-session"
-        shell._session_db = db
-        shell._install_tool_callbacks = lambda: None
-        shell.streaming_enabled = False
-        shell.ignore_rules = True
+    with patch("model_tools.get_tool_definitions", return_value=[]):
         if exhausted:
-            assert not shell._init_agent()
+            with pytest.raises(ModelRoutingError):
+                gateway_agent(monkeypatch, model, provider)
             assert native_transport == []
         else:
-            assert shell._init_agent()
-            assert shell.agent.run_conversation("Say ok")["final_response"] == "ok"
-            assert shell.agent.model_routing["requested_class"] == "deep"
+            agent = gateway_agent(monkeypatch, model, provider)
+            assert agent.run_conversation("Say ok")["final_response"] == "ok"
+            assert agent.model_routing["requested_class"] == "deep"
             assert native_transport
             assert all(body["model"] == "anthropic-deep" and url.startswith("https://api.anthropic.com/")
                        and headers.get("authorization", "").startswith("Bearer sk-ant-oat")
                        and "x-api-key" not in headers for url, headers, body in native_transport)
-            shell.agent.release_clients()
-    db.close()
+            agent.release_clients()

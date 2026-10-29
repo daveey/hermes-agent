@@ -51,7 +51,7 @@ def test_cli_empty_class_never_uses_legacy_fallback(routing_home, streaming_rout
     s._resolve_fallback_runtime.assert_not_called()
 
 
-def test_cli_real_construction_request_and_database_resume(routing_home, streaming_route, tmp_path):
+def test_cli_real_construction_request_and_database_resume(routing_home, streaming_route, tmp_path, monkeypatch):
     import json
     import anthropic
     import httpx
@@ -82,22 +82,35 @@ def test_cli_real_construction_request_and_database_resume(routing_home, streami
         return sdk_class(**kwargs)
 
     db = SessionDB(tmp_path / "cli-test.db")
-    with patch("cli._prepare_deferred_agent_startup"), \
-         patch("agent.title_generator._auto_title_enabled", return_value=False), \
-         patch("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build"), \
+    # Fork: upstream's cutover builds the turn's agent in the gateway, not the CLI (cli._init_agent now
+    # constructs a GatewayAgent proxy; cli._prepare_deferred_agent_startup is gone, 4b6a8edd6a4). The CLI
+    # sends its launch model to session.create (_gateway_launch) and the gateway's _make_agent builds the
+    # AIAgent, so construction/request/resume is asserted on that path; the CLI-side route signature and
+    # session-model restore stay on the CLI.
+    from hermes_cli.cli_agent_setup_mixin import _current_runtime, _route_signature
+    from hermes_cli.cli_init_mixin import _gateway_launch
+    from hermes_cli.config import load_config
+    from tui_gateway import server
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(server, "_load_cfg", load_config)
+    monkeypatch.setattr(server, "_agent_cbs", lambda sid: {})
+    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda platform: [])
+    monkeypatch.setattr(server, "_startup_system_prompt", lambda *a: "")
+    with patch("agent.title_generator._auto_title_enabled", return_value=False), \
          patch("model_tools.get_tool_definitions", return_value=[]), \
          patch("anthropic.Anthropic", side_effect=sdk):
         s = cli.HermesCLI(model="class:deep", provider="auto", compact=True)
         s.session_id = "cli-real"
-        s._session_db = db
-        s._install_tool_callbacks = lambda: None
-        s.streaming_enabled = False
-        s.ignore_rules = True
-        assert s._init_agent()
-        assert s.agent.model_routing["requested_class"] == "deep"
+        assert s._ensure_runtime_credentials()
+        launch = _gateway_launch(s)
+        assert launch["model"] == "class:deep" and launch["provider"] is None  # auto: the class picks it
+        agent = server._make_agent("cli-ui", s.session_id, session_db=db, model_override=launch["model"],
+                                   provider_override=launch["provider"])
+        assert agent.model_routing["requested_class"] == "deep"
+        # A class route does not rebuild the agent every turn: the turn's signature is the build's.
         signature = s._resolve_turn_agent_config("next")["signature"]
-        assert signature == s._active_agent_route_signature
-        result = s.agent.run_conversation("Say ok")
+        assert signature == _route_signature(s.model, _current_runtime(s))
+        result = agent.run_conversation("Say ok")
         assert result["final_response"] == "ok"
         stored = db.get_session(s.session_id)
         restored = shell()
@@ -106,13 +119,13 @@ def test_cli_real_construction_request_and_database_resume(routing_home, streami
         CLIModelSwitchMixin._restore_session_model(restored, stored, quiet=True)
         assert restored.model == "class:deep"
         assert restored.requested_provider == "auto"
-        s.agent.switch_model(s.agent.model, s.agent.provider, api_key=s.agent.api_key,
-                             base_url=s.agent.base_url, api_mode=s.agent.api_mode)
+        agent.switch_model(agent.model, agent.provider, api_key=agent.api_key,
+                           base_url=agent.base_url, api_mode=agent.api_mode)
         config = db.get_session(s.session_id)["model_config"]
         config = json.loads(config) if isinstance(config, str) else config
         assert not config.get("model_routing")
-        assert not s.agent._session_init_model_config.get("model_routing")
-        s.agent.release_clients()
+        assert not agent._session_init_model_config.get("model_routing")
+        agent.release_clients()
     db.close()
     assert sent
     assert all(body["model"] == "anthropic-deep" for _, _, body in sent)
