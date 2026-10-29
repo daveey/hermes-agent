@@ -27,7 +27,8 @@ import { computed } from 'nanostores'
 
 import { outcomeStripe } from '@/lib/session-outcome'
 import { stableArray, stableRecord } from '@/lib/stable-array'
-import type { SessionBackgroundProcess, SessionInfo, SessionOutcome } from '@/types/hermes'
+import type { SessionBackgroundProcess, SessionInfo } from '@/types/hermes'
+import type { SessionOutcome } from '@/types/session-outcome'
 
 import { $backgroundRunningSessionIds } from './composer-status'
 import { $kanbanObservationTick, hasFreshKanbanObservation } from './kanban-observation'
@@ -253,6 +254,38 @@ export type SessionStatusStripe = 'attention' | 'blocked' | 'done' | 'periodic' 
  *  beats a running watcher (`background`) and `done`, never a working turn. */
 export type ReviewWait = 'parked' | 'stuck'
 
+/** [daveey] Red: an unfinished turn needs help, or (unless a turn is working) its cards or a review wait on the user. */
+const isStuck = (state: SessionDotState, kanbanBlocked: number, reviewWait: null | ReviewWait | undefined): boolean =>
+  state === 'needs-input' ||
+  state === 'stalled' ||
+  (state !== 'working' && (kanbanBlocked > 0 || reviewWait === 'stuck'))
+
+/** [daveey] The parked / waiting stripes a non-working row can wear before it counts as finished. */
+const parkedStripe = (
+  state: SessionDotState,
+  reviewWait: null | ReviewWait | undefined,
+  kanbanWaiting: number,
+  kanbanStalled: number
+): null | SessionStatusStripe => {
+  if (state === 'working') {
+    return null
+  }
+
+  if (reviewWait === 'parked') {
+    return 'blocked'
+  }
+
+  if (kanbanWaiting > 0) {
+    return kanbanStalled > 0 ? 'stalled' : 'waiting'
+  }
+
+  return null
+}
+
+/** [daveey] A finished turn: green, or amber when a card it made admits dropped work. */
+const settledStripe = (state: SessionDotState, hasTurns: boolean, kanbanAttention: number): null | SessionStatusStripe =>
+  state === 'unread' || (state === 'idle' && hasTurns) ? (kanbanAttention > 0 ? 'attention' : 'done') : null
+
 const derivedStatusStripe = (
   state: SessionDotState,
   hasTurns: boolean,
@@ -263,27 +296,24 @@ const derivedStatusStripe = (
   kanbanAttention: number,
   kanbanWaiting: number,
   kanbanStalled: number
-): null | SessionStatusStripe =>
-  userBlocked
-    ? 'blocked'
-    : periodic && state !== 'needs-input'
-    ? 'periodic'
-    : state === 'needs-input' ||
-        state === 'stalled' ||
-        (kanbanBlocked > 0 && state !== 'working') ||
-        (reviewWait === 'stuck' && state !== 'working')
-    ? 'stuck'
-    : reviewWait === 'parked' && state !== 'working'
-    ? 'blocked'
-    : (kanbanWaiting ?? 0) > 0 && state !== 'working'
-    ? (kanbanStalled ?? 0) > 0
-      ? 'stalled'
-      : 'waiting'
-    : state === 'unread' || (state === 'idle' && hasTurns)
-      ? (kanbanAttention ?? 0) > 0
-        ? 'attention'
-        : 'done'
-      : null
+): null | SessionStatusStripe => {
+  if (userBlocked) {
+    return 'blocked'
+  }
+
+  if (periodic && state !== 'needs-input') {
+    return 'periodic'
+  }
+
+  if (isStuck(state, kanbanBlocked, reviewWait)) {
+    return 'stuck'
+  }
+
+  return (
+    parkedStripe(state, reviewWait, kanbanWaiting ?? 0, kanbanStalled ?? 0) ??
+    settledStripe(state, hasTurns, kanbanAttention ?? 0)
+  )
+}
 
 //  [daveey] `outcome`: the row's stored outcome (session-outcome contract). When present it wins over every derived
 //  input below; a ⌘B park and a live turn (working / quiet / needs-input) still beat it. Absent (an older backend)

@@ -204,7 +204,7 @@ const migrating = new Set<string>()
  *  backend no longer has) and still counts as done; any other failure leaves the profile unmarked, so the next
  *  load retries. Rows not on that page are not migrated. */
 export async function migrateLocalParks(
-  rows: readonly SessionInfo[],
+  rows: readonly SessionInfo[] = [],
   post: (row: MuteRow, muted: boolean) => Promise<unknown> = setSessionMutedRemote
 ): Promise<void> {
   const done = new Set($mutedMigrationDone.get())

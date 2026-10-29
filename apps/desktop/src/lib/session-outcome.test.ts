@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { TRANSLATIONS } from '@/i18n/catalog'
 import { type SessionDotState, sessionStatusStripe } from '@/store/session-dot-state'
-import type { SessionOutcome } from '@/types/hermes'
+import type { SessionOutcome } from '@/types/session-outcome'
 
 import { outcomeEtaLabel, outcomeStripe, outcomeTooltip, outcomeWaitingLine } from './session-outcome'
 

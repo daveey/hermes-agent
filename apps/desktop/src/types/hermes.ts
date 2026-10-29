@@ -1,6 +1,7 @@
 import type { ConnectionRequestPayload, FreeTierChallengePayload, ToolLabel } from '@hermes/shared'
 
 import type { ToolResultMetadata } from '@/lib/tool-result-metadata'
+import type { SessionOutcome } from '@/types/session-outcome'
 
 export type StoredToolCallLabels = Record<string, ToolLabel[]>
 
@@ -710,11 +711,9 @@ export interface SessionInfo {
   review_wait?: 'parked' | 'stuck'
   /** [daveey] The PR `review_wait` refers to. */
   review_wait_pr?: string
-  /** [daveey] The chat's stored outcome (backend `sessions.outcome_json`, parsed): what the sidebar paints when
-   *  present, instead of deriving a status from idleness. Absent against a backend that predates it. */
+  /** [daveey] Stored outcome (sessions.outcome_json); wins over derived status. Absent on older backends. */
   outcome?: null | SessionOutcome
-  /** [daveey] The user parked this chat (⌘B), persisted backend-side (`sessions.muted`). Absent against a backend
-   *  that predates it: then the local ⌘B list is the only record, as before. */
+  /** [daveey] ⌘B park, persisted (sessions.muted). Absent on older backends: the local list rules. */
   muted?: boolean
   /** [daveey] The owning profile's `sessions.automated_sources` matched this
    *  row (bot / smoke-test traffic). Hidden from the sidebar unless "Show
@@ -760,44 +759,6 @@ export interface SessionInfo {
   offline_version?: null | number
 }
 
-/** [daveey] The kind of a chat's stored outcome (session-outcome contract). */
-export type SessionOutcomeKind = 'decision' | 'done' | 'muted' | 'running' | 'unresolved' | 'waiting'
-
-/** [daveey] Why an outcome is `unresolved`. */
-export type SessionOutcomeReason =
-  'empty' | 'interrupted' | 'no_summary' | 'notice_tail' | 'subagent_killed' | 'turn_failed'
-
-/** [daveey] One open question a `decision` outcome waits on the user for. */
-export interface SessionOutcomeItem {
-  id: string
-  question: string
-  choices?: { label: string; value: string }[]
-  card_id?: string
-  state?: string
-}
-
-/** [daveey] One thing a `waiting` / `running` outcome waits on. */
-export interface SessionOutcomeWaitingOn {
-  kind: 'capacity' | 'card' | 'cron' | 'process' | 'subagent' | 'time' | string
-  id: string
-  label?: string
-  state?: string
-  /** Epoch seconds. */
-  eta?: number
-}
-
-/** [daveey] A chat's stored outcome, as list rows carry it (`row.outcome`). */
-export interface SessionOutcome {
-  kind: SessionOutcomeKind | string
-  source?: 'declared' | 'derived'
-  /** Epoch seconds. */
-  at?: number
-  summary?: string
-  items?: SessionOutcomeItem[]
-  on?: SessionOutcomeWaitingOn[]
-  reason?: SessionOutcomeReason | string
-}
-
 /** [daveey] One live background process a session row owns (backend stamp). */
 export interface SessionBackgroundProcess {
   /** Process-registry id (`proc_…`), what Stop names. */
@@ -823,7 +784,6 @@ export type TimelineDisplayMetadata =
   | { reactions: MessageReaction[] }
   | { tool_result_metadata: ToolResultMetadata }
   | { error?: string; error_surface?: unknown }
-  /** [daveey] A blocked `kanban_notice` whose card has since left `blocked`. */
   | { display_text?: string; stale?: boolean }
 
 /** One emoji reaction on a message. One per author, iOS-Tapback style. */

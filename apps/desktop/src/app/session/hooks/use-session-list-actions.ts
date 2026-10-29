@@ -484,7 +484,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
             return sameCronSignature(prev, next) ? prev : next
           })
           // [daveey] First page from a backend that owns the ⌘B park: push the old local parks to it, once.
-          void migrateLocalParks(recents.sessions ?? [])
+          void migrateLocalParks(recents.sessions)
           // "Is there another page?" instead of an exact total: the backend
           // reports which profiles filled their window, which costs nothing on
           // top of the rows it already read (the old exact totals ran a COUNT(*)

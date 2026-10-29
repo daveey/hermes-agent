@@ -19,6 +19,7 @@ import type { ModelMenuTranslations } from './types_model_menu'
 import type { NoticeTranslations } from './types_notices'
 import type { OnboardingTranslations } from './types_onboarding'
 import type { SidebarProjectsTranslations } from './types_projects'
+import type { SessionRowStatusCopy } from './types_session_row_status'
 import type { SharedMetricsTranslations } from './types_shared_metrics'
 import type { UninstallSectionTranslations } from './types_uninstall_section'
 import type { UpdateChannelCopy } from './types_update_channel'
@@ -2903,7 +2904,7 @@ export interface Translations extends NoticeTranslations {
     loadCount: (step: number) => string
     messageCount: (count: number) => string
     toolCallCount: (count: number) => string
-    row: {
+    row: SessionRowStatusCopy & {
       pin: string
       unpin: string
       markUnread: string
@@ -2948,21 +2949,6 @@ export interface Translations extends NoticeTranslations {
       ageDay: string
       ageHour: string
       ageMin: string
-      kanbanTasks: (open: number, blocked: number) => string
-      kanbanAttention: (count: number) => string
-      kanbanStalled: (count: number) => string
-      /** [daveey] Status-stripe tooltips for a row's stored outcome (session-outcome contract). */
-      outcomeDone: string
-      outcomeDecision: string
-      outcomeMuted: string
-      outcomeRunning: string
-      outcomeWaiting: string
-      outcomeUnresolved: (reason: null | string) => string
-      muteFailed: string
-      backgroundProcesses: (count: number) => string
-      backgroundProcessUnnamed: string
-      stopProcess: string
-      stoppingProcess: string
     }
     dateDivider: {
       today: string

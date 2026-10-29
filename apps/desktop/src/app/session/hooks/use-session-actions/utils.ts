@@ -69,6 +69,7 @@ import type { SessionCreateResponse, SessionInfo, SessionResumeResult, SessionRu
 
 import type { ClientSessionState } from '../../../types'
 
+import { committedDuringTurn } from './committed-during-turn'
 import {
   acknowledgedTranscriptBoundary,
   conflictingTranscriptIdentity,
@@ -167,15 +168,6 @@ function carryRowIdentity(next: ChatMessage, previous: ChatMessage): ChatMessage
 }
 
 /**
- * True only when a row was written after the live turn began. Text alone
- * cannot tell this turn's reply from the previous turn's answer to the same
- * resent prompt, so a missing timestamp (older runtime) never passes.
- */
-function committedDuringTurn(turnStartedAt: unknown, committedAt: unknown): boolean {
-  return typeof turnStartedAt === 'number' && typeof committedAt === 'number' && committedAt >= turnStartedAt
-}
-
-/**
  * Carry structural parts an authoritative row cannot express.
  *
  * A live turn's authoritative projection is TEXT-ONLY: the gateway's `inflight`
@@ -238,7 +230,6 @@ const COMPARED_FIELDS = [
   'recovered',
   'asyncResult',
   'asyncResultKind',
-  // [daveey] Dims a kanban notice the backend marked outdated.
   'staleNotice',
   'id',
   'role',

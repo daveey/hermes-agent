@@ -13,6 +13,7 @@ import { enModelMenu } from './en_model_menu'
 import { enNotices } from './en_notices'
 import { enOnboarding } from './en_onboarding'
 import { enProjects } from './en_projects'
+import { enSessionRowStatus } from './en_session_row_status'
 import { enSharedMetrics } from './en_shared_metrics'
 import { enUninstallSection } from './en_uninstall_section'
 import { enUpdateChannel } from './en_update_channel'
@@ -3375,51 +3376,7 @@ export const en: Translations = {
       ageDay: 'd',
       ageHour: 'h',
       ageMin: 'm',
-      kanbanTasks: (open, blocked) =>
-        [
-          open > 0 ? `Waiting on ${open} ${open === 1 ? 'card' : 'cards'}` : '',
-          blocked > 0 ? `${blocked} blocked` : ''
-        ]
-          .filter(Boolean)
-          .join(', '),
-      kanbanAttention: count =>
-        `${count} done ${count === 1 ? 'card says' : 'cards say'} part of the work was dropped, with no follow-up card`,
-      kanbanStalled: count =>
-        `${count} ${count === 1 ? 'card has' : 'cards have'} stalled: waiting over 2 h on something only an agent can do, with nothing producing it`,
-      outcomeDone: 'Done',
-      outcomeDecision: 'Waiting on your decision',
-      outcomeMuted: 'Muted',
-      outcomeRunning: 'Running',
-      outcomeWaiting: 'Waiting',
-      outcomeUnresolved: reason => {
-        switch (reason) {
-          case 'notice_tail':
-            return 'Unresolved: a card update arrived and nothing answered it'
-
-          case 'no_summary':
-            return 'Unresolved: the last reply did not wrap the work up'
-
-          case 'turn_failed':
-            return 'Unresolved: the last turn failed'
-
-          case 'interrupted':
-            return 'Unresolved: the last turn was interrupted'
-
-          case 'subagent_killed':
-            return 'Unresolved: a subagent was stopped before it finished'
-
-          case 'empty':
-            return 'Unresolved: no messages yet'
-
-          default:
-            return 'Unresolved'
-        }
-      },
-      muteFailed: 'Could not update the parked state',
-      backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
-      backgroundProcessUnnamed: 'background process',
-      stopProcess: 'Stop',
-      stoppingProcess: 'Stopping…'
+      ...enSessionRowStatus
     },
     dateDivider: {
       today: 'Earlier today',

@@ -6,7 +6,7 @@
  */
 import type { Translations } from '@/i18n'
 import type { SessionStatusStripe } from '@/store/session-dot-state'
-import type { SessionOutcome, SessionOutcomeWaitingOn } from '@/types/hermes'
+import type { SessionOutcome, SessionOutcomeWaitingOn } from '@/types/session-outcome'
 
 /** The stripe an outcome paints. done → green, decision → red, muted → grey (parked, like ⌘B), waiting / running
  *  → the existing grey "waiting" glyph, unresolved → amber (the `attention` tone). Null for a kind this app does

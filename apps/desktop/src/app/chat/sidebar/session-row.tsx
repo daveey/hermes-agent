@@ -1,6 +1,6 @@
 import { compactNumber } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
-import { memo, useEffect } from 'react'
+import { memo } from 'react'
 import type * as React from 'react'
 
 import { PrTag } from '@/app/chat/pr-tag'
@@ -20,14 +20,11 @@ import { pathLeaf } from '@/lib/display-path'
 import { triggerHaptic } from '@/lib/haptics'
 import { middleClickHandlers } from '@/lib/middle-click'
 import { displayModelName } from '@/lib/model-status-label'
-import { outcomeStripe, outcomeTooltip } from '@/lib/session-outcome'
 import { sessionProjectLabel } from '@/lib/session-project-label'
 import { SESSION_ROW_AREAS } from '@/lib/session-row-slots'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
-import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { coarseElapsed } from '@/lib/time'
 import { useSessionDotState } from '@/lib/use-session-dot-state'
-import { useSessionParked } from '@/lib/use-session-parked'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
@@ -39,10 +36,7 @@ import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
 import {
   hasLiveTurn,
-  kanbanStripeCounts,
-  recordStripeTransition,
-  rowBackgroundProcesses,
-  sessionStatusStripe
+  rowBackgroundProcesses
 } from '@/store/session-dot-state'
 import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
@@ -68,6 +62,7 @@ import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
 import { gatewayMarks } from './session-row-offline'
 import { SessionRowSlot } from './session-row-slots'
+import { SessionRowStatusStripe, useSessionRowStripe } from './session-row-stripe'
 import { useProfilePrewarm } from './use-profile-prewarm'
 
 interface SidebarSessionRowProps extends React.ComponentProps<'div'> {
@@ -369,44 +364,7 @@ function SidebarSessionRowImpl({
   const dotState = useSessionDotState(session.id, session)
 
   const liveTurn = hasLiveTurn(dotState)
-  // [daveey] The left stripe is the session's status: green = its turn is done
-  // and waiting on you (stays after you open it); red = not done but stuck
-  // (blocked on a prompt, or gone quiet mid-turn, or kanban cards it made are
-  // blocked on a human, or a PR it links waits on a review that's on you).
-  // Working: no stripe. A review only others were asked for (<24h) is grey.
-  // ⌘B parks a session as blocked: grey stripe, skipped by ⌘] / ⌘[.
-  // [daveey] The park is the backend's `row.muted` now; the local ⌘B list is its optimistic cache.
-  const userBlocked = useSessionParked(session.id, session)
-
-  const statusStripe =
-    !rowHasLiveStatus(session)
-      ? null
-      : sessionStatusStripe(
-          dotState,
-          session.message_count > 0,
-          userBlocked,
-          kanbanStripeCounts(session).blocked,
-          session.cron_active === true,
-          session.review_wait,
-          session.kanban_attention,
-          kanbanStripeCounts(session).waiting,
-          kanbanStripeCounts(session).stalled,
-          session.outcome
-        )
-
-  // [daveey] The stored outcome explains the stripe on hover: the summary, the open questions, what it waits on, or
-  // why it is unresolved. Only while the outcome is what painted it (a park or a live turn beats it).
-  const outcomeKind =
-    statusStripe && !userBlocked && !liveTurn && outcomeStripe(session.outcome) ? session.outcome?.kind : undefined
-
-  const stripeTipText = outcomeKind ? outcomeTooltip(session.outcome, r) : null
-  const stripeTip = stripeTipText ? <span className="whitespace-pre-line">{stripeTipText}</span> : null
-
-  // [daveey] desktop.log trace of every stripe change with the row inputs that fed it (`stripe-transition <sid>`),
-  // so the next "green while work is queued" report has the payload. Change-only and capped inside.
-  useEffect(() => {
-    recordStripeTransition(session, statusStripe, dotState)
-  }, [session, statusStripe, dotState])
+  const { statusStripe, userBlocked } = useSessionRowStripe(session, dotState, rowHasLiveStatus(session))
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
@@ -588,45 +546,7 @@ function SidebarSessionRowImpl({
             not a working one: with several sessions busy the arcs drowned out
             the current task. Working state stays on the status dot [daveey]. */}
         {isSelected && <span aria-hidden="true" className="arc-border arc-row" />}
-        {/* [daveey] A session that owns a live cron job: a tiny grey loop
-            glyph in the stripe's place — it recurs, so it is never "done". */}
-        {(statusStripe === 'periodic' || statusStripe === 'waiting' || statusStripe === 'stalled') && (
-          <Tip label={stripeTip}>
-            <span
-              aria-hidden={stripeTipText ? undefined : 'true'}
-              aria-label={stripeTipText ?? undefined}
-              className={cn(
-                'absolute top-1/2 -left-0.5 flex -translate-y-1/2 text-(--session-status-color)',
-                stripeTipText ? 'pointer-events-auto' : 'pointer-events-none',
-                sessionStatusStripeColor(statusStripe)
-              )}
-              data-outcome={outcomeKind}
-              data-slot="session-status-stripe"
-              data-status-stripe={statusStripe}
-              role={stripeTipText ? 'img' : undefined}
-            >
-              {/* [daveey] `waiting`: open kanban cards hold it — the card glyph (amber when `stalled`). */}
-              <Codicon name={statusStripe === 'periodic' ? 'sync' : 'project'} size="0.5625rem" />
-            </span>
-          </Tip>
-        )}
-        {statusStripe && statusStripe !== 'periodic' && statusStripe !== 'waiting' && statusStripe !== 'stalled' && (
-          <Tip label={stripeTip}>
-            <span
-              aria-hidden={stripeTipText ? undefined : 'true'}
-              aria-label={stripeTipText ?? undefined}
-              className={cn(
-                'absolute top-1 bottom-1 left-0 w-[3px] rounded-full bg-(--session-status-color)',
-                stripeTipText ? 'pointer-events-auto' : 'pointer-events-none',
-                sessionStatusStripeColor(statusStripe)
-              )}
-              data-outcome={outcomeKind}
-              data-slot="session-status-stripe"
-              data-status-stripe={statusStripe}
-              role={stripeTipText ? 'img' : undefined}
-            />
-          </Tip>
-        )}
+        <SessionRowStatusStripe outcomePainted={!userBlocked && !liveTurn} session={session} statusStripe={statusStripe} />
         {/* #38072 finding 3: the row's body is a DIV, not a button — the
             reorder grabber (dnd-kit role="button" + tabIndex, kept for
             keyboard reorder, #83617) and the ⋯ trigger must be SIBLINGS of
