@@ -25,6 +25,21 @@ def _dir_holds_board(d: Path) -> bool:
     return (d / "board.json").exists()
 
 
+def named_board_db_files() -> list[tuple[str, Path]]:
+    """``(slug, boards/<slug>/kanban.db)`` for every named board on disk, sorted. [daveey]
+
+    The ONE real-board enumerator over ``boards/``: only folders whose name is a
+    valid board slug count (``_archived/`` holds archived boards, and a stray
+    ``sqlite3 boards/*/kanban.db`` glob creates an empty db there). A slug board
+    whose file can't be read is still returned, so its callers fail closed.
+    """
+    root = _kb.boards_root()
+    if not root.is_dir():
+        return []
+    return [(child.name, child / "kanban.db") for child in sorted(root.iterdir(), key=lambda p: p.name)
+            if _kb._BOARD_SLUG_RE.match(child.name) and (child / "kanban.db").is_file()]
+
+
 def board_metadata_path(board: Optional[str] = None) -> Path:
     """Display/discovery metadata stays at its original board-local path."""
     return _kb.board_dir(_kb._slug_or_default(board)) / "board.json"

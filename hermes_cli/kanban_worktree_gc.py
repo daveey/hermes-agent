@@ -90,8 +90,21 @@ def sweep_repo(repo_root: str) -> None:
     """
     try:
         _sweep_repo(repo_root)
+    except _BoardError as exc:
+        log.warning("Kanban worktree sweep aborted on board db %s; preserving uncertain worktrees",
+                    exc.board, exc_info=True)
+        from hermes_cli import kanban_gc_alert
+        kanban_gc_alert.report(None, str(exc.board), f"startup worktree sweep aborted: {exc.__cause__!r}")
     except Exception:
         log.warning("Kanban worktree sweep aborted; preserving uncertain worktrees", exc_info=True)
+
+
+class _BoardError(Exception):
+    """A board db failed during the sweep; names it for the GC-abort card. [daveey]"""
+
+    def __init__(self, board: Path):
+        super().__init__(str(board))
+        self.board = board
 
 
 def _sweep_repo(repo_root: str) -> None:
@@ -109,9 +122,12 @@ def _sweep_repo(repo_root: str) -> None:
     known_paths: set[str] = set()
     # Read ALL boards before any mutation: corruption must not look like deletion.
     for board in boards:
-        with _read_board(board) as conn:
-            for row in conn.execute("SELECT workspace_path FROM tasks WHERE workspace_path IS NOT NULL"):
-                known_paths.add(str(Path(row["workspace_path"]).expanduser().resolve()))
+        try:
+            with _read_board(board) as conn:
+                for row in conn.execute("SELECT workspace_path FROM tasks WHERE workspace_path IS NOT NULL"):
+                    known_paths.add(str(Path(row["workspace_path"]).expanduser().resolve()))
+        except sqlite3.Error as exc:
+            raise _BoardError(board) from exc
     listing = ws._git(Path(repo_root), "worktree", "list", "--porcelain", timeout=10)
     if listing.returncode:
         return

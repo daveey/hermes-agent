@@ -157,14 +157,11 @@ class Hub:
 
 def board_paths() -> list[tuple[str, Path]]:
     """``(slug, kanban.db)`` for every board on this host that ``kanban.sync.boards`` selects."""
-    from hermes_cli import kanban_db
+    from hermes_cli import kanban_db, kanban_db_boards
     root = kanban_db.kanban_home()
     found = [("default", root / "kanban.db")] if (root / "kanban.db").exists() else []
-    boards = kanban_db.boards_root()
-    if boards.is_dir():
-        # Only real board slugs (the service's board-id rule): ``_archived/`` holds archived boards, not a board.
-        found += [(p.parent.name, p) for p in sorted(boards.glob("*/kanban.db"))
-                  if p.is_file() and BOARD_ID_RE.match(p.parent.name)]
+    # The shared real-board enumerator: ``_archived/`` and other non-slug folders are not boards.
+    found += [(slug, p) for slug, p in kanban_db_boards.named_board_db_files() if BOARD_ID_RE.match(slug)]
     local = {slug for slug, _ in found}
     links_dir = root / "kanban" / sync.LINKS_DIR
     if links_dir.is_dir():  # boards only another gateway has, where this gateway's chats have cards
