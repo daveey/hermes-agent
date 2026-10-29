@@ -360,6 +360,9 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
     local placeholder already reports. ``transcript_has(notice_key, task_id)`` lets a dead holder's claim be
     acked instead of re-offered, and re-offers a legacy ``delivered=1`` row once. Never raises.
     """
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(session_key):
+        return []
     path = hub_db or hub_db_path()
     if not session_key or not path.is_file():
         return []

@@ -512,6 +512,9 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
     session's last completed poll: no commit means no new event to claim. 21 open chats each probing every board
     every 5 s, and opening it writable to re-claim nothing, kept the Desktop backend busy. The signature is taken
     before the poll, so a commit during it is polled again next tick."""
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(session_key):
+        return []
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
     db_path = sig = None

@@ -76,3 +76,14 @@ def test_origin_creation_and_ledger_projection_ignore_placeholder(tmp_path, monk
         dict(id=tid, board='default', origin_gateway='hub', session=origin['session'], via='origin')])
     assert kanban_chat_links._ledger_links('default', 'hub') == {}
 
+
+def test_live_pollers_ignore_placeholder_before_storage(monkeypatch):
+    from tui_gateway import kanban_remote_notices, session_notifications
+    def unexpected(*args, **kwargs):
+        raise AssertionError('placeholder reached storage')
+    monkeypatch.setattr(kanban_remote_notices, 'hub_db_path', unexpected)
+    monkeypatch.setattr(session_notifications, '_kb_poll_board_now', unexpected)
+    assert kanban_remote_notices.collect('kanban-placement-macbook', 'default') == []
+    assert session_notifications._kb_poll_board(None, 'default', 'kanban-placement-macbook') == []
+
+
