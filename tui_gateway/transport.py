@@ -63,6 +63,16 @@ def reset_transport(token) -> None:
     _current_transport.reset(token)
 
 
+#: ``/api/ws?client=agent`` marks a connection an agent script opened (gateway_rpc.py and kin), not a person's
+#: client. [daveey]
+AGENT_CLIENT_KIND = "agent"
+
+
+def is_agent_transport(transport: Optional[Transport]) -> bool:
+    """True when *transport* is a websocket an agent opened with the ``client=agent`` marker. [daveey]"""
+    return getattr(transport, "client_kind", None) == AGENT_CLIENT_KIND
+
+
 def _raise_unless_peer_gone(exc: Exception, what: str) -> None:
     """Return when *exc* from a stream write/flush means the peer is gone; re-raise anything else.
     ``False`` from :meth:`StdioTransport.write` is the dispatcher's "broken stdout pipe" signal (``entry.py``

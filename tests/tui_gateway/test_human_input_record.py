@@ -67,6 +67,116 @@ def test_classifier_rejects_relay_and_hosted_submits():
     assert not human_input.is_human_typed_submit("r", {}, "   ")
 
 
+# ── agent-marked websockets (/api/ws?client=agent, gateway_rpc.py) are not David typing (t_01a186c204de1d5b) ──
+
+
+def _bound(client_kind=None):
+    """Bind a stub WS transport, as handle_ws's dispatch does, for one prompt.submit."""
+    from tui_gateway.transport import bind_transport
+
+    return bind_transport(types.SimpleNamespace(client_kind=client_kind, auth_identity=None, _peer="t",
+                                                write=lambda obj: True))
+
+
+def test_agent_marked_ws_submit_does_not_record(home):
+    from tui_gateway.transport import reset_transport
+
+    token = _bound("agent")
+    try:
+        _submit({"session_id": "no-such-session", "text": "proof prompt from an agent"})
+    finally:
+        reset_transport(token)
+    assert _stamp(home) is None, "a prompt.submit over /api/ws?client=agent must not stamp"
+
+
+def test_normal_client_ws_submit_still_records(home):
+    from tui_gateway.transport import reset_transport
+
+    token = _bound(None)
+    try:
+        _submit({"session_id": "no-such-session", "text": "typed by David"})
+    finally:
+        reset_transport(token)
+    stamp = _stamp(home)
+    assert stamp is not None and stamp["session_id"] == "no-such-session"
+
+
+def test_submit_into_agent_created_session_does_not_record(home, monkeypatch):
+    # Belt and braces: a normal (unmarked) connection submitting into a chat an agent connection created.
+    # (A running session, so the submit queues instead of starting a turn.)
+    monkeypatch.setitem(server._sessions, "agent-sid", _session(types.SimpleNamespace(), agent_created=True))
+    _submit({"session_id": "agent-sid", "text": "follow-up", "queued": True})
+    assert _stamp(home) is None
+    human_input.note_submit("r", {"session_id": "x", "text": "hi"}, "hi", session={"agent_created": False})
+    assert _stamp(home) is not None, "control: a human-created session still stamps"
+
+
+def test_hidden_param_path_unchanged_on_normal_transport(home):
+    from tui_gateway.transport import reset_transport
+
+    token = _bound(None)
+    try:
+        _submit({"session_id": "s", "text": "widget", "display_kind": "hidden"})
+    finally:
+        reset_transport(token)
+    assert _stamp(home) is None
+
+
+def test_ws_accept_records_client_kind(monkeypatch):
+    import asyncio
+
+    from tui_gateway import ws as ws_mod
+
+    created = []
+    real = ws_mod.WSTransport
+    monkeypatch.setattr(ws_mod, "WSTransport", lambda ws, loop, **kw: created.append(real(ws, loop, **kw)) or created[-1])
+
+    def fake(query, scope=None):
+        class FakeWS:
+            query_params = query
+
+            async def accept(self):
+                pass
+
+            async def send_text(self, line):
+                pass
+
+            async def receive_text(self):
+                raise ws_mod._WebSocketDisconnect()
+
+            async def close(self, code=1000):
+                pass
+
+        ws = FakeWS()
+        if scope is not None:
+            ws.scope = scope  # real ASGI path: the raw query string
+        return ws
+
+    asyncio.run(ws_mod.handle_ws(fake({"token": "x", "client": "agent"})))
+    asyncio.run(ws_mod.handle_ws(fake({"token": "x"})))
+    asyncio.run(ws_mod.handle_ws(fake({}, scope={"type": "websocket", "query_string": b"token=x&client=agent"})))
+    asyncio.run(ws_mod.handle_ws(fake({}, scope={"type": "websocket"})))
+    from tui_gateway.transport import is_agent_transport
+
+    assert [is_agent_transport(t) for t in created] == [True, False, True, False]
+
+
+def test_agent_connection_session_create_defaults_hidden(home):
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    for kind, params, want_hidden in (("agent", {}, True), ("agent", {"hidden": False}, False), (None, {}, False)):
+        token = bind_transport(types.SimpleNamespace(client_kind=kind, auth_identity=None, write=lambda o: True))
+        try:
+            res = server._methods["session.create"]("r", dict(params, cols=80))
+        finally:
+            reset_transport(token)
+        sid = (res.get("result") or {}).get("session_id")
+        assert sid, res
+        sess = server._sessions.pop(sid)
+        assert sess["pending_hidden"] is want_hidden, (kind, params)
+        assert sess["agent_created"] is (kind == "agent")
+
+
 # ── injected turns run _run_prompt_submit directly: the turn pipeline itself never records ───────────────
 
 

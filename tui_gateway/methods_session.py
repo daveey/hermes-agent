@@ -406,6 +406,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
         with _profile_build_scope(profile_home):
             profile_model, profile_provider = _config_model_target()
         composer_override_profile = {"model": profile_model, "provider": profile_provider}
+    agent_created = getattr(current_transport(), "client_kind", None) == "agent"  # [daveey] /api/ws?client=agent
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
@@ -413,16 +414,15 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
             "close_on_disconnect": _flag(params, "close_on_disconnect"),
             "active_session_lease": None,  # claimed lazily on the first turn (_ensure_active_session_slot)
             "cols": int(params.get("cols", 80)), "created_at": now, "edit_snapshots": {},
-            "explicit_cwd": explicit_cwd,
+            "explicit_cwd": explicit_cwd, "model_override": session_model_override,
             "history": history, "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
             "seeded": bool(history),  # gates _persist_branch_seed: only create-time history is unpersisted
             "cwd": session_cwd, "inflight_turn": None, "last_active": now,
-            "model_override": session_model_override,
-            "composer_override_profile": composer_override_profile,
-            "create_reasoning_override": create_reasoning_override,
+            "composer_override_profile": composer_override_profile, "create_reasoning_override": create_reasoning_override,
             "create_service_tier_override": create_service_tier_override,
             "parent_session_id": parent_session_id, "pending_title": _str_param(params, "title") or None,
-            "pending_hidden": _flag(params, "hidden"), "room_plumbing": _flag(params, "room_plumbing"),
+            "pending_hidden": _flag(params, "hidden") if "hidden" in params else agent_created,  # human_input.py
+            "agent_created": agent_created, "room_plumbing": _flag(params, "room_plumbing"),
             "follow_profile_config": _flag(params, "follow_profile_config"),
             "profile_home": str(profile_home) if profile_home is not None else None,
             "running": False, "session_key": key, "show_reasoning": _load_show_reasoning(), "source": source,

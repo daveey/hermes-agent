@@ -782,7 +782,7 @@ def _(rid, params: dict) -> dict:
     # [daveey] Stamp the last human-typed prompt (local and desktop-ssh clients) before any refusal: hermes-sync
     # opens core-update drain windows only while the user is away (tui_gateway/human_input.py).
     from tui_gateway.human_input import note_submit
-    note_submit(rid, params, raw_text)
+    note_submit(rid, params, raw_text, session=_sessions.get(sid) if isinstance(sid, str) else None)
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
     if params.get("interrupted"):

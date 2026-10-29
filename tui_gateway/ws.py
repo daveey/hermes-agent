@@ -95,8 +95,12 @@ class WSTransport:
     deadlock, so it detects that and fires-and-forgets. Loop-thread callers needing completion use ``write_async``."""
 
     def __init__(self, ws: Any, loop: asyncio.AbstractEventLoop, *, peer: str = "unknown",
-                 auth_identity: dict | None = None) -> None:
+                 auth_identity: dict | None = None, client_kind: str | None = None) -> None:
         self._ws = ws
+        #: ``/api/ws?client=<kind>`` as the client sent it (``"agent"`` for agent scripts, else None). Advisory, not an
+        #: auth fact: it only lets agent traffic opt OUT of the human-presence stamp (``human_input``) and defaults
+        #: its new chats to hidden. [daveey]
+        self.client_kind = client_kind
         self._loop = loop
         self._peer = peer
         #: Server-verified identity from the WS-upgrade credential, stamped by ``web_server_chat._ws_auth_reason``; None
@@ -301,6 +305,20 @@ def _disable_nagle(ws: Any) -> None:
         _log.debug("ws TCP_NODELAY skip: %s", exc)
 
 
+def _ws_client_kind(ws: Any) -> str | None:
+    """The upgrade request's ``client`` query marker (``?client=agent``), lower-cased; None when absent. [daveey]"""
+    from urllib.parse import parse_qs
+
+    scope = getattr(ws, "scope", None)
+    if isinstance(scope, dict):  # real ASGI websockets (a harness scope may lack query_string)
+        raw = scope.get("query_string") or b""
+        params = {k: v[0] for k, v in parse_qs(raw.decode("latin-1") if isinstance(raw, bytes) else str(raw)).items()}
+    else:
+        params = getattr(ws, "query_params", None) or {}
+    kind = str(params.get("client", "") or "").strip().lower()
+    return kind or None
+
+
 class _SendFailed(Exception):
     """Raised by handle_ws._reply when a reply could not be written: ends the read loop."""
 
@@ -402,7 +420,8 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         _note_dashboard_client_activity(force=True)
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
-        transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity)
+        transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity,
+                                client_kind=_ws_client_kind(ws))
         # resolve_skin() is sync I/O + CPU; pooled so the read loop can drain the frontend's initial RPC burst.
         skin_payload = await asyncio.to_thread(server.resolve_skin)
         # change_events: this backend broadcasts pet/cron/sessions.changed, so clients can demote legacy
