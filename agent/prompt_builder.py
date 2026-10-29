@@ -1754,10 +1754,14 @@ def global_context_file_paths(home_override: Path | None = None) -> list[Path]:
     path, and the right profile even on a thread that lost the HERMES_HOME ContextVar). Never raises: a missing
     or unreadable config means no global files."""
     try:
-        from utils import load_yaml_file_readonly
-        home = Path(home_override) if home_override is not None else get_hermes_home()
-        cfg_path = home / "config.yaml"
-        cfg = load_yaml_file_readonly(cfg_path) if cfg_path.is_file() else {}
+        from agent.safe_worker_policy import worker_config_snapshot
+        # A worker bound to an explicit config (ignore_user_config) never reads the profile's file.
+        cfg = worker_config_snapshot()
+        if cfg is None:
+            from utils import load_yaml_file_readonly
+            home = Path(home_override) if home_override is not None else get_hermes_home()
+            cfg_path = home / "config.yaml"
+            cfg = load_yaml_file_readonly(cfg_path) if cfg_path.is_file() else {}
         raw = ((cfg or {}).get("agent") or {}).get("global_context_files") if isinstance(cfg, dict) else None
     except Exception as e:
         logger.debug("Could not read agent.global_context_files: %s", e)

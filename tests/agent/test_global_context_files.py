@@ -183,3 +183,24 @@ def test_context_manifest_lists_global_rows(profile, tmp_path):
     with patch("agent.system_prompt._agent_home", return_value=profile.home):
         rows = context_file_sources_for_agent(cron)
     assert [r["path"] for r in rows] == [str(profile.rules), str(missing)]
+
+
+def test_worker_bound_to_an_explicit_config_never_reads_the_profile_file(profile, tmp_path, monkeypatch):
+    """A worker started with ignore_user_config reads the setting from its bound config, not config.yaml."""
+    import agent.safe_worker_policy as policy
+    other = tmp_path / "bound.md"
+    other.write_text("BOUND RULE")
+    monkeypatch.setattr(policy, "worker_config_snapshot",
+                        lambda: {"agent": {"global_context_files": [str(other)]}})
+    real_open = open
+    opened = []
+
+    def spy(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    with patch("builtins.open", spy):
+        assert global_context_file_paths(profile.home) == [other]
+    assert not any(p.endswith("config.yaml") for p in opened)
+    monkeypatch.setattr(policy, "worker_config_snapshot", lambda: {})
+    assert global_context_file_paths(profile.home) == []
