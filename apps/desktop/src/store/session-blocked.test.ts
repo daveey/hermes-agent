@@ -11,8 +11,10 @@ import { notifyError } from './notifications'
 import { $sessions, setSessions } from './session'
 import {
   $blockedSessionIds,
+  $mutedMigrationDone,
   $muteWriteGuard,
   isSessionParked,
+  migrateLocalParks,
   MUTE_WRITE_GUARD_MS,
   resolveSessionParked,
   toggleSessionBlocked,
@@ -125,5 +127,79 @@ describe('⌘B mute write-through', () => {
     expect(toggleSessionBlocked('draft-1')).toBe(true)
     expect($blockedSessionIds.get()).toEqual(['draft-1'])
     expect(setSessionMutedRemote).not.toHaveBeenCalled()
+  })
+})
+
+describe('one-time migration of local ⌘B parks', () => {
+  beforeEach(() => {
+    $mutedMigrationDone.set([])
+  })
+
+  it('posts muted=true once for each locally parked row the backend says is unmuted', async () => {
+    const rows = [row({ id: 'a', muted: false }), row({ id: 'b', muted: false }), row({ id: 'c', muted: true })]
+    setSessions(rows)
+    $blockedSessionIds.set(['a', 'c', 'gone'])
+    vi.mocked(setSessionMutedRemote).mockResolvedValue({ ok: true, muted: true })
+
+    await migrateLocalParks(rows)
+
+    // Only `a`: `b` was never parked, `c` already is, `gone` has no row.
+    expect(setSessionMutedRemote).toHaveBeenCalledTimes(1)
+    expect(setSessionMutedRemote).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), true)
+    expect(mutedOf('a')).toBe(true)
+    expect(isSessionParked('a')).toBe(true)
+    expect($mutedMigrationDone.get()).toEqual(['primary\u0000default'])
+  })
+
+  it('does not re-run for a profile it already migrated', async () => {
+    const rows = [row({ id: 'a', muted: false })]
+    setSessions(rows)
+    $blockedSessionIds.set(['a'])
+    vi.mocked(setSessionMutedRemote).mockResolvedValue({ ok: true, muted: true })
+
+    await migrateLocalParks(rows)
+    await migrateLocalParks([row({ id: 'a', muted: false })])
+
+    expect(setSessionMutedRemote).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits for a backend that stamps muted: rows without it change nothing', async () => {
+    const rows = [row({ id: 'a' })]
+    setSessions(rows)
+    $blockedSessionIds.set(['a'])
+
+    await migrateLocalParks(rows)
+
+    expect(setSessionMutedRemote).not.toHaveBeenCalled()
+    expect($mutedMigrationDone.get()).toEqual([])
+  })
+
+  it('a 404 leaves the local list alone and does not retry', async () => {
+    const rows = [row({ id: 'a', muted: false })]
+    setSessions(rows)
+    $blockedSessionIds.set(['a'])
+    vi.mocked(setSessionMutedRemote).mockRejectedValue(new Error('404 Not Found'))
+
+    await migrateLocalParks(rows)
+
+    expect($blockedSessionIds.get()).toEqual(['a'])
+    expect(mutedOf('a')).toBe(false)
+    expect(notifyError).not.toHaveBeenCalled()
+    expect($mutedMigrationDone.get()).toEqual(['primary\u0000default'])
+  })
+
+  it('any other failure leaves the profile unmarked so the next load retries', async () => {
+    const rows = [row({ id: 'a', muted: false })]
+    setSessions(rows)
+    $blockedSessionIds.set(['a'])
+    vi.mocked(setSessionMutedRemote).mockRejectedValueOnce(new Error('network down'))
+
+    await migrateLocalParks(rows)
+    expect($mutedMigrationDone.get()).toEqual([])
+
+    vi.mocked(setSessionMutedRemote).mockResolvedValue({ ok: true, muted: true })
+    await migrateLocalParks(rows)
+    expect(setSessionMutedRemote).toHaveBeenCalledTimes(2)
+    expect($mutedMigrationDone.get()).toEqual(['primary\u0000default'])
   })
 })

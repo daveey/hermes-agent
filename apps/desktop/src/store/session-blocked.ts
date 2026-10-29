@@ -167,6 +167,75 @@ export async function writeSessionMuted(
   }
 }
 
+/** [daveey] Profiles (per gateway) whose old local ⌘B parks were pushed to the backend once. */
+export const $mutedMigrationDone = persistentAtom<string[]>(
+  'hermes.desktop.mutedMigrationDone.v1',
+  [],
+  Codecs.stringArray
+)
+
+const migrationScope = (row: Pick<SessionInfo, 'connection_id' | 'profile'>) =>
+  `${row.connection_id ?? 'primary'}\u0000${row.profile || 'default'}`
+
+const migrating = new Set<string>()
+
+/** [daveey] One-time migration of the pre-backend ⌘B list. The first list page whose rows carry `muted` (a backend
+ *  that owns the park) POSTs `/mute {muted: true}` for every locally parked row it reports `muted=false`, then
+ *  records the profile so it never runs again. A 404 leaves the local list alone (an older backend, or a row the
+ *  backend no longer has) and still counts as done; any other failure leaves the profile unmarked, so the next
+ *  load retries. Rows not on that page are not migrated. */
+export async function migrateLocalParks(
+  rows: readonly SessionInfo[],
+  post: (row: MuteRow, muted: boolean) => Promise<unknown> = setSessionMutedRemote
+): Promise<void> {
+  const done = new Set($mutedMigrationDone.get())
+  const byScope = new Map<string, SessionInfo[]>()
+
+  for (const row of rows) {
+    if (typeof row.muted !== 'boolean') {
+      continue
+    }
+
+    const scope = migrationScope(row)
+
+    if (done.has(scope) || migrating.has(scope)) {
+      continue
+    }
+
+    byScope.set(scope, [...(byScope.get(scope) ?? []), row])
+  }
+
+  await Promise.all(
+    [...byScope].map(async ([scope, scoped]) => {
+      migrating.add(scope)
+
+      try {
+        const blocked = $blockedSessionIds.get()
+        const targets = scoped.filter(row => row.muted === false && isSessionBlocked(row.id, blocked, $sessions.get()))
+        let retry = false
+
+        for (const row of targets) {
+          try {
+            await post(row, true)
+            setMuteWrite(row.id, { at: Date.now(), value: true })
+            setRowMuted(row.id, true)
+          } catch (error) {
+            if (!isMissingRestEndpoint(error)) {
+              retry = true
+            }
+          }
+        }
+
+        if (!retry) {
+          $mutedMigrationDone.set([...new Set([...$mutedMigrationDone.get(), scope])])
+        }
+      } finally {
+        migrating.delete(scope)
+      }
+    })
+  )
+}
+
 /** Flip the flag; returns the new state. Unblocking clears every alias. [daveey] A persisted row writes through to
  *  the backend (`writeSessionMuted`); a draft with no row stays local-only. */
 export function toggleSessionBlocked(id: string): boolean {
