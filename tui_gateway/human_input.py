@@ -34,6 +34,10 @@ def is_human_typed_submit(rid, params: dict, text) -> bool:
     """True for a ``prompt.submit`` a person typed in a client (not an injected or relayed turn)."""
     if rid is None or not isinstance(params, dict):
         return False
+    from tui_gateway.transport import current_transport, is_agent_transport
+
+    if is_agent_transport(current_transport()):  # an agent script over /api/ws?client=agent, not a person typing
+        return False
     if any(params.get(k) is not None for k in _INTERNAL_PARAMS):
         return False
     if params.get("display_kind") == "hidden":

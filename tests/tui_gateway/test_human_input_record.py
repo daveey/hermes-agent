@@ -257,3 +257,41 @@ def test_auto_continue_schedule_does_not_record(monkeypatch, home):
     assert server._maybe_schedule_auto_continue("sid", session, "session-key") is not None
     assert submitted and submitted[0]["display_kind"] == "auto_continue"
     assert _stamp(home) is None
+
+
+
+# ── agent-declared transports (/api/ws?client=agent) are not a person typing [daveey] ───────────────────────
+
+
+def _submit_on(client_kind, params, rid="r1"):
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    transport = types.SimpleNamespace(client_kind=client_kind, auth_identity=None, _peer="t", write=lambda o: True)
+    token = bind_transport(transport)
+    try:
+        return _submit(params, rid=rid)
+    finally:
+        reset_transport(token)
+
+
+def test_agent_transport_submit_does_not_record(home):
+    _submit_on("agent", {"session_id": "s", "text": "Run sleep 45 sequentially 150 times"})
+    assert _stamp(home) is None
+
+
+@pytest.mark.parametrize("client_kind", [None, "renderer"])
+def test_renderer_transport_submit_still_records(home, client_kind):
+    _submit_on(client_kind, {"session_id": "s", "text": "hello there"})
+    stamp = _stamp(home)
+    assert stamp is not None and stamp["session_id"] == "s"
+
+
+def test_classifier_rejects_agent_transport():
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    token = bind_transport(types.SimpleNamespace(client_kind="agent", write=lambda o: True))
+    try:
+        assert not human_input.is_human_typed_submit("r", {"text": "hi"}, "hi")
+    finally:
+        reset_transport(token)
+    assert human_input.is_human_typed_submit("r", {"text": "hi"}, "hi")
