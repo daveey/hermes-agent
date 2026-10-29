@@ -2514,10 +2514,10 @@ def release_stale_claims(
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
         heartbeat_stale = hb is not None and (now - hb) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
-        lease_lost = _sync.lease_lost(conn, row["id"], now)  # a live worker never outlives its lease
         started_at = _row_get(row, "worker_started_at")
-        if (host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at)
-                and not heartbeat_stale and not lease_lost):
+        live = host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at) and not heartbeat_stale
+        lease_lost = _sync.lease_lost(conn, row["id"], now, _resolve_claim_ttl_seconds() if live else None)  # [daveey] asks the Board
+        if live and not lease_lost:
             _extend_live_stale_claim(conn, row, now)
             continue
 

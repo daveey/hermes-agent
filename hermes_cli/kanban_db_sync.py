@@ -42,6 +42,12 @@ MODES = ("off", "shadow", "primary")
 # A worker whose lease cannot be renewed is stopped this long before the
 # server-side expiry, so it is gone before another gateway can be granted the card.
 LEASE_SAFETY_MARGIN_SECONDS = 60
+# [daveey] How long past its expiry a lapsed lease can still be ours while the Board cannot be asked. Matches the
+# Board's DARK_HOLD_MAX_MS: the Board keeps the lease of a holder that went silent (a laptop asleep, offline) that
+# long, so a worker frozen by sleep, or woken in a networkless maintenance wake, is not stopped on our clock alone.
+LEASE_DARK_HOLD_SECONDS = 12 * 3600
+# [daveey] Retry spacing for a lease that has already lapsed (see ``_renewal_due``).
+LAPSED_RENEW_RETRY_SECONDS = 30
 
 # Columns that travel to the service. Integer cross-references travel as uids
 # (``REF_COLUMNS``); identity columns (``KEY_COLUMNS``) are the row key, never a field.
@@ -737,10 +743,15 @@ def stage_claim(conn: sqlite3.Connection, task_id: str, gate: Optional[ClaimGate
 
 
 def _renewal_due(task_id: str, lease_expires_ms: int, ttl_s: int) -> bool:
-    """At most one renewal attempt per ``ttl/3``, and only once a third of the lease is used."""
+    """At most one renewal attempt per ``ttl/3``, and only once a third of the lease is used.
+
+    [daveey] A lease already inside the safety margin (lapsed while the process was suspended: the throttle is
+    measured on the monotonic clock, which stops during macOS sleep, while the lease is wall-clock) is retried every
+    ``LAPSED_RENEW_RETRY_SECONDS`` instead, so the first heartbeat after a wake renews it."""
     remaining_s = lease_expires_ms / 1000 - time.time()
     last = _RENEW_ATTEMPTS.get(task_id)
-    if remaining_s > ttl_s * 2 / 3 or (last is not None and time.monotonic() - last < ttl_s / 3):
+    spacing = LAPSED_RENEW_RETRY_SECONDS if remaining_s <= LEASE_SAFETY_MARGIN_SECONDS else ttl_s / 3
+    if remaining_s > ttl_s * 2 / 3 or (last is not None and time.monotonic() - last < spacing):
         return False
     _RENEW_ATTEMPTS[task_id] = time.monotonic()
     return True
@@ -785,16 +796,56 @@ def _renew(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str], ttl_s
     return None
 
 
-def lease_lost(conn: sqlite3.Connection, task_id: str, now: int) -> bool:
+def lease_lost(conn: sqlite3.Connection, task_id: str, now: int, reassert_ttl_s: Optional[int] = None) -> bool:
     """True when this gateway no longer holds the card's lease, or the lease is
-    within the safety margin of expiring (renewal kept failing)."""
+    within the safety margin of expiring (renewal kept failing).
+
+    [daveey] With ``reassert_ttl_s`` (the caller is about to stop a live worker), a lapse on our clock is checked
+    with the Board first (:func:`reassert_lease`): only ``lost`` counts, so a Mac that slept keeps its workers."""
     if board_mode(conn) != "primary":
         return False
     row = conn.execute("SELECT lease_holder, lease_expires FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None or row["lease_expires"] is None:
         return False
     own = _state(conn)["gateway_id"]
-    return row["lease_holder"] != own or now >= row["lease_expires"] // 1000 - LEASE_SAFETY_MARGIN_SECONDS
+    lost = row["lease_holder"] != own or now >= row["lease_expires"] // 1000 - LEASE_SAFETY_MARGIN_SECONDS
+    return lost and (reassert_ttl_s is None or reassert_lease(conn, task_id, now, reassert_ttl_s) == "lost")
+
+
+def reassert_lease(conn: sqlite3.Connection, task_id: str, now: int, ttl_s: int) -> str:
+    """[daveey] Before a live local worker is stopped for :func:`lease_lost`, ask the Board.
+
+    A lease past its expiry on our clock is not proof the Board gave the card away: the machine may have slept
+    through the renewals (its workers frozen with it) and the Board holds a dark holder's lease (DARK_HOLD_MAX_MS).
+    Returns ``held`` (renewed: keep the worker), ``unknown`` (Board unreachable and the lapse is within
+    ``LEASE_DARK_HOLD_SECONDS``: keep it and ask again) or ``lost`` (another holder, a lease the Board already
+    ended, a refused renewal, or offline past the hold: stop it)."""
+    row = conn.execute(
+        "SELECT t.lease_holder, t.lease_expires, r.uid AS run_uid FROM tasks t "
+        "LEFT JOIN task_runs r ON r.id = t.current_run_id WHERE t.id = ?", (task_id,),
+    ).fetchone()
+    if row is None or row["lease_expires"] is None or row["run_uid"] is None:
+        return "lost"
+    if row["lease_holder"] != _state(conn)["gateway_id"]:
+        return "lost"  # the Board's feed moved or ended the lease: a real takeover, not a gap on our side
+    try:
+        lease = _client().renew(board_id=_state(conn)["board_id"], task_uid=task_id, run_uid=row["run_uid"],
+                                gateway_id=_state(conn)["gateway_id"], ttl_s=max(int(ttl_s), 1))
+    except _CLIENT_ERRORS as exc:
+        lapsed_s = now - int(row["lease_expires"]) // 1000
+        _log.info("kanban sync: lease of %s lapsed %ds ago and the Board is unreachable (%s: %s)",
+                  task_id, lapsed_s, type(exc).__name__, exc)
+        return "unknown" if lapsed_s <= LEASE_DARK_HOLD_SECONDS else "lost"
+    from hermes_cli.kanban_db_connect import write_txn
+    with write_txn(conn):
+        if lease.granted:
+            conn.execute("UPDATE tasks SET lease_expires = ?, lease_version = COALESCE(?, lease_version) "
+                         "WHERE id = ?", (lease.expires_ms, lease.version, task_id))
+            _log.info("kanban sync: lease of %s re-asserted after a renewal gap", task_id)
+            return "held"
+        _log.warning("kanban sync: lease for %s lost to %s (%s)", task_id, lease.holder, lease.reason)
+        conn.execute("UPDATE tasks SET lease_holder = ? WHERE id = ?", (lease.holder, task_id))
+    return "lost"
 
 
 def release_lease(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str]) -> None:

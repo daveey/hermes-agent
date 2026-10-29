@@ -148,30 +148,103 @@ def _attach_worker(conn, tid, proc):
                      (proc.pid, kbd._process_fingerprint(proc.pid), int(time.time()), tid))
 
 
-def test_worker_that_cannot_renew_is_stopped_before_lease_expiry(primary, lease_client):
+def _lapse(conn, tid, seconds_ago: int) -> None:
+    """The lease and the claim ran out ``seconds_ago`` on the wall clock with no renewal: the machine slept (or the
+    backend restarted) while the worker was alive, so nothing renewed in between."""
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET lease_expires = ?, claim_expires = ? WHERE id = ?",
+                     (int((time.time() - seconds_ago) * 1000), int(time.time()) - 1, tid))
+
+
+def test_lease_gap_does_not_kill_a_live_worker_when_the_board_still_holds_it(primary, lease_client):
+    """Regression (card t_01a18628253a543a): the Mac slept 17:59-18:14 PDT with live workers; on the first wake the
+    dispatcher saw their leases past expiry on its own clock and SIGTERMed them. The Board holds a dark holder's
+    lease, so the dispatcher must renew it and keep the worker."""
     conn = primary
-    tid = kb.create_task(conn, title="network drops", assignee="worker")
-    lease_client.lease_seconds = 30  # lease already inside the 60s safety margin
+    tid = kb.create_task(conn, title="slept through renewals", assignee="worker")
     kb.claim_task(conn, tid, ttl_seconds=900)
-    lease_ms = conn.execute("SELECT lease_expires FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+    run_uid = lease_client.calls[0][1]["run_uid"]
+    proc, _reaper = _spawn_worker()
+    try:
+        _attach_worker(conn, tid, proc)
+        _lapse(conn, tid, 15 * 60)
+        assert kb.release_stale_claims(conn) == 0
+        assert proc.poll() is None, "a live worker was stopped for a lease the Board still held"
+        assert kb.get_task(conn, tid).status == "running"
+        assert lease_client.calls[-1][0] == "renew" and lease_client.calls[-1][1]["run_uid"] == run_uid
+        lease_ms, claim_expires = conn.execute(
+            "SELECT lease_expires, claim_expires FROM tasks WHERE id = ?", (tid,)).fetchone()
+        assert lease_ms / 1000 > time.time() + 800 and claim_expires > time.time()
+        assert _run_rows(conn, tid)[-1][1:] == (None, "running")
+    finally:
+        proc.kill()
+
+
+def test_lease_gap_with_the_board_unreachable_keeps_the_worker(primary, lease_client):
+    """A maintenance wake has no network (agent.log 18:18:47: Errno 51), so the lease cannot be checked: keep the
+    worker and ask again, instead of stopping it on our clock alone."""
+    conn = primary
+    tid = kb.create_task(conn, title="dark wake", assignee="worker")
+    kb.claim_task(conn, tid, ttl_seconds=900)
+    proc, _reaper = _spawn_worker()
+    try:
+        _attach_worker(conn, tid, proc)
+        _lapse(conn, tid, 20 * 60)
+        lease_client.renew_mode = "offline"
+        assert kb.release_stale_claims(conn) == 0
+        assert proc.poll() is None
+        assert kb.get_task(conn, tid).status == "running"
+        kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id = ? ORDER BY id", (tid,))]
+        assert kinds[-1] == "claim_extended" and "reclaimed" not in kinds
+        # Back online: the next sweep renews it.
+        lease_client.renew_mode = "grant"
+        with kbc.write_txn(conn):
+            conn.execute("UPDATE tasks SET claim_expires = ? WHERE id = ?", (int(time.time()) - 1, tid))
+        assert kb.release_stale_claims(conn) == 0
+        assert proc.poll() is None
+        assert conn.execute("SELECT lease_expires FROM tasks WHERE id = ?", (tid,)).fetchone()[0] > time.time() * 1000
+    finally:
+        proc.kill()
+
+
+@pytest.mark.parametrize("case", ["refused", "offline_past_dark_hold"])
+def test_lease_gap_stops_the_worker_once_the_lease_is_really_gone(primary, lease_client, case):
+    """Controls: the Board refuses the renewal (it gave the card away), or it stayed unreachable past the hold."""
+    conn = primary
+    tid = kb.create_task(conn, title="really gone", assignee="worker")
+    kb.claim_task(conn, tid, ttl_seconds=900)
     proc, reaper = _spawn_worker()
     try:
         _attach_worker(conn, tid, proc)
-        lease_client.renew_mode = "offline"
-        kb.heartbeat_claim(conn, tid, ttl_seconds=900)
-        assert lease_client.count("renew") == 1
-        claim_expires = conn.execute("SELECT claim_expires FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
-        assert claim_expires <= lease_ms // 1000 - sync.LEASE_SAFETY_MARGIN_SECONDS
+        if case == "refused":
+            _lapse(conn, tid, 15 * 60)
+            lease_client.renew_mode = "deny"
+        else:
+            _lapse(conn, tid, sync.LEASE_DARK_HOLD_SECONDS + 60)
+            lease_client.renew_mode = "offline"
         assert kb.release_stale_claims(conn) == 1
-        stopped_at_ms = time.time() * 1000
         reaper.join(timeout=30)
-        assert proc.poll() is not None, "worker kept running after its lease was lost"
-        assert stopped_at_ms < lease_ms
+        assert proc.poll() is not None, "worker kept running after its lease was gone"
         assert kb.get_task(conn, tid).status == "ready"
         assert _run_rows(conn, tid)[-1][1:] == ("lease_lost", "lease_lost")
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def test_first_heartbeat_after_sleep_renews_a_lapsed_lease(primary, lease_client):
+    """The renewal throttle runs on the monotonic clock, which stops during macOS sleep: a renewal attempted just
+    before the lid closed must not block the first renewal after wake, when the lease has already lapsed."""
+    conn = primary
+    tid = kb.create_task(conn, title="wakes up", assignee="worker")
+    lock = "host:1"
+    kb.claim_task(conn, tid, ttl_seconds=900, claimer=lock)
+    sync._RENEW_ATTEMPTS[tid] = time.monotonic() - 60  # last attempt 1 min "ago" (monotonic) = before the sleep
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (int((time.time() - 600) * 1000), tid))
+    assert kb.heartbeat_claim(conn, tid, ttl_seconds=900, claimer=lock)
+    assert lease_client.count("renew") == 1
+    assert conn.execute("SELECT claim_expires FROM tasks WHERE id = ?", (tid,)).fetchone()[0] > time.time() + 600
 
 
 def test_live_worker_with_a_valid_lease_keeps_its_claim(primary, lease_client):
