@@ -689,6 +689,16 @@ class ClaimGate:
             _log.info("kanban sync: release of unused lease for %s failed: %s", task_id, err)
 
 
+# task_id -> why the Board did not grant its lease, set by :func:`claim_gate` and read once by the dispatcher
+# (:func:`pop_claim_deferral`), so a tick can tell a deferred claim from a lost CAS and the "dispatcher stuck"
+# warning can name it.
+_CLAIM_DEFERRALS: dict[str, str] = {}
+
+
+def pop_claim_deferral(task_id: str) -> Optional[str]:
+    return _CLAIM_DEFERRALS.pop(task_id, None)
+
+
 def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str = "ready") -> ClaimGate:
     """Lease seam before a claim CAS. Only ``primary`` boards ask the service;
     without a grant the card stays ``ready`` (no offline claims: every card is
@@ -703,9 +713,11 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
                                   ttl_s=max(expires - int(time.time()), 1), lane=lane)
     except _CLIENT_ERRORS as exc:  # fail closed: an unreachable service defers the claim
         _log.info("claim_deferred: offline task=%s (%s: %s)", task_id, type(exc).__name__, exc)
+        _CLAIM_DEFERRALS[task_id] = "offline"
         return ClaimGate(expires, deferred=True)
     if not lease.granted:
         _log.info("claim_deferred: %s task=%s holder=%s", lease.reason or "denied", task_id, lease.holder)
+        _CLAIM_DEFERRALS[task_id] = lease.reason or "denied"
         return ClaimGate(expires, deferred=True)
     deadline = lease.expires_ms // 1000 - LEASE_SAFETY_MARGIN_SECONDS
     return ClaimGate(min(expires, deadline), lease=lease, ids=ids)
