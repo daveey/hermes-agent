@@ -45,6 +45,16 @@ This is the shape that covers the workloads `delegate_task` can't:
 
 The eight canonical collaboration patterns are catalogued in [Collaboration patterns](#collaboration-patterns) below.
 
+## Duplicate-owner checks
+
+`kanban.create_overlap_check` defaults to `true`. Creation checks open cards across
+local boards and available gateway replicas for overlapping work, rather than only
+cards linked to the current chat. A refusal returns `create_overlap` with the existing
+card IDs; continue the existing owner, or pass `distinct_from` and `distinct_reason`
+when the proposed work is genuinely separate. Set `kanban.create_overlap_check` to
+`false` to disable this check. Missing or unreadable replicas are skipped and logged;
+the check cannot guarantee uniqueness against unavailable boards.
+
 ## PR completion contracts
 
 Declare PR work at creation with `--completion-contract OWNER/REPO` (or an exact

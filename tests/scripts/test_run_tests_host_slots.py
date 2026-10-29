@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,6 +27,7 @@ def slot_env(tmp_path, monkeypatch):
     monkeypatch.delenv(slots.HELD_ENV, raising=False)
     monkeypatch.setenv("HERMES_TEST_SLOT_DIR", str(tmp_path / "slots"))
     monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "2")
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(tmp_path / "no-config.yaml"))  # never the real home
     return tmp_path / "slots"
 
 
@@ -237,3 +239,117 @@ def test_direct_pytest_n8_is_capped_to_the_slot_budget(tmp_path):
     assert proc.returncode == 0, out
     assert "capping xdist workers 8 -> 2" in out, out
     assert "created: 2/2 workers" in out, out
+
+
+# --- orphaned holders are reclaimed [daveey] ----------------------------------------------------
+# hermes-hub 2026-10-29: two direct `pytest` runs whose worktrees had been removed hung for 6h45m holding
+# 2 of the 4 slots; every other agent's run_tests.sh waited behind them.
+
+_HOLDER = ("import sys, time; sys.path.insert(0, sys.argv[1]); from scripts import run_tests_host_slots as s\n"
+           "fd = s.acquire_host_slot()\nprint('held', flush=True)\ntime.sleep(120)\n")
+
+
+def _spawn_holder(cwd, code=_HOLDER):
+    env = {k: v for k, v in os.environ.items() if k != slots.HELD_ENV}
+    child = subprocess.Popen([sys.executable, "-c", code, str(REPO_ROOT)], stdout=subprocess.PIPE, text=True,
+                             env=env, cwd=str(cwd))
+    line = child.stdout.readline().split()
+    assert line[:1] == ["held"], line
+    return child, line
+
+
+def _acquire_in_thread():
+    got: list = []
+    done = threading.Event()
+
+    def take():
+        got.append(slots.acquire_host_slot())
+        done.set()
+
+    threading.Thread(target=take, daemon=True).start()
+    return got, done
+
+
+def test_slot_held_from_a_deleted_tree_is_reclaimed(slot_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "1")
+    tree = tmp_path / "worktree"
+    tree.mkdir()
+    child, _ = _spawn_holder(tree)
+    try:
+        got, done = _acquire_in_thread()
+        assert not done.wait(0.5), "a live holder keeps its slot"
+        shutil.rmtree(tree)
+        assert done.wait(15), "a holder whose tree was deleted must not keep the slot"
+        if Path("/proc/self/stat").exists():  # identity provable: the hung orphan is killed (it ignored SIGTERM)
+            assert child.wait(10) == -signal.SIGKILL
+        slots.release_host_slot(got[0])
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(5)
+
+
+def test_slot_held_past_the_age_cap_is_reclaimed_without_killing(slot_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "1")
+    monkeypatch.setenv(slots.MAX_AGE_ENV, "1")
+    child, _ = _spawn_holder(tmp_path)
+    try:
+        got, done = _acquire_in_thread()  # the waiter re-checks every REAP_EVERY_S, so the 1 s cap passes
+        assert done.wait(15), "a slot held past the cap is reclaimed"
+        assert child.poll() is None, "an over-age holder in a live tree is left running"
+        slots.release_host_slot(got[0])
+    finally:
+        child.kill()
+        child.wait(5)
+
+
+def test_slot_kept_by_an_inherited_fd_of_a_dead_holder_is_reclaimed(slot_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "1")
+    stop = tmp_path / "stop"
+    code = ("import os, sys, time; sys.path.insert(0, sys.argv[1]); from scripts import run_tests_host_slots as s\n"
+            "fd = s.acquire_host_slot()\npid = os.fork()\n"
+            "if pid == 0:\n"
+            f"    end = time.time() + 60\n    while time.time() < end and not os.path.exists({str(stop)!r}):\n"
+            "        time.sleep(0.1)\n    os._exit(0)\n"
+            "print('held', pid, flush=True)\nos._exit(0)\n")
+    child, _ = _spawn_holder(tmp_path, code)
+    try:
+        child.wait(10)
+        got, done = _acquire_in_thread()
+        assert done.wait(15), "the recorded holder exited; its forked child must not keep the slot"
+        slots.release_host_slot(got[0])
+    finally:
+        stop.touch()  # the reparented grandchild exits on its own (it is outside this test's kill scope)
+
+
+def test_live_young_holder_is_not_reclaimed(slot_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "1")
+    child, _ = _spawn_holder(tmp_path)
+    try:
+        assert slots.reclaim_stale_slots(str(slot_env), 1) == []
+        assert (slot_env / "0.lock").exists()
+        assert child.poll() is None
+    finally:
+        child.kill()
+        child.wait(5)
+
+
+def test_release_clears_the_holder_record(slot_env, monkeypatch):
+    """A record left after release would name a dead pid as the holder of an older runner that writes none."""
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "1")
+    fd = slots.acquire_host_slot()
+    assert (slot_env / "0.lock").read_text().startswith("{")
+    slots.release_host_slot(fd)
+    assert (slot_env / "0.lock").read_text() == ""
+
+
+def test_slot_max_age_env_and_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(tmp_path / "absent.yaml"))
+    monkeypatch.delenv(slots.MAX_AGE_ENV, raising=False)
+    assert slots.slot_max_age_s() == 45 * 60
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("tests:\n  slot_max_age_s: 600\n")
+    monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(cfg))
+    assert slots.slot_max_age_s() == 600
+    monkeypatch.setenv(slots.MAX_AGE_ENV, "0")
+    assert slots.slot_max_age_s() == 0, "env wins; 0 disables the age cap"

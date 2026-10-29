@@ -287,6 +287,48 @@ def test_hooks_prefer_the_repo_virtualenv_over_path_python(tmp_path):
     assert proc.returncode != 0 and "wrong interpreter" in proc.stderr
 
 
+@pytest.mark.parametrize("where", ["main_checkout", "installed_hermes"])
+def test_hooks_take_the_pm_composed_environment_minus_its_checkout(tmp_path, where):
+    """A pm-managed install (the Macs) keeps the dependencies on its composed PYTHONPATH: the
+    stale venv/ python cannot import them, so the hook runs the composed PATH's python with the
+    composed PYTHONPATH, minus the composing checkout (the judged tree's own modules must win).
+    A clone that is not an install (the sync mirror's worktrees) borrows the installed Hermes
+    checkout's environment, ``$HERMES_HOME/hermes-agent``."""
+    repo = _engine_repo(tmp_path)
+    assert _check(repo, "--install-hook", "pre-commit").returncode == 0
+    (repo / ".venv").symlink_to(Path(sys.prefix), target_is_directory=True)
+    hermes_home = tmp_path / "hermes-home"
+    pm_root = repo if where == "main_checkout" else hermes_home / "hermes-agent"
+    record = tmp_path / "seen"
+    composed = tmp_path / "composed-bin"
+    composed.mkdir()
+    (composed / "python3").write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$PYTHONPATH\" >> '{record}'\nexec '{sys.executable}' \"$@\"\n",
+        encoding="utf-8")
+    (composed / "python3").chmod(0o755)
+    env = _env()
+    env["HERMES_HOME"] = str(hermes_home)
+    path = os.pathsep.join([str(composed), env["PATH"]])
+    # untracked in the repo: the hook reads it from the composing checkout, not the judged tree
+    _write(pm_root, {"pm/environments.py": (
+        "import json, os\n"
+        f"print(json.dumps({{'PATH': {path!r}, 'PYTHONPATH': os.pathsep.join([os.getcwd(), '/deps'])}}))\n"
+    )})
+    _write(repo, {"pkg/b.py": "def b():\n    return 2\n"})
+    _git(repo, "add", "--", "pkg/b.py")
+    proc = _sh(repo, "git", "commit", "-q", "-m", "pm", env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert record.read_text(encoding="utf-8").splitlines() == ["/deps"]
+    # control: with no composing checkout the hook keeps the venv python and never runs ours
+    (pm_root / "pm/environments.py").unlink()
+    record.unlink()
+    _write(repo, {"pkg/b.py": "def b():\n    return 3\n"})
+    _git(repo, "add", "--", "pkg/b.py")
+    proc = _sh(repo, "git", "commit", "-q", "-m", "venv", env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not record.exists()
+
+
 def test_check_refuses_old_python_before_importing_anything():
     # The guard reads sys.version_info; a 3.10 interpreter is emulated by overriding it before
     # scripts/check runs (tomllib, imported via ruff_runner, would otherwise crash it).

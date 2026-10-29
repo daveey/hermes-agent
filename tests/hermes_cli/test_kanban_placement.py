@@ -167,8 +167,8 @@ def test_caller_pin_wins_both_ways():
     # Parents no longer keep a hub-pinned card from the hub: it is deferred there (not refused).
     assert decide({"title": "x", "placement": "hub", "parents": ["t_1"]}).get("defer") == "hub"
     # A gateway with no route is not a destination, and never silently becomes a local card.
-    assert decide({"title": "x", "placement": "mini"})["where"] == "refuse"
-    assert decide({"title": "x", "placement": "mini"}, cfg={})["where"] == "refuse"
+    assert decide({"title": "x", "placement": "mini"}, live=lambda t: f"{t} record missing")["where"] == "refuse"
+    assert decide({"title": "x", "placement": "mini"}, cfg={}, live=lambda t: f"{t} record missing")["where"] == "refuse"
     # Own gateway name and 'here' still mean local, with or without a route.
     assert decide({"title": "x", "placement": "macbook"})["where"] == "local"
     assert decide({"title": "x", "placement": "macbook"}, cfg={})["where"] == "local"
@@ -908,7 +908,7 @@ def test_kanban_create_with_parents_creates_a_local_deferred_card(mac):
         assert st["target"] == "hub" and st["origin_session"] == "20261027_183000_abc123"
         assert kb.get_task(conn, out["task_id"]).status == "todo"
         task = kb.get_task(conn, out["task_id"])
-        assert kpf.forward_argv(task, None, ["hermes", "chat"])[1:4] == ["-m", kpf.MODULE, "--"]
+        assert kpf.forward_argv(task, None, ["hermes", "chat"])[1:5] == ["-P", "-m", kpf.MODULE, "--"]
         task.skills = ["sdlc-review"]  # the review lane always runs a real reviewer
         assert kpf.forward_argv(task, None, ["hermes", "chat"]) is None
     marked = json.loads(kt._handle_create({"title": "Read the Chrome tab", "parents": [parent]}))
@@ -1120,9 +1120,9 @@ def test_configured_alias_maps_any_name_and_unknown_names_still_refuse():
     cfg = {**ROUTE, "aliases": {"ec2-hub": "hub"}}
     assert decide({"title": "x", "placement": "ec2-hub"}, cfg=cfg)["where"] == "hub"
     # Only a known gateway behind the 'hermes-' prefix resolves; anything else is refused as before.
-    d = decide({"title": "x", "placement": "hermes-mini"})
+    d = decide({"title": "x", "placement": "hermes-mini"}, live=lambda t: f"{t} record missing")
     assert d["where"] == "refuse" and d["pin"] == "hermes-mini", d
-    assert decide({"title": "x", "placement": "hermes"})["where"] == "refuse"
+    assert decide({"title": "x", "placement": "hermes"}, live=lambda t: f"{t} record missing")["where"] == "refuse"
 
 
 def test_hermes_hub_pin_through_the_tool_creates_on_the_hub_not_refused(mac):
@@ -1214,3 +1214,50 @@ def test_heavy_route_machine_check_reads_the_board_registry(monkeypatch, entry, 
     machines = {"worker-1": entry} if entry else {}
     monkeypatch.setattr(wn, "registry", lambda: {"me": "macbook", "machines": machines})
     assert kp._machine_picks_up("worker-1") is ok
+
+
+# --- explicit pin to a live gateway that is not this gateway's route target ---------------------------
+# From the hub (no route entry) placement='macbook' was refused "no placement route for this gateway", so
+# kanban_create could not reach the MacBook at all. [daveey]
+
+HUB_CFG = {"route": {"macbook": "hub"}}
+NOT_LIVE = lambda target: f"{target}'s capability record is stale or missing"
+
+
+def test_pin_to_a_live_gateway_without_a_route_entry_goes_there():
+    d = decide({"title": "scratch", "placement": "macbook"}, cfg=HUB_CFG, self_gw="hub")
+    assert d["where"] == "macbook", d
+
+
+def test_pin_to_a_non_routed_gateway_goes_there_even_with_a_route_of_its_own():
+    d = decide({"title": "scratch", "placement": "mini"})  # self macbook routes to hub; mini is another
+    assert d["where"] == "mini", d
+
+
+def test_pin_without_any_route_config_goes_to_a_live_gateway():
+    assert decide({"title": "x", "placement": "macbook"}, cfg={}, self_gw="hub")["where"] == "macbook"
+
+
+def test_pin_to_an_unknown_or_not_live_gateway_is_still_refused():
+    d = decide({"title": "x", "placement": "nowhere"}, cfg=HUB_CFG, self_gw="hub", live=NOT_LIVE)
+    assert d["where"] == "refuse" and d["pin"] == "nowhere" and "not live" in d["why"], d
+
+
+@pytest.mark.parametrize("extra", [
+    {"workspace_kind": "dir", "workspace_path": "/tmp/x"},
+    {"board": "links"},
+    {"assignee": "links"},
+])
+def test_foreign_pin_keeps_the_structural_refusals(extra):
+    d = decide({"title": "x", "placement": "macbook", **extra}, cfg=HUB_CFG, self_gw="hub")
+    assert d["where"] == "refuse" and d["pin"] == "macbook", d
+
+
+def test_foreign_pin_with_parents_is_deferred_to_the_pinned_gateway():
+    d = decide({"title": "x", "placement": "macbook", "parents": ["t_1"]}, cfg=HUB_CFG, self_gw="hub")
+    assert d["where"] == "local" and d["defer"] == "macbook", d
+
+
+def test_foreign_pin_for_an_origin_bound_card_is_not_forwarded():
+    d = decide({"title": "x", "placement": "macbook"}, cfg=HUB_CFG, self_gw="hub", origin_intent="chat")
+    assert d["where"] == "local", d

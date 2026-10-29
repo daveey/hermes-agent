@@ -70,6 +70,10 @@ def _now() -> float:
     return time.time()
 
 
+def _mono() -> float:
+    return time.monotonic()
+
+
 def _home(session: dict) -> Path:
     from tui_gateway import server
     return Path(session.get("profile_home") or server._hermes_home)
@@ -340,13 +344,45 @@ def continuation_due(session: dict) -> bool:
     if time.monotonic() < float(session.get("_update_pause_due_until") or 0.0):
         return True
     if time.monotonic() >= float(session.get("_update_pause_watch_until") or 0.0):
-        return False  # no live watcher for a paused turn here
+        # Keep a surviving backend's bounded hold unchanged. A replacement has neither
+        # field: its only ordering evidence is the previous writer's durable marker.
+        if session.get("_update_pause_watched") or "_update_pause_due_until" in session:
+            return False
+        return _durable_continuation_due(session)
     return _window_over(session)
+
+
+def _durable_continuation_due(session: dict) -> bool:
+    from tui_gateway import server
+    from tui_gateway.turn_marker import marker_writer_state, read_turn_marker
+    key = str(session.get("session_key") or "")
+    marker = read_turn_marker(_home(session), key)
+    if not marker or marker.get("reason") != PAUSE_REASON or not marker.get("auto_continue", True):
+        return False
+    if marker_writer_state(marker) == "alive":
+        return False  # its own backend's watcher owns the bounded in-place hold
+    # Match scheduling eligibility so disabled, stale, or exhausted pauses don't
+    # indefinitely starve automatic delivery when the startup reader skips them.
+    with server._session_profile_runtime_scope(session):
+        enabled, freshness, attempts = server._auto_continue_config()
+    if not (enabled and _now() - marker["started_at"] <= freshness and marker["attempts"] < attempts):
+        return False
+    # Same cap as the in-place hold (HOLD_MAX_S): a continuation this backend keeps failing to admit
+    # (a live foreign owner, a startup sweep that gave up) must not refuse the chat's notices for the
+    # whole freshness window. The clock starts when this backend first sees this pause and is keyed by
+    # the pause's identity, so re-reading the same marker never re-arms it; only a new pause does.
+    identity = (marker.get("started_at"), marker.get("paused_at"), marker.get("pauses"))
+    with session["history_lock"]:
+        seen = session.get("_update_pause_durable_seen")
+        if not seen or seen[0] != identity:
+            seen = session["_update_pause_durable_seen"] = (identity, _mono())
+    return _mono() - seen[1] < HOLD_MAX_S
 
 
 def _note_watching(session: dict) -> None:
     """A watcher is alive for this session; lapses by itself if the watcher thread never runs or dies."""
     with session["history_lock"]:
+        session["_update_pause_watched"] = True
         session["_update_pause_watch_until"] = time.monotonic() + DUE_HOLD_S
 
 

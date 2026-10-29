@@ -11,9 +11,14 @@ Guards:
 
 * the target labels must be satisfiable now by a registry machine other than this one that is active and not
   on hold (``machine:<x>`` for an unregistered x never is);
+* ``machine:<x>`` needs x to advertise pickup (``placement_unavailable`` otherwise: x would never copy the card,
+  :func:`hermes_cli.kanban_worker_node.check_machine_pins`);
 * ``kanban.move.max_moves`` (default 3) moves per card;
 * moving back to a machine the card already left is ping-pong: refused unless ``force``, and it still counts;
 * ``dir`` / ``worktree`` workspaces exist only on their creator, so those cards never move;
+* the card's ``requires`` must fit the assignee's profile on at least one matching machine whose profile
+  tools are known or unknown; every match known to lack one refuses ``capability_mismatch``, naming the
+  machine and the missing tool (:mod:`hermes_cli.kanban_runs_on_capabilities`);
 * the board must sync to the Board service (``runs_on`` is a Board placement field).
 
 Every move is a ``moved`` event ``{from_machine, runs_on, previous_runs_on, reason, move_no, forced}``: the audit log.
@@ -83,7 +88,8 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
         raise MoveRefused("invalid_runs_on", str(exc)) from exc
     if not labels:
         raise MoveRefused("invalid_runs_on", "runs_on must name at least one label, e.g. ['machine:worker-1']")
-    row = conn.execute("SELECT status, workspace_kind, runs_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    row = conn.execute("SELECT status, workspace_kind, runs_on, assignee, requires FROM tasks WHERE id = ?",
+                       (task_id,)).fetchone()
     if row is None:
         raise MoveRefused("not_found", f"task {task_id} not found")
     if row["workspace_kind"] in ("dir", "worktree"):
@@ -99,6 +105,20 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     matches = matching_machines(labels, machines, me=me)
     if not matches:
         raise MoveRefused("no_machine", f"no active, unheld machine other than {me} has every label in {labels}")
+    try:
+        wn.check_machine_pins(conn, labels, machines=machines, me=me)
+    except wn.MachinePinRefused as exc:
+        raise MoveRefused(exc.code, str(exc)) from exc
+    from hermes_cli import kanban_runs_on_capabilities as roc
+    try:
+        requires = json.loads(row["requires"]) if row["requires"] else []
+    except ValueError:
+        requires = []
+    try:
+        roc.check(labels, assignee=row["assignee"], requires=requires, workspace_kind=row["workspace_kind"] or "scratch",
+                  me=me, machines={m: machines[m] for m in matches}, exclude_me=True)
+    except roc.PlacementCapabilityMismatch as exc:
+        raise MoveRefused("capability_mismatch", str(exc)) from exc
     past = history(conn, task_id)
     limit = max_moves(cfg)
     if len(past) >= limit:

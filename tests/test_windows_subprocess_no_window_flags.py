@@ -282,6 +282,13 @@ def test_lsp_client_spawn_hides_console_window(monkeypatch):
         stdout = None
         stderr = None
 
+    # No real child exists: model its birth identity without querying a host PID.
+    def fake_create_time(pid):
+        assert pid == _FakeProc.pid
+        return 123.0
+
+    monkeypatch.setattr("agent.deadline.process_create_time", fake_create_time)
+
     async def fake_exec(*cmd, **kwargs):
         captured.append((list(cmd), kwargs))
         return _FakeProc()
@@ -297,6 +304,7 @@ def test_lsp_client_spawn_hides_console_window(monkeypatch):
         command=["fake-langserver", "--stdio"],
     )
     asyncio.run(client._spawn())
+    assert client._proc_born == 123.0
 
     assert len(captured) == 1, captured
     cmd, kwargs = captured[0]

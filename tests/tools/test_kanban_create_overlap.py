@@ -186,3 +186,99 @@ def test_a_board_named_in_passing_with_an_unrelated_title_is_not_a_match(home):
     out = _create(title="Rotate the Telnyx API key",
                   body="Logs are under ~/.hermes/kanban/boards/unconventional-collab/ for reference.")
     assert out.get("ok") is True, out
+
+
+# Mini bb_stall, 2026-10-28 20:42-21:28 PDT: every ci-runners alarm create exited 2.
+# stall.log: "rc=2 from EC2 — the new card names board 'runners'". The alarm title is
+# "CI: bb-linux runners can't run jobs (...)" and open hub/runners cards share the word "bb"
+# (t_625bc2b7 ends "from EC2"). A plain-word board slug in the title is not naming that board.
+ALARM_TITLE = ("CI: bb-linux runners can't run jobs "
+               "(1 bb-linux job(s) queued > 30 min (oldest 0.5 h))")
+ALARM_BODY = (
+    "The merge train and every bb-linux CI job stall until a runner can start jobs.\n"
+    "1 bb-linux job(s) queued > 30 min (oldest 0.5 h).\n"
+    "Runners: metta1 online, 48 GB free.\n"
+    "Disk full: free space or add a runner (tools/ci-runner/install-linux.sh).")
+RUNNERS_TITLE = ("Runners L: real end-to-end natural-language macOS routing, "
+                 "workspace build and BB action from EC2")
+
+
+def _runners_owner():
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_boards as kbb
+    from hermes_cli import kanban_db_connect as kbc
+    kbb.create_board("runners")
+    conn = kbc.connect(board="runners")
+    try:
+        return kb.create_task(conn, title=RUNNERS_TITLE, assignee="default",
+                              session_id="other-chat")
+    finally:
+        conn.close()
+
+
+def test_plain_word_board_slug_in_the_title_does_not_name_that_board(home):
+    owner = _runners_owner()
+    out = _create(title=ALARM_TITLE, body=ALARM_BODY)
+    assert out.get("code") != "create_overlap", out
+    assert out.get("ok") is True, out
+    assert owner not in [m.get("id") for m in out.get("matches") or []]
+
+
+def test_bare_plain_word_in_the_body_does_not_name_that_board(home):
+    """'runners' or 'hermes' as an ordinary word, with no /slug or 'board slug', is not a reference."""
+    _runners_owner()
+    out = _create(title="CI: bb-linux fleet is down",
+                  body="The runners are fine and hermes logs are unrelated. The bb fleet disk is full.")
+    assert out.get("ok") is True, out
+
+
+def test_explicit_board_reference_still_names_the_board(home):
+    owner = _runners_owner()
+    out = _create(title="CI: bb-linux fleet is down",
+                  body="See hub/runners. The bb fleet is stuck.")
+    assert out.get("code") == "create_overlap", out
+    assert owner in [m["id"] for m in out["matches"]]
+    named = _create(title="CI: the bb runners board is down", body="The bb fleet is stuck.")
+    assert named.get("code") == "create_overlap", named
+    assert owner in [m["id"] for m in named["matches"]]
+
+
+def test_hyphenated_slug_in_the_title_still_names_the_board(home):
+    owner = _board_with_b1()
+    out = _create(title="external-anchor rescoring on unconventional-collab",
+                  body="notes, no slash path and no 'board' marker")
+    assert out.get("code") == "create_overlap", out
+    assert owner in [m["id"] for m in out["matches"]]
+
+
+def test_cli_alarm_create_is_not_refused_for_a_plain_word_board_slug(home, monkeypatch, capsys):
+    """The mini alarm files via `hermes kanban create`, the path that exited 2."""
+    import argparse
+    from hermes_cli import kanban as kc
+    _runners_owner()
+    monkeypatch.setattr(kc, "_check_dispatcher_presence", lambda **kw: (True, ""))
+    root = argparse.ArgumentParser(prog="hermes")
+    kc.build_parser(root.add_subparsers())
+    # --board is a group flag pinned before the verb (alarm: `kanban --board default create`).
+    # Omitting it uses the current board, which this fixture's create also targets.
+    rc = kc._cmd_create(root.parse_args([
+        "kanban", "create", ALARM_TITLE, "--body", ALARM_BODY,
+        "--assignee", "default", "--json"]))
+    captured = capsys.readouterr()
+    assert rc == 0, (rc, captured.out, captured.err)
+    assert "create_overlap" not in captured.err
+
+
+def test_rest_alarm_create_is_not_refused_for_a_plain_word_board_slug(home):
+    """Dashboard POST /tasks uses the same overlap check as the tool and the CLI."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from plugins.kanban.dashboard.plugin_api import router
+    _runners_owner()
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        r = client.post("/tasks", json={"title": ALARM_TITLE, "body": ALARM_BODY, "assignee": "default"})
+    assert r.status_code != 409, r.text
+    assert r.status_code == 200, r.text
+    assert "create_overlap" not in r.text

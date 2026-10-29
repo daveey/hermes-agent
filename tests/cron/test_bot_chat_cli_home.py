@@ -34,7 +34,8 @@ def test_cli_keeps_discovered_home_when_launch_selection_changes(tmp_path, monke
                 'import hermes_cli.main; from hermes_constants import get_hermes_home; '
                 'print(json.dumps(str(get_hermes_home())))')
         # Everything after the launcher (binary or ``python -m hermes_cli.main``) is the CLI argv.
-        cli_argv = argv[3:] if argv[1:3] == ["-m", "hermes_cli.main"] else argv[1:]
+        from cron.scheduler_worker_env import is_hermes_module_argv
+        cli_argv = argv[argv.index("hermes_cli.main") + 1:] if is_hermes_module_argv(argv) else argv[1:]
         result = real_run([sys.executable, "-c", code, json.dumps(cli_argv)],
                           env=env, capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr

@@ -1741,25 +1741,6 @@ async def _resolve_handoff_watch_scopes(runner: object) -> list:
     return _handoff_watch_scopes(runner)
 
 
-async def _reclaim_stale(runner: object) -> None:
-    """Fail handoffs left in ``running`` by a gateway that died mid-dispatch (once per store at startup).
-    ``running`` is only set for one in-process dispatch, so a leftover row belongs to a dead process and
-    blocks ``request_handoff`` for that session forever. Defensive: a raising reclaim aborts startup."""
-    reclaim = getattr(getattr(runner, "_session_db", None), "reclaim_stale_running_handoffs", None)
-    if not callable(reclaim):
-        return
-    try:
-        ids = await reclaim(
-            "gateway stopped mid-handoff; state reclaimed at startup. Re-run /handoff to try again.")
-    except Exception:
-        logger.debug("Stale-handoff reclaim raised", exc_info=True)
-        return
-    if ids:
-        logger.warning(
-            "Reclaimed %d handoff(s) stranded in 'running' by a previous "
-            "gateway: %s", len(ids), ", ".join(str(i) for i in ids))
-
-
 def _terminal_scope_cwd(default: str = "") -> str:
     """Scope-aware TERMINAL_CWD read for footer/context surfaces. Only an import failure falls back:
     an active refusal scope must raise, not use the launch cwd."""

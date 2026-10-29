@@ -142,13 +142,16 @@ def _session_moved_refusal(session: dict):
         return None
 
 
-def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool = True) -> str | None:
+def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool = True,
+                                takeover_idle_only: bool = False) -> str | None:
     """Claim this session's cap slot on its first real turn; None when ok. session.create/resume deliberately
     do NOT claim: tile paints, reconnect-resumes and abandoned drafts would hold invisible slots (no DB row)
     that starve the messaging gateway sharing the cap. Anything holding a slot must be user-visible. An
     inert borrowed token (see _install_borrowed_lease) also lands here: present = slot held upstream.
     Exact admission passes allow_takeover=False: it must not move a detached owner's lease,
-    and already holds the non-reentrant resume lock used by takeover."""
+    and already holds the non-reentrant resume lock used by takeover. ``takeover_idle_only`` takes over
+    only a detached sibling that is not mid-turn (a paused-turn continuation must never interrupt a
+    notice or another reader's continuation, but must not wait out an idle holder's reap either)."""
     # A registry slot is not the SQLite writer lease. Check even on a warm Desktop session.
     # Its own running agent is excluded by exact holder, preserving ordinary steer/stop.
     if (refusal := _durable_owner_refusal(session)) is not None:
@@ -163,7 +166,7 @@ def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool
         return None
     from hermes_cli.active_sessions import SESSION_NOT_OWNED
     if (allow_takeover and getattr(limit_message, "reason", None) == SESSION_NOT_OWNED
-            and _take_over_detached_runtime_lease(sid, session, key)):
+            and _take_over_detached_runtime_lease(sid, session, key, idle_only=takeover_idle_only)):
         return None
     return limit_message
 
@@ -186,7 +189,7 @@ def _detached_lease_holder(session: dict, key: str) -> tuple[str, dict] | None:
     return None
 
 
-def _take_over_detached_runtime_lease(sid: str, session: dict, key: str) -> bool:
+def _take_over_detached_runtime_lease(sid: str, session: dict, key: str, *, idle_only: bool = False) -> bool:
     """Hand a detached sibling runtime's lease for ``key`` to ``session``; True when it now owns the slot.
 
     Lease identity is (pid, live_session_id), so a client that reconnects under a NEW runtime — Desktop
@@ -203,6 +206,8 @@ def _take_over_detached_runtime_lease(sid: str, session: dict, key: str) -> bool
         if (found := _detached_lease_holder(session, key)) is None:
             return False
         other_sid, other = found
+        if idle_only and other.get("running"):
+            return False
         lease = other["active_session_lease"]
         if not transfer_active_session(lease, session_id=key, metadata=_lease_metadata(sid)):
             return False
@@ -425,11 +430,15 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         if agent is not None and history and hasattr(agent, "commit_memory_session"):
             with contextlib.suppress(Exception):
                 agent.commit_memory_session(history)
-
-    session_key = session.get("session_key")
-    session_id = getattr(agent, "session_id", None) or session_key
-    # Returned to the client by ``session.close`` (the TUI shows them after its /new reset); reaper paths have no client.
-    session["_end_msgs"] = _notify_session_boundary("on_session_finalize", session_id, _session_source(session)) or []
+        # ``on_session_finalize`` resolves profile state at call time — plugin hooks and Relay's
+        # ``current_profile_key`` — so it has to run in this same scope. The gateway binds the
+        # owning profile for that reason (``_finalize_session_off_loop``). Outside it, a reaper
+        # with an empty context discovers and fires the LAUNCH profile's plugins for a secondary
+        # session: a second full manifest scan on the first teardown of that profile.
+        session_key = session.get("session_key")
+        session_id = getattr(agent, "session_id", None) or session_key
+        # Returned to the client by ``session.close`` (the TUI shows them after its /new reset); reaper paths have no client.
+        session["_end_msgs"] = _notify_session_boundary("on_session_finalize", session_id, _session_source(session)) or []
     # End the state.db row so it doesn't linger as a ghost in /resume. Use session_id (agent.session_id), not
     # session_key: after compression the key may be the stale ended parent while session_id is the live continuation.
     # Fix for #20001.

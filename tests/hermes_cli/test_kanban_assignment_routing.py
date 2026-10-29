@@ -168,8 +168,11 @@ def test_explicit_human_evidence_preserves_access_boundary(board, blocker_id, pa
 def test_supervisor_must_have_board_tools(board):
     conn, home = board
     tid = task_with_drift(board)
+    # Dispatched workers get the kanban toolset whatever platform_toolsets.cli says; only
+    # agent.disabled_toolsets removes it (kanban_capabilities._profile_capabilities). [daveey]
     (home / 'profiles/supervisor/config.yaml').write_text(
-        'platform_toolsets:\n  cli: [terminal, file]\nterminal:\n  backend: local\n')
+        'platform_toolsets:\n  cli: [terminal, file]\nterminal:\n  backend: local\n'
+        'agent:\n  disabled_toolsets: [kanban]\n')
     assert kb.block_task(conn, tid, kind='assignment', reason='Wrong worker')
     assert kb.get_task(conn, tid).assignee == 'creator'
     repair = kb.get_task(conn, payload(conn, tid)['supervisor_task_id'])

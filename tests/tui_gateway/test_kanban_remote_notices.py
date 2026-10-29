@@ -349,11 +349,12 @@ def test_legacy_fresh_rows_reoffered_once_and_stale_rows_left(tmp_path, caplog):
                        transcript_has=lambda key, tid: False) == []
 
 
-def test_sweep_skips_persisted_notices_without_opening_store_until_restart(tmp_path):
+def test_sweep_skips_persisted_notices_without_opening_store_even_after_restart(tmp_path):
     from tui_gateway import kanban_remote_notices as krn
 
     krn._reset_for_tests()
     _tid, replica = _replicate(tmp_path, f"FINAL SEND for @session:default@macbook/{CHAT}: memo proof")
+    ledger = tmp_path / "remote-notices.db"
     opens = []
     with SessionDB(tmp_path / "state.db") as db:
         for sid in (CHAT, OTHER):
@@ -364,14 +365,70 @@ def test_sweep_skips_persisted_notices_without_opening_store_until_restart(tmp_p
             opens.append(sid)
             yield db, db.get_compression_tip(sid) or sid
 
-        assert len(sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)) == 2
+        def sweep():
+            return sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger)
+
+        assert len(sweep()) == 2
         assert len(opens) == 2
         for _ in range(3):
-            assert sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener) == []
+            assert sweep() == []
         assert len(opens) == 2
-        krn._reset_for_tests()  # a restarted backend re-checks once and finds the rows: still one notice per chat
-        assert len(sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)) == 2
+        krn._reset_for_tests()  # a restarted backend loads the ledger: no store opened, no notice re-written
+        assert sweep() == []
+        assert len(opens) == 2
+        ledger.unlink()  # a lost ledger: re-checks once, finds the rows (still one notice per chat), records again
+        for suffix in ("-wal", "-shm"):
+            ledger.with_name(ledger.name + suffix).unlink(missing_ok=True)
+        krn._reset_for_tests()
+        assert len(sweep()) == 2
         assert len(opens) == 4 and len(db.get_messages(CHAT)) == 1
+        krn._reset_for_tests()
+        assert sweep() == [] and len(opens) == 4
+
+
+def test_sweep_keeps_working_in_memory_when_the_ledger_is_unusable(tmp_path):
+    from tui_gateway import kanban_remote_notices as krn
+
+    krn._reset_for_tests()
+    _tid, replica = _replicate(tmp_path, "unusable ledger proof")
+    ledger = tmp_path / "remote-notices.db"
+    ledger.mkdir()  # sqlite cannot open a directory
+    opens = []
+    with SessionDB(tmp_path / "state.db") as db:
+        for sid in (CHAT, OTHER):
+            db.create_session(sid, "desktop")
+
+        @contextlib.contextmanager
+        def opener(profile, sid):
+            opens.append(sid)
+            yield db, sid
+
+        def sweep():
+            return sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger)
+
+        assert len(sweep()) == 2
+        assert sweep() == [] and len(opens) == 2
+        assert len(db.get_messages(CHAT)) == 1
+
+
+def test_swept_rows_older_than_the_keep_window_are_pruned_on_load(tmp_path):
+    from tui_gateway import kanban_remote_notices as krn
+
+    krn._reset_for_tests()
+    ledger = tmp_path / "remote-notices.db"
+    conn = krn._ledger(ledger)
+    with conn:
+        krn._swept(conn)
+        conn.executemany("INSERT INTO swept VALUES (?,?,?,?,?)", [
+            ("hub.db", "default", CHAT, "old", time.time() - krn.SWEPT_KEEP_S - 60),
+            ("hub.db", "default", CHAT, "new", time.time())])
+    conn.close()
+    krn._load_swept(ledger)
+    assert ("hub.db", "default", CHAT, "new") in krn._delivered
+    assert ("hub.db", "default", CHAT, "old") not in krn._delivered
+    conn = krn._ledger(ledger)
+    assert [r[0] for r in conn.execute("SELECT notice_id FROM swept")] == ["new"]
+    conn.close()
 
 
 def test_sweep_does_not_remember_a_notice_it_could_not_write(tmp_path):
@@ -387,6 +444,9 @@ def test_sweep_does_not_remember_a_notice_it_could_not_write(tmp_path):
         def opener(profile, sid):
             yield (None, None) if missing or sid != CHAT else (db, sid)
 
-        assert not sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)
+        ledger = tmp_path / "remote-notices.db"
+        assert not sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger)
+        krn._reset_for_tests()  # nothing was recorded for the unwritten notice, so a restart still retries it
         missing = False
-        assert len(sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)) == 1
+        assert len(sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                        ledger=ledger)) == 1

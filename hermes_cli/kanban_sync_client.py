@@ -157,14 +157,11 @@ class Hub:
 
 def board_paths() -> list[tuple[str, Path]]:
     """``(slug, kanban.db)`` for every board on this host that ``kanban.sync.boards`` selects."""
-    from hermes_cli import kanban_db
+    from hermes_cli import kanban_db, kanban_db_boards
     root = kanban_db.kanban_home()
     found = [("default", root / "kanban.db")] if (root / "kanban.db").exists() else []
-    boards = kanban_db.boards_root()
-    if boards.is_dir():
-        # Only real board slugs (the service's board-id rule): ``_archived/`` holds archived boards, not a board.
-        found += [(p.parent.name, p) for p in sorted(boards.glob("*/kanban.db"))
-                  if p.is_file() and BOARD_ID_RE.match(p.parent.name)]
+    # The shared real-board enumerator: ``_archived/`` and other non-slug folders are not boards.
+    found += [(slug, p) for slug, p in kanban_db_boards.named_board_db_files() if BOARD_ID_RE.match(slug)]
     local = {slug for slug, _ in found}
     links_dir = root / "kanban" / sync.LINKS_DIR
     if links_dir.is_dir():  # boards only another gateway has, where this gateway's chats have cards
@@ -615,6 +612,9 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
             if mode == "primary" and sync.refresh_remote_parents(live, replica):
                 sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
             result.repaired = repair_divergence(live, replica, gateway)
+            repair_missing_children(live, replica, gateway)
+            if mode == "primary":
+                heal_clobbered_completions(live)
         finally:
             replica.close()
         result.push = push(live, hub, slug, gateway, primary=mode == "primary")
@@ -1012,13 +1012,47 @@ def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> 
             "child_mismatch": children, "rejected_ops": rejected, "foreign_cards": foreign}
 
 
+def repair_missing_children(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> None:
+    """Heal capture-gap links, including app-assigned uids the NULL-uid install heal cannot find.
+
+    Only absence is evidence here: never overwrite an existing replica child. Equal acknowledged
+    task versions and no outstanding ops distinguish settled local inserts from unpulled work.
+    Serialize the live scan and queue so concurrent rounds cannot enqueue the same row twice.
+    """
+    from hermes_cli.kanban_db_connect import write_txn
+    seen = {r[0]: r[1] for r in shadow.execute(
+        "SELECT id, sync_version FROM tasks WHERE (created_on = ? OR created_on IS NULL) AND sync_version IS NOT NULL",
+        (gateway,))}
+    with write_txn(live):
+        held = {(t, u) for t, u in live.execute(
+            "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state IN ('pending', 'rejected')")}
+        held |= {(t, u) for t, u in live.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")}
+        held |= {(t, u) for t, u in shadow.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")}
+        settled = {r[0] for r in live.execute("SELECT id, sync_version FROM tasks WHERE sync_version IS NOT NULL")
+                   if seen.get(r[0]) == r[1] and ("tasks", r[0]) not in held}
+        for table in ("task_links", "task_chat_links"):
+            remote = _live_uids(shadow, table)
+            for row in live.execute(f"SELECT * FROM {table}").fetchall():
+                uid = _row_uid(table, row)
+                parents = {row["parent_id"], row["child_id"]} if table == "task_links" else {row["task_id"]}
+                if not uid or uid in remote or (table, uid) in held or not parents <= settled:
+                    continue
+                live.execute(
+                    "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
+                    "VALUES (?, ?, ?, 'upsert', ?, NULL, '', ?)",
+                    (sync.uuid7(), table, uid, json.dumps(_row_fields(live, table, row)), time.time_ns() // 1_000_000))
+                _log.warning("kanban sync: %s %s absent from the service with nothing in flight "
+                             "(an uncaptured write); re-queued", table, uid)
+
+
 def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> dict[str, list[str]]:
     """Queue the local values of this gateway's cards that the service never received.
 
     A card whose live ``sync_version`` equals the replica's, with no outbox op in flight, has seen every service
     write. Any synced field that still differs was then written locally with no capture trigger, e.g. in the
-    window while another process re-installed the triggers. The gap heal in ``install_or_remove`` only finds
-    child rows (they have no uid yet). A task row has no such marker, so this is the only place that finds it.
+    window while another process re-installed the triggers. The install heal only finds NULL-uid children;
+    ``repair_missing_children`` handles settled missing links. A task row has no missing-row marker, so this
+    field comparison is the only place that finds its uncaptured edits.
     Hub incident 2026-10-28: a ``scheduled -> ready`` wake reached the service as its event but not as its
     status, and the service refused every lease as ``not_claimable`` for 3 h. Returns {task id: fields queued}."""
     from hermes_cli.kanban_db_connect import write_txn
@@ -1038,15 +1072,92 @@ def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gate
         fields = {k: v for k, v in mine.items() if k in remote and remote[k] != v}
         if not fields:
             continue
+        runs = _diverged_runs(live, shadow, tid)
         with write_txn(live):
+            # [daveey] The same uncaptured transaction usually ended the card's run too (``complete_task`` writes
+            # both). Queue those run rows FIRST: a card arriving ``done`` before its run makes the Board end the
+            # lease's run generically (rows.ts ``endLeaseRun``: ``released``, "card left running (done)"), and
+            # with no later holder write that row came back over the real ``done/completed`` run. The owner then
+            # published the card unverified, and no origin ever released it (hub t_01a185075c59bd52, 10-29).
+            for run_uid, run_fields, run_version in runs:
+                live.execute(
+                    "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, "
+                    "created_at) VALUES (?, 'task_runs', ?, 'upsert', ?, ?, '', ?)",
+                    (sync.uuid7(), run_uid, json.dumps(run_fields), None, int(time.time() * 1000)))
             live.execute(
                 "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
                 "VALUES (?, 'tasks', ?, 'upsert', ?, ?, '', ?)",
                 (sync.uuid7(), tid, json.dumps(fields), row["sync_version"], int(time.time() * 1000)))
-        repaired[tid] = sorted(fields)
+        repaired[tid] = sorted(fields) + [f"task_runs:{uid}" for uid, _f, _v in runs]
         _log.warning("kanban sync: %s %s differed from the service with nothing in flight (an uncaptured write); "
-                     "re-queued", tid, ", ".join(sorted(fields)))
+                     "re-queued", tid, ", ".join(repaired[tid]))
     return repaired
+
+
+def _diverged_runs(live: sqlite3.Connection, shadow: sqlite3.Connection, tid: str) -> list[tuple[str, dict, Any]]:
+    """``(uid, full row fields, Board version)`` of ``tid``'s run rows the service never received: same Board version on
+    both sides (this gateway has applied every service write of the row), nothing in flight, and a synced field that
+    differs. A run the service never saw at all is the install-time gap heal's (it has no uid there)."""
+    held = {r[0] for r in live.execute(
+        "SELECT DISTINCT row_uid FROM kanban_sync_outbox WHERE table_name = 'task_runs' "
+        "AND state IN ('pending', 'rejected')")}
+    out = []
+    for row in live.execute("SELECT * FROM task_runs WHERE task_id = ? AND uid IS NOT NULL ORDER BY id", (tid,)):
+        uid = row["uid"]
+        if uid in held:
+            continue
+        theirs = shadow.execute("SELECT * FROM task_runs WHERE uid = ?", (uid,)).fetchone()
+        if theirs is None or theirs["sync_version"] is None or theirs["sync_version"] != row["sync_version"]:
+            continue
+        mine, remote = _row_fields(live, "task_runs", row), _row_fields(shadow, "task_runs", theirs)
+        if any(k in remote and remote[k] != v for k, v in mine.items()):
+            out.append((uid, mine, row["sync_version"]))
+    return out
+
+
+# rows.ts ``upsertTask``: the holder moved its card out of ``running`` before its own end of the run arrived, so the
+# Board ended the lease's run with this placeholder. Its comment: "the holder's own end of the run normally follows".
+_LEASE_END_PLACEHOLDER = "card left running (done)"
+
+
+def heal_clobbered_completions(live: sqlite3.Connection) -> list[str]:
+    """Restore completed runs the Board's placeholder lease end overwrote; returns the task ids healed.
+
+    Guarded to the one shape that write leaves: the card is ``done``; the run is its latest; the run reads exactly
+    ``released``/``released`` with the Board's placeholder error; and the card's latest ``completed`` event names
+    that run (``complete_task`` writes the event and the ``done/completed`` run end in one transaction, so the
+    event proves how this holder ended the run). The run is set back to ``done``/``completed`` with the event's
+    summary, through the capture triggers, so the Board's copy is corrected by the next push too. Anything else is
+    left alone: a run released for any other reason is not a completion. [daveey]"""
+    from hermes_cli.kanban_db_connect import write_txn
+    rows = live.execute(
+        "SELECT r.id AS run_id, r.task_id, r.ended_at, t.completed_at FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+        "WHERE r.status = 'released' AND r.outcome = 'released' AND r.error = ? AND t.status = 'done' "
+        "AND r.id = (SELECT MAX(id) FROM task_runs WHERE task_id = r.task_id)", (_LEASE_END_PLACEHOLDER,)).fetchall()
+    healed = []
+    for row in rows:
+        event = live.execute(
+            "SELECT run_id, payload FROM task_events WHERE task_id = ? AND kind = 'completed' ORDER BY id DESC LIMIT 1",
+            (row["task_id"],)).fetchone()
+        if event is None or event["run_id"] != row["run_id"]:
+            continue
+        try:
+            payload = json.loads(event["payload"] or "{}")
+        except ValueError:
+            payload = {}
+        summary = (payload.get("summary") or payload.get("result")) if isinstance(payload, dict) else None
+        ended = max(int(row["ended_at"] or 0), int(row["completed_at"] or 0)) or None
+        with write_txn(live):
+            changed = live.execute(
+                "UPDATE task_runs SET status = 'done', outcome = 'completed', error = NULL, "
+                "summary = COALESCE(summary, ?), ended_at = ? "
+                "WHERE id = ? AND status = 'released' AND outcome = 'released' AND error = ?",
+                (summary, ended, row["run_id"], _LEASE_END_PLACEHOLDER)).rowcount
+        if changed:
+            healed.append(row["task_id"])
+            _log.warning("kanban sync: %s run %s was ended by the Board's lease placeholder over its completion; "
+                         "restored done/completed", row["task_id"], row["run_id"])
+    return healed
 
 
 # --- leases (primary boards) ----------------------------------------------------------------------

@@ -80,6 +80,13 @@ def _pin_environment() -> None:
     socket.socket.connect = refuse  # type: ignore[method-assign]
     socket.create_connection = refuse  # type: ignore[assignment]
     socket.getaddrinfo = refuse  # type: ignore[assignment]
+    # Modules that pick their implementation from sys.platform at import load here, under the
+    # host's real platform, before the override: on macOS sysconfig (zoneinfo's first call) would
+    # look up `_sysconfigdata__linux_darwin` and psutil would load its Linux extension.
+    import sysconfig
+    import zoneinfo
+    sysconfig.get_config_vars()
+    import psutil
     sys.platform = "linux"  # skills index ``platforms:`` gate
 
     import hermes_time
@@ -216,12 +223,18 @@ def render(out: Path) -> int:
     """Render into *out* from a fresh child process and home, so nothing from the caller's
     environment, config or imported modules reaches the bytes."""
     with tempfile.TemporaryDirectory(prefix="prompt-surface-") as tmp:
+        # Resolved: macOS's /var/folders is a symlink to /private/var/folders, and the child
+        # scrubs the resolved HOME out of text that would otherwise carry the unresolved one.
+        tmp = str(Path(tmp).resolve())
         home = Path(tmp) / "home"
         home.mkdir()
         staging = Path(tmp) / "out"
         env = {
             "PATH": os.environ.get("PATH", ""), "HOME": str(home), "HERMES_HOME": str(home / ".hermes"),
-            "TZ": "UTC", "LANG": "C.UTF-8", "PYTHONHASHSEED": "0", "PYTHONPATH": str(ROOT),
+            "TZ": "UTC", "LANG": "C.UTF-8", "PYTHONHASHSEED": "0",
+            # ROOT first; the caller's entries after it, because pm-managed installs (the Macs)
+            # carry the dependencies' site-packages on PYTHONPATH rather than in a venv.
+            "PYTHONPATH": os.pathsep.join([str(ROOT), *filter(None, [os.environ.get("PYTHONPATH")])]),
             "TMPDIR": tmp, "PYTHONDONTWRITEBYTECODE": "1",
         }
         for key in ("HERMES_RUNTIME_DIR", "SYSTEMROOT"):

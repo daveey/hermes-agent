@@ -49,12 +49,19 @@ def _one_rpc(client, query: str) -> None:
         assert "result" in reply, reply
 
 
-def test_client_agent_param_sets_agent_client_kind(client, seen):
-    _one_rpc(client, "&client=agent")
+@pytest.mark.parametrize("query", ["&client=agent", "&client=AGENT"])
+def test_client_agent_param_sets_agent_client_kind(client, seen, query):
+    _one_rpc(client, query)
     assert seen == ["agent"]
 
 
-@pytest.mark.parametrize("query", ["", "&client=renderer", "&client=AGENT"])
-def test_without_agent_param_client_kind_is_unset(client, seen, query):
-    _one_rpc(client, query)
+def test_without_client_param_client_kind_is_unset(client, seen):
+    _one_rpc(client, "")
     assert seen == [None]
+
+
+def test_other_client_kind_is_not_agent(client, seen):
+    from tui_gateway.transport import AGENT_CLIENT_KIND
+
+    _one_rpc(client, "&client=renderer")
+    assert seen == ["renderer"] and seen[0] != AGENT_CLIENT_KIND

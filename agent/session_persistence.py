@@ -31,6 +31,24 @@ from agent.transcript_repair import sync_flushed_message_markers
 
 logger = logging.getLogger("run_agent")  # origin module's name: log records / caplog filters unchanged
 
+# How long a flush keeps retrying a busy state.db writer before failing the turn closed.
+# SessionDB gives up per operation at 60s; one long holder (load spike, slow fsync on a 12 GB
+# db) must pause a healthy turn, not end it. Ten minutes still surfaces a genuinely wedged writer.
+_LOCKED_FLUSH_RETRY_BUDGET_S = 600.0
+# Tests that exercise the retry set this; the suite otherwise fails a locked flush at once, because
+# many tests inject a permanent "database is locked" to assert fail-closed behaviour.
+_LOCKED_FLUSH_RETRY_BUDGET_OVERRIDE_S: Optional[float] = None
+
+
+def _locked_flush_retry_budget_s() -> float:
+    import os
+
+    if _LOCKED_FLUSH_RETRY_BUDGET_OVERRIDE_S is not None:
+        return _LOCKED_FLUSH_RETRY_BUDGET_OVERRIDE_S
+    if os.environ.get("HERMES_TEST_ISOLATION"):
+        return 0.0
+    return _LOCKED_FLUSH_RETRY_BUDGET_S
+
 # Flags marking ephemeral recovery scaffolding the loop pops before appending the real response.
 # Persistence must skip them or a resumed session replays synthetic turns / breaks prefix-cache reuse.
 _EPHEMERAL_SCAFFOLDING_FLAGS = (
@@ -468,9 +486,37 @@ class SessionPersistenceMixin:
     _repair_message_sequence = _forward("agent.agent_runtime_helpers", "repair_message_sequence")
 
     def _flush_messages_to_session_db(self, messages: list[dict], conversation_history: Optional[list[dict]] = None):
-        """Serialize direct and turn-boundary session flushes per agent."""
+        """Serialize flushes and wait out writer contention without replaying tools.
+
+        SessionDB's per-operation deadline bounds contention diagnostics, not the lifetime
+        of a healthy turn. Keep the unmarked transcript here until it is durable; never
+        report success and run a side effect against process-only state. Other failures
+        (especially a lost turn lease) still fail closed.
+        """
+        import threading
+        import time
+
+        budget_s = _locked_flush_retry_budget_s()
+        deadline = time.monotonic() + budget_s
         with _persist_lock(self):
-            return self._flush_messages_to_session_db_unlocked(messages, conversation_history)
+            while True:
+                self._last_persistence_error_cause = None
+                result = self._flush_messages_to_session_db_unlocked(messages, conversation_history)
+                if result is not False or self._last_persistence_error_cause != "locked":
+                    return result
+                if getattr(self, "_interrupt_requested", False):
+                    return False
+                if time.monotonic() >= deadline:
+                    # A writer wedged this long is an incident, not contention: fail closed so the
+                    # turn ends with the "storage busy" explanation instead of hanging forever.
+                    logger.warning("Session DB writer busy for over %.0fs for %s; giving up on this flush",
+                                   budget_s, getattr(self, "session_id", None))
+                    return False
+                logger.warning("Session DB writer still busy for %s; retaining transcript and retrying flush",
+                               getattr(self, "session_id", None))
+                # Avoid spinning when a connection reports BUSY immediately. SessionDB
+                # rolls failed transactions back; message markers advance only on commit.
+                threading.Event().wait(0.25)
 
     def _flush_messages_to_session_db_unlocked(
         self, messages: list[dict], conversation_history: Optional[list[dict]] = None, _adoption_budget: int = 1,

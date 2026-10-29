@@ -232,7 +232,7 @@ def test_kanban_modules_open_boards_only_through_the_guard():
     root = Path(__file__).resolve().parents[2] / "hermes_cli"
     allowed = {
         # state.db / hub.db / in-memory / offline copies, not live boards
-        "kanban_worker_recovery.py", "kanban_transfer.py", "kanban_worktree_gc.py",
+        "kanban_worker_recovery.py", "kanban_transfer.py",
         "kanban_origin_ledger.py", "kanban_lockguard.py",
         # connects only inside its own short-lived child (`python -m hermes_cli.kanban_db_recover`);
         # in-process callers (kanban_ops, the dispatcher) reach it only through spawn_recovery()

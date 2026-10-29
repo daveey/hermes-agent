@@ -399,7 +399,7 @@ KANBAN_MOVE_SCHEMA = _schema(
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "runs_on": {"type": "array", "items": {"type": "string"}, "description": (
             "Labels the next machine must have, e.g. [\"machine:worker-1\"], [\"macos\"], [\"linux\"]. "
-            "machine:<name> pins one registered machine."
+            "machine:<name> pins one registered machine that picks up this board (else refused)."
         )},
         "reason": _prop("string", "Why the card must move (what this machine lacks). Logged on the card."),
         "checkpoint": _prop("string", (
@@ -733,7 +733,8 @@ KANBAN_CREATE_SCHEMA = _schema(
                     "description": "Machine labels the card needs (all of them), on a board that syncs to the "
                     "Board service: e.g. ['linux'], ['macos', 'xcode'], ['machine:<name>'] for one machine, "
                     "[] for any machine. Omit for the default: it runs here, or on a machine like this one "
-                    "if it waits too long."},
+                    "if it waits too long. 'machine:<name>' is refused (placement_unavailable) unless that "
+                    "machine picks up this board; then use placement='<name>'."},
         "placement": _prop("string", (
                 "Where the card runs. 'auto' (default): on a gateway with a "
                 "kanban.placement route (e.g. the MacBook -> 'hub', the gateway "
@@ -743,7 +744,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "(use it when the work needs this machine: its Chrome, "
                 "Keychain, Apple apps, launchd/Desktop state, local "
                 "checkouts). A gateway name pins it there; if the card cannot be "
-                "placed there (no placement route to it, a parent link, a "
+                "placed there (it is not live, a parent link, a "
                 "non-scratch workspace, a non-default board, an origin-bound "
                 "card, target not live, ...) the call fails with code "
                 "placement_unavailable and creates nothing (never a silent "
@@ -802,7 +803,9 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "completion_contract": _prop("string", (
             "Declare at creation: local-only (default), OWNER/REPO for PR publication, or an exact GitHub PR URL. "
-            "PR tasks cannot complete until repository-required exact-head CI passes. On publication pass metadata.published_pr."
+            "PR tasks cannot complete until repository-required exact-head CI passes. On publication pass metadata.published_pr. "
+            "A repo with no required checks can only complete with metadata.contract_waiver={\"reason\": ...} "
+            "(prefer local-only there)."
         )),
         "goal_max_turns": _prop("integer", (
                 "Turn budget for goal_mode workers. Caps how many "
@@ -834,9 +837,11 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     (
         "Unblock a Kanban task (blocked, scheduled, or a triage card a block "
         "loop escalated). It moves to ready when all parents are done, "
-        "or todo while any parent remains open. Orchestrator-only — only "
-        "profiles with the kanban toolset can unblock routed work; "
-        "dispatcher-spawned task workers never see this tool."
+        "or todo while any parent remains open. Orchestrator-only, except "
+        "one case: a self-heal fix card may unblock the single card named in "
+        "its defect (`kanban card t_...`). A card that finished fix card "
+        "created may do the same. Any other worker call is refused, and the "
+        "worker shell stays fenced."
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),

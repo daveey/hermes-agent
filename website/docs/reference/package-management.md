@@ -537,6 +537,16 @@ hermes pm install chromium
 | `pm status` | Print the latest sync/update receipt as JSON, or report that no receipt exists. |
 | `pm gc` | Remove unreferenced tool-store entries, eligible download partials, unused lease-managed Python generations, and the `installs/INSTALL_KEY/` state of deleted checkouts (a worktree removed from a `.worktrees/` dir that still exists, or a clone under the data root; checkouts this process cannot see, such as a host install viewed from a container sharing the data root, are kept, as is any state whose install lock or generation lease is still held). The worktree pruner that runs at startup reclaims those orphaned state dirs too. |
 
+`python -m pm.install_states --dry-run` previews just the orphan install-state
+sweep. The same collector requires at least one hour without any entry's mtime
+changing and holds a nonblocking install lock through removal; held dependency
+and PM runtime generation leases keep the state. Missing/unreadable root records
+are retained and reported. On a host that sees every recorded checkout filesystem,
+`--all-missing-roots` explicitly includes deleted temporary and `_wt` checkouts
+outside the data root. Never select that policy from a container sharing host
+state or while checkout volumes are unmounted. Output lists removals and estimated
+allocated GiB reclaimed; shared/cloned storage can differ from apparent size.
+
 `pm env` excludes inherited process variables, including credentials. Its
 output can still reveal local installation paths; review it before sharing.
 

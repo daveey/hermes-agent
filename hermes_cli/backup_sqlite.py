@@ -52,7 +52,14 @@ def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0) -> boo
                 os.close(secure_fd)
         # timeout=0.0 disables sqlite3's implicit busy wait so the progress callback owns the
         # full locked-source deadline instead of adding the default timeout before each callback.
-        conn = sqlite3.connect(f"{src.resolve().as_uri()}?mode=ro", uri=True, timeout=0.0)
+        # Imported backups run inside the gateway/CLI alongside live board readers.
+        # The standalone pre-stop script is already isolated from the backend's locks.
+        try:
+            from hermes_cli.kanban_lockguard import connect as source_connect
+        except ImportError:
+            # The pre-stop emergency script must also work with only the stdlib available.
+            source_connect = sqlite3.connect
+        conn = source_connect(f"{src.resolve().as_uri()}?mode=ro", uri=True, timeout=0.0)
         backup_conn = sqlite3.connect(str(dst))
         busy_deadline = time.monotonic() + max(0.0, timeout_seconds)
 

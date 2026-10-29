@@ -184,3 +184,55 @@ def test_estop_still_skips_the_whole_tick(tmp_path, monkeypatch):
     probes = _run_one_tick(tmp_path, monkeypatch)
     assert probes == [] and spawned == []
     assert _statuses(ids)["child"] == "todo"
+
+
+def test_hold_requeues_a_dead_worker_and_does_not_claim_until_the_hold_lifts(tmp_path, monkeypatch):
+    """A worker that dies during a drain hold goes back to ready and is not claimed again while the hold is up."""
+    import subprocess
+    import sys
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.setattr(drain, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(drain, "_canonical_root", lambda: tmp_path)
+    monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: lambda name: name == "default")
+    monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: False)
+    monkeypatch.setattr(kbd, "_memory_pressure_level", lambda: "unknown")
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    spawned = []
+
+    def spawn(task, ws, board=None):
+        spawned.append(task.id)
+        return 1
+
+    with kbc.connect_closing(board="default") as conn:
+        tid = kb.create_task(conn, title="died-during-drain", assignee="default")
+        kb.claim_task(conn, tid)
+        kbd._set_worker_pid(conn, tid, child.pid)
+        aged = int(time.time()) - 3600
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET started_at = ? WHERE id = ?", (aged, tid))
+        _write(tmp_path, {"pid": os.getpid(), "started_at": time.time(), "reason": "core update"})
+
+        held = kbd.dispatch_once(conn, spawn_fn=spawn, max_spawn=0)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready", (task.status, held.crashed)
+        assert task.worker_pid is None
+        assert spawned == []
+
+        spawned.clear()
+        kbd.dispatch_once(conn, spawn_fn=spawn, max_spawn=0)
+        assert kb.get_task(conn, tid).status == "ready"
+        assert spawned == []
+
+        (tmp_path / drain.HOLD_RELPATH).unlink()
+        kbd.dispatch_once(conn, spawn_fn=spawn)
+        assert spawned == [tid]
+        assert kb.get_task(conn, tid).status == "running"

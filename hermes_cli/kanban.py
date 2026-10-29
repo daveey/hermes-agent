@@ -25,12 +25,17 @@ from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_operator as kbo
 from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
+from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_cli_park import (
+    _REASON_FLAG_HINT, _REASON_WORDS_HINT, _cli_awaiting, _cli_wake_check, _commented, _guarded_park, _ids_error,
+    _parked_msg,
+)
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_recover, _cmd_repair, _cmd_tail, _cmd_watch,
 )
@@ -300,12 +305,15 @@ def _bulk_ids(args: argparse.Namespace) -> list[str]:
     return [args.task_id] + list(getattr(args, "ids", None) or [])
 
 
-def _require_ids(args: argparse.Namespace) -> tuple[list[str], int]:
-    """``args.task_ids`` -> ``(ids, 0)`` or ``([], 1)`` after printing the standard error."""
+def _require_ids(args: argparse.Namespace, hint: str = 'Free text goes in its flag, e.g. --reason "..."',
+                 ) -> tuple[list[str], int]:
+    """``args.task_ids`` -> ``(ids, 0)``, ``([], 1)`` when empty, or ``([], 2)`` when a token is not
+    task-id shaped (``_ids_error``), after printing the error."""
     ids = list(args.task_ids or [])
     if not ids:
         return ids, _err("at least one task_id is required")
-    return ids, 0
+    rc = _ids_error(ids, hint)
+    return ([], rc) if rc else (ids, 0)
 
 
 def _parse_duration(val) -> Optional[int]:
@@ -459,7 +467,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
         from hermes_cli.kanban_skill_check import UnknownSkillError
         from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
+        from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
         try:
+            check_machine_pins(conn, getattr(args, "runs_on", None))  # explicit pins need pickup [daveey]
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
                 assignee=args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
@@ -487,7 +497,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             )
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)
-        except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing) as exc:
+        except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
         except (PinProviderUnresolvedError, ModelProviderMismatchError) as exc:
             return _err(f"kanban: {exc}", 2)
@@ -506,6 +516,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             from hermes_cli.kanban_capability_routing import preflight
             placement = preflight(conn, task_id, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
+    contract_extra = _contract_cli.create_warning_fields(task, skip=idem_hit, stderr=True)
     unlinked_warning = None
     if not in_worker and not session_id and not idem_hit and _agent_invoked():
         # An agent shelled out but no chat could be stamped (unknown/missing session env:
@@ -521,6 +532,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         out = _task_to_dict(task)
         if unlinked_warning:  # also in the payload: run_slash returns only stdout for --json
             out["warning"] = unlinked_warning
+        out.update(contract_extra)
         if origin_binding:
             out["origin_binding"] = origin_binding
         if placement:
@@ -1126,6 +1138,59 @@ def _is_stranded_runs_on_copy(conn, task) -> bool:
     return False
 
 
+_SELF_HEAL_FIX_KEY = re.compile(r"^selfheal:[a-z0-9]+(?:-[a-z0-9]+)*(?::r[1-9]\d*)?:fix$")
+_NAMED_DEFECT_CARD = re.compile(
+    r"\bkanban card (t_[0-9a-f]{16}|t_[0-9a-f]{8})\b", re.IGNORECASE,
+)
+_PLURAL_DEFECT = re.compile(r"\bkanban cards\b", re.IGNORECASE)
+
+
+def _is_self_heal_fix_card(task) -> bool:
+    """A self-heal FIX card, not an investigation (``created_by`` alone is both)."""
+    if task is None or (task.created_by or "") != "self-heal":
+        return False
+    return bool(_SELF_HEAL_FIX_KEY.fullmatch(task.idempotency_key or ""))
+
+
+def named_defect_card(task) -> Optional[str]:
+    """The one ``kanban card t_...`` id in title/body, else None.
+
+    A sibling batch (``kanban cards``) or two different ids is not a single
+    defect, so it is not a grant.
+    """
+    if task is None:
+        return None
+    text = f"{task.title or ''}\n{task.body or ''}"
+    if _PLURAL_DEFECT.search(text):
+        return None
+    found = list(dict.fromkeys(_NAMED_DEFECT_CARD.findall(text)))
+    return found[0] if len(found) == 1 else None
+
+
+def self_heal_requeue_grant(conn, worker_task_id: str) -> tuple[Optional[str], Optional[str]]:
+    """``(target_id, fix_card_id)`` this worker may unblock, else ``(None, None)``.
+
+    A self-heal fix card may unblock the single card named in its defect. A
+    card that fix card created may do the same once the fix card is done, so a
+    finished repair is not stranded when the fix card can no longer call tools.
+    Any other worker, and any other target, stays refused. [daveey]
+    """
+    worker = kb.get_task(conn, worker_task_id)
+    if worker is None:
+        return None, None
+    if _is_self_heal_fix_card(worker):
+        target = named_defect_card(worker)
+        return (target, worker.id) if target else (None, None)
+    creator = _creator_task_id(conn, worker_task_id)
+    if not creator:
+        return None, None
+    fix = kb.get_task(conn, creator)
+    if fix is None or not _is_self_heal_fix_card(fix) or fix.status != "done":
+        return None, None
+    target = named_defect_card(fix)
+    return (target, fix.id) if target else (None, None)
+
+
 def worker_archive_scope(conn, task_id: str) -> tuple[Optional[str], Optional[str]]:
     """``(refusal, via)`` for archiving ``task_id`` from this process.
 
@@ -1293,6 +1358,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                     detail = ", ".join(f"{pid} ({status})" for pid, status in blockers)
                     fail_msg[tid] = (f"cannot complete {tid}: unsatisfied parent dependencies: {detail}; "
                                      f"complete the parents first, or `hermes kanban unlink <parent> {tid}`.")
+                else:  # a PR-acceptance refusal names its reason, not "unknown id" [daveey]
+                    fail_msg[tid] = _contract_cli.complete_refusal(conn, tid) or fail_msg[tid]
             return done
 
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
@@ -1301,43 +1368,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
 _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id")
 
 
-def _cmd_edit_contract(args: argparse.Namespace) -> int:
-    """``hermes kanban edit <id> --completion-contract X --reason Y``: the audited way out
-    of a completion gate that can never pass. Orchestrator-only, like unblock: a worker
-    that could re-point its own card's gate would make the gate meaningless. [daveey]"""
-    if os.environ.get("HERMES_KANBAN_TASK"):
-        return _err(
-            "kanban edit: --completion-contract is orchestrator-only; a worker can't change its own "
-            "card's gate. Block without a human_request so the owning chat re-points it", 2,
-        )
-    others = [f"--{name.replace('_', '-')}" for name in (
-        "title", "body", "priority", "result", "summary", "metadata", *_OPERATOR_EDIT_FLAGS,
-    ) if getattr(args, name, None) is not None]
-    if others or getattr(args, "force", False):
-        return _err(
-            "kanban edit: --completion-contract can't be combined with other edit flags "
-            f"({', '.join(others) or '--force'}); run them as separate edits", 2,
-        )
-    with kbc.connect_closing() as conn:
-        try:
-            change = kbo.set_completion_contract(
-                conn, args.task_id, args.completion_contract,
-                reason=getattr(args, "reason", None) or "", actor=_profile_author(),
-            )
-        except kbo.KanbanEditRefused as exc:
-            return _err(f"kanban edit: {exc}", 2)
-    if change is None:
-        return _err(f"cannot edit {args.task_id} (unknown id)")
-    if not change:
-        print(f"Edited {args.task_id} (completion_contract unchanged)")
-        return 0
-    print(f"Edited {args.task_id} (completion_contract: {change['old']!r} -> {change['new']!r})")
-    return 0
-
-
 def _cmd_edit(args: argparse.Namespace) -> int:
     if getattr(args, "completion_contract", None) is not None:
-        return _cmd_edit_contract(args)
+        return _contract_cli.cmd_edit_contract(args)
     if getattr(args, "reason", None) is not None:
         return _err("kanban edit: --reason only applies to --completion-contract", 2)
     result = getattr(args, "result", None)
@@ -1402,83 +1435,6 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     return 0
 
 
-def _commented(conn, reason: Optional[str], author, prefix: str, op):
-    """Wrap a per-task ``op`` so a ``reason`` is first recorded as a ``PREFIX: reason`` comment."""
-    def run(tid):
-        if reason:
-            kb.add_comment(conn, tid, author, f"{prefix}: {reason}")
-        return op(tid)
-    return run
-
-
-def _cli_wake_check(args: argparse.Namespace):
-    """``(wake_check, check_every, clock_only)`` from ``--wake-check/--check-every/--clock-only``."""
-    from hermes_cli import kanban_wake_check as kwc
-
-    cmd = kwc.normalize_cmd(getattr(args, "wake_check", None))
-    every = kwc.normalize_every(getattr(args, "check_every", None)) if cmd else None
-    err = kwc.dry_run_error(cmd)
-    if err:
-        raise ValueError(err)
-    return cmd, every, bool(getattr(args, "clock_only", False))
-
-
-def _cli_awaiting(args: argparse.Namespace, wake):
-    """``(awaiting, wake)`` from ``--awaiting KIND:REF|JSON`` (+ ``--awaiting-why``); a card wait
-    with no ``--wake-check`` gets ``hermes kanban wait-check task`` as its probe. [daveey]"""
-    from hermes_cli import kanban_awaiting as kaw
-
-    raw = getattr(args, "awaiting", None)
-    if not raw:
-        return None, wake
-    awaiting = kaw.normalize(raw)
-    why = getattr(args, "awaiting_why", None)
-    if why and awaiting is not None:
-        awaiting["why"] = why.strip()[:600]
-    probe = None if wake[0] else kaw.card_probe(awaiting)
-    if probe:
-        from hermes_cli import kanban_wake_check as kwc
-        wake = (probe, kwc.normalize_every(None), wake[2])
-    kaw.confirm_remote(awaiting)  # ssh, so before the park's write txn
-    return awaiting, wake
-
-
-def _guarded_park(conn, op: str, wake, refused: dict, park, awaiting=None, **plan):
-    """Per-task op: refuse a park > 2 h out with no probe (``kanban_wake_check.guard_error``)
-    or one nothing would produce (``kanban_awaiting``), before its comment is written. [daveey]"""
-    from hermes_cli import kanban_awaiting as kaw
-    from hermes_cli import kanban_wake_check as kwc
-
-    def run(tid):
-        wake_at = kwc.planned_wake(conn, tid, op=op, **plan)
-        err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
-        if err:
-            refused[tid] = f"cannot {op} {tid}: {err}"
-            return False
-        try:
-            if wake_at is not None:
-                kaw.resolve(conn, tid, awaiting=awaiting, reason=plan.get("reason"), wake_check=wake[0],
-                            clock_only=wake[2], op=op)
-            return park(tid)
-        except kaw.AwaitingError as exc:
-            refused[tid] = f"cannot {op} {tid}: {exc}"
-            return False
-        except ValueError as exc:   # e.g. a wake_check on a block that is not a timed park
-            refused[tid] = f"cannot {op} {tid}: {exc}"
-            return False
-    return run
-
-
-def _parked_msg(conn, verb: str, suffix: str):
-    """``ok_msg`` for a park that may have escalated to an owner card instead."""
-    from hermes_cli import kanban_awaiting as kaw
-
-    def msg(tid):
-        owner = kaw.escalated_owner(conn, tid)
-        return kaw.escalation_message(tid, owner) if owner else f"{verb} {tid}{suffix}"
-    return msg
-
-
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)
@@ -1494,6 +1450,10 @@ def _cmd_block(args: argparse.Namespace) -> int:
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
+        rc = _ids_error(ids, _REASON_WORDS_HINT, conn)
+        if rc:
+            return rc
+
         def ok_msg(tid):
             # Report where it landed: dependency blocks -> todo, tripped unblock-loop breaker -> triage.
             landed = kb.get_task(conn, tid)
@@ -1523,9 +1483,9 @@ def _cmd_block(args: argparse.Namespace) -> int:
             return _err(f"kanban block: {policy}", 2)
         refused: dict = {}
         op = _guarded_park(conn, "block", wake, refused, _commented(
-            conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
+            reason, author, "BLOCKED", lambda tid, comment: kb.block_task(
                 conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid),
-                human_request=request, awaiting=awaiting,
+                human_request=request, awaiting=awaiting, comment=comment,
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
             awaiting=awaiting, reason=reason, kind=kind)
         return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}")
@@ -1540,6 +1500,9 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
+        rc = _ids_error(ids, _REASON_WORDS_HINT, conn)
+        if rc:
+            return rc
         try:
             wake = _cli_wake_check(args)
             awaiting, wake = _cli_awaiting(args, wake)
@@ -1547,25 +1510,30 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
             return _err(f"kanban schedule: {exc}", 2)
         refused: dict = {}
         op = _guarded_park(conn, "schedule", wake, refused, _commented(
-            conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
+            reason, author, "SCHEDULED", lambda tid, comment: kb.schedule_task(
                 conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid), awaiting=awaiting,
-                wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
+                wake_check=wake[0], check_every=wake[1], clock_only=wake[2], comment=comment)),
             awaiting=awaiting, reason=reason)
+        from hermes_cli.kanban_reason_comment import human_answer_refusal
         return _bulk_apply(ids, op, _parked_msg(conn, "Scheduled", suffix),
-                           lambda tid: refused.get(tid) or f"cannot schedule {tid}")
+                           lambda tid: (refused.get(tid) or human_answer_refusal(conn, tid, "schedule")
+                                        or f"cannot schedule {tid}"))
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
     if os.environ.get("HERMES_KANBAN_TASK"):
         return _err("kanban unblock is orchestrator-only; workers must hand off their assigned task")
-    ids, rc = _require_ids(args)
+    ids, rc = _require_ids(args, _REASON_FLAG_HINT)
     if rc:
         return rc
     reason = _stripped_or_none(getattr(args, "reason", None))
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
-        op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
+        rc = _ids_error(ids, _REASON_FLAG_HINT, conn)
+        if rc:
+            return rc
+        op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment))
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
                            lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
 

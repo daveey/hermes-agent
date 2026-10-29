@@ -3,6 +3,7 @@ file-serving helpers shared with the local-skill path. Helpers tests patch on th
 (``_is_skill_disabled``, ``_parse_frontmatter``, ``skill_matches_platform``) resolve lazily."""
 
 import json
+import os
 import logging
 from contextlib import suppress
 from pathlib import Path
@@ -42,12 +43,50 @@ def _truncate_description(description: str) -> str:
     return description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
 
 
+_FRONTMATTER_CACHE: dict = {}
+_FRONTMATTER_CACHE_MAX = 4096
+
+
 def _safe_frontmatter(path: Path | None = None, *, content: str | None = None) -> dict[str, Any]:
     """Frontmatter of *path* (or of *content*), ``{}`` on any read/parse failure.
-    Parses via ``tools.skills_tool._parse_frontmatter`` so test patches are honored."""
+    Parses via ``tools.skills_tool._parse_frontmatter``; replacing that callable invalidates cached entries.
+
+    Path parses are memoized per process, keyed on the file's identity and stat
+    (path, dev, ino, size, mtime_ns, ctime_ns) plus the parser in use, so a catalog scan that
+    resolves many skills parses each unchanged SKILL.md once; any edit, replace or deletion
+    changes the key (or the stat fails) and re-parses. Callers get a private deep copy."""
+    import copy
     from tools import skills_tool as _st
+    parser = _st._parse_frontmatter
+
+    def _ident(p) -> tuple:
+        s = Path(p).stat()
+        return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+
+    key = before = text = None
+    if content is None and path is not None:
+        with suppress(Exception):
+            before = _ident(path)
+            hit = _FRONTMATTER_CACHE.get((str(path), *before))
+            if hit is not None and hit[0] is parser:  # entry holds the parser, so no id() reuse
+                return copy.deepcopy(hit[1])
+        with suppress(Exception):
+            # Bind the bytes parsed to the identity they are cached under: fstat the very
+            # descriptor that is read, so a symlink retargeted mid-lookup files the content
+            # under the identity of what was really read (a later lookup of the old target misses).
+            with open(path, encoding="utf-8-sig", errors="replace") as fh:
+                s = os.fstat(fh.fileno())
+                text = fh.read()
+            key = (str(path), s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
     with suppress(Exception):
-        return _st._parse_frontmatter(_read_skill_text(path) if content is None else content)[0]
+        if text is None:
+            text = _read_skill_text(path) if content is None else content
+        result = parser(text)[0]
+        if key is not None and isinstance(result, dict):
+            if len(_FRONTMATTER_CACHE) >= _FRONTMATTER_CACHE_MAX:
+                _FRONTMATTER_CACHE.clear()
+            _FRONTMATTER_CACHE[key] = (parser, copy.deepcopy(result))
+        return result
     return {}
 
 

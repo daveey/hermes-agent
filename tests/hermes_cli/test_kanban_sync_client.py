@@ -613,6 +613,119 @@ def test_rows_written_in_a_capture_gap_are_queued_on_the_next_install(live, kanb
         other.close()
 
 
+def _gap_link(live, table, parent, child):
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_state SET applying = 1")
+        if table == "task_links":
+            uid = f"{parent}>{child}"
+            live.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent, child))
+        else:
+            uid = f"{child}:chat-created"
+            live.execute("INSERT INTO task_chat_links "
+                         "(uid, task_id, chat_gateway, chat_session, kind, created_at) "
+                         "VALUES (?, ?, ?, 'session-gap', 'created', 1)", (uid, child, ME))
+        live.execute("UPDATE kanban_sync_state SET applying = 0")
+    return uid
+
+
+@pytest.mark.parametrize("table", ["task_links", "task_chat_links"])
+@pytest.mark.parametrize("mode", ["shadow", "primary"])
+def test_missing_child_capture_gap_is_healed_by_a_sync_round(live, svc, kanban_home, caplog, table, mode):
+    sync.set_mode(live, mode)
+    parent = kb.create_task(live, title="parent", assignee="worker")
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    uid = _gap_link(live, table, parent, child)
+    assert not _pending(live)
+    _round(kanban_home, svc)
+    assert uid in svc.board(BOARD)["rows"].get(table, {})
+    assert table in caplog.text and uid in caplog.text and "re-queued" in caplog.text
+    settled = _round(kanban_home, svc)
+    assert settled.push.sent == 0
+    assert sum(table in r.message and uid in r.message and "re-queued" in r.message
+               for r in caplog.records) == 1
+    shadow = _shadow()
+    try:
+        assert ksc.diff(live, shadow, ME)["child_mismatch"] == {}
+    finally:
+        shadow.close()
+
+
+@pytest.mark.parametrize("table", ["task_links", "task_chat_links"])
+@pytest.mark.parametrize("mode", ["shadow", "primary"])
+def test_missing_child_repair_does_not_duplicate_an_inflight_op(live, svc, kanban_home, monkeypatch, table, mode):
+    sync.set_mode(live, mode)
+    parent = kb.create_task(live, title="parent", assignee="worker")
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    uid = _gap_link(live, table, parent, child)
+    hub = svc.hub(ME)
+
+    def no_ack(board, ops):
+        return {"results": []}
+
+    monkeypatch.setattr(hub, "ops", no_ack)
+    for _ in range(2):
+        ksc.sync_board(BOARD, kanban_home / "kanban.db", hub, ME)
+    rows = [r for r in _pending(live) if r["table_name"] == table and r["row_uid"] == uid]
+    assert len(rows) == 1
+    assert json.loads(rows[0]["fields"])["child_id" if table == "task_links" else "task_id"] == child
+
+
+@pytest.mark.parametrize("table", ["task_links", "task_chat_links"])
+@pytest.mark.parametrize("guard", ["pending", "rejected", "local_tombstone", "remote_tombstone",
+                                  "version_ahead", "replica_ahead", "unacknowledged", "foreign", "task_pending",
+                                  "parent_version", "parent_unacknowledged", "parent_pending", "present", "none"])
+def test_missing_child_repair_honors_existing_state(live, svc, kanban_home, table, guard):
+    parent = kb.create_task(live, title="parent", assignee="worker")
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    uid = _gap_link(live, table, parent, child)
+    shadow = _shadow()
+    try:
+        subject = parent if table == "task_links" and guard.startswith("parent_") else child
+        with kbc.write_txn(live), kbc.write_txn(shadow):
+            live.execute("UPDATE kanban_sync_state SET applying = 1")
+            if guard in ("pending", "rejected", "task_pending", "parent_pending"):
+                live.execute("INSERT INTO kanban_sync_outbox "
+                             "(op_id, table_name, row_uid, op, fields, hlc, created_at, state) "
+                             "VALUES ('held-op', ?, ?, 'upsert', '{}', '', 1, ?)",
+                             ("tasks" if guard in ("task_pending", "parent_pending") else table,
+                              subject if guard in ("task_pending", "parent_pending") else uid,
+                              "rejected" if guard == "rejected" else "pending"))
+            elif guard.endswith("tombstone"):
+                target = live if guard == "local_tombstone" else shadow
+                target.execute("INSERT INTO kanban_sync_tombstones VALUES (?, ?, 1)", (table, uid))
+            elif guard in ("version_ahead", "parent_version"):
+                live.execute("UPDATE tasks SET sync_version = sync_version + 1 WHERE id = ?", (subject,))
+            elif guard == "replica_ahead":
+                shadow.execute("UPDATE tasks SET sync_version = sync_version + 1 WHERE id = ?", (child,))
+            elif guard in ("unacknowledged", "parent_unacknowledged"):
+                live.execute("UPDATE tasks SET sync_version = NULL WHERE id = ?", (subject,))
+            elif guard == "foreign":
+                shadow.execute("UPDATE tasks SET created_on = ? WHERE id = ?", (OTHER, child))
+            live.execute("UPDATE kanban_sync_state SET applying = 0")
+        if guard == "present":
+            row = live.execute(f"SELECT * FROM {table}").fetchone()
+            fields = ksc._row_fields(live, table, row)
+            if table == "task_chat_links":
+                fields["released"] = 1  # existing replica differs: never clobber it
+            sync.apply_remote_changes(shadow, [sync.RemoteChange(
+                1, table, uid, "upsert", fields, 1, "", ME)], new_cursor=1, board=BOARD)
+        before = [dict(r) for r in live.execute("SELECT * FROM kanban_sync_outbox")]
+        ksc.repair_missing_children(live, shadow, ME)
+        after = [dict(r) for r in live.execute("SELECT * FROM kanban_sync_outbox")]
+        if guard == "none":
+            assert len(after) == 1 and after[0]["row_uid"] == uid
+        else:
+            assert after == before
+    finally:
+        shadow.close()
+
+
 def _gap_wake(live, tid):
     """kanban_wake_check._wake landing in a capture gap: a raw status UPDATE plus an event, no trigger."""
     with kbc.write_txn(live):

@@ -14,6 +14,12 @@ globalThis.ResizeObserver ??= InertResizeObserver as unknown as typeof ResizeObs
 // accessor shadows jsdom's Storage and every `localStorage.getItem(...)` in a
 // test throws "Cannot read properties of undefined". Install a real in-memory
 // Storage when the global resolves to nothing, before any test module reads it.
+//
+// This stand-in is a plain object, not a Storage instance. setItem/getItem live
+// on the object itself, so vi.spyOn(Storage.prototype, 'setItem') does not
+// intercept writes (CI: voice-prefs quota cases wrote "false"). Spy the live
+// function: window.localStorage.setItem === Storage.prototype.setItem means
+// jsdom (spy the prototype); otherwise spy the instance.
 if (typeof (globalThis as any).localStorage === 'undefined') {
   const store = new Map<string, string>()
 

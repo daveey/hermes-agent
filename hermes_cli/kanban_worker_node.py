@@ -81,6 +81,70 @@ def advertises_pickup(entry: Optional[Mapping[str, Any]]) -> bool:
     return value is True
 
 
+class MachinePinRefused(Exception):  # not ValueError: label-syntax handlers must not swallow its code
+    """An explicit ``runs_on`` names ``machine:<name>`` for a machine that never copies this board's cards.
+
+    Such a card sits ``ready`` forever: only that machine may lease it, and it never looks (10-28: three hub cards
+    with ``runs_on=[machine:macbook]`` were never claimed). Nothing was written; the working route is a
+    cross-gateway create on the machine's own gateway (``placement="<name>"``)."""
+
+    code = "placement_unavailable"
+
+    def __init__(self, machine: str, why: str):
+        self.machine = machine
+        super().__init__(
+            f"runs_on names machine:{machine}, but {why}, so no worker would ever claim the card on this board. "
+            f"Nothing was written. Create it on that machine's own gateway instead (a cross-gateway create): "
+            f"kanban_create(placement=\"{machine}\") (works for any live gateway, routed or not), or "
+            f"`hermes-hub create-task {machine} <title> --body ...`.")
+
+    @property
+    def tool_error_fields(self) -> dict:
+        return {"machine": self.machine, "placement": self.machine, "created": False}
+
+
+def check_machine_pins(conn: sqlite3.Connection, runs_on: Any, *,
+                       machines: Optional[Mapping[str, Mapping[str, Any]]] = None,
+                       me: Optional[str] = None) -> None:
+    """Refuse (:class:`MachinePinRefused`) a ``runs_on`` naming ``machine:<x>`` (x not this machine) unless x is an
+    active registry machine that advertises pickup (:func:`advertises_pickup`; null or missing = no pickup).
+    Labels other than ``machine:*`` are not checked. A no-op off a Board primary (``set_runs_on`` refuses there).
+    The registry unreachable fails closed: pickup cannot be confirmed."""
+    if runs_on is None:
+        return
+    labels = normalize_runs_on(runs_on if isinstance(runs_on, str) else list(runs_on))
+    names = [lab.split(":", 1)[1] for lab in labels or [] if lab.startswith("machine:")]
+    if not names or sync.board_mode(conn) != "primary":
+        return
+    me = me or _own(conn)
+    names = [n for n in names if n != me]
+    if not names:
+        return
+    pool = machines
+    if pool is None:
+        reg = registry()
+        if reg is None:
+            raise MachinePinRefused(names[0], "the Board machine registry is unreachable, so its pickup is unknown")
+        pool = reg.get("machines") or {}
+    for name in names:
+        entry = pool.get(name)
+        if not entry:
+            raise MachinePinRefused(name, "no machine of that name is enrolled in the Board registry")
+        if entry.get("state", "active") != "active":
+            raise MachinePinRefused(name, f"that machine is {entry.get('state')!r}, not active")
+        if not advertises_pickup(entry):
+            raise MachinePinRefused(name, "that machine does not pick up other gateways' cards (its /v2/machines "
+                                          f"entry has pickup={entry.get('pickup')!r})")
+
+
+def explicit_runs_on(conn: sqlite3.Connection, value: Any) -> Optional[list[str]]:
+    """A caller-supplied ``runs_on`` (create tool / CLI): :func:`normalize_runs_on`, then :func:`check_machine_pins`.
+    Placement-derived ``runs_on`` (``placement_runs_on``, ``heavy_route``) keeps its own pickup rule."""
+    labels = normalize_runs_on(value)
+    check_machine_pins(conn, labels)
+    return labels
+
+
 def placement_runs_on(conn: sqlite3.Connection, placement: Any) -> Optional[list[str]]:
     """``placement=<gateway>`` on a primary board, naming another active machine in the registry that picks up other
     gateways' cards -> ``[machine:<gateway>]``. None for ``auto``/``local``/this gateway/unknown names/machines
@@ -323,6 +387,11 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
             if eligible(dict(card), own, machines) is not None:
                 continue
             if profile_exists is not None and card["assignee"] and not profile_exists(card["assignee"]):
+                continue
+            # [daveey] Never claim a card this machine's profile cannot satisfy: it would run, then fail its own
+            # handoffs here (t_01a184ac93d31979). Left on the Board for a machine that can.
+            from hermes_cli.kanban_runs_on_capabilities import claim_refusal
+            if claim_refusal(dict(card), me=own) is not None:
                 continue
             picked.append(card["id"])
         imported = import_cards(conn, replica, picked)

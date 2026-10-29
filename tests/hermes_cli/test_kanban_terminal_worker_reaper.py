@@ -130,6 +130,38 @@ def test_fresh_terminal_run_is_left_alone_until_grace_passes(conn):
         proc.wait()
 
 
+def test_closed_run_does_not_reap_the_still_running_worker(conn):
+    """A replica can stamp ended_at on the run while the task is still running under this host's worker.
+
+    That is the 2026-10-28 hub kill: Mac reclaim closed the run, the Board refused the status
+    change, and reap_terminal_workers SIGTERMed pids that were still the card's current worker.
+    """
+    proc = _sleeper()
+    signals = []
+
+    def signal_fn(pid, sig):
+        signals.append(pid)
+        os.kill(pid, sig)
+
+    try:
+        tid = kb.create_task(conn, title="still going", assignee="coder")
+        kb.claim_task(conn, tid, claimer=kb._claimer_id())
+        run_id = kb._current_run_id(conn, tid)
+        kbd._set_worker_pid(conn, tid, proc.pid)
+        lock = conn.execute("SELECT claim_lock FROM tasks WHERE id=?", (tid,)).fetchone()["claim_lock"]
+        conn.execute(
+            "UPDATE task_runs SET ended_at = ?, claim_lock = ? WHERE id = ?",
+            (int(time.time()) - 600, lock, run_id),
+        )
+        assert kb.get_task(conn, tid).status == "running"
+        assert kbd.reap_terminal_workers(conn, signal_fn=signal_fn) == []
+        assert signals == [] and proc.poll() is None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 def test_one_failing_row_does_not_abort_the_sweep(conn):
     """A signal failure on one run is logged and skipped; the other rows are still reaped."""
     broken, healthy = _sleeper(), _sleeper()

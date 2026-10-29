@@ -20,9 +20,10 @@ from hermes_cli.goals import handoff_judge_goal, judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
-from hermes_cli import kanban_overlap
+from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import _marker_placement_fields, _placement_refused, _runs_where
 from tools.kanban_tools_db_hint import generic_tool_error
+from tools import kanban_tools_completion as _kc
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
@@ -108,7 +109,7 @@ def _check_kanban_mode() -> bool:
 
 @no_cache_check_fn
 def _check_kanban_orchestrator_mode() -> bool:
-    """Board-routing tools (kanban_list, kanban_unblock): hidden from task workers."""
+    """Board-routing tools (kanban_list): hidden from task workers."""
     return _visible(to_env_worker=False)
 
 
@@ -151,6 +152,7 @@ COMPLETE_REJECTION_CLASSES = frozenset({
     "empty",          # no summary/result, or an evidence-free completion
     "live_claim",     # another live dispatcher worker owns the card
     "stale_run",      # run superseded, card already terminal, or unknown id
+    "pr_acceptance",  # completion contract's PR CI acceptance refused (pr_acceptance event ok=false)
     "parents",        # unsatisfied parent dependencies
     "not_owner",      # delegate child / other task / unbound run id
     "invalid_args",   # unknown parameter or malformed argument
@@ -943,18 +945,6 @@ def _handle_list(args: dict, **kw) -> str:
             "promoted": promoted})
 
 
-def _parked_by_own_run(conn, tid: str, run_id: int) -> bool:
-    """True when ``run_id`` is the card's latest run, ended by ``kanban_block``, and nothing has
-    claimed the card since (no current run, no claim lock, status ready/blocked)."""
-    row = conn.execute("SELECT status, current_run_id, claim_lock FROM tasks WHERE id = ?", (tid,)).fetchone()
-    if row is None or row["current_run_id"] is not None or row["claim_lock"] \
-            or row["status"] not in ("ready", "blocked"):
-        return False
-    last = conn.execute("SELECT id, outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-                        (tid,)).fetchone()
-    return bool(last and last["id"] == run_id and last["outcome"] == "blocked")
-
-
 @_kanban_handler("kanban_complete", classify_rejections=True)
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff. Every refusal
@@ -985,10 +975,11 @@ def _handle_complete(args: dict, **kw) -> str:
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             run_id = _worker_run_id(tid)
-            if run_id is not None and _parked_by_own_run(conn, tid, run_id):
+            if run_id is not None and _kc.parked_by_own_run(conn, tid, run_id):
                 # This worker parked its card with kanban_block, then edited its own edges (kanban_unlink):
                 # its run is over but nothing has claimed the card since, so it may still close its own card.
                 run_id = None
+            event_mark = _kc.event_mark(conn, tid)  # a refusal's own pr_acceptance event lands above it
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
                 created_cards=created_cards, expected_run_id=run_id, goal_verification=goal_verification)
@@ -1039,9 +1030,10 @@ def _handle_complete(args: dict, **kw) -> str:
                 raise _Reject(
                     f"could not complete {tid}: unsatisfied parent dependencies: "
                     f"{detail}; complete the parents first (done or archived)", "parents")
-            _check(False, (task.last_failure_error if task else None) or
-                   f"could not complete {tid} (unknown id, stale run, or already terminal)",
-                   "stale_run")
+            reason = (task.last_failure_error if task else None) or \
+                f"could not complete {tid} (unknown id, stale run, or already terminal)"
+            _check(False, reason, "pr_acceptance" if _kc.pr_acceptance_refused(conn, tid, event_mark)
+                   else "stale_run")
         run = kb.latest_run(conn, tid)
         # Artifact staging is atomic with the completion write, so a worker that
         # read `kanban_attachments` before completing saw an empty list and has
@@ -1303,8 +1295,8 @@ def _handle_schedule(args: dict, **kw) -> str:
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid),
             wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting,
             clear_blocker=clear_blocker)
-        _check(ok, f"could not schedule {tid} (unknown id, not in todo/ready/running/blocked, or it "
-                   "waits on a human answer: needs_input/capability asks stay blocked, never scheduled)")
+        _check(ok, "" if ok else krc.human_answer_refusal(conn, tid, "schedule")
+               or f"could not schedule {tid} (unknown id, or not in todo/ready/running/blocked)")
         escalated = _escalated(kb, conn, tid)
         if escalated:
             return escalated
@@ -1768,7 +1760,7 @@ def _handle_create(args: dict, **kw) -> str:
         # other pin, a routed gateway included, falls through to the gateway route below. [daveey]
         from hermes_cli import kanban_worker_node as _wn
         try:
-            runs_on = _wn.normalize_runs_on(args.get("runs_on"))
+            runs_on = _wn.explicit_runs_on(conn, args.get("runs_on"))  # machine pins need pickup
         except ValueError as exc:
             return tool_error(str(exc))
         pinned_machine = None
@@ -1859,9 +1851,9 @@ def _handle_create(args: dict, **kw) -> str:
                 extra["placement"] = {"where": "local", "runs_on": runs_on, "machine": pinned_machine}
                 extra["note"] = (f"Created here as {new_tid}; it runs on {pinned_machine} via the board lease "
                                  f"(runs_on={runs_on}). The pin was honoured: do not re-create it.")
-        # Every result says where the card runs (`placed` for a routed card, `runs_on` for a board-lease card):
-        # a caller that can't tell re-creates it, or never learns it is stranded. [daveey]
-        extra["runs_where"] = _runs_where(runs_on, pinned_machine, marker_placement)
+        # Every result says where the card runs (a caller that can't tell re-creates it or never learns it is stranded)
+        extra.update(runs_where=_runs_where(runs_on, pinned_machine, marker_placement),  # + contract advisory [daveey]
+                     **_contract_cli.create_warning_fields(kb.get_task(conn, new_tid)))
         if origin_intent is not None:
             # The courier is not a chat: the bound origin is subscribed from the binding in the same txn
             # (kanban_origin_creation._subscribe_origin), never the receiving process's ambient session. [daveey]
@@ -2027,22 +2019,6 @@ def _maybe_subscribe_on_touch(conn: Any, task_id: str) -> bool:
                                  reason="touch")
 
 
-@_kanban_handler("kanban_unblock")
-def _handle_unblock(args: dict, **kw) -> str:
-    """Transition a blocked (or triage/scheduled) task to ready, or todo while parents remain open."""
-    _reject_delegated_child_mutation("kanban_unblock")
-    _require_orchestrator_tool("kanban_unblock")
-    tid = args.get("task_id")
-    _check(tid, "task_id is required")
-    tid = str(tid)
-    _enforce_worker_task_ownership(tid)
-    with _board(args.get("board")) as (kb, conn):
-        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
-        subscribed = _maybe_subscribe_on_touch(conn, tid)
-        return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)),
-                   **({"subscribed": True} if subscribed else {}))
-
-
 @_kanban_handler("kanban_archive")
 def _handle_archive(args: dict, **kw) -> str:
     """Archive an unclaimed card this worker's task created, or any card for an orchestrator."""
@@ -2133,8 +2109,13 @@ def _handle_origin_adopt(args: dict, **kw) -> str:
 
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
-# kanban_list / kanban_unblock route the board and are hidden from task workers.
-_ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_unblock"})
+# kanban_list routes the board and is hidden from task workers. kanban_unblock's
+# gate lives in kanban_tools_self_heal (orchestrators, plus a self-heal requeue grant).
+_ORCHESTRATOR_TOOLS = frozenset({"kanban_list"})
+from tools.kanban_tools_self_heal import check_unblock as _check_kanban_unblock_fn
+from tools.kanban_tools_self_heal import handle_unblock as _handle_unblock_fn
+_check_kanban_unblock = no_cache_check_fn(_check_kanban_unblock_fn)
+_handle_unblock = _kanban_handler("kanban_unblock")(_handle_unblock_fn)
 _TOOLS = (
     ("kanban_show", KANBAN_SHOW_SCHEMA, _handle_show, "📋"),
     ("kanban_list", KANBAN_LIST_SCHEMA, _handle_list, "📋"),
@@ -2158,6 +2139,11 @@ _TOOLS = (
     ("kanban_archive", KANBAN_ARCHIVE_SCHEMA, _handle_archive, "🗄"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:
-    _gate = _check_kanban_orchestrator_mode if _name in _ORCHESTRATOR_TOOLS else _check_kanban_mode
+    if _name == "kanban_unblock":
+        _gate = _check_kanban_unblock
+    elif _name in _ORCHESTRATOR_TOOLS:
+        _gate = _check_kanban_orchestrator_mode
+    else:
+        _gate = _check_kanban_mode
     registry.register(name=_name, toolset="kanban", schema=_sch, handler=_handler, emoji=_emoji,
                       check_fn=_gate)

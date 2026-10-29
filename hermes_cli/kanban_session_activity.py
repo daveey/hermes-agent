@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_activity_identity as _identity
+from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases, _moved_evidence, _retire_moved
 import contextlib
 import json
 import logging
@@ -477,17 +478,7 @@ def replica_task_resolution(ids: list[str], now: float | None = None) -> tuple[s
     return found, fresh
 
 
-def _open_ro(path: Path, check_same_thread: bool = True) -> sqlite3.Connection:
-    """Read-only open that survives a WAL db whose -wal/-shm were just removed (plain ``mode=ro`` then fails);
-    never creates the file."""
-    try:
-        conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5, check_same_thread=check_same_thread)
-        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
-        return conn
-    except sqlite3.OperationalError:
-        conn = _kanban_lockguard.connect(f"file:{path}?mode=rw", uri=True, timeout=0.5, check_same_thread=check_same_thread)
-        conn.execute("PRAGMA query_only = ON")
-        return conn
+from hermes_cli.kanban_generation import open_ro as _open_ro
 
 
 # Linked-card reads run on every sidebar refresh across ~16 boards and replicas; a fresh connection pays schema
@@ -495,7 +486,11 @@ def _open_ro(path: Path, check_same_thread: bool = True) -> sqlite3.Connection:
 # so keep one read-only connection per file, shared across the threadpool (one per thread would hold ~3 fds per
 # board per worker). An idle autocommit reader holds no snapshot, so it never blocks writers or checkpoints.
 _RO_CACHE: dict[str, tuple[sqlite3.Connection, tuple[int, int], threading.Lock, tuple[int, int] | None]] = {}
-_RO_CACHE_LOCK = threading.Lock()
+_RO_CACHE_LOCK = threading.RLock()
+
+
+from hermes_cli.kanban_generation import recover as _recover_generation, evict_readers, register_reader_cache
+register_reader_cache(evict_readers)
 
 
 @contextlib.contextmanager
@@ -504,6 +499,7 @@ def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
     replaced (new inode: a rebuilt replica), after any sqlite error, or when its ``-shm`` generation is gone (the
     connection is stranded on a deleted WAL index and would fail with ``disk I/O error`` or read stale rows until
     restart; kanban-759104eb56). Raises ``sqlite3.OperationalError`` when the file is missing, like ``_open_ro``."""
+    _recover_generation(path)
     key = str(path)
     try:
         st = os.stat(path)
@@ -514,10 +510,6 @@ def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
     with _RO_CACHE_LOCK:
         entry = _RO_CACHE.get(key)
         if entry is not None and entry[1] != ident:
-            stale = _RO_CACHE.pop(key)[0]
-            entry = None
-        elif entry is not None and entry[3] is not None and _kanban_lockguard.shm_identity(path) != entry[3]:
-            _log.warning("kanban board %s: cached reader was on a deleted WAL/SHM generation; reopening", path)
             stale = _RO_CACHE.pop(key)[0]
             entry = None
         if stale is not None:
@@ -531,6 +523,10 @@ def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
             _RO_CACHE[key] = entry
     conn, _ident, lock, _shm = entry
     with lock:  # bodies read every result they start: an unfinished cursor would pin a WAL snapshot
+        with _RO_CACHE_LOCK:
+            if _RO_CACHE.get(key) is not entry:
+                from hermes_cli.kanban_generation import DeletedWalGenerationError
+                raise DeletedWalGenerationError(f"kanban DB {path}: reader was evicted while waiting; retry")
         conn.row_factory = None
         try:
             yield conn
@@ -654,38 +650,6 @@ def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | 
     return beat is not None and 0 <= now - beat <= SCOPE_HEARTBEAT_FRESH_S
 
 
-def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, dict[str, Any]]) -> None:
-    """Merge each unqualified ``board/id`` record into its proven profile-qualified twin, in place.
-
-    Hub-sync used to key records ``board/id``; it now publishes ``profile/board/id`` and the old rows linger,
-    so every pre-qualification card was both counted twice and stuck ``unknown`` forever. A legacy record is
-    folded only when exactly one profile on the same owner gateway publishes that board/id AND both records
-    carry the same non-null ``created_at`` and ``created_by`` (identity, not an ID match). Its shepherd links
-    move onto the twin, so no session loses the association; anything ambiguous stays a separate ``unknown``
-    obligation. [daveey]
-    """
-    qualified: dict[tuple[str, str, str], list[tuple]] = {}
-    for key in tasks:
-        gw, owner_profile, board, tid = key
-        if owner_profile is not None:
-            qualified.setdefault((gw, board, tid), []).append(key)
-    for key in [k for k in tasks if k[1] is None]:
-        gw, _, board, tid = key
-        twins = qualified.get((gw, board, tid), [])
-        if len(twins) != 1:
-            continue
-        old, new = raw[key], raw[twins[0]]
-        if (old.get('created_at') is None or old.get('created_at') != new.get('created_at')
-                or old.get('created_by') != new.get('created_by')):
-            continue
-        twin = tasks[twins[0]]
-        links = [*(twin.get('sessions') if isinstance(twin.get('sessions'), list) else []),
-                 *(link for link in (old.get('sessions') if isinstance(old.get('sessions'), list) else [])
-                   if isinstance(link, dict) and link.get('rel') == 'shepherd')]
-        tasks[twins[0]] = {**twin, 'sessions': links, '_legacy_key': f'{gw}/{board}/{tid}'}
-        del tasks[key]
-
-
 # (replica path, gw, record key) -> (row text, decoded row) from the last replica read: the projection rebuilds on
 # every kanban.db / hub.db change, and re-parsing and re-hashing thousands of unchanged rows cost ~0.3 s per
 # sidebar refresh. Keyed on the exact stored text, so an edited row always decodes afresh. [daveey]
@@ -724,7 +688,8 @@ _REPLICA_PROBE = ("SELECT count(*), count(seq), max(seq), total(seq), total(vers
 
 def _read_remote_links(path: Path, now: float | None = None, *,
                        qualified_out: set | None = None,
-                       owners_out: set | None = None) -> list[dict[str, Any]]:
+                       owners_out: set | None = None,
+                       moved_out: dict | None = None) -> list[dict[str, Any]]:
     """Replica cards linked to a session on this gateway, one row per (session, card).
 
     Open and unproven cards come back ``unfinished``; cards their owner attests closed
@@ -763,27 +728,32 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                     qualified_out.update(memo[4])
                 if owners_out is not None:
                     owners_out.update(memo[5])
+                if moved_out is not None:
+                    moved_out.update(memo[9])
                 return list(memo[3])  # cards are read-only, as in ``_links_cache``
         rows = conn.execute(f"SELECT gw, key, data, updated_at, {version_column} FROM replica WHERE coll = 'tasks'").fetchall()
     finally:
         conn.close()
     if key is None:
         return _project_replica(path, now, me, rows, info_rows, last_ok, offline,
-                                qualified_out=qualified_out, owners_out=owners_out)
+                                qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out)
     qualified: set = set()
     owners: set = set()
+    moved: dict = {}
     seen_at: dict[str, float] = {}
     cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
-                             qualified_out=qualified, owners_out=owners, seen_out=seen_at)
+                             qualified_out=qualified, owners_out=owners, seen_out=seen_at, moved_out=moved)
     # Reuse ends at the next scope-heartbeat cut-off; the hub-staleness cut-off is the ``stale`` comparison above.
     beats = [beat + d for beat in _scope_heartbeats(info_rows).values() for d in (0.0, SCOPE_HEARTBEAT_FRESH_S)]
     _remote_read_memo = (key, now, min((t for t in beats if t > now), default=float('inf')), list(cards),
                          frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
-                         dict(seen_at))
+                         dict(seen_at), dict(moved))
     if qualified_out is not None:
         qualified_out.update(qualified)
     if owners_out is not None:
         owners_out.update(owners)
+    if moved_out is not None:
+        moved_out.update(moved)
     return cards
 
 
@@ -799,7 +769,8 @@ def _replica_synced(seen_at: dict[str, float], last_ok: float | None) -> tuple:
 def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: list, last_ok: float | None,
                      offline: float | None, *, qualified_out: set | None = None, owners_out: set | None = None,
                      horizon_out: list[float] | None = None,
-                     seen_out: dict[str, float] | None = None) -> list[dict[str, Any]]:
+                     seen_out: dict[str, float] | None = None,
+                     moved_out: dict | None = None) -> list[dict[str, Any]]:
     """``_read_remote_links`` of rows already read. ``horizon_out`` collects every wall time after ``now`` at which
     the same rows could project differently (hub-sync staleness, scope-heartbeat freshness)."""
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
@@ -853,6 +824,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         # A fresh replica that still carries the owner row is authoritative about its links: a remembered
         # (session, card) pair absent from it is a dropped link, not an unreadable replica.
         owners_out.update((gw, board, tid) for gw, _, board, tid in tasks)
+    if moved_out is not None and not stale:
+        moved_out.update(_moved_evidence(tasks, heartbeats, now, SCOPE_HEARTBEAT_FRESH_S))
     blank_before = {key for key in tasks if key[1] is None}
     _fold_legacy_aliases(tasks, raw)
     # Only a proven-identity alias is the same card as its qualified twin (folded above, links carried
@@ -1279,7 +1252,8 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
             raise FileNotFoundError("no hub.db")
         qualified: set[tuple[str, str, str]] = set()
         owners: set[tuple[str, str, str]] = set()
-        cards = _read_remote_links(path, qualified_out=qualified, owners_out=owners)
+        moved: dict[str, Any] = {}
+        cards = _read_remote_links(path, qualified_out=qualified, owners_out=owners, moved_out=moved)
     except Exception as exc:  # a broken replica must never break the sidebar
         if previous is None:
             if path is not None:
@@ -1306,7 +1280,9 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                  # Fresh replica + owner row present but this session's link gone: expire the ghost.
                  and (c.get("gateway"), c.get("board"), c.get("id")) not in owners
                  and not (c.get("ownership_state") == "unknown"
-                          and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now))
+                          and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now)
+                 # Fresh replica: the named owner publishes the scope without it, another gateway owns the card.
+                 and not _retire_moved(c, moved))
     if _snapshot_saved != (scope, cards):
         # The durable snapshot only speeds a cold start. Losing a write race (database is locked) must not
         # fail this read: the sidebar would mark every row kanban_unknown. The next changed read retries.

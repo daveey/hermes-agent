@@ -484,18 +484,19 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
     worker is ``{"where": "local", "runs_on": [machine:<worker>], "why": ...}``. Never raises."""
     try:
         c = _Cfg(config() if cfg is None else cfg)
-        if not isinstance(c.raw.get("route"), dict) or not c.raw["route"]:
-            return {"where": "local", "why": "no placement route for this gateway"}
         self_gw = reg.self_gateway() if self_gw is None else self_gw
-        target = c.target(self_gw)
-        if not target:
-            return {"where": "local", "why": "no placement route for this gateway"}
         pin = canonical_pin(args.get("placement") or "auto", self_gw, c.raw)
         if pin in ("local", "here", (self_gw or "").lower()):
             return {"where": "local", "why": "placement pinned local by the caller"}
         explicit = pin not in ("", "auto")
-        if explicit and pin != target.lower():
-            return {"where": "local", "why": f"placement {pin!r} is not a routed gateway (only {target!r})"}
+        target = c.target(self_gw)
+        if explicit and (not target or pin != target.lower()):
+            # An explicit pin to another gateway does not need a route entry for it: it takes the same
+            # create_remote path as the routed target (same structural refusals below), and the
+            # liveness check below refuses a gateway that is unknown or not live.
+            target = pin
+        if not target:
+            return {"where": "local", "why": "no placement route for this gateway"}
         if origin_intent is not None:
             return {"where": "local", "why": "courier creation for another gateway"}
         # Parents are local links, so the card is created here; with ``defer_parents`` (default on) it

@@ -246,6 +246,16 @@ def _profile_capabilities(assignee: str) -> set[str]:
         stack.callback(reset_terminal_scope, set_terminal_scope(terminal))
         toolsets = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
         available = set(toolsets) & {"terminal", "file", "kanban"}
+        # [daveey] Every assignee runs as a dispatcher-spawned worker, and model_tools._select_tool_names adds
+        # the kanban toolset to every such worker whatever platform_toolsets.cli says; only
+        # agent.disabled_toolsets (subtracted last) can take it away. Reading `kanban` from the chat toolsets
+        # refused a reviewer's verdict on worker-1 while that reviewer was calling kanban tools
+        # (t_01a184ac93d31979).
+        disabled = (config.get("agent") or {}).get("disabled_toolsets") or []
+        if isinstance(disabled, str):
+            disabled = [disabled]
+        if "kanban" not in disabled:
+            available.add("kanban")
         if "terminal" in available:
             available.add("git")
         if terminal.get("TERMINAL_ENV", "").strip().lower() == "local":

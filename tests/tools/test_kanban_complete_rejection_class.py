@@ -75,6 +75,56 @@ def test_stale_run(board, monkeypatch):
     assert _complete({"summary": "done"}) == "stale_run"
 
 
+_PR = "https://github.com/acme/repo/pull/7"
+
+
+def _no_required_checks(monkeypatch):
+    """PR acceptance read: the contract repo has no required checks (refused unless waived)."""
+    from hermes_cli import kanban_pr_acceptance as kpa
+
+    def collect(contract, published_pr, assignee=None):
+        return {"ok": False, "classification": "no_required_checks", "head_sha": "a" * 40,
+                "pr_url": published_pr, "detail": "no required checks; pass metadata.contract_waiver",
+                "recovery": "Add required checks or pass a contract_waiver."}
+    monkeypatch.setattr(kpa, "collect_acceptance", collect)
+
+
+def test_pr_acceptance_refusal_is_not_stale_run(board, monkeypatch):
+    # Regression: a no_required_checks PR-acceptance refusal was tagged stale_run, so digests
+    # counted every PR-CI refusal as a stale run. [daveey]
+    _no_required_checks(monkeypatch)
+    _claim(board, monkeypatch, completion_contract="acme/repo")
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_complete({"summary": "done", "metadata": {"published_pr": _PR}}))
+    assert out["rejection"] == "pr_acceptance"
+    assert "PR acceptance no_required_checks" in out["error"]
+    # Retrying hits the same refusal: still pr_acceptance, not stale_run.
+    assert _complete({"summary": "done", "metadata": {"published_pr": _PR}}) == "pr_acceptance"
+
+
+def test_terminal_card_after_pr_refusal_is_stale_run(board, monkeypatch):
+    # A card whose last_failure_error still names an old PR refusal, but is now terminal:
+    # this call recorded no acceptance, so it stays stale_run.
+    _no_required_checks(monkeypatch)
+    tid, _ = _claim(board, monkeypatch, completion_contract="acme/repo")
+    assert _complete({"summary": "done", "metadata": {"published_pr": _PR}}) == "pr_acceptance"
+    from tools import kanban_tools as kt
+    waived = json.loads(kt._handle_complete({"summary": "done", "metadata": {
+        "published_pr": _PR, "contract_waiver": {"reason": "repo has no CI"}}}))
+    assert waived.get("ok") is True, waived
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
+        assert board.get_task(conn, tid).status == "done"
+    assert _complete({"summary": "done again", "metadata": {"published_pr": _PR}}) == "stale_run"
+
+
+def test_already_terminal_card_is_stale_run(board, monkeypatch):
+    _claim(board, monkeypatch)
+    from tools import kanban_tools as kt
+    assert json.loads(kt._handle_complete({"summary": "done"})).get("ok") is True
+    assert _complete({"summary": "done again"}) == "stale_run"
+
+
 def test_parents(board, monkeypatch):
     from hermes_cli import kanban_db_connect as kbc
     with kbc.connect() as conn:

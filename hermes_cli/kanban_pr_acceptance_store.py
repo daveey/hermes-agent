@@ -49,7 +49,13 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
     # The assignee profile's gh login owns the repo: acceptance must not run as
     # the ambient login of whichever process completes the card (#122689).
     assignee = conn.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()["assignee"]
-    return snapshot, _kpa.collect_acceptance(contract, published_pr, assignee=assignee)
+    receipt = _kpa.collect_acceptance(contract, published_pr, assignee=assignee)
+    reason = _kpa.waiver_reason(metadata)
+    if reason and receipt.get("classification") == "no_required_checks":
+        # The only waivable classification, judged on THIS fresh read: a repo that gained
+        # required checks (or a failing/missing/pending check) is never waived. [daveey]
+        receipt["waived"] = {"reason": reason}
+    return snapshot, receipt
 
 
 def record_acceptance(conn, task_id, acceptance):
@@ -59,6 +65,12 @@ def record_acceptance(conn, task_id, acceptance):
     if _snapshot(conn, task_id) != snapshot:
         return False
     _append_event(conn, task_id, "pr_acceptance", receipt, run_id=snapshot[0])
+    if receipt.get("waived") and receipt.get("classification") == "no_required_checks":
+        acceptance_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        _append_event(conn, task_id, "contract_waived",
+                      {"reason": receipt["waived"]["reason"], "pr_acceptance_event_id": acceptance_id,
+                       "receipt": receipt}, run_id=snapshot[0])
+        return acceptance_id
     if not receipt["ok"]:
         detail = f"PR acceptance {receipt['classification']}: {receipt.get('detail', '')} {receipt['recovery']}"
         conn.execute("UPDATE tasks SET last_failure_error=? WHERE id=?", (detail, task_id))

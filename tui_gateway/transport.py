@@ -54,22 +54,6 @@ def current_transport() -> Optional[Transport]:
     return _current_transport.get()
 
 
-#: ``client_kind`` an ``/api/ws`` client declares with ``?client=agent`` (an agent script driving the backend,
-#: e.g. the patching-local-hermes ``gateway_rpc.py``). Client-declared, NOT a security boundary: it only picks
-#: defaults (chats born hidden, submits not counted as human input). [daveey]
-AGENT_CLIENT_KIND = "agent"
-
-
-def current_client_kind() -> Optional[str]:
-    """``client_kind`` of the transport bound to this request (None for renderer / stdio / unmarked clients)."""
-    return getattr(current_transport(), "client_kind", None)
-
-
-def is_agent_client() -> bool:
-    """True when the bound transport declared itself an agent client (``/api/ws?client=agent``)."""
-    return current_client_kind() == AGENT_CLIENT_KIND
-
-
 def bind_transport(transport: Optional[Transport]):
     """Bind *transport* for the current context; returns a token for :func:`reset_transport`."""
     return _current_transport.set(transport)
@@ -77,6 +61,16 @@ def bind_transport(transport: Optional[Transport]):
 
 def reset_transport(token) -> None:
     _current_transport.reset(token)
+
+
+#: ``/api/ws?client=agent`` marks a connection an agent script opened (gateway_rpc.py and kin), not a person's
+#: client. [daveey]
+AGENT_CLIENT_KIND = "agent"
+
+
+def is_agent_transport(transport: Optional[Transport]) -> bool:
+    """True when *transport* is a websocket an agent opened with the ``client=agent`` marker. [daveey]"""
+    return getattr(transport, "client_kind", None) == AGENT_CLIENT_KIND
 
 
 def _raise_unless_peer_gone(exc: Exception, what: str) -> None:

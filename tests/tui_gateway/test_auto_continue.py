@@ -446,7 +446,7 @@ def test_tui_setup_turn_still_auto_continues(emits, schedule_env, marker_home, u
 def test_stale_marker_is_cleared_not_continued(schedule_env, marker_home, monkeypatch):
     record_turn_start(marker_home, "session-key", "old prompt")
     monkeypatch.setattr(
-        server, "time", types.SimpleNamespace(time=lambda: time.time() + 3600)
+        server, "time", types.SimpleNamespace(time=lambda: time.time() + 3600, monotonic=time.monotonic)
     )
 
     result = server._maybe_schedule_auto_continue("sid", _session(), "session-key")
@@ -464,7 +464,7 @@ def test_config_widens_freshness_window(emits, schedule_env, marker_home, monkey
         lambda: {"desktop": {"auto_continue": {"freshness_minutes": 120}}},
     )
     monkeypatch.setattr(
-        server, "time", types.SimpleNamespace(time=lambda: time.time() + 3600)
+        server, "time", types.SimpleNamespace(time=lambda: time.time() + 3600, monotonic=time.monotonic)
     )
 
     result = server._maybe_schedule_auto_continue("sid", _session(), "session-key")

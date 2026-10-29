@@ -60,7 +60,8 @@ def register_worker_session(session_db, session_id: str) -> bool:
             ).fetchone()
         if session != ("kanban", profile):
             return False
-        with closing(sqlite3.connect(Path(board).resolve().as_uri() + "?mode=rw", uri=True, timeout=2)) as conn, conn:
+        from hermes_cli import kanban_lockguard
+        with closing(kanban_lockguard.connect(Path(board).resolve().as_uri() + "?mode=rw", uri=True, timeout=2)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT t.status, t.current_run_id, t.claim_lock, t.claim_expires, "

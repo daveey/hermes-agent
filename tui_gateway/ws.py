@@ -97,15 +97,16 @@ class WSTransport:
     def __init__(self, ws: Any, loop: asyncio.AbstractEventLoop, *, peer: str = "unknown",
                  auth_identity: dict | None = None, client_kind: str | None = None) -> None:
         self._ws = ws
+        #: ``/api/ws?client=<kind>`` as the client sent it (``"agent"`` for agent scripts, else None). Advisory, not an
+        #: auth fact: it only lets agent traffic opt OUT of the human-presence stamp (``human_input``) and defaults
+        #: its new chats to hidden. [daveey]
+        self.client_kind = client_kind
         self._loop = loop
         self._peer = peer
         #: Server-verified identity from the WS-upgrade credential, stamped by ``web_server_chat._ws_auth_reason``; None
         #: for legacy-token/stdio. RPC params can never populate it: sole identity authority for browser controllers
         #: and for the ``user_id`` the agent is built with (``server._session_auth_user_id``).
         self.auth_identity = auth_identity
-        #: [daveey] Client-declared kind from ``/api/ws?client=agent`` (``transport.AGENT_CLIENT_KIND``); None for the
-        #: renderer and every unmarked client. Only picks defaults, never authority (see transport.current_client_kind).
-        self.client_kind = client_kind
         self._closed = False
         # Why this side gave up on the socket (first cause wins); None while open or after a plain close().
         # handle_ws's read loop reads it to end a dropped peer as a disconnect, not a receive crash.
@@ -304,16 +305,28 @@ def _disable_nagle(ws: Any) -> None:
         _log.debug("ws TCP_NODELAY skip: %s", exc)
 
 
+def _ws_client_kind(ws: Any) -> str | None:
+    """The upgrade request's ``client`` query marker (``?client=agent``), lower-cased; None when absent. [daveey]"""
+    from urllib.parse import parse_qs
+
+    scope = getattr(ws, "scope", None)
+    if isinstance(scope, dict):  # real ASGI websockets (a harness scope may lack query_string)
+        raw = scope.get("query_string") or b""
+        params = {k: v[0] for k, v in parse_qs(raw.decode("latin-1") if isinstance(raw, bytes) else str(raw)).items()}
+    else:
+        params = getattr(ws, "query_params", None) or {}
+    kind = str(params.get("client", "") or "").strip().lower()
+    return kind or None
+
+
 class _SendFailed(Exception):
     """Raised by handle_ws._reply when a reply could not be written: ends the read loop."""
 
 
-async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: str | None = None,
-                    client_kind: str | None = None) -> None:
+async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: str | None = None) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``. *auth_identity* is the server-minted
     ``{user_id, provider}`` recorded at WS-upgrade auth, stored as ``WSTransport.auth_identity`` (the only identity
-    authority for browser-controller registration); callers that omit it (harnesses, embedded TUI child) get None.
-    *client_kind* is the client-declared ``?client=`` marker stored as ``WSTransport.client_kind`` (None = renderer)."""
+    authority for browser-controller registration); callers that omit it (harnesses, embedded TUI child) get None."""
     peer, transport = _ws_peer_label(ws), None
     messages = parse_errors = dispatch_crashes = send_failures = 0
     disconnect_reason = "not_connected"
@@ -408,7 +421,7 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
         transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity,
-                                client_kind=client_kind)
+                                client_kind=_ws_client_kind(ws))
         # resolve_skin() is sync I/O + CPU; pooled so the read loop can drain the frontend's initial RPC burst.
         skin_payload = await asyncio.to_thread(server.resolve_skin)
         # change_events: this backend broadcasts pet/cron/sessions.changed, so clients can demote legacy

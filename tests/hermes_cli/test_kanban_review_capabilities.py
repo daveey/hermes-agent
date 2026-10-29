@@ -62,7 +62,9 @@ def _handoff(conn, tid, operation):
     return kb.reopen_review_task(conn, tid)
 
 
-@pytest.mark.parametrize("operation", ["request", "rerequest", "changes", "reopen"])
+# ``changes`` is not here: request_changes records the verdict for the implementer that already ran the card
+# and only warns (tests/hermes_cli/test_kanban_requires_placement.py, t_01a184ac93d31979). [daveey]
+@pytest.mark.parametrize("operation", ["request", "rerequest", "reopen"])
 @pytest.mark.parametrize("workspace_kind", ["scratch", "dir", "worktree"])
 def test_review_rejects_incapable_target_atomically(profiles, operation, workspace_kind):
     with kbc.connect() as conn:

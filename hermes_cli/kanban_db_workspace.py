@@ -135,11 +135,8 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     current_file = _main_db_file(conn)
     current = Path(current_file).resolve() if current_file else None
     candidates = [_kb.kanban_home() / "kanban.db"]
-    root = _kb.boards_root()
-    if root.is_dir():
-        for child in root.iterdir():
-            if child.is_dir():
-                candidates.append(child / "kanban.db")
+    from hermes_cli import kanban_db_boards as _kdb_boards  # late: import cycle
+    candidates += [path for _slug, path in _kdb_boards.named_board_db_files()]
     found: list[Path] = []
     seen: set[Path] = set()
     for path in candidates:
@@ -204,6 +201,11 @@ def _workspace_in_use_by_other(
         except (OSError, sqlite3.Error) as exc:
             _kb._log.warning(
                 "Cannot read board db %s for task %s: %s", db_file, task_id, exc,
+            )
+            from hermes_cli import kanban_gc_alert  # late: kanban_db imports this module
+            kanban_gc_alert.report(
+                conn, str(db_file),
+                f"workspace cleanup for {task_id} deferred (cannot tell whether another task still uses it): {exc!r}",
             )
             return "unknown"
     return None

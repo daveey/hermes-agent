@@ -531,7 +531,8 @@ class GatewayAdapterLifecycleMixin:
         """Process pending CLI→gateway session handoffs from ``state.db``: claim atomically (pending
         → running), re-bind the home channel to the CLI session_id, dispatch a synthetic event, mark
         ``completed``/``failed``."""
-        from gateway.run import _async_profile_runtime_scope, _reclaim_stale, _resolve_handoff_watch_scopes
+        from gateway.run import _async_profile_runtime_scope, _resolve_handoff_watch_scopes
+        from gateway.run_handoff_reclaim import StaleHandoffReclaimer, _reclaim_stale
         from gateway.run_idle_gates import off_loop_gate, profile_has_pending_handoff
         await asyncio.sleep(5)  # let platforms connect before dispatching through them
         # Does _process_handoff accept the profile argument? Test stand-ins bind a one-arg callable.
@@ -594,13 +595,20 @@ class GatewayAdapterLifecycleMixin:
 
         # Multiplex scope resolution walks the filesystem (profiles_to_serve) off the loop, so a
         # stalled walk cannot trip the liveness probe — startup reclaim and every tick alike.
-        for _pname, _phome in await _resolve_handoff_watch_scopes(self):
+        # A failed reclaim (busy state.db) is retried with backoff on later ticks (run_handoff_reclaim).
+        async def _reclaim_scope(pname, phome) -> bool:
+            ok = False
             with _log_suppressed(logging.DEBUG, "Stale-handoff reclaim failed", exc_info=True):
-                async with _scope(_phome):
-                    await _reclaim_stale(self)
+                async with _scope(phome):
+                    ok = bool(await _reclaim_stale(self))
+            return ok
+
+        reclaimer = StaleHandoffReclaimer(_reclaim_scope)
+        await reclaimer.startup(await _resolve_handoff_watch_scopes(self))
         try:
             while self._running:
                 try:
+                    await reclaimer.retry_due(busy=bool(inflight))
                     for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
                         # Idle gate (run_idle_gates): skip the scope entry when the profile's store
                         # holds no pending handoff. The root poll (None) is unscoped and stays cheap.

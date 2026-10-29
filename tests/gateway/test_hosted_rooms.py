@@ -730,14 +730,27 @@ def test_room_log_pages_are_bounded_by_serialized_event_bytes(tmp_path, monkeypa
             kind="message.user",
             actor=USER,
             payload={"text": "x" * 180, "index": index},
+            # Fixed timestamps: the budget below is one event's page + 1 byte, so
+            # every event must serialize to the same size. A wall-clock
+            # ``created_at`` repr varies in length (1793254574.5 vs
+            # 1793254574.123456), which made a later event alone overflow it.
+            now=20 + index,
+        )
+
+    def page_bytes(page):
+        return len(
+            json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         )
 
     one_event = rooms.read_events(db, room_id="room-1", limit=1)
-    budget = len(
-        json.dumps(one_event, ensure_ascii=False, separators=(",", ":")).encode(
-            "utf-8"
-        )
-    ) + 1
+    budget = page_bytes(one_event) + 1
+    # Precondition: every single-event page with more after it (the last page's
+    # ``has_more:false`` is a byte longer) has the same size, so the budget
+    # admits exactly one event per page regardless of which event leads it.
+    assert {
+        page_bytes(rooms.read_events(db, room_id="room-1", since_seq=seq, limit=1))
+        for seq in range(3)
+    } == {budget - 1}
     monkeypatch.setattr(rooms, "MAX_LOG_PAGE_BYTES", budget)
 
     first = rooms.read_events(db, room_id="room-1", limit=4)

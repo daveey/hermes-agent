@@ -13,7 +13,7 @@ def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     expected_run_id: Optional[int] = None, wake_check: Optional[str] = None,
     check_every: Optional[int] = None, clock_only: bool = False, awaiting: Any = None,
-    clear_blocker: bool = False,
+    clear_blocker: bool = False, comment: Optional[tuple[str, str]] = None,
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable) until its wake
     (``SCHEDULED_UNTIL=`` in the reason, else ``kanban_timed_park.DEFAULT_WAKE_SECONDS``) or an
@@ -21,8 +21,12 @@ def schedule_task(
     not on any needs-me surface, so such a park hid the ask (t_6feb6afd). [daveey]
 
     ``awaiting`` names the producer (``kanban_awaiting``); a park nothing would satisfy raises
-    ``AwaitingError``, and a third park on one premise escalates to an owner card instead."""
-    with _kb.write_txn(conn):
+    ``AwaitingError``, and a third park on one premise escalates to an owner card instead.
+
+    ``comment`` (``(author, body)``) is written in the same txn and only when the park lands
+    (``kanban_reason_comment``); ``human_answer_refusal`` explains the human-answer refusal."""
+    from hermes_cli.kanban_reason_comment import reason_comment
+    with _kb.write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         if _kb._awaiting_human_answer(conn, task_id):
             return False
         from hermes_cli.kanban_timed_park import scheduled_payload
@@ -32,8 +36,8 @@ def schedule_task(
             record = kaw.gate(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
                               clock_only=clock_only, op="schedule")
         except kaw.RepeatedPark as rp:
-            return kaw.escalate(conn, task_id, record=rp.record, reason=reason,
-                                expected_run_id=expected_run_id) is not None
+            return noted.keep(kaw.escalate(conn, task_id, record=rp.record, reason=reason,
+                                           expected_run_id=expected_run_id) is not None)
         wake_check = wake_check or kaw.card_probe(record)
         why = kaw.park_cycle_error(conn, task_id, record, wake_check)
         if why:
@@ -69,7 +73,7 @@ def schedule_task(
             **payload, **kwc.park_fields(wake_check, check_every, clock_only), "awaiting": record, **meta,
         }, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check, check_every)
-        return True
+        return noted.keep(True)
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 
 import pm.environments
 import pytest
@@ -18,7 +19,16 @@ def _state(installs, key, project_root):
     (state / "inputs").mkdir(parents=True)
     (state / "inputs" / ".project-root").write_text(str(project_root), encoding="utf-8")
     (state / "environments" / "gen" / "venv").mkdir(parents=True)
+    _age(state)
     return state
+
+
+def _age(state):
+    old = time.time() - 7200
+    for parent, dirs, files in os.walk(state):
+        for name in dirs + files:
+            os.utime(os.path.join(parent, name), (old, old))
+    os.utime(state, (old, old))
 
 
 def test_startup_prune_reclaims_only_provably_deleted_checkouts(tmp_path, monkeypatch):
@@ -58,6 +68,8 @@ def test_held_orphan_is_kept(tmp_path):
                       runtime / "pm-runtime" / "generations" / "gen" / ".leases"):
         lease_dir.mkdir(parents=True)
         fds.append(os.open(lease_dir / "reader", os.O_CREAT | os.O_RDWR, 0o600))
+    for state in (locked, leased, runtime):
+        _age(state)
     assert all(lock_fd(fd, wait=False) for fd in fds)
     try:
         assert collect_orphan_install_states(installs) == []
@@ -76,10 +88,12 @@ def test_partly_removed_orphan_keeps_its_record_until_retried(tmp_path):
     state = _state(installs, "aaaa", tmp_path / "gone")
     stuck = state / "environments" / "gen" / "venv"
     (stuck / "pyvenv.cfg").write_text("", encoding="utf-8")
+    _age(state)
     stuck.chmod(0o500)  # its entries cannot be unlinked: the removal stops part-way
     try:
         assert collect_orphan_install_states(installs) == []
         assert orphan_install_states(installs) == [state]
     finally:
         stuck.chmod(0o700)
+    _age(state)  # Partial removal touched dirs; retry after another idle window.
     assert collect_orphan_install_states(installs) == [state] and not state.exists()

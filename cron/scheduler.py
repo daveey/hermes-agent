@@ -3810,10 +3810,10 @@ def _launch_external_cron_worker(job: dict) -> bool:
     ack_path = handoff_dir / f"{execution_id}.ready"
     # Captured so a worker that dies before its acknowledgement can name the cause (#112729).
     stderr_path = handoff_dir / f"{execution_id}.stderr"
+    from cron.scheduler_worker_env import hermes_module_argv
+
     command = [
-        sys.executable,
-        "-m",
-        "cron.scheduler",
+        *hermes_module_argv(sys.executable, "cron.scheduler"),
         "--external-worker-file",
         str(payload_path),
         "--ack-file",

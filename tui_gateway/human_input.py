@@ -9,9 +9,9 @@ desktop-ssh clients alike, in ``<HERMES_HOME>/desktop/last_human_input.json`` (a
 Only client-sent submits count. Injected turns never reach the ``prompt.submit`` RPC handler (Kanban
 notices and wakes, auto-continue resumes and queued drains call ``_run_prompt_submit`` directly), and the
 handler skips the in-process ones that do: bot-relay / hosted-room submits (``_turn_author`` /
-``_hosted_*``), ``start_chat`` (no request id), hidden widget intents, submits over an agent-declared
-``/api/ws?client=agent`` transport (agent scripts such as ``gateway_rpc.py``), and cross-session sends (the
-session-mentions courier submits over the websocket, with its fixed header first).
+``_hosted_*``), ``start_chat`` (no request id), hidden widget intents, and cross-session sends (the
+session-mentions courier submits over the websocket, with its fixed header first). Agent scripts that dial
+``/api/ws?client=agent`` (gateway_rpc.py) never stamp either, nor do submits into chats they created.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ def is_human_typed_submit(rid, params: dict, text) -> bool:
     """True for a ``prompt.submit`` a person typed in a client (not an injected or relayed turn)."""
     if rid is None or not isinstance(params, dict):
         return False
-    from tui_gateway.transport import is_agent_client
+    from tui_gateway.transport import current_transport, is_agent_transport
 
-    if is_agent_client():  # an agent script over /api/ws?client=agent, not a person at a keyboard
+    if is_agent_transport(current_transport()):  # an agent script over /api/ws?client=agent, not a person typing
         return False
     if any(params.get(k) is not None for k in _INTERNAL_PARAMS):
         return False
@@ -67,9 +67,20 @@ def record_human_input(session_id: str = "", home: Path | None = None) -> None:
         logger.debug("could not record the last human input", exc_info=True)
 
 
-def note_submit(rid, params: dict, text) -> None:
-    """Record ``prompt.submit`` when a human typed it. Never raises."""
+def note_submit(rid, params: dict, text, *, transport=None, session: dict | None = None) -> None:
+    """Record ``prompt.submit`` when a human typed it. Never raises.
+
+    Agent traffic never stamps: a submit over a websocket opened with ``/api/ws?client=agent`` (*transport*,
+    default the bound one), or into a session such a connection created (*session* ``agent_created``)."""
     try:
+        if transport is None:
+            from tui_gateway.transport import current_transport
+
+            transport = current_transport()
+        from tui_gateway.transport import is_agent_transport
+
+        if is_agent_transport(transport) or (isinstance(session, dict) and session.get("agent_created")):
+            return
         if is_human_typed_submit(rid, params, text):
             record_human_input(str(params.get("session_id") or ""))
     except Exception:  # health: allow BLE001 -- a stamp must never fail a prompt

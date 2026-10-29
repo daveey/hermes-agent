@@ -494,3 +494,119 @@ def test_terminal_scratch_parent_still_swept_after_last_child(
         assert ws.is_dir()  # live child still needs the handoff files
         assert kb.archive_task(conn, child)
     assert not ws.exists()
+
+
+# ---------------------------------------------------------------------------
+# Non-board folders under boards/ (kanban-e808885f9e): ``boards/_archived/``
+# holds archived boards, and a stray glob (``sqlite3 boards/*/kanban.db``)
+# created an empty ``_archived/kanban.db`` there. That file is not a board and
+# must not stop GC; a REAL board that can't be read still fails closed.
+# ---------------------------------------------------------------------------
+
+
+def _junk_board_files(kanban_home: Path) -> list[Path]:
+    made = []
+    for name in ("_archived", "_junk", "Upper"):
+        db = kanban_home / "kanban" / "boards" / name / "kanban.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        db.touch()  # 0 bytes: opens as an sqlite db with no tables
+        made.append(db)
+    return made
+
+
+def _gc_abort_cards(home: Path) -> list:
+    with kbc.connect_closing() as conn:
+        return conn.execute(
+            "SELECT id, status, body FROM tasks WHERE idempotency_key='kanban-worktree-gc-abort'"
+        ).fetchall()
+
+
+def test_named_board_files_skip_non_slug_folders(kanban_home):
+    from hermes_cli.kanban_db_boards import named_board_db_files
+    _junk_board_files(kanban_home)
+    real = kanban_home / "kanban" / "boards" / "runners" / "kanban.db"
+    real.parent.mkdir(parents=True)
+    real.touch()
+    (kanban_home / "kanban" / "boards" / "nodb").mkdir()
+    assert named_board_db_files() == [("runners", real)]
+
+
+def test_startup_sweep_ignores_non_board_folders(kanban_home, repo, monkeypatch):
+    from hermes_cli import kanban_worktree_gc as gc
+    monkeypatch.setattr(gc, "retention_days", lambda: 7)
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        _local_commit(wt)
+        _age_task(conn, tid, "archived")
+        missing, orphan = _worktree_task(conn, repo)
+        conn.execute("DELETE FROM task_events WHERE task_id=?", (missing,))
+        conn.execute("DELETE FROM tasks WHERE id=?", (missing,))
+    _junk_board_files(kanban_home)
+    gc.sweep_repo(str(repo))
+    assert not wt.exists()  # reaped as normal
+    assert orphan.exists()
+    assert len(list((kanban_home / "archive" / "kanban-orphans").glob("*.json"))) == 1
+    assert _gc_abort_cards(kanban_home) == []
+
+
+def test_workspace_sharing_ignores_non_board_folders(kanban_home, tmp_path):
+    _junk_board_files(kanban_home)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t")
+        assert kbw._workspace_in_use_by_other(conn, tid, tmp_path / "ws") is None
+
+
+def test_workspace_sharing_real_board_without_tables_fails_closed(kanban_home, tmp_path):
+    bad = kanban_home / "kanban" / "boards" / "broken" / "kanban.db"
+    bad.parent.mkdir(parents=True)
+    bad.touch()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t")
+        assert kbw._workspace_in_use_by_other(conn, tid, tmp_path / "ws") == "unknown"
+
+
+def test_startup_real_board_without_tables_aborts_and_opens_one_card(kanban_home, repo, monkeypatch):
+    from hermes_cli import kanban_worktree_gc as gc
+    monkeypatch.setattr(gc, "retention_days", lambda: 7)
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        _local_commit(wt)
+        _age_task(conn, tid, "archived")
+    bad = kanban_home / "kanban" / "boards" / "broken" / "kanban.db"
+    bad.parent.mkdir(parents=True)
+    bad.touch()
+    gc.sweep_repo(str(repo))
+    assert wt.exists()  # fail-closed: nothing reaped
+    gc.sweep_repo(str(repo))
+    cards = _gc_abort_cards(kanban_home)
+    assert len(cards) == 1
+    assert str(bad.resolve()) in cards[0]["body"]
+
+
+def test_unknown_cleanup_deferral_opens_one_card(kanban_home):
+    bad = kanban_home / "kanban" / "boards" / "broken" / "kanban.db"
+    bad.parent.mkdir(parents=True)
+    bad.touch()
+    with kbc.connect_closing() as conn:
+        tid, ws = _running_scratch_parent(conn)
+        assert kb.complete_task(conn, tid, summary="done")
+        assert ws.is_dir()  # deferred: the broken board might share it
+        other, _ws2 = _running_scratch_parent(conn, title="second")
+        assert kb.complete_task(conn, other, summary="done")
+    cards = _gc_abort_cards(kanban_home)
+    assert len(cards) == 1
+    assert str(bad.resolve()) in cards[0]["body"]
+
+
+def test_gc_abort_card_comments_once_then_reopens_after_done(kanban_home):
+    from hermes_cli import kanban_gc_alert
+    first = kanban_gc_alert.report(None, "/x/kanban.db", "boom")
+    assert kanban_gc_alert.report(None, "/x/kanban.db", "boom") == first  # within the hour: no new comment
+    assert kanban_gc_alert.report(None, "/y/kanban.db", "boom") == first  # another path: one comment
+    with kbc.connect_closing() as conn:
+        bodies = [r[0] for r in conn.execute("SELECT body FROM task_comments WHERE task_id=?", (first,))]
+        assert len(bodies) == 1 and "/y/kanban.db" in bodies[0]
+        assert kb.complete_task(conn, first, summary="fixed")
+    again = kanban_gc_alert.report(None, "/x/kanban.db", "boom")
+    assert again != first  # a recurrence after the fix is a new, visible card
+    assert [c["id"] for c in _gc_abort_cards(kanban_home) if c["status"] != "done"] == [again]

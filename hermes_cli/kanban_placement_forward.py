@@ -86,14 +86,17 @@ def forward_argv(task, board: Optional[str], worker_cmd: list) -> Optional[list]
         path = kb.kanban_db_path(board=board)
         if not os.path.exists(path):
             return None
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)  # noqa: kanban-lockguard — short-lived read-only handle, closed in the finally below
+        from hermes_cli import kanban_lockguard
+        conn = kanban_lockguard.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
         try:
             st = state(conn, task.id)
         finally:
             conn.close()
         if not st:
             return None
-        return [sys.executable, "-m", MODULE, "--", *[str(x) for x in worker_cmd]]
+        # ``-P``: the forwarder runs with cwd = the task workspace; see ``hermes_module_argv``.
+        from cron.scheduler_worker_env import hermes_module_argv
+        return [*hermes_module_argv(sys.executable, MODULE), "--", *[str(x) for x in worker_cmd]]
     except Exception:
         return None
 
