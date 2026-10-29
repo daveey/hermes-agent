@@ -55,13 +55,27 @@ def guard_hold_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     return reason if isinstance(reason, str) else None
 
 
-def _pr_failing_checks(pr_url: str) -> str:
-    """Best-effort one-line summary of ``pr_url``'s failing checks ('' if unavailable)."""
+def _pr_failing_checks(pr_url: str) -> Optional[str]:
+    """Failing-check summary, ``''`` if the read succeeded with none, None if unreadable.
+
+    Uses the same gh argv as :func:`kanban_db_dispatch_pr_state.pr_state`. A bare ``gh``
+    in the dispatcher process cannot read a broker-visible pull, and an empty summary
+    used to be reported as ``failing checks unavailable`` even when the read succeeded
+    with zero failures. [daveey]
+    """
+    from hermes_cli import kanban_db_dispatch_pr_state as prs
+
+    gh = prs._gh_argv() or ["gh"]
     try:
-        out = subprocess.run(["gh", "pr", "checks", pr_url], stdin=subprocess.DEVNULL, capture_output=True,
-                             text=True, encoding="utf-8", errors="replace", timeout=30, check=False).stdout
+        proc = subprocess.run([*gh, "pr", "checks", pr_url], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return None
+    out = proc.stdout or ""
+    # gh pr checks: 0 green, 8 pending, 1 failing — all print a table. Empty stdout
+    # with a non-zero exit is an unreadable lookup (bare gh, auth, missing command).
+    if not out.strip() and proc.returncode != 0:
+        return None
     failing = [ln.split("\t")[0].strip() for ln in out.splitlines()
                if len(ln.split("\t")) > 1 and ln.split("\t")[1].strip().lower() in ("fail", "failure", "cancel")]
     return f"{len(failing)} failing check(s): " + ", ".join(failing[:12]) if failing else ""
@@ -75,8 +89,13 @@ def _file_fix_card(conn: sqlite3.Connection, task_id: str, reason: str, body: st
     try:
         _kb.create_task(
             conn, title=f"Fix respawn-guard hold ({reason}) on {task_id}"[:120],
-            body=(f"{body}\n\nRead kanban card {task_id}'s latest [respawn-guard] comment, fix the cause "
-                  f"(failing PR checks, binding) and unblock it. Only ask David for a decision he alone can make."),
+            body=(f"{body}\n\nRead kanban card {task_id}'s latest [respawn-guard] comment and fix the cause "
+                  f"(failing PR checks, or a false active_pr bind). Do not call unblock or schedule "
+                  f"on that card: a dispatcher worker cannot mutate another card, and the worker shell "
+                  f"is write-fenced. The dispatcher releases the hold on the next tick once the guard "
+                  f"no longer matches. A manual lift, if one is still required before that code is "
+                  f"running, is an orchestrator or CLI write, not this worker. Only ask David for a "
+                  f"decision he alone can make."),
             assignee="default", created_by="kanban-dispatcher", idempotency_key=f"guard-hold:{task_id}")
     except Exception:
         logger.warning("kanban: guard-hold fix card for %s failed", task_id, exc_info=True)
@@ -104,12 +123,17 @@ def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
             "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id DESC", (task_id,))
             for m in [_kbd._RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(r["body"]) or "")] if m]
         if urls:
-            checks = _pr_failing_checks(urls[0]) or "failing checks unavailable"
+            checks = _pr_failing_checks(urls[0])
+            if checks is None:
+                checks = "failing checks unavailable"
+            elif not checks:
+                checks = "0 failing checks"
             detail = f" PR: {urls[0]} ({checks})."
     minutes = max(1, held // 60)
     body = (f"{GUARD_HOLD_NOTE_MARKER} Held in ready by the respawn guard ({reason}) for {minutes} min "
             f"without running.{detail} It will be auto-blocked at the hold cap; fix the cause "
-            f"(merge/close the PR, rebind, or unblock) before then.")
+            f"(the guard binding, or the PR's failing checks) before then. "
+            f"The dispatcher releases the hold on the next tick once the guard no longer matches.")
     _kb.add_comment(conn, task_id, "kanban-dispatcher", body)
     _file_fix_card(conn, task_id, reason, body)
     return True

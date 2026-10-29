@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import subprocess
 import time
@@ -29,6 +30,14 @@ TERMINAL_STATES = frozenset({"MERGED", "CLOSED"})
 OPEN_TTL_SECONDS = 300
 ERROR_TTL_SECONDS = 120
 GH_TIMEOUT_SECONDS = 20
+
+# A comment whose purpose is to say the named pull does not block this card.
+# "doesn't block the merge" is not that purpose; the object has to be the card.
+_NONBLOCKING_RE = re.compile(
+    r"\b(?:does(?:n['\u2019]t| not)|do(?:n['\u2019]t| not)|won['\u2019]t|will not)\s+block\s+"
+    r"(?:you|this\s+(?:card|task)|the\s+card)\b",
+    re.IGNORECASE,
+)
 
 # url -> (state or None, monotonic expiry or None for "forever")
 _cache: dict[str, tuple[Optional[str], Optional[float]]] = {}
@@ -148,6 +157,95 @@ def _immediate_checkpoint_after(
     )
 
 
+def _norm_pr(url: str) -> str:
+    return url.rstrip("/").lower()
+
+
+def _comment_says_pull_does_not_block(body: str) -> bool:
+    return bool(_NONBLOCKING_RE.search(body))
+
+
+def _own_published_key(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """This card's completion_contract when it is a pull URL, else None."""
+    row = conn.execute("SELECT completion_contract FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return None
+    contract = row["completion_contract"]
+    if not isinstance(contract, str) or not contract.lower().startswith("http"):
+        return None
+    return _norm_pr(contract)
+
+
+def _foreign_live_contract_keys(conn: sqlite3.Connection, task_id: str, keys: set[str]) -> set[str]:
+    """Pull URLs that are another live card's completion_contract.
+
+    Done and archived cards are not live: a finished contract is not an owner
+    that excuses a duplicate-PR mention. [daveey]
+    """
+    if not keys:
+        return set()
+    placeholders = ",".join("?" * len(keys))
+    rows = conn.execute(
+        "SELECT lower(rtrim(completion_contract, '/')) AS k FROM tasks "
+        "WHERE id != ? AND status NOT IN ('done', 'archived') "
+        f"AND lower(rtrim(completion_contract, '/')) IN ({placeholders})",
+        (task_id, *sorted(keys)),
+    ).fetchall()
+    return {row["k"] for row in rows}
+
+
+def _urls_that_hold(conn: sqlite3.Connection, task_id: str, mentions: list[tuple[str, str]]) -> set[str]:
+    """Normalized pull URLs that are duplicate-PR evidence.
+
+    Drop a URL that is another live card's completion_contract, and a URL that
+    appears only in comments saying that pull does not block this card. This
+    card's own completion_contract still holds. [daveey]
+    """
+    by_url: dict[str, list[str]] = {}
+    for url, body in mentions:
+        by_url.setdefault(_norm_pr(url), []).append(body)
+    if not by_url:
+        return set()
+    own = _own_published_key(conn, task_id)
+    foreign = _foreign_live_contract_keys(conn, task_id, set(by_url) - ({own} if own else set()))
+    holding: set[str] = set()
+    for key, bodies in by_url.items():
+        disclaimed = all(_comment_says_pull_does_not_block(body) for body in bodies)
+        if key == own or (key not in foreign and not disclaimed):
+            holding.add(key)
+    return holding
+
+
+def _holding_pr_comments(
+    conn: sqlite3.Connection, task_id: str, now: int,
+) -> tuple[list[int], list[str], int]:
+    """``(times, urls, latest_comment_id)`` for pulls that still arm ``active_pr``."""
+    from hermes_cli import kanban_db as _kb
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    parsed: list[tuple[int, int, str, list[str]]] = []
+    for t, c in _kbd._rows_since(conn, "task_comments", task_id, now - _kbd._RESPAWN_GUARD_PR_WINDOW,
+                                 cols=", id, body, author", unreadable=now):  # duplicate-PR risk: fail closed
+        body = _kb._lossy_text(c["body"]) or ""
+        if c["author"] == "kanban-dispatcher" and body.startswith("[respawn-guard]"):
+            continue  # a diagnostic must not rearm its own handoff barrier
+        urls = _kbd._RESPAWN_GUARD_PR_URL_RE.findall(body)
+        if urls:
+            parsed.append((t, c["id"], body, urls))
+    holding = _urls_that_hold(conn, task_id, [(url, body) for _, _, body, urls in parsed for url in urls])
+    pr_times: list[int] = []
+    pr_urls: list[str] = []
+    latest_pr_comment_id = 0
+    for t, comment_id, _body, urls in parsed:
+        kept = [url for url in urls if _norm_pr(url) in holding]
+        if not kept:
+            continue
+        latest_pr_comment_id = max(latest_pr_comment_id, comment_id)
+        pr_times.append(t)
+        pr_urls.extend(kept)
+    return pr_times, pr_urls, latest_pr_comment_id
+
+
 def _pr_comments_predate_first_run(conn: sqlite3.Connection, task_id: str, newest_pr_at: int) -> bool:
     """True when the card never ran a worker, or every PR comment predates its first run.
 
@@ -181,24 +279,14 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     notices are diagnostic, not new PR publication evidence, and cannot invalidate
     an existing handoff.
     Also lifted once EVERY PR named in those comments is MERGED or CLOSED (gh, cached; any
-    gh failure keeps the hold), or has a completed queue rejection requiring repair. [daveey]
+    gh failure keeps the hold), or has a completed queue rejection requiring repair.
+    A pull that is another live card's completion_contract is not this card's work, and
+    neither is a pull that appears only in a comment saying it does not block this card.
+    This card's own completion_contract still holds. [daveey]
     """
-    from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
 
-    pr_times: list[int] = []
-    pr_urls: list[str] = []
-    latest_pr_comment_id = 0
-    for t, c in _kbd._rows_since(conn, "task_comments", task_id, now - _kbd._RESPAWN_GUARD_PR_WINDOW,
-                                 cols=", id, body, author", unreadable=now):  # duplicate-PR risk: fail closed
-        body = _kb._lossy_text(c["body"]) or ""
-        if c["author"] == "kanban-dispatcher" and body.startswith("[respawn-guard]"):
-            continue  # a diagnostic must not rearm its own handoff barrier
-        urls = _kbd._RESPAWN_GUARD_PR_URL_RE.findall(body)
-        if urls:
-            latest_pr_comment_id = max(latest_pr_comment_id, c["id"])
-            pr_times.append(t)
-            pr_urls.extend(urls)
+    pr_times, pr_urls, latest_pr_comment_id = _holding_pr_comments(conn, task_id, now)
     if not pr_times:
         return None
     if _pr_comments_predate_first_run(conn, task_id, max(pr_times)):
