@@ -147,7 +147,10 @@ def _build(route, parent):
 
     def construct(**kwargs):
         seen.update(kwargs)
-        return MagicMock(session_id="child-1")
+        # Fork: a class-routed child (``model_routing`` set) keeps its billing-fenced native pool and is never
+        # given the resolved pool (tools.delegate_tool, [daveey]); a bare MagicMock's auto attribute would
+        # read as class-routed. These profile children are not class-routed.
+        return MagicMock(session_id="child-1", model_routing=None)
 
     with patch("run_agent.AIAgent", side_effect=construct):
         child = _build_child_agent(task_index=0, goal="work as coder", context=None, toolsets=None,
