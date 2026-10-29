@@ -908,7 +908,7 @@ def test_kanban_create_with_parents_creates_a_local_deferred_card(mac):
         assert st["target"] == "hub" and st["origin_session"] == "20261027_183000_abc123"
         assert kb.get_task(conn, out["task_id"]).status == "todo"
         task = kb.get_task(conn, out["task_id"])
-        assert kpf.forward_argv(task, None, ["hermes", "chat"])[1:4] == ["-m", kpf.MODULE, "--"]
+        assert kpf.forward_argv(task, None, ["hermes", "chat"])[1:5] == ["-P", "-m", kpf.MODULE, "--"]
         task.skills = ["sdlc-review"]  # the review lane always runs a real reviewer
         assert kpf.forward_argv(task, None, ["hermes", "chat"]) is None
     marked = json.loads(kt._handle_create({"title": "Read the Chrome tab", "parents": [parent]}))

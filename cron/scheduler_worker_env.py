@@ -61,6 +61,29 @@ def _committed_dependency_site_packages(project_root: Path) -> Path | None:
     return selected if selected.is_dir() else None
 
 
+#: ``-P`` (Python >= 3.11, the floor in ``pyproject.toml``): don't put the cwd in front of
+#: ``sys.path`` for ``-m``/``-c``. A Hermes child spawned with ``cwd`` = a task workspace
+#: that is itself a Hermes checkout (a hermes-agent worktree card) otherwise imports THAT
+#: tree's ``hermes_cli`` ahead of the PYTHONPATH pin below, takes the worktree as its
+#: project root and refuses to start ("no dependency environment is committed for this
+#: install"). The flag is not inherited, so the worker's own shell children keep normal
+#: ``python -m`` semantics.
+SAFE_PATH_FLAG = "-P"
+
+
+def hermes_module_argv(executable: str, module: str = "hermes_cli.main") -> list[str]:
+    """``[executable, -P, -m, module]``: run ``module`` from the install's import path only."""
+    return [executable, SAFE_PATH_FLAG, "-m", module]
+
+
+def is_hermes_module_argv(argv: list, module: str = "hermes_cli.main") -> bool:
+    """True for ``python [-P] -m <module> ...`` (both the safe-path and the legacy shape)."""
+    rest = list(argv[1:])
+    if rest[:1] == [SAFE_PATH_FLAG]:
+        rest = rest[1:]
+    return rest[:2] == ["-m", module]
+
+
 def pin_hermes_tree_on_pythonpath(worker_env: dict, repo_root: Path) -> dict:
     """Prepend ``repo_root`` -- and, when this runner has one, the committed dependency
     generation's ``site-packages`` -- to the worker env's own PYTHONPATH (never

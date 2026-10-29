@@ -93,7 +93,9 @@ def forward_argv(task, board: Optional[str], worker_cmd: list) -> Optional[list]
             conn.close()
         if not st:
             return None
-        return [sys.executable, "-m", MODULE, "--", *[str(x) for x in worker_cmd]]
+        # ``-P``: the forwarder runs with cwd = the task workspace; see ``hermes_module_argv``.
+        from cron.scheduler_worker_env import hermes_module_argv
+        return [*hermes_module_argv(sys.executable, MODULE), "--", *[str(x) for x in worker_cmd]]
     except Exception:
         return None
 
