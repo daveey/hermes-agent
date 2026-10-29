@@ -425,7 +425,21 @@ def recover_interrupted_executions() -> int:
             _prune_unlocked(conn)
     for record in recovered:
         _emit_execution_state(record)
+    _end_interrupted_sessions(recovered)
     return changed
+
+
+def _end_interrupted_sessions(records: list[dict[str, Any]]) -> None:
+    """Close the state.db session rows of attempts whose owner died mid-turn: its
+    ``_finalize_cron_session`` never ran, so nothing else would ever end them. Bounded, never raises."""
+    if not records:
+        return
+    try:
+        from cron.interrupted_sessions import end_interrupted_cron_sessions
+
+        end_interrupted_cron_sessions(records)
+    except Exception:  # health: allow BLE001 -- recovery boundary: the ledger is already settled
+        logger.warning("cron: ending interrupted session rows failed", exc_info=True)
 
 
 def terminalize_dead_owner(execution_id: str, *, reason: str) -> bool:
@@ -480,6 +494,8 @@ def terminalize_dead_owner(execution_id: str, *, reason: str) -> bool:
         record = _fetch(conn, execution_id)
         _prune_unlocked(conn)
     _emit_execution_state(record)
+    if record is not None:
+        _end_interrupted_sessions([record])
     return True
 
 
