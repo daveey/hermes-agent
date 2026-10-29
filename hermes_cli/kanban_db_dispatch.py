@@ -33,6 +33,8 @@ from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as 
 from hermes_cli import kanban_db_dispatch_quota as _kbq
 from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code_kind
 from hermes_cli import kanban_worker_scope as _worker_scope
+from hermes_cli import kanban_host_reboot as _host_reboot
+from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
 from hermes_cli.kanban_db_dispatch_queries import lane_rows, skip_reap
 
 if TYPE_CHECKING:
@@ -1268,31 +1270,6 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
     return " ".join(lines)[-400:]
 
 
-@dataclass
-class _DeadWorker:
-    """How ``detect_crashed_workers`` should book one dead worker."""
-
-    kind: str
-    code: Optional[int]
-    error_text: str
-    event_kind: str
-    event_payload: dict
-    protocol_violation: bool = False
-    rate_limited: bool = False
-    terminal_provider: bool = False
-    """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's credential/model — trips at once."""
-    unknown_skill: bool = False  # died of ``Unknown skill(s)``: blocked as ``assignment`` at once [daveey]
-    stdlib_shadow: bool = False  # traceback from a workspace ``<stdlib>.py``: blocked at once [daveey]
-
-    @property
-    def run_outcome(self) -> str:
-        if self.event_kind in {"oom_killed", "signaled"}:
-            return self.kind
-        # A rate-limited requeue is recorded as ``rate_limited`` so board history
-        # doesn't show a phantom crash for a quota wall.
-        return "rate_limited" if self.rate_limited else "crashed"
-
-
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
     run_id: Optional[int] = None, conn: Optional[sqlite3.Connection] = None,
@@ -1400,6 +1377,7 @@ class _CrashSweep:
 
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
+    host_rebooted: list[str] = field(default_factory=list)  # reboot bystanders, requeued uncounted [daveey]
     # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
     # ``_record_task_failure`` (needs its own write_txn).
     crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
@@ -1413,11 +1391,13 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, current_run_id "
-            "FROM tasks "
+            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, current_run_id, "
+            "workspace_path FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
         host_prefix = _kb._host_prefix()
+        now_boot, reboot_victims = _host_reboot.victims(rows, lambda r: _kb._claim_is_local(r["claim_lock"] or "",
+                                                                                          host_prefix))
         for row in rows:
             lock = row["claim_lock"] or ""
             if not _kb._claim_is_local(lock, host_prefix):
@@ -1433,6 +1413,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             pid = int(row["worker_pid"])
             dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board,
                                          run_id=row["current_run_id"], conn=conn)
+            _host_reboot.note(dead, row, now_boot, reboot_victims)  # [daveey]
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1471,7 +1452,12 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
-            if dead.rate_limited:
+            if dead.host_reboot and not dead.reboot_culprit:
+                # A bystander of a reboot: back to its source phase, no failure counted. [daveey]
+                conn.execute("UPDATE tasks SET last_failure_error = ? WHERE id = ?",
+                             (dead.error_text[:500], row["id"]))
+                sweep.host_rebooted.append(row["id"])
+            elif dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
                 try:
                     from hermes_cli import kanban_provider_walls as _walls
@@ -1531,9 +1517,11 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                     "protocol_violation_limit": violation_limit,
                 },
             )
-        elif dead.terminal_provider or dead.unknown_skill or dead.stdlib_shadow:
-            # No retry heals a revoked credential, a gone model, a missing skill or a stdlib shadow: block now.
-            flag = "unknown_skill" if dead.unknown_skill else "stdlib_shadow" if dead.stdlib_shadow else "terminal_provider"
+        elif dead.terminal_provider or dead.unknown_skill or dead.stdlib_shadow or dead.reboot_culprit:
+            # No retry heals a revoked credential, a gone model, a missing skill, a stdlib shadow or this
+            # card's own sudo shutdown of the host (a retry reboots it again): block now.
+            flag = "unknown_skill" if dead.unknown_skill else "stdlib_shadow" if dead.stdlib_shadow else \
+                "reboot_culprit" if dead.reboot_culprit else "terminal_provider"
             tripped = _record_task_failure(
                 conn, tid,
                 error=error_text,
@@ -1541,9 +1529,11 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 force_trip=True,
                 release_claim=False,
                 end_run=False,
-                event_payload_extra={"pid": pid, "claimer": claimer, flag: True},
-                block_kind="transient" if dead.terminal_provider else "assignment",
+                event_payload_extra={"pid": pid, "claimer": claimer, flag: dead.reboot_culprit or True},
+                block_kind="transient" if dead.terminal_provider else "capability" if dead.reboot_culprit else "assignment",
             )
+            if dead.reboot_culprit:
+                _host_reboot.comment_culprit(conn, tid, dead.reboot_culprit)
         else:
             is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
             extra = {"pid": pid, "claimer": claimer}
@@ -1584,6 +1574,7 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     # requeues did NOT count a failure and are NOT crashes.
     detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
     detect_crashed_workers._last_rate_limited = sweep.rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_host_rebooted = sweep.host_rebooted  # type: ignore[attr-defined]
     # Fired only now, after the reclaim txn AND breaker accounting have
     # committed, so subscribers always observe fully durable board state.
     if sweep.exited_hook_payloads and _kb._kanban_observer_consumed("on_kanban_worker_exited"):
