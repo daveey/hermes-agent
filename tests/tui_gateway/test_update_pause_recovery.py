@@ -129,7 +129,7 @@ def test_replaced_backend_slot_refusal_backs_off(recovery, monkeypatch):
     monkeypatch.setattr(server, "time", types.SimpleNamespace(time=time.time, monotonic=lambda: clock[0]))
     monkeypatch.setattr(server, "_start_session_work", lambda fn, **kw: fn() or True)
     def slot(*args, **kwargs):
-        assert kwargs == {"allow_takeover": False}
+        assert kwargs == {"takeover_idle_only": True}
         attempts.append(clock[0])
         return "another live owner" if len(attempts) == 1 else None
     monkeypatch.setattr(server, "_ensure_active_session_slot", slot)
@@ -188,6 +188,75 @@ def test_pause_readers_use_exclusive_slot_without_detached_takeover(recovery, mo
     finally:
         server._release_active_session_slot(first)
         server._release_active_session_slot(second)
+
+
+@pytest.mark.parametrize("holder_running", [False, True])
+def test_pause_reader_takes_over_only_an_idle_detached_holder(recovery, monkeypatch, holder_running):
+    _detached_ws_transport = server._detached_ws_transport
+    af.set_hold(recovery.home)
+    sid = mount()["session_id"]
+    af.clear_hold(recovery.home)
+    first = server._sessions[sid]
+    # A same-process sibling runtime of this chat lost its client but still holds the lease.
+    holder = {**first, "history_lock": threading.Lock(), "transport": _detached_ws_transport,
+              "running": holder_running}
+    holder.pop("active_session_lease", None)
+    server._sessions["holder"] = holder
+    assert recovery.real_slot("holder", holder) is None
+    monkeypatch.setattr(server, "_ensure_active_session_slot", recovery.real_slot)
+    monkeypatch.setattr(server, "_start_session_work", lambda fn, **kw: fn() or True)
+    monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **kw: None)
+    try:
+        assert server._maybe_schedule_auto_continue(sid, first, "paused") is not None
+        if holder_running:
+            # Mid-turn holder (a notice, another reader's continuation): never interrupted; retry backs off.
+            assert recovery.calls == [] and not first["running"]
+            assert holder.get("active_session_lease") is not None
+            assert first["_auto_continue_retry_after"] > time.monotonic()
+        else:
+            # Idle holder: no wait for its reap, the paused turn continues now.
+            assert_continued(recovery)
+            assert holder.get("active_session_lease") is None
+    finally:
+        server._release_active_session_slot(first)
+        server._release_active_session_slot(holder)
+
+
+def test_replaced_backend_durable_hold_is_bounded(recovery, monkeypatch):
+    # Fresh backend whose continuation is refused forever (a live foreign owner): notices wait for the
+    # paused turn at most HOLD_MAX_S, like the in-place hold, then flow; re-reading never re-arms it.
+    af.set_hold(recovery.home)
+    sid = mount()["session_id"]
+    af.clear_hold(recovery.home)
+    session = server._sessions[sid]
+    mono = [1000.0]
+    monkeypatch.setattr(up, "_mono", lambda: mono[0])
+    monkeypatch.setattr(server, "_start_session_work", lambda fn, **kw: fn() or True)
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a, **kw: "another live owner")
+    assert server._maybe_schedule_auto_continue(sid, session, "paused") is not None
+    assert recovery.calls == []
+    def claim():
+        claimed = server._notif_claim_turn(session)
+        session["running"] = False
+        return claimed
+    for dt in (0.0, 60.0, up.HOLD_MAX_S - 1):
+        mono[0] = 1000.0 + dt
+        assert up.continuation_due(session) and not claim(), dt
+    for dt in (up.HOLD_MAX_S, 900.0, 3600.0, 3 * 3600.0):
+        mono[0] = 1000.0 + dt
+        monkeypatch.setattr(up, "_now", lambda dt=dt: time.time() + min(dt, 3600.0))
+        assert not up.continuation_due(session) and claim(), dt
+    # A new pause (fresh paused_at) by a dead writer is a new hold, bounded the same way.
+    mark_turn_paused(recovery.home, "paused", up.PAUSE_REASON)
+    path = recovery.home / "desktop" / "interrupted_turns.json"
+    entries = json.loads(path.read_text())
+    entries["paused"]["writer_pid"] = 2 ** 22 - 3
+    entries["paused"].pop("writer_start_time", None)
+    path.write_text(json.dumps(entries))
+    monkeypatch.setattr(up, "_now", time.time)
+    assert up.continuation_due(session) and not claim()
+    mono[0] += up.HOLD_MAX_S
+    assert not up.continuation_due(session) and claim()
 
 
 def test_typed_message_during_build_retires_scheduled_pause(recovery, monkeypatch):

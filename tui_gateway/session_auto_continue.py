@@ -231,7 +231,9 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         # marker and still be mid-turn. Leave the marker so a later resume retries.
         # Running the continuation anyway would be the double-writer this fence exists to prevent. See
         # #94778.
-        slot_error = (_ensure_active_session_slot(sid, session, allow_takeover=False) if paused
+        # A paused continuation takes over only an idle detached sibling: one mid-turn (a notice, another
+        # reader's continuation) keeps the slot and this retries after the 30 s backoff below.
+        slot_error = (_ensure_active_session_slot(sid, session, takeover_idle_only=True) if paused
                       else _ensure_active_session_slot(sid, session))
         if slot_error is not None:
             logger.info("auto-continue for %s refused: session has another live owner", session_key)

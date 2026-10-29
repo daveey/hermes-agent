@@ -142,13 +142,16 @@ def _session_moved_refusal(session: dict):
         return None
 
 
-def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool = True) -> str | None:
+def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool = True,
+                                takeover_idle_only: bool = False) -> str | None:
     """Claim this session's cap slot on its first real turn; None when ok. session.create/resume deliberately
     do NOT claim: tile paints, reconnect-resumes and abandoned drafts would hold invisible slots (no DB row)
     that starve the messaging gateway sharing the cap. Anything holding a slot must be user-visible. An
     inert borrowed token (see _install_borrowed_lease) also lands here: present = slot held upstream.
     Exact admission passes allow_takeover=False: it must not move a detached owner's lease,
-    and already holds the non-reentrant resume lock used by takeover."""
+    and already holds the non-reentrant resume lock used by takeover. ``takeover_idle_only`` takes over
+    only a detached sibling that is not mid-turn (a paused-turn continuation must never interrupt a
+    notice or another reader's continuation, but must not wait out an idle holder's reap either)."""
     # A registry slot is not the SQLite writer lease. Check even on a warm Desktop session.
     # Its own running agent is excluded by exact holder, preserving ordinary steer/stop.
     if (refusal := _durable_owner_refusal(session)) is not None:
@@ -163,7 +166,7 @@ def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool
         return None
     from hermes_cli.active_sessions import SESSION_NOT_OWNED
     if (allow_takeover and getattr(limit_message, "reason", None) == SESSION_NOT_OWNED
-            and _take_over_detached_runtime_lease(sid, session, key)):
+            and _take_over_detached_runtime_lease(sid, session, key, idle_only=takeover_idle_only)):
         return None
     return limit_message
 
@@ -186,7 +189,7 @@ def _detached_lease_holder(session: dict, key: str) -> tuple[str, dict] | None:
     return None
 
 
-def _take_over_detached_runtime_lease(sid: str, session: dict, key: str) -> bool:
+def _take_over_detached_runtime_lease(sid: str, session: dict, key: str, *, idle_only: bool = False) -> bool:
     """Hand a detached sibling runtime's lease for ``key`` to ``session``; True when it now owns the slot.
 
     Lease identity is (pid, live_session_id), so a client that reconnects under a NEW runtime — Desktop
@@ -203,6 +206,8 @@ def _take_over_detached_runtime_lease(sid: str, session: dict, key: str) -> bool
         if (found := _detached_lease_holder(session, key)) is None:
             return False
         other_sid, other = found
+        if idle_only and other.get("running"):
+            return False
         lease = other["active_session_lease"]
         if not transfer_active_session(lease, session_id=key, metadata=_lease_metadata(sid)):
             return False
