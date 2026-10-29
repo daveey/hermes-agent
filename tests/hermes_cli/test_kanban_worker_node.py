@@ -416,3 +416,58 @@ def test_tool_create_heavy_route_works_when_the_registry_has_no_pickup_field(gws
     monkeypatch.setattr(kp, "create_remote", lambda view, **kw: {"ok": True, "request_id": "r", "queued_only": True})
     out = _tool_create({"title": "Run the bench-v2 benchmark", "assignee": "default"})
     assert out["runs_on"] == ["machine:worker-1"], out
+
+
+def test_client_publishes_pickup_mode_once_per_round_when_it_changed(gws, monkeypatch):
+    """The sync client posts pickup_mode() (None → null) once per sync round, and only when it changed."""
+    hub_gw, worker = gws
+    posted: list = []
+
+    class PublishingHub:
+        def __init__(self, gateway):
+            self.ident = ksc.Identity(url="https://board.test", key="k" * 16, gateway=gateway)
+
+        def report_pickup(self, pickup):
+            posted.append((self.ident.gateway, pickup))
+            return {"pickup": pickup}
+
+    ksc.reset_published_pickup()
+    worker.enter()  # kanban.sync.pickup: true → pickup_mode() == "all"
+    assert wn.pickup_mode() == "all"
+    assert ksc.publish_pickup_if_changed(PublishingHub(WORKER)) is True
+    assert ksc.publish_pickup_if_changed(PublishingHub(WORKER)) is False  # unchanged: no second post
+    hub_gw.enter()  # pickup off → None, posted as null
+    assert wn.pickup_mode() is None
+    assert ksc.publish_pickup_if_changed(PublishingHub(HUB)) is True
+    assert posted == [(WORKER, "all"), (HUB, None)]
+    assert json.dumps({"pickup": posted[-1][1]}) == '{"pickup": null}'
+
+    calls = []
+    client = ksc.Hub(ksc.Identity(url="https://board.test", key="k" * 16, gateway=WORKER))
+    monkeypatch.setattr(client, "_call", lambda method, path, body=None: calls.append((method, path, body)) or {})
+    client.report_pickup(None)
+    assert calls == [("POST", "/v2/machines/me", {"pickup": None})]
+
+    seen = []
+    monkeypatch.setattr(ksc, "publish_pickup_if_changed", lambda hub: seen.append(hub.ident.gateway) or False)
+    worker.enter()
+    ksc.sync_all_once(worker.svc.hub(WORKER))
+    ksc.sync_all_once(worker.svc.hub(WORKER))
+    assert seen == [WORKER, WORKER]  # once per round, not once per board
+
+
+def test_pin_to_a_machine_that_published_all_gets_runs_on(gws, monkeypatch):
+    """A registry entry whose machine posted pickup=all is a real pin target; one without pickup is not."""
+    hub, _ = gws
+    hub.enter()
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": [
+        {"name": WORKER, "state": "active", "labels": ["linux"], "pickup": "all"},
+        {"name": "macbook", "state": "active", "labels": ["macos"], "pinned_only": True},
+    ]})
+    out = _tool_create({"title": "pinned to a publisher", "assignee": "default", "placement": WORKER})
+    assert out["runs_on"] == ["machine:worker-1"], out
+    assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?",
+                                        (out["task_id"],)).fetchone()[0]) == ["machine:worker-1"]
+    # macbook is active and has no pickup field: the pin does not become runs_on
+    assert wn.placement_runs_on(hub.conn, "macbook") is None

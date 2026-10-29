@@ -152,6 +152,10 @@ class Hub:
         """This machine's own load for the registry (display only; see hermes_cli.machine_metrics)."""
         return self._call("POST", "/v2/machines/me/metrics", metrics)
 
+    def report_pickup(self, pickup: Optional[str]) -> dict:
+        """Publish this machine's ``kanban.sync.pickup`` (None → null) on its own registry row."""
+        return self._call("POST", "/v2/machines/me", {"pickup": pickup})
+
 
 # --- boards ---------------------------------------------------------------------------------------
 
@@ -623,9 +627,52 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
         live.close()
 
 
+_UNPUBLISHED = object()
+_PICKUP_STATE: dict[str, Any] = {"value": _UNPUBLISHED, "retry_at": 0.0}
+_PICKUP_UNSUPPORTED_S = 600.0
+
+
+def reset_published_pickup() -> None:
+    """Tests: forget the last posted pickup so the next round posts again."""
+    _PICKUP_STATE["value"] = _UNPUBLISHED
+    _PICKUP_STATE["retry_at"] = 0.0
+
+
+def publish_pickup_if_changed(hub: Any, *, now: Optional[float] = None) -> bool:
+    """Post :func:`hermes_cli.kanban_worker_node.pickup_mode` (None → null) once per sync round, and only when it
+    changed. A failed post is retried next round. An older Board (404/405) stays quiet for 10 minutes. Never
+    raises into the sync loop. A hub without ``report_pickup`` (test fakes) is a no-op."""
+    from hermes_cli.kanban_worker_node import pickup_mode
+    mode = pickup_mode()
+    if _PICKUP_STATE["value"] == mode:
+        return False
+    clock = time.monotonic() if now is None else now
+    if clock < float(_PICKUP_STATE["retry_at"]):
+        return False
+    poster = getattr(hub, "report_pickup", None)
+    if poster is None:
+        return False
+    try:
+        poster(mode)
+    except HubError as exc:
+        if exc.status in (404, 405):
+            _PICKUP_STATE["retry_at"] = clock + _PICKUP_UNSUPPORTED_S
+            _log.info("kanban sync: board has no pickup route yet (%s); retrying later", exc.status)
+        else:
+            _log.warning("kanban sync: pickup publish failed (%s)", exc)
+        return False
+    except OSError as exc:
+        _log.warning("kanban sync: pickup publish failed (%s)", exc)
+        return False
+    _PICKUP_STATE["value"] = mode
+    _PICKUP_STATE["retry_at"] = 0.0
+    return True
+
+
 def sync_all_once(hub: Optional[Hub] = None) -> list[RoundResult]:
     ident = load_identity() if hub is None else hub.ident
     hub = hub or Hub(ident)
+    publish_pickup_if_changed(hub)
     results = []
     for slug, path in board_paths():
         try:
