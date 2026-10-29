@@ -1760,7 +1760,7 @@ def _handle_create(args: dict, **kw) -> str:
         # other pin, a routed gateway included, falls through to the gateway route below. [daveey]
         from hermes_cli import kanban_worker_node as _wn
         try:
-            runs_on = _wn.normalize_runs_on(args.get("runs_on"))
+            runs_on = _wn.explicit_runs_on(conn, args.get("runs_on"))  # machine pins need pickup
         except ValueError as exc:
             return tool_error(str(exc))
         pinned_machine = None

@@ -125,7 +125,9 @@ def test_max_moves_and_ping_pong(gws):
     hub, _ = gws
     hub.enter()
     tid = kb.create_task(hub.conn, title="q", assignee="default")
-    machines = {**MACHINES, "w2": {"name": "w2", "state": "active", "labels": ["linux"], "hold": False}}
+    # Every target advertises pickup: a machine:<x> move to a machine without it is refused (placement_unavailable).
+    machines = {**MACHINES, HUB: {**MACHINES[HUB], "pickup": "explicit"},
+                "w2": {"name": "w2", "state": "active", "labels": ["linux"], "hold": False, "pickup": "all"}}
     # hub -> worker-1 -> w2: each move leaves a machine.
     assert km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], reason="1", machines=machines, me=HUB)["ok"]
     assert km.move_queued(hub.conn, tid, runs_on=["machine:w2"], reason="2", machines=machines, me=WORKER)["ok"]

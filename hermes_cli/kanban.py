@@ -467,7 +467,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
         from hermes_cli.kanban_skill_check import UnknownSkillError
         from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
+        from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
         try:
+            check_machine_pins(conn, getattr(args, "runs_on", None))  # explicit pins need pickup [daveey]
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
                 assignee=args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
@@ -495,7 +497,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             )
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)
-        except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing) as exc:
+        except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
         except (PinProviderUnresolvedError, ModelProviderMismatchError) as exc:
             return _err(f"kanban: {exc}", 2)

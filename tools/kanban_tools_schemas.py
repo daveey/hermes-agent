@@ -399,7 +399,7 @@ KANBAN_MOVE_SCHEMA = _schema(
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "runs_on": {"type": "array", "items": {"type": "string"}, "description": (
             "Labels the next machine must have, e.g. [\"machine:worker-1\"], [\"macos\"], [\"linux\"]. "
-            "machine:<name> pins one registered machine."
+            "machine:<name> pins one registered machine that picks up this board (else refused)."
         )},
         "reason": _prop("string", "Why the card must move (what this machine lacks). Logged on the card."),
         "checkpoint": _prop("string", (
@@ -733,7 +733,8 @@ KANBAN_CREATE_SCHEMA = _schema(
                     "description": "Machine labels the card needs (all of them), on a board that syncs to the "
                     "Board service: e.g. ['linux'], ['macos', 'xcode'], ['machine:<name>'] for one machine, "
                     "[] for any machine. Omit for the default: it runs here, or on a machine like this one "
-                    "if it waits too long."},
+                    "if it waits too long. 'machine:<name>' is refused (placement_unavailable) unless that "
+                    "machine picks up this board; then use placement='<name>'."},
         "placement": _prop("string", (
                 "Where the card runs. 'auto' (default): on a gateway with a "
                 "kanban.placement route (e.g. the MacBook -> 'hub', the gateway "

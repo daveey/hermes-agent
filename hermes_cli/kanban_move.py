@@ -11,6 +11,8 @@ Guards:
 
 * the target labels must be satisfiable now by a registry machine other than this one that is active and not
   on hold (``machine:<x>`` for an unregistered x never is);
+* ``machine:<x>`` needs x to advertise pickup (``placement_unavailable`` otherwise: x would never copy the card,
+  :func:`hermes_cli.kanban_worker_node.check_machine_pins`);
 * ``kanban.move.max_moves`` (default 3) moves per card;
 * moving back to a machine the card already left is ping-pong: refused unless ``force``, and it still counts;
 * ``dir`` / ``worktree`` workspaces exist only on their creator, so those cards never move;
@@ -103,6 +105,10 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     matches = matching_machines(labels, machines, me=me)
     if not matches:
         raise MoveRefused("no_machine", f"no active, unheld machine other than {me} has every label in {labels}")
+    try:
+        wn.check_machine_pins(conn, labels, machines=machines, me=me)
+    except wn.MachinePinRefused as exc:
+        raise MoveRefused(exc.code, str(exc)) from exc
     from hermes_cli import kanban_runs_on_capabilities as roc
     try:
         requires = json.loads(row["requires"]) if row["requires"] else []
