@@ -114,6 +114,40 @@ def test_stdlib_bootstrap_exports_the_pm_lock(toolchain, names, tmp_path):
     assert not Path(exported["HERMES_RUNTIME_DIR"]).exists(), "prepare must not provision before cache restore"
 
 
+def test_bootstrap_leaves_cache_key_inputs_unchanged(tmp_path):
+    """The PM tools cache key hashes pm/** and the setup-pm action after `prepare`.
+
+    Bytecode written by the bootstrap (a .pyc embeds the source mtime) made that hash unique per
+    checkout, so every job missed the cache and ran a ~114 MB save in its post hook; two such
+    hooks stalled past the job timeout. The key inputs must be identical before and after.
+    """
+    import shutil
+
+    root = Path(__file__).resolve().parents[2]
+    checkout = tmp_path / "checkout"
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+    shutil.copytree(root / "pm", checkout / "pm", ignore=ignore)
+    shutil.copytree(root / "scripts" / "ci", checkout / "scripts" / "ci", ignore=ignore)
+    (checkout / "scripts" / "__init__.py").touch()
+
+    def snapshot():
+        return sorted(
+            str(path.relative_to(checkout)) for tree in ("pm", "scripts")
+            for path in (checkout / tree).rglob("*") if path.is_file()
+        )
+
+    before = snapshot()
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+    env.update(GITHUB_OUTPUT=str(tmp_path / "output"), GITHUB_ENV=str(tmp_path / "environment"))
+    result = subprocess.run(
+        [sys.executable, "-S", str(checkout / "scripts/ci/setup_toolchain.py"), "prepare",
+         "--toolchain", "python", "--home", str(tmp_path / "state")],
+        cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert snapshot() == before, "the bootstrap wrote files the cache key hashes (bytecode?)"
+
+
 @pytest.mark.parametrize("extras", ['"dev"', '{}', '[1]', '["dev\\nHERMES_HOME=bad"]', '["--all"]'])
 def test_invalid_extras_do_not_export_or_install(extras, tmp_path):
     root = Path(__file__).resolve().parents[2]
