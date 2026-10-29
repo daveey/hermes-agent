@@ -825,6 +825,53 @@ def held_by_us_live(conn: sqlite3.Connection, task_id: str, now: Optional[int] =
     return row["lease_holder"] == _state(conn)["gateway_id"] and int(row["lease_expires"]) > now_ms
 
 
+def foreign_live_lease(conn: sqlite3.Connection, task_id: str, now: Optional[float] = None) -> Optional[str]:
+    """Gateway id of an unexpired Board lease held by someone else, else None.
+
+    A primary board mirrors cards running on another machine (``status='running'``,
+    ``claim_lock`` NULL, ``lease_holder`` = them). Operator reclaim on that replica
+    used to close the run row; the close synced and the owner's terminal-worker
+    reaper SIGTERMed the live worker (David-MBP 2026-10-28 23:05, pid 1522 drain
+    window: hub workers 631696/762267 died ~3 min after a Mac reclaim the Board
+    refused). Empty when this gateway holds the lease, the lease has expired, or
+    the board does not sync.
+    """
+    if board_mode(conn) != "primary":
+        return None
+    row = conn.execute(
+        "SELECT lease_holder, lease_expires FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if row is None or row["lease_holder"] is None or row["lease_expires"] is None:
+        return None
+    if row["lease_holder"] == _state(conn)["gateway_id"]:
+        return None
+    now_ms = int((time.time() if now is None else now) * 1000)
+    if int(row["lease_expires"]) <= now_ms:
+        return None
+    return str(row["lease_holder"])
+
+
+def refuse_foreign_reclaim(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when reclaim must not close the run: another gateway still holds the lease.
+
+    Writes ``reclaim_refused`` and leaves the run open. Closing it here syncs an
+    ended run to the lease owner, whose terminal-worker reaper then SIGTERMs the
+    live process.
+    """
+    holder = foreign_live_lease(conn, task_id)
+    if not holder:
+        return False
+    from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli import kanban_db as _kb
+    with write_txn(conn):
+        _kb._append_event(conn, task_id, "reclaim_refused", {
+            "reason": "foreign_live_lease",
+            "lease_holder": holder,
+            "manual": True,
+        })
+    return True
+
+
 def held_elsewhere_sql(conn: sqlite3.Connection, alias: str = "") -> str:
     """SQL condition (``AND NOT ...``) that leaves out cards whose Board lease another gateway holds.
 

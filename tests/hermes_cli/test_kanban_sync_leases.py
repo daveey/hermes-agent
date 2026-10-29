@@ -218,3 +218,34 @@ def test_operator_reclaim_releases_the_lease(primary, lease_client):
     run_uid = lease_client.calls[0][1]["run_uid"]
     assert kb.reclaim_task(conn, tid, reason="operator")
     assert lease_client.calls[-1][0] == "release" and lease_client.calls[-1][1]["run_uid"] == run_uid
+
+
+def test_reclaim_of_a_foreign_live_lease_does_not_end_the_run(primary, lease_client):
+    """A replica must not close a run another gateway still holds.
+
+    David-MBP 2026-10-28 23:05: reclaim of hub-leased cards (claim_lock NULL here)
+    ended the run; the Board refused the status change; the hub reaper SIGTERMed
+    the live workers ~3 min later.
+    """
+    conn = primary
+    tid = kb.create_task(conn, title="hub-owned", assignee="worker")
+    kb.claim_task(conn, tid)
+    run_uid = lease_client.calls[0][1]["run_uid"]
+    far = int((time.time() + 3600) * 1000)
+    conn.execute(
+        "UPDATE tasks SET lease_holder = ?, lease_expires = ?, claim_lock = NULL, worker_pid = NULL WHERE id = ?",
+        ("hub", far, tid),
+    )
+    before = conn.execute(
+        "SELECT status, ended_at FROM task_runs WHERE task_id = ?", (tid,),
+    ).fetchall()
+    assert kb.reclaim_task(conn, tid, reason="no local worker") is False
+    assert kb.get_task(conn, tid).status == "running"
+    after = conn.execute(
+        "SELECT status, ended_at FROM task_runs WHERE task_id = ?", (tid,),
+    ).fetchall()
+    assert after == before
+    kinds = [r["kind"] for r in conn.execute("SELECT kind FROM task_events WHERE task_id = ?", (tid,))]
+    assert "reclaim_refused" in kinds
+    assert "reclaimed" not in kinds
+    assert not any(kind == "release" and req.get("run_uid") == run_uid for kind, req in lease_client.calls)

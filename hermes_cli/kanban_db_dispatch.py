@@ -33,7 +33,7 @@ from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as 
 from hermes_cli import kanban_db_dispatch_quota as _kbq
 from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code_kind
 from hermes_cli import kanban_worker_scope as _worker_scope
-from hermes_cli.kanban_db_dispatch_queries import lane_rows
+from hermes_cli.kanban_db_dispatch_queries import lane_rows, skip_reap
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -689,7 +689,7 @@ def reap_terminal_workers(conn: sqlite3.Connection, *, signal_fn=None) -> list[s
 
 def _reap_terminal_worker_row(conn, row, host_prefix: str, signal_fn, reaped: list[str]) -> None:
     pid, fingerprint = int(row["worker_pid"]), row["worker_started_at"]
-    if pid == os.getpid() or not _kb._claim_is_local(row["claim_lock"], host_prefix):
+    if skip_reap(conn, row, pid, host_prefix):
         return
     if fingerprint == UNVERIFIED_WORKER_FINGERPRINT and _kb._pid_alive(pid):
         return  # unproven identity: never signalled; its evidence is cleared once the pid is gone

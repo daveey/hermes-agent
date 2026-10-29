@@ -2632,8 +2632,8 @@ def reclaim_task(
     ).fetchone()
     if not row:
         return False
-    if row["status"] != "running" and row["claim_lock"] is None:
-        # Nothing to reclaim — already ready / blocked / done.
+    idle = row["status"] != "running" and row["claim_lock"] is None
+    if idle or _sync.refuse_foreign_reclaim(conn, task_id):
         return False
     prev_lock = row["claim_lock"]
     termination = _terminate_reclaimed_worker(
