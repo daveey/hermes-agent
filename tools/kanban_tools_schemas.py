@@ -744,7 +744,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "(use it when the work needs this machine: its Chrome, "
                 "Keychain, Apple apps, launchd/Desktop state, local "
                 "checkouts). A gateway name pins it there; if the card cannot be "
-                "placed there (no placement route to it, a parent link, a "
+                "placed there (it is not live, a parent link, a "
                 "non-scratch workspace, a non-default board, an origin-bound "
                 "card, target not live, ...) the call fails with code "
                 "placement_unavailable and creates nothing (never a silent "
