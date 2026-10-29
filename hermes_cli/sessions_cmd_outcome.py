@@ -8,6 +8,7 @@ session-status auditor's input.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -50,8 +51,24 @@ def _describe(outcome: dict[str, Any] | None) -> str:
     return str(kind)
 
 
+def ensure_outcome_hooks() -> None:
+    """Load plugins before a re-derive so their outcome providers and judge are registered. Without
+    them a CLI/web refresh drops plugin-sourced decisions (user-steps tiles) and downgrades to the
+    heuristic, overwriting what the chat's own backend stored. Idempotent; a load failure leaves the
+    core-only derivation."""
+    try:
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception:  # health: allow BLE001 -- plugin load is best effort; core sources still derive
+        logging.getLogger(__name__).warning("outcome refresh: plugin load failed", exc_info=True)
+
+
 def cmd_outcome(db, args):
     from hermes_state_outcome import get_outcome, refresh_outcome
+
+    if args.refresh:
+        ensure_outcome_hooks()
 
     sid = _resolve(db, args.session_id)
     if not sid:
@@ -79,6 +96,8 @@ def audit_rows(db, *, refresh: bool = False, limit: int = AUDIT_DEFAULT_LIMIT) -
     """``{id, title, kind, reason, age_h, on, items}`` per sidebar row (``age_h`` = hours since last activity)."""
     from hermes_state_outcome import refresh_outcome
 
+    if refresh:
+        ensure_outcome_hooks()
     now, out = time.time(), []
     for row in sidebar_rows(db, limit):
         outcome = refresh_outcome(row["id"], "manual", db=db) if refresh else row.get("outcome")

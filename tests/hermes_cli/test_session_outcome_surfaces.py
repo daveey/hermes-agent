@@ -147,3 +147,52 @@ def test_cli_outcome_audit_lists_exactly_the_sidebar_rows(homes, capsys):
         db.close()
     run_cli("outcome-audit")
     assert "no_summary" in capsys.readouterr().out
+
+
+# ── refresh loads plugin hooks ───────────────────────────────────────────
+
+PROBE_PLUGIN = '''
+def register(ctx):
+    import hermes_state_outcome as so
+
+    def provider(sid):
+        return {"decision_items": [{"id": "us_probe", "question": "Ship it?",
+                                    "choices": [{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}],
+                                    "state": "open"}]}
+
+    so.register_outcome_provider("probe", provider)
+'''
+
+
+@pytest.fixture
+def probe_plugin(homes):
+    from hermes_cli import plugins
+
+    pdir = homes["default"] / "plugins" / "outcome-probe"
+    pdir.mkdir(parents=True)
+    (pdir / "plugin.yaml").write_text("name: outcome-probe\nversion: 0.1.0\ndescription: probe\n", encoding="utf-8")
+    (pdir / "__init__.py").write_text(PROBE_PLUGIN, encoding="utf-8")
+    (homes["default"] / "config.yaml").write_text("plugins:\n  enabled: [outcome-probe]\n", encoding="utf-8")
+    plugins._reset_plugin_managers_for_tests()
+    yield
+    plugins._reset_plugin_managers_for_tests()
+
+
+def test_cli_refresh_loads_plugin_providers(homes, probe_plugin, capsys):
+    """A CLI re-derive must see plugin decisions; without loading plugins it stored ``done`` over them."""
+    seed(homes["default"])
+    run_cli("outcome", "chat", "--refresh", "--json")
+    outcome = json.loads(capsys.readouterr().out)["outcome"]
+    assert outcome["kind"] == "decision"
+    assert outcome["items"][0]["id"] == "us_probe"
+    so._reset_hooks_for_tests()
+    from hermes_cli import plugins
+
+    plugins._reset_plugin_managers_for_tests()
+    run_cli("outcome-audit", "--json", "--refresh")
+    assert json.loads(capsys.readouterr().out)[0]["kind"] == "decision"
+
+
+def test_web_refresh_loads_plugin_providers(client, homes, probe_plugin):
+    seed(homes["default"])
+    assert client.get("/api/sessions/chat/outcome?refresh=1").json()["outcome"]["kind"] == "decision"

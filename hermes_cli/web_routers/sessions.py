@@ -1025,6 +1025,10 @@ async def get_session_outcome_endpoint(session_id: str, refresh: bool = False, p
         sid = _resolve_session_id(db, session_id)
         if not sid:
             raise HTTPException(status_code=404, detail=_NOT_FOUND)
+        if refresh:
+            from hermes_cli.sessions_cmd_outcome import ensure_outcome_hooks
+
+            ensure_outcome_hooks()
         outcome = refresh_outcome(sid, "manual", db=db) if refresh else get_outcome(sid, db=db)
         return {"session_id": sid, "outcome": outcome}
 
