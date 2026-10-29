@@ -31,6 +31,7 @@ from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 from hermes_cli import kanban_db_dispatch_guard_notice as _guard_notice
 from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as _guard_hold_started_at
 from hermes_cli import kanban_db_dispatch_quota as _kbq
+from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code_kind
 from hermes_cli import kanban_worker_scope as _worker_scope
 from hermes_cli.kanban_db_dispatch_queries import lane_rows
 
@@ -363,17 +364,6 @@ def _classify_worker_exit(pid: int) -> tuple[str, Optional[int]]:
     if signal_number != 0x7F:
         return ("signaled", signal_number)
     return ("unknown", None)
-
-
-def _exit_code_kind(code: int) -> tuple[str, int]:
-    """``(kind, code)`` for a worker's exit code, however it was observed."""
-    if code == 0:
-        return ("clean_exit", 0)
-    if code == _kb.KANBAN_RATE_LIMIT_EXIT_CODE:
-        return ("rate_limited", code)
-    if code == _kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE:
-        return ("terminal_provider", code)
-    return ("nonzero_exit", code)
 
 
 _EXIT_TRAILER_RE = re.compile(
@@ -1293,6 +1283,7 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's credential/model — trips at once."""
     unknown_skill: bool = False  # died of ``Unknown skill(s)``: blocked as ``assignment`` at once [daveey]
+    stdlib_shadow: bool = False  # traceback from a workspace ``<stdlib>.py``: blocked at once [daveey]
 
     @property
     def run_outcome(self) -> str:
@@ -1331,6 +1322,9 @@ def _classify_dead_worker(
             dead.error_text += f" Worker's last output: {worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
             dead.unknown_skill = dead.kind == "nonzero_exit" and "Unknown skill(s):" in worker_output
+    if task_id and dead.kind == "nonzero_exit":  # name a workspace <stdlib>.py [daveey]
+        from hermes_cli.kanban_workspace_shadow import note_dead_worker
+        note_dead_worker(dead, conn, task_id, run_id, board)
     return dead
 
 
@@ -1538,8 +1532,9 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                     "protocol_violation_limit": violation_limit,
                 },
             )
-        elif dead.terminal_provider or dead.unknown_skill:
-            # No retry heals a revoked credential, a gone model or a missing pinned skill: block now, sticky.
+        elif dead.terminal_provider or dead.unknown_skill or dead.stdlib_shadow:
+            # No retry heals a revoked credential, a gone model, a missing skill or a stdlib shadow: block now.
+            flag = "unknown_skill" if dead.unknown_skill else "stdlib_shadow" if dead.stdlib_shadow else "terminal_provider"
             tripped = _record_task_failure(
                 conn, tid,
                 error=error_text,
@@ -1547,9 +1542,8 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 force_trip=True,
                 release_claim=False,
                 end_run=False,
-                event_payload_extra={"pid": pid, "claimer": claimer,
-                                     "unknown_skill" if dead.unknown_skill else "terminal_provider": True},
-                block_kind="assignment" if dead.unknown_skill else "transient",
+                event_payload_extra={"pid": pid, "claimer": claimer, flag: True},
+                block_kind="transient" if dead.terminal_provider else "assignment",
             )
         else:
             is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
