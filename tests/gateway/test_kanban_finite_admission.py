@@ -19,6 +19,10 @@ def test_kanban_submission_enters_single_query_approval_context(tmp_path, monkey
     for name in ('HERMES_KANBAN_DB', 'HERMES_DELEGATED_CHILD', 'HERMES_SINGLE_QUERY_SESSION'):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr('hermes_cli.profiles.resolve_profile_env', lambda name: str(tmp_path))
+    # Fork: dir workspaces need terminal/file/host_repo in the assignee's profile policy; that gate
+    # (hermes_cli.kanban_capabilities) is not what this upstream test covers, so the assignee has them.
+    monkeypatch.setattr('hermes_cli.kanban_capabilities._profile_capabilities',
+                        lambda name: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     kb.create_board('owned')
@@ -80,6 +84,10 @@ def kanban_owner(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(run, '_hermes_home', tmp_path)
     monkeypatch.setattr('hermes_cli.profiles.resolve_profile_env', lambda name: str(tmp_path))
+    # Fork: dir workspaces need terminal/file/host_repo in the assignee's profile policy; that gate
+    # (hermes_cli.kanban_capabilities) is not what this upstream test covers, so the assignee has them.
+    monkeypatch.setattr('hermes_cli.kanban_capabilities._profile_capabilities',
+                        lambda name: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
 
     def build(config):
         (tmp_path / 'config.yaml').write_text(json.dumps(config))

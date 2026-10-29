@@ -48,6 +48,10 @@ def main():
            'auxiliary': {'title_generation': {'enabled': False}},
            'platform_toolsets': {'cli': []}, 'kanban': {'dispatch_in_gateway': False}}
     (owner / 'config.yaml').write_text(json.dumps(cfg))
+    # Fork: dir workspaces need terminal/file/host_repo in the assignee's profile policy; that gate
+    # (hermes_cli.kanban_capabilities) is not what this recovery probe covers.
+    import hermes_cli.kanban_capabilities as kanban_capabilities
+    kanban_capabilities._profile_capabilities = lambda name: {'terminal', 'file', 'git', 'host_repo', 'kanban'}
     env = dict(os.environ, HERMES_HOME=str(owner), OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
     # Already-running owner deliberately has no dispatcher-specific board overrides.
     for key in list(env):

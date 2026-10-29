@@ -18,11 +18,13 @@ def test_gateway_reply_includes_failed_fallback(monkeypatch):
     ])
     wrapped = RuntimeError(str(chain))
     wrapped.__cause__ = chain
-    runner = SimpleNamespace(_resolve_session_agent_runtime=Mock(side_effect=wrapped))
+    # Upstream's run_sync resolves the source's session policy first (d8835ab3a8b7); no adapter here.
+    runner = SimpleNamespace(_resolve_session_agent_runtime=Mock(side_effect=wrapped),
+                             _adapter_for_source=lambda source: None)
     turn = object.__new__(TurnRunner)
     turn._runner = runner
     turn._ctx = SimpleNamespace(source=SimpleNamespace(platform=Platform.LOCAL),
-                                session_key='test-session', user_config={})
+                                session_key='test-session', session_id='test-session', user_config={})
     monkeypatch.setattr(turn, '_combined_ephemeral_prompt', lambda: '')
     monkeypatch.setattr(run, '_current_max_iterations', lambda: 10)
     result = turn.run_sync()
