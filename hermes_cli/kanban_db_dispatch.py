@@ -2443,7 +2443,7 @@ def _run_reclaim_phase(
     stale_timeout_seconds: int,
     failure_limit: int,
     reconcile_orphans: bool,
-    board: Optional[str] = None,
+    board: Optional[str] = None, dry_run: bool = False,
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
     reap_worker_zombies()
@@ -2458,7 +2458,7 @@ def _run_reclaim_phase(
         _kb._log.warning("kanban: applying remote stop requests failed", exc_info=True)
     # [daveey] Before any stale check: a long gap since the last pass is a host suspend, which the
     # heartbeat backstop, the stale sweep and max_runtime must not count (``kanban_suspend_ledger``).
-    _record_dispatch_pass(conn)
+    _record_dispatch_pass(conn, dry_run=dry_run)
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
@@ -2672,7 +2672,7 @@ def _dispatch_once_locked(
     result = DispatchResult()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
-        failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
+        failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board, dry_run=dry_run,
     )
     if not dry_run:
         # Agent-owned blocks (no human ask / wake probe) get one triage respawn after 2h.

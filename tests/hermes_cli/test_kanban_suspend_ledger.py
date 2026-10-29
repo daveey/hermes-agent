@@ -224,3 +224,20 @@ def test_fresh_run_is_not_stale_against_its_predecessors_heartbeat(board, child)
     kinds = [e.kind for e in kb.list_events(board, tid)]
     assert "reclaimed" not in kinds and "claim_extended" in kinds
     assert kb.get_task(board, tid).claim_expires > now
+
+
+def test_dry_run_dispatch_writes_no_stamp_and_keeps_the_gap(board, monkeypatch):
+    """A dry run is not a pass: no ledger table, and the next real pass still sees the suspend gap."""
+    now = int(time.time())
+    monkeypatch.setattr(ledger, "_configured_interval_seconds", lambda: 60)
+    before = list(board.iterdump())
+    kbd.dispatch_once(board, dry_run=True)
+    assert list(board.iterdump()) == before
+    assert ledger.record_dispatch_pass(board, now=now - 3600, dry_run=True) is None
+    assert list(board.iterdump()) == before
+
+    ledger.record_dispatch_pass(board, now=now - 3600, interval_seconds=60)
+    kbd._run_reclaim_phase(board, kbd.DispatchResult(), stale_timeout_seconds=0, failure_limit=2,
+                           reconcile_orphans=False, dry_run=True)
+    ledger.record_dispatch_pass(board, now=now, interval_seconds=60)
+    assert ledger.suspended_intervals(board) == [(now - 3600, now)]

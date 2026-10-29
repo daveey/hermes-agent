@@ -60,12 +60,16 @@ def _configured_interval_seconds() -> float:
 
 def record_dispatch_pass(
     conn: sqlite3.Connection, *, now: Optional[int] = None, interval_seconds: Optional[float] = None,
+    dry_run: bool = False,
 ) -> Optional[tuple[int, int]]:
     """Stamp this pass; record ``[previous, now]`` as suspended when the gap is over the threshold.
 
     Returns the recorded span, else ``None``. Never raises: a failure leaves the checks on wall-clock
-    time, which is the pre-ledger behaviour.
+    time, which is the pre-ledger behaviour. A dry run (``dispatch_once(dry_run=True)``) is not a pass:
+    it writes nothing, and its stamp would hide a real suspend gap from the next pass.
     """
+    if dry_run:
+        return None
     from hermes_cli.kanban_db import write_txn
 
     now = int(time.time()) if now is None else int(now)
