@@ -256,6 +256,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     marker_text = session.pop("_auto_continue_prompt", None) or text
     session.pop("_paused_marker_carried", None)
     synthesized = session.pop("_synthesized_turn", False)
+    until_tool = bool(session.pop("_marker_until_tool", False))
     # [daveey] A core-update pause kept the previous turn's marker; this turn owns (and retires) its own.
     session.pop("_update_pause_marker_key", None)
     if not synthesized:  # the continuation (or a typed message) started: automatic turns may run again
@@ -265,8 +266,12 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     if isinstance(marker_text, str) and marker_text.strip():
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
+            # [daveey] _on_tool_start switches an at-most-once turn's marker off before its first tool runs.
+            session["_until_tool_marker_key"] = marker_key if until_tool and auto_continue else ""
         record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
-                          auto_continue=auto_continue, **({"killed_jobs": killed_jobs} if killed_jobs else {}),
+                          auto_continue=auto_continue,
+                          **({"until_tool": True} if until_tool and auto_continue else {}),
+                          **({"killed_jobs": killed_jobs} if killed_jobs else {}),
                           **({"pauses": marker_pauses} if marker_pauses else {}),
                           **({"notification_category": "diagnostic"}
                              if notification_category == "diagnostic" else {}))

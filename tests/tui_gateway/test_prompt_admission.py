@@ -104,7 +104,7 @@ def test_crash_after_commit_does_not_reexecute(owner, monkeypatch):
     assert db.get_messages(params["stored_session_id"]) == []
 
 
-def test_turn_adopts_admission_row_without_duplicate_and_disables_recovery(owner, monkeypatch):
+def test_turn_adopts_admission_row_without_duplicate_and_limits_recovery_to_no_tool_turns(owner, monkeypatch):
     from tests.tui_gateway.test_submit_time_user_row import _flush_agent
     from agent.turn_context import _stage_turn_user_message
     db, session, params, started = owner
@@ -113,7 +113,10 @@ def test_turn_adopts_admission_row_without_duplicate_and_disables_recovery(owner
     recorded = []
     monkeypatch.setattr(server, "_run_after_agent_ready", lambda *a, **kw: recorded.append(kw))
     started[0]()
-    assert recorded == [{"auto_continue": False}]
+    # Dispatch never replays; the turn stays continuable only until its first tool starts
+    # (test_admission_restart_resume.py proves both halves).
+    assert recorded == [{"auto_continue": True}]
+    assert session.get("_marker_until_tool") is True
     agent = _flush_agent(db, params["stored_session_id"])
     server._adopt_submit_user_row(session, agent, params["text"], params["text"])
     msg, _ = _stage_turn_user_message(agent, params["text"], params["text"], None, None, None, None)

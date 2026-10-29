@@ -116,11 +116,12 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> bool:
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
                       auto_continue: bool = True, notification_category: str | None = None,
-                      pauses: int = 0, killed_jobs: list | None = None) -> None:
+                      pauses: int = 0, killed_jobs: list | None = None, until_tool: bool = False) -> None:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
     this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume.
     ``pauses`` = core-update pauses this logical turn already took (``mark_turn_paused``), counted apart
-    from crash attempts so a pause never uses one up."""
+    from crash attempts so a pause never uses one up. ``until_tool`` [daveey]: the turn is continuable only
+    until its first tool starts (``mark_turn_tool_started``); used by at-most-once admitted decisions."""
     if not session_key or not prompt:
         return
     now = time.time()
@@ -130,6 +131,8 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
         entry["killed_jobs"] = list(killed_jobs)
     if pauses:
         entry["pauses"] = max(0, int(pauses))
+    if until_tool:
+        entry["until_tool"] = True
     if notification_category == "diagnostic":
         entry["notification_category"] = notification_category
     # Identity only — never the prompt: this log is read on crash triage and must not carry turn content.
@@ -141,6 +144,20 @@ def clear_turn_marker(home: Path | str, session_key: str) -> None:
     """Remove the marker once its turn concluded (any outcome the client saw)."""
     if session_key:
         _update(home, session_key, lambda e: {k: v for k, v in e.items() if k != session_key} if session_key in e else None, "clear")
+
+
+def mark_turn_tool_started(home: Path | str, session_key: str) -> bool:
+    """[daveey] An ``until_tool`` turn just started its first tool: from here a restart may have left a side
+    effect behind, so auto-continue is switched off (the turn's at-most-once contract). Written BEFORE the tool
+    runs. True when an ``until_tool`` marker was switched off."""
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not isinstance(entry, dict) or not entry.get("until_tool") or not entry.get("auto_continue", True):
+            return None
+        entry.update(auto_continue=False, tool_started_at=time.time())
+        return entries
+
+    return bool(session_key) and _update(home, session_key, mutate, "mark tool start")
 
 
 def mark_turn_paused(home: Path | str, session_key: str, reason: str,
@@ -226,6 +243,7 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
                 # Writer identity when present: extra keys only, so a marker written by an older build still reads.
                 **{k: entry[k] for k in ("writer_pid", "writer_start_time") if entry.get(k) is not None},
                 **({"reason": str(entry["reason"])} if entry.get("reason") else {}),
+                **({"until_tool": True} if entry.get("until_tool") else {}),
                 **({"notification_category": "diagnostic"}
                    if entry.get("notification_category") == "diagnostic" else {}),
                 **({"killed_jobs": killed} if killed else {})}

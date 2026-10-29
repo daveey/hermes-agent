@@ -43,6 +43,13 @@ PARTIAL_FAILED_TURN_NOTICE = (
     "This turn did not complete. Some actions may already have run; verify their effects "
     "before resending."
 )
+# [daveey] A backend restart (``backend_exit``) stopped the turn before any tool ran: restart recovery
+# continues it (auto-continue / the boot sweep), and a For-you decision has no button left to press, so
+# "Send it again" would be wrong advice (self-heal desktop-3a6213ce74).
+RESTART_FAILED_TURN_NOTICE = (
+    "Hermes restarted before this turn finished. It continues automatically once the backend is back; "
+    "send it again only if nothing happens within a few minutes."
+)
 # ``messages.display_kind`` of that row: display-only (stripped before every provider request),
 # so renderers show a Hermes notice and room pollers never read it as the model's reply.
 FAILED_TURN_DISPLAY_KIND = "failed_turn"
@@ -52,20 +59,21 @@ def untyped_failed_turn_display_kind(role: Any, content: Any) -> Optional[str]:
     """``FAILED_TURN_DISPLAY_KIND`` for a boundary row persisted before the closers typed it
     (exact notice text, so a real reply quoting it stays a reply); read-side only."""
     if role == "assistant" and isinstance(content, str) and content.strip() in (
-        FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE,
+        FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE, RESTART_FAILED_TURN_NOTICE,
     ):
         return FAILED_TURN_DISPLAY_KIND
     return None
 
 
-def failed_turn_notice(turn_messages: Any) -> str:
-    """Boundary copy for a failed turn: never claim "not processed" when a tool may have run."""
+def failed_turn_notice(turn_messages: Any, *, restarted: bool = False) -> str:
+    """Boundary copy for a failed turn: never claim "not processed" when a tool may have run. ``restarted``:
+    the turn was stopped by a backend restart, whose recovery continues a turn that ran no tool."""
     for row in turn_messages or ():
         if isinstance(row, dict) and (
             row.get("role") == "tool" or (row.get("role") == "assistant" and row.get("tool_calls"))
         ):
             return PARTIAL_FAILED_TURN_NOTICE
-    return FAILED_TURN_NOTICE
+    return RESTART_FAILED_TURN_NOTICE if restarted else FAILED_TURN_NOTICE
 
 
 def provider_label_for(provider: Any) -> str:
