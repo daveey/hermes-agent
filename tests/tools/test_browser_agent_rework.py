@@ -2,6 +2,7 @@
 import threading
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+import pytest
 
 from tools import browser_agent_lifecycle as lifecycle
 from tools import browser_use_cli as cli
@@ -122,17 +123,18 @@ def test_expired_capability_rotation_retires_old_daemon(monkeypatch):
 def test_managed_vault_exception_never_falls_back_to_unscoped_eval(monkeypatch):
     from unittest.mock import Mock
     from tools import browser_vault_tool as vault
-    from tools import browser_tool_session
     from tools.browser_supervisor import SUPERVISOR_REGISTRY
     monkeypatch.setattr(lifecycle, 'supervisor_task', lambda task: 'managed-scope')
     supervisor = Mock()
     supervisor.evaluate_runtime.side_effect = RuntimeError('connection disappeared')
     monkeypatch.setattr(SUPERVISOR_REGISTRY, 'get', lambda task: supervisor)
-    raw = Mock(side_effect=AssertionError('unscoped fallback'))
-    monkeypatch.setattr(browser_tool_session, '_run_browser_command', raw)
-    result = vault._eval_js('task', 'document.title')
-    assert result['success'] is False
-    raw.assert_not_called()
+    # No unscoped path remains (the built-in browser_* subprocess route is gone upstream): a supervisor
+    # that dies mid-call fails the read instead of widening it.
+    started = Mock(side_effect=AssertionError('unscoped supervisor attach'))
+    monkeypatch.setattr(SUPERVISOR_REGISTRY, 'get_or_start', started)
+    with pytest.raises(RuntimeError, match='connection disappeared'):
+        vault._eval_js('task', 'document.title')
+    started.assert_not_called()
 
 
 def test_failed_daemon_stop_retries_before_owner_reuse(monkeypatch):

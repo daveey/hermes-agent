@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from tools import browser_tool_lifecycle as bt_lifecycle
+from tools import browser_session_lifecycle as bt_lifecycle
 from tools import browser_use_cli as bu
 
 
@@ -231,10 +231,9 @@ def test_corrupt_ledger_file_is_treated_as_empty(ledger, cli, monkeypatch):
 def test_browser_exec_ships_ledger_preamble_on_shared_browser(ledger, tmp_path, monkeypatch):
     """Unnamed sessions on a shared browser get the ledger (before the own-tab pin for named ones), with
     the owner's ledger path and caps exported, and the call refreshes the owner's last_used."""
-    from tools import browser_tool_cloud as bt_cloud
-
-    monkeypatch.setattr("tools.browser_tool_cdp._get_cdp_override", lambda: "http://127.0.0.1:9222")
-    monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: None)
+    monkeypatch.setattr("tools.browser_session_cdp.get_cdp_override", lambda: "http://127.0.0.1:9222")
+    monkeypatch.setattr("tools.browser_session_cdp.get_cdp_override_raw", lambda: "http://127.0.0.1:9222")
+    monkeypatch.setattr("tools.browser_session_cloud.get_cloud_provider", lambda: None)
     monkeypatch.setattr(bu, "_attach_vault_supervisor", lambda env, task_id: None)
     monkeypatch.setattr(bu, "_read_browser_cfg", lambda: {"agent_tab_cap_per_owner": 2})
     monkeypatch.setattr(bu, "_base_subprocess_env", lambda: {"PATH": os.environ["PATH"], **ledger["env"]})

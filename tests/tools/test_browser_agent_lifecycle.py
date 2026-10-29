@@ -51,7 +51,7 @@ def managed(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, '_find_screenshot', lambda *args: None)
     monkeypatch.setattr(cli, '_code_url_verdict', lambda code: cli._CodeUrlVerdict('', False))
     # Raw discovery must not precede acquisition, even when idle.
-    monkeypatch.setattr('tools.browser_tool_cdp._get_cdp_override',
+    monkeypatch.setattr('tools.browser_session_cdp.get_cdp_override',
                         lambda: pytest.fail('unscoped discovery'))
     executions = []
 
@@ -84,7 +84,7 @@ def test_managed_entry_acquires_before_dispatch_and_completes(managed, local):
 
 
 def test_cleanup_releases_only_tasks_own_capabilities(managed):
-    from tools.browser_tool_lifecycle import cleanup_browser
+    from tools.browser_session_lifecycle import cleanup_browser
     _, calls, executions = managed
     for task in ('owner-a', 'owner-b'):
         for session in ('', 'same'):
@@ -109,7 +109,7 @@ def test_failed_execution_completes_request(managed, monkeypatch):
 
 
 def test_route_reset_does_not_release_other_sessions_but_shutdown_does(managed):
-    from tools.browser_tool_lifecycle import cleanup_all_browsers
+    from tools.browser_session_lifecycle import cleanup_all_browsers
     _, calls, executions = managed
     cli.browser_exec('print(1)', task_id='owner-a')
     cli.browser_exec('print(1)', task_id='owner-b')
@@ -122,8 +122,8 @@ def test_route_reset_does_not_release_other_sessions_but_shutdown_does(managed):
 
 def test_profile_isolation_and_emergency_release_without_legacy_sessions(managed, tmp_path, monkeypatch):
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-    from tools import browser_tool as bt
-    from tools import browser_tool_lifecycle as lifecycle
+    from tools import browser_session as bt
+    from tools import browser_session_lifecycle as lifecycle
     _, calls, executions = managed
     cli.browser_exec('print(1)', task_id='same-task')
     other = tmp_path / 'other'
@@ -139,10 +139,8 @@ def test_profile_isolation_and_emergency_release_without_legacy_sessions(managed
     assert executions[0][1]['BU_NAME'] != executions[1][1]['BU_NAME']
     assert [p['capability'] for path, p in calls if path.endswith('/release')] == [caps[1]]
     monkeypatch.setattr(bt, '_cleanup_done', False)
-    monkeypatch.setattr(lifecycle._real_profile, '_terminate_real_profile_chrome', lambda: None)
-    monkeypatch.setattr(lifecycle, '_stop_all_lightpanda', lambda: None)
-    monkeypatch.setattr(lifecycle, '_reap_orphaned_browser_sessions', lambda: None)
-    lifecycle._emergency_cleanup_all_sessions()
+    monkeypatch.setattr(lifecycle, 'cleanup_all_browsers', lambda **_kw: None)
+    lifecycle.emergency_cleanup_all_sessions()
     assert [p['capability'] for path, p in calls if path.endswith('/release')] == [caps[1], caps[0]]
 
 

@@ -37,11 +37,11 @@ def _unresolved(skills: list[str], home: str) -> tuple[list[str], list[str]]:
     """(missing labels, loadable names) for *skills* as a worker under *home* would see them."""
     from agent.skill_commands import build_preloaded_skills_prompt
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-    from tools.skills_tool import _find_all_skills
+    from tools.skills_tool import find_all_skills
     token = set_hermes_home_override(home)
     try:
         _prompt, _loaded, missing = build_preloaded_skills_prompt(skills)
-        names = [s["name"] for s in _find_all_skills()] if missing else []
+        names = [s["name"] for s in find_all_skills()] if missing else []
     finally:
         reset_hermes_home_override(token)
     return missing, names

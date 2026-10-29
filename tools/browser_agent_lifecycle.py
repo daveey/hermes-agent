@@ -74,8 +74,8 @@ def configured_route(browser_cfg: dict, env: dict) -> dict | None:
     endpoint = config.get("endpoint")
     if not isinstance(endpoint, str):
         raise ManagedBrowserError("browser.managed_agent.endpoint is required")
-    from tools.browser_tool_cdp import _get_cdp_override_raw
-    selected = env.get("BU_CDP_WS") or env.get("BU_CDP_URL") or _get_cdp_override_raw()
+    from tools.browser_session_cdp import get_cdp_override_raw
+    selected = env.get("BU_CDP_WS") or env.get("BU_CDP_URL") or get_cdp_override_raw()
     if selected != endpoint:
         return None  # cloud, personal-copy and other explicit routes retain their behavior
     parts = urllib.parse.urlsplit(endpoint)

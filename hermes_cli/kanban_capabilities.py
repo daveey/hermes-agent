@@ -93,11 +93,11 @@ def declaration_required() -> bool:
 def _skill_frontmatter(name: str) -> dict | None:
     """Frontmatter of skill *name* resolved the way ``skill_view`` resolves it in this home, or None."""
     from agent.skill_utils import normalize_skill_lookup_name
-    from tools.skills_tool import _locate_skill, _read_skill_text, _safe_frontmatter, _skill_search_dirs
+    from tools.skills_tool import _read_skill_text, _safe_frontmatter, locate_skill, skill_search_dirs
 
     lookup = normalize_skill_lookup_name(name)
-    roots, _active = _skill_search_dirs()
-    error, _skill_dir, skill_md = _locate_skill(lookup, None, roots)
+    roots, _active = skill_search_dirs()
+    error, _skill_dir, skill_md = locate_skill(lookup, None, roots)
     if error is not None or skill_md is None:
         return None
     frontmatter = _safe_frontmatter(content=_read_skill_text(skill_md))
