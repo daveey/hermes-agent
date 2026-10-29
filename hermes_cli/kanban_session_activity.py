@@ -1738,7 +1738,7 @@ def _remote_cards(ids: list[str] | None, statuses: tuple[str, ...], stale_ok: bo
         except _ksc.SyncUnavailable:
             gateway = None
         if gateway:
-            return _links.replica_cards(ids, gateway, statuses)
+            return _links.replica_cards(ids, gateway, statuses, stale_ok=stale_ok)
     return _remote_links(stale_ok=True) if stale_ok else _remote_links()
 
 

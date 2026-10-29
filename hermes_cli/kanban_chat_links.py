@@ -152,13 +152,14 @@ def _read_replica(path: Path, gateway: str, profile: str) -> tuple[list[dict[str
     return rows, pulled
 
 
-def _ledger_owners() -> dict[tuple[str, str], list[tuple[str, str, str, bool]]]:
+def _ledger_owners(stale_ok: bool = False) -> dict[tuple[str, str], list[tuple[str, str, str, bool]]]:
     """``(board, id) -> [(owner gateway, owner profile, session, released)]`` from the origin-ledger projection. A
     synced board is one file per gateway with one row per id, shared by that gateway's profiles, so the replica
-    row carries no owner profile: the ledger only labels it (``_owner_of``)."""
+    row carries no owner profile: the ledger only labels it (``_owner_of``). ``stale_ok`` is ``_remote_links``'s:
+    take the last projection instead of waiting on a rebuild."""
     from hermes_cli.kanban_session_activity import _remote_links
     try:
-        cards = _remote_links()
+        cards = _remote_links(stale_ok=True) if stale_ok else _remote_links()
     except Exception as exc:  # health: allow BLE001 -- the profile is a label; a failed ledger read must not hide cards
         _log.info("kanban chat links: owner profiles unavailable (%s: %s)", type(exc).__name__, exc)
         return {}
@@ -204,7 +205,8 @@ def _ledger_fallback(board: str, gateway: str, profile: str, statuses: tuple[str
 
 def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES,
                   replicas: Optional[list[tuple[str, Path]]] = None, *, now: Optional[float] = None,
-                  ledger_fallback: bool = True, unreadable_out: Optional[list[str]] = None) -> list[dict[str, Any]]:
+                  ledger_fallback: bool = True, unreadable_out: Optional[list[str]] = None,
+                  stale_ok: bool = False) -> list[dict[str, Any]]:
     """This gateway's chats' (``session_ids``, one lineage; ``None`` = every chat) unreleased links to cards created
     on OTHER gateways, from every board's replica, shaped like the origin-ledger rows ``session_tasks`` appends.
 
@@ -216,7 +218,10 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
     - an unreadable replica keeps its last rows, stale; on a cold start the ledger's rows for that board, stale.
       ``ledger_fallback=False`` (links_diff) skips both, so a diff never compares the ledger with itself;
       ``unreadable_out`` collects the boards whose replica could not be read;
-    - one row per (chat, card); the key carries the owner profile the ledger names for it, else ``default``."""
+    - one row per (chat, card); the key carries the owner profile the ledger names for it, else ``default``;
+    - ``stale_ok`` (the Desktop linked-card strip): the owner labels come from the last ledger projection rather
+      than waiting behind a rebuild of it. [daveey] Without it the strip's ``stale_ok`` stopped at this call and
+      ``/api/session-kanban-tasks`` queued on ``_links_lock`` for every board write (3-7 s in a wake burst)."""
     from hermes_cli.profiles import get_active_profile_name
     ids = None if session_ids is None else set(str(s) for s in session_ids if s)
     if ids is not None and not ids:
@@ -251,7 +256,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             rows, pulled = hit
             stale = True
         if owners is None and rows:
-            owners = _ledger_owners()
+            owners = _ledger_owners(stale_ok)
         for r in rows:
             if ids is not None and r["chat_session"] not in ids:
                 continue

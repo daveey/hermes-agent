@@ -251,3 +251,49 @@ def test_unknown_replica_card_waits_like_a_parked_one(live, kanban_home, monkeyp
     assert ksa.active_task_counts() == {"s1": 2, "s2": 1}
     parked, held = ksa.parked_task_counts()
     assert parked == {"s1": 2} and held == {}
+
+
+def test_session_tasks_stale_ok_reaches_the_replica_owner_labels(live, kanban_home, monkeypatch, tmp_path):
+    """[daveey] The Desktop strip's ``stale_ok`` must reach ``_ledger_owners``: it used to stop at
+    ``replica_cards``, so ``/api/session-kanban-tasks`` waited on every ledger rebuild in replica mode."""
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_remote", "from replica", "running", OTHER)], [("t_remote", ME, "s1", "shepherd", 0)])
+    _switch_to_replica(kanban_home, monkeypatch, rep)
+    calls = []
+
+    def remote_links(stale_ok=False):
+        calls.append(stale_ok)
+        return [_ledger_row("t_remote", "s1")]
+
+    monkeypatch.setattr(ksa, "_remote_links", remote_links)
+    assert [t["id"] for t in ksa.session_tasks(["s1"], stale_ok=True)] == ["t_remote"]
+    assert calls == [True]
+    calls.clear()
+    assert [t["id"] for t in ksa.session_tasks(["s1"])] == ["t_remote"]
+    assert calls == [False]  # every other reader keeps read-your-writes
+
+
+def test_session_tasks_stale_ok_does_not_wait_behind_a_ledger_rebuild(live, kanban_home, monkeypatch, tmp_path):
+    """A rebuild holding ``_links_lock`` (a board write moved the fingerprint) must not hold the strip."""
+    import threading
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_remote", "from replica", "running", OTHER)], [("t_remote", ME, "s1", "shepherd", 0)])
+    _switch_to_replica(kanban_home, monkeypatch, rep)
+    monkeypatch.setattr(ksa, "_remote_links", _real_remote_links)  # the real cache + lock, not the stub
+    monkeypatch.setattr(ksa, "_project_remote_links", lambda: [_ledger_row("t_remote", "s1")])
+    fp = ["v1"]
+    monkeypatch.setattr(ksa, "_links_fingerprint", lambda: (fp[0],))
+    assert [t["id"] for t in ksa.session_tasks(["s1"], stale_ok=True)] == ["t_remote"]  # primes the projection
+    fp[0] = "v2"  # a board write: the projection is stale and a rebuild is due
+    out: list = []
+    with ksa._links_lock:  # a rebuild in flight
+        th = threading.Thread(target=lambda: out.append(ksa.session_tasks(["s1"], stale_ok=True)), daemon=True)
+        th.start()
+        th.join(timeout=3)
+        finished = not th.is_alive()
+    th.join(timeout=5)
+    assert finished, "stale_ok session_tasks waited on _links_lock"
+    assert [t["id"] for t in out[0]] == ["t_remote"]
+
+
+_real_remote_links = ksa._remote_links
