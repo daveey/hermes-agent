@@ -62,20 +62,25 @@ done
   echo "scripts/check hook: no python3 or python on PATH" >&2; exit 1; }
 # A pm-managed install keeps the dependencies on its composed PYTHONPATH, not in a venv (the
 # Macs' venv/ predates them, and prompt-surface imports them all): take PATH and PYTHONPATH from
-# the main checkout's composed environment (read-only, never syncs), minus the main checkout
-# itself so the judged tree's own modules win.
-if [ -f "$common/pm/environments.py" ] && pm_env="$(cd "$common" && PYTHONHOME= PYTHONPATH="$common" \
-    "$py" -m pm.environments --format json 2>/dev/null | "$py" -c '
+# the composed environment (read-only, never syncs) of the main checkout, or, for a clone that
+# is not an install (a mirror's worktree), of the installed Hermes checkout; minus that checkout
+# itself, so the judged tree's own modules win.
+for pm_root in "$common" "${HERMES_HOME:-$HOME/.hermes}/hermes-agent"; do
+  [ -f "$pm_root/pm/environments.py" ] || continue
+  pm_env="$(cd "$pm_root" && PYTHONHOME= PYTHONPATH="$pm_root" "$py" -m pm.environments --format json \
+      2>/dev/null | "$py" -c '
 import json, os, shlex, sys
-env, common = json.load(sys.stdin), os.path.realpath(sys.argv[1])
-pp = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p and os.path.realpath(p) != common]
-if env.get("PATH"):
+env, root = json.load(sys.stdin), os.path.realpath(sys.argv[1])
+pp = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p and os.path.realpath(p) != root]
+if env.get("PATH") and pp:
     print("export PATH=" + shlex.quote(env["PATH"]))
     print("export PYTHONPATH=" + shlex.quote(os.pathsep.join(pp)))
-' "$common")" && [ -n "$pm_env" ]; then
+' "$pm_root")" || continue
+  [ -n "$pm_env" ] || continue
   eval "$pm_env"
   py="$(command -v python3 || command -v python || echo "$py")"
-fi
+  break
+done
 judge() {  # judge TREE-ISH ARGS...: check out TREE-ISH alone and run its own scripts/check ARGS
   local tree=$1 tmp dir rc
   shift
