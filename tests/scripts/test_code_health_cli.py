@@ -287,6 +287,41 @@ def test_hooks_prefer_the_repo_virtualenv_over_path_python(tmp_path):
     assert proc.returncode != 0 and "wrong interpreter" in proc.stderr
 
 
+def test_hooks_take_the_pm_composed_environment_minus_the_main_checkout(tmp_path):
+    """A pm-managed install (the Macs) keeps the dependencies on its composed PYTHONPATH: the
+    stale venv/ python cannot import them, so the hook runs the composed PATH's python with the
+    composed PYTHONPATH, minus the main checkout (the judged tree's own modules must win)."""
+    repo = _engine_repo(tmp_path)
+    assert _check(repo, "--install-hook", "pre-commit").returncode == 0
+    (repo / ".venv").symlink_to(Path(sys.prefix), target_is_directory=True)
+    record = tmp_path / "seen"
+    composed = tmp_path / "composed-bin"
+    composed.mkdir()
+    (composed / "python3").write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$PYTHONPATH\" >> '{record}'\nexec '{sys.executable}' \"$@\"\n",
+        encoding="utf-8")
+    (composed / "python3").chmod(0o755)
+    path = os.pathsep.join([str(composed), _env()["PATH"]])
+    # untracked: the hook reads it from the main checkout, not from the judged tree
+    _write(repo, {"pm/environments.py": (
+        "import json, os\n"
+        f"print(json.dumps({{'PATH': {path!r}, 'PYTHONPATH': os.pathsep.join([os.getcwd(), '/deps'])}}))\n"
+    )})
+    _write(repo, {"pkg/b.py": "def b():\n    return 2\n"})
+    _git(repo, "add", "--", "pkg/b.py")
+    proc = _sh(repo, "git", "commit", "-q", "-m", "pm")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert record.read_text(encoding="utf-8").splitlines() == ["/deps"]
+    # control: without pm/environments.py the hook keeps the venv python and never runs ours
+    (repo / "pm/environments.py").unlink()
+    record.unlink()
+    _write(repo, {"pkg/b.py": "def b():\n    return 3\n"})
+    _git(repo, "add", "--", "pkg/b.py")
+    proc = _sh(repo, "git", "commit", "-q", "-m", "venv")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not record.exists()
+
+
 def test_check_refuses_old_python_before_importing_anything():
     # The guard reads sys.version_info; a 3.10 interpreter is emulated by overriding it before
     # scripts/check runs (tomllib, imported via ruff_runner, would otherwise crash it).
