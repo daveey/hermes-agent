@@ -80,7 +80,7 @@ def test_kanban_block_reason_scrubbed_jwt(worker_env):
         "reason": f"Bearer {jwt}",
         "kind": "needs_input",
         "human_request": {
-            "action": "Rotate the leaked token",
+            "action": "Rotate the leaked token. Unblock = proceed; archive = drop it.",
             "why_human": "Only the account owner can rotate it",
             "interaction": "external",
             "scope": "test token",

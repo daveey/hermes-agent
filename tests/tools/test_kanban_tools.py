@@ -436,7 +436,7 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need clarification", "kind": "needs_input",
-                            "human_request": {"action": "clarify", "why_human": "ambiguous spec",
+                            "human_request": {"action": "clarify. Unblock = proceed; archive = drop it.", "why_human": "ambiguous spec",
                                               "interaction": "reply", "scope": "worker-test",
                                               "evidence": "spec has two readings"}})
     d = json.loads(out)
@@ -774,7 +774,7 @@ def test_create_blocked_open_parent_explicit_present_human_need(worker_env):
     result = json.loads(kt._handle_create(dict(
         title="Grant test account now while implementation continues", assignee="peer",
         parents=[worker_env], initial_status="blocked", human_action_now=True,
-        human_request=dict(action="grant", why_human="needs David", interaction="reply", scope="x", evidence="y"))))
+        human_request=dict(action="grant. Unblock = proceed; archive = drop it.", why_human="needs David", interaction="reply", scope="x", evidence="y"))))
     assert result.get("ok"), result
     assert result["status"] == "blocked"
     with kbc.connect() as conn:
@@ -795,7 +795,7 @@ def test_create_immediate_block_without_open_parents_unchanged(worker_env, paren
         parents = [worker_env]
     result = json.loads(kt._handle_create(dict(
         title="Approve release now", assignee="peer", parents=parents, initial_status="blocked",
-        human_request=dict(action="grant", why_human="needs David", interaction="reply", scope="x", evidence="y"))))
+        human_request=dict(action="grant. Unblock = proceed; archive = drop it.", why_human="needs David", interaction="reply", scope="x", evidence="y"))))
     assert result.get("ok"), result
     assert result["status"] == "blocked"
 

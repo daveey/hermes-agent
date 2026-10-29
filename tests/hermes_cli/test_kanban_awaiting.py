@@ -127,7 +127,7 @@ def test_hidden_human_ask_is_refused_as_a_park(kanban_home, monkeypatch) -> None
         assert kb.get_task(conn, tid).status == "running"
         # The visible path still works: a needs_input block with a human_request.
         out = _tool("block", {"reason": "Send support draft attachment180?", "kind": "needs_input",
-                              "human_request": {"action": "Send draft 180", "why_human": "your account",
+                              "human_request": {"action": "Send draft 180. Unblock = proceed; archive = drop it.", "why_human": "your account",
                                                 "interaction": "approval", "scope": "GitHub support",
                                                 "evidence": "draft attached"}})
         assert out.get("status") == "blocked", out

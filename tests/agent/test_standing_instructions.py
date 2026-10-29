@@ -86,7 +86,7 @@ def test_worker_context_always_shows_standing_comments(worker_env):
     assert text.index("## Standing instructions") < text.index("## Comment thread")
 
 
-ASK = {"action": "Pick when to restart the mini gateways", "why_human": "restart needs consent",
+ASK = {"action": "Pick when to restart the mini gateways. Unblock = restart; archive = skip.", "why_human": "restart needs consent",
        "interaction": "reply", "scope": "mini launcher migration", "evidence": "card comments"}
 
 

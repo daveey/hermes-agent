@@ -248,7 +248,10 @@ HUMAN_REQUEST = {
         "metadata never grants execution permission or completes/unblocks the task."
     ),
     "properties": {
-        "action": {"type": "string", "minLength": 1},
+        "action": {"type": "string", "minLength": 1, "description": (
+            "The ask line David sees verbatim on the card and in chat notices: the exact thing to do and "
+            "where, then what unblock and archive mean, e.g. \"Reply A or B in this chat. Unblock = build "
+            "the pick; archive = drop it.\" An action missing either meaning is refused.")},
         "why_human": {"type": "string", "minLength": 1},
         "interaction": {"type": "string", "enum": ["approval", "reply", "user_terminal", "physical", "external"]},
         "scope": {"type": "string", "minLength": 1},

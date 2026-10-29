@@ -55,6 +55,40 @@ def block_policy_error(kind, *, human_request=None, wake_check=None, clock_only=
     )
 
 
+ASK_LINT_CODE = "user_ask_incomplete"
+_UNBLOCK = re.compile(r"\bun-?block", re.IGNORECASE)
+_ARCHIVE = re.compile(r"\barchiv", re.IGNORECASE)
+
+
+def user_ask_lint_error(human_request) -> Optional[str]:
+    """Typed refusal when a block on David does not say, in its ask line, what unblock and archive mean.
+
+    ``human_request.action`` is the one line every surface shows David verbatim (card view, For-you queue, chat
+    close-out and ask-relay notices). An action like "Pick A or B" or "the safety change" left him reading
+    "blocked" with no idea what to do or what his click would do (coach pattern blocked-card-missing-user-ask).
+    Only agent entry points (kanban_block / kanban_create tools) call this; internal trackers are not linted.
+    """
+    if not isinstance(human_request, dict):
+        return None
+    action = " ".join(str(human_request.get("action") or "").split())
+    missing = [label for label, rx in (("what unblocking the card does", _UNBLOCK),
+                                       ("what archiving it does", _ARCHIVE)) if not rx.search(action)]
+    if not missing:
+        return None
+    return (f"{ASK_LINT_CODE}: human_request.action is the ask line David sees verbatim on the card and in chat "
+            f"notices, and it does not say {' or '.join(missing)}. Rewrite action as one self-contained line: "
+            "the exact thing to do and where, then 'Unblock = <what happens next>; archive = <what happens / "
+            "what is dropped>'. Example: \"Reply with the owner (david, household or system) for device "
+            "'barley' in this chat. Unblock = the agent records it and enforces privacy; archive = leave it "
+            "unowned.\"")
+
+
+def ask_lint_check(human_request) -> tuple:
+    """``_check`` args for the tool entry points: ``(ok, message, rejection)``."""
+    err = user_ask_lint_error(human_request)
+    return err is None, err or "", ASK_LINT_CODE
+
+
 def creation_lint_error(title, initial_status, human_request, *, triage=False) -> Optional[str]:
     """Refuse decision cards / blocked cards that carry no human ask."""
     if human_request:
