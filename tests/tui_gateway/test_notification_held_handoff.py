@@ -169,14 +169,18 @@ def test_busy_owner_among_many_pollers_does_not_bounce_its_event(env, monkeypatc
     sessions = {"sid_owner": owner, **others}
     _add(**sessions)
     ready = {sid: threading.Event() for sid in sessions}
-    queue_get = env.queue.get
+    # Fork: upstream's poller dequeues through tools.process_registry_awaiting.take_ready (dequeue and
+    # in-flight hold in one step), not queue.get, so the first-dequeue probe wraps take_ready.
+    from tools import process_registry_awaiting
+    take_ready = process_registry_awaiting.take_ready
 
-    def get_when_ready(*args, **kwargs):
+    def take_when_ready(*args, **kwargs):
         # First dequeue happens after held-list initialization, unlike merely starting a thread.
-        ready[threading.current_thread().name].set()
-        return queue_get(*args, **kwargs)
+        if threading.current_thread().name in ready:
+            ready[threading.current_thread().name].set()
+        return take_ready(*args, **kwargs)
 
-    monkeypatch.setattr(env.queue, "get", get_when_ready)
+    monkeypatch.setattr(process_registry_awaiting, "take_ready", take_when_ready)
     stops, threads = [], []
     for sid, s in sessions.items():
         stop = threading.Event()
