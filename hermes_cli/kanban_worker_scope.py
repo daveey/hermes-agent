@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -221,39 +222,54 @@ def apply_toolchain_env(env: dict) -> None:
         env["NODE_OPTIONS"] = (node_options + " " + _NODE_HEAP_FLAG).strip()
 
 
-def note_oom_kill(task_id: str, board: str | None = None, *, now: int | None = None) -> str | None:
+def note_oom_kill(
+    task_id: str, board: str | None = None, *, now: int | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> str | None:
     """Count OOM kills in 24h; above the threshold open one card per incident.
 
     Later kills in the same incident (an open alert card exists) become comments.
     Returns the alert task id, or None. Never raises.
+
+    Pass ``conn`` when the caller already holds a write transaction on this
+    board. A fresh ``connect()`` from inside that transaction deadlocks: init
+    re-runs the legacy-inflight backfill, and its ``BEGIN IMMEDIATE`` waits on
+    the lock the caller holds for the busy timeout. The alert card's
+    ``create_task`` / ``add_comment`` nest as a savepoint on ``conn``.
     """
     import time
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     now = int(now if now is not None else time.time())
+
+    def _note(db: sqlite3.Connection) -> str | None:
+        kills = db.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE outcome = 'oom_killed' AND ended_at >= ?",
+            (now - OOM_ALERT_WINDOW_SECONDS,)).fetchone()[0] + 1  # + this run, not yet booked
+        if kills <= OOM_ALERT_THRESHOLD:
+            return None
+        key = "worker-oom-rate-alert"
+        open_card = db.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? AND status NOT IN ('done', 'archived') "
+            "ORDER BY created_at DESC LIMIT 1", (key,)).fetchone()
+        if open_card:
+            kb.add_comment(db, open_card[0], "oom-detector",
+                           f"Another worker OOM kill ({task_id}); {kills} in the last 24h.")
+            return open_card[0]
+        return kb.create_task(
+            db, title=f"Worker OOM kills: {kills} in 24h",
+            body=(f"{kills} kanban worker scopes were OOM-killed in the last 24h "
+                  f"(threshold {OOM_ALERT_THRESHOLD}); latest: {task_id}. Retries get a doubled "
+                  "MemoryMax up to 12 GiB; check `journalctl --user | grep oom-kill` and the "
+                  "victims' last output for the heavy step."),
+            assignee="default", created_by="oom-detector", priority=70,
+            idempotency_key=key, board=board)
+
     try:
-        with kbc.connect_closing(board=board) as conn:
-            kills = conn.execute(
-                "SELECT COUNT(*) FROM task_runs WHERE outcome = 'oom_killed' AND ended_at >= ?",
-                (now - OOM_ALERT_WINDOW_SECONDS,)).fetchone()[0] + 1  # + this run, not yet booked
-            if kills <= OOM_ALERT_THRESHOLD:
-                return None
-            key = "worker-oom-rate-alert"
-            open_card = conn.execute(
-                "SELECT id FROM tasks WHERE idempotency_key = ? AND status NOT IN ('done', 'archived') "
-                "ORDER BY created_at DESC LIMIT 1", (key,)).fetchone()
-            if open_card:
-                kb.add_comment(conn, open_card[0], "oom-detector",
-                               f"Another worker OOM kill ({task_id}); {kills} in the last 24h.")
-                return open_card[0]
-            return kb.create_task(
-                conn, title=f"Worker OOM kills: {kills} in 24h",
-                body=(f"{kills} kanban worker scopes were OOM-killed in the last 24h "
-                      f"(threshold {OOM_ALERT_THRESHOLD}); latest: {task_id}. Retries get a doubled "
-                      "MemoryMax up to 12 GiB; check `journalctl --user | grep oom-kill` and the "
-                      "victims' last output for the heavy step."),
-                assignee="default", created_by="oom-detector", priority=70,
-                idempotency_key=key, board=board)
+        if conn is not None:
+            return _note(conn)
+        with kbc.connect_closing(board=board) as owned:
+            return _note(owned)
     except Exception:
         import logging
         logging.getLogger(__name__).warning("oom detector failed", exc_info=True)

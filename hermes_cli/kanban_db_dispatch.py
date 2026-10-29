@@ -1305,7 +1305,7 @@ class _DeadWorker:
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
-    run_id: Optional[int] = None,
+    run_id: Optional[int] = None, conn: Optional[sqlite3.Connection] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -1317,8 +1317,10 @@ def _classify_dead_worker(
     failure = _worker_scope.read_failure(task_id, run_id, log or "") if task_id else None
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
-        if kind == "oom_killed":
-            _worker_scope.note_oom_kill(task_id, board)
+        if kind == "oom_killed" and task_id:
+            # On the reclaim connection. A second connect here re-runs the
+            # legacy-inflight backfill and deadlocks on this write txn.
+            _worker_scope.note_oom_kill(task_id, board, conn=conn)
         dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
                            {"pid": pid, "claimer": claimer, **failure})
     else:
@@ -1437,7 +1439,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
 
             pid = int(row["worker_pid"])
             dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board,
-                                         run_id=row["current_run_id"])
+                                         run_id=row["current_run_id"], conn=conn)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(

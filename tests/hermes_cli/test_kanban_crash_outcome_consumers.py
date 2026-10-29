@@ -1,6 +1,9 @@
 """Classified scope deaths retain crash recovery policy, not log-text diagnoses."""
+import contextlib
 import json
+import sqlite3
 import time
+from pathlib import Path
 
 import pytest
 
@@ -75,3 +78,72 @@ def test_killed_workers_retain_crash_diagnostics(outcome):
     task["consecutive_failures"] = 3
     result = _rule_repeated_failures(task, [], runs, 100, {})
     assert result[0].data["most_recent_outcome"] == outcome
+
+
+def test_oom_reclaim_does_not_take_a_second_write_txn(board, monkeypatch):
+    """A legacy inflight row makes the next connect's backfill take a write txn.
+
+    ``detect_crashed_workers`` already holds one. ``note_oom_kill`` used to open
+    a second connection for the OOM counter; that connect re-ran
+    ``_backfill_legacy_inflight_runs`` and blocked in ``BEGIN IMMEDIATE`` for
+    the busy timeout (the shard-0 hang). The counter must stay on the caller's
+    connection, and an over-threshold reclaim must still open the alert card.
+    """
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(scope, "read_failure", lambda *a: {
+        "scope_result": "oom-kill", "systemd_unit": "test.scope",
+        "memory_max_bytes": 67108864, "memory_peak_bytes": 67239936,
+    })
+    monkeypatch.setattr(scope, "release_failure", lambda *a: None)
+    holder: dict = {"conn": None}
+    crossed = []
+    real_write_txn = kbc.write_txn
+
+    @contextlib.contextmanager
+    def guarding_write_txn(conn, *, allow_nested=False):
+        # BEGIN IMMEDIATE on any other connection while reclaim holds its write
+        # txn is the deadlock (busy_timeout, then retries). Fail it immediately
+        # so the regression asserts instead of stalling the suite.
+        if holder["conn"] is not None and conn is not holder["conn"] and holder["conn"].in_transaction:
+            crossed.append(conn)
+            raise sqlite3.OperationalError("database is locked")
+        with real_write_txn(conn, allow_nested=allow_nested) as yielded:
+            yield yielded
+
+    monkeypatch.setattr(kbc, "write_txn", guarding_write_txn)
+
+    with kbc.connect() as conn:
+        legacy = kb.create_task(conn, title="legacy inflight", assignee="default")
+        conn.execute(
+            "UPDATE tasks SET status='running', current_run_id=NULL, worker_pid=NULL, "
+            "claim_lock=NULL, started_at=? WHERE id=?",
+            (int(time.time()) - 300, legacy),
+        )
+        for _ in range(scope.OOM_ALERT_THRESHOLD):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, status, outcome, started_at, ended_at) "
+                "VALUES (?, 'crashed', 'oom_killed', ?, ?)",
+                (legacy, int(time.time()) - 10, int(time.time()) - 10),
+            )
+        victim = kb.create_task(conn, title="oom victim", assignee="default")
+        _dead_worker_with_log(conn, victim, 72001, 1)
+        conn.commit()
+        # Force note_oom_kill's connect through the migration/backfill path.
+        db_file = kbc._main_db_file(conn)
+        assert db_file
+        kbc._INITIALIZED_PATHS.discard(str(Path(db_file).resolve()))
+        holder["conn"] = conn
+        dispatch.detect_crashed_workers(conn)
+        run = conn.execute(
+            "SELECT outcome FROM task_runs WHERE task_id=? AND outcome IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (victim,),
+        ).fetchone()
+        alert = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key='worker-oom-rate-alert' "
+            "AND status NOT IN ('done', 'archived')"
+        ).fetchone()
+    assert not crossed, "note_oom_kill opened a second write txn inside reclaim"
+    assert run["outcome"] == "oom_killed"
+    assert alert is not None
