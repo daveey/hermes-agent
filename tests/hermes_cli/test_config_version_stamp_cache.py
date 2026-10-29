@@ -23,16 +23,17 @@ def hermes_home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def parses(monkeypatch):
-    from hermes_cli import config
+    # The stamp parses through upstream's config backend (read_config_doc), so count those parses.
+    from hermes_cli import config_backend
 
-    real = config.fast_safe_load
+    real = config_backend.read_config_doc
     count = [0]
 
-    def counting(stream):
+    def counting(path):
         count[0] += 1
-        return real(stream)
+        return real(path)
 
-    monkeypatch.setattr(config, "fast_safe_load", counting)
+    monkeypatch.setattr(config_backend, "read_config_doc", counting)
     return count
 
 

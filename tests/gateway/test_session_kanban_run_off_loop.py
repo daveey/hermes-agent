@@ -27,7 +27,7 @@ def test_run_task_kanban_write_never_blocks_the_loop(tmp_path, monkeypatch):
     # Fork: dir workspaces need terminal/file/host_repo in the assignee's profile policy; that gate
     # (hermes_cli.kanban_capabilities) is not what this upstream test covers, so the assignee has them.
     monkeypatch.setattr('hermes_cli.kanban_capabilities._profile_capabilities',
-                        lambda name: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
+                        lambda name, *_required: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     kb.create_board('owned')

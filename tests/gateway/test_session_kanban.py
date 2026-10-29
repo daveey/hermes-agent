@@ -20,7 +20,7 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
     # Fork: dir workspaces need terminal/file/host_repo in the assignee's profile policy; that gate
     # (hermes_cli.kanban_capabilities) is not what this upstream test covers, so the assignee has them.
     monkeypatch.setattr('hermes_cli.kanban_capabilities._profile_capabilities',
-                        lambda name: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
+                        lambda name, *_required: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     (workspace / 'pyproject.toml').write_text('[project]\nname = "task"\n')  # a code worktree
@@ -120,7 +120,7 @@ def test_claim_reclaimed_before_admission_marker_is_refused(tmp_path, monkeypatc
     # Fork: dir workspaces need terminal/file/host_repo in the assignee's profile policy; that gate
     # (hermes_cli.kanban_capabilities) is not what this upstream test covers, so the assignee has them.
     monkeypatch.setattr('hermes_cli.kanban_capabilities._profile_capabilities',
-                        lambda name: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
+                        lambda name, *_required: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     kb.create_board('owned')  # explicit creation; connect() never creates a board (#43243)

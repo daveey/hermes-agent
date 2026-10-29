@@ -179,7 +179,7 @@ def test_content_parses_never_touch_the_index(home):
 
 
 def test_cold_process_skill_lookup_reads_no_skill_frontmatter_twice(tmp_path):
-    """Work bound across processes: a second cold `_locate_skill` over 40 skills parses none."""
+    """Work bound across processes: a second cold `locate_skill` over 40 skills parses none."""
     home = tmp_path / "hermes"
     skills = home / "skills"
     for i in range(40):
@@ -190,9 +190,9 @@ def test_cold_process_skill_lookup_reads_no_skill_frontmatter_twice(tmp_path):
         from hermes_yaml import safe_load
         n = []
         skill_utils._yaml_load_fn = lambda t: (n.append(1), safe_load(t))[1]
-        from tools.skills_tool import _locate_skill, _skill_search_dirs
-        roots, _ = _skill_search_dirs()
-        err, d, md = _locate_skill("s07", None, roots)
+        from tools.skills_tool import locate_skill, skill_search_dirs  # upstream dropped the leading underscores
+        roots, _ = skill_search_dirs()
+        err, d, md = locate_skill("s07", None, roots)
         print("RESULT " + json.dumps({"err": err, "md": str(md), "parses": len(n)}))
     """)
     env = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "PYTEST"))}

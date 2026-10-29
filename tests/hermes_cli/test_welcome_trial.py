@@ -328,7 +328,7 @@ def _kanban_worker_model(monkeypatch, tmp_path) -> str:
     # (hermes_cli.kanban_capabilities fails closed on a missing file); that gate is not what this
     # upstream trial-model test covers, so the assignee has them.
     monkeypatch.setattr("hermes_cli.kanban_capabilities._profile_capabilities",
-                        lambda name: {"terminal", "file", "git", "host_repo", "kanban"})
+                        lambda name, *_required: {"terminal", "file", "git", "host_repo", "kanban"})
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     kb.create_board("trial")

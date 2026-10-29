@@ -1719,18 +1719,24 @@ def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int, *, run_id=
     fingerprint is what lets every later liveness/kill decision tell OUR worker from a process that
     recycled the PID after a reboot. A failed capture is persisted as ``UNVERIFIED_WORKER_FINGERPRINT``,
     never NULL: NULL is the legacy pre-fingerprint row whose bare-PID kill authority a new spawn must
-    not inherit."""
+    not inherit.
+
+    [daveey] ``run_id`` is the claimed run (HERMES_KANBAN_RUN_ID): its run row always records the
+    worker it launched, and a ``current_run_id`` a sync pull blanked mid-spawn (t_01a189343dd2f6ac)
+    still counts as this claim's for the task row. A card that moved on to a newer run keeps that
+    run's task fields untouched."""
     started_at = _process_fingerprint(int(pid)) or UNVERIFIED_WORKER_FINGERPRINT
     with _kb.write_txn(conn):
         if run_id is None:
             run_id = _kb._current_run_id(conn, task_id)
-        cur = conn.execute(
+        conn.execute(
             "UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ? AND status = 'running' "
-            "AND current_run_id IS ? AND worker_pid IS NULL "
+            "AND (current_run_id IS ? OR current_run_id IS NULL) AND worker_pid IS NULL "
             "AND (? IS NULL OR claim_lock = ?)",
             (int(pid), started_at, task_id, run_id, claim_lock, claim_lock))
-        if cur.rowcount:
-            conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
+        if run_id is not None:
+            conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ? "
+                         "AND worker_pid IS NULL",
                          (int(pid), started_at, run_id))
         _kb._append_event(conn, task_id, "spawned", {"pid": int(pid), "started_at": started_at}, run_id=run_id)
 

@@ -131,7 +131,7 @@ def test_a_kanban_custom_provider_override_stays_on_the_profiles_endpoint(tmp_pa
     # Fork: dir workspaces need terminal/file/host_repo in the assignee's profile policy; that gate
     # (hermes_cli.kanban_capabilities) is not what this upstream test covers, so the assignee has them.
     monkeypatch.setattr('hermes_cli.kanban_capabilities._profile_capabilities',
-                        lambda name: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
+                        lambda name, *_required: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
     kb.create_board('owned')
     with closing(connect(board='owned')) as conn:
         task_id = kb.create_task(conn, title='t', assignee='default', workspace_kind='dir',
