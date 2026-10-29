@@ -532,9 +532,20 @@ def _write_moa_config(home, text):
 
 
 
+@pytest.fixture()
+def draft_rpc_pool(server, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    # A failed assertion must not leave a worker using the next test's session
+    # or monkeypatches. Drain it before either fixture can be torn down.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        monkeypatch.setattr(server, "_pool", pool)
+        yield pool
+
+
 @pytest.mark.parametrize("method", ["command.dispatch", "slash.exec"])
 def test_goal_draft_uses_session_profile_without_blocking_rpc_reader(
-    server, session, monkeypatch, tmp_path, method,
+    server, session, monkeypatch, tmp_path, method, draft_rpc_pool,
 ):
     from hermes_cli import goals
     from hermes_constants import get_hermes_home
@@ -553,7 +564,9 @@ def test_goal_draft_uses_session_profile_without_blocking_rpc_reader(
     def draft(objective):
         observed.append(get_hermes_home())
         started.set()
-        assert release.wait(10)
+        # Only the caller's finally may unblock the draft: a slow runner must
+        # not make an inline (reader-blocking) dispatch appear asynchronous.
+        release.wait()
         return goals.GoalContract(verification="tests pass")
 
     def write(frame):
@@ -575,14 +588,15 @@ def test_goal_draft_uses_session_profile_without_blocking_rpc_reader(
     caller = threading.Thread(target=dispatch)
     caller.start()
     try:
-        assert started.wait(5)
-        assert returned.wait(2), "draft blocked the transport reader"
+        assert started.wait(60), "draft worker did not start"
+        assert returned.wait(60), "draft blocked the transport reader"
+        assert not release.is_set()
         ping = server.dispatch({"id": "ping", "method": "ping", "params": {}}, transport)
         assert ping["id"] == "ping" and "result" in ping
     finally:
         release.set()
-        caller.join(5)
-    assert replied.wait(5)
+        caller.join()
+    assert replied.wait(60)
     assert observed == [secondary]
     assert goals.load_goal(key) is None, "goal leaked into the launch profile"
     with server._session_profile_runtime_scope(record):
