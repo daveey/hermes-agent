@@ -257,12 +257,13 @@ def test_messaging_gateway_and_desktop_backend_recover_with_their_owner_filter()
     import inspect
 
     from gateway import run_startup
-    from hermes_cli import web_server
+    # Fork: upstream split FastAPI app assembly (incl. the startup hook) out of web_server into web_server_app.
+    from hermes_cli import web_server_app
 
     gw = inspect.getsource(run_startup)
     assert "recover_from_checkpoint()" not in gw
     assert gw.count('recover_from_checkpoint(owner="gateway")') == 2
-    assert "start_tui_orphan_recovery()" in inspect.getsource(web_server)
+    assert "start_tui_orphan_recovery()" in inspect.getsource(web_server_app)
 
 
 def test_reassert_checkpoint_restores_entries_a_foreign_writer_dropped(checkpoint, procs):
