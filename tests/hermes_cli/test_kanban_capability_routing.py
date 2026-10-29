@@ -564,3 +564,167 @@ def test_woken_card_needing_another_gateway_is_claimed_here_once_its_owner_is_do
         assert kb.get_task(conn, tid).status == "ready"
         assert kb.claim_task(conn, tid, claimer="worker") is not None
         assert kb.get_task(conn, tid).status == "running"
+
+
+# --- owner create vs the waiting card itself (hub t_01a18669308f507f) ------------------------
+
+# The owner title embeds this (truncated at 80). 9 shared words, score 0.6: the target's
+# create_overlap matched the requester itself and wait-check exited 2 forever.
+OVERLAP_TITLE = (
+    "Fix prompt-surface lint renderer importing sysconfig after spoofing sys.platform on macOS"
+)
+
+
+def _parse_create_options(argv: list[str]) -> dict:
+    opts = {}
+    for i, arg in enumerate(argv):
+        if arg == "--option" and i + 1 < len(argv):
+            key, sep, raw = argv[i + 1].partition("=")
+            assert sep, argv[i + 1]
+            opts[key] = json.loads(raw)
+    return opts
+
+
+def _apply_owner_create(env, monkeypatch):
+    """create-task as the target gateway applies it: overlap against open cards, reject or accept.
+
+    A refusal is recorded on the sent request (state=rejected), which is what made
+    ``wait-check`` exit 2. Acceptance records a done create with an owner id and no replica
+    yet, so ``wait-check`` stays 1 (pending).
+    """
+    from hermes_cli import kanban_overlap
+
+    applied: dict = {}
+
+    def applying_hub(argv):
+        rid = argv[argv.index("--id") + 1]
+        title = argv[3]
+        body = argv[argv.index("--body") + 1]
+        opts = _parse_create_options(argv)
+        env["hub"].execute(
+            "INSERT INTO sent (id, body, state, created_at) VALUES (?, ?, 'local', ?)",
+            (rid, json.dumps({"id": rid, "to_gw": argv[2], "args": {"title": title}}), time.time()))
+        env["hub"].commit()
+        matches = kanban_overlap.find(
+            title=title, body=body, target_board="default", session_id=None, self_tid=None, parents=[])
+        distinct = [str(x) for x in (opts.get("distinct_from") or [])]
+        reason = str(opts.get("distinct_reason") or "")
+        applied["matches"] = [m["id"] for m in matches]
+        applied["distinct"] = distinct
+        if matches and not kanban_overlap.covered(matches, distinct, reason):
+            env["hub"].execute(
+                "UPDATE sent SET state='rejected', result=? WHERE id=?",
+                (json.dumps({"code": "create_overlap", "matches": [m["id"] for m in matches]}), rid))
+            env["hub"].commit()
+            applied["rejected"] = True
+            return 0, rid
+        owner = "t_01a18679owner1"
+        env["hub"].execute(
+            "UPDATE sent SET state='done', result=? WHERE id=?",
+            (json.dumps({"task": owner}), rid))
+        env["hub"].commit()
+        applied["owner"] = owner
+        return 0, rid
+
+    monkeypatch.setattr(kcr, "hub_runner", applying_hub)
+    return applied
+
+
+def _route_overlapping(env, monkeypatch, *, stranger: bool):
+    need = "host:macbook"
+    publish(env["hub"], "macbook", {need: time.time()})
+    applied = _apply_owner_create(env, monkeypatch)
+    with kbc.connect_closing() as conn:
+        awaited = kb.create_task(conn, title=OVERLAP_TITLE, assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (awaited,))
+        extra = None
+        if stranger:
+            extra = kb.create_task(conn, title=OVERLAP_TITLE, assignee="worker")
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='running' WHERE id=?", (extra,))
+        tid = kb.create_task(conn, title=OVERLAP_TITLE, assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "scheduled", {
+                "awaiting": {"kind": "card", "ref": awaited, "why": "same work, already owned"},
+                "reason": OVERLAP_TITLE,
+            })
+        try:
+            kcr.route(conn, tid, [need], reason=OVERLAP_TITLE)
+        except Exception as exc:
+            applied["error"] = f"{type(exc).__name__}: {exc}"
+    return tid, awaited, extra, kcr.request_id(tid, need), applied
+
+
+def test_overlap_skips_the_waiting_card_a_capability_owner_quotes(env):
+    """Target-side guard: even a create-task that drops --option must not match the waiting card."""
+    from hermes_cli import kanban_overlap
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title=OVERLAP_TITLE, assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        sibling = kb.create_task(
+            conn, title=f"Capability owner: host:macbook for hub/{tid} ({OVERLAP_TITLE[:80]})",
+            assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (sibling,))
+    title = f"Capability owner: ssh:mini for hub/{tid} ({OVERLAP_TITLE[:80]})"
+    body = f"Capability owner card for waiting card hub/default/default/{tid}.\n"
+    matches = kanban_overlap.find(
+        title=title, body=body, target_board="default", session_id=None, self_tid=None, parents=[])
+    ids = [m["id"] for m in matches]
+    assert tid not in ids and sibling not in ids, ids
+
+
+def test_old_create_task_client_still_queues_without_the_overlap_option(env, monkeypatch):
+    """hermes-hub < 1.9.11 exits 2 on distinct_from. Routing must still queue the owner card."""
+    need = "host:macbook"
+    publish(env["hub"], "macbook", {need: time.time()})
+    calls: list[list[str]] = []
+
+    def old_client(argv):
+        calls.append(list(argv))
+        if any(str(a).startswith("distinct_from=") for a in argv):
+            return 2, "create_option_unknown: distinct_from (allowed: skills)"
+        rid = argv[argv.index("--id") + 1]
+        env["hub"].execute(
+            "INSERT INTO sent (id, body, state, created_at) VALUES (?, ?, 'local', ?)",
+            (rid, json.dumps({"id": rid, "to_gw": argv[2]}), time.time()))
+        env["hub"].commit()
+        return 0, rid
+
+    monkeypatch.setattr(kcr, "hub_runner", old_client)
+    with kbc.connect_closing() as conn:
+        tid = running(conn)
+        out = kcr.route(conn, tid, [need], reason="need the MacBook")
+    assert out["status"] == "scheduled"
+    assert len(calls) == 2
+    assert any(str(a).startswith("distinct_from=") for a in calls[0])
+    assert not any(str(a).startswith("distinct_") for a in calls[1])
+    assert kcr.wait_check(kcr.request_id(tid, need))[0] == 1
+
+
+def test_capability_route_creates_owner_when_reason_duplicates_requester_title(env, monkeypatch):
+    """The owner card quotes the waiting card. That must not be create_overlap against the
+    waiting card or the cards it awaits, and wait-check must stay pending (1), not 2."""
+    tid, awaited, _extra, rid, applied = _route_overlapping(env, monkeypatch, stranger=False)
+    assert applied.get("owner"), applied
+    assert not applied.get("error"), applied
+    assert tid in applied["distinct"] and awaited in applied["distinct"], applied
+    rc, msg = kcr.wait_check(rid)
+    assert rc == 1, msg
+
+
+def test_unrelated_title_twin_still_rejects_the_owner_create(env, monkeypatch):
+    """Excluding the waiting card must not disable overlap. A different open card with the
+    same title is still a second owner, and wait-check reports the rejection (2)."""
+    _tid, awaited, stranger, rid, applied = _route_overlapping(env, monkeypatch, stranger=True)
+    assert applied.get("rejected"), applied
+    assert "create_overlap" in applied.get("error", ""), applied
+    assert stranger in applied["matches"] and stranger not in applied["distinct"]
+    assert awaited in applied.get("distinct", [])
+    rc, msg = kcr.wait_check(rid)
+    assert rc == 2 and "rejected" in msg, msg

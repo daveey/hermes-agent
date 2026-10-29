@@ -26,9 +26,11 @@ Refusals are typed (:class:`CapabilityRouteError`), and nothing is written:
   card must finish or report why. A REJECTED owner request may be re-routed once more (a new
   generation of the request id).
 
-Retries are safe: the owner envelope is a pure function of (card, need, reason), and an id that
-was already sent is re-sent from its stored envelope (same gateway), so ``hermes-hub`` sees an
-exact retry, never a conflicting one.
+Retries are safe: an id that was already sent is re-sent from its stored envelope (same gateway,
+title, body and overlap override), so ``hermes-hub`` sees an exact retry, never a conflicting one.
+A fresh envelope carries ``distinct_from`` for the waiting card and the cards it awaits: the owner
+title quotes that work, and the target's create_overlap check would otherwise refuse it as a
+duplicate of the card it exists to serve.
 """
 from __future__ import annotations
 
@@ -48,6 +50,11 @@ ROUTED_EVENT = "capability_routed"
 WAKE_EVERY = 120
 WAKE_HORIZON = 72 * 3600
 HUB_TIMEOUT = 60
+# Stable: a resend of a fresh envelope must byte-match, and the target records it on the new card.
+DISTINCT_REASON = (
+    "capability owner card for the waiting card and the cards it awaits; "
+    "it does the scoped action on this gateway, it is not a second owner of that work"
+)
 
 
 class CapabilityRouteError(ValueError):
@@ -99,6 +106,69 @@ def _default_runner(argv: list[str]) -> tuple[int, str]:
 
 # Tests replace this with a fake that records argv.
 hub_runner: Callable[[list[str]], tuple[int, str]] = _default_runner
+
+
+def overlap_exclusions(conn, task_id: str) -> list[str]:
+    """The waiting card and the local cards it awaits (bounded), in walk order.
+
+    The owner card's title embeds the waiting card's title, so the target's overlap check matches
+    that card and any open card it awaits with a similar title. Those are the work this owner
+    exists to serve, not a second owner. A remote awaiting ref (a request id) is not a task id
+    and is not walked: the producer card id is not in it.
+    """
+    from hermes_cli.kanban_awaiting import _TASK_ID, _latest_park
+
+    seen: list[str] = []
+    stack = [task_id]
+    while stack and len(seen) < 32:
+        node = stack.pop(0)
+        if not node or node in seen or not _TASK_ID.fullmatch(node):
+            continue
+        seen.append(node)
+        awaiting, _reason = _latest_park(conn, node)
+        if not isinstance(awaiting, dict) or awaiting.get("kind") != "card":
+            continue
+        ref = str(awaiting.get("ref") or "")
+        if _TASK_ID.fullmatch(ref):
+            stack.append(ref)
+    return seen
+
+
+def _strip_overlap_options(argv: list[str]) -> list[str]:
+    """Drop distinct_from / distinct_reason options an older hermes-hub client rejects."""
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        nxt = argv[i + 1] if i + 1 < len(argv) else ""
+        if argv[i] == "--option" and nxt.startswith(("distinct_from=", "distinct_reason=")):
+            i += 2
+            continue
+        out.append(argv[i])
+        i += 1
+    return out
+
+
+def _create_task(argv: list[str]) -> tuple[int, str]:
+    """Queue the owner card. An older client that does not know distinct_from still gets the create;
+    the target's overlap check skips the waiting card itself (kanban_overlap.capability_owner_waiting_id).
+    """
+    rc, out = hub_runner(argv)
+    if rc in (0, 3) or "create_option_unknown" not in out or "distinct_from" not in out:
+        return rc, out
+    return hub_runner(_strip_overlap_options(argv))
+
+
+def _overlap_option_argv(stored_args: Optional[dict], exclusions: list[str]) -> list[str]:
+    """``--option`` pairs for create-task. A stored envelope is replayed unchanged."""
+    if stored_args and "distinct_from" in stored_args:
+        distinct = stored_args["distinct_from"]
+        reason = stored_args.get("distinct_reason") or DISTINCT_REASON
+    else:
+        distinct, reason = exclusions, DISTINCT_REASON
+    return [
+        "--option", "distinct_from=" + json.dumps(distinct, separators=(",", ":")),
+        "--option", "distinct_reason=" + json.dumps(reason, separators=(",", ":")),
+    ]
 
 
 def _ago(at: float, now: float) -> str:
@@ -284,15 +354,17 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
             args = env.get("args") or {}
             gw, title, body = env.get("to_gw") or r["gateway"], args.get("title") or "", args.get("body") or ""
             assignee = args.get("assignee") or _owner_assignee()
+            overlap_opts = _overlap_option_argv(args, overlap_exclusions(conn, task_id))
         else:
             gw = r["gateway"]
             title = redact_sensitive_text(
                 f"Capability owner: {r['need']} for {self_gw}/{task_id} ({(task.title or '')[:80]})", force=True)
             body = owner_body(task, r["need"], self_gw=self_gw, board=board_slug, reason=reason)
             assignee = _owner_assignee()
+            overlap_opts = _overlap_option_argv(None, overlap_exclusions(conn, task_id))
         argv = [hub, "create-task", gw, title, "--body", body, "--assignee", assignee,
-                "--origin-session", "", "--id", rid]
-        rc, out = hub_runner(argv)
+                "--origin-session", "", "--id", rid, *overlap_opts]
+        rc, out = _create_task(argv)
         # 0 = sent, 3 = queued locally (hub unreachable; sent on the next sync). Both are durable.
         if rc not in (0, 3):
             done = ", ".join(x["request_id"] for x in routes)

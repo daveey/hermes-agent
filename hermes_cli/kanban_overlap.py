@@ -11,7 +11,8 @@ An open card matches when:
 - both titles share at least half of the longer title's significant words (3 or more).
 
 Never matched: closed cards, the creator's own card, the new card's parents, cards the same chat or the same
-worker created (fan-out). A missing or unreadable replica is skipped and logged, never a block.
+worker created (fan-out), the waiting card a capability-owner create quotes, and another capability-owner
+card for that same waiting card. A missing or unreadable replica is skipped and logged, never a block.
 ``kanban.create_overlap_check: false`` turns the check off.
 """
 
@@ -141,6 +142,31 @@ def key_family(key: Optional[str]) -> Optional[str]:
     return key.split(":", 1)[0] if key else None
 
 
+_OWNER_TITLE_RE = re.compile(
+    r"^Capability owner: \S+ for [A-Za-z0-9._-]+/(t_[0-9a-f]{8,16}) \(")
+_OWNER_BODY_RE = re.compile(
+    r"^Capability owner card for waiting card \S+/(t_[0-9a-f]{8,16})\b")
+
+
+def capability_owner_waiting_id(title: str, body: str) -> Optional[str]:
+    """The waiting card a capability-owner create quotes, when the title and body name the same id.
+
+    The owner title embeds that card's title, so a word-overlap check matches the card the owner
+    exists to serve (hub t_01a18669308f507f). Both shapes must agree, so a title that merely starts
+    with the prefix does not skip anything.
+    """
+    title_m = _OWNER_TITLE_RE.match(title or "")
+    body_m = _OWNER_BODY_RE.match(body or "")
+    if title_m and body_m and title_m.group(1) == body_m.group(1):
+        return title_m.group(1)
+    return None
+
+
+def _sibling_owner(card_title: str, waiting_id: str) -> bool:
+    found = _OWNER_TITLE_RE.match(card_title or "")
+    return bool(found and found.group(1) == waiting_id)
+
+
 def find(*, title: str, body: str, target_board: str, session_id: Optional[str], self_tid: Optional[str],
          parents: Iterable[str], family: Optional[str] = None) -> list[dict]:
     """Open cards elsewhere that already cover this work, best match first. Never raises. ``family`` (the new
@@ -149,11 +175,14 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
         from hermes_cli import kanban_capability_registry as reg
         self_gw = reg.self_gateway()
         skip = set(parents) | ({self_tid} if self_tid else set())
+        waiting = capability_owner_waiting_id(title, body)
         new_words = words(title)
         out = []
         for source in (_local_cards(self_gw), _replica_cards(self_gw)):
             for card in source:
-                if (card["id"] in skip or (session_id and card["session_id"] == session_id)
+                if (card["id"] in skip or card["id"] == waiting
+                        or (waiting and _sibling_owner(card.get("title") or "", waiting))
+                        or (session_id and card["session_id"] == session_id)
                         or (self_tid and card["creator_task_id"] == self_tid)
                         or (family and card.get("key_family") == family)):
                     continue
