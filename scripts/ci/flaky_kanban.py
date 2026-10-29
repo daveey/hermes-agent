@@ -258,6 +258,7 @@ def _mentions(text: str, test_id: str) -> bool:
 
 
 _GH_JOB_URL = re.compile(r"(https://github\.com/[^/\s]+/[^/\s]+/actions/runs/\d+)/job/(\d+)")
+_TEST_ID = re.compile(r"tests/[\w./-]+\.py(?:::[\w\[\]./-]+)+")
 
 
 def _cites_job(text: str, url: str) -> bool:
@@ -367,11 +368,16 @@ class _Flake:
         return {**data, "id": card_id, "board": slug or "default", "gateway": gw} if data else None
 
     def owns(self, card: dict[str, Any]) -> bool:
-        """Open and about THIS test: its title/body names the test id, or its key is ``deflake:<id>[#n]``."""
+        """Open and about THIS test: its title or its body's lead paragraph names the test id and no other, or its
+        key is ``deflake:<id>[#n]``. A card that only quotes the id further down (a report about this cron that
+        lists several dropped tests, t_01a189b2c78e9005 itself) is not the card that fixes it."""
         if card.get("status") not in OPEN:
             return False
         key = str(card.get("idempotency_key") or "")
-        return (_mentions(f"{card.get('title') or ''}\n{card.get('body') or ''}", self.test_id)
+        lead = str(card.get("body") or "").strip().split("\n\n", 1)[0]
+        subject = f"{card.get('title') or ''}\n{lead}"
+        others = {t for t in _TEST_ID.findall(subject) if t != self.test_id and not self.test_id.startswith(t)}
+        return ((_mentions(subject, self.test_id) and not others)
                 or key == f"deflake:{self.test_id}" or key.startswith(f"deflake:{self.test_id}#"))
 
     def deliver(self, card: dict[str, Any]) -> tuple[bool | None, str]:

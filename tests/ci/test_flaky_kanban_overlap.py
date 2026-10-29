@@ -287,3 +287,24 @@ def test_local_owner_about_the_test_gets_the_comment_read_back(env):
     assert any(RUN in c and TEST in c for c in env.kanban()["cards"]["t_owner"]["comments"])
     assert any(argv[:3] == ["--board", "ops", "comment"] for argv in env.kanban()["argv"])
     assert state["cards"][TEST] == {"card": "t_owner", "generation": 0, "board": "ops"}
+
+
+def test_a_card_that_only_quotes_the_test_id_among_others_is_not_its_owner(env):
+    """Live: the guard named t_01a189b2c78e9005 (a card ABOUT this cron) for all three tests its body
+    lists in a table. A lead paragraph naming several test ids is not the card that fixes this one."""
+    other = "tests/y.py::test_b"
+    # On another board here, so the default-board scan does not reach them and the refusal path decides.
+    env.card("t_report", "running", "ci-flaky-cards drops flaky tests when the overlap guard names an unrelated card",
+             f"Found while verifying the fix.\n\n| test | card |\n| {TEST} | t_1 |\n| {other} | t_2 |", board="ops")
+    env.card("t_pair", "ready", "triage", f"`{TEST}` and `{other}` both flake under load", board="ops")
+    env.refuse({"id": "t_report", "gateway": "hub", "board": "ops", "status": "running", "title": "r"},
+               {"id": "t_pair", "gateway": "hub", "board": "ops", "status": "ready", "title": "p"})
+    state = fk.load_state(env.tmp / "absent.json")
+
+    log = _file(env, state)
+
+    cards = env.kanban()["cards"]
+    assert cards["t_report"]["comments"] == [] and cards["t_pair"]["comments"] == []
+    new = [c for c in cards.values() if c["id"].startswith("t_new")]
+    assert len(new) == 1 and sorted(new[0]["distinct_from"]) == ["t_pair", "t_report"]
+    assert log == [f"opened {new[0]['id']} {TEST} (distinct from t_report, t_pair)"]
