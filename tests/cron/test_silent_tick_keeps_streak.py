@@ -20,6 +20,10 @@ import cron.scheduler as sched
 from cron.monitor import MonitorOutcome
 from tests.cron.test_preflight_config import _job
 
+# Upstream admits agent cron runs through the canonical gateway owner (cdbe8c35adf); run_job
+# here goes through the production owner execution seam, never a spawned gateway.
+pytestmark = pytest.mark.usefixtures("cron_owner")
+
 
 def _tick(tmp_path, job_id, *, gate):
     fresh = next(j for j in cron_jobs.load_jobs() if j["id"] == job_id)

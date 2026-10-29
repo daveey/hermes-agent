@@ -2,6 +2,11 @@
 from unittest.mock import patch
 
 from tests.agent import test_managed_subscription as fixtures
+import pytest
+
+# Upstream admits agent cron runs through the canonical gateway owner (cdbe8c35adf); run_job
+# here goes through the production owner execution seam, never a spawned gateway.
+pytestmark = pytest.mark.usefixtures("cron_owner")
 
 managed = fixtures.managed
 routing_home = fixtures.routing_home

@@ -7,6 +7,10 @@ import pytest
 from tests.agent import test_model_routing_agent
 from tests.tui_gateway import test_class_routing
 
+# Upstream admits agent cron runs through the canonical gateway owner (cdbe8c35adf); run_job
+# here goes through the production owner execution seam, never a spawned gateway.
+pytestmark = pytest.mark.usefixtures("cron_owner")
+
 routing_home = test_model_routing_agent.routing_home
 streaming_route = test_model_routing_agent.streaming_route
 native_transport = test_class_routing.native_transport

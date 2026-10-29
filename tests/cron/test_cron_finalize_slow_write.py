@@ -15,6 +15,25 @@ from unittest.mock import MagicMock, patch
 
 import cron.scheduler as sched
 from cron.scheduler import _finalize_cron_session, run_job
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def owner_bound(monkeypatch):
+    """Upstream runs an agent cron job only inside the canonical owner's execution (cdbe8c35adf).
+    These tests stub the session DB, so bind that execution directly (``bind_execution`` is the call
+    the owner's ``execute()`` makes) instead of going through the owner seam's real DB."""
+    from gateway.session_cron import _execution, bind_execution
+    tokens = []
+    from types import SimpleNamespace
+
+    def bind(job, db):
+        # The owner's store is the one ``acquire`` hands back (here the stubbed DB).
+        authority = SimpleNamespace(db=db)
+        tokens.append(bind_execution(authority, f"cron_{job['id']}_1", job["id"], None))
+    yield bind
+    for token in reversed(tokens):
+        _execution.reset(token)
 
 
 _RUNTIME = {
@@ -27,6 +46,8 @@ _RUNTIME = {
 
 class SlowTitleSessionDB:
     """A real-shaped SessionDB whose title write blocks past the cleanup timeout (lock held elsewhere)."""
+
+    db_path = "state.db"
 
     def __init__(self, release: threading.Event):
         self.release = release
@@ -61,6 +82,8 @@ class SlowTitleSessionDB:
 
 class RecordingSessionDB:
     """The fresh connection the retry opens once the lock holder is gone."""
+
+    db_path = "state.db"
 
     def __init__(self):
         self.titles: list[tuple[str, str]] = []
@@ -114,11 +137,12 @@ def test_finalize_survives_title_write_timeout_and_retries_on_fresh_connection()
         release.set()
 
 
-def test_run_job_survives_title_write_timeout_and_tears_agent_down(tmp_path):
+def test_run_job_survives_title_write_timeout_and_tears_agent_down(tmp_path, owner_bound):
     release = threading.Event()
     slow_db = SlowTitleSessionDB(release)
     fresh_db = RecordingSessionDB()
     job = {"id": "slow-title", "name": "slow title", "prompt": "hello"}
+    owner_bound(job, slow_db)
     try:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
@@ -148,15 +172,17 @@ def test_run_job_survives_title_write_timeout_and_tears_agent_down(tmp_path):
         release.set()
 
 
-def test_run_job_hands_agent_off_when_finalize_raises(tmp_path):
+def test_run_job_hands_agent_off_when_finalize_raises(tmp_path, owner_bound):
     """Even if finalization itself blows up, the deferred-teardown hand-off still happens."""
     job = {"id": "finalize-raises", "name": "finalize raises", "prompt": "hello"}
+    finalize_db = RecordingSessionDB()
+    owner_bound(job, finalize_db)
     deferred: list = []
     with patch("cron.scheduler._hermes_home", tmp_path), \
          patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-         patch("hermes_state_registry.acquire", return_value=RecordingSessionDB()), \
+         patch("hermes_state_registry.acquire", return_value=finalize_db), \
          patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=_RUNTIME), \
          patch("run_agent.AIAgent") as mock_agent_cls, \
          patch("cron.scheduler._finalize_cron_session", side_effect=RuntimeError("boom")):

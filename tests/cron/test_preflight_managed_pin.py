@@ -20,6 +20,10 @@ import cron.jobs as cron_jobs
 import cron.scheduler as sched
 from tests.cron.test_preflight_config import _job, _run_job_patched
 
+# Upstream admits agent cron runs through the canonical gateway owner (cdbe8c35adf); run_job
+# here goes through the production owner execution seam, never a spawned gateway.
+pytestmark = pytest.mark.usefixtures("cron_owner")
+
 
 def managed_yaml(enforce=True):
     lines = ["model_routing:", "  enabled: true", "  policy_version: 1", "  allow_metered: false",
@@ -84,7 +88,8 @@ def test_unpinned_job_on_rejected_cron_model_is_blocked(tmp_path):
     (tmp_path / "config.yaml").write_text(
         "model:\n  default: claude-opus-5-5\n  provider: anthropic\ncron:\n  model: claude-sonnet-5\n"
         + managed_yaml(), encoding="utf-8")
-    success, _output, _final, error, agent_constructed = _run(tmp_path)
+    # Upstream's shared _job now pins "test-model" by default; this case is the unpinned job.
+    success, _output, _final, error, agent_constructed = _run(tmp_path, model=None)
     assert agent_constructed is False and success is False
     assert "[blocked_config]" in (error or "") and "cron.model" in error
 
@@ -92,11 +97,14 @@ def test_unpinned_job_on_rejected_cron_model_is_blocked(tmp_path):
 def test_rejected_pin_alerts_once_across_woken_runs(tmp_path):
     """Two woken runs of the stale-pin job deliver ONE alert and persist blocked_config."""
     _write_config(tmp_path)
-    job = _job(model="claude-sonnet-5")
+    # Upstream delivers owner-run results through the durable delivery queue (a "local" lane
+    # enqueues nothing), so alert to a real target and count enqueues, as test_preflight_config does.
+    job = _job(model="claude-sonnet-5", failure_deliver="slack:alerts")
     deliveries = []
 
-    def fake_deliver(job, content, adapters=None, loop=None, **kwargs):
+    def fake_deliver(execution_id, job, content, **kwargs):
         deliveries.append(content)
+        return {"status": "pending"}
 
     with cron_jobs.use_cron_store(tmp_path):
         cron_jobs.save_jobs([job])
@@ -111,7 +119,7 @@ def test_rejected_pin_alerts_once_across_woken_runs(tmp_path):
                  patch("hermes_cli.runtime_provider.resolve_runtime_provider",
                        return_value={"api_key": "k", "base_url": "https://example.invalid/v1",
                                      "provider": "anthropic", "api_mode": "chat_completions"}), \
-                 patch.object(sched, "_deliver_result", side_effect=fake_deliver), \
+                 patch("cron.delivery_queue.enqueue", side_effect=fake_deliver), \
                  patch("run_agent.AIAgent") as mock_agent_cls:
                 assert sched.run_one_job(fresh) is True
                 assert mock_agent_cls.called is False
