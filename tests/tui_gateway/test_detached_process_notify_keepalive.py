@@ -200,11 +200,19 @@ def test_stop_releases_session_even_with_a_running_watch(server, registry, detac
     """After Stop no notification turn can start until the user's next prompt, so a never-exiting watched server
     must not keep the stopped, disconnected session alive."""
     sid, session, _ = detached
-    _spawn(registry, session["session_key"], watch_patterns=["ERROR"], persist_on_release=persist)
+    proc = _spawn(registry, session["session_key"], watch_patterns=["ERROR"], persist_on_release=persist)
     assert not server._session_is_reapable(sid, session)
 
     session["_turn_cancel_requested"] = True
 
+    assert not server._session_owns_pending_process_notification(session)
+    # Fork: the fork also keeps the owner of ANY still-running background job (closing the session kills it,
+    # b2251b13754 _session_owns_running_process), so this case is reapable only once the job is gone; the
+    # notification pin itself (upstream's subject here) must already be released.
+    assert not server._session_is_reapable(sid, session)
+    proc.mark_exited(0)
+    registry._move_to_finished(proc)
+    _drain(registry)
     assert server._session_is_reapable(sid, session)
 
 
@@ -261,8 +269,15 @@ def test_uncollected_recovered_exit_never_pins_session(server, registry, detache
 def test_silent_background_process_does_not_pin_session(server, registry, detached):
     """A process nobody asked to hear from (a dev server) must not make its session immortal."""
     sid, session, _ = detached
-    _spawn(registry, session["session_key"])
+    proc = _spawn(registry, session["session_key"])
 
+    assert not server._session_owns_pending_process_notification(session)
+    # Fork: the fork also keeps the owner of ANY still-running background job (closing the session kills it,
+    # b2251b13754 _session_owns_running_process), so this case is reapable only once the job is gone; the
+    # notification pin itself (upstream's subject here) must already be released.
+    assert not server._session_is_reapable(sid, session)
+    proc.mark_exited(0)
+    registry._move_to_finished(proc)
     assert server._session_is_reapable(sid, session)
 
 
@@ -293,6 +308,14 @@ def test_disabled_watch_does_not_pin_session(server, registry, detached):
     proc = _spawn(registry, session["session_key"], watch_patterns=["VERDICT"])
     proc._watch_disabled = True
 
+    assert not server._session_owns_pending_process_notification(session)
+    # Fork: the fork also keeps the owner of ANY still-running background job (closing the session kills it,
+    # b2251b13754 _session_owns_running_process), so this case is reapable only once the job is gone; the
+    # notification pin itself (upstream's subject here) must already be released.
+    assert not server._session_is_reapable(sid, session)
+    proc.mark_exited(0)
+    registry._move_to_finished(proc)
+    _drain(registry)
     assert server._session_is_reapable(sid, session)
 
 
