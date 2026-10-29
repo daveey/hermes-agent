@@ -468,6 +468,7 @@ def spawn_after_turn_move(session_id: str, to: str, reason: str) -> int:
     """Start ``hermes sessions move <id> --to <to> --reason ... --after-turn`` detached (the agent tool's path);
     returns its pid. Output goes to ``<hermes home>/logs/session-move-<id>.log``."""
     from hermes_constants import get_hermes_home
+    from tools.environments.local import build_subprocess_env
     log_dir = Path(get_hermes_home()) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log = open(log_dir / f"session-move-{session_id}.log", "ab")  # handed to the child
@@ -477,7 +478,7 @@ def spawn_after_turn_move(session_id: str, to: str, reason: str) -> int:
             [sys.executable, "-m", "hermes_cli.main", "sessions", "move", session_id, "--to", to,
              "--reason", reason, "--after-turn"],
             cwd=repo, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
-            env={**os.environ})
+            env=build_subprocess_env(scrub_secrets=False, inherit_profile_home=False))
     finally:
         log.close()
     return p.pid
