@@ -83,7 +83,11 @@ async function run() {
     isReady: () => app.isReady(),
     getOauthSession: () => jar,
     resolvePortalBaseUrl: () => base,
-    warmOauthCookieStore: () => jar.cookies.flushStore(),
+    warmOauthCookieStore: async () => {
+      console.log('PORTAL_SESSION_LIVE flushing cookie store')
+      await jar.cookies.flushStore()
+      console.log('PORTAL_SESSION_LIVE flushed cookie store')
+    },
     createWindow: options => new BrowserWindow({ ...options, show: false }),
     rememberLog: message => console.log(message)
   })
@@ -191,18 +195,30 @@ async function run() {
     assert.equal(forced, true)
     assert.equal(refreshes, beforeForced + 1)
 
+    console.log('PORTAL_SESSION_LIVE clearing final jar')
     await jar.clearStorageData()
+    console.log('PORTAL_SESSION_LIVE setting provider hint')
     await jar.cookies.set({ url: base, name: 'next-auth-provider', value: 'workos' })
+    console.log('PORTAL_SESSION_LIVE checking absent credentials')
     assert.equal(await portal.hasLivePortalSession(), false)
+    console.log('PORTAL_SESSION_LIVE checking absent renewal material')
     assert.equal(await portal.renewPortalAccessSilently(), false)
     console.log('PORTAL_SESSION_LIVE_OK')
+  } catch (error) {
+    // Report before teardown: a stuck server.close must not conceal the
+    // assertion that caused the fixture to enter finally.
+    console.error('PORTAL_SESSION_LIVE body failed', error)
+    throw error
   } finally {
+    console.log('PORTAL_SESSION_LIVE closing windows and server')
+
     for (const window of BrowserWindow.getAllWindows()) {
       window.destroy()
     }
 
     server.closeAllConnections()
     await new Promise<void>(resolve => server.close(() => resolve()))
+    console.log('PORTAL_SESSION_LIVE closed server')
   }
 }
 
