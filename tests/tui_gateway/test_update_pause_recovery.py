@@ -39,7 +39,8 @@ def recovery(tmp_path, monkeypatch, request):
     monkeypatch.setattr(server, "_schedule_agent_build", lambda *a: None)
     monkeypatch.setattr(server, "_start_agent_build", lambda *a: None)
     monkeypatch.setattr(server, "_wait_agent", lambda *a, **kw: None)
-    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a: None)
+    real_slot = server._ensure_active_session_slot
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a, **kw: None)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
     calls, done, platforms = [], threading.Event(), []
     def submit(rid, sid, session, text, **kw):
@@ -49,7 +50,7 @@ def recovery(tmp_path, monkeypatch, request):
         done.set()
     monkeypatch.setattr(server, "_run_prompt_submit", submit)
     before = set(server._sessions)
-    yield types.SimpleNamespace(home=tmp_path, calls=calls, done=done, platforms=platforms)
+    yield types.SimpleNamespace(home=tmp_path, calls=calls, done=done, platforms=platforms, real_slot=real_slot)
     for sid in set(server._sessions) - before:
         server._sessions.pop(sid, None)
     db.close()
@@ -67,6 +68,163 @@ def assert_continued(r):
     assert len(r.calls) == 1
     assert r.calls[0][0] == up.pause_note("finish the request")
     assert r.calls[0][1]["display_kind"] == "auto_continue"
+
+
+def test_replaced_backend_notice_requeues_before_real_continuation(recovery, monkeypatch):
+    from agent import memory_provider
+    from hermes_cli import config
+    import hermes_constants
+
+    # Fresh backend record: only the dead writer's durable pause survives.
+    af.set_hold(recovery.home)
+    sid = mount()["session_id"]
+    af.clear_hold(recovery.home)
+    session = server._sessions[sid]
+    assert not any(k.startswith("_update_pause_") for k in session)
+    clock, attempts, submitted = [0.0], [], []
+    monkeypatch.setattr(server, "_start_session_work", lambda fn, **kw: fn() or True)
+    monkeypatch.setattr(server, "_ensure_active_session_slot",
+                        lambda *a, **kw: attempts.append(clock[0]))
+    monkeypatch.setattr(server, "_collect_kanban_notifications", lambda *a: [])
+    session["_kanban_pending"] = ["a queued owner notice"]
+    session["running"] = True  # a notice already in flight when the sweep first sees us
+    original_submit = server._run_prompt_submit
+    def submit(*a, **kw):
+        submitted.append(clock[0])
+        original_submit(*a, **kw)
+    monkeypatch.setattr(server, "_run_prompt_submit", submit)
+    def sleep(seconds):
+        if not seconds:
+            return
+        clock[0] += seconds
+        assert attempts == [] and recovery.calls == []
+        session["running"] = False  # the old notice ends before the retry poll
+        server._notif_poll_kanban_scoped(sid, session)
+        assert session["_kanban_pending"] == ["a queued owner notice"]
+        assert not session["running"]  # queued notice refused; pause wins
+    monkeypatch.setattr(config, "load_config", lambda: CFG)
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: recovery.home)
+    monkeypatch.setattr(sr, "time", types.SimpleNamespace(
+        sleep=sleep, time=time.time, monotonic=lambda: clock[0]))
+    class Inline:
+        def __init__(self, target):
+            self.target = target
+        def start(self):
+            self.target()
+    monkeypatch.setattr(memory_provider, "spawn_context_thread", lambda target, **kw: Inline(target))
+    # Drive the real startup worker + resume handler, not an explicit scheduling call.
+    sr.start_startup_resume_sweep()
+    assert_continued(recovery)
+    assert attempts == submitted == [5.0]
+    assert submitted[0] <= 120
+    assert not up.continuation_due(session)
+
+
+def test_replaced_backend_slot_refusal_backs_off(recovery, monkeypatch):
+    af.set_hold(recovery.home)
+    sid = mount()["session_id"]
+    af.clear_hold(recovery.home)
+    session = server._sessions[sid]
+    clock, attempts = [0.0], []
+    monkeypatch.setattr(server, "time", types.SimpleNamespace(time=time.time, monotonic=lambda: clock[0]))
+    monkeypatch.setattr(server, "_start_session_work", lambda fn, **kw: fn() or True)
+    def slot(*args, **kwargs):
+        assert kwargs == {"allow_takeover": False}
+        attempts.append(clock[0])
+        return "another live owner" if len(attempts) == 1 else None
+    monkeypatch.setattr(server, "_ensure_active_session_slot", slot)
+    assert server._maybe_schedule_auto_continue(sid, session, "paused") is not None
+    for second in range(1, 30):
+        clock[0] = float(second)
+        assert server._maybe_schedule_auto_continue(sid, session, "paused") is None
+    assert attempts == [0.0]
+    clock[0] = 30.0
+    assert server._maybe_schedule_auto_continue(sid, session, "paused") is not None
+    assert_continued(recovery)
+    assert attempts == [0.0, 30.0]
+
+
+def test_two_readers_do_not_replay_a_consumed_pause(recovery, monkeypatch):
+    af.set_hold(recovery.home)
+    sid = mount()["session_id"]
+    af.clear_hold(recovery.home)
+    first = server._sessions[sid]
+    second = {**first, "history_lock": threading.Lock()}
+    pending = []
+    monkeypatch.setattr(server, "_start_session_work", lambda fn, **kw: pending.append(fn) or True)
+    assert server._maybe_schedule_auto_continue(sid, first, "paused") is not None
+    assert server._maybe_schedule_auto_continue("second", second, "paused") is not None
+    pending[0]()  # writes the accepted continuation's marker, as the real prompt path does
+    pending[1]()  # previously read the same dead writer; must revalidate after admission
+    assert_continued(recovery)
+    assert second["running"] is False
+
+
+def test_pause_readers_use_exclusive_slot_without_detached_takeover(recovery, monkeypatch):
+    af.set_hold(recovery.home)
+    sid = mount()["session_id"]
+    af.clear_hold(recovery.home)
+    first = server._sessions[sid]
+    second = {**first, "history_lock": threading.Lock()}
+    server._sessions["second"] = second
+    pending = []
+    monkeypatch.setattr(server, "_ensure_active_session_slot", recovery.real_slot)
+    monkeypatch.setattr(server, "_start_session_work", lambda fn, **kw: pending.append(fn) or True)
+    assert server._maybe_schedule_auto_continue(sid, first, "paused") is not None
+    assert server._maybe_schedule_auto_continue("second", second, "paused") is not None
+    original = server._run_prompt_submit
+    def submit(*args, **kwargs):
+        # Winner owns the real registry slot but has not replaced the pause yet.
+        assert first["active_session_lease"] is not None
+        pending[1]()
+        assert not second["running"]
+        assert second.get("active_session_lease") is None
+        assert first["running"] and not first.get("_turn_cancel_requested")
+        original(*args, **kwargs)
+    monkeypatch.setattr(server, "_run_prompt_submit", submit)
+    try:
+        pending[0]()
+        assert_continued(recovery)
+    finally:
+        server._release_active_session_slot(first)
+        server._release_active_session_slot(second)
+
+
+def test_typed_message_during_build_retires_scheduled_pause(recovery, monkeypatch):
+    from tui_gateway.turn_marker import clear_turn_marker
+    af.set_hold(recovery.home)
+    sid = mount()["session_id"]
+    af.clear_hold(recovery.home)
+    session = server._sessions[sid]
+    pending = []
+    monkeypatch.setattr(server, "_start_session_work", lambda fn, **kw: pending.append(fn) or True)
+    assert server._maybe_schedule_auto_continue(sid, session, "paused") is not None
+    # The typed turn starts and ends before the old continuation finishes building.
+    record_turn_start(recovery.home, "paused", "new typed request")
+    clear_turn_marker(recovery.home, "paused")
+    pending[0]()
+    assert recovery.calls == []
+    assert not session["running"]
+    assert not up.continuation_due(session)
+
+
+@pytest.mark.parametrize("unrecoverable", ["disabled", "stale", "exhausted", "live_writer"])
+def test_durable_hold_does_not_starve_unrecoverable_or_live_writer(recovery, monkeypatch, unrecoverable):
+    af.set_hold(recovery.home)
+    sid = mount()["session_id"]
+    af.clear_hold(recovery.home)
+    session = server._sessions[sid]
+    assert up.continuation_due(session)
+    if unrecoverable == "disabled":
+        monkeypatch.setattr(server, "_load_cfg", lambda: {"desktop": {"auto_continue": {"enabled": False}}})
+    elif unrecoverable == "stale":
+        monkeypatch.setattr(up, "_now", lambda: time.time() + 24 * 3600)
+    elif unrecoverable == "exhausted":
+        monkeypatch.setattr(server, "_auto_continue_config", lambda: (True, 24 * 3600, 0))
+    else:
+        record_turn_start(recovery.home, "paused", "finish the request")
+        mark_turn_paused(recovery.home, "paused", up.PAUSE_REASON)
+    assert not up.continuation_due(session)
 
 
 def test_connected_desktop_reattach_retries_after_admission_hold(recovery):
@@ -307,7 +465,7 @@ def test_a_continuation_that_never_schedules_stops_holding_automatic_turns(recov
     # e.g. a live foreign marker writer refuses every schedule: the watcher keeps retrying, but the chat's
     # notices, loop ticks and heartbeats wait at most HOLD_MAX_S past the window's end, not 6 h.
     skewed.armed = False
-    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a: None)
+    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a, **kw: None)
     session_box, due = {}, []
     def probe(now):
         if (session := session_box.get("session")) is not None:

@@ -181,6 +181,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         return None
     with session["history_lock"]:
         if (session.get("_auto_continue_scheduled")
+                or (marker.get("reason") == "core_update_pause" and session.get("running"))
+                or time.monotonic() < float(session.get("_auto_continue_retry_after") or 0)
                 or session.get("_closing") or session.get("_finalized") or session.get("resume_hydrating")):
             return None
         session["_auto_continue_scheduled"] = True
@@ -229,8 +231,20 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         # marker and still be mid-turn. Leave the marker so a later resume retries.
         # Running the continuation anyway would be the double-writer this fence exists to prevent. See
         # #94778.
-        if _ensure_active_session_slot(sid, session) is not None:
+        slot_error = (_ensure_active_session_slot(sid, session, allow_takeover=False) if paused
+                      else _ensure_active_session_slot(sid, session))
+        if slot_error is not None:
             logger.info("auto-continue for %s refused: session has another live owner", session_key)
+            with session["history_lock"]:
+                session["running"] = False
+                session["_auto_continue_retry_after"] = time.monotonic() + 30.0
+                session["_auto_continue_scheduled"] = False
+            return
+        if paused and read_turn_marker(home, session_key) != marker:
+            # Two readers can build from the same dead writer's marker. The slot
+            # serializes them; the winner replaced/cleared the pause before releasing
+            # it, so a delayed loser must not dispatch its stale snapshot.
+            _release_active_session_slot(session)
             with session["history_lock"]:
                 session["running"] = False
                 session["_auto_continue_scheduled"] = False
