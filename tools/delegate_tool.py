@@ -481,6 +481,13 @@ def _apply_task_model_pins(task_list: list[dict[str, Any]], routes: list[Any],
     model/provider preflight on every runnable route. ``([], error)`` on a bad pin or an impossible route."""
     from dataclasses import replace
     from tools.delegate_tool_routes import task_route_conflict
+    # [daveey] A batch carrying per-task pins is preflighted as a whole (4961aff13f0): a sibling whose route
+    # could not be resolved (e.g. the default it actually uses has no credentials) refuses the call before
+    # any child spawns, rather than running the pinned children alone.
+    if any(_task_route_cfg(t, {}) != (None, None) for t in task_list):
+        for i, route in enumerate(routes):
+            if route.error:
+                return [], route.error if route.error.startswith(f"Task {i}:") else f"Task {i}: {route.error}"
     out: list[Any] = []
     for i, (t, route) in enumerate(zip(task_list, routes)):
         if route.error:
@@ -575,7 +582,12 @@ def _routes_for(task_list: list[dict[str, Any]], cfg: dict[str, Any], credential
     every task's route; otherwise the active delegation provider decides each one."""
     from tools.delegate_tool_routes import resolve_task_routes, route_for_config
     if credentials_cfg is None:
-        routes, err = resolve_task_routes(task_list, cfg, parent_agent)
+        # [daveey] A pinned task resolves only its own route (_apply_task_model_pins): the default is resolved
+        # only for the children that actually use it, so an unavailable default never vetoes an explicit pin.
+        def pinned(i: int) -> bool:
+            task_cfg, err = _task_route_cfg(task_list[i], {})
+            return task_cfg is not None or err is not None  # _apply_task_model_pins resolves (or refuses) it
+        routes, err = resolve_task_routes(task_list, cfg, parent_agent, unresolved=pinned)
         return (routes, err) if err else _apply_task_model_pins(task_list, routes, parent_agent)
     try:
         route = route_for_config(credentials_cfg, parent_agent)

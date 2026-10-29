@@ -316,11 +316,15 @@ def _route_one(provider: DelegationProvider, declared: dict[str, dict[str, Any]]
 
 
 def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, Any], parent_agent: Any,
-                        ) -> tuple[list[TaskRoute], Optional[str]]:
+                        unresolved: Optional[Any] = None) -> tuple[list[TaskRoute], Optional[str]]:
     """One :class:`TaskRoute` per task from the backend the session's ``delegate_task`` was built from (else
     ``delegation.backend``), or ``([], error)`` when that backend cannot run (fails closed, never another backend).
     A task the backend cannot route gets a route with ``error`` set; its siblings are unaffected. Identical routes
-    resolve credentials once per call (the default backend resolves exactly once)."""
+    resolve credentials once per call (the default backend resolves exactly once).
+
+    [daveey] ``unresolved(index)`` true marks a task whose credentials the caller resolves itself (a per-task
+    ``model``/``provider`` pin): its non-profile route comes back with empty ``creds`` and is never resolved here,
+    so an unused default route with missing credentials cannot veto the task's explicit route."""
     from agent.delegation_backends import pinned_backend
     if pinned := pinned_backend(parent_agent):
         config = {**config, "backend": pinned}
@@ -335,6 +339,11 @@ def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, An
         try:
             route = _route_one(provider, declared, i, task, config)
             _check_backend_effort(i, route, config)
+            if unresolved is not None and not route.get("profile") and unresolved(i):
+                label = route.get("label") if isinstance(route.get("label"), str) else None
+                routes.append(TaskRoute({}, _with_inherited_fallback(route, config), route.get("reasoning_effort"),
+                                        None, label, provider.name))
+                continue
             routes.append(_route_to_task_route(route, parent_agent, cache, config, provider.name))
         except ValueError as exc:  # DelegationRouteError, the credential resolver's and the tier check's refusals
             routes.append(TaskRoute({}, {}, backend=provider.name, error=str(exc)))

@@ -129,8 +129,14 @@ class TestDelegateToolPerTaskModel(unittest.TestCase):
             )
         self.assertEqual(models, ["z-ai/glm-5.3", "claude-sonnet-5-5"])
         self.assertEqual(providers, ["openrouter", "anthropic"])
-        self.assertEqual(seen[0]["provider"], "openrouter")
-        self.assertNotIn("provider", seen[1])
+        # Fork: upstream's delegation backends resolve the backend routes of unpinned tasks first and the
+        # pins after (tools.delegate_tool_routes.resolve_task_routes, then _apply_task_model_pins), so the
+        # resolver calls are matched by content, not call order. Each route resolves exactly once.
+        self.assertEqual(len(seen), 2)
+        pinned_cfg = [c for c in seen if c.get("model") == "z-ai/glm-5.3"]
+        default_cfg = [c for c in seen if c.get("model") == "claude-sonnet-5-5"]
+        self.assertEqual(pinned_cfg[0]["provider"], "openrouter")
+        self.assertNotIn("provider", default_cfg[0])
 
     def test_unavailable_default_does_not_block_explicit_provider(self):
         def resolve(*, requested, target_model):
