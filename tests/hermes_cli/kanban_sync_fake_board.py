@@ -92,6 +92,13 @@ class FakeService:
                 row = self._put(b, table, uid, {"lease_holder": None, "lease_expires": None}, gw, op["client_op_id"],
                                 op["hlc"])
             return {"status": "applied" if len(won) == len(f) else "merged", "row": row}
+        if table == "task_links":
+            # rows.ts upsertLink: a link needs both of its cards on the Board.
+            tasks = b["rows"].get("tasks", {})
+            missing = [x for x in (f.get("parent_id"), f.get("child_id"))
+                       if x not in tasks or tasks[x].get("deleted_at")]
+            if missing:
+                return {"status": "rejected", "reason": "not_found", "detail": f"unknown task(s): {', '.join(map(str, missing))}"}
         return {"status": "applied", "row": self._put(b, table, uid, f, gw, op["client_op_id"], op["hlc"])}
 
     def compact(self, bid: str) -> None:

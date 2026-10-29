@@ -286,7 +286,7 @@ def transient_rejection(res: dict) -> bool:
     reason = str(res.get("reason") or "")
     detail = str(res.get("detail") or "")
     return (reason in TRANSIENT_REASONS or (reason == "invalid" and "unknown table" in detail)
-            or (reason == "not_found" and detail.startswith("no task")))  # its card is sent first next round
+            or (reason == "not_found" and detail.startswith(("no task", "unknown task"))))  # card goes first next round
 
 
 def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -> list[tuple[dict, str]]:
@@ -298,12 +298,19 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
     in_batch = {r["row_uid"] for r in rows if r["table_name"] == "tasks"}
     wanted: list[str] = []
     for r in rows:
-        if r["table_name"] in ("tasks", "task_links"):
+        if r["table_name"] == "tasks":
             continue
-        fields = r["fields"] if isinstance(r["fields"], dict) else json.loads(r["fields"] or "{}")
-        tid = fields.get("task_id")
-        if tid and tid not in in_batch and tid not in wanted:
-            wanted.append(tid)
+        if r["table_name"] == "task_links":
+            if r["op"] != "upsert":
+                continue
+            # Both ends of a new link: a link must never reach the Board ahead of a card it names. [daveey]
+            tids = list(str(r["row_uid"]).split(">", 1))
+        else:
+            fields = r["fields"] if isinstance(r["fields"], dict) else json.loads(r["fields"] or "{}")
+            tids = [fields.get("task_id")]
+        for tid in tids:
+            if tid and tid not in in_batch and tid not in wanted:
+                wanted.append(tid)
     out: list[tuple[dict, str]] = []
     for tid in wanted:
         task = conn.execute("SELECT * FROM tasks WHERE id = ? AND sync_version IS NULL", (tid,)).fetchone()
@@ -460,7 +467,12 @@ def own_partition(conn: sqlite3.Connection, changes: list[sync.RemoteChange], ga
     """The changes for cards this gateway created (``created_on`` = it, or unset) and their child rows.
 
     A primary board's live file holds only its own cards, so the dispatcher's sweeps (stale claims, orphans,
-    concurrency counts) never see another gateway's work; the replica copy holds the whole board."""
+    concurrency counts) never see another gateway's work; the replica copy holds the whole board.
+
+    A link is kept when its CHILD is ours, even if the parent is another gateway's card: the edge gates our card,
+    and the Board's claim check counts it. Dropping it made the local promoter re-promote a child the Board refused
+    to lease (60 promoted/claim_rejected events in 7 min, 2026-10-28). The parent's status comes from the replica
+    (``kanban_db_sync.refresh_remote_parents``). [daveey]"""
     kept: list[sync.RemoteChange] = []
     mine: set[str] = set()
 
@@ -478,8 +490,8 @@ def own_partition(conn: sqlite3.Connection, changes: list[sync.RemoteChange], ga
             if not is_mine(ch.uid):
                 continue
         elif ch.table == "task_links":
-            parent, _, child = ch.uid.partition(">")
-            if not (is_mine(parent) and is_mine(child)):
+            _parent, _, child = ch.uid.partition(">")
+            if not is_mine(child):
                 continue
         elif not is_mine(ch.fields.get("task_id") if ch.op == "upsert" else
                          _child_task(conn, ch.table, ch.uid)):
@@ -600,6 +612,8 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
                 resync(live, hub, slug, observers=True, partition=gateway)
         replica = open_shadow(slug, gateway)
         try:
+            if mode == "primary" and sync.refresh_remote_parents(live, replica):
+                sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
             result.repaired = repair_divergence(live, replica, gateway)
         finally:
             replica.close()

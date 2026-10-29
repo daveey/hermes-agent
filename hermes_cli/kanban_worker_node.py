@@ -213,7 +213,12 @@ def candidates(replica: sqlite3.Connection, own: str, *, now_ms: Optional[int] =
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     return replica.execute(
         "SELECT * FROM tasks WHERE status = 'ready' AND created_on IS NOT NULL AND created_on != ? "
-        "AND (lease_holder IS NULL OR COALESCE(lease_expires, 0) < ?) ORDER BY priority DESC, created_at, id",
+        "AND (lease_holder IS NULL OR COALESCE(lease_expires, 0) < ?) "
+        # The replica holds the whole board: a card with an open (or missing) parent would only be refused
+        # parents_not_done by the Board, and that refusal demotes it on every machine. [daveey]
+        "AND NOT EXISTS (SELECT 1 FROM task_links l LEFT JOIN tasks p ON p.id = l.parent_id "
+        "WHERE l.child_id = tasks.id AND COALESCE(p.status, '') NOT IN ('done', 'archived')) "
+        "ORDER BY priority DESC, created_at, id",
         (own, now_ms)).fetchall()
 
 

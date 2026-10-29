@@ -2172,6 +2172,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
         failure_limit = DEFAULT_FAILURE_LIMIT
     from hermes_cli.kanban_block_routing import has_sticky_block
     promoted = 0
+    remote = _sync.has_remote_parents(conn)
     with write_txn(conn):
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
@@ -2187,12 +2188,10 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             if cur_status in ("blocked", "triage") and has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?", (task_id,),
-            ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
+            states = parent_states(conn, task_id, remote=remote)
+            if cur_status == "todo" and _note_missing_parents(conn, task_id, states):
+                continue
+            if all(st in ("done", "archived") for _pid, st in states):
                 resume_status = _resume_status_from_events(conn, task_id)
                 if cur_status in ("blocked", "triage"):
                     # At the breaker limit, no auto-recovery (else block ->
@@ -2225,14 +2224,74 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
 
 # --- Claim / complete / block ---
 
+# A child whose parent row this board does not have (neither a local card nor, on a synced board, a card another
+# gateway owns) waits; after this long it is blocked "parent <id> missing from this board". [daveey]
+PARENT_MISSING_BLOCK_SECONDS = 600
+
+
+def parent_states(
+    conn: sqlite3.Connection, task_id: str, *, remote: Optional[bool] = None,
+) -> list[tuple[str, Optional[str]]]:
+    """``(parent_id, status)`` for every direct parent, in id order: the ONE dependency view that the promoter
+    (:func:`recompute_ready`), the claim (:func:`claim_task`) and the board views read.
+
+    The status is the local card's. On a synced board a parent another gateway owns is not a local card (a primary
+    board's live file holds only this gateway's cards), so its status comes from the mirror the sync round keeps
+    from the replica (``kanban_db_sync.REMOTE_PARENTS_TABLE``), the same rows the Board's own claim check reads.
+    ``None`` = the parent is on neither: missing, and it gates (never read as satisfied). [daveey]"""
+    if remote is None:
+        remote = _sync.has_remote_parents(conn)
+    if remote:
+        sql = ("SELECT l.parent_id AS id, COALESCE(p.status, r.status) AS status FROM task_links l "
+               "LEFT JOIN tasks p ON p.id = l.parent_id "
+               f"LEFT JOIN {_sync.REMOTE_PARENTS_TABLE} r ON r.parent_id = l.parent_id "
+               "WHERE l.child_id = ? ORDER BY l.parent_id")
+    else:
+        sql = ("SELECT l.parent_id AS id, p.status AS status FROM task_links l "
+               "LEFT JOIN tasks p ON p.id = l.parent_id WHERE l.child_id = ? ORDER BY l.parent_id")
+    return [(row["id"], row["status"]) for row in conn.execute(sql, (task_id,)).fetchall()]
+
+
+def _note_missing_parents(
+    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]],
+) -> bool:
+    """Inside :func:`recompute_ready`'s txn, for a ``todo`` child: record when a parent goes missing
+    (``parent_missing`` event, once per streak), clear the streak when it comes back (``parent_found``), and block
+    the child after :data:`PARENT_MISSING_BLOCK_SECONDS`. True when the child was blocked here."""
+    if not states:
+        return False
+    missing = [pid for pid, st in states if st is None]
+    last = conn.execute(
+        "SELECT kind, created_at FROM task_events WHERE task_id = ? AND kind IN ('parent_missing', 'parent_found') "
+        "ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    if not missing:
+        if last is not None and last["kind"] == "parent_missing":
+            _append_event(conn, task_id, "parent_found", None)
+        return False
+    if last is None or last["kind"] != "parent_missing":
+        _append_event(conn, task_id, "parent_missing", {"parents": missing})
+        return False
+    if int(time.time()) - int(last["created_at"] or 0) < PARENT_MISSING_BLOCK_SECONDS:
+        return False
+    reason = "; ".join(f"parent {pid} missing from this board" for pid in missing)
+    cur = conn.execute(
+        "UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ? AND status = 'todo'",
+        (task_id,),
+    )
+    if cur.rowcount != 1:
+        return False
+    _append_event(conn, task_id, "blocked", {
+        "reason": reason + f" (unlink it with `hermes kanban unlink <parent> {task_id}`, then unblock)",
+        "kind": "transient", "source": "parent_missing", "parents": missing,
+    })
+    return True
+
+
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return whether every direct parent is terminal for dependency gating."""
-    return conn.execute(
-        "SELECT 1 FROM task_links l "
-        "JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = ? "
-        "AND p.status NOT IN ('done', 'archived') LIMIT 1", (task_id,),
-    ).fetchone() is None
+    """Return whether every direct parent is terminal for dependency gating (:func:`parent_states`: a parent
+    another gateway owns counts by its Board status, a missing parent gates)."""
+    return all(st in ("done", "archived") for _pid, st in parent_states(conn, task_id))
 
 
 def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, str]]:
@@ -2240,13 +2299,8 @@ def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[st
     still counts as open (``done`` / ``archived`` release the child), in id
     order, so a refusal or a board view can name the blockers instead of the
     caller guessing. Read-only."""
-    rows = conn.execute(
-        "SELECT p.id, p.status FROM task_links l "
-        "JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') "
-        "ORDER BY p.id", (task_id,),
-    ).fetchall()
-    return [(row["id"], row["status"]) for row in rows]
+    return [(pid, st if st is not None else "missing") for pid, st in parent_states(conn, task_id)
+            if st not in ("done", "archived")]
 
 
 def claim_task(
@@ -3716,12 +3770,7 @@ def promote_task(
     # No override: claim_task demotes ready -> todo on an undone parent whichever
     # writer set 'ready', so a forced promotion would only report a success the
     # first claim silently reverts (#106195). The dependency itself is the knob.
-    parents = conn.execute(
-        "SELECT t.id, t.status FROM tasks t "
-        "JOIN task_links l ON l.parent_id = t.id "
-        "WHERE l.child_id = ?", (task_id,),
-    ).fetchall()
-    unsatisfied = [p["id"] for p in parents if p["status"] not in ("done", "archived")]
+    unsatisfied = [pid for pid, st in parent_states(conn, task_id) if st not in ("done", "archived")]
     if unsatisfied:
         return False, (
             f"unsatisfied parent dependencies: {', '.join(unsatisfied)} "

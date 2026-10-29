@@ -172,6 +172,11 @@ CREATE TABLE IF NOT EXISTS kanban_sync_outbox (
     state        TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON kanban_sync_outbox(state, created_at);
+CREATE TABLE IF NOT EXISTS kanban_sync_remote_parents (
+    parent_id    TEXT PRIMARY KEY,
+    status       TEXT NOT NULL,
+    refreshed_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS kanban_sync_tombstones (
     table_name TEXT NOT NULL,
     row_uid    TEXT NOT NULL,
@@ -296,6 +301,45 @@ def board_selected(db_path: str) -> bool:
 def _db_key(conn: sqlite3.Connection) -> Optional[str]:
     from hermes_cli.kanban_db_connect import _main_db_file
     return _main_db_file(conn)
+
+
+# Local-only mirror (never captured, never pushed): the Board status of every parent a local link names that is not
+# a local card, i.e. a card another gateway owns. ``kanban_db.parent_states`` reads it, so the promoter and the claim
+# gate on the same parents the Board's own claim check does. Refreshed from the replica each sync round
+# (``kanban_sync_client.refresh_remote_parents``). A parent the replica lacks has no row: it reads as missing. [daveey]
+REMOTE_PARENTS_TABLE = "kanban_sync_remote_parents"
+
+
+def has_remote_parents(conn: sqlite3.Connection) -> bool:
+    """Whether this board file has the remote-parent mirror (synced boards only)."""
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                        (REMOTE_PARENTS_TABLE,)).fetchone() is not None
+
+
+def refresh_remote_parents(live: sqlite3.Connection, replica: sqlite3.Connection) -> list[str]:
+    """Copy the replica's status of every foreign parent the live file's links name into the mirror; drop rows no
+    link needs and rows the replica no longer has. Returns the parents whose status changed (the caller wakes the
+    dispatcher so a released child is promoted on the next tick, not the next sweep)."""
+    if not has_remote_parents(live):
+        return []
+    wanted = [r[0] for r in live.execute(
+        "SELECT DISTINCT l.parent_id FROM task_links l LEFT JOIN tasks p ON p.id = l.parent_id WHERE p.id IS NULL")]
+    found: dict[str, str] = {}
+    for i in range(0, len(wanted), 500):
+        chunk = wanted[i:i + 500]
+        found.update({r[0]: r[1] for r in replica.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({','.join('?' * len(chunk))})", chunk)})
+    current = {r[0]: r[1] for r in live.execute(f"SELECT parent_id, status FROM {REMOTE_PARENTS_TABLE}")}
+    if current == found:
+        return []
+    changed = sorted(k for k in set(current) | set(found) if current.get(k) != found.get(k))
+    now = int(time.time())
+    from hermes_cli.kanban_db_connect import write_txn
+    with write_txn(live):
+        live.execute(f"DELETE FROM {REMOTE_PARENTS_TABLE}")
+        live.executemany(f"INSERT INTO {REMOTE_PARENTS_TABLE} (parent_id, status, refreshed_at) VALUES (?, ?, ?)",
+                         [(pid, st, now) for pid, st in found.items()])
+    return changed
 
 
 def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
