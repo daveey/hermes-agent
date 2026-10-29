@@ -30,16 +30,19 @@ pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PO
 
 SEEDED = 40
 WRITE_SECONDS = 8.0
+# The contention window is at least this many sessions written while the readers run, however slow
+# the box: a pure time budget committed 19 on a loaded 4-CPU CI slot and failed the >= 20 check.
+MIN_SESSIONS = 20
 
 # Writes sessions + messages in the agent's own persistence layer; prints the committed count after
 # every session so the harness knows an upper bound at any instant.
 _WRITER = r"""
 import sys, time
 from hermes_state import SessionDB
-deadline = time.monotonic() + float(sys.argv[1])
 db = SessionDB()
+deadline = time.monotonic() + float(sys.argv[1])  # after import + open: they are not write time
 n = 0
-while time.monotonic() < deadline:
+while time.monotonic() < deadline or n < int(sys.argv[2]):
     sid = f"live-{n:05d}"
     db.create_session(sid, source="cli", model="writer")
     for j in range(3):
@@ -54,7 +57,7 @@ print("DONE", n, flush=True)
 class Writer:
     def __init__(self, sb: H.Sandbox, p: H.Profile) -> None:
         self.proc = subprocess.Popen(
-            [sys.executable, "-c", _WRITER, str(WRITE_SECONDS)], env=sb.env({"HERMES_HOME": str(p.home)}),
+            [sys.executable, "-c", _WRITER, str(WRITE_SECONDS), str(MIN_SESSIONS)], env=sb.env({"HERMES_HOME": str(p.home)}),
             cwd=str(sb.home), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, start_new_session=True)
         self.committed = 0
@@ -149,7 +152,7 @@ def test_session_routes_stay_consistent_under_a_concurrent_writer(env) -> None:
     w.proc.wait(timeout=60)
     err = w.proc.stderr.read() if w.proc.stderr else ""
     assert w.proc.returncode == 0 and w.done, f"writer failed rc={w.proc.returncode}: {err[-2000:]}"
-    assert w.done >= 20, f"writer committed only {w.done} sessions: the contention window never opened"
+    assert w.done >= MIN_SESSIONS, f"writer committed only {w.done} sessions: the contention window never opened"
     assert len(totals) >= 10 and len(series) >= 10, f"too few reads overlapped the writer ({len(totals)}, {len(series)})"
     assert not problems, f"{len(problems)} inconsistent read(s) while writing:\n  " + "\n  ".join(dict.fromkeys(problems[:30]))
     backwards = [(a, b) for a, b in itertools.pairwise(series) if b < a]
@@ -162,3 +165,15 @@ def test_session_routes_stay_consistent_under_a_concurrent_writer(env) -> None:
     assert [m["content"] for m in newest] == [f"live-{w.done - 1:05d} message {j}" for j in range(3)]
     log = d.log_tail(200_000).lower()
     assert "database is locked" not in log and "traceback" not in log, d.log_tail()
+
+
+def test_writer_commits_the_minimum_however_slow_the_box(tmp_path) -> None:
+    """The contention window is a session count, not only a time budget: with no time at all the writer
+    still commits MIN_SESSIONS (a loaded CI slot managed 19 in 8 s and failed the main test)."""
+    sb = H.make_sandbox(tmp_path / "writer-floor")
+    p = sb.profiles["default"]
+    cp = subprocess.run([sys.executable, "-c", _WRITER, "0", str(MIN_SESSIONS)],
+                        env=sb.env({"HERMES_HOME": str(p.home)}), cwd=str(sb.home), stdin=subprocess.DEVNULL,
+                        capture_output=True, text=True, timeout=300, check=False)
+    assert cp.returncode == 0, cp.stderr[-2000:]
+    assert cp.stdout.split()[-2:] == ["DONE", str(MIN_SESSIONS)], cp.stdout[-500:]
