@@ -25,6 +25,7 @@ from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_operator as kbo
 from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
+from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
@@ -506,6 +507,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             from hermes_cli.kanban_capability_routing import preflight
             placement = preflight(conn, task_id, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
+    contract_extra = _contract_cli.create_warning_fields(task, skip=idem_hit, stderr=True)
     unlinked_warning = None
     if not in_worker and not session_id and not idem_hit and _agent_invoked():
         # An agent shelled out but no chat could be stamped (unknown/missing session env:
@@ -521,6 +523,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         out = _task_to_dict(task)
         if unlinked_warning:  # also in the payload: run_slash returns only stdout for --json
             out["warning"] = unlinked_warning
+        out.update(contract_extra)
         if origin_binding:
             out["origin_binding"] = origin_binding
         if placement:
@@ -1293,6 +1296,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                     detail = ", ".join(f"{pid} ({status})" for pid, status in blockers)
                     fail_msg[tid] = (f"cannot complete {tid}: unsatisfied parent dependencies: {detail}; "
                                      f"complete the parents first, or `hermes kanban unlink <parent> {tid}`.")
+                else:  # a PR-acceptance refusal names its reason, not "unknown id" [daveey]
+                    fail_msg[tid] = _contract_cli.complete_refusal(conn, tid) or fail_msg[tid]
             return done
 
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
@@ -1301,43 +1306,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
 _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id")
 
 
-def _cmd_edit_contract(args: argparse.Namespace) -> int:
-    """``hermes kanban edit <id> --completion-contract X --reason Y``: the audited way out
-    of a completion gate that can never pass. Orchestrator-only, like unblock: a worker
-    that could re-point its own card's gate would make the gate meaningless. [daveey]"""
-    if os.environ.get("HERMES_KANBAN_TASK"):
-        return _err(
-            "kanban edit: --completion-contract is orchestrator-only; a worker can't change its own "
-            "card's gate. Block without a human_request so the owning chat re-points it", 2,
-        )
-    others = [f"--{name.replace('_', '-')}" for name in (
-        "title", "body", "priority", "result", "summary", "metadata", *_OPERATOR_EDIT_FLAGS,
-    ) if getattr(args, name, None) is not None]
-    if others or getattr(args, "force", False):
-        return _err(
-            "kanban edit: --completion-contract can't be combined with other edit flags "
-            f"({', '.join(others) or '--force'}); run them as separate edits", 2,
-        )
-    with kbc.connect_closing() as conn:
-        try:
-            change = kbo.set_completion_contract(
-                conn, args.task_id, args.completion_contract,
-                reason=getattr(args, "reason", None) or "", actor=_profile_author(),
-            )
-        except kbo.KanbanEditRefused as exc:
-            return _err(f"kanban edit: {exc}", 2)
-    if change is None:
-        return _err(f"cannot edit {args.task_id} (unknown id)")
-    if not change:
-        print(f"Edited {args.task_id} (completion_contract unchanged)")
-        return 0
-    print(f"Edited {args.task_id} (completion_contract: {change['old']!r} -> {change['new']!r})")
-    return 0
-
-
 def _cmd_edit(args: argparse.Namespace) -> int:
     if getattr(args, "completion_contract", None) is not None:
-        return _cmd_edit_contract(args)
+        return _contract_cli.cmd_edit_contract(args)
     if getattr(args, "reason", None) is not None:
         return _err("kanban edit: --reason only applies to --completion-contract", 2)
     result = getattr(args, "result", None)

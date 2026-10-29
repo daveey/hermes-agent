@@ -20,7 +20,7 @@ from hermes_cli.goals import handoff_judge_goal, judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
-from hermes_cli import kanban_overlap
+from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap
 from tools.kanban_tools_placement import _marker_placement_fields, _placement_refused, _runs_where
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_schemas import (
@@ -1859,9 +1859,9 @@ def _handle_create(args: dict, **kw) -> str:
                 extra["placement"] = {"where": "local", "runs_on": runs_on, "machine": pinned_machine}
                 extra["note"] = (f"Created here as {new_tid}; it runs on {pinned_machine} via the board lease "
                                  f"(runs_on={runs_on}). The pin was honoured: do not re-create it.")
-        # Every result says where the card runs (`placed` for a routed card, `runs_on` for a board-lease card):
-        # a caller that can't tell re-creates it, or never learns it is stranded. [daveey]
-        extra["runs_where"] = _runs_where(runs_on, pinned_machine, marker_placement)
+        # Every result says where the card runs (a caller that can't tell re-creates it or never learns it is stranded)
+        extra.update(runs_where=_runs_where(runs_on, pinned_machine, marker_placement),  # + contract advisory [daveey]
+                     **_contract_cli.create_warning_fields(kb.get_task(conn, new_tid)))
         if origin_intent is not None:
             # The courier is not a chat: the bound origin is subscribed from the binding in the same txn
             # (kanban_origin_creation._subscribe_origin), never the receiving process's ambient session. [daveey]

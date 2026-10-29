@@ -20,10 +20,12 @@ def github(tmp_path, monkeypatch):
             state["requests"].append(self.path)
             sha = state["head"]
             if self.path == "/graphql":
+                rule = None if state.get("no_required") else {"requiredStatusChecks": [
+                    {"context": "required", "app": {"databaseId": 1}}]}
                 value = {"data": {"repository": {"pullRequest": {
                     "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
-                    "baseRef": {"branchProtectionRule": {"requiredStatusChecks": [
-                        {"context": "required", "app": {"databaseId": 1}}]}}}}}}
+                    "baseRef": {"branchProtectionRule": rule}},
+                    "defaultBranchRef": {"name": "main", "branchProtectionRule": rule}}}}
             elif "/rules/branches/" in self.path:
                 value = [[]]
             elif "/check-runs" in self.path:
@@ -268,3 +270,119 @@ def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, m
             "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
     assert receipt["classification"] == "auth"
     assert "'ghost'" in receipt["detail"] and "cannot be resolved" in receipt["detail"]
+
+
+# --- contract waiver: an OWNER/REPO contract on a repo with NO required checks (agent-650ad5206a) ---
+# Such a contract could never pass acceptance and nothing could change it after creation, so workers
+# stalled and then rewrote completion_contract in kanban.db by hand. The supported way out is
+# metadata.contract_waiver, honoured only when a fresh read shows zero required checks.
+
+_PR7 = "https://github.com/acme/repo/pull/7"
+_WAIVER = {"reason": "repo has no CI; tests ran locally"}
+
+
+def _events(conn, tid, kind):
+    return [json.loads(r[0]) for r in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind=? ORDER BY id", (tid, kind))]
+
+
+@pytest.mark.platforms("linux")
+def test_no_required_checks_names_the_waiver_and_waiver_completes(github):
+    from hermes_cli.kanban_origin_ledger import observe_owner_task
+
+    github["no_required"] = True
+    with connect() as conn:
+        tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
+        assert not kb.complete_task(conn, tid, result="done", metadata={"published_pr": _PR7})
+        receipt = _events(conn, tid, "pr_acceptance")[-1]
+        assert receipt["classification"] == "no_required_checks"
+        assert "contract_waiver" in receipt["detail"]
+        assert "contract_waiver" in kb.get_task(conn, tid).last_failure_error
+        assert not _events(conn, tid, "contract_waived")
+        # An empty reason is not a waiver.
+        assert not kb.complete_task(conn, tid, result="done",
+                                    metadata={"published_pr": _PR7, "contract_waiver": {"reason": " "}})
+        assert kb.complete_task(conn, tid, result="done",
+                                metadata={"published_pr": _PR7, "contract_waiver": _WAIVER})
+        assert kb.get_task(conn, tid).status == "done"
+        waived = _events(conn, tid, "contract_waived")
+        assert len(waived) == 1 and waived[0]["reason"] == _WAIVER["reason"]
+        assert waived[0]["receipt"]["classification"] == "no_required_checks"
+        assert waived[0]["receipt"]["pr_url"] == _PR7
+        conn.execute("SAVEPOINT observation")
+        try:
+            obs = observe_owner_task(conn, {"id": tid, "status": "done"}, now=123)["origin_observation"]
+        finally:
+            conn.execute("RELEASE observation")
+        assert obs["verified"]
+
+
+@pytest.mark.platforms("linux")
+def test_waiver_never_bypasses_configured_required_checks(github):
+    with connect() as conn:
+        for fault in ("failure", "missing", "pending"):
+            github.update(conclusion="failure" if fault == "failure" else
+                          "pending" if fault == "pending" else "success", head="a" * 40)
+            if fault == "missing":
+                github["missing"] = True
+            tid = kb.create_task(conn, title=fault, completion_contract="acme/repo")
+            assert not kb.complete_task(conn, tid, result="done",
+                                        metadata={"published_pr": _PR7, "contract_waiver": _WAIVER})
+            assert kb.get_task(conn, tid).status != "done"
+            assert not _events(conn, tid, "contract_waived")
+            github.pop("missing", None)
+
+
+@pytest.mark.platforms("linux")
+def test_waiver_via_kanban_complete_tool(github, monkeypatch):
+    from tools import kanban_tools as kt
+
+    github["no_required"] = True
+    with connect() as conn:
+        tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
+        run_id = kb.claim_task(conn, tid).current_run_id
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    refused = json.loads(kt._handle_complete({"summary": "shipped", "metadata": {"published_pr": _PR7}}))
+    assert refused.get("ok") is not True and "contract_waiver" in json.dumps(refused)
+    out = json.loads(kt._handle_complete({"summary": "shipped",
+                                          "metadata": {"published_pr": _PR7, "contract_waiver": _WAIVER}}))
+    assert out["ok"] is True
+    with connect() as conn:
+        assert kb.get_task(conn, tid).status == "done"
+        assert _events(conn, tid, "contract_waived")
+
+
+@pytest.mark.platforms("linux")
+def test_waiver_via_cli_complete(github):
+    from hermes_cli import kanban as kc
+
+    github["no_required"] = True
+    with connect() as conn:
+        tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
+    meta = json.dumps({"published_pr": _PR7})
+    refused = kc.run_slash(f"complete {tid} --summary shipped --metadata '{meta}'")
+    assert "contract_waiver" in refused, refused
+    meta = json.dumps({"published_pr": _PR7, "contract_waiver": _WAIVER})
+    kc.run_slash(f"complete {tid} --summary shipped --metadata '{meta}'")
+    with connect() as conn:
+        assert kb.get_task(conn, tid).status == "done"
+        assert _events(conn, tid, "contract_waived")
+
+
+@pytest.mark.platforms("linux")
+def test_create_warns_when_contract_repo_has_no_required_checks(github, monkeypatch):
+    from hermes_cli import kanban as kc
+    from tools import kanban_tools as kt
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    github["no_required"] = True
+    out = json.loads(kt._handle_create({"title": "pr work", "assignee": "default", "requires": [],
+                                        "completion_contract": "acme/repo"}))
+    assert out["ok"] is True and "contract_waiver" in out.get("contract_warning", "")
+    cli = kc.run_slash("create 'pr work 2' --completion-contract acme/repo")
+    assert "contract_waiver" in cli, cli
+    github["no_required"] = False
+    out = json.loads(kt._handle_create({"title": "pr work 3", "assignee": "default", "requires": [],
+                                        "completion_contract": "acme/repo"}))
+    assert out["ok"] is True and "contract_warning" not in out

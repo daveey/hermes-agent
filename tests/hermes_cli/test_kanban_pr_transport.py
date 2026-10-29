@@ -126,6 +126,8 @@ def test_no_required_checks_names_the_repoint_path(monkeypatch):
         "baseRef": {"branchProtectionRule": None}}}}}
     monkeypatch.setattr(gate, "_api", lambda endpoint, **kw: pr if endpoint == "graphql" else [[]])
     receipt = gate.collect_acceptance("https://github.com/acme/repo/pull/7", None)
-    assert receipt["ok"] is False and receipt["classification"] == "missing"
+    # Its own classification (the only waivable one), naming the worker's waiver AND the re-point.
+    assert receipt["ok"] is False and receipt["classification"] == "no_required_checks"
     assert "No repository-required checks" in receipt["detail"]
     assert "--completion-contract" in receipt["detail"]
+    assert "contract_waiver" in receipt["detail"]

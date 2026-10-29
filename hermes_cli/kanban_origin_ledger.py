@@ -157,8 +157,12 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
             (acceptance_id, task['id'], event[0])).fetchone() if type(acceptance_id) is int else None
         if acceptance and acceptance[1] is not None and acceptance[1] == event[1]:
             receipt = json.loads(acceptance[0] or '{}')
-            contract_verified = bool(isinstance(receipt, dict) and receipt.get('ok') is True
-                                     and receipt.get('classification') == 'success'
+            # [daveey] A contract_waiver is accepted only on a no_required_checks receipt (kanban_pr_acceptance_store).
+            waived = (receipt.get('classification') == 'no_required_checks'
+                      and isinstance(receipt.get('waived'), dict)) if isinstance(receipt, dict) else False
+            contract_verified = bool(isinstance(receipt, dict)
+                                     and ((receipt.get('ok') is True and receipt.get('classification') == 'success')
+                                          or waived)
                                      and receipt.get('pr_url') == row[4]
                                      and isinstance(receipt.get('head_sha'), str)
                                      and re.fullmatch(r'[0-9a-f]{40}', receipt['head_sha']))

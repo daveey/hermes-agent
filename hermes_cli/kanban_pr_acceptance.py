@@ -34,6 +34,22 @@ def validate_contract(value: str | None) -> str:
     return value
 
 
+NO_REQUIRED_CHECKS_DETAIL = (
+    "No repository-required checks are configured on {where}, so this PR contract can never pass CI "
+    "acceptance. If the work is verified another way, retry completion with "
+    "metadata.contract_waiver={{\"reason\": \"<how it was verified>\"}} (honoured only while the repo has "
+    "no required checks; logged as a contract_waived event). Otherwise {repoint} Never edit "
+    "completion_contract in kanban.db.")
+
+
+def waiver_reason(metadata) -> str | None:
+    """The stripped reason of ``metadata.contract_waiver`` (``{"reason": str}`` or a bare string), else None."""
+    raw = metadata.get("contract_waiver") if isinstance(metadata, dict) else None
+    if isinstance(raw, dict):
+        raw = raw.get("reason")
+    return raw.strip()[:500] if isinstance(raw, str) and raw.strip() else None
+
+
 def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
          profile_home: str | None = None):
     from hermes_platform.resolver.github import resolve_gh
@@ -210,8 +226,11 @@ def collect_acceptance(contract: str, published_pr: str | None,
                                     for r in rule["parameters"]["required_status_checks"])
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
-            receipt["detail"] = ("No repository-required checks are configured on the PR's base branch, so "
-                                 f"{_REPOINT_HINT} (Create non-CI tasks with a local-only contract.)")
+            # A contract that can never pass. Name the one supported way out: nothing can edit
+            # completion_contract after creation, so "use local-only" sent workers to hand-edit
+            # kanban.db (agent-650ad5206a). [daveey]
+            receipt.update(classification="no_required_checks", detail=NO_REQUIRED_CHECKS_DETAIL.format(
+                where=f"{repo}@{branch}", repoint=_REPOINT_HINT))
             return receipt
         phase = "reading check runs"
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
