@@ -127,13 +127,27 @@ export function recordSessionListResult(
   }
 
   const returnedOwners = new Set(incoming.map(row => ownerKey(row.connection_id, row.profile)))
+  // [daveey] The primary backend's list can carry other gateways' rows, so its failure is everyone's. A REMOTE
+  // backend's list answers only for that gateway: a failed list on the hub (the window's request scope follows the
+  // focused chat) used to mark this Mac's own rows stale too, so the sidebar swapped them for stamp-less fallback
+  // copies and every local stripe (periodic, waiting, stuck, done) blanked until the next local list. Primary rows
+  // carry no connection_id: one identity for both spellings.
+  const primary = $connectionsRegistry.get()?.primary?.trim() || 'local'
+  const gatewayOf = (id: null | string | undefined) => id?.trim() || primary
+  const requestGateway = gatewayOf(connection)
+  const covers = (ownerConnection: null | string | undefined, errorConnection?: null | string) =>
+    errorConnection?.trim()
+      ? gatewayOf(errorConnection) === gatewayOf(ownerConnection)
+      : requestGateway === primary || gatewayOf(ownerConnection) === requestGateway
 
   for (const [key, owner] of owners) {
+    const onRequestGateway = gatewayOf(owner.connection_id) === requestGateway
+
     const ownerFailed =
-      failed ||
+      (failed && covers(owner.connection_id)) ||
       errors.some(
         error =>
-          (!error.connection_id || error.connection_id === owner.connection_id) &&
+          covers(owner.connection_id, error.connection_id) &&
           (error.profile === 'all' || profileOf(error.profile) === profileOf(owner.profile))
       )
 
@@ -141,7 +155,7 @@ export function recordSessionListResult(
       next[key] = true
     } else if (ownerFailed) {
       next[key] = false
-    } else if ((owner.connection_id || 'local') === (connection || 'local')) {
+    } else if (onRequestGateway && !failed) {
       next[key] = true
     }
   }
@@ -318,8 +332,17 @@ export function mergeOfflineFallback(
     return effective
   })
 
+  // [daveey] This Mac's own fallback rows are the cold-start boot snapshot: frozen at launch and without activity
+  // stamps (cron_active, kanban_*, goal_active, ...). Once the own backend has put any live row in the list it has
+  // answered this launch, and its older chats paint from the live (stamped) projects tree instead; re-adding the boot
+  // copies after a failed list blanked their stripes.
+  const ownBackendAnswered = live.some(
+    row => !row.offline_cached && (row.connection_id?.trim() || primary) === primary
+  )
+
   const added = offline.filter(
     row =>
+      !(ownBackendAnswered && (row.connection_id?.trim() || primary) === primary) &&
       !freshOwners.has(ownerKey(row.connection_id, row.profile)) &&
       freshness[ownerKey(row.connection_id, row.profile)] !== true &&
       !seen.has(ownedIdentity(row, row.id))

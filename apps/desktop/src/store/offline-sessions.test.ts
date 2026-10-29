@@ -278,6 +278,61 @@ describe('mergeOfflineFallback', () => {
     ])
   })
 
+  // [daveey] Boot-snapshot copies of this Mac's own chats: no activity stamps (cron_active, kanban_*).
+  const ownBoot = () =>
+    offlineSessionsFromReplica(
+      [rec('older', { gateway: 'macbook', local: true }), rec('recent', { gateway: 'macbook', local: true })],
+      gateway => (gateway === 'macbook' ? 'local' : undefined),
+      9_000,
+      { includeLocal: true }
+    )
+
+  it("a failed list on another gateway leaves this Mac's own rows live and adds no boot copies", () => {
+    const previous = [
+      live('recent', { connection_id: 'local', profile: 'default' }),
+      live('h1', { connection_id: 'hermes-hub', profile: 'default' })
+    ]
+
+    recordSessionListResult(previous, [], 'hermes-hub', 'default', [], true)
+    const merged = mergeOfflineFallback(previous, ownBoot())
+
+    expect(merged.find(r => r.id === 'recent')?.offline_cached).toBeUndefined()
+    expect(merged.find(r => r.id === 'h1')).toMatchObject({ offline_cached: true, offline_stale_list: true })
+    expect(ids(merged)).toEqual(['recent', 'h1'])
+  })
+
+  it('a backend error without connection_id belongs to the gateway the list was sent to', () => {
+    const previous = [
+      live('recent', { connection_id: 'local', profile: 'default' }),
+      live('h1', { connection_id: 'hermes-hub', profile: 'default' })
+    ]
+
+    recordSessionListResult(previous, [], 'hermes-hub', 'default', [{ profile: 'default' }])
+    const merged = mergeOfflineFallback(previous, [])
+
+    expect(merged.find(r => r.id === 'recent')?.offline_cached).toBeUndefined()
+    expect(merged.find(r => r.id === 'h1')?.offline_cached).toBe(true)
+  })
+
+  it("once this Mac's backend answered, a failed local list never re-adds its stamp-less boot copies", () => {
+    recordSessionListResult([], [], undefined, 'default', [], true)
+    const merged = mergeOfflineFallback([live('recent', { connection_id: 'local' })], ownBoot())
+
+    expect(ids(merged)).toEqual(['recent'])
+    expect(merged[0]).toMatchObject({ offline_stale_list: true })
+  })
+
+  it("on a cold start (no live row of this Mac yet) the boot copies of its chats still paint", () => {
+    recordSessionListResult([], [], undefined, 'default', [], true)
+
+    expect(ids(mergeOfflineFallback([], ownBoot())).sort()).toEqual(['older', 'recent'])
+    expect(ids(mergeOfflineFallback([live('h1', { connection_id: 'hermes-hub' })], ownBoot())).sort()).toEqual([
+      'h1',
+      'older',
+      'recent'
+    ])
+  })
+
   it('keeps reference identity when nothing is added', () => {
     const rows = [live('l1')]
 

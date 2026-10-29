@@ -815,6 +815,14 @@ describe('recordStripeTransition', () => {
     expect(String(logLine.mock.calls[1][0])).toContain('cached done->none')
     expect(String(logLine.mock.calls[1][0])).toContain('source=cache')
 
+    // [daveey] A replica/boot fallback row is named as such: it carries no activity stamps (cron_active, kanban_*).
+    const fallback = { ...row, id: 'fallback', offline_synced_at: 9_000 }
+    recordStripeTransition(fallback, 'periodic', 'background', 1_000)
+    recordStripeTransition(fallback, null, 'background', 2_000)
+    expect(String(logLine.mock.calls[2][0])).toContain('fallback periodic->none')
+    expect(String(logLine.mock.calls[2][0])).toContain('source=fallback')
+    expect(String(logLine.mock.calls[2][0])).toContain('cron_active=-')
+
     expect(takeSessionListRefreshReason()).toBe('list-refetch')
   })
 
