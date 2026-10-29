@@ -492,6 +492,10 @@ def _foreign_state_db_holders(db_path: Path) -> list[tuple[int, str]]:
 # one-shots, recovery flows, and read-only cross-profile opens use SessionDB() directly with their own close().
 
 
+# A writer txn open longer than this is logged with its callback name: lockowner warnings name only the
+# process, so slow transactions were otherwise anonymous. [daveey]
+_WRITE_HOLD_WARN_S = 5.0
+
 class SessionDB(
     SessionSessionsMixin, SessionFtsSetupMixin, SessionSearchMixin, SessionSchemaMixin,
     SessionPortabilityMixin, SessionTelegramTopicsMixin, SessionCompressionMixin,
@@ -1065,10 +1069,15 @@ class SessionDB(
                     if self._conn is None:  # close() raced this writer
                         self._reopen_after_close_locked(context="write")
                     self._conn.execute("BEGIN IMMEDIATE")
+                    held_since = time.monotonic()
                     try:
                         fn_started = True
                         result = fn(self._conn)
                         self._conn.commit()
+                        held_s = time.monotonic() - held_since
+                        if held_s >= _WRITE_HOLD_WARN_S:  # the log names waiters; this names the holder's code
+                            logger.warning("state.db write lock held %.1fs by %s (pid %d)", held_s,
+                                           getattr(fn, "__qualname__", repr(fn)), os.getpid())
                     except BaseException:
                         try:
                             self._conn.rollback()

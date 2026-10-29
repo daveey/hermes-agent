@@ -53,3 +53,16 @@ def test_duplicate_notice_while_another_process_holds_write_lock(db, tmp_path):
     finally:
         other.execute("ROLLBACK")
         other.close()
+
+
+def test_slow_write_txn_logs_its_callback_name(db, caplog, monkeypatch):
+    import hermes_state
+
+    monkeypatch.setattr(hermes_state, "_WRITE_HOLD_WARN_S", 0.0)
+
+    def my_slow_callback(conn):
+        return conn.execute("SELECT 1").fetchone()[0]
+
+    with caplog.at_level("WARNING", logger="hermes_state"):
+        assert db._execute_write(my_slow_callback) == 1
+    assert any("write lock held" in r.getMessage() and "my_slow_callback" in r.getMessage() for r in caplog.records)
