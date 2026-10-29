@@ -148,6 +148,10 @@ class Hub:
         """The machine registry (RFC "One machine registry"): ``{me, machines: [{name, labels, pinned_only, ...}]}``."""
         return self._call("GET", "/v2/machines")
 
+    def report_metrics(self, metrics: dict) -> dict:
+        """This machine's own load for the registry (display only; see hermes_cli.machine_metrics)."""
+        return self._call("POST", "/v2/machines/me/metrics", metrics)
+
 
 # --- boards ---------------------------------------------------------------------------------------
 
@@ -747,6 +751,8 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     wake = threading.Event()
     watchers: dict[str, threading.Thread] = {}
     next_links = 0.0
+    from hermes_cli.machine_metrics import Reporter
+    metrics = Reporter(hub.report_metrics)
     while keep_running():
         boards = board_paths()
         for slug, _path in boards:
@@ -761,6 +767,7 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
         if time.monotonic() >= next_links:
             reconcile_links(boards, ident.gateway)
             next_links = time.monotonic() + LINKS_EVERY_S
+        metrics.report_due()
         wait_for_work(wake, [p for _s, p in boards], period, keep_running)
 
 
