@@ -430,6 +430,28 @@ def _cmd_create(args: argparse.Namespace) -> int:
         idem_hit = bool(idem_key) and conn.execute(
             "SELECT 1 FROM tasks WHERE idempotency_key = ? AND status != 'archived' LIMIT 1",
             (idem_key,)).fetchone() is not None
+        # [daveey] Refuse a second owner, exactly as the kanban_create tool does (hermes_cli/kanban_overlap.py):
+        # open cards on every board/gateway, skipping parents, the creator's own fan-out and its key family.
+        from hermes_cli import kanban_overlap
+        board = getattr(args, "board", None) or kb.get_current_board()
+        refused, after_create = kanban_overlap.check(
+            conn, {"body": body, "idempotency_key": idem_key,
+                   "board": None if board == kb.DEFAULT_BOARD else board,
+                   "distinct_from": getattr(args, "distinct_from", None) or [],
+                   "distinct_reason": getattr(args, "distinct_reason", None)},
+            courier=False, title=str(args.title).strip(), session_id=session_id,
+            self_tid=os.environ.get("HERMES_KANBAN_TASK") if in_worker else None,
+            parents=list(args.parent or ()), entry="cli")
+        if refused:
+            if getattr(args, "json", False):
+                print(refused)
+            else:
+                ref = json.loads(refused)
+                print(f"kanban: {ref['code']}: {ref['note']}", file=sys.stderr)
+                for m in ref["matches"]:
+                    print(f"  {m['id']}  {m['gateway']}/{m['board']}  ({m['status']})  {m['title']}  — {m['why']}",
+                          file=sys.stderr)
+            return 2
         from hermes_cli.kanban_db_workspace import WorktreeWorkspaceConfigError
         from hermes_cli.kanban_capabilities import CapabilityMismatchError
         from hermes_cli.kanban_pin_provider import PinProviderUnresolvedError
@@ -468,6 +490,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             return _err(f"kanban: {exc.code}: {exc}", 2)
         except (PinProviderUnresolvedError, ModelProviderMismatchError) as exc:
             return _err(f"kanban: {exc}", 2)
+        if not idem_hit:
+            after_create(conn, task_id)  # records an accepted --distinct-from override on the new card
         if session_key and not idem_hit:
             # Same completion subscription the kanban_create tool adds, so the chat
             # that shelled out hears when the card lands (and its row stays busy).

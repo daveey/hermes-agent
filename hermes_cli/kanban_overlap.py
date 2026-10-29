@@ -83,7 +83,7 @@ def _local_cards(self_gw: Optional[str]) -> Iterable[dict]:
                 rows = c.execute(
                     "SELECT t.id, t.title, t.status, t.session_id, (SELECT json_extract(e.payload, "
                     "'$.creator_task_id') FROM task_events e WHERE e.task_id = t.id AND e.kind = 'created' "
-                    f"LIMIT 1) FROM tasks t WHERE t.status IN ({marks})", OPEN).fetchall()
+                    f"LIMIT 1), t.idempotency_key FROM tasks t WHERE t.status IN ({marks})", OPEN).fetchall()
                 try:
                     links = c.execute("SELECT task_id, chat_session FROM task_chat_links WHERE released = 0"
                                       ).fetchall()
@@ -95,9 +95,9 @@ def _local_cards(self_gw: Optional[str]) -> Iterable[dict]:
         chats: dict[str, set[str]] = {}
         for tid, sess in links:
             chats.setdefault(tid, set()).add(sess)
-        for tid, title, status, sess, creator in rows:
+        for tid, title, status, sess, creator, key in rows:
             yield {"id": tid, "board": slug, "gateway": self_gw or "local", "status": status, "title": title,
-                   "session_id": sess, "creator_task_id": creator, "local": True,
+                   "session_id": sess, "creator_task_id": creator, "local": True, "key_family": key_family(key),
                    "chats": sorted(chats.get(tid, set()) | ({sess} if sess else set()))}
 
 
@@ -130,13 +130,21 @@ def _replica_cards(self_gw: Optional[str]) -> Iterable[dict]:
         yield {"id": t["id"], "board": t.get("board") or "default", "gateway": t.get("gateway") or gw,
                "status": t.get("status"), "title": t.get("title") or "", "local": False,
                "session_id": next((s.get("session") for s in sessions if s.get("rel") == "created"), None),
-               "creator_task_id": None,
+               "creator_task_id": None, "key_family": None,
                "chats": sorted({str(s["session"]) for s in sessions if s.get("session")})}
 
 
+def key_family(key: Optional[str]) -> Optional[str]:
+    """An idempotency key's family: the text before the first ':' (``coach-fix:<slug>`` -> ``coach-fix``), else
+    the whole key. One automated creator (coach / self-heal cron) keys all its cards in one family."""
+    key = (key or "").strip()
+    return key.split(":", 1)[0] if key else None
+
+
 def find(*, title: str, body: str, target_board: str, session_id: Optional[str], self_tid: Optional[str],
-         parents: Iterable[str]) -> list[dict]:
-    """Open cards elsewhere that already cover this work, best match first. Never raises."""
+         parents: Iterable[str], family: Optional[str] = None) -> list[dict]:
+    """Open cards elsewhere that already cover this work, best match first. Never raises. ``family`` (the new
+    card's idempotency-key family) skips cards from the same keyed creator: its keys already dedupe them."""
     try:
         from hermes_cli import kanban_capability_registry as reg
         self_gw = reg.self_gateway()
@@ -146,7 +154,8 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
         for source in (_local_cards(self_gw), _replica_cards(self_gw)):
             for card in source:
                 if (card["id"] in skip or (session_id and card["session_id"] == session_id)
-                        or (self_tid and card["creator_task_id"] == self_tid)):
+                        or (self_tid and card["creator_task_id"] == self_tid)
+                        or (family and card.get("key_family") == family)):
                     continue
                 reasons, score = _reasons(card, new_words, title, body, target_board)
                 if reasons:
@@ -163,11 +172,21 @@ def public(matches: list[dict]) -> list[dict]:
     return [{k: v for k, v in m.items() if not k.startswith("_")} for m in matches[:MAX_SHOWN]]
 
 
-def refusal(matches: list[dict], distinct_from: list[str], reason: str) -> dict:
+def _retry_ask(entry: str, uncovered: list[str]) -> str:
+    if entry == "cli":
+        flags = " ".join(f"--distinct-from {i}" for i in uncovered)
+        return f"run `hermes kanban create` again with {flags} --distinct-reason '<why it is separate>'"
+    if entry == "rest":
+        return (f"POST again with \"distinct_from\": {json.dumps(uncovered)} and "
+                "\"distinct_reason\": \"<why it is separate>\"")
+    return f"call kanban_create again with distinct_from={uncovered} and distinct_reason='<why it is separate>'"
+
+
+def refusal(matches: list[dict], distinct_from: list[str], reason: str, entry: str = "tool") -> dict:
     shown = public(matches)
     uncovered = [m["id"] for m in shown if m["id"] not in distinct_from]
     ask = ("pass distinct_reason (why this is separate work) with distinct_from" if distinct_from and not reason
-           else f"call kanban_create again with distinct_from={uncovered} and distinct_reason='<why it is separate>'")
+           else _retry_ask(entry, uncovered))
     named = ", ".join(f"{m['id']} on {m['gateway']}/{m['board']} ({m['status']})" for m in shown[:3])
     note = (f"No card was created: {len(matches)} open card(s) already look like this work ({named}). "
             "Count owners by board/project, not by your chat's links: continue the existing card "
@@ -209,10 +228,12 @@ def _no_override(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def check(conn: sqlite3.Connection, args: dict, *, courier: bool, title: str, session_id: Optional[str],
-          self_tid: Optional[str], parents: list[str]) -> tuple[Optional[str], Callable[[sqlite3.Connection, str], None]]:
+          self_tid: Optional[str], parents: list[str], entry: str = "tool",
+          ) -> tuple[Optional[str], Callable[[sqlite3.Connection, str], None]]:
     """``(refusal_json, _)`` stops the create; otherwise ``(None, after_create)``, where ``after_create(conn,
     new_task_id)`` records an accepted ``distinct_from`` override on the new card (a no-op when nothing
-    overlapped). A courier-applied card (``courier``) was already checked on the gateway that asked for it."""
+    overlapped). A courier-applied card (``courier``) was already checked on the gateway that asked for it.
+    ``entry`` (tool | cli | rest) only words the refusal's retry hint for the caller's entry path."""
     from hermes_cli import kanban_db as kb
     if courier or not enabled():
         return None, _no_override
@@ -223,7 +244,7 @@ def check(conn: sqlite3.Connection, args: dict, *, courier: bool, title: str, se
     distinct = [str(x) for x in (args.get("distinct_from") or [])]
     reason = str(args.get("distinct_reason") or "")
     matches = find(title=title, body=str(args.get("body") or ""), target_board=args.get("board") or kb.DEFAULT_BOARD,
-                   session_id=session_id, self_tid=self_tid, parents=parents)
+                   session_id=session_id, self_tid=self_tid, parents=parents, family=key_family(key))
     if not matches:
         return None, _no_override
     if covered(matches, distinct, reason):
@@ -232,4 +253,4 @@ def check(conn: sqlite3.Connection, args: dict, *, courier: bool, title: str, se
     own = bool(self_tid) and not args.get("board")  # the creator's card is on the board this call opened
     record(conn if own else None, self_tid, outcome="refused", title=title, matches=matches,
            session_id=session_id)
-    return json.dumps(refusal(matches, distinct, reason)), _no_override
+    return json.dumps(refusal(matches, distinct, reason, entry)), _no_override

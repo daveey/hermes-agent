@@ -566,13 +566,28 @@ class CreateTaskBody(BaseModel):
     provider_override: Optional[str] = None
     reasoning_effort: Optional[str] = None  # none|minimal|…|ultra; None inherits the profile's level
     project_id: Optional[str] = None  # None inherits the board's scoped project (if any)
+    # [daveey] create_overlap override (same as the kanban_create tool): open cards this is not a duplicate of.
+    distinct_from: list[str] = Field(default_factory=list)
+    distinct_reason: Optional[str] = None
 
 
 @router.post("/tasks")
 def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     with _board_conn(board) as (board, conn), _value_error_400():
-        # CreateTaskBody field names match create_task's keyword parameters.
-        task_id = kanban_db.create_task(conn, created_by="dashboard", board=board, **payload.model_dump())
+        fields = payload.model_dump()
+        overlap_args = {"body": fields.get("body"), "idempotency_key": fields.get("idempotency_key"),
+                        "board": None if (board or kanban_db.DEFAULT_BOARD) == kanban_db.DEFAULT_BOARD else board,
+                        "distinct_from": fields.pop("distinct_from"), "distinct_reason": fields.pop("distinct_reason")}
+        # [daveey] Refuse a second owner, exactly as the kanban_create tool does (hermes_cli/kanban_overlap.py).
+        from hermes_cli import kanban_overlap
+        refused, after_create = kanban_overlap.check(
+            conn, overlap_args, courier=False, title=payload.title.strip(), session_id=None, self_tid=None,
+            parents=list(payload.parents), entry="rest")
+        if refused:
+            raise HTTPException(status_code=409, detail=json.loads(refused))
+        # CreateTaskBody field names (less the overlap override) match create_task's keyword parameters.
+        task_id = kanban_db.create_task(conn, created_by="dashboard", board=board, **fields)
+        after_create(conn, task_id)
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(
             task, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)

@@ -253,6 +253,11 @@ _SPECS = [
         _arg("--idempotency-key",
              help="Dedup key. If a non-archived task with this key exists, "
                   "its id is returned instead of creating a duplicate."),
+        _arg("--distinct-from", action="append", default=[], metavar="TASK_ID",
+             help="Open card this is NOT a duplicate of (repeatable). A create that open cards already "
+                  "cover is refused (create_overlap) unless every match is listed here with --distinct-reason."),
+        _arg("--distinct-reason", default=None,
+             help="Why this card is separate work from the --distinct-from cards (recorded on the new card)"),
         _arg("--origin-session", default=None,
              help="Chat on ANOTHER gateway this card is work for (@session:<profile>@<gateway>/<id>; "
                   "default $HERMES_ORIGIN_SESSION). It then shows in that chat's task list."),

@@ -314,3 +314,112 @@ def test_placed_tool_create_is_overlap_checked_before_it_leaves(chat, tmp_path, 
                                                         "requires": []}))
     assert ok["status"] == "queued" and ok["placed"]["gateway"] == "hub", ok
     assert sent == ["Rotate the Telnyx key"]
+
+
+_LIVE_TITLE = "Rotate the Telnyx webhook signing key"
+_DUP_TITLE = "Rotate Telnyx webhook signing key now"
+
+
+def _open_owner(key: str | None = None) -> str:
+    """An open card another chat created on this gateway (the existing owner)."""
+    with kbc.connect_closing() as conn:
+        return kb.create_task(conn, title=_LIVE_TITLE, assignee="default", session_id="20261027_000000_other0",
+                              idempotency_key=key)
+
+
+def _cli(argv: list[str], monkeypatch) -> int:
+    monkeypatch.setattr(kc, "_check_dispatcher_presence", lambda **kw: (True, ""))
+    root = argparse.ArgumentParser(prog="hermes")
+    kc.build_parser(root.add_subparsers())
+    return kc._cmd_create(root.parse_args(["kanban", "create", *argv]))
+
+
+def _rest(payload: dict):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from plugins.kanban.dashboard.plugin_api import router
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        return client.post("/tasks", json=payload)
+
+
+def _titles() -> list[str]:
+    with kbc.connect_closing() as conn:
+        return sorted(t.title for t in kb.list_tasks(conn))
+
+
+def _override_events(task_id: str) -> list[dict]:
+    with kbc.connect_closing() as conn:
+        rows = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'create_overlap'",
+                            (task_id,)).fetchall()
+    return [json.loads(r[0]) for r in rows]
+
+
+def test_cli_create_refuses_a_duplicate_owner(chat, monkeypatch, capsys):
+    """[daveey] `hermes kanban create` runs the same create_overlap check as the kanban_create tool."""
+    live = _open_owner()
+    assert _cli([_DUP_TITLE, "--assignee", "default", "--json"], monkeypatch) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["code"] == "create_overlap" and [m["id"] for m in out["matches"]] == [live], out
+    assert _titles() == [_LIVE_TITLE]
+    assert _cli([_DUP_TITLE, "--assignee", "default"], monkeypatch) == 2
+    err = capsys.readouterr().err
+    assert "create_overlap" in err and live in err and f"--distinct-from {live}" in err, err
+    assert _titles() == [_LIVE_TITLE]
+
+
+def test_cli_create_override_is_accepted_and_recorded(chat, monkeypatch, capsys):
+    live = _open_owner()
+    # distinct_from without a reason is still refused
+    assert _cli([_DUP_TITLE, "--assignee", "default", "--distinct-from", live], monkeypatch) == 2
+    capsys.readouterr()
+    assert _cli([_DUP_TITLE, "--assignee", "default", "--json", "--distinct-from", live,
+                 "--distinct-reason", "different key: the staging one"], monkeypatch) == 0
+    new = json.loads(capsys.readouterr().out)["id"]
+    assert _titles() == sorted([_LIVE_TITLE, _DUP_TITLE])
+    [ev] = _override_events(new)
+    assert ev["outcome"] == "override" and ev["reason"] == "different key: the staging one", ev
+
+
+def test_cli_create_with_idempotency_key_skips_its_own_family(chat, monkeypatch, capsys):
+    """Automated creators (coach / self-heal crons) dedupe by --idempotency-key: a retry returns the existing
+    card, and an earlier open card from the same key family (text before the first ':') never blocks a new one."""
+    live = _open_owner("coach-fix:telnyx-a")
+    assert _cli([_LIVE_TITLE, "--assignee", "default", "--json", "--idempotency-key", "coach-fix:telnyx-a"],
+                monkeypatch) == 0
+    assert json.loads(capsys.readouterr().out)["id"] == live
+    assert _cli([_DUP_TITLE, "--assignee", "default", "--json", "--idempotency-key", "coach-fix:telnyx-b"],
+                monkeypatch) == 0
+    capsys.readouterr()
+    assert _cli(["Rotate Telnyx webhook signing key today", "--assignee", "default", "--json",
+                 "--idempotency-key", "other-watch:1"], monkeypatch) == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "create_overlap"
+
+
+def test_cli_create_never_matches_its_parent(chat, monkeypatch, capsys):
+    live = _open_owner()
+    assert _cli([_DUP_TITLE, "--assignee", "default", "--parent", live], monkeypatch) == 0
+
+
+def test_rest_create_refuses_a_duplicate_owner(chat):
+    """[daveey] The dashboard/REST POST /tasks runs the same create_overlap check as the kanban_create tool."""
+    live = _open_owner()
+    r = _rest({"title": _DUP_TITLE, "assignee": "default"})
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "create_overlap" and [m["id"] for m in detail["matches"]] == [live], detail
+    assert _titles() == [_LIVE_TITLE]
+
+
+def test_rest_create_override_is_accepted_and_recorded(chat):
+    live = _open_owner()
+    r = _rest({"title": _DUP_TITLE, "assignee": "default", "distinct_from": [live]})
+    assert r.status_code == 409, r.text
+    r = _rest({"title": _DUP_TITLE, "assignee": "default", "distinct_from": [live],
+               "distinct_reason": "the staging key, not prod"})
+    assert r.status_code == 200, r.text
+    new = r.json()["task"]["id"]
+    assert _titles() == sorted([_LIVE_TITLE, _DUP_TITLE])
+    [ev] = _override_events(new)
+    assert ev["outcome"] == "override" and ev["reason"] == "the staging key, not prod", ev
