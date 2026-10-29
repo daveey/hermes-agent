@@ -212,7 +212,12 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   { id: 'session.archive', category: 'session', defaults: ['mod+shift+a'] },
   // ⌘⇧P — "p" for project: re-home the selected session into another project
   // through a typeahead palette page (same move as the row menu's submenu).
-  { id: 'session.moveToProject', category: 'session', defaults: ['mod+shift+p'] },
+  // In a browser tab ⌘⇧P / Ctrl+Shift+P opens a private window first.
+  {
+    id: 'session.moveToProject',
+    category: 'session',
+    ...hostDefaults(['mod+shift+p'], { mac: 'mod+ctrl+shift+p', other: 'alt+shift+p' })
+  },
   // ⌘⇧B — "b" for branch: spin up a new git worktree from the active repo.
   { id: 'workspace.newWorktree', category: 'session', defaults: ['mod+shift+b'] },
   // ⌘O — the editor-standard "open folder" chord (VS Code ⌘O, Zed's
