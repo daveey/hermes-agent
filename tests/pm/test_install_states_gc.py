@@ -139,7 +139,9 @@ def test_retention_days_from_config_yaml_decides_reclaim(tmp_path, days, reclaim
     assert state.exists() is not reclaimed
 
 
-def _age(state, days):
+# Fork: renamed from upstream `_age(state, days)`; the merge kept both helpers and the
+# second silently shadowed the fork's one-argument `_age`.
+def _age_days(state, days):
     then = time.time() - days * 86400
     for path in sorted(state.rglob("*"), reverse=True) + [state]:
         os.utime(path, (then, then), follow_symlinks=False)
@@ -163,7 +165,7 @@ def test_retention_comes_from_the_store_owner_not_the_active_profile(tmp_path, r
         installs = pm.environments.installs_root()
         assert installs == root / "installs"
         state = _state(installs, "aaaa", tmp_path / "unmounted" / "checkout")
-        _age(state, 30)
+        _age_days(state, 30)
         assert (collect_orphan_install_states(installs) == [state]) is reclaimed
     finally:
         reset_hermes_home_override(token)
@@ -180,7 +182,7 @@ def test_symlinked_installs_reads_retention_from_the_home_not_the_link_target(tm
     target.mkdir(parents=True)
     (root / "installs").symlink_to(target, target_is_directory=True)
     state = _state(root / "installs", "aaaa", tmp_path / "unmounted" / "checkout")
-    _age(state, 30)
+    _age_days(state, 30)
     assert collect_orphan_install_states(root / "installs") == []
     assert state.exists() and sorted(p.name for p in target.parent.iterdir()) == ["installs"]
 
@@ -195,7 +197,7 @@ def test_state_used_while_another_orphan_is_removed_is_kept(tmp_path, monkeypatc
     deleted = _state(installs, "aaaa", tmp_path / "home" / "cache" / "scratch" / "gone")
     used = _state(installs, "bbbb", tmp_path / "unmounted" / "checkout")
     (used / "environments" / "gen" / ".lease-managed").touch()
-    _age(used, 30)
+    _age_days(used, 30)
     rmtree = pm.install_states.shutil.rmtree
 
     def remove_then_launch(path, *args, **kwargs):
