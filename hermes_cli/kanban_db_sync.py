@@ -1010,6 +1010,9 @@ class ApplyResult:
     changed_fields: dict[str, set[str]] = field(default_factory=dict)
     wake_dispatcher: bool = False
     blobs_to_fetch: list[str] = field(default_factory=list)
+    # [daveey] A feed pull or snapshot: task fields with an unanswered local edit keep the local value
+    # (``_without_unacked_fields``), checked inside the apply transaction.
+    local_pending_wins: bool = False
 
 
 _STATUS_HOOKS = {"running": "kanban_task_claimed", "done": "kanban_task_completed", "blocked": "kanban_task_blocked"}
@@ -1018,7 +1021,7 @@ _CLAIMABLE = ("ready", "review")
 
 def apply_remote_changes(
     conn: sqlite3.Connection, changes: Sequence[RemoteChange], *, new_cursor: int, board: Optional[str] = None,
-    observers: bool = True,
+    observers: bool = True, local_pending_wins: bool = False,
 ) -> ApplyResult:
     """Apply one feed page in ONE transaction, then fire local observers.
 
@@ -1028,11 +1031,13 @@ def apply_remote_changes(
     never written from the wire, and the cursor advances in the same commit as
     the rows. Hooks fire once, after the commit, with ``remote=True`` and
     ``origin_gateway``; a page that makes work claimable wakes the dispatcher.
-    ``observers=False`` (a shadow copy) applies the rows and fires nothing."""
+    ``observers=False`` (a shadow copy) applies the rows and fires nothing. ``local_pending_wins`` (the feed
+    pull and the snapshot rebuild) keeps every task field that has an unanswered local edit in the outbox, read
+    in the same transaction as the apply. [daveey]"""
     from hermes_cli.kanban_db_connect import write_txn
     if board_mode(conn) == "off":
         raise RuntimeError("apply_remote_changes: kanban sync is not enabled on this board")
-    result = ApplyResult(cursor=new_cursor)
+    result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     with write_txn(conn):
         conn.execute("UPDATE kanban_sync_state SET applying = 1")
         own = _state(conn)["gateway_id"]
@@ -1101,7 +1106,8 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
     old = conn.execute("SELECT * FROM tasks WHERE id = ?", (ch.uid,)).fetchone()
     if old is not None and old["sync_version"] is not None and ch.version < old["sync_version"]:  # equal = the same row (a re-send or a revert)
         return False
-    cols = _local_fields(conn, "tasks", ch.fields, ch.uid)
+    fields = _without_unacked_fields(conn, ch) if result.local_pending_wins else ch.fields
+    cols = _local_fields(conn, "tasks", fields, ch.uid)
     if old is None:
         names = ["id", *cols, "sync_version"]
         conn.execute(f"INSERT INTO tasks ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
@@ -1117,6 +1123,26 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
                       ch.version, own, result)
     _collect_task_observers(ch, cols.get("status"), changed, result)
     return True
+
+
+def _without_unacked_fields(conn: sqlite3.Connection, ch: RemoteChange) -> Mapping[str, Any]:
+    """The feed's task fields minus those with a local edit the Board has not answered yet (an outbox op that is not
+    rejected): the newer local value wins until that op's answer arrives, the rule ``without_pending`` applies on
+    the pull and ``_local_row_is_newer`` on child rows. [daveey] Read inside the apply transaction. The pull's
+    pre-filter reads the outbox before the apply takes the write lock, so a claim that committed in between was
+    not in it, and the Board's pre-claim echo (an equal version, which the version fence lets through) set the
+    card back to ``ready`` with no current run while its worker was being spawned (MacBook t_01a189343dd2f6ac run
+    9821, 2026-10-29)."""
+    pending: set[str] = set()
+    for (fields,) in conn.execute("SELECT fields FROM kanban_sync_outbox WHERE table_name = 'tasks' AND row_uid = ? "
+                                  "AND state != 'rejected'", (ch.uid,)):
+        try:
+            pending.update(json.loads(fields or "{}"))
+        except ValueError:
+            continue
+    if not pending:
+        return ch.fields
+    return {k: v for k, v in ch.fields.items() if k not in pending}
 
 
 def _mirror_lease(conn: sqlite3.Connection, task_id: str, holder: Optional[str], expires: Optional[int],

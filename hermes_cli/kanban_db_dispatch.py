@@ -1689,17 +1689,17 @@ def _record_task_failure(
         return True
 
 
-def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
-    """Record the spawned child's pid + its restart-stable fingerprint (``_process_fingerprint``), and
-    emit a ``spawned`` event carrying them. The fingerprint is what lets every later liveness/kill
-    decision tell OUR worker from a process that recycled the PID after a reboot. A failed capture is
-    persisted as ``UNVERIFIED_WORKER_FINGERPRINT``, never NULL: NULL is the legacy pre-fingerprint row
-    whose bare-PID kill authority a new spawn must not inherit."""
+def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int, run_id: Optional[int] = None) -> None:
+    """Record the spawned child's pid + restart-stable fingerprint (``_process_fingerprint``) and emit a ``spawned``
+    event with them. The fingerprint lets every later liveness/kill decision tell OUR worker from a recycled PID. A
+    failed capture is persisted as ``UNVERIFIED_WORKER_FINGERPRINT``, never NULL (the legacy row whose bare-PID kill
+    authority a new spawn must not inherit). [daveey] ``run_id``: the claimed run (HERMES_KANBAN_RUN_ID), not a
+    re-read of ``current_run_id``, which a sync pull once blanked mid-spawn (t_01a189343dd2f6ac, 10-29)."""
     started_at = _process_fingerprint(int(pid)) or UNVERIFIED_WORKER_FINGERPRINT
     with _kb.write_txn(conn):
         conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
                      (int(pid), started_at, task_id))
-        run_id = _kb._current_run_id(conn, task_id)
+        run_id = run_id if run_id is not None else _kb._current_run_id(conn, task_id)
         if run_id is not None:
             conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
                          (int(pid), started_at, run_id))
@@ -2379,7 +2379,7 @@ def _dispatch_lane_task(
     try:
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:
-            _set_worker_pid(conn, claimed.id, int(pid))
+            _set_worker_pid(conn, claimed.id, int(pid), run_id=claimed.current_run_id)  # [daveey] the claimed run
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
         _kb._fire_worker_spawned_hook(conn, claimed, str(workspace), pid, board=board)
         # consecutive_failures is deliberately NOT reset here: resetting on
