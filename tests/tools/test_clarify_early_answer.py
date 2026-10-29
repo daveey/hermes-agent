@@ -22,18 +22,26 @@ def _clean(monkeypatch):
     clarify_early.reset_for_tests()
 
 
+# Upper bound for event waits only; a passing run never waits this long. The path to the surface
+# callback runs the human-input hook dispatch (plugin discovery: 0.2-0.4s locally, more on a busy
+# runner), so tests sync on events, never on a sleep that guesses how long that takes.
+WAIT_S = 10
+
+
 class Blocking:
     """A surface callback that blocks until answered or cancelled, like the TUI bridge."""
 
     def __init__(self):
         self.event = threading.Event()
+        self.entered = threading.Event()  # set once the clarify is genuinely shown and blocked
         self.reply = None
         self.calls = 0
         self.cancel_reasons = []
 
     def __call__(self, questions):
         self.calls += 1
-        self.event.wait(5)
+        self.entered.set()
+        self.event.wait(WAIT_S)
         return self.reply or {"answers": {}, "outcome": "cancelled"}
 
     def cancel_early(self, reason):
@@ -70,14 +78,15 @@ def test_decision_recorded_while_blocked_ends_the_clarify():
     box = {}
     t = threading.Thread(target=lambda: box.update(
         out=json.loads(clarify_tool(QUESTIONS, callback=cb, session_id="s1", tool_call_id="call_1"))))
-    started = time.monotonic()
     t.start()
-    time.sleep(0.2)
+    assert cb.entered.wait(WAIT_S)
     assert t.is_alive() and cb.calls == 1  # genuinely blocked, nothing to deliver yet
+    started = time.monotonic()
     state["ready"] = True
-    t.join(3)
+    t.join(WAIT_S)
     assert not t.is_alive()
-    assert time.monotonic() - started < 3
+    # Ended by the watcher (POLL_INTERVAL_S=0.05), well before the callback's own WAIT_S timeout.
+    assert time.monotonic() - started < WAIT_S / 2
     assert box["out"]["status"] == "answered_elsewhere"
     assert cb.cancel_reasons == ["answered_elsewhere"]
     assert commits == ["done"]
@@ -85,18 +94,26 @@ def test_decision_recorded_while_blocked_ends_the_clarify():
 
 def test_decision_for_another_session_does_not_end_the_clarify():
     """Guard: the provider says None for a session it does not own; the clarify keeps waiting for the user."""
-    commits = []
-    clarify_early.register_provider(lambda sid, tcid: _answer(commits) if sid == "other" else None)
+    commits, polls, polled_enough = [], [], threading.Event()
+
+    def provider(sid, tcid):
+        polls.append(sid)
+        if len(polls) >= 4:  # the pre-ask check plus three watcher polls while blocked
+            polled_enough.set()
+        return _answer(commits) if sid == "other" else None
+
+    clarify_early.register_provider(provider)
     cb = Blocking()
     box = {}
     t = threading.Thread(target=lambda: box.update(
         out=json.loads(clarify_tool(QUESTIONS, callback=cb, session_id="s1", tool_call_id="call_1"))))
     t.start()
-    time.sleep(0.4)
+    assert cb.entered.wait(WAIT_S) and polled_enough.wait(WAIT_S)
     assert t.is_alive() and cb.cancel_reasons == [] and commits == []
+    assert set(polls) == {"s1"}
     cb.reply = {"answers": {"q0": "both"}, "outcome": "submitted"}
     cb.event.set()
-    t.join(3)
+    t.join(WAIT_S)
     assert box["out"]["responses"][0]["user_response"] == "both"
     assert commits == []
 
@@ -117,10 +134,10 @@ def test_a_real_answer_that_wins_the_race_is_not_replaced():
     t = threading.Thread(target=lambda: box.update(
         out=json.loads(clarify_tool(QUESTIONS, callback=cb, session_id="s1", tool_call_id="call_1"))))
     t.start()
-    time.sleep(0.2)
+    assert cb.entered.wait(WAIT_S)  # shown before the decision lands, so only the watcher can see it
     state["ready"] = True
     cb.event.set()
-    t.join(3)
+    t.join(WAIT_S)
     assert box["out"]["responses"][0]["user_response"] == "aws"
     assert commits == []
 
