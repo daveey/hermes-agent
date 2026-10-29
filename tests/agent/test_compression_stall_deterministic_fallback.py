@@ -90,9 +90,9 @@ def _wait_cancelled_workers_settled():
 
 @pytest.fixture
 def fast_timeouts(monkeypatch):
-    # The idle window bounds each attempt INCLUDING the deterministic rung's no-LLM compress pass (prompt
-    # rebuild, SQLite commit, malloc_trim), which outran a 0.4 s window on loaded CI runners. 2 s keeps a
-    # stall cheap while leaving that work several times its normal cost.
+    # Stall detection only. The deterministic rung does not inherit this window: it waits for the
+    # local commit and returns when that work finishes. Sharing this budget with that commit outran
+    # 0.4s, then 2.0s, on loaded CI runners.
     monkeypatch.setattr(cc, "resolve_context_compression_timeouts", lambda compression_cfg=None: (2.0, 20.0))
 
 
@@ -299,3 +299,36 @@ def test_over_window_request_commits_the_deterministic_fallback_on_the_first_sta
     assert out is not live and len(out) < len(live)
     assert len(_summary_rows(out)) == 1, "the over-window request got a committed deterministic handoff"
     assert getattr(agent, "_last_compression_timed_out", None) is not True
+
+
+def test_deterministic_pinned_retry_outlasts_the_llm_idle_window():
+    """The LLM idle window detects a silent socket. The deterministic rung is local work
+    (prompt rebuild, SQLite, malloc_trim) and must still commit when that work outlasts
+    the window — a CPU-throttled runner's wall clock does, and widening the shared budget
+    (0.4s, then 2.0s) did not hold."""
+    from agent.context_compressor import DETERMINISTIC_SUMMARY_ROUTE
+
+    original = [{"role": "user", "content": "keep-me"}]
+    recovered = [{"role": "assistant", "content": SUMMARY_PREFIX + " handoff"}]
+    llm_idle = 0.05
+
+    def worker(fence: CompressionCommitFence):
+        remaining = (fence.deadline_monotonic or 0.0) - time.monotonic()
+        assert remaining > llm_idle, "the deterministic fence inherited the LLM idle window"
+        # Outlast the idle window the caller passed. The delay is the behaviour under test.
+        time.sleep(llm_idle * 4)  # health: allow HX013 -- the sleep is the LLM idle window this commit must outlast
+        return recovered, "compressed-prompt"
+
+    started = time.monotonic()
+    result = cc._run_pinned_compression_retry(
+        dict(DETERMINISTIC_SUMMARY_ROUTE),
+        worker=worker, messages=original, system_prompt_fallback="degraded-prompt",
+        idle_timeout_seconds=llm_idle, total_ceiling_seconds=llm_idle,
+        on_commit_overrun=None, on_timeout_cause=None, telemetry_agent=None, new_fence=None,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result is not None, "a slow local commit must not be abandoned as a silent socket"
+    assert result[0] is recovered and result[1] == "compressed-prompt"
+    # The wait returns when the worker finishes, not when a generous hang backstop expires.
+    assert elapsed < 2.0, f"deterministic wait blocked for {elapsed:.1f}s instead of returning on completion"

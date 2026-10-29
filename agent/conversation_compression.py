@@ -668,11 +668,9 @@ class CompressionCommitFence:
 # Defaults for the in-agent progress-aware wrap; mirror hermes_cli.config.DEFAULT_CONFIG["compression"] keys.
 DEFAULT_CONTEXT_TIMEOUT_SECONDS = 120.0
 DEFAULT_CONTEXT_TOTAL_CEILING_SECONDS = 600.0
+DETERMINISTIC_FALLBACK_WAIT_SECONDS = DEFAULT_CONTEXT_TIMEOUT_SECONDS
 
-# Unlike explicit_interrupt, a /stop after the stall window arms the durable backoff (no automatic re-entry).
-# Distinct from ``explicit_interrupt``: a /stop that arrived after the summary stream had already crossed
-# the no-progress stall window (#96775). Ordinary early /stop stays cooldown-neutral; this class arms the
-# durable backoff so the next automatic turn does not re-enter the same stalled strategy.
+# Unlike explicit_interrupt, a /stop after the stall window arms the durable backoff (#96775).
 STALL_INTERRUPTED_FAILURE_CLASS = "stall_interrupted"
 
 # Daemon pool so a fence-cancelled hung worker cannot block interpreter exit; never shut down per call.
@@ -1007,6 +1005,8 @@ def _run_pinned_compression_retry(
     ceiling = max(float(total_ceiling_seconds), idle)
     deterministic = route.get("deterministic") is True
     if deterministic:
+        idle = max(idle, DETERMINISTIC_FALLBACK_WAIT_SECONDS)
+        ceiling = max(ceiling, idle)
         logger.warning(
             "Context compression stalled on every summary route — committing the %s (no summary model) "
             "before continuing without compression", route["label"],
