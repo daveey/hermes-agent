@@ -161,15 +161,25 @@ def test_bad_pattern_is_ignored_not_fatal(board):
     assert got == (SONNET, "anthropic", "default")
 
 
-def test_tier_pin_reaches_worker_argv(board, monkeypatch):
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["hermes"])
-    monkeypatch.setattr(kbd, "_resolve_worker_cli_toolsets", lambda home: None)
+def test_tier_pin_reaches_owner(board):
+    """The tier pin lives on the in-memory claimed task; the profile owner (workers are
+    ``-m hermes_cli.kanban_worker_client``) re-reads the card and takes it from the run's model_tier event."""
     with kbc.connect() as conn:
-        t = kb.get_task(conn, kb.create_task(conn, title="routine", assignee="default"))
+        tid = kb.create_task(conn, title="routine", assignee="default")
+        t = kb.claim_task(conn, tid)
         tier.apply_model_tier(conn, t, lane="ready", cfg={"default_model": SONNET, "default_provider": "anthropic"})
-    argv = kbd._worker_argv(t, "default", None)
-    assert argv[argv.index("-m") + 1] == SONNET
-    assert argv[argv.index("--provider") + 1] == "anthropic"
+        fresh = kb.get_task(conn, tid)
+        assert (fresh.model_override, fresh.provider_override) == (None, None)  # never the DB row
+        assert tier.owner_model_pin(conn, fresh) == (SONNET, "anthropic")
+        # Another run of the same card does not inherit this run's tier decision.
+        fresh.current_run_id = (fresh.current_run_id or 0) + 1000
+        assert tier.owner_model_pin(conn, fresh) == (None, None)
+
+
+def test_owner_runs_class_selector_with_provider_auto(board):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="deep", assignee="default", model_override="class:deep")
+        assert tier.owner_model_pin(conn, kb.get_task(conn, tid)) == ("class:deep", "auto")
 
 
 def test_unset_default_provider_is_inferred_not_the_profiles(board):

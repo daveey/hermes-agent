@@ -42,6 +42,9 @@ def build_kanban_policy(connection, params, config):
             if bound and json.loads(bound[0])['request_id'] != 'kanban:' + json.dumps([board, task.id, task.current_run_id], separators=(',', ':')):
                 raise RuntimeStoreError('stale_kanban_claim')
             context = kb.build_worker_context(conn, task.id)
+            # [daveey] The dispatcher's model tier for this run (in-memory pin + model_tier event), class → auto.
+            from hermes_cli.kanban_model_tier import owner_model_pin
+            pinned_model, pinned_provider = owner_model_pin(conn, task)
             skills = list(task.skills or ())
             if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
                 # Same rule as the dispatcher's review lane: the reviewer always loads sdlc-review.
@@ -50,7 +53,7 @@ def build_kanban_policy(connection, params, config):
         raise RuntimeStoreError('invalid_kanban_claim') from exc
     cwd = task.workspace_path
     params_policy = {'source': 'cli', 'cwd': cwd}
-    for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
+    for name, value in (('model', pinned_model), ('provider', pinned_provider), ('reasoning', task.reasoning_effort)):
         if value:
             params_policy[name] = value
     private = {}

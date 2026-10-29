@@ -125,6 +125,9 @@ def test_create_task_with_model_and_provider(conn):
         ({"reasoning_effort": "high"}, "profile-model", "custom", "high"),
         ({"reasoning_effort": "none"}, "profile-model", "custom", None),
         ({}, "profile-model", "custom", "low"),
+        # [daveey] The dispatcher's tier pin lives on the in-memory task and reaches the owner through
+        # the run's model_tier event (owner_model_pin), never the DB row.
+        ({"_tier": {"default_model": "glm-5", "default_provider": "openrouter"}}, "glm-5", "openrouter", "low"),
     ],
 )
 def test_spawn_resolves_claimed_task_policy(
@@ -142,10 +145,16 @@ def test_spawn_resolves_claimed_task_policy(
     (profile / "config.yaml").write_text("{}\n")  # identity marker: a bare dir is not a live profile
     workspace = tmp_path / "ws"
     workspace.mkdir()
+    overrides = dict(overrides)
+    tier_cfg = overrides.pop("_tier", None)
     tid = kb.create_task(conn, title="t", assignee="elias",
                          workspace_kind="dir", workspace_path=str(workspace), **overrides)
     task = kb.claim_task(conn, tid)
     assert task is not None
+    if tier_cfg is not None:
+        from hermes_cli.kanban_model_tier import apply_model_tier
+        assert apply_model_tier(conn, task, lane="ready", cfg=tier_cfg) == "default"
+        assert kb.get_task(conn, tid).model_override is None
     captured = {}
 
     def fake_popen(cmd, **kwargs):

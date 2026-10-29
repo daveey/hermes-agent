@@ -48,19 +48,11 @@ def auto_home(tmp_path, monkeypatch, request):
 
 
 def _argv(monkeypatch, tmp_path, task):
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["hermes"])
-    captured = {}
-
-    class FakeProc:
-        pid = 4245
-
-    monkeypatch.setattr(subprocess, "Popen", lambda cmd, *a, **k: captured.setdefault("cmd", list(cmd)) and FakeProc())
-    ws = tmp_path / "ws"
-    ws.mkdir(exist_ok=True)
-    kbd._default_spawn(task, str(ws))
-    cmd = captured["cmd"]
-    i = cmd.index("-m")
-    return cmd[i + 1], (cmd[cmd.index("--provider") + 1] if "--provider" in cmd else None)
+    """(model, provider) the profile owner runs *task* with. Workers are ``-m hermes_cli.kanban_worker_client``
+    (upstream) and the owner builds the turn's policy from ``owner_model_pin`` (gateway.session_kanban), so the
+    pin no longer rides the worker argv."""
+    with kbc.connect_closing() as conn:
+        return tier.owner_model_pin(conn, task)
 
 
 def _parser():

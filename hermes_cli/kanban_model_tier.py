@@ -192,6 +192,31 @@ def worker_model_args(model: str, provider: Optional[str]) -> list[str]:
     return args
 
 
+def owner_model_pin(conn: sqlite3.Connection, task: Any) -> tuple[Optional[str], Optional[str]]:
+    """``(model, provider)`` the profile owner runs *task*'s current run with. [daveey]
+
+    Workers are ``-m hermes_cli.kanban_worker_client`` (upstream) and the owner re-reads the card, so the
+    dispatcher's in-memory tier pin (:func:`apply_model_tier`) reaches it only through this run's
+    ``model_tier`` event; without one the row's overrides apply. A class selector always runs with
+    provider ``auto`` (:func:`worker_model_args`), so the profile's concrete provider never pins a class."""
+    import json
+    model, provider = _str(getattr(task, "model_override", None)) or None, _str(getattr(task, "provider_override", None)) or None
+    run_id = getattr(task, "current_run_id", None)
+    if run_id is not None:
+        row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='model_tier' "
+                           "ORDER BY id DESC LIMIT 1", (task.id, run_id)).fetchone()
+        try:
+            payload = json.loads(row[0]) if row else {}
+        except (TypeError, ValueError):
+            payload = {}
+        if isinstance(payload, dict) and _str(payload.get("model")):
+            model, provider = _str(payload["model"]), _str(payload.get("provider")) or None
+    if not model:
+        return None, None
+    args = worker_model_args(model, provider)
+    return model, (args[args.index("--provider") + 1] if "--provider" in args else None)
+
+
 def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
     """Pin the tier's model on the in-memory ``task`` (never the DB row) and record a ``model_tier`` event.
     Returns the reason. Never raises: a failure leaves the task on its profile's model."""
