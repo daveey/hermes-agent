@@ -3110,9 +3110,14 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
 
 
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
-    """The profile owner executes; this subprocess only waits for its receipt."""
+    """The profile owner executes; this subprocess only waits for its receipt.
+
+    [daveey] ``-P``: the worker runs with cwd = the task workspace, which for a hermes-agent worktree
+    card is another Hermes checkout; plain ``-m`` put that cwd first on ``sys.path`` and the worker
+    imported the worktree's ``hermes_cli`` (see ``hermes_module_argv``)."""
     import sys
-    return [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+    from cron.scheduler_worker_env import hermes_module_argv
+    return hermes_module_argv(sys.executable, "hermes_cli.kanban_worker_client")
 
 
 def _open_worker_log(task: Task, board: Optional[str]):

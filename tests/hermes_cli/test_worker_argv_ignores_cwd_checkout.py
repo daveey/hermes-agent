@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKER_MODULE = "hermes_cli.kanban_worker_client"
 PROBE = "import hermes_cli, cron; print(hermes_cli.__file__); print(cron.__file__)"
 # The spawn paths under test get ``subprocess.Popen`` monkeypatched; the probe needs the real one.
 _REAL_POPEN = subprocess.Popen
@@ -106,12 +107,14 @@ def test_kanban_worker_in_a_checkout_workspace_imports_the_install(
     captured = _capture_kanban_spawn(monkeypatch, tmp_path, decoy_checkout)
 
     assert captured["cwd"] == str(decoy_checkout)
-    assert "hermes_cli.main" in captured["cmd"]
+    # Fork: upstream's worker is the owner client ``-m hermes_cli.kanban_worker_client`` (the profile
+    # owner runs the card), not ``-m hermes_cli.main ... chat``; the cwd rule is the same.
+    assert WORKER_MODULE in captured["cmd"]
     _assert_install_tree(_imports_from(captured["cmd"], captured["env"], decoy_checkout))
-    # And the real entry point starts from there (it refused with the PM error before).
-    module_at = captured["cmd"].index("hermes_cli.main")
+    # And the real worker module imports from there (it refused with the PM error before).
+    module_at = captured["cmd"].index(WORKER_MODULE)
     child_env = {k: v for k, v in captured["env"].items() if k != "PYTHONSAFEPATH"}
-    returncode, out, err = _run([*captured["cmd"][: module_at + 1], "--version"],
+    returncode, out, err = _run([*captured["cmd"][: module_at - 1], "-c", f"import {WORKER_MODULE}"],
                                 cwd=decoy_checkout, env=child_env)
     assert returncode == 0 and "DECOY" not in err, (out, err)
 
@@ -140,7 +143,7 @@ def test_placement_forwarder_and_its_worker_import_the_install(
     assert fwd.MODULE in cmd, cmd
     _assert_install_tree(_imports_from(cmd, captured["env"], decoy_checkout))
     worker = cmd[cmd.index("--") + 1:]
-    assert "hermes_cli.main" in worker
+    assert WORKER_MODULE in worker  # Fork: upstream's owner client, see above
     _assert_install_tree(_imports_from(worker, captured["env"], decoy_checkout))
 
 
