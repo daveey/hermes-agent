@@ -19,7 +19,7 @@ import {
   SIDEBAR_FILTERED_PAGE_SIZE,
   SIDEBAR_SESSIONS_PAGE_SIZE
 } from '@/store/layout'
-import { recordSessionListResult } from '@/store/offline-sessions'
+import { $sessionListFreshness, recordSessionListResult, staleSessionOwners } from '@/store/offline-sessions'
 import { messagingTotalsKey, normalizeProfileKey, sidebarProfileForScope } from '@/store/profile'
 import {
   $messagingSessions,
@@ -44,7 +44,11 @@ import {
   setSessionsLoading,
   stampMessagingRowsWithListServer
 } from '@/store/session'
-import { noteSessionListSource, takeSessionListRefreshReason } from '@/store/session-dot-state'
+import {
+  markSessionListRefreshReason,
+  noteSessionListSource,
+  takeSessionListRefreshReason
+} from '@/store/session-dot-state'
 import {
   $removedSessionIds,
   captureSessionTombstoneGenerations,
@@ -57,6 +61,9 @@ import { $sessionTiles, $workingSessionIds, getRecentlySettledSessionIds } from 
 import { refreshCronJobs as refreshCronJobsStore } from '../../cron/cron-actions'
 
 import { refreshRetainedKanban, withKanbanEvidence } from './refresh-retained-kanban'
+
+/** [daveey] Backoff for re-listing while a failed list leaves owners stale (last value repeats). */
+export const STALE_LIST_RETRY_MS = [15_000, 30_000, 60_000]
 
 function sidebarRequestConnection(): string | undefined {
   return getApiRequestConnection() ?? undefined
@@ -600,6 +607,52 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       }),
     [refreshSessions]
   )
+
+  // [daveey] A failed list leaves its owners stale: their rows paint as cached copies (no red/grey stripe, 0/0 kanban
+  // badge) and only a SUCCESSFUL list makes them live again. Nothing used to re-list on its own: after a Desktop
+  // restart whose first hub list failed, this Mac's rows stayed blank for 16 min, until the user switched gateways.
+  // Re-list with backoff while any owner is stale; any successful refresh (this one or another) ends it.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let attempt = 0
+
+    const clear = () => {
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+    }
+
+    const schedule = (state: Record<string, boolean>) => {
+      if (!staleSessionOwners(state).length) {
+        attempt = 0
+        clear()
+
+        return
+      }
+
+      if (timer !== null) {
+        return
+      }
+
+      const delay = STALE_LIST_RETRY_MS[Math.min(attempt, STALE_LIST_RETRY_MS.length - 1)]
+      timer = setTimeout(() => {
+        timer = null
+        attempt += 1
+        markSessionListRefreshReason('stale-owner-retry')
+        void refreshSessions()
+          .catch(() => undefined)
+          .finally(() => schedule($sessionListFreshness.get()))
+      }, delay)
+    }
+
+    const unsubscribe = $sessionListFreshness.subscribe(schedule)
+
+    return () => {
+      unsubscribe()
+      clear()
+    }
+  }, [refreshSessions])
 
   return {
     loadMoreMessagingForPlatform,

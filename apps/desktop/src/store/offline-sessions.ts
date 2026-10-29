@@ -65,16 +65,43 @@ export const $sessionListFreshness = atom<Record<string, boolean>>({})
 const ownerKey = (connection: string | undefined, profile: string | undefined) =>
   `${connection?.trim() || 'local'}\u0000${profileOf(profile)}`
 
-function publishFreshness(next: Record<string, boolean>): void {
+/** [daveey] desktop.log line per owner whose freshness changed, with what changed it. A stale owner's rows paint as
+ *  cached copies (no stripe, no kanban badge), and a 16 min stretch of that after a restart left no trace of which
+ *  list failed. Diagnostics only; never throws. */
+function logFreshnessFlips(previous: Record<string, boolean>, next: Record<string, boolean>, reason: string): void {
+  try {
+    const flips = [...new Set([...Object.keys(previous), ...Object.keys(next)])]
+      .filter(key => previous[key] !== next[key])
+      .map(key => `${key.replace('\u0000', '/')}:${previous[key] ?? '-'}->${next[key] ?? '-'}`)
+
+    if (flips.length && typeof window !== 'undefined') {
+      window.hermesDesktop?.logLine?.(`[session-freshness] ${flips.join(' ')} reason=${reason}`)
+    }
+  } catch {
+    // diagnostics only
+  }
+}
+
+function publishFreshness(next: Record<string, boolean>, reason: string): void {
   const previous = $sessionListFreshness.get()
 
   if (
     Object.keys(previous).length !== Object.keys(next).length ||
     Object.keys(next).some(key => previous[key] !== next[key])
   ) {
+    logFreshnessFlips(previous, next, reason)
     $sessionListFreshness.set(next)
   }
 }
+
+/** [daveey] Owner keys a sidebar LIST marked stale (failed request, or an error naming them). A gateway the hub-sync
+ *  status probe calls unreachable is not here: re-listing it would only flap against the probe. */
+const listStaleOwners = new Set<string>()
+
+/** [daveey] Owners whose last list failed (`connection/profile`) and are still stale. Only a successful list makes
+ *  them live again, so the sidebar re-lists while this is non-empty instead of waiting for an unrelated refresh. */
+export const staleSessionOwners = (state = $sessionListFreshness.get()): string[] =>
+  [...listStaleOwners].filter(key => state[key] === false).map(key => key.replace('\u0000', '/'))
 
 export function sessionOwnerIsFresh(
   connection: string | undefined,
@@ -92,7 +119,7 @@ export function recordSessionGatewayUnavailable(connection: string): void {
   )
 
   next[ownerKey(connection, '*')] = false
-  publishFreshness(next)
+  publishFreshness(next, `gateway-unavailable conn=${connection}`)
 }
 
 /** Called only by the owning, non-superseded sidebar refresh. */
@@ -135,6 +162,7 @@ export function recordSessionListResult(
   const primary = $connectionsRegistry.get()?.primary?.trim() || 'local'
   const gatewayOf = (id: null | string | undefined) => id?.trim() || primary
   const requestGateway = gatewayOf(connection)
+
   const covers = (ownerConnection: null | string | undefined, errorConnection?: null | string) =>
     errorConnection?.trim()
       ? gatewayOf(errorConnection) === gatewayOf(ownerConnection)
@@ -160,7 +188,18 @@ export function recordSessionListResult(
     }
   }
 
-  publishFreshness(next)
+  for (const [key, fresh] of Object.entries(next)) {
+    if (fresh) {
+      listStaleOwners.delete(key)
+    } else if (owners.has(key)) {
+      listStaleOwners.add(key)
+    }
+  }
+
+  publishFreshness(
+    next,
+    `list conn=${connection?.trim() || 'local'} profile=${profile}${failed ? ' failed' : ''}${errors.length ? ` errors=${errors.length}` : ''}`
+  )
 }
 
 /**
@@ -377,6 +416,7 @@ export function hideOfflineSession(row: SessionInfo): void {
 
 export function _resetOfflineSessionsForTests(): void {
   archivedWhileOffline.clear()
+  listStaleOwners.clear()
   $sessionListFreshness.set({})
   $offlineSessions.set([])
 }

@@ -15,6 +15,7 @@ import {
   type OfflineReplicaRecord,
   offlineSessionsFromReplica,
   recordSessionListResult,
+  sessionOwnerIsFresh,
   syncedAgoLabel
 } from './offline-sessions'
 
@@ -246,6 +247,7 @@ describe('mergeOfflineFallback', () => {
 
   it('a retained row of a failed list is stamped stale-list only when no replica copy replaces it', () => {
     recordSessionListResult([], [], 'conn-mini', 'all', [], true)
+
     const merged = mergeOfflineFallback(
       [live('c1', { connection_id: 'conn-mini' }), live('busy', { connection_id: 'conn-mini' })],
       cached
@@ -331,6 +333,15 @@ describe('mergeOfflineFallback', () => {
       'older',
       'recent'
     ])
+  })
+
+  it('an error naming another gateway still marks that gateway stale', () => {
+    const previous = [live('mine', { connection_id: 'local' }), live('hubrow', { connection_id: 'conn-hub' })]
+
+    recordSessionListResult(previous, [], 'conn-hub', 'all', [{ connection_id: 'local', profile: 'default' }], true)
+
+    expect(sessionOwnerIsFresh('local', 'default')).toBe(false)
+    expect(sessionOwnerIsFresh('conn-hub', 'default')).toBe(false)
   })
 
   it('keeps reference identity when nothing is added', () => {
