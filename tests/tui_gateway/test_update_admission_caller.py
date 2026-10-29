@@ -20,7 +20,8 @@ def test_prompt_worker_refusal_preserves_replacement_turn(tmp_path, monkeypatch)
         assert accepted
         session["running"] = True
     monkeypatch.setattr(server, "_ensure_session_db_row", lambda *a: True)
-    monkeypatch.setattr(server, "_admit_prompt_turn", lambda *a: ([], SimpleNamespace()))
+    # Fork: upstream's _admit_prompt_turn takes a keyword-only report_ownership_refusal.
+    monkeypatch.setattr(server, "_admit_prompt_turn", lambda *a, **kw: ([], SimpleNamespace()))
     monkeypatch.setattr(server, "_session_profile_runtime_scope", lambda *a: nullcontext())
     monkeypatch.setattr(server, "_routing_provenance_db", lambda *a: nullcontext(None))
     monkeypatch.setattr(server, "_sessions", {})
