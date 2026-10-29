@@ -15,6 +15,15 @@ from tests.waiting import wait_until
 def consumer(tmp_path, monkeypatch):
     from tui_gateway import process_consumer_health as health
     registry = ProcessRegistry()
+    new_session = registry._new_session
+
+    def notifying_session(*args, **kwargs):
+        process = new_session(*args, **kwargs)
+        # Arm before the reader starts: a fast child can finish before spawn returns.
+        process.notify_on_complete = True
+        return process
+
+    monkeypatch.setattr(registry, "_new_session", notifying_session)
     monkeypatch.setattr("tools.process_registry.process_registry", registry)
     for name in ("_poll_bot_live_delivery_guarded", "_maybe_fire_tui_loop_tick",
                  "_maybe_fire_tui_heartbeat_tick", "_notif_poll_kanban", "_notif_take_parked"):
@@ -37,7 +46,6 @@ def consumer(tmp_path, monkeypatch):
     def complete():
         with scoped_current_session_id("origin"):
             p = registry.spawn_local(f"exec {sys.executable} -c 'pass'", session_key="origin")
-            p.notify_on_complete = True
         assert p._completion_event.wait(5)
         assert state["submitted"].wait(5)
     try:
@@ -49,6 +57,24 @@ def consumer(tmp_path, monkeypatch):
                 thread.join(5)
                 assert not thread.is_alive()
         lease.release()
+
+
+@pytest.mark.parametrize("accepted", [True, False, None])
+def test_completion_before_spawn_returns_still_reaches_consumer(consumer, tmp_path, monkeypatch, accepted):
+    registry = consumer[1]
+    consumer[3]["accept"] = accepted
+    spawn = registry.spawn_local
+
+    def completed_spawn(*args, **kwargs):
+        process = spawn(*args, **kwargs)
+        assert process._completion_event.wait(5)
+        return process
+
+    monkeypatch.setattr(registry, "spawn_local", completed_spawn)
+    consumer[-1]()
+    if accepted is True:
+        wait_until(lambda: available(consumer, tmp_path), timeout=5)
+    assert available(consumer, tmp_path) is (accepted is True)
 
 
 def available(c, home):
