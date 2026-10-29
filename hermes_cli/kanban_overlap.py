@@ -304,7 +304,10 @@ def record(conn: Optional[sqlite3.Connection], task_id: Optional[str], *, outcom
     payload = {"outcome": outcome, "title": title, "reason": reason or None, "session_id": session_id,
                "matches": [{"id": m["id"], "board": m["board"], "gateway": m["gateway"], "status": m["status"]}
                            for m in public(matches)]}
-    _log.info("kanban create overlap: %s %r (%d matches)", outcome, title, len(matches))
+    # The matched cards ride in the log line: a refusal whose matches are all on other gateways records no
+    # event anywhere, so this line is the only trace an audit can read (hub t_01a189b2d186a986).
+    _log.info("kanban create overlap: %s %r (%d matches: %s)", outcome, title, len(matches),
+              ", ".join(f"{m['gateway']}/{m['board']}/{m['id']} ({m['why']})" for m in matches[:MAX_SHOWN]))
     try:
         if conn is not None and task_id:
             with kb.write_txn(conn):

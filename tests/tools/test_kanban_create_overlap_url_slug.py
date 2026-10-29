@@ -206,3 +206,13 @@ def test_legacy_row_without_a_qualified_twin_still_counts(home, tmp_path):
     out = _create("Desktop session GET stalls recurring after 24c3eda at 14:26 PDT", "")
     assert out.get("code") == "create_overlap", out
     assert [m["id"] for m in out["matches"]] == [STALLS[0]]
+
+
+def test_a_refusal_matching_only_remote_cards_logs_which_cards(macbook_hermes, caplog):
+    """No board event is written when every match is on another gateway; the log line is the audit trail."""
+    import logging
+    with caplog.at_level(logging.INFO, logger="hermes_cli.kanban_overlap"):
+        out = _create("David-MBP desktop backend timeouts again: 40 in 30 min", "")
+    assert out.get("code") == "create_overlap", out
+    line = next(r.getMessage() for r in caplog.records if "create overlap: refused" in r.getMessage())
+    assert f"macbook/hermes/{TIMEOUTS[0]} (titles share" in line, line
