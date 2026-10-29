@@ -36,6 +36,14 @@ def _no_host_browser_use_cli():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_harness_runtime(tmp_path, monkeypatch):
+    """Keep the host's browser-harness runtime dir (daemon owner stamps, the agent tab ledger under
+    ~/.config/browser-harness/runtime) out of tests: browser_exec and cleanup_browser read and
+    delete files there. Tests that need a specific dir set BH_RUNTIME_DIR themselves."""
+    monkeypatch.setenv("BH_RUNTIME_DIR", str(tmp_path / "bh-runtime"))
+
+
+@pytest.fixture(autouse=True)
 def _no_host_bot_desktop_autostart():
     """Keep the host's TigerVNC/Xfce install out of tests.
 
