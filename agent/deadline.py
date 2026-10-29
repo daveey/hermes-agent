@@ -436,7 +436,23 @@ def _process_tree_snapshot(pid: int, *, hard_kill: bool):
                 logger.debug("kill_process_tree: target already gone or resume refused", exc_info=True)
 
 
-def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
+def process_create_time(pid: int) -> Optional[float]:
+    """Start time of ``pid``, or None if it is gone or unreadable.
+
+    Compared exactly. A reused PID has a later start time, and psutil returns
+    the same float for one incarnation, so a mismatch means the number no longer
+    names the process that was spawned.
+    """
+    try:
+        import psutil
+        return float(psutil.Process(int(pid)).create_time())
+    except Exception:
+        return None
+
+
+def kill_process_tree(
+    pid: int, *, sig: Optional[int] = None, create_time: Optional[float] = None,
+) -> bool:
     """Terminate ``pid`` and all its descendants, portably; True when anything was signalled.
 
     Windows: ``taskkill /F /T`` (``sig`` ignored). POSIX: snapshot descendants via
@@ -444,7 +460,18 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
     escape a stale snapshot. Signal identity-checked descendants before their
     parent, then its group when ``pid`` leads one. Stopping is best-effort with a
     bounded wait; unavailable psutil still leaves process-group cleanup. Other
-    signals do not suspend recipients. ``sig`` defaults to ``SIGKILL``."""
+    signals do not suspend recipients. ``sig`` defaults to ``SIGKILL``.
+
+    ``create_time``, when passed, is the incarnation captured at spawn. A PID
+    that no longer has that start time is not signalled: after the leader exits
+    the number can already belong to an unrelated process group. Without a stamp,
+    the start time is sampled on entry and checked again immediately before the
+    group signal, so a PID reused during the snapshot wait is not killpg'd either.
+    """
+    if create_time is not None and process_create_time(pid) != create_time:
+        # Gone, or the PID now names a different process. Do not snapshot: that
+        # would SIGSTOP the unrelated process before the group signal.
+        return False
     if sys.platform == "win32":
         try:
             from hermes_cli._subprocess_compat import windows_hide_flags
@@ -465,6 +492,9 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
     import signal as _signal
     if sig is None:
         sig = _signal.SIGKILL
+    # None means the target was already gone on entry. A later getpgid success is
+    # PID reuse, not the process we were asked to kill.
+    identity = create_time if create_time is not None else process_create_time(pid)
 
     with _process_tree_snapshot(int(pid), hard_kill=sig == _signal.SIGKILL) as descendants:
         signalled = False
@@ -478,8 +508,12 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
             except Exception:
                 continue
         try:
-            # getpgid→killpg has an inherent TOCTOU shared by every killpg site; the psutil
-            # sweep below is identity-aware (PID + create time) and does not.
+            # Recheck immediately before the group signal. The snapshot can spend
+            # seconds waiting for SIGSTOP; on a CPU-throttled host the leader can
+            # exit, be reaped, and have its PID reused in that window. getpgid
+            # succeeding is not identity: a new session leader also has pgid == pid.
+            if identity is None or process_create_time(pid) != identity:
+                return signalled
             pgid = os.getpgid(pid)
         except (ProcessLookupError, PermissionError, OSError):
             pgid = None

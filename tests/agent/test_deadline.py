@@ -487,6 +487,67 @@ class TestKillProcessTree:
         proc.wait(timeout=10)  # reaped: PID is gone from the process table
         assert kill_process_tree(proc.pid) is False
 
+    def test_reaped_pid_is_not_signalled_when_getpgid_succeeds(self, monkeypatch):
+        """A reaped session leader's PID can be reused before killpg.
+
+        ``getpgid`` then succeeds and ``pgid == pid`` for the new group leader.
+        Signalling it is the live-system-guard flake in
+        ``test_reader_exit_at_end_of_initialization_retires_client`` (and, without
+        the guard, a SIGKILL of an unrelated process group).
+        """
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        proc.wait(timeout=10)
+        signalled: list[tuple] = []
+
+        def reused_getpgid(pid):
+            if pid == proc.pid:
+                return proc.pid
+            raise ProcessLookupError(pid)
+
+        monkeypatch.setattr(os, "getpgid", reused_getpgid)
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append(("killpg", pgid, sig)))
+        monkeypatch.setattr(os, "kill", lambda pid, sig, *a, **k: signalled.append(("kill", pid, sig)))
+
+        assert kill_process_tree(proc.pid) is False
+        assert signalled == []
+
+    def test_spawn_stamp_does_not_signal_a_different_incarnation(self):
+        """A live process at a reused PID must survive a kill stamped for the old one."""
+        victim = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            import psutil
+            stale = psutil.Process(victim.pid).create_time() - 100.0
+            assert kill_process_tree(victim.pid, create_time=stale) is False
+            assert victim.poll() is None
+        finally:
+            victim.kill()
+            victim.wait(timeout=5)
+
+    def test_matching_create_time_still_kills(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        import psutil
+        born = psutil.Process(proc.pid).create_time()
+        assert kill_process_tree(proc.pid, create_time=born) is True
+        proc.wait(timeout=5)
+
     def test_non_group_leader_falls_back_to_single_kill(self):
         # Child in OUR process group: killpg would signal the test runner.
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])

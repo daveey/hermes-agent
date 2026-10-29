@@ -155,6 +155,7 @@ class LSPClient:
         self._seed_first_push = seed_diagnostics_on_first_push
 
         self._proc: Optional[asyncio.subprocess.Process] = None
+        self._proc_born: Optional[float] = None
         self._stderr_task: Optional[asyncio.Task] = None
         # Ring buffer of the most recent server stderr lines, surfaced when spawn/initialize fails.
         self._stderr_tail: list[str] = []
@@ -265,6 +266,8 @@ class LSPClient:
                 env=delegated_child_subprocess_env({**hermes_subprocess_env(), **(self._env or {})}), cwd=self._cwd,
                 start_new_session=True, creationflags=windows_hide_flags(),
             )
+            from agent.deadline import process_create_time
+            self._proc_born = process_create_time(self._proc.pid)
         except FileNotFoundError as e:
             raise LSPProtocolError(f"LSP server binary not found: {cmd[0]} ({e})") from e
         # stderr must be drained or the pipe buffer fills and the server hangs.
@@ -437,10 +440,15 @@ class LSPClient:
                 # after SIGTERM can let an ignoring descendant become reparented and escape.
                 # Windows maps this to a synchronous taskkill /T /F (up to 15s), so the
                 # kill runs off the event loop.
-                from agent.deadline import kill_process_tree
+                from agent.deadline import kill_process_tree, process_create_time
 
-                if not await asyncio.to_thread(kill_process_tree, proc.pid):
-                    proc.kill()
+                born = self._proc_born
+                if not await asyncio.to_thread(kill_process_tree, proc.pid, create_time=born):
+                    # proc.kill() is the same PID-keyed signal. Fall back only while
+                    # the incarnation we spawned is still at that PID (a refused kill),
+                    # not when the PID was reused or the process is already gone.
+                    if born is None or process_create_time(proc.pid) == born:
+                        proc.kill()
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(proc.wait(), timeout=SHUTDOWN_GRACE)
             except ProcessLookupError:

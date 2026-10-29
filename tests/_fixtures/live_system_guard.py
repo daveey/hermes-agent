@@ -176,6 +176,11 @@ def _live_system_guard(request, monkeypatch):
             for parent in walker.parents():
                 if parent.pid == test_pid:
                     return True
+        except _psutil.NoSuchProcess:
+            # Vanished mid-walk (reaped while the kill was in flight). The signal
+            # is a no-op, same as a stale PID. Failing closed here flakes any test
+            # whose own child exits between getpgid and this walk.
+            return True
         except Exception:
             return False
         return False
