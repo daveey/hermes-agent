@@ -59,9 +59,15 @@ def test_new_eager_session_keeps_transport_identity(monkeypatch, tmp_path):
                  "_wire_session_agent", "_start_session_services", "_emit", "_schedule_mcp_late_refresh"):
         monkeypatch.setattr(server, name, lambda *a, **k: None)
     monkeypatch.setattr(server, "_session_info", lambda *a: {})
-    token = bind_transport(SimpleNamespace(auth_identity={"provider": "basic", "user_id": "creator"}))
+    transport = SimpleNamespace(auth_identity={"provider": "basic", "user_id": "creator"})
+    token = bind_transport(transport)
     try:
         server._init_session("new", "new-key", SimpleNamespace(), [], cwd=str(tmp_path))
-        assert server._sessions["new"]["auth_user_id"] == "basic:creator"
+        # Fork: upstream (8497ce93189, kept by the merge) stamps a login-created row with the identity
+        # _transport_auth_user_id derives for that login (the host owner's subject), no longer
+        # "<provider>:<user>". The intent stands: a NEW session takes the creating transport's identity.
+        expected = server._transport_auth_user_id(transport)
+        assert expected
+        assert server._sessions["new"]["auth_user_id"] == expected
     finally:
         reset_transport(token)
