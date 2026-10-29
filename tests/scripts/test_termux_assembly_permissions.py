@@ -13,6 +13,11 @@ ROOT = Path(__file__).resolve().parents[2]
 # executed. A native Linux image keeps this kernel-permissions test off QEMU.
 IMAGE = "python@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a"
 
+# Hung-process guards only: they return as soon as docker answers. A CPU-throttled
+# hub runner can take well over 15s for `docker info`, so keep them generous.
+PROBE_TIMEOUT = 120
+RUN_TIMEOUT = 300
+
 
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("build_exit", [0, 23], ids=["success", "failed-build"])
@@ -20,13 +25,13 @@ def test_assembly_publishes_facts_as_termux_uid_and_returns_host_owned_output(tm
     if not shutil.which("docker"):
         pytest.skip("Docker is required for the bind-mount ownership regression")
     available = subprocess.run(
-        ["docker", "info"], capture_output=True, timeout=15,
+        ["docker", "info"], capture_output=True, timeout=PROBE_TIMEOUT,
         check=False,
     )
     if available.returncode:
         pytest.skip("Docker daemon is unavailable")
     image = subprocess.run(
-        ["docker", "image", "inspect", IMAGE], capture_output=True, timeout=15,
+        ["docker", "image", "inspect", IMAGE], capture_output=True, timeout=PROBE_TIMEOUT,
         check=False,
     )
     if image.returncode:
@@ -63,7 +68,7 @@ docker run --rm --user 1000:1000 --network none \
         exit "$1"
     ' sh "$4"
 ''', "assembly-permissions-test", IMAGE, str(payload), str(ROOT), str(build_exit)],
-        cwd=ROOT, capture_output=True, text=True, timeout=90,
+        cwd=ROOT, capture_output=True, text=True, timeout=RUN_TIMEOUT,
         check=False,
     )
     assert result.returncode == build_exit, result.stdout + result.stderr
