@@ -140,9 +140,23 @@ def _packaged_desktop_current_for_head(desktop_dir: Path, project_root: Path) ->
         return False
     from hermes_cli.steward import read_install_stamp
 
-    if not _stamp_commit_serves_head(project_root, read_install_stamp(resources).get("commit")):
+    commit = read_install_stamp(resources).get("commit")
+    if not _stamp_commit_serves_head(project_root, commit):
         return False
-    return not _desktop_build_needed(desktop_dir, project_root, source_mode=False)
+    if _desktop_build_needed(desktop_dir, project_root, source_mode=False):
+        return False
+    # [daveey] An ancestor commit with identical desktop inputs still ships a different app when a
+    # build at HEAD would bake another stamp (branch, channel, version): upstream's stamp-drift check
+    # decides that. Drift it cannot read keeps the fork's ancestor rule.
+    from hermes_cli.version_info import _run_git
+
+    if commit != _run_git(project_root, "rev-parse", "HEAD"):
+        from hermes_cli.desktop_build_reuse import _stamp_drift
+
+        drift = _stamp_drift(project_root, resources / "install-stamp.json", dict(os.environ))
+        if drift:
+            return False
+    return True
 
 
 # [daveey] What the desktop build reads from the checkout: sourceHash('desktop') in
