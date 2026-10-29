@@ -573,7 +573,9 @@ def test_our_own_pid_is_ours_only_at_our_exact_creation_time():
     me = pause_record.identity()
     assert me["ct"].startswith("ct:") and pause_record.identity_is_live(me)
     created = float(me["ct"][3:])
-    reused = {"pid": os.getpid(), "ct": f"ct:{created - 0.5:.3f}"}  # inside the cross-writer skew
+    # Stay inside the 2 s cross-writer skew, but outside our creation second: at .500,
+    # subtracting .5 produces a whole-second timestamp intentionally accepted for macOS ps.
+    reused = {"pid": os.getpid(), "ct": f"ct:{created - 1.5:.3f}"}
     assert not pause_record.identity_is_live(reused), "a killed update's record became ours by pid reuse"
 
 
