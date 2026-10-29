@@ -22,7 +22,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: catalog-tests-${{ (github.ref_type == 'tag' || inputs.commit != '') && github.run_id || github.ref }}
+  group: catalog-tests-${{ (github.ref_type == 'tag' || github.ref == 'refs/heads/main' || inputs.commit != '') && github.run_id || github.ref }}
+  # fork: main pushes keep their own run; upstream: a stable dispatch (inputs.commit) never queues behind or cancels a push.
   cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.commit == '' }}
 
 jobs:
