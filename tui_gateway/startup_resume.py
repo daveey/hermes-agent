@@ -27,6 +27,7 @@ from tui_gateway.turn_marker import (
     UPDATE_HOLD_QUEUE_REASON,
     _load,
     _marker_path,
+    freshness_since,
     marker_writer_state,
     read_turn_marker,
 )
@@ -87,7 +88,7 @@ def _skip_reason(m: dict | None, now: float, fresh: float, max_attempts: int) ->
         return "unreadable or empty prompt"
     if not m.get("auto_continue", True):
         return "auto_continue off (a tool already ran in an at-most-once turn, or its owner recovers it)"
-    if now - m["started_at"] > _max_age(m, fresh):
+    if now - freshness_since(m) > _max_age(m, fresh):
         return f"older than the {_max_age(m, fresh) / 60:.0f} min freshness window"
     if m["attempts"] >= max_attempts:
         return f"attempt cap reached ({m['attempts']}/{max_attempts})"
@@ -146,7 +147,7 @@ def _paused_markers_remain(home: Path, cfg: dict | None) -> bool:
     _, fresh, max_attempts, _ = _settings(cfg)
     now = time.time()
     return any(entry.get("reason") in _RETRY_REASONS and entry.get("auto_continue", True)
-               and now - float(entry.get("started_at") or 0) <= _max_age(entry, fresh)
+               and now - freshness_since(entry) <= _max_age(entry, fresh)
                and int(entry.get("attempts") or 0) < max_attempts
                for _, h in _homes(home) for key in _load(_marker_path(h))
                if (entry := read_turn_marker(h, key)) is not None)

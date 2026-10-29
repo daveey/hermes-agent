@@ -167,8 +167,12 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
                     "marker is ownership evidence and the owner clears it", session_key,
                     marker.get("writer_pid"), os.getpid())
         return None
+    from tui_gateway.update_pause import drain_retry_pending
+    from tui_gateway.turn_marker import freshness_since
+    if drain_retry_pending(session, marker):
+        return None
     enabled, freshness_secs, max_attempts = _auto_continue_config()
-    age = time.time() - marker["started_at"]
+    age = time.time() - freshness_since(marker)
     # [daveey] A background-job receipt is a delivery, not a turn to redo: it keeps longer than a turn.
     from tui_gateway.exit_job_receipts import JOBS_REASON, JOBS_RECEIPT_MAX_AGE_S, jobs_stopped_note
     receipt = marker.get("reason") == JOBS_REASON

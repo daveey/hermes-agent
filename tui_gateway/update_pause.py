@@ -7,10 +7,13 @@ hold (``hermes_cli.admission_fence.pause_requested``). Each such turn then ends 
 (after its tool results are persisted, before the next model call; ``agent.turn_iteration_prep``), keeps
 its interrupted-turn marker stamped ``reason: core_update_pause``, and releases its admission reservation,
 so the update applies. The next backend's startup sweep continues the turn with ``pause_note`` and no
-crash-resume attempt is used. Pauses are counted apart (``MAX_PAUSES`` per turn) so they cannot loop.
+crash-resume attempt is used. After ``MAX_PAUSES`` checkpoints, a failed window no longer restarts
+the turn while its drainer holds ``cache/core-update/drain.lock``: it stays idle for the next window.
+The threshold bounds no-progress continuations, never the checkpoint needed to let the update apply.
 
 A turn the next backend would not auto-continue is never paused. A paused turn whose window ends without
-an update (expired, apply refused) continues in place (``start_in_place_watcher``), so it never hangs.
+an update (expired, apply refused) continues in place (``start_in_place_watcher``), unless its pause
+budget is spent and the drainer still runs. Drainer exit/cancellation releases that wait automatically.
 When the update did move the checkout, the turn is left for a successor only while one is coming: this
 process's skew watchdog runs and its idle proof holds (or a retirement is already under way). A backend
 kept busy by other work for ``NO_REPLACEMENT_S``, one no watchdog retires, or one that has not begun
@@ -64,6 +67,8 @@ KICKOFF_HOLD_S = 120.0 + DUE_HOLD_S
 # Automatic turns never wait for a paused turn longer than this past the window's end (a continuation that
 # keeps failing to schedule, e.g. a live foreign marker writer, must not starve the chat's notices).
 HOLD_MAX_S = LEAVE_GRACE_S + WATCH_POLL_S
+# A capped pause parked between drain windows restamps its freshness clock this often (``_keep_parked``).
+PARK_STAMP_S = 30.0
 
 
 def _now() -> float:
@@ -112,8 +117,6 @@ def not_resumable_reason(session: dict, marker_key: str) -> str | None:
         return "turn opted out of auto-continue"
     if marker["attempts"] >= max_attempts:
         return "crash-resume attempts used up"
-    if marker["pauses"] >= MAX_PAUSES:
-        return f"already paused {marker['pauses']} times"
     if _now() - marker["started_at"] + UPDATE_MARGIN_S > fresh_s:
         return "turn older than the auto-continue freshness window"
     return None
@@ -191,6 +194,18 @@ def stop_owned_jobs_for_update_pause(jobs: list[dict], save: Callable[[], bool],
     return True
 
 
+def _drainer_lock(session: dict) -> Path:
+    """The v1 request may come from a drainer serving several installation roots."""
+    import json
+    fallback = _root(session) / "cache" / "core-update" / "drain.lock"
+    try:
+        body = json.loads((_root(session) / "core-update" / "pause-request").read_text(encoding="utf-8-sig"))
+        path = Path(body.get("drain_lock") or fallback)
+        return path if path.is_absolute() else fallback
+    except (OSError, ValueError, TypeError, AttributeError):
+        return fallback
+
+
 def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | None]:
     """The per-turn ``agent.step_boundary_pause``: one stat per step while no pause is requested."""
     declined: list[str] = []
@@ -225,8 +240,11 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
         except Exception:
             logger.warning("core-update pause: background cleanup failed; refusing pause for %s", marker_key, exc_info=True)
             return None
+        drainer_lock = _drainer_lock(session)  # request disappears when the window ends
         with session["history_lock"]:
             session["_update_pause_marker_key"] = marker_key
+            session["_update_pause_drainer_lock"] = drainer_lock
+            session.pop("_update_pause_parked_stamp", None)  # a new pause starts unparked
         logger.info("core-update pause: session %s paused at a step boundary for a Hermes update", marker_key)
         return PAUSE_REASON
 
@@ -280,6 +298,34 @@ def _detect_skew():
     return detect_code_skew()
 
 
+def drain_retry_pending(session: dict, marker: dict) -> bool:
+    """A capped pause stays idle between windows of its live drainer, not in a pause/continue loop.
+
+    Only the original writer defers here: a replacement must recover its dead writer's marker.
+    The flock (not file existence or a PID) releases on cancellation/crash. Code skew also
+    releases this gate so the existing updated-backend handoff/recovery bounds still apply.
+    """
+    import os
+    if (marker.get("reason") != PAUSE_REASON or marker.get("pauses", 0) < MAX_PAUSES
+            or marker.get("writer_pid") != os.getpid() or _detect_skew() is not None):
+        return False
+    if os.name != "posix":
+        return False  # hermes-sync's POSIX drain protocol is not present
+    import fcntl
+    try:
+        path = session.get("_update_pause_drainer_lock") or _root(session) / "cache" / "core-update" / "drain.lock"
+        with Path(path).open("rb") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # unreadable lock is not evidence that the drainer exited
+    return False
+
+
 def in_place_resume_action(session: dict, marker_key: str, *, skew: Callable[[], Any] | None = None) -> str:
     """What a paused turn's own backend does now: ``wait`` (the window is still up), ``carried`` (the window
     is over but a synthesized turn runs over the pause: wait for it), ``leave`` (the checkout moved: the next
@@ -309,8 +355,34 @@ def in_place_resume_action(session: dict, marker_key: str, *, skew: Callable[[],
     if not marker or marker.get("reason") != PAUSE_REASON:
         return "done"
     if (skew or _detect_skew)() is not None:
+        _keep_parked(session, marker_key, last=True)
         return "leave"
+    if drain_retry_pending(session, marker):
+        _keep_parked(session, marker_key)
+        return "wait"
+    _keep_parked(session, marker_key, last=True)
     return "resume"
+
+
+def _keep_parked(session: dict, marker_key: str, *, last: bool = False) -> None:
+    """Restamp the parked marker's freshness clock (``turn_marker.freshness_since``) while this writer
+    keeps a capped pause idle between drain windows: it may wait out several windows (up to the
+    drainer's lifetime), and an age measured from ``started_at`` would then drop it as stale at the
+    in-place continue or the next backend's startup sweep. Throttled to ``PARK_STAMP_S`` of wall time;
+    ``last`` stamps once more as parking ends (drainer exit, checkout moved) so a wall-clock jump while
+    parked (a sleeping laptop) cannot age it out at that edge. Afterwards the usual window applies."""
+    from tui_gateway.turn_marker import mark_turn_parked
+    with session["history_lock"]:
+        prev = session.get("_update_pause_parked_stamp")
+        if last:
+            if prev is None:
+                return  # never parked: a plain pause keeps its started_at clock
+            session.pop("_update_pause_parked_stamp", None)
+        elif prev is not None and 0 <= _now() - prev < PARK_STAMP_S:
+            return
+        else:
+            session["_update_pause_parked_stamp"] = _now()
+    mark_turn_parked(_home(session), marker_key)
 
 
 def replacement_outlook() -> str:
@@ -354,7 +426,7 @@ def continuation_due(session: dict) -> bool:
 
 def _durable_continuation_due(session: dict) -> bool:
     from tui_gateway import server
-    from tui_gateway.turn_marker import marker_writer_state, read_turn_marker
+    from tui_gateway.turn_marker import freshness_since, marker_writer_state, read_turn_marker
     key = str(session.get("session_key") or "")
     marker = read_turn_marker(_home(session), key)
     if not marker or marker.get("reason") != PAUSE_REASON or not marker.get("auto_continue", True):
@@ -365,7 +437,7 @@ def _durable_continuation_due(session: dict) -> bool:
     # indefinitely starve automatic delivery when the startup reader skips them.
     with server._session_profile_runtime_scope(session):
         enabled, freshness, attempts = server._auto_continue_config()
-    if not (enabled and _now() - marker["started_at"] <= freshness and marker["attempts"] < attempts):
+    if not (enabled and _now() - freshness_since(marker) <= freshness and marker["attempts"] < attempts):
         return False
     # Same cap as the in-place hold (HOLD_MAX_S): a continuation this backend keeps failing to admit
     # (a live foreign owner, a startup sweep that gave up) must not refuse the chat's notices for the
@@ -442,6 +514,9 @@ def start_in_place_watcher(sid: str, session: dict, marker_key: str) -> threadin
                     _release_automatic_turns(session, watching=True)
                 try:
                     action = in_place_resume_action(session, marker_key)
+                    if action == "wait" and over_at is None and _window_over(session):
+                        # A capped pause may wait across windows, but notices still keep their bounded hold.
+                        over_at = time.monotonic()
                     if action in ("leave", "resume", "carried"):
                         if over_at is None:
                             over_at = time.monotonic()

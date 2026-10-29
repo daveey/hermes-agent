@@ -44,6 +44,20 @@ def _started_at(entry: dict) -> float:
     return float(entry.get("started_at") or 0)
 
 
+def freshness_since(marker: dict) -> float:
+    """[daveey] When a marker's auto-continue freshness clock starts: ``started_at``, except a core-update
+    pause its live writer kept parked between drain windows (``mark_turn_parked``) counts from the last
+    time it was confirmed parked. Waiting on the drainer is not the turn going stale, and every reader of
+    freshness (in-place continue, startup sweep, notice hold) must agree or a parked turn is dropped."""
+    started = _started_at(marker)
+    if marker.get("reason") != "core_update_pause":
+        return started
+    try:
+        return max(started, float(marker.get("parked_at") or 0))
+    except (TypeError, ValueError):
+        return started
+
+
 def _writer_identity() -> dict:
     """Best-effort identity of the process writing this marker. ``writer_pid`` alone already answers "who wrote
     this, and are they still alive?" (``marker_writer_state``); ``writer_start_time`` pairs the pid with its create
@@ -192,6 +206,19 @@ def mark_turn_paused(home: Path | str, session_key: str, reason: str,
     return False
 
 
+def mark_turn_parked(home: Path | str, session_key: str) -> bool:
+    """[daveey] Restamp ``parked_at`` on a core-update pause its live writer keeps idle between drain
+    windows (``update_pause.drain_retry_pending``). Reason, prompt and counters untouched."""
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not isinstance(entry, dict) or entry.get("reason") != "core_update_pause":
+            return None
+        entry["parked_at"] = time.time()
+        return entries
+
+    return bool(session_key) and _update(home, session_key, mutate, "park")
+
+
 def record_killed_jobs(home: Path | str, session_key: str, killed_jobs: list) -> bool:
     """[daveey] Replace an existing marker's ``killed_jobs`` (reason, prompt and counters untouched).
     True when a marker existed and the write landed."""
@@ -254,6 +281,7 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
                 # Writer identity when present: extra keys only, so a marker written by an older build still reads.
                 **{k: entry[k] for k in ("writer_pid", "writer_start_time") if entry.get(k) is not None},
                 **({"reason": str(entry["reason"])} if entry.get("reason") else {}),
+                **({"parked_at": float(entry["parked_at"])} if entry.get("parked_at") else {}),
                 **({"until_tool": True} if entry.get("until_tool") else {}),
                 **({"notification_category": "diagnostic"}
                    if entry.get("notification_category") == "diagnostic" else {}),

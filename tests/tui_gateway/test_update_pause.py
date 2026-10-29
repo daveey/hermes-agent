@@ -86,7 +86,7 @@ def test_resumable_turn_pauses_and_its_marker_survives_the_turn_end(home):
 
 
 @pytest.mark.parametrize("case", ["resume_on_startup_off", "auto_continue_disabled", "bot_room", "opted_out",
-                                  "attempts_used_up", "pauses_used_up", "stale", "no_marker"])
+                                  "attempts_used_up", "stale", "no_marker"])
 def test_turn_that_cannot_be_auto_continued_is_untouched(home, monkeypatch, case):
     cfg = {"desktop": {"auto_continue": dict(CFG["desktop"]["auto_continue"])}}
     extra = {}
@@ -99,8 +99,7 @@ def test_turn_that_cannot_be_auto_continued_is_untouched(home, monkeypatch, case
         extra["source"] = "bot_room"
     if case != "no_marker":
         record_turn_start(home, "session-key", "the prompt", auto_continue=case != "opted_out",
-                          attempts=2 if case == "attempts_used_up" else 0,
-                          pauses=up.MAX_PAUSES if case == "pauses_used_up" else 0)
+                          attempts=2 if case == "attempts_used_up" else 0)
     if case == "stale":
         later = time.time() + 4 * 3600  # past the 240-min freshness window
         monkeypatch.setattr(up, "_now", lambda: later)
