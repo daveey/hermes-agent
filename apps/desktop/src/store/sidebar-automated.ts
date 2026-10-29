@@ -33,7 +33,7 @@ type AutomatedRow = Pick<
   | 'pinned'
   | 'review_wait'
 > &
-  Partial<Pick<SessionInfo, 'muted' | 'outcome'>>
+  Partial<Pick<SessionInfo, 'muted'>>
 
 export interface AutomatedRowContext {
   /** Dot state for the row; defaults to `$sessionDotStateById`. */
@@ -59,8 +59,9 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
     row.review_wait,
     row.kanban_attention ?? 0,
     kanbanStripeCounts(row).waiting,
-    kanbanStripeCounts(row).stalled,
-    row.outcome
+    // [daveey] No `row.outcome`: an automated row resurfaces only on the signals it always did. An outcome-derived
+    // stripe (e.g. `unresolved` → amber) on bot / smoke-test traffic would flood the sidebar with it.
+    kanbanStripeCounts(row).stalled
   )
 
   return stripe === 'stuck' || stripe === 'blocked' || stripe === 'attention' || stripe === 'stalled'

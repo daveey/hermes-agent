@@ -132,8 +132,27 @@ function setMuteWrite(id: string, write: MuteWrite | null): void {
   $muteWriteGuard.set(next)
 }
 
+/** [daveey] The row after a park write, until the next list page brings the backend's own outcome. Muting stamps a
+ *  `muted` outcome (what the backend refreshes to); unmuting drops a `muted` one, so the stripe falls back to the
+ *  derived logic instead of staying grey on the stale kind. Any other outcome is left as it is. */
+export function withRowMuted(row: SessionInfo, muted: boolean, now: number = Date.now()): SessionInfo {
+  if (muted) {
+    return { ...row, muted, outcome: { kind: 'muted', source: 'derived', at: now / 1000 } }
+  }
+
+  if (row.outcome?.kind === 'muted') {
+    const { outcome: _stale, ...rest } = row
+
+    return { ...rest, muted }
+  }
+
+  return { ...row, muted }
+}
+
 function setRowMuted(id: string, muted: boolean): void {
-  setSessions(rows => (rows.some(row => row.id === id) ? rows.map(row => (row.id === id ? { ...row, muted } : row)) : rows))
+  setSessions(rows =>
+    rows.some(row => row.id === id) ? rows.map(row => (row.id === id ? withRowMuted(row, muted) : row)) : rows
+  )
 }
 
 /** [daveey] Write a park through to the backend. Optimistic: the local list and the guard paint at once; a failed

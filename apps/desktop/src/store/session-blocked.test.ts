@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionInfo } from '@/types/hermes'
 
 vi.mock('./notifications', () => ({ notifyError: vi.fn() }))
-vi.mock('@/hermes', () => ({ setSessionMutedRemote: vi.fn() }))
+vi.mock('@/hermes', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  setSessionMutedRemote: vi.fn()
+}))
 
 import { setSessionMutedRemote } from '@/hermes'
 
@@ -18,8 +21,10 @@ import {
   MUTE_WRITE_GUARD_MS,
   resolveSessionParked,
   toggleSessionBlocked,
+  withRowMuted,
   writeSessionMuted
 } from './session-blocked'
+import { sessionStatusStripe } from './session-dot-state'
 
 const row = (overrides: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id: 's1', message_count: 3, profile: 'default', ...overrides }) as unknown as SessionInfo
@@ -201,5 +206,41 @@ describe('one-time migration of local ⌘B parks', () => {
     await migrateLocalParks(rows)
     expect(setSessionMutedRemote).toHaveBeenCalledTimes(2)
     expect($mutedMigrationDone.get()).toEqual(['primary\u0000default'])
+  })
+})
+
+describe('the row after a park write', () => {
+  const paint = (r: SessionInfo) => sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, r.outcome)
+
+  it('unmuting drops a stale `muted` outcome so the stripe falls back to the derived logic', async () => {
+    setSessions([row({ muted: true, outcome: { kind: 'muted' } })])
+    $blockedSessionIds.set(['s1'])
+    vi.mocked(setSessionMutedRemote).mockResolvedValue({ ok: true, muted: false })
+
+    expect(toggleSessionBlocked('s1')).toBe(false)
+    await vi.waitFor(() => expect(mutedOf('s1')).toBe(false))
+
+    const after = $sessions.get()[0]
+    expect(after.outcome).toBeUndefined()
+    expect(isSessionParked('s1')).toBe(false)
+    expect(paint(after)).toBe('done')
+  })
+
+  it('muting stamps a `muted` outcome', async () => {
+    setSessions([row({ muted: false, outcome: { kind: 'done', summary: 'shipped' } })])
+    vi.mocked(setSessionMutedRemote).mockResolvedValue({ ok: true, muted: true })
+
+    toggleSessionBlocked('s1')
+    await vi.waitFor(() => expect(mutedOf('s1')).toBe(true))
+
+    expect($sessions.get()[0].outcome?.kind).toBe('muted')
+    expect(paint($sessions.get()[0])).toBe('blocked')
+  })
+
+  it('unmuting keeps any outcome other than `muted`', () => {
+    const r = withRowMuted(row({ muted: true, outcome: { kind: 'decision', items: [] } }), false)
+
+    expect(r.outcome?.kind).toBe('decision')
+    expect(r.muted).toBe(false)
   })
 })

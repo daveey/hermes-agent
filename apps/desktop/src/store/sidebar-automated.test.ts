@@ -50,7 +50,9 @@ describe('sessionHiddenAsAutomated [daveey]', () => {
 
   it('hides automated rows waiting on cards unless they need human attention', () => {
     expect(sessionHiddenAsAutomated({ ...bot, kanban_active: 1 }, false, { dotState: 'idle' })).toBe(true)
-    expect(sessionHiddenAsAutomated({ ...bot, kanban_active: 1, kanban_blocked: 1 }, false, { dotState: 'idle' })).toBe(false)
+    expect(sessionHiddenAsAutomated({ ...bot, kanban_active: 1, kanban_blocked: 1 }, false, { dotState: 'idle' })).toBe(
+      false
+    )
     expect(sessionHiddenAsAutomated({ ...bot, kanban_active: 0 }, false, { dotState: 'idle' })).toBe(true)
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'idle' })).toBe(true)
   })
@@ -58,6 +60,25 @@ describe('sessionHiddenAsAutomated [daveey]', () => {
   it('still hides a working or finished automated row', () => {
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'working' })).toBe(true)
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'unread' })).toBe(true)
+  })
+})
+
+// [daveey] session-outcome: a stored outcome on bot / smoke-test traffic must not pull it back into the sidebar;
+// only the signals automated rows always resurfaced on count.
+describe('sessionHiddenAsAutomated ignores the stored outcome', () => {
+  it.each(['unresolved', 'decision', 'done', 'waiting', 'running'])('a %s outcome keeps the row hidden', kind => {
+    const row = { ...bot, outcome: { kind, reason: 'no_summary', items: [{ id: 'us_1', question: 'Merge?' }] } }
+
+    expect(sessionHiddenAsAutomated(row as never, false, { dotState: 'idle' })).toBe(true)
+  })
+
+  it('the pre-existing signals still resurface it with an outcome present', () => {
+    const row = { ...bot, kanban_attention: 1, outcome: { kind: 'done' } }
+
+    expect(sessionHiddenAsAutomated(row as never, false, { dotState: 'idle' })).toBe(false)
+    expect(
+      sessionHiddenAsAutomated({ ...bot, outcome: { kind: 'done' } } as never, false, { dotState: 'needs-input' })
+    ).toBe(false)
   })
 })
 
