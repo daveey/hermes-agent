@@ -42,12 +42,27 @@ def consumer(tmp_path, monkeypatch):
         state["submitted"].set()
         return state["accept"]
     monkeypatch.setattr(server, "_run_prompt_submit", submit)
+    delivered = threading.Event()
+    real_delivered = health.delivered
+
+    def observe_delivery(*args, **kwargs):
+        try:
+            return real_delivered(*args, **kwargs)
+        finally:
+            delivered.set()
+
+    monkeypatch.setattr(health, "delivered", observe_delivery)
     stop = server._start_notification_poller("ui", session)
-    def complete():
+    def complete(*, wait_for_delivery=True):
+        delivered.clear()
         with scoped_current_session_id("origin"):
             p = registry.spawn_local(f"exec {sys.executable} -c 'pass'", session_key="origin")
         assert p._completion_event.wait(60)
         assert state["submitted"].wait(60)
+        # submit() wakes before its return value is consumed. A negative
+        # receipt assertion must not race ahead of health.delivered().
+        if wait_for_delivery:
+            assert delivered.wait(60), "poller never processed the admission result"
     try:
         yield health, registry, session, state, stop, complete
     finally:
@@ -142,7 +157,9 @@ def test_dispatch_exception_revokes_previous_success(consumer, tmp_path, monkeyp
         raise RuntimeError("fixture admission unavailable")
     monkeypatch.setattr(server, "_run_prompt_submit", fail)
     consumer[3]["submitted"].clear()
-    consumer[-1]()
+    # Submission raises before delivered() is called. begin_delivery() must
+    # already have revoked the old receipt when the failing submit is entered.
+    consumer[-1](wait_for_delivery=False)
     wait_until(lambda: not available(consumer, tmp_path), timeout=60)
     assert not available(consumer, tmp_path)
 
