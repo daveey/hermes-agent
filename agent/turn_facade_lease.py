@@ -432,6 +432,20 @@ def _durable_session_exists(db, session_id: str) -> Optional[bool]:
         return None
 
 
+def _seed_adopted_row_model_config(agent, db, session_id: str) -> None:
+    """Fill the init model_config keys an existing row lacks (never overwrites); best effort."""
+    if getattr(agent, "_persist_disabled", False):
+        return
+    seed = getattr(db, "seed_session_model_config", None)
+    row_config = getattr(agent, "_session_row_model_config", None)
+    if not callable(seed) or not callable(row_config):
+        return
+    try:
+        seed(session_id, row_config())
+    except Exception:
+        logger.warning("Could not record the agent's model_config on an adopted session row", exc_info=True)
+
+
 def session_was_taken_over(agent, session_id: str) -> bool:
     """The stand-down latch follows compression, but never a different profile or fork."""
     taken = getattr(agent, "_taken_over_session_id", None)
@@ -536,6 +550,11 @@ def admit_durable_turn_lease(
             # Row proven to exist — suppress the redundant create attempt. A missing row leaves
             # the flag alone: the flush heals a row deleted under a live agent (#123583). So does
             # an unknown one: the create is an upsert that never overwrites an existing row.
+            if not getattr(agent, "_session_db_created", False):
+                # Another writer made the row (the gateway's bare SessionStore row), so the skipped
+                # create was this agent's only chance to record its init model_config: without it a
+                # class session's row lost ``model_routing`` and resumed as a concrete pin.
+                _seed_adopted_row_model_config(agent, db, agent.session_id)
             agent._session_db_created = True
         # Reload only a transcript that may exist: callers may seed a fresh id in memory before its
         # row is written, and reloading an absent row would erase that seed. An unknown row still

@@ -834,6 +834,26 @@ class SessionSessionsMixin:
             return
         self._write_model_config_patch(session_id, patch)
 
+    def seed_session_model_config(self, session_id: str, defaults: dict[str, Any]) -> None:
+        """Add the ``defaults`` keys the row's model_config lacks, atomically; existing keys (including an
+        explicit ``None``) always win. For an agent adopting a row another writer created first (the
+        gateway's bare SessionStore row): the create upsert would have kept that writer's model_config
+        whole, so the agent's init config (``model_routing``, ``max_iterations``) never reached it."""
+        if not session_id or not isinstance(defaults, dict) or not defaults:
+            return
+
+        def _do(conn):
+            row = conn.execute("SELECT model_config FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if row is None:
+                return
+            config = _parse_model_config(row[0])
+            missing = {k: v for k, v in defaults.items() if k not in config}
+            if not missing:
+                return
+            config.update(missing)
+            conn.execute("UPDATE sessions SET model_config = ? WHERE id = ?", (json.dumps(config), session_id))
+        self._execute_write(_do)
+
     def get_session_model_config_value(self, session_id: str, key: str, default: Any = None) -> Any:
         """Read one key out of a session's model_config JSON (tolerant parse)."""
         session = self.get_session(session_id) or {}

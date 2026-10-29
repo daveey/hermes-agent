@@ -117,3 +117,19 @@ class TestResolveActiveContextLengthProviderAware:
 
         assert ctx == 150_000
         assert captured["config_ctx"] == 150_000
+
+
+def test_class_default_uses_class_window_not_catalog_probe():
+    """``model.default: class:deep`` is a marker, not a slug: the gate must not run the catalog
+    resolver on it (that logged "Could not determine context length for model 'class:deep'")."""
+    import model_tools
+    from unittest.mock import MagicMock
+
+    probe = MagicMock(side_effect=AssertionError("catalog probe on a class marker"))
+    with patch("hermes_cli.config.load_config", return_value={"model": {"default": "class:deep"}}), \
+         patch("gateway.run_class_routing.class_context_length", return_value=200_000) as window, \
+         patch("agent.model_metadata.get_model_context_length", probe):
+        ctx = model_tools._resolve_active_context_length()
+    assert ctx == 200_000
+    assert window.call_args.args == ("class:deep",)
+    probe.assert_not_called()

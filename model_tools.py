@@ -613,6 +613,12 @@ def _resolve_active_context_length() -> int:
         model_id, model_cfg = _active_model_config()
         if not model_id:
             return 0
+        from agent.model_routing import is_class_selector
+        if is_class_selector(model_id):
+            # A class marker is not a catalog slug: probing it logs a bogus "could not determine context
+            # length" and gates tool search on the 256K fallback. Use the class's conservative window.
+            from gateway.run_class_routing import class_context_length
+            return int(class_context_length(model_id) or 0)
         from agent.model_metadata import get_cached_context_length, get_model_context_length
         # Honor explicit `model.context_length` in config.yaml — short-circuits the OpenRouter /models probe
         # at get_model_context_length step 0, so non-OpenRouter providers don't pay the ~2-3s OpenRouter
