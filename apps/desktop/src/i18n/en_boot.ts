@@ -18,6 +18,9 @@ export const enBoot = {
         'The service that runs your chats closed unexpectedly. Restart it to keep going — your chats and settings are safe.',
       backgroundExitedDuringStartup: 'Hermes stopped right after it started.',
       backendStopped: 'Hermes stopped working in the background',
+      backendUpdating: 'Updating Hermes…',
+      backendUpdatingMessage:
+        'Hermes is restarting to finish an update. Your chats will reconnect on their own.',
       restartHermes: 'Restart Hermes',
       openLogs: 'Open logs',
       desktopBootFailed: "Hermes couldn't start",

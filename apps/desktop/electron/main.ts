@@ -77,6 +77,7 @@ import { backendDialClaimKey, BackendDialClaims } from './backend-dial-claim'
 import type { HostBackendRecord } from './backend-discovery'
 import { buildDesktopBackendEnv, pooledProfileBackendEnv, profileBackendParentEnv } from './backend-env'
 import { createBackendExitRecoveryLatch } from './backend-exit-recovery'
+import { createBackendExitSender } from './backend-exit-report'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
 import {
   backendCommandMatches,
@@ -6516,25 +6517,15 @@ function getWindowState(win = mainWindow) {
   }
 }
 
-function sendBackendExit(payload) {
-  // Intentional soft re-home (gateway mode apply) kills the child on purpose —
-  // don't surface the "backend stopped" error toast / boot-failure path.
-  if (softRehomeInProgress) {
-    return
-  }
-
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return
-  }
-
-  const { webContents } = mainWindow
-
-  if (!webContents || webContents.isDestroyed()) {
-    return
-  }
-
-  webContents.send('hermes:backend-exit', payload)
-}
+// [daveey] Soft re-home (gateway mode apply) kills the child on purpose and stays silent; a core update or our own
+// update hand-off is a planned restart, not a crash (backend-exit-report.ts).
+const sendBackendExit = createBackendExitSender({
+  isSilenced: () => softRehomeInProgress,
+  isPlannedRestart: async () =>
+    updateInFlight || isQuittingForHandoff || Boolean(await readLiveUpdateMarker(HERMES_HOME)),
+  window: () => mainWindow,
+  log: rememberLog
+})
 
 function sendClosePreviewRequested() {
   if (!mainWindow || mainWindow.isDestroyed()) {

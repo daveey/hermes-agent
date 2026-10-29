@@ -14,6 +14,8 @@ export interface BootTranslations {
     backgroundExited: string
     backgroundExitedDuringStartup: string
     backendStopped: string
+    backendUpdating: string
+    backendUpdatingMessage: string
     restartHermes: string
     openLogs: string
     desktopBootFailed: string

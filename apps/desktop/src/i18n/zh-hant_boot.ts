@@ -16,6 +16,9 @@ export const zhHantBoot = {
       backgroundExited: 'Hermes 背景程序已結束。',
       backgroundExitedDuringStartup: 'Hermes 背景程序在啟動期間結束。',
       backendStopped: '後端已停止',
+      backendUpdating: '正在更新 Hermes…',
+      backendUpdatingMessage:
+        'Hermes 正在重新啟動以完成更新，聊天會自動重新連線。',
       desktopBootFailed: '桌面啟動失敗',
       gatewayConnectionLost: '與閘道的連線已中斷',
       gatewayConnectionLostDetail:

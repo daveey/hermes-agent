@@ -66,7 +66,7 @@ import {
   registerGatewaySwitchLifecycle
 } from '@/store/gateway-switch'
 import { watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
-import { notify, notifyError, RECOVERY_ACTIONS } from '@/store/notifications'
+import { dismissNotification, notify, notifyError, RECOVERY_ACTIONS } from '@/store/notifications'
 import { loadPoolLimits } from '@/store/pool-limits'
 import {
   $activeGatewayProfile,
@@ -148,6 +148,9 @@ const BOOT_RETRY_MAX_ATTEMPTS = 5
 // Base delay for boot retries. Deliberately slower than the socket reconnect
 // loop's 300ms: each attempt may rebuild an SSH master + remote dashboard.
 const BOOT_RETRY_BASE_DELAY_MS = 2_000
+// [daveey] Stable ids for the backend-exit notices: a repeat replaces, a reopen dismisses.
+export const BACKEND_EXIT_TOAST_ID = 'backend-exit'
+export const BACKEND_UPDATING_TOAST_ID = 'backend-updating'
 
 // While any of the RECONNECT_ATTEMPT_TIMEOUT_MS-bounded awaits below is
 // pending, `reconnecting` never clears, so scheduleReconnect()/
@@ -1088,6 +1091,9 @@ export function useGatewayBoot({
       reportPrimaryGatewayState(st)
 
       if (st === 'open') {
+        // [daveey] The backend is serving again: whatever exit notice is up is stale.
+        dismissNotification(BACKEND_EXIT_TOAST_ID)
+        dismissNotification(BACKEND_UPDATING_TOAST_ID)
         bootSnapshotSuperseded = true
         openedAt = Date.now()
         reauthNotified = false
@@ -1414,8 +1420,27 @@ export function useGatewayBoot({
       }
     })
 
-    const offExit = desktop.onBackendExit(() => {
+    const offExit = desktop.onBackendExit(exit => {
       if ($gatewaySwitching.get()) {
+        return
+      }
+
+      // [daveey] A core update (or our own update hand-off) stopped the backend
+      // on purpose and main is already parked to respawn it when the update
+      // ends: not a crash. No red card and no failed boot overlay (main's boot
+      // progress already says "An update is finishing"); post-boot, one quiet
+      // notice that the socket's reopen dismisses.
+      if (exit?.planned === 'update') {
+        if (!$desktopBoot.get().running && !$desktopBoot.get().visible) {
+          notify({
+            id: BACKEND_UPDATING_TOAST_ID,
+            kind: 'info',
+            title: translateNow('boot.errors.backendUpdating'),
+            message: translateNow('boot.errors.backendUpdatingMessage'),
+            durationMs: 0
+          })
+        }
+
         return
       }
 
@@ -1437,7 +1462,10 @@ export function useGatewayBoot({
       // Post-boot: the shell's restart intent recycles a local service via main
       // (or re-dials a remote one) and does not depend on this hook's
       // reconnect gate, unlike reconnectGateway().
+      // [daveey] One card per outage: a repeat exit replaces it (stable id) and
+      // the socket's reopen dismisses it.
       notify({
+        id: BACKEND_EXIT_TOAST_ID,
         kind: 'error',
         title: translateNow('boot.errors.backendStopped'),
         message: translateNow('boot.errors.backgroundExited'),

@@ -1782,4 +1782,7 @@ export interface HermesSelectPathsOptions {
 export interface BackendExit {
   code: number | null
   signal: string | null
+  error?: string
+  // [daveey] Set by main when a core update / update hand-off stopped the backend on purpose.
+  planned?: 'update'
 }

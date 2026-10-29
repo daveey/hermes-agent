@@ -17,6 +17,9 @@ export const deBoot = {
       backgroundExited: 'Der Hermes-Hintergrundprozess wurde beendet.',
       backgroundExitedDuringStartup: 'Der Hermes-Hintergrundprozess wurde während des Starts beendet.',
       backendStopped: 'Backend gestoppt',
+      backendUpdating: 'Hermes wird aktualisiert…',
+      backendUpdatingMessage:
+        'Hermes startet neu, um ein Update abzuschließen. Deine Chats verbinden sich von selbst wieder.',
       restartHermes: 'Hermes neu starten',
       openLogs: 'Logs öffnen',
       desktopBootFailed: 'Desktop-Start fehlgeschlagen',

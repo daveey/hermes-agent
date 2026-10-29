@@ -17,6 +17,9 @@ export const frBoot = {
       backgroundExited: "Le processus en arrière-plan de Hermes s'est arrêté.",
       backgroundExitedDuringStartup: "Le processus en arrière-plan de Hermes s'est arrêté pendant le démarrage.",
       backendStopped: 'Backend arrêté',
+      backendUpdating: 'Mise à jour de Hermes…',
+      backendUpdatingMessage:
+        'Hermes redémarre pour terminer une mise à jour. Vos discussions se reconnecteront d\'elles-mêmes.',
       restartHermes: 'Redémarrer Hermes',
       openLogs: 'Ouvrir les journaux',
       desktopBootFailed: 'Échec du démarrage',

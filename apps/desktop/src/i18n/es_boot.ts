@@ -18,6 +18,9 @@ export const esBoot = {
         'El servicio que ejecuta tus chats se cerró de forma inesperada. Reinícialo para continuar; tus chats y ajustes están a salvo.',
       backgroundExitedDuringStartup: 'Hermes se detuvo justo después de iniciarse.',
       backendStopped: 'Hermes dejó de funcionar en segundo plano',
+      backendUpdating: 'Actualizando Hermes…',
+      backendUpdatingMessage:
+        'Hermes se está reiniciando para terminar una actualización. Tus chats se reconectarán solos.',
       restartHermes: 'Reiniciar Hermes',
       openLogs: 'Abrir registros',
       desktopBootFailed: 'Hermes no pudo iniciarse',
