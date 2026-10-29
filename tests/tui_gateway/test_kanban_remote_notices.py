@@ -450,3 +450,139 @@ def test_sweep_does_not_remember_a_notice_it_could_not_write(tmp_path):
         missing = False
         assert len(sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
                                         ledger=ledger)) == 1
+
+
+# [daveey] 2026-10-29 00:22Z on the MacBook the unloaded-chat sweep appended 293 stale "blocked" notices into idle
+# chats: frozen legacy-key replica rows (``<board>/<id>``, published before the owner switched to
+# ``<profile>/<board>/<id>``) of cards done days earlier. Examples below are three of them.
+REPLAYED = ("t_cc5aeb02", "t_414dafc6", "t_4bf9a311")
+LEGACY_BLOCKED_AT = 1792843956.0  # 2026-10-24, "Held in ready by the respawn guard (active_pr) for 360 min"
+SWEPT_AT = 1793233342.0  # 2026-10-29 00:22:22Z, first stale append
+
+
+def _legacy(card: dict) -> dict:
+    """The same card under the pre-board-qualified replica key."""
+    return {"key": card["key"].split("/", 1)[1], "task": card["task"]}
+
+
+def _sweep_db(tmp_path, sessions):
+    db = SessionDB(tmp_path / "state.db")
+    for sid in sessions:
+        db.create_session(sid, "desktop")
+
+    @contextlib.contextmanager
+    def opener(profile, sid):
+        yield (db, db.get_compression_tip(sid) or sid) if sid in sessions else (None, None)
+
+    return db, opener
+
+
+def test_sweep_does_not_replay_stale_blocked_legacy_rows_of_done_cards(tmp_path):
+    """The 00:22Z incident: days-old legacy blocked rows beside current done rows append nothing."""
+    from tui_gateway import kanban_remote_notices as krn
+
+    cards = []
+    for tid in REPLAYED:
+        old = _card(tid, CHAT, status="blocked", at=LEGACY_BLOCKED_AT,
+                    summary="Held in ready by the respawn guard (active_pr) for 360 min")
+        cards.append(_legacy(old))
+        cards.append(_card(tid, CHAT, status="done", at=LEGACY_BLOCKED_AT + 2 * 86400))
+    replica = _hub(tmp_path, cards)
+    ledger = tmp_path / "ledger.db"
+    krn._reset_for_tests()
+    db, opener = _sweep_db(tmp_path, (CHAT,))
+    with db:
+        assert sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                    ledger=ledger, now=SWEPT_AT) == []
+        assert db.get_messages(CHAT) == []
+    assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=SWEPT_AT,
+                       transcript_has=lambda key, tid: False) == []
+
+
+def test_sweep_skips_a_four_day_old_blocked_card_even_with_no_newer_row(tmp_path):
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [_card("t_old_blocked", CHAT, status="blocked", at=now - 4 * 86400)])
+    krn._reset_for_tests()
+    db, opener = _sweep_db(tmp_path, (CHAT,))
+    with db:
+        assert sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                    ledger=tmp_path / "ledger.db", now=now) == []
+        assert db.get_messages(CHAT) == []
+
+
+def test_superseded_legacy_row_is_ignored_even_when_recent(tmp_path):
+    """Canonical row wins regardless of age: a fresh legacy blocked row beside the current done row yields
+    exactly the done notice, from the sweep and from the poller."""
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    stale_view = _legacy(_card("t_moved", CHAT, status="blocked", at=now - 600, summary="old block"))
+    current = _card("t_moved", CHAT, status="done", at=now - 60, summary="real handoff")
+    for order in ([stale_view, current], [current, stale_view]):
+        sub = tmp_path / str(len(list(tmp_path.iterdir())))
+        sub.mkdir()
+        replica = _hub(sub, order)
+        krn._reset_for_tests()
+        got = krn.collect(OTHER, "default", hub_db=replica, ledger=sub / "ledger.db", now=now)
+        assert got == []  # not linked to OTHER
+        db, opener = _sweep_db(sub, (CHAT,))
+        with db:
+            out = sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                       ledger=sub / "ledger.db", now=now)
+            assert len(out) == 1
+            texts = [m["content"] for m in db.get_messages(CHAT)]
+            assert len(texts) == 1 and "done" in texts[0] and "old block" not in texts[0]
+        krn._reset_for_tests()
+        polled = krn.collect(CHAT, "default", hub_db=replica, ledger=sub / "poll-ledger.db", now=now)
+        assert [p["state"].split("@")[0] for p in polled] == ["done"]
+
+
+def test_sweep_skips_a_notice_the_ledger_settled_silently(tmp_path):
+    """A notice collect() recorded without announcing (a local placeholder covers it) is not swept later."""
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [_card("t_placeholder", CHAT, status="done", at=now - 30)])
+    ledger = tmp_path / "ledger.db"
+    krn._reset_for_tests()
+    assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now, skip=lambda tid: True) == []
+    db, opener = _sweep_db(tmp_path, (CHAT,))
+    with db:
+        assert sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                    ledger=ledger, now=now) == []
+        assert db.get_messages(CHAT) == []
+
+
+def test_sweep_still_delivers_genuine_fresh_notices_once(tmp_path):
+    """Control: fresh done and blocked cards on an idle chat are each swept exactly once."""
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [_card("t_fresh_done", CHAT, status="done", at=now - 120, summary="shipped"),
+                              _card("t_fresh_blocked", CHAT, status="blocked", at=now - 90, summary="need a yes")])
+    ledger = tmp_path / "ledger.db"
+    krn._reset_for_tests()
+    db, opener = _sweep_db(tmp_path, (CHAT,))
+    with db:
+        out = sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger, now=now)
+        assert sorted(item["task_id"] for item in out) == ["t_fresh_blocked", "t_fresh_done"]
+        krn._reset_for_tests()  # a restarted backend: the ledger and transcript keys still dedupe
+        assert sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                    ledger=ledger, now=now) == []
+        texts = [m["content"] for m in db.get_messages(CHAT)]
+        assert len(texts) == 2 and any("need a yes" in t for t in texts)
+    for item in ("t_fresh_done", "t_fresh_blocked"):
+        assert _ledger_row(ledger, CHAT, f"hub/default/default/{item}")["delivered"] == 1
+
+
+def test_canonical_drops_only_superseded_legacy_rows():
+    from tui_gateway import kanban_remote_notices as krn
+
+    rows = [("hub", "default/t_a", 1, "legacy-a"), ("hub", "default/default/t_a", 9, "current-a"),
+            ("hub", "other/default/t_a", 5, "other-profile-a"),  # same board + id, another profile: kept
+            ("hub", "bb/t_orphan", 2, "legacy-only"),  # no current row: kept (freshness decides)
+            ("mini", "default/t_a", 3, "other-gateway-legacy")]  # another owner gateway: kept
+    assert sorted(r[3] for r in krn._canonical(rows)) == [
+        "current-a", "legacy-only", "other-gateway-legacy", "other-profile-a"]
