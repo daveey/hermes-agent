@@ -66,7 +66,9 @@ def poller_env(monkeypatch):
     monkeypatch.setattr(server, "_foreign_turn_owner", lambda session: None)
     monkeypatch.setattr(server, "_get_usage", lambda agent: {})
     monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: True)
-    for name in ("_poll_bot_live_delivery_guarded", "_maybe_fire_tui_loop_tick",
+    # Fork: upstream retired the bot-mailbox claim from the notification poller (c8ae25cd112, kept by
+    # the merge), so there is no _poll_bot_live_delivery_guarded pass left to stub out.
+    for name in ("_maybe_fire_tui_loop_tick",
                  "_maybe_fire_tui_heartbeat_tick", "_notif_poll_kanban", "_notif_take_parked"):
         monkeypatch.setattr(server, name, lambda *a, **k: None)
     monkeypatch.setattr("tools.async_delegation.maybe_sweep_orphaned_completions", lambda q: None)
