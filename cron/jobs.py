@@ -2364,7 +2364,7 @@ def note_fire_forward_failure(job_id: str, detail: str) -> bool:
 
 def _record_run_outcome(
     job: dict[str, Any], success: bool, error: Optional[str], delivery_error: Optional[str],
-    status: Optional[str], now: str,
+    status: Optional[str], now: str, *, agent_skipped: bool = False,
 ) -> None:
     """Stamp one completed run onto *job*: status fields, failure streak, alert markers, claims."""
     job["last_run_at"] = now
@@ -2372,10 +2372,16 @@ def _record_run_outcome(
     # The transient manual-run context is single-fire: the run that just completed consumed it.
     job.pop("manual_run_prompt", None)
     delivery_failed = isinstance(delivery_error, str) and bool(delivery_error.strip())
-    job["last_status"] = status or (
-        "error" if not success else ("delivery_failed" if delivery_failed else "ok"))
-    job["last_error"] = None if success else error
-    if success:
+    # [daveey] A gated tick (agent suppressed) keeps the last real run's verdict; only a job with
+    # no verdict yet records it as ok.
+    keep_verdict = agent_skipped and success and job.get("last_status") is not None
+    if not keep_verdict:
+        job["last_status"] = status or (
+            "error" if not success else ("delivery_failed" if delivery_failed else "ok"))
+        job["last_error"] = None if success else error
+    if keep_verdict:
+        job.pop("last_fire_error", None)
+    elif success:
         # Healthy run: drop the alert-once dedup markers so a FUTURE break re-alerts, and clear
         # the forward-failure stamp so it only describes CURRENT auto-fire health.
         job.pop("preflight_alerted", None)
@@ -2391,7 +2397,8 @@ def _record_run_outcome(
         # survives success (latest failure wins); the recency window is the consumer's
         # call. Delivery failures keep their own sticky last_delivery_error.
         job["last_failure"] = {"at": now, "detail": error or (status or "run failed")}
-    job["last_delivery_error"] = delivery_error
+    if not keep_verdict:
+        job["last_delivery_error"] = delivery_error
     # Clear both claims: the run is over, so the job is claimable again.
     job["fire_claim"] = None
     job.pop("pending_slot", None)
@@ -2462,6 +2469,7 @@ def mark_job_run(
     ladder_rung: bool = False,
     quota_hold_seconds: Optional[float] = None,
     recover_consumed_fire: bool = False,
+    agent_skipped: bool = False,
 ) -> bool:
     """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
     and retire the record as a terminal completion when the repeat limit is reached.
@@ -2483,6 +2491,10 @@ def mark_job_run(
     it on every tick. ``recover_consumed_fire`` lets a scheduled sparse cron recover its
     consumed fire when the provider reopens; manual runs retain the natural schedule
     (cron/quota_hold.py, #89376).
+
+    ``agent_skipped``: a gate (``wakeAgent=false`` script, unchanged monitor) suppressed the agent,
+    so this successful tick is not evidence of agent health. ``last_status``, ``last_error``,
+    ``failure_streak`` and ``preflight_alerted`` keep the last real run's values. [daveey]
     """
     def apply(jobs, _i, job):
         if expected_fire_owner is not None:
@@ -2493,7 +2505,8 @@ def mark_job_run(
                     job_id)
                 return False
         now = _hermes_now().isoformat()
-        _record_run_outcome(job, success, error, delivery_error, status, now)
+        _record_run_outcome(job, success, error, delivery_error, status, now,
+                            agent_skipped=agent_skipped)
         _advance_after_run(job, now, ladder_rung=ladder_rung)
         from cron import quota_hold
         from cron.unreachable_retry import clear_state, plan_retry

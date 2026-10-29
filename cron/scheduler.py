@@ -1599,6 +1599,7 @@ def _apply_monitor_gate(
     if not _mon.changed:
         # Unchanged: silent no_change tick (ledger doc kept; SILENT_MARKER blocks delivery).
         logger.info("Job '%s': monitor output unchanged — suppressing agent run", job_id)
+        job["_agent_skipped"] = True  # [daveey] not an agent run: mark_job_run keeps the last real outcome
         return (
             True, f"{header}**Status:** no_change (agent run suppressed)\n", SILENT_MARKER, None,
         ), extra_prompt, None
@@ -2428,6 +2429,7 @@ def _prepare_job_prompt(
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info("Job '%s' (ID: %s): wakeAgent=false, skipping agent run", job_name, job_id)
             note_cron_skipped(job)
+            job["_agent_skipped"] = True  # [daveey] not an agent run: mark_job_run keeps the last real outcome
             silent_doc = (
                 f"# Cron Job: {job_name}\n\n"
                 f"**Job ID:** {job_id}\n"
@@ -3336,6 +3338,10 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
         mark_kwargs["status"] = "blocked_config"
+    if job.pop("_agent_skipped", False) and d.success:
+        # [daveey] A gate tick (wakeAgent=false / unchanged monitor) says nothing about agent health:
+        # resetting the streak and alert marker here hid a job whose every woken run failed.
+        mark_kwargs["agent_skipped"] = True
     # A run that removed its own record has nothing left to mark; the delivery above is its result.
     marked = self_removal_delivery_allowed(job["id"]) or mark_job_run(
         job["id"], d.success, d.error, **mark_kwargs)
