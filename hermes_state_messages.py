@@ -118,6 +118,14 @@ def _stale_holder(row, now: float) -> bool:
     return float(row["expires_at"]) <= now or _compression_lock_holder_process_is_dead(row["holder"])
 
 
+# Drive from the lineage sessions through idx_messages_session_active. The previous ``JOIN lineage`` form let the
+# planner SCAN the whole messages table (300k rows / 1.9 GB on hermes-hub) inside BEGIN IMMEDIATE, holding the
+# state.db write lock for as long as a cold scan took. [daveey]
+_NOTICE_BY_ID_SQL = (
+    "SELECT m.id FROM messages m WHERE m.session_id IN (SELECT id FROM lineage) "
+    "AND m.display_kind='kanban_notice' AND json_extract(m.display_metadata, '$.notice_id') = ? LIMIT 1")
+
+
 class SessionMessagesMixin:
     """Message append/replace/rewind, reactions, resume conversations, replay dedupe."""
 
@@ -499,10 +507,8 @@ class SessionMessagesMixin:
         keys = [str(k) for k in metadata.get("kanban_event_keys") or () if k]
         from hermes_state_sessions import _LINEAGE_CTE_SQL  # watermark is lineage-stamped
 
-        def _do(conn):
-            existing = conn.execute(_LINEAGE_CTE_SQL +
-                "SELECT m.id FROM messages m JOIN lineage l ON m.session_id=l.id WHERE m.display_kind='kanban_notice' "
-                "AND json_extract(m.display_metadata, '$.notice_id') = ? LIMIT 1", (session_id, session_id, notice_id)).fetchone()
+        def _existing(conn):
+            existing = conn.execute(_LINEAGE_CTE_SQL + _NOTICE_BY_ID_SQL, (session_id, session_id, notice_id)).fetchone()
             if existing is None and keys:
                 existing = conn.execute(
                     _LINEAGE_CTE_SQL + " SELECT m.id FROM messages m, "
@@ -510,6 +516,17 @@ class SessionMessagesMixin:
                     "WHERE m.session_id IN (SELECT id FROM lineage) AND m.display_kind = 'kanban_notice' "
                     "AND json_valid(m.display_metadata) AND j.value IN (" + ",".join("?" * len(keys)) + ") LIMIT 1",
                     (session_id, session_id, *keys)).fetchone()
+            return existing
+
+        # Already delivered (the common case: the unloaded sweep re-offers every done card each tick): answer
+        # from a read connection and never take the WAL write lock. Re-checked inside the writer txn below.
+        with self._read_ctx() as rconn:
+            seen = _existing(rconn)
+        if seen is not None:
+            return seen[0], False
+
+        def _do(conn):
+            existing = _existing(conn)
             if existing is not None:
                 return existing[0], False
             self._check_transcript_write_guards(conn, session_id, None, reject_active_turn_lease=reject_active_turn)

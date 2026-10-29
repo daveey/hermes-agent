@@ -22,6 +22,7 @@ from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
 from hermes_cli import kanban_overlap
 from tools.kanban_tools_placement import _marker_placement_fields, _placement_refused, _runs_where
+from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
@@ -247,9 +248,7 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
 
                 if not isinstance(e, ValueError):
                     logger.exception(f"{tool_name} failed")
-                if classify_rejections:
-                    return tool_error(f"{tool_name}: {e}", rejection="error")
-                return tool_error(f"{tool_name}: {e}")
+                return generic_tool_error(tool_name, args, e, classify_rejections)
         return wrapper
     return deco
 

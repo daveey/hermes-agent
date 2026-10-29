@@ -1020,7 +1020,8 @@ def test_multi_task_call_is_one_completion_unless_independent_completions(monkey
     gates[1].set()
     assert _drain_one(timeout=0.5) is None  # two of three done: no message yet
     gates[2].set()
-    evt = _drain_one()
+    evt = _drain_one(timeout=60)  # returns as soon as the event lands; a CPU-throttled runner needs the slack
+    assert evt is not None, "no completion message after all three tasks finished"
     assert sorted(r["task_index"] for r in evt["results"]) == [0, 1, 2]
 
 

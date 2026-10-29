@@ -6,12 +6,15 @@ train, full suite, deploy) without polling. Invariants: each heartbeat carries o
 heartbeats stop at exit, and the normal completion notice still fires.
 """
 import json
+import os
 import queue
+import shlex
 import time
 
 import pytest
 
 import tools.process_registry as pr
+from tests.waiting import wait_until
 from tools.process_registry import ProcessRegistry
 
 
@@ -114,22 +117,69 @@ def test_schema_minimum_heartbeat_is_disabled_for_foreground(monkeypatch):
     assert captured["notify_on_complete"] is False
 
 
+def _release_hold(path) -> None:
+    """Unblock a child reading ``path``. A missing reader is fine: the caller still kills."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        os.write(fd, b"\n")
+    finally:
+        os.close(fd)
+
+
+# Deadline, not a delay: a descheduled runner can sit well past the 1s heartbeat
+# interval and still be fine. Only a session the tick loop will never see waits this out.
+_HEARTBEAT_WAIT = 60.0
+
+
 @pytest.mark.platforms("linux")
 def test_first_heartbeat_carries_output_produced_before_arming(tmp_path, monkeypatch):
-    """The terminal tool arms the heartbeat after its spawn bookkeeping; whatever the process
-    printed in that gap belongs to the first heartbeat, not to nobody (CI: 'first' vanished)."""
+    """Pre-arm output belongs in the first heartbeat, not in nobody.
+
+    The terminal tool arms the heartbeat after spawn bookkeeping, and a fast child has
+    already written by then. The child stays blocked on a fifo until that heartbeat is
+    observed: ``sleep 3`` is a wall-clock lifetime, so a descheduled runner publishes
+    "first" only after the child has exited. ``arm_heartbeat`` then stamps a session the
+    tick loop no longer scans (``_running`` only, and not ``exited``), and the wait is
+    for an event that will never arrive.
+    """
     monkeypatch.setattr(pr, "HEARTBEAT_MIN_SECONDS", 1)
     monkeypatch.setattr(pr, "HEARTBEAT_TICK_SECONDS", 0.1)
+    hold = tmp_path / "hold"
+    os.mkfifo(hold)
     registry = ProcessRegistry()
-    session = registry.spawn_local("echo first; sleep 3", cwd=str(tmp_path))
+    session = registry.spawn_local(
+        f"echo first; read -r _ < {shlex.quote(str(hold))}",
+        cwd=str(tmp_path),
+    )
     session.notify_on_complete = True
-    assert _wait_until(lambda: "first" in registry.poll(session.id).get("output_preview", ""), timeout=10)
-    registry.arm_heartbeat(session, 1)
-
-    assert _wait_until(lambda: any(e.get("type") == "heartbeat" for e in list(registry.completion_queue.queue)),
-                       timeout=10)
-    first_beat = next(e for e in _drain(registry.completion_queue) if e["type"] == "heartbeat")
-    assert "first" in first_beat["output"], first_beat
+    try:
+        wait_until(
+            lambda: "first" in registry.poll(session.id).get("output_preview", ""),
+            timeout=_HEARTBEAT_WAIT,
+            what="child output 'first' published",
+        )
+        status = registry.poll(session.id).get("status")
+        assert status == "running", (
+            f"child exited before arm ({status}); a fixed sleep cannot cover a descheduled reader"
+        )
+        registry.arm_heartbeat(session, 1)
+        wait_until(
+            lambda: any(
+                e.get("type") == "heartbeat" for e in list(registry.completion_queue.queue)
+            ),
+            timeout=_HEARTBEAT_WAIT,
+            what="first heartbeat while the child is still held open",
+        )
+        first_beat = next(
+            e for e in list(registry.completion_queue.queue) if e.get("type") == "heartbeat"
+        )
+        assert "first" in first_beat["output"], first_beat
+    finally:
+        _release_hold(hold)
+        registry.kill_process(session.id)
 
 
 def test_terminal_dispatch_heartbeat_implies_notify_and_foreground_runs_without_it(monkeypatch):

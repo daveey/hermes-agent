@@ -13,6 +13,9 @@ files one card per test id.
 * later flakes while that card is open: append a comment to it
 * flake after its card was closed (done/archived): open a new card that links
   the old one, since the fix did not hold
+* a card anyone filed (any status) already cites the job URL: never open another;
+  comment it if open, else record it and skip. An open card about the test id that
+  this cron did not file gets the comment too (found via ``hermes kanban list``)
 
 Modes:
 
@@ -30,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -47,6 +51,8 @@ class Board(Protocol):
     def create(self, title: str, body: str, key: str) -> str: ...
     def status(self, card_id: str) -> str | None: ...
     def comment(self, card_id: str, body: str) -> None: ...
+    def list_cards(self) -> list[dict[str, Any]]: ...   # every card, any status: id, status, title, body
+    def comments(self, card_id: str) -> list[str]: ...
 
 
 class CliBoard:
@@ -79,6 +85,16 @@ class CliBoard:
 
     def comment(self, card_id: str, body: str) -> None:
         self._run("comment", card_id, body)
+
+    def list_cards(self) -> list[dict[str, Any]]:
+        return list(json.loads(self._run("list", "--archived", "--json")))
+
+    def comments(self, card_id: str) -> list[str]:
+        try:
+            data = json.loads(self._run("show", card_id, "--json"))
+        except (RuntimeError, ValueError):
+            return []
+        return [str(c.get("body") or "") for c in data.get("comments") or []]
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -120,9 +136,59 @@ def _card_body(entry: dict[str, str], run_url: str, branch: str, previous: str |
     return "\n".join(lines)
 
 
+def _mentions(text: str, test_id: str) -> bool:
+    """``test_id`` appears as a whole id (``tests/x.py::test_a`` is not in ``...::test_ab``)."""
+    return re.search(re.escape(test_id) + r"(?![\w\[])", text) is not None
+
+
+_GH_JOB_URL = re.compile(r"(https://github\.com/[^/\s]+/[^/\s]+/actions/runs/\d+)/job/(\d+)")
+
+
+def _cites_job(text: str, url: str) -> bool:
+    """``text`` cites the job at ``url``: the URL itself, or (GitHub) its run URL plus its job id.
+
+    Workers often write "run <run url> ... job 123202653589" instead of the job URL
+    (t_01a1858daf93c588 did), and that is the same job.
+    """
+    if url in text:
+        return True
+    m = _GH_JOB_URL.fullmatch(url)
+    return bool(m) and m.group(1) in text and re.search(rf"(?<!\d){m.group(2)}(?!\d)", text) is not None
+
+
+def _existing_cards(board: Board, run_url: str, test_id: str) -> tuple[list[dict], list[dict]]:
+    """Cards on the whole board (any creator, any status) that relate to this flake.
+
+    Returns ``(citing, open_for_test)``: cards that already cite this job URL for this test
+    id (both appear in the title, body or comments; one job can flake several test ids, each
+    with its own card), and open cards that mention the test id. Comments are read (one
+    ``show`` each) only for cards whose title/body already has one of the two.
+    """
+    citing, open_for_test = [], []
+    url = run_url if run_url.startswith(("http://", "https://")) else None
+    for card in board.list_cards():
+        text = f"{card.get('title') or ''}\n{card.get('body') or ''}"
+        about_test, has_url = _mentions(text, test_id), bool(url) and _cites_job(text, url)
+        if url and (about_test or has_url) and not (about_test and has_url):
+            notes = "\n".join(board.comments(card["id"]))
+            about_test, has_url = about_test or _mentions(notes, test_id), has_url or _cites_job(f"{text}\n{notes}", url)
+        if about_test and has_url:
+            citing.append(card)
+        elif about_test and card.get("status") not in CLOSED:
+            open_for_test.append(card)
+    return citing, open_for_test
+
+
 def file_cards(entries: Iterable[dict[str, str]], *, run_url: str, branch: str, board: Board,
                state: dict[str, Any]) -> list[str]:
-    """Open or append one card per distinct test id; returns one log line per id."""
+    """Open or append one card per distinct test id; returns one log line per id.
+
+    Before opening a card it checks the whole board, since other workers (CI watch) file
+    cards for the same failures without touching this cron's state: a card that already
+    cites this job URL for this test id owns the incident (comment it when open; when closed, skip and record
+    it so a LATER job's flake opens a linked new generation), and an open card about the test
+    id gets the comment instead of a duplicate.
+    """
     log = []
     seen: set[str] = set()
     for entry in entries:
@@ -130,13 +196,29 @@ def file_cards(entries: Iterable[dict[str, str]], *, run_url: str, branch: str, 
         if test_id in seen:
             continue
         seen.add(test_id)
+        excerpt_comment = (f"Flaked again: {run_url} (branch `{branch}`).\n\n```\n"
+                           f"{(entry.get('first_attempt_excerpt') or '')[-1500:]}\n```")
         known = state["cards"].get(test_id)
         if known and board.status(known["card"]) not in CLOSED | {None}:
-            board.comment(known["card"], f"Flaked again: {run_url} (branch `{branch}`).\n\n```\n"
-                          f"{(entry.get('first_attempt_excerpt') or '')[-1500:]}\n```")
+            board.comment(known["card"], excerpt_comment)
             log.append(f"appended {known['card']} {test_id}")
             continue
-        generation = (known or {}).get("generation", 0) + (1 if known else 0)
+        recorded_generation = (known or {}).get("generation", 0)
+        citing, open_for_test = _existing_cards(board, run_url, test_id)
+        open_citing = [c for c in citing if c.get("status") not in CLOSED]
+        # A card citing this job owns the incident; only without one does an open card about the test id.
+        target = (open_citing or ([] if citing else open_for_test) or [None])[0]
+        if target is not None:
+            board.comment(target["id"], excerpt_comment)
+            state["cards"][test_id] = {"card": target["id"], "generation": recorded_generation}
+            log.append(f"appended {target['id']} {test_id}")
+            continue
+        if citing:
+            owner = citing[0]
+            state["cards"][test_id] = {"card": owner["id"], "generation": recorded_generation}
+            log.append(f"skipped {test_id}: {run_url} already cited by {owner['id']} ({owner.get('status')})")
+            continue
+        generation = recorded_generation + (1 if known else 0)
         key = f"deflake:{test_id}" + (f"#{generation}" if generation else "")
         card = board.create(f"Deflake {test_id}", _card_body(entry, run_url, branch, (known or {}).get("card")), key)
         state["cards"][test_id] = {"card": card, "generation": generation}
