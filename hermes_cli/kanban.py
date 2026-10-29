@@ -22,6 +22,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_db_notify as kbn
+from hermes_cli import kanban_db_operator as kbo
 from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli.kanban_output import (
@@ -251,7 +252,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
-    "request-review", "request-changes", "reopen-review",
+    "request-review", "request-changes", "reopen-review", "reopen",
     "gc", "origin-bind", "origin-create", "origin-adopt", "sync",
 })
 
@@ -1297,6 +1298,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
 
 
+_OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id")
+
+
 def _cmd_edit(args: argparse.Namespace) -> int:
     result = getattr(args, "result", None)
     raw_metadata = getattr(args, "metadata", None)
@@ -1304,23 +1308,60 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     title = getattr(args, "title", None)
     body = getattr(args, "body", None)
     priority = getattr(args, "priority", None)
+    operator = {name: getattr(args, name, None) for name in _OPERATOR_EDIT_FLAGS}
+    if operator["goal_mode"] is not None:
+        operator["goal_mode"] = operator["goal_mode"] == "on"
+    has_operator = any(value is not None for value in operator.values())
     if result is None and (summary is not None or raw_metadata is not None):
         return _err("kanban edit: --summary and --metadata require --result", 2)
-    if all(value is None for value in (title, body, priority, result)):
-        return _err("kanban edit: provide --title, --body, --priority, or --result", 2)
+    if all(value is None for value in (title, body, priority, result)) and not has_operator:
+        return _err(
+            "kanban edit: provide --title, --body, --priority, --result, --max-retries, --goal-mode, "
+            "--goal-max-turns, --max-runtime-seconds, or --session-id", 2,
+        )
+    if getattr(args, "force", False) and operator["session_id"] is None:
+        return _err("kanban edit: --force only applies to --session-id", 2)
     metadata, rc = _parse_metadata_flag(raw_metadata)
     if rc:
         return rc
     with kbc.connect_closing() as conn:
-        ok = kb.edit_task(
-            conn, args.task_id, title=title, body=body, priority=priority,
-            result=result, summary=summary, metadata=metadata,
-        )
-    return _ok_or_err(
-        ok,
-        f"cannot edit {args.task_id} (unknown id, or --result used on a task that is not done)",
-        f"Edited {args.task_id}",
-    )
+        changed: dict = {}
+        if has_operator:
+            # Operator columns first: a refusal (e.g. a session_id overwrite) must leave the
+            # whole edit unapplied rather than half of it. [daveey]
+            try:
+                changed = kbo.edit_operator_fields(
+                    conn, args.task_id, force=bool(getattr(args, "force", False)), **operator,
+                )
+            except kbo.KanbanEditRefused as exc:
+                return _err(f"kanban edit: {exc}")
+            if changed is None:
+                return _err(f"cannot edit {args.task_id} (unknown id)")
+        if any(value is not None for value in (title, body, priority, result)):
+            ok = kb.edit_task(
+                conn, args.task_id, title=title, body=body, priority=priority,
+                result=result, summary=summary, metadata=metadata,
+            )
+            if not ok:
+                return _err(f"cannot edit {args.task_id} (unknown id, or --result used on a task that is not done)")
+    detail = "; ".join(f"{f}: {c['old']!r} -> {c['new']!r}" for f, c in (changed or {}).items())
+    print(f"Edited {args.task_id}" + (f" ({detail})" if detail else ""))
+    return 0
+
+
+def _cmd_reopen(args: argparse.Namespace) -> int:
+    """``done`` -> ``ready`` (``todo`` while a parent is open) with an audited reason. [daveey]"""
+    with kbc.connect_closing() as conn:
+        try:
+            status = kbo.reopen_done_task(conn, args.task_id, reason=args.reason, actor=_profile_author())
+        except kbo.KanbanEditRefused as exc:
+            return _err(f"kanban reopen: {exc}", 2)
+        if status is None:
+            current = kb.get_task(conn, args.task_id)
+            what = "unknown id" if current is None else f"status is {current.status!r}, not 'done'"
+            return _err(f"cannot reopen {args.task_id} ({what}); use unblock/reopen-review for other states")
+    print(f"Reopened {args.task_id} -> {status}")
+    return 0
 
 
 def _commented(conn, reason: Optional[str], author, prefix: str, op):
@@ -1826,7 +1867,7 @@ _HANDLERS = {
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,
     "comment": _cmd_comment, "attach": _cmd_attach,
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
-    "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
+    "complete": _cmd_complete, "edit": _cmd_edit, "reopen": _cmd_reopen, "block": _cmd_block,
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
