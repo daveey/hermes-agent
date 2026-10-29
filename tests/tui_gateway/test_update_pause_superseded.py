@@ -105,7 +105,7 @@ def test_watcher_waits_while_a_synthesized_turn_runs_over_the_pause(env):
     session = _paused_session(env.home)
     session["running"] = True
     session["_paused_marker_carried"] = "session-key"
-    assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "wait"
+    assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "carried"
     session.pop("_paused_marker_carried")
     assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "done"
 

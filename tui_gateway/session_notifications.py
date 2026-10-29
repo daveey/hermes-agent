@@ -175,6 +175,9 @@ def _notif_claim_turn(session: dict) -> bool:
     the chat (owner-refusal backoff) no automatic turn starts either."""
     if _notif_owner_refused(session):
         return False
+    from tui_gateway.update_pause import continuation_due
+    if continuation_due(session):
+        return False  # [daveey] a core-update-paused turn continues first; callers requeue (update_pause)
     with _session_turn_admission(session) as admitted:
         if not admitted or session.get("running") or session.get("_turn_cancel_requested"):
             return False

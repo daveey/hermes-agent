@@ -13,7 +13,12 @@ A turn the next backend would not auto-continue is never paused. A paused turn w
 an update (expired, apply refused) continues in place (``start_in_place_watcher``), so it never hangs.
 When the update did move the checkout, the turn is left for a successor only while one is coming: this
 process's skew watchdog runs and its idle proof holds (or a retirement is already under way). A backend
-kept busy by other work for ``NO_REPLACEMENT_S``, or one no watchdog retires, continues the turn here.
+kept busy by other work for ``NO_REPLACEMENT_S``, one no watchdog retires, or one that has not begun
+retiring ``HANDOFF_WAIT_S`` after the move continues the turn here. Every bound counts from the moment
+the move was first seen, so a fluctuating outlook or a synthesized turn running over the pause cannot
+restart it. From the end of the window until the continuation starts, automatic turns (kanban notices,
+process completions, wake-ups) wait (``continuation_due``): one claiming the idle paused session would
+keep the backend busy, block the hand-off and delay the paused turn by its whole run.
 The retirement fence makes the two exclusive: in-place work is admitted through it, so once retirement
 prepares or commits, the turn is left to the successor's startup sweep.
 """
@@ -46,6 +51,19 @@ LEAVE_GRACE_S = 300.0
 # turn used to wait the whole grace (900 s) for that successor. Now it waits only while a replacement
 # is actually on its way; once none has been for this long, it continues here.
 NO_REPLACEMENT_S = 60.0
+# [daveey] t_01a18300e42c3364 (2nd attempt): an idle backend with a live watchdog retires within two skew
+# polls (_CONFIRMATIONS x DEFAULT_SKEW_POLL_S = 60 s) of the move being visible. One that has not even begun
+# retiring after this long is not going to: continue here instead of trusting the outlook up to the backstop.
+HANDOFF_WAIT_S = 90.0
+# Automatic turns hold off at most this long past the watcher's last poll, so a dead watcher or a failed
+# continuation kickoff never holds them for good.
+DUE_HOLD_S = 2 * WATCH_POLL_S + 5.0
+# After the watcher schedules the continuation, its kickoff may wait up to 120 s for an agent build
+# (session_auto_continue) before it claims the session; automatic turns wait that long at most.
+KICKOFF_HOLD_S = 120.0 + DUE_HOLD_S
+# Automatic turns never wait for a paused turn longer than this past the window's end (a continuation that
+# keeps failing to schedule, e.g. a live foreign marker writer, must not starve the chat's notices).
+HOLD_MAX_S = LEAVE_GRACE_S + WATCH_POLL_S
 
 
 def _now() -> float:
@@ -259,9 +277,10 @@ def _detect_skew():
 
 
 def in_place_resume_action(session: dict, marker_key: str, *, skew: Callable[[], Any] | None = None) -> str:
-    """What a paused turn's own backend does now: ``wait`` (the window is still up), ``leave`` (the
-    checkout moved: the next backend continues it), ``resume`` (no update replaced us: continue here) or
-    ``done`` (the user or another path already moved on)."""
+    """What a paused turn's own backend does now: ``wait`` (the window is still up), ``carried`` (the window
+    is over but a synthesized turn runs over the pause: wait for it), ``leave`` (the checkout moved: the next
+    backend may continue it), ``resume`` (no update replaced us: continue here) or ``done`` (the user or
+    another path already moved on)."""
     from hermes_cli.admission_fence import is_held
     from tui_gateway.turn_marker import read_turn_marker
     if pause_requested(session):
@@ -281,7 +300,7 @@ def in_place_resume_action(session: dict, marker_key: str, *, skew: Callable[[],
         # user moving on: wait for it, then continue the paused turn.
         with session["history_lock"]:
             carried = session.get("_paused_marker_carried") == marker_key and session.get("running")
-        return "wait" if carried else "done"
+        return "carried" if carried else "done"
     marker = read_turn_marker(_home(session), marker_key)
     if not marker or marker.get("reason") != PAUSE_REASON:
         return "done"
@@ -312,51 +331,134 @@ def replacement_outlook() -> str:
     return "coming" if idle is True else "blocked"
 
 
+def continuation_due(session: dict) -> bool:
+    """[daveey] True while a paused turn's window is over and its continuation has not started: an automatic
+    turn claiming the idle session now would run first and delay the paused turn by its whole run (a kanban
+    notice took 8 min on 2026-10-28), and its work would keep the backend from retiring for the hand-off.
+    Read live while a watcher runs (a notice can land between two of its polls), then held by the deadline
+    until the continuation records its marker."""
+    if time.monotonic() < float(session.get("_update_pause_due_until") or 0.0):
+        return True
+    if time.monotonic() >= float(session.get("_update_pause_watch_until") or 0.0):
+        return False  # no live watcher for a paused turn here
+    return _window_over(session)
+
+
+def _note_watching(session: dict) -> None:
+    """A watcher is alive for this session; lapses by itself if the watcher thread never runs or dies."""
+    with session["history_lock"]:
+        session["_update_pause_watch_until"] = time.monotonic() + DUE_HOLD_S
+
+
+def _window_over(session: dict) -> bool:
+    from hermes_cli.admission_fence import is_held
+    if pause_requested(session):
+        return False
+    try:
+        return not is_held(_root(session) / "core-update")
+    except OSError:
+        return False
+
+
+def _hold_automatic_turns(session: dict, hold_s: float = DUE_HOLD_S) -> None:
+    with session["history_lock"]:
+        session["_update_pause_due_until"] = time.monotonic() + hold_s
+
+
+def _release_automatic_turns(session: dict, *, watching: bool = False) -> None:
+    with session["history_lock"]:
+        if watching:
+            session.pop("_update_pause_watch_until", None)
+        if not session.get("_auto_continue_scheduled"):  # another watcher's continuation is still starting
+            session.pop("_update_pause_due_until", None)
+
+
+def _leave_decision(waited: float, outlook: str) -> str | None:
+    """Why to continue a paused turn here now that the checkout moved (``waited`` s ago), else None."""
+    if outlook == "retiring":
+        return None  # the fence refuses in-place work from here on; only the backstop retries
+    if outlook == "none":
+        return "no retirement watchdog"
+    if outlook == "blocked" and waited >= NO_REPLACEMENT_S:
+        return f"backend kept busy, {waited:.0f}s since the checkout moved"
+    if waited >= HANDOFF_WAIT_S:
+        return f"no retirement began within {waited:.0f}s of the checkout moving"
+    return None
+
+
 def start_in_place_watcher(sid: str, session: dict, marker_key: str) -> threading.Thread:
     """Bounded daemon: continue the paused turn here when its window ends without an update, or when
     the checkout moved but no successor backend is coming to continue it."""
 
     def run() -> None:
         from tui_gateway import server
-        started, left_at, blocked_since = time.monotonic(), None, None
-        while time.monotonic() - started < WATCH_MAX_S:
-            time.sleep(WATCH_POLL_S)
-            try:
-                action = in_place_resume_action(session, marker_key)
-                if action == "leave":
-                    now = time.monotonic()
-                    if left_at is None:
-                        left_at = now
-                        logger.info("core-update pause: checkout moved; session %s continues on the next backend",
-                                    marker_key)
-                    outlook = replacement_outlook()
-                    if outlook == "coming":
-                        blocked_since = None
-                    elif blocked_since is None:
-                        blocked_since = now
-                    blocked_for = 0.0 if blocked_since is None else now - blocked_since
-                    if outlook == "none" or blocked_for >= NO_REPLACEMENT_S:
-                        logger.info("core-update pause: no backend replacement is coming (%s); continuing session "
-                                    "%s here", "no retirement watchdog" if outlook == "none" else
-                                    f"backend kept busy for {blocked_for:.0f}s", marker_key)
-                    elif now - left_at >= LEAVE_GRACE_S:
-                        logger.info("core-update pause: backend still not replaced after %.0fs; continuing session "
-                                    "%s here", LEAVE_GRACE_S, marker_key)
-                    else:
+        from hermes_cli.backend_retirement import retirement
+        started, left_at, last_outlook, scheduled, over_at = time.monotonic(), None, None, False, None
+        try:
+            while time.monotonic() - started < WATCH_MAX_S:
+                time.sleep(WATCH_POLL_S)
+                # Automatic turns wait for the paused turn at most HOLD_MAX_S past the window's end: a
+                # continuation that keeps failing to schedule must not starve the chat's notices for hours.
+                holding = over_at is None or time.monotonic() - over_at < HOLD_MAX_S
+                if holding:
+                    _note_watching(session)
+                else:
+                    _release_automatic_turns(session, watching=True)
+                try:
+                    action = in_place_resume_action(session, marker_key)
+                    if action in ("leave", "resume", "carried"):
+                        if over_at is None:
+                            over_at = time.monotonic()
+                        if holding:
+                            _hold_automatic_turns(session)  # the window is over: the paused turn goes first
+                    if action == "carried" and left_at is None and _detect_skew() is not None:
+                        left_at = time.monotonic()  # the hand-off clock starts at the move, not after this turn
+                        logger.info("core-update pause: checkout moved while a synthesized turn runs over session "
+                                    "%s; the paused turn continues after it", marker_key)
+                    if action in ("wait", "carried"):
                         continue
-                    action = "resume"
-                if action == "wait":
-                    continue
-                if action == "resume":
-                    if left_at is None:
-                        logger.info("core-update pause: window ended without an update; continuing session %s "
-                                    "here", marker_key)
-                    if server._maybe_schedule_auto_continue(sid, session, marker_key) is None:
-                        continue  # admission refused or not yet idle: the next poll decides again
-                return
-            except Exception:
-                logger.debug("core-update pause watcher for %s failed a poll", marker_key, exc_info=True)
+                    if action == "leave":
+                        now = time.monotonic()
+                        if left_at is None:
+                            left_at = now
+                            logger.info("core-update pause: checkout moved; session %s continues on the next "
+                                        "backend if one is coming", marker_key)
+                        outlook = "retiring" if retirement.retiring() else replacement_outlook()
+                        if outlook != last_outlook:
+                            logger.info("core-update pause: replacement outlook for session %s is %s (%.0fs since "
+                                        "the checkout moved)", marker_key, outlook, now - left_at)
+                            last_outlook = outlook
+                        why = _leave_decision(now - left_at, outlook)
+                        if why is not None:
+                            logger.info("core-update pause: no backend replacement is coming (%s); continuing "
+                                        "session %s here", why, marker_key)
+                        elif now - left_at >= LEAVE_GRACE_S:
+                            logger.info("core-update pause: backend still not replaced after %.0fs; continuing "
+                                        "session %s here", LEAVE_GRACE_S, marker_key)
+                        else:
+                            continue
+                        action = "resume"
+                    if action == "resume":
+                        if left_at is None:
+                            logger.info("core-update pause: window ended without an update; continuing session %s "
+                                        "here", marker_key)
+                        if server._maybe_schedule_auto_continue(sid, session, marker_key) is None:
+                            continue  # admission refused or not yet idle: the next poll decides again
+                        scheduled = True
+                        # The kickoff may wait for an agent build before it claims the session: hold until
+                        # the continuation records its marker (prompt_turn pops this), bounded by the build.
+                        _hold_automatic_turns(session, KICKOFF_HOLD_S)
+                    return
+                except Exception:
+                    logger.debug("core-update pause watcher for %s failed a poll", marker_key, exc_info=True)
+        finally:
+            if not scheduled:
+                _release_automatic_turns(session, watching=True)
+            else:
+                with session["history_lock"]:
+                    session.pop("_update_pause_watch_until", None)
 
     thread = threading.Thread(target=run, daemon=True, name=f"update-pause-watch-{sid}")
+    _note_watching(session)  # before start: automatic turns see the watcher from its first instant
     thread.start()
     return thread
