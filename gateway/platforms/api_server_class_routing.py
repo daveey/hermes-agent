@@ -42,12 +42,29 @@ def initial_runtime(adapter, *, default_model, requested_model,
     return _resolve_runtime_agent_kwargs()
 
 
+def _class_request_supersedes(requested_model, session_selector):
+    """An explicit class request beats a session's standing selection of anything else.
+
+    Routing state is keyed per (session, class), but the persisted session row records
+    only the first selection. Without this, a reused session (an implicit fingerprint id
+    or an explicit X-Hermes-Session-Id) silently served every later ``class:<level>``
+    request on the first class's route. The session ``/model`` override and a confirmed
+    runtime lock still win; requests that name no class keep the persisted selection.
+    """
+    requested = (requested_model or "").strip()
+    return is_class_selector(requested) and bool(session_selector) and session_selector != requested
+
+
 def prepare_runtime(adapter, session_id, session_model, confirmed_runtime_lock,
                     requested_model, route, gateway_session_key):
     from gateway.run import _resolve_gateway_model
     from gateway.platforms.api_server import _ProviderAuthResolutionError
     restored = restore_session_route(adapter, session_id, session_model, confirmed_runtime_lock)
+    if restored and _class_request_supersedes(requested_model, restored[0]):
+        restored = None
     session_model = restored[0] if restored else session_model
+    if not confirmed_runtime_lock and _class_request_supersedes(requested_model, session_model):
+        session_model = None
     model = _resolve_gateway_model()
     try:
         if restored and not adapter._session_model_override_for(gateway_session_key or session_id):
