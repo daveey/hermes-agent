@@ -324,6 +324,11 @@ def _kanban_worker_model(monkeypatch, tmp_path) -> str:
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban"))
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda name: home)
+    # Fork: dir workspaces need terminal/file/host_repo proven by the assignee's profile config.yaml
+    # (hermes_cli.kanban_capabilities fails closed on a missing file); that gate is not what this
+    # upstream trial-model test covers, so the assignee has them.
+    monkeypatch.setattr("hermes_cli.kanban_capabilities._profile_capabilities",
+                        lambda name: {"terminal", "file", "git", "host_repo", "kanban"})
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     kb.create_board("trial")
