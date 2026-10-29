@@ -702,7 +702,8 @@ def test_setup_errors_are_counted_on_the_summary_line(tmp_path: Path) -> None:
 
     assert proc.returncode != 0
     summary = next(line for line in proc.stdout.splitlines() if line.startswith("=== Summary"))
-    assert "1 tests passed, 0 failed, 2 errored" in summary, summary
+    # Fork: upstream's summary notes say "N errors" (the fork said "N errored"); same count.
+    assert "1 tests passed, 0 failed, 2 errors" in summary, summary
 
 
 @pytest.mark.platforms("posix")  # POSIX signal death; Windows has no SIGSEGV exit

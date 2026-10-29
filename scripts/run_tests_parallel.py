@@ -1741,7 +1741,6 @@ def main() -> int:
     fail_count = 0
     tests_passed = 0
     tests_failed = 0
-    tests_errored = 0
     tests_skipped = 0
     skipped_files: list[tuple[Path, int]] = []
     # pytest setup/teardown ERRORs ("41 passed, 7 errors"). Not failures, but
@@ -1786,7 +1785,6 @@ def main() -> int:
             tests_skipped += summary.get("skipped", 0)
             if summary.get("skipped", 0):
                 skipped_files.append((fpath, summary["skipped"]))
-            tests_errored += summary.get("errors", 0)
             files_crashed += summary.get("crashed", 0)
             tests_collected += sum(
                 summary.get(k, 0)
