@@ -52,10 +52,18 @@ _background_review_read_paths: _ctxvars.ContextVar[Optional[_BackgroundReviewRea
     _ctxvars.ContextVar("background_review_read_paths", default=None))
 
 
+# Fork: upstream eedf3944e9e dropped the internal ``_source_path`` from skill_view results, so
+# _current_skill_view learns which file skill_view served from the read mark it records instead.
+_served_paths_capture: _ctxvars.ContextVar[Optional[list]] = _ctxvars.ContextVar(
+    "skill_view_served_paths_capture", default=None)
+
+
 def mark_background_review_skill_read(path: Path) -> None:
     """Record that the active background-review fork has read a skill file. The fork must not
     patch content it only inferred from the transcript: skill_view/read_file call this, and
     the write guards require the mark."""
+    if (capture := _served_paths_capture.get()) is not None:
+        capture.append(Path(path))
     if not _is_background_review():
         return
     if (marks := _background_review_read_paths.get()) is None:
@@ -162,16 +170,21 @@ def _current_skill_view(name: str, file_path: Optional[str], session_id: Optiona
     import contextvars
     import json
 
+    served: list = []
+
     def _view():
         _background_review_read_paths.set(_BackgroundReviewReadMarks())
+        _served_paths_capture.set(served)
         from tools.skills_tool import skill_view
         return skill_view(name, file_path=file_path, task_id=session_id)
 
     payload = json.loads(contextvars.copy_context().run(_view))
-    if not (isinstance(payload, dict) and payload.get("success") is True and payload.get("_source_path")
+    source = payload.get("_source_path") if isinstance(payload, dict) else None
+    source = Path(source) if source else (served[-1] if served else None)
+    if not (isinstance(payload, dict) and payload.get("success") is True and source is not None
             and isinstance(payload.get("content"), str)):
         return None
-    return Path(payload["_source_path"]), payload["content"]
+    return source, payload["content"]
 
 
 def _resolved_roots(skill_path: Path):
