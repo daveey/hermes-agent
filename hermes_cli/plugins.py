@@ -1718,8 +1718,10 @@ def start_background_plugin_discovery() -> None:
 
         def _run() -> None:
             try:
+                from hermes_cli import plugins_snapshot
+                stamp = plugins_snapshot.fingerprint()  # inputs as the sweep is about to read them
                 manager.discover_and_load()
-                _persist_plugin_toolset_keys()
+                plugins_snapshot.record(stamp)
             except Exception:
                 logger.warning("background plugin discovery failed", exc_info=True)
 
@@ -1741,21 +1743,19 @@ def _plugin_toolset_keys_cache_path() -> Path:
 
 
 def _persist_plugin_toolset_keys() -> None:
-    """Persist discovered plugin toolset keys + portable MCP names (best-effort)."""
-    try:
-        from utils import atomic_json_write
-        keys = sorted({ts_key for ts_key, _, _ in get_plugin_toolsets()})
-        try:
-            portable = sorted(get_plugin_manager().get_portable_mcp_servers())
-        except Exception:
-            portable = []
-        atomic_json_write(_plugin_toolset_keys_cache_path(), {"toolset_keys": keys, "portable_mcp": portable}, indent=None, mode=0o600)
-    except Exception:
-        logger.debug("plugin toolset key persist failed", exc_info=True)
+    """Persist discovered plugin toolset keys + portable MCP names (best-effort), unstamped: a
+    reader that needs the inputs to be unchanged (plugins_snapshot.load) ignores this record."""
+    from hermes_cli import plugins_snapshot
+    plugins_snapshot.record(None)
 
 
 def _nowait_plugin_set(cache_field: str, live: Callable[[PluginManager], set[str]]) -> set[str]:
-    """Shared body of the ``*_nowait`` probes: live registry, else last launch's cache, else block."""
+    """Shared body of the ``*_nowait`` probes: an active recorded snapshot (plugins_snapshot.serving),
+    else live registry, else last launch's cache, else block."""
+    from hermes_cli import plugins_snapshot
+    snapshot = plugins_snapshot.active()
+    if snapshot is not None:
+        return set(snapshot.toolset_keys if cache_field == "toolset_keys" else snapshot.portable_mcp)
     manager = get_plugin_manager()
     t = _background_discovery_thread
     in_flight = t is not None and t.is_alive()

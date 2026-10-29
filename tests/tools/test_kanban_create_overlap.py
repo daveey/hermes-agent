@@ -233,14 +233,18 @@ def test_bare_plain_word_in_the_body_does_not_name_that_board(home):
 
 
 def test_explicit_board_reference_still_names_the_board(home):
+    # Titles share 4 words (bb, macos, workspace, build) but not half of them: only the board reference
+    # matches. One shared word ("bb") is not enough for a plain-word board (hub t_01a189b2d186a986).
     owner = _runners_owner()
-    out = _create(title="CI: bb-linux fleet is down",
+    out = _create(title="CI: bb macOS workspace build is stuck",
                   body="See hub/runners. The bb fleet is stuck.")
     assert out.get("code") == "create_overlap", out
     assert owner in [m["id"] for m in out["matches"]]
-    named = _create(title="CI: the bb runners board is down", body="The bb fleet is stuck.")
+    named = _create(title="CI: bb macOS workspace build on the runners board is stuck", body="The bb fleet is stuck.")
     assert named.get("code") == "create_overlap", named
     assert owner in [m["id"] for m in named["matches"]]
+    one_word = _create(title="CI: bb-linux fleet is down", body="See hub/runners. The bb fleet is stuck.")
+    assert one_word.get("ok") is True, one_word
 
 
 def test_hyphenated_slug_in_the_title_still_names_the_board(home):

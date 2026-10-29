@@ -162,6 +162,7 @@ skill_matches_platform = _skill_utils_delegate("skill_matches_platform")
 skill_matches_environment = _skill_utils_delegate("skill_matches_environment")
 skill_matches_apps = _skill_utils_delegate("skill_matches_apps")
 _parse_frontmatter = _skill_utils_delegate("parse_frontmatter")
+_DEFAULT_PARSE_FRONTMATTER = _parse_frontmatter  # tools.skill_frontmatter_index: only the stock parser persists
 _get_disabled_skill_names = _skill_utils_delegate("get_disabled_skill_names")
 
 

@@ -1,5 +1,5 @@
 import { $messagingSessions, $sessions } from '@/store/session'
-import { isSessionBlocked } from '@/store/session-blocked'
+import { isSessionParked } from '@/store/session-blocked'
 import { $sessionDotStateById, kanbanStripeCounts, sessionStatusStripe, withRowActivity } from '@/store/session-dot-state'
 import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
 import type { SessionInfo } from '@/types/hermes'
@@ -108,7 +108,7 @@ const sessionHasStepStripe = (stripe: null | string | undefined): boolean =>
   stripe === 'done' || stripe === 'stuck' || stripe === 'attention'
 
 export function sessionHasStatusStripe(id: string): boolean {
-  if (isSessionBlocked(id)) {
+  if (isSessionParked(id)) {
     return false
   }
 
@@ -151,7 +151,8 @@ export function sessionHasStatusStripe(id: string): boolean {
         session?.review_wait,
         session?.kanban_attention ?? 0,
         kanbanStripeCounts(session ?? {}).waiting,
-        kanbanStripeCounts(session ?? {}).stalled
+        kanbanStripeCounts(session ?? {}).stalled,
+        session?.outcome
       )
     )
   )
@@ -200,7 +201,7 @@ export function nextSidebarSessionId(
 ): null | string {
   const order = sidebarSessionOrder()
 
-  const notBlocked = (id: string) => !isSessionBlocked(id)
+  const notBlocked = (id: string) => !isSessionParked(id)
 
   if (anySession) {
     return stepSessionId(order, currentId, direction, notBlocked)

@@ -29,6 +29,7 @@ const COMPARED_FIELDS = [
   'recovered',
   'asyncResult',
   'asyncResultKind',
+  'staleNotice',
   'id',
   'role',
   'pending',

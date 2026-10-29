@@ -245,11 +245,23 @@ HUMAN_REQUEST = {
         "metadata never grants execution permission or completes/unblocks the task."
     ),
     "properties": {
-        "action": {"type": "string", "minLength": 1},
+        "action": {"type": "string", "minLength": 1, "description": (
+            "The ask line David sees verbatim on the card and in chat notices: the exact thing to do and "
+            "where, then what unblock and archive mean, e.g. \"Reply A or B in this chat. Unblock = build "
+            "the pick; archive = drop it.\" An action missing either meaning is refused.")},
         "why_human": {"type": "string", "minLength": 1},
         "interaction": {"type": "string", "enum": ["approval", "reply", "user_terminal", "physical", "external"]},
         "scope": {"type": "string", "minLength": 1},
         "evidence": {"type": "string", "minLength": 1},
+        "choices": {
+            "type": "array", "minItems": 2, "maxItems": 6,
+            "description": "Optional decision buttons David can click instead of typing, e.g. "
+                           "[{\"label\": \"Ship it\", \"value\": \"ship\"}, {\"label\": \"Hold\", \"value\": \"hold\"}].",
+            "items": {"type": "object", "properties": {
+                "label": {"type": "string", "minLength": 1, "maxLength": 60},
+                "value": {"type": "string", "minLength": 1, "maxLength": 120}},
+                "required": ["label", "value"], "additionalProperties": False},
+        },
     },
     "required": ["action", "why_human", "interaction", "scope", "evidence"],
     "additionalProperties": False,

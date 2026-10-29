@@ -80,3 +80,26 @@ def test_shell_runner_forwards_host_slot_settings(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     names = {p.name for p in slot_dir.iterdir()}
     assert names and names <= {"0.lock", "1.lock", "2.lock"}, names
+
+
+@pytest.mark.platforms("posix")
+def test_shell_runner_forwards_docker_mount_root(tmp_path):
+    """A remote daemon must receive bind sources from its shared filesystem."""
+    mount_root = tmp_path / "shared docker mounts"
+    case = tmp_path / "test_mount_canary.py"
+    case.write_text(
+        "import os\n"
+        "def test_mount_canary():\n"
+        f"    assert os.environ.get('HERMES_TEST_DOCKER_MOUNT_ROOT') == {str(mount_root)!r}\n",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["bash", str(root / "scripts/run_tests.sh"), "-j", "1", str(case)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=180,
+        env={**os.environ, "HERMES_PYTHON": sys.executable,
+             "HERMES_TEST_FILE_RETRIES": "0",
+             "HERMES_TEST_DOCKER_MOUNT_ROOT": str(mount_root)},
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

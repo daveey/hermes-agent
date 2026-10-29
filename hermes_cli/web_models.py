@@ -296,6 +296,12 @@ class SessionRename(BaseModel):
     unread: Optional[StrictBool] = None
     profile: Optional[str] = None  # session owned by another profile (opens its state.db)
 
+class SessionMute(BaseModel):
+    """POST /api/sessions/{id}/mute: the server-side mute flag (whole compression lineage). [daveey]"""
+    muted: bool
+    profile: Optional[str] = None
+
+
 class SessionOwnerBackfill(BaseModel):
     """POST /api/sessions/owner-backfill (legacy migration). ``profile`` scopes WHICH state.db is
     stamped; the stamped value is always that store's own serving-profile identity — the caller

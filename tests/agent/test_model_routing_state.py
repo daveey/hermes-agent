@@ -34,17 +34,17 @@ def test_profile_state_isolation_and_resume(tmp_path, monkeypatch):
     assert resolve_model_route("class:deep", session_id="shared-id") == first
 
 
-def test_revoked_funding_requires_explicit_failure_not_silent_switch(tmp_path):
+def test_revoked_funding_reselects_an_unpinned_route_in_same_class(tmp_path):
     cfg = policy()
     args = dict(config=cfg, session_id="same", state_path=tmp_path / "routes.db")
     chosen = resolve_model_route("class:deep", **args)
     for r in cfg["model_routing"]["routes"]["deep"]:
         if r["provider"] == chosen["provider"]:
             r["funding_verified"] = False
-    with pytest.raises(ModelRoutingError, match="Sticky route"):
-        resolve_model_route("class:deep", **args)
-    alternative = resolve_model_route("class:deep", excluded=[(chosen["provider"], chosen["model"])], **args)
+    alternative = resolve_model_route("class:deep", **args)
     assert alternative["provider"] != chosen["provider"]
+    assert alternative["metadata"]["requested_class"] == "deep"
+    assert resolve_model_route("class:deep", **args) == alternative
 
 
 def test_lineage_arriving_before_parent_shares_identity(tmp_path):

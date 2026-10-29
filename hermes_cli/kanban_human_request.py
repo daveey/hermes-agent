@@ -8,6 +8,26 @@ from typing import Any
 INTERACTIONS = frozenset({"approval", "reply", "user_terminal", "physical", "external"})
 FIELDS = ("action", "why_human", "interaction", "scope", "evidence")
 NONHUMAN_KINDS = frozenset({"dependency", "transient", "time"})
+# [daveey] Optional decision buttons for a blocked card (session-outcome contract): 2-6 short {label, value}.
+MIN_CHOICES, MAX_CHOICES = 2, 6
+CHOICE_LABEL_MAX, CHOICE_VALUE_MAX = 60, 120
+
+
+def _validate_choices(value: Any) -> list[dict]:
+    if not isinstance(value, list) or not MIN_CHOICES <= len(value) <= MAX_CHOICES:
+        raise ValueError(f"human_request choices must be a list of {MIN_CHOICES}-{MAX_CHOICES} {{label, value}} items")
+    out = []
+    for choice in value:
+        label = choice.get("label") if isinstance(choice, dict) else None
+        val = choice.get("value") if isinstance(choice, dict) else None
+        if (not isinstance(label, str) or not label.strip() or len(label.strip()) > CHOICE_LABEL_MAX
+                or not isinstance(val, str) or not val.strip() or len(val.strip()) > CHOICE_VALUE_MAX):
+            raise ValueError(f"each human_request choice needs a label (<= {CHOICE_LABEL_MAX} chars) and a value "
+                             f"(<= {CHOICE_VALUE_MAX} chars)")
+        out.append({"label": label.strip(), "value": val.strip()})
+    if len({c["value"] for c in out}) != len(out):
+        raise ValueError("human_request choice values must be distinct")
+    return out
 
 
 def validate_human_request(value: Any, *, kind: str | None = None) -> dict | None:
@@ -22,7 +42,10 @@ def validate_human_request(value: Any, *, kind: str | None = None) -> dict | Non
         raise ValueError("human_request interaction must be approval, reply, user_terminal, physical or external")
     if kind in NONHUMAN_KINDS:
         raise ValueError("human_request cannot accompany dependency, transient or time waits")
-    return {field: value[field].strip() for field in FIELDS}
+    request = {field: value[field].strip() for field in FIELDS}
+    if value.get("choices") is not None:
+        request["choices"] = _validate_choices(value["choices"])
+    return request
 
 
 def needs_human(value: Any, *, kind: str | None = None) -> bool:

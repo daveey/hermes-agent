@@ -27,6 +27,7 @@ import { enPluginPreviewAccess } from './en_plugin_preview_access'
 import { enPluginUpdate } from './en_plugin_update'
 import { enPreviewWeb } from './en_preview_web'
 import { enProjects } from './en_projects'
+import { enSessionRowStatus } from './en_session_row_status'
 import { enSharedMetrics } from './en_shared_metrics'
 import { enThemePicker } from './en_theme_picker'
 import { enUninstallSection } from './en_uninstall_section'
@@ -3289,21 +3290,7 @@ export const en: Translations = {
       ageDay: 'd',
       ageHour: 'h',
       ageMin: 'm',
-      kanbanTasks: (open, blocked) =>
-        [
-          open > 0 ? `Waiting on ${open} ${open === 1 ? 'card' : 'cards'}` : '',
-          blocked > 0 ? `${blocked} blocked` : ''
-        ]
-          .filter(Boolean)
-          .join(', '),
-      kanbanAttention: count =>
-        `${count} done ${count === 1 ? 'card says' : 'cards say'} part of the work was dropped, with no follow-up card`,
-      kanbanStalled: count =>
-        `${count} ${count === 1 ? 'card has' : 'cards have'} stalled: waiting over 2 h on something only an agent can do, with nothing producing it`,
-      backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
-      backgroundProcessUnnamed: 'background process',
-      stopProcess: 'Stop',
-      stoppingProcess: 'Stopping…'
+      ...enSessionRowStatus
     },
     dateDivider: {
       today: 'Earlier today',
@@ -4472,6 +4459,7 @@ export const en: Translations = {
       react: 'React',
       dismissError: 'Dismiss error',
       responseStopped: 'Response stopped',
+      staleNotice: 'outdated: card moved on',
       ...enErrorLayers,
       errorCodes: enErrorCodes,
       errorAuthKinds: {

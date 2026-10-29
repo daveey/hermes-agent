@@ -7,6 +7,7 @@ backends never prove access to a host repository, even when mounts might make it
 from __future__ import annotations
 
 from contextlib import ExitStack
+import sys
 from pathlib import Path
 from collections.abc import Iterable
 
@@ -219,11 +220,45 @@ def _check_policy_shape(config) -> None:
         raise ValueError("terminal.backend must be a nonempty string")
 
 
-def _profile_capabilities(assignee: str) -> set[str]:
+def _cli_toolsets(config: dict, home: Path, needed: set[str] | None) -> set[str]:
+    """The profile's cli toolsets, as ``_get_platform_tools`` resolves them after plugin discovery.
+
+    [daveey] With ``needed`` (the toolsets the caller must find), a recorded discovery for this
+    profile (``plugins_snapshot.load``: inputs unchanged, no plugin touched a built-in tool or
+    toolset) is served instead of importing every plugin; under those conditions discovery cannot
+    change whether ``terminal``/``file`` resolve. The served answer is used only when it grants
+    every needed toolset; otherwise, and with no usable record, the full discovery runs as before
+    and records its result for the next cold process.
+    """
+    from hermes_cli import plugins as plugins_mod, plugins_snapshot
+    from hermes_cli.tools_config import _get_platform_tools
+
+    # agent.disabled_toolsets resolution imports model_tools, whose import is the one-time plugin
+    # discovery of a process; importing it with discovery suppressed would leave a long-lived
+    # process without plugin tools, so such a first import goes the full way.
+    disabled = (config.get("agent") or {}).get("disabled_toolsets")
+    if needed is not None and not (disabled and "model_tools" not in sys.modules):
+        snapshot = plugins_snapshot.load(home)
+        if snapshot is not None:
+            with plugins_snapshot.serving(snapshot):
+                served = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+            if needed <= served:
+                return served
+    manager = plugins_mod.get_plugin_manager()
+    fresh = not manager._discovered
+    stamp = plugins_snapshot.fingerprint(home) if fresh else None
+    toolsets = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+    if fresh and manager._discovered:
+        plugins_snapshot.record(stamp, home)
+    return toolsets
+
+
+def _profile_capabilities(assignee: str, required: list[str] | None = None) -> set[str]:
+    """Capabilities ``assignee``'s policy grants. ``required`` (validate_assignment's list) only
+    lets the toolset lookup skip plugin discovery when a recorded one already grants it."""
     from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
     from hermes_cli.config_effective import load_user_config_effective
     from hermes_cli.profiles import resolve_profile_env
-    from hermes_cli.tools_config import _get_platform_tools
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from tools.terminal_scope import build_profile_terminal_scope, reset_terminal_scope, set_terminal_scope
     from utils import load_yaml_file_readonly
@@ -244,7 +279,11 @@ def _profile_capabilities(assignee: str) -> set[str]:
         if "backend" in config.get("terminal", {}):
             terminal["TERMINAL_ENV"] = config["terminal"]["backend"]
         stack.callback(reset_terminal_scope, set_terminal_scope(terminal))
-        toolsets = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+        needed = None
+        if required is not None:
+            needed = {"terminal"} if {"terminal", "git"} & set(required) else set()
+            needed |= {"file"} & set(required)
+        toolsets = _cli_toolsets(config, home, needed)
         available = set(toolsets) & {"terminal", "file", "kanban"}
         # [daveey] Every assignee runs as a dispatcher-spawned worker, and model_tools._select_tool_names adds
         # the kanban toolset to every such worker whatever platform_toolsets.cli says; only
@@ -294,7 +333,7 @@ def validate_assignment(
         # Unassigned drafts cannot dispatch; assign_task validates before binding.
         return required
     try:
-        available = _profile_capabilities(assignee)
+        available = _profile_capabilities(assignee, required)
     except Exception as exc:
         raise CapabilityMismatchError(assignee, [n for n in required if n in _CAPABILITIES],
                                       reason=f"profile policy unavailable: {exc}") from exc

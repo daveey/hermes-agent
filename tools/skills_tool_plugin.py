@@ -64,12 +64,26 @@ def _safe_frontmatter(path: Path | None = None, *, content: str | None = None) -
         return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
     key = before = text = None
+    persisted_home = None
     if content is None and path is not None:
         with suppress(Exception):
             before = _ident(path)
             hit = _FRONTMATTER_CACHE.get((str(path), *before))
             if hit is not None and hit[0] is parser:  # entry holds the parser, so no id() reuse
                 return copy.deepcopy(hit[1])
+        # [daveey] Cross-process tier (tools.skill_frontmatter_index): same identity rule, parses
+        # made by an earlier process with the same parser code; the stock parser only.
+        with suppress(Exception):
+            from tools import skill_frontmatter_index as _index
+            if before is not None and _index.default_parser_in_use(parser):
+                from hermes_constants import get_hermes_home
+                persisted_home = get_hermes_home()
+                stored = _index.lookup(persisted_home, str(path), before)
+                if stored is not None:
+                    if len(_FRONTMATTER_CACHE) >= _FRONTMATTER_CACHE_MAX:
+                        _FRONTMATTER_CACHE.clear()
+                    _FRONTMATTER_CACHE[(str(path), *before)] = (parser, copy.deepcopy(stored))
+                    return stored
         with suppress(Exception):
             # Bind the bytes parsed to the identity they are cached under: fstat the very
             # descriptor that is read, so a symlink retargeted mid-lookup files the content
@@ -86,6 +100,10 @@ def _safe_frontmatter(path: Path | None = None, *, content: str | None = None) -
             if len(_FRONTMATTER_CACHE) >= _FRONTMATTER_CACHE_MAX:
                 _FRONTMATTER_CACHE.clear()
             _FRONTMATTER_CACHE[key] = (parser, copy.deepcopy(result))
+            if persisted_home is not None:
+                with suppress(Exception):
+                    from tools import skill_frontmatter_index as _index
+                    _index.store(persisted_home, key[0], key[1:], result)
         return result
     return {}
 

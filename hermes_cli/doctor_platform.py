@@ -538,12 +538,16 @@ def _check_web_dashboard_import(should_fix: bool, f: Finding) -> None:
     from taking the doctor down with it; lazy installs stay off so the probe never mutates the
     environment it is diagnosing.
     """
+    from hermes_cli._launchers import runtime_command
     from hermes_cli.doctor import PROJECT_ROOT
 
     env = dict(os.environ, HERMES_DISABLE_LAZY_INSTALLS="1")
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", "import hermes_cli.web_server"],
+            # The runtime's own launch: the store interpreter runs isolated and only
+            # ``hermes_bootstrap`` puts the dependency generation on sys.path, so a bare
+            # ``python -c`` reported "No module named 'ruamel'" for a dashboard that served 200.
+            runtime_command(PROJECT_ROOT, code="import hermes_cli.web_server"),
             capture_output=True,
             text=True,
             encoding="utf-8",

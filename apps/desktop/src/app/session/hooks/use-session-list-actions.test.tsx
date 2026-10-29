@@ -30,6 +30,7 @@ import {
   setSessionsLoadError,
   setSessionsLoading
 } from '@/store/session'
+import { $blockedSessionIds, $mutedMigrationDone } from '@/store/session-blocked'
 
 import { deferred } from '../../../test/deferred'
 
@@ -73,6 +74,7 @@ const sidebar = (
 })
 
 const listSidebarSessions = vi.fn()
+const setSessionMutedRemote = vi.fn()
 const listAllProfileSessions = vi.fn()
 const getCronJobs = vi.fn()
 const getSession = vi.fn()
@@ -90,7 +92,8 @@ vi.mock('@/hermes', async importOriginal => ({
   getCronJobs: (...args: unknown[]) => getCronJobs(...args),
   getSession: (...args: unknown[]) => getSession(...args),
   listAllProfileSessions: (...args: unknown[]) => listAllProfileSessions(...args),
-  listSidebarSessions: (...args: unknown[]) => listSidebarSessions(...args)
+  listSidebarSessions: (...args: unknown[]) => listSidebarSessions(...args),
+  setSessionMutedRemote: (...args: unknown[]) => setSessionMutedRemote(...args)
 }))
 
 vi.mock('@/store/gateway', async importOriginal => ({
@@ -118,6 +121,8 @@ vi.mock('@/store/session-states', async importActual => ({
 }))
 
 beforeEach(() => {
+  setSessionMutedRemote.mockReset()
+  setSessionMutedRemote.mockResolvedValue({ ok: true, muted: true })
   getSession.mockReset()
   gatewayScope.epoch = 0
   settled.ids = []
@@ -1453,5 +1458,68 @@ describe('re-lists while a failed list leaves owners stale', () => {
       vi.useRealTimers()
       _resetOfflineSessionsForTests()
     }
+  })
+})
+
+// [daveey] session-outcome: the sidebar refresh is what runs the one-time ⌘B migration, and a page that moves only
+// the stored outcome or the park must land (the identity gate used to swallow it).
+describe('refreshSessions and the stored outcome', () => {
+  beforeEach(() => {
+    $blockedSessionIds.set([])
+    $mutedMigrationDone.set([])
+  })
+
+  it('pushes the old local ⌘B parks to a backend that stamps muted, once', async () => {
+    $blockedSessionIds.set(['a'])
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a', { muted: false }), row('b', { muted: false })] }))
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+    await vi.waitFor(() => expect(setSessionMutedRemote).toHaveBeenCalledTimes(1))
+    expect(setSessionMutedRemote).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), true)
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+    expect(setSessionMutedRemote).toHaveBeenCalledTimes(1)
+  })
+
+  it('never posts against a backend whose rows carry no muted', async () => {
+    $blockedSessionIds.set(['a'])
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a')] }))
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+
+    expect(setSessionMutedRemote).not.toHaveBeenCalled()
+  })
+
+  it('swaps the rows when only the outcome or muted changed', async () => {
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a', { muted: false, outcome: { kind: 'waiting' } })] }))
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+    const first = $sessions.get()
+
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a', { muted: false, outcome: { kind: 'done' } })] }))
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+    expect($sessions.get()).not.toBe(first)
+    expect($sessions.get()[0].outcome?.kind).toBe('done')
+
+    const second = $sessions.get()
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a', { muted: true, outcome: { kind: 'done' } })] }))
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+    expect($sessions.get()).not.toBe(second)
+    expect($sessions.get()[0].muted).toBe(true)
   })
 })

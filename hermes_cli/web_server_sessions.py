@@ -446,7 +446,8 @@ _last_auto_archive_check: dict[str, float] = {}
 
 
 def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
-    """Config-gated owner-lifetime maintenance, never invoked by browsing.
+    """Config-gated owner-lifetime maintenance, never invoked by browsing. [daveey] Also runs the
+    ungated empty-draft archive.
 
     The standalone serve ticker maintains its own profile; a composed HTTP
     listener relies on its gateway owner's startup and housekeeping hooks.
@@ -472,8 +473,6 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
             cfg = (_load_full_config().get("sessions") or {})
         finally:
             reset_hermes_home_override(_home_token)
-        if not cfg.get("auto_archive", False):
-            return
         from hermes_cli.profiles import _check_gateway_running
 
         # A live gateway owns this profile's store and runs the same sweep on its own
@@ -486,11 +485,22 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
         # of its own and a bare lock-file probe would report stopped.
         if _check_gateway_running(profile_home):
             return
+        if not cfg.get("auto_archive", False):
+            # Draft sweep only: opening the store writable bumps the WAL data_version even when
+            # nothing is archived, which a GET /api/sessions poll must not do. Ask read-only first.
+            probe = _open_session_db_for_profile(profile, read_only=True)
+            try:
+                if not probe.empty_draft_ids():
+                    return
+            finally:
+                probe.close()
         db = _open_session_db_for_profile(profile, read_only=False)
         try:
-            db.maybe_auto_archive(
-                idle_days=float(cfg.get("auto_archive_days", 3)),
-                min_interval_hours=int(cfg.get("min_interval_hours", 24)))
+            db.maybe_archive_empty_drafts()  # [daveey] not gated by sessions.auto_archive
+            if cfg.get("auto_archive", False):
+                db.maybe_auto_archive(
+                    idle_days=float(cfg.get("auto_archive_days", 3)),
+                    min_interval_hours=int(cfg.get("min_interval_hours", 24)))
         finally:
             db.close()
     except Exception as exc:

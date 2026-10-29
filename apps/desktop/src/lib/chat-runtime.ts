@@ -425,6 +425,10 @@ export function messageCreatedAt(message: Pick<ChatMessage, 'timestamp'>, nowMs 
     : new Date(nowMs)
 }
 
+// [daveey] A blocked kanban notice the backend marked outdated rides to the system row as metadata.
+const staleNoticeMeta = (message: ChatMessage): { staleNotice?: true } =>
+  message.staleNotice ? { staleNotice: true } : {}
+
 export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
   const role =
     message.role === 'user' || message.role === 'assistant' || message.role === 'system' ? message.role : 'assistant'
@@ -466,7 +470,8 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
         custom: {
           ...timelineMeta,
           ...(message.asyncResult ? { asyncResult: message.asyncResult } : {}),
-          ...(message.asyncResultKind ? { asyncResultKind: message.asyncResultKind } : {})
+          ...(message.asyncResultKind ? { asyncResultKind: message.asyncResultKind } : {}),
+          ...staleNoticeMeta(message)
         }
       }
     } as ThreadMessage

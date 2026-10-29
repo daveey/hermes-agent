@@ -58,16 +58,19 @@ def _create(title: str) -> None:
         conn.close()
 
 
-def test_unchanged_board_is_read_once_and_a_write_is_seen(board):
-    from plugins.kanban.dashboard.board_snapshot import join_refresh
+def test_unchanged_board_is_read_once_and_a_write_is_seen(board, monkeypatch):
+    from plugins.kanban.dashboard.board_snapshot import MIN_REFRESH_S, join_refresh
 
-    _mod, client, reads = board
+    mod, client, reads = board
+    monkeypatch.setattr(mod.time, "monotonic", lambda: 1000.0)
     _create("first")
     one = client.get("/api/plugins/kanban/board").json()
     two = client.get("/api/plugins/kanban/board").json()
     assert len(reads) == 1 and _titles(one) == _titles(two) == {"first"}
     assert two["now"] >= one["now"]
     _create("second")
+    clock = {"t": 1000.0 + MIN_REFRESH_S + 1}
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock["t"])
     three = client.get("/api/plugins/kanban/board").json()
     assert _titles(three) == {"first"}
     join_refresh()
@@ -99,11 +102,14 @@ def test_cache_expires_after_ttl(board, monkeypatch):
 
 
 def test_poll_returns_last_snapshot_while_refresh_is_blocked(board, monkeypatch):
-    from plugins.kanban.dashboard.board_snapshot import join_refresh
+    from plugins.kanban.dashboard.board_snapshot import MIN_REFRESH_S, join_refresh
 
     mod, client, _reads = board
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock["t"])
     _create("first")
     client.get("/api/plugins/kanban/board")
+    clock["t"] += MIN_REFRESH_S + 1
     started = threading.Event()
     release = threading.Event()
     real = mod._get_board_uncached
@@ -121,3 +127,23 @@ def test_poll_returns_last_snapshot_while_refresh_is_blocked(board, monkeypatch)
     release.set()
     join_refresh()
     assert _titles(client.get("/api/plugins/kanban/board").json()) == {"first", "second"}
+
+
+def test_busy_board_is_not_reread_more_often_than_min_refresh(board, monkeypatch):
+    """Every kanban commit moves the db signature; a poll must not turn each into a ~1.3s read."""
+    from plugins.kanban.dashboard.board_snapshot import MIN_REFRESH_S, join_refresh
+
+    mod, client, reads = board
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock["t"])
+    client.get("/api/plugins/kanban/board")
+    for i in range(5):
+        _create(f"busy{i}")
+        clock["t"] += 2
+        client.get("/api/plugins/kanban/board")
+        join_refresh()
+    assert len(reads) == 1
+    clock["t"] += MIN_REFRESH_S
+    client.get("/api/plugins/kanban/board")
+    join_refresh()
+    assert len(reads) == 2

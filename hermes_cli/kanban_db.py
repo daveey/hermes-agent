@@ -2491,12 +2491,13 @@ def release_stale_claims(
     now = int(time.time())
     reclaimed = 0
     host_prefix = _host_prefix()
+    from hermes_cli.kanban_suspend_ledger import awake_seconds  # [daveey]
     stale = conn.execute(
-        "SELECT id, claim_lock, worker_pid, worker_started_at, claim_expires, last_heartbeat_at, "
-        "       assignee "
-        "FROM tasks "
-        "WHERE status = 'running' AND claim_expires IS NOT NULL "
-        "  AND claim_expires < ?", (now,),
+        "SELECT t.id, t.claim_lock, t.worker_pid, t.worker_started_at, t.claim_expires, "
+        "       t.last_heartbeat_at, t.assignee, r.started_at AS run_started_at "
+        "FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id "
+        "WHERE t.status = 'running' AND t.claim_expires IS NOT NULL "
+        "  AND t.claim_expires < ?", (now,),
     ).fetchall()
     from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, reclaim_error
     for row in stale:
@@ -2506,7 +2507,13 @@ def release_stale_claims(
         hb = _to_epoch(row["last_heartbeat_at"])
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
-        heartbeat_stale = hb is not None and (now - hb) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+        # [daveey] Measured from the newer of the heartbeat and the active run's start (a fresh run
+        # is never stale against its predecessor's heartbeat), counting awake time only: a host
+        # suspend recorded by the dispatcher (``kanban_suspend_ledger``) is not worker silence.
+        run_started = _to_epoch(_row_get(row, "run_started_at"))
+        hb_ref = max(hb, run_started) if hb is not None and run_started is not None else hb
+        hb_awake_age = awake_seconds(conn, hb_ref, now) if hb_ref is not None else None
+        heartbeat_stale = hb_awake_age is not None and hb_awake_age > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
         started_at = _row_get(row, "worker_started_at")
         live = host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at) and not heartbeat_stale
         lease_lost = _sync.lease_lost(conn, row["id"], now, _resolve_claim_ttl_seconds() if live else None)  # [daveey] asks the Board
@@ -2552,6 +2559,7 @@ def release_stale_claims(
                     "now": now,
                     "host_local": host_local,
                     "heartbeat_stale": bool(heartbeat_stale),
+                    "heartbeat_awake_age": _opt_int(hb_awake_age),  # [daveey]
                     "retry_status": retry_status,
                 },
             )
@@ -2587,36 +2595,6 @@ def _record_reclaim(
     payload.update(termination)
     _append_event(conn, task_id, "reclaimed", payload, run_id=run_id)
     return run_id
-
-
-def _extend_live_stale_claim(conn: sqlite3.Connection, row: sqlite3.Row, now: int) -> None:
-    """TTL-expired claim whose host-local worker is alive: extend instead of
-    reclaiming (``claim_extended`` event). CAS on the same expired lock so a
-    concurrent reclaimer wins cleanly."""
-    new_expires = now + _resolve_claim_ttl_seconds()
-    with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET claim_expires = ? "
-            "WHERE id = ? AND status = 'running' "
-            "  AND claim_lock IS ? "
-            "  AND claim_expires IS NOT NULL "
-            "  AND claim_expires < ?", (new_expires, row["id"], row["claim_lock"], now),
-        )
-        if cur.rowcount != 1:
-            return
-        run_id = _extend_run_claim(conn, row["id"], new_expires)
-        _append_event(
-            conn, row["id"], "claim_extended",
-            {
-                "reason": "pid_alive",
-                "worker_pid": int(row["worker_pid"]),
-                "claim_lock": row["claim_lock"],
-                "claim_expires_was": _to_epoch(row["claim_expires"]),
-                "claim_expires_now": new_expires,
-                "last_heartbeat_at": _to_epoch(row["last_heartbeat_at"]),
-            },
-            run_id=run_id,
-        )
 
 
 def reclaim_task(
@@ -4559,6 +4537,7 @@ from hermes_cli.kanban_db_workspace import (
     _managed_scratch_path_info,
     _scratch_workspace,
 )
+from hermes_cli.kanban_db_stale_claims import _extend_live_stale_claim
 from hermes_cli.kanban_db_dispatch import (
     DEFAULT_FAILURE_LIMIT,
     DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,

@@ -458,6 +458,10 @@ def _sweep_orphaned_session_rows() -> list[str]:
         logger.info(
             "Closed %d orphaned session row(s) from a previous gateway process (startup_orphan_reap): %s",
             len(swept), ", ".join(swept))
+        from hermes_state_outcome import refresh_outcomes_quietly  # [daveey] reaped rows end mid-turn
+        refresh_outcomes_quietly(swept, "reap", db=db)
+        from tui_gateway.reap_notices import notify_parents_of_killed_subagents
+        notify_parents_of_killed_subagents(db, swept)  # [daveey] a child killed mid-work tells its parent
         # [daveey] A reaped chat keeps its kanban subscriptions; kanban_unloaded.py delivers their results to the
         # transcript, but say which chats depend on that so a missing notice is traceable.
         try:

@@ -10,6 +10,14 @@ import type { SessionInfo, SessionMessage } from '@/hermes'
 const backgroundProcessKey = (session: SessionInfo): string =>
   (session.background_processes ?? []).map(proc => proc.id).join(',')
 
+// [daveey] The stored outcome, compared by value (a fresh parse each page).
+const outcomeKey = (session: SessionInfo): string => (session.outcome ? JSON.stringify(session.outcome) : '')
+
+// [daveey] Stamps that paint the stripe directly: a page that moves only these (a review ask, the backend park, the
+// stored outcome) must land.
+const sameStatusStamps = (a: SessionInfo, b: SessionInfo): boolean =>
+  a.review_wait === b.review_wait && a.muted === b.muted && outcomeKey(a) === outcomeKey(b)
+
 export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
   if (a.length !== b.length) {
     return false
@@ -57,7 +65,7 @@ export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
       session.cron_active === other.cron_active &&
       session.background_active === other.background_active &&
       backgroundProcessKey(session) === backgroundProcessKey(other) &&
-      session.review_wait === other.review_wait
+      sameStatusStamps(session, other)
     )
   })
 }

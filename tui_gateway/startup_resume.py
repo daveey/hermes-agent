@@ -2,8 +2,8 @@
 
 Auto-continue (``session_auto_continue._maybe_schedule_auto_continue``) only fires from ``session.resume``, i.e. when
 the user re-opens each interrupted session. After an app restart or ``hermes update`` that means visiting every
-session that was mid-turn and telling it to continue. With ``desktop.auto_continue.resume_on_startup: true`` the
-backend does that itself at boot: for each fresh turn marker (``turn_marker``) whose writer process is gone, it runs
+session that was mid-turn and telling it to continue. With ``desktop.auto_continue.resume_on_startup`` (default on)
+the backend does that itself at boot: for each fresh turn marker (``turn_marker``) whose writer process is gone, it runs
 an in-process ``session.resume`` — the same handler the Desktop calls — which schedules the continuation turn. The
 sessions run detached until a client attaches; opening one later reuses the live session and streams the turn.
 
@@ -55,7 +55,9 @@ def _settings(cfg: dict | None) -> tuple[bool, float, int, float]:
     ac = desktop.get("auto_continue") if isinstance(desktop, dict) else None
     ac = ac if isinstance(ac, dict) else {}
     enabled = ac.get("enabled", True) not in (False, "false", "False", 0, "0", "off", "no")
-    on_start = ac.get("resume_on_startup", False) in (True, "true", "True", 1, "1", "on", "yes")
+    # [daveey] On by default (session-outcome contract, "Restarts"): a chat a restart interrupted continues even
+    # when no Desktop reopens it. ``resume_on_startup: false`` turns it off.
+    on_start = ac.get("resume_on_startup", True) in (True, "true", "True", 1, "1", "on", "yes")
     try:
         fresh = max(0.0, float(ac.get("freshness_minutes", 15))) * 60.0
     except (TypeError, ValueError):

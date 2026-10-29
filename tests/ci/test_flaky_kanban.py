@@ -29,7 +29,7 @@ class FakeBoard:
         self.cards: dict[str, dict] = {}
         self.keys: dict[str, str] = {}
 
-    def create(self, title, body, key):
+    def create(self, title, body, key, *, distinct_from=None, distinct_reason=None):
         if key in self.keys and self.cards[self.keys[key]]["status"] != "archived":
             return self.keys[key]
         card = f"t_{len(self.cards) + 1}"
@@ -40,14 +40,18 @@ class FakeBoard:
     def status(self, card):
         return self.cards.get(card, {}).get("status")
 
-    def comment(self, card, body):
+    def card(self, card, board=None):
+        c = self.cards.get(card)
+        return {"id": card, "status": c["status"], "title": c["title"], "body": c["body"]} if c else None
+
+    def comment(self, card, body, board=None):
         self.cards[card]["comments"].append(body)
 
     def list_cards(self):
         return [{"id": cid, "status": c["status"], "title": c["title"], "body": c["body"]}
                 for cid, c in self.cards.items()]
 
-    def comments(self, card):
+    def comments(self, card, board=None):
         return list(self.cards.get(card, {}).get("comments", []))
 
     def add_foreign(self, card, status, body, title="ci-watch: fix it", comments=()):

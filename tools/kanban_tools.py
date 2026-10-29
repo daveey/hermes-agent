@@ -23,6 +23,8 @@ from hermes_cli.kanban_capabilities import check_tool_create, declaration_requir
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import _marker_placement_fields, _placement_refused, _runs_where
 from tools.kanban_tools_db_hint import generic_tool_error
+from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg
+from hermes_cli.kanban_block_policy import ask_lint_check
 from tools import kanban_tools_completion as _kc
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
@@ -1045,26 +1047,6 @@ def _handle_complete(args: dict, **kw) -> str:
                        for a in kb.list_attachments(conn, tid)])
 
 
-def _blocker_id_arg(args: dict) -> Optional[str]:
-    """Validated ``blocker_id`` (shared external blocker slug) or None. [daveey]"""
-    raw = args.get("blocker_id")
-    if raw is None or (isinstance(raw, str) and not raw.strip()):
-        return None
-    _check(isinstance(raw, str), "blocker_id must be a string")
-    from hermes_cli.kanban_shared_blockers import normalize_blocker_id
-    bid = normalize_blocker_id(raw)
-    _check(bid is not None, "blocker_id must be a short slug like 'github-actions-billing'")
-    return bid
-
-
-def _clear_blocker_arg(args: dict, blocker_id: Optional[str] = None) -> bool:
-    """Validated ``clear_blocker``: the caller saw the card's shared blocker gone. [daveey]"""
-    raw = args.get("clear_blocker", False)
-    _check(isinstance(raw, bool), "clear_blocker must be true or false")
-    _check(not (raw and blocker_id), "clear_blocker says the wall is gone; blocker_id says it still stands. Pass one")
-    return raw
-
-
 def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
     """``(wake_check, check_every, clock_only)`` from a park call, validated. [daveey]"""
     from hermes_cli import kanban_wake_check as kwc
@@ -1233,6 +1215,7 @@ def _handle_block(args: dict, **kw) -> str:
         _standing_wait_guard(kb, conn, tid, kind, args.get("human_request"), reason)
         _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id,
                     human_request=args.get("human_request"))
+        _check(*ask_lint_check(args.get("human_request")))  # the ask line must say unblock/archive [daveey]
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
                            clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")),
@@ -1689,6 +1672,7 @@ def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
     _reject_delegated_child_mutation("kanban_create")
     title = _require_text(args, "title")
+    _check(*ask_lint_check(args.get("human_request")))  # the ask line must say unblock/archive [daveey]
     assignee = args.get("assignee") or _persisted_identity()
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child

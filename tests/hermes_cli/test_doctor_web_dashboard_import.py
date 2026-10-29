@@ -10,7 +10,6 @@ crash lands in the report instead of the user's terminal.
 
 from __future__ import annotations
 
-import sys
 
 from hermes_cli import doctor_platform as dp
 from hermes_cli.doctor_report import Finding
@@ -52,8 +51,26 @@ def test_probe_runs_without_lazy_installs(capsys, monkeypatch):
     _run_check(monkeypatch, _FakeCompleted(0, ""), recorded)
 
     (args, kwargs) = recorded[0]
-    assert args[0][:2] == [sys.executable, "-c"]
-    assert args[0][2] == "import hermes_cli.web_server"
+    from hermes_cli._launchers import runtime_command
+    from hermes_cli.doctor import PROJECT_ROOT
+
+    assert args[0] == runtime_command(PROJECT_ROOT, code="import hermes_cli.web_server")
     env = kwargs["env"]
     assert env["HERMES_DISABLE_LAZY_INSTALLS"] == "1"
     assert kwargs["timeout"] >= 60
+
+
+def test_probe_loads_the_dependency_generation_like_the_runtime():
+    """The store interpreter runs isolated; only ``hermes_bootstrap`` adds the dependency generation. A bare
+    ``python -c 'import hermes_cli.web_server'`` failed "No module named 'ruamel'" on every store install
+    while the dashboard served 200 (2026-10-29)."""
+    import subprocess
+
+    from hermes_cli._launchers import runtime_command
+    from hermes_cli.doctor import PROJECT_ROOT
+
+    argv = runtime_command(PROJECT_ROOT, code="import ruamel.yaml, hermes_cli.web_server; print('ok')")
+    assert "-I" in argv and "import hermes_bootstrap" in argv[argv.index("-c") + 1]
+    proc = subprocess.run(argv, cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=120, check=False,
+                          env={**__import__("os").environ, "HERMES_DISABLE_LAZY_INSTALLS": "1"})
+    assert proc.returncode == 0 and proc.stdout.strip().endswith("ok"), proc.stderr[-2000:]

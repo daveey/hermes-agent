@@ -510,9 +510,8 @@ def _update_trigger(table: str, columns: list[str]) -> str:
 
 def _delete_trigger(table: str) -> str:
     when = _NOT_APPLYING
-    if table == "task_links":  # links removed by a task delete ride on the task's tombstone
-        when += (" AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.parent_id)"
-                 " AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.child_id)")
+    if table == "task_links":  # foreign parents are absent locally; the child owns the edge
+        when += " AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.child_id)"
     elif table == "task_attachments":
         when += " AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)"
     uid = _row_uid_sql(table, "OLD")
@@ -771,16 +770,19 @@ def heartbeat_expiry(conn: sqlite3.Connection, task_id: str, expires: int) -> in
         return expires
     lease_expires = row["lease_expires"]
     ttl_s = max(expires - int(time.time()), 1)
-    if _renewal_due(task_id, lease_expires, ttl_s):
-        lease_expires = _renew(conn, task_id, row["run_uid"], ttl_s) or lease_expires
+    # [daveey] No current run (it just ended continued/blocked): there is no run uid to renew under and the Board
+    # refuses an empty one (400 "run_uid required"), so make no call; the bound below still applies.
+    if row["run_uid"] and _renewal_due(task_id, lease_expires, ttl_s):
+        lease_expires = _renew(conn, task_id, row["run_uid"], ttl_s, lease_expires) or lease_expires
     return min(expires, lease_expires // 1000 - LEASE_SAFETY_MARGIN_SECONDS)
 
 
-def _renew(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str], ttl_s: int) -> Optional[int]:
+def _renew(conn: sqlite3.Connection, task_id: str, run_uid: str, ttl_s: int,
+           old_expires_ms: Optional[int] = None) -> Optional[int]:
     from hermes_cli.kanban_db_connect import write_txn
     state = _state(conn)
     try:
-        lease = _client().renew(board_id=state["board_id"], task_uid=task_id, run_uid=run_uid or "",
+        lease = _client().renew(board_id=state["board_id"], task_uid=task_id, run_uid=run_uid,
                                 gateway_id=state["gateway_id"], ttl_s=ttl_s)
     except _CLIENT_ERRORS as exc:
         _log.warning("kanban sync: lease renewal for %s failed (%s: %s)", task_id, type(exc).__name__, exc)
@@ -790,6 +792,11 @@ def _renew(conn: sqlite3.Connection, task_id: str, run_uid: Optional[str], ttl_s
             conn.execute("UPDATE tasks SET lease_expires = ?, "
                          "lease_version = COALESCE(?, lease_version) WHERE id = ?",
                          (lease.expires_ms, lease.version, task_id))
+            # [daveey] A renewal that rescues a lapsed lease (the first heartbeat after macOS sleep) is the only
+            # evidence that path ran; log it like the session-turn lease does.
+            left_s = None if old_expires_ms is None else old_expires_ms / 1000 - time.time()
+            if left_s is not None and left_s <= LEASE_SAFETY_MARGIN_SECONDS:
+                _log.info("kanban sync: lease of %s renewed %ds after it lapsed", task_id, max(0, int(-left_s)))
             return lease.expires_ms
         _log.warning("kanban sync: lease for %s lost to %s (%s)", task_id, lease.holder, lease.reason)
         conn.execute("UPDATE tasks SET lease_holder = ? WHERE id = ?", (lease.holder, task_id))
@@ -1003,6 +1010,9 @@ class ApplyResult:
     changed_fields: dict[str, set[str]] = field(default_factory=dict)
     wake_dispatcher: bool = False
     blobs_to_fetch: list[str] = field(default_factory=list)
+    # [daveey] A feed pull or snapshot: task fields with an unanswered local edit keep the local value
+    # (``_without_unacked_fields``), checked inside the apply transaction.
+    local_pending_wins: bool = False
 
 
 _STATUS_HOOKS = {"running": "kanban_task_claimed", "done": "kanban_task_completed", "blocked": "kanban_task_blocked"}
@@ -1011,7 +1021,7 @@ _CLAIMABLE = ("ready", "review")
 
 def apply_remote_changes(
     conn: sqlite3.Connection, changes: Sequence[RemoteChange], *, new_cursor: int, board: Optional[str] = None,
-    observers: bool = True,
+    observers: bool = True, local_pending_wins: bool = False,
 ) -> ApplyResult:
     """Apply one feed page in ONE transaction, then fire local observers.
 
@@ -1021,11 +1031,13 @@ def apply_remote_changes(
     never written from the wire, and the cursor advances in the same commit as
     the rows. Hooks fire once, after the commit, with ``remote=True`` and
     ``origin_gateway``; a page that makes work claimable wakes the dispatcher.
-    ``observers=False`` (a shadow copy) applies the rows and fires nothing."""
+    ``observers=False`` (a shadow copy) applies the rows and fires nothing. ``local_pending_wins`` (the feed
+    pull and the snapshot rebuild) keeps every task field that has an unanswered local edit in the outbox, read
+    in the same transaction as the apply. [daveey]"""
     from hermes_cli.kanban_db_connect import write_txn
     if board_mode(conn) == "off":
         raise RuntimeError("apply_remote_changes: kanban sync is not enabled on this board")
-    result = ApplyResult(cursor=new_cursor)
+    result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     with write_txn(conn):
         conn.execute("UPDATE kanban_sync_state SET applying = 1")
         own = _state(conn)["gateway_id"]
@@ -1094,7 +1106,8 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
     old = conn.execute("SELECT * FROM tasks WHERE id = ?", (ch.uid,)).fetchone()
     if old is not None and old["sync_version"] is not None and ch.version < old["sync_version"]:  # equal = the same row (a re-send or a revert)
         return False
-    cols = _local_fields(conn, "tasks", ch.fields, ch.uid)
+    fields = _without_unacked_fields(conn, ch) if result.local_pending_wins else ch.fields
+    cols = _local_fields(conn, "tasks", fields, ch.uid)
     if old is None:
         names = ["id", *cols, "sync_version"]
         conn.execute(f"INSERT INTO tasks ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
@@ -1110,6 +1123,26 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
                       ch.version, own, result)
     _collect_task_observers(ch, cols.get("status"), changed, result)
     return True
+
+
+def _without_unacked_fields(conn: sqlite3.Connection, ch: RemoteChange) -> Mapping[str, Any]:
+    """The feed's task fields minus those with a local edit the Board has not answered yet (an outbox op that is not
+    rejected): the newer local value wins until that op's answer arrives, the rule ``without_pending`` applies on
+    the pull and ``_local_row_is_newer`` on child rows. [daveey] Read inside the apply transaction. The pull's
+    pre-filter reads the outbox before the apply takes the write lock, so a claim that committed in between was
+    not in it, and the Board's pre-claim echo (an equal version, which the version fence lets through) set the
+    card back to ``ready`` with no current run while its worker was being spawned (MacBook t_01a189343dd2f6ac run
+    9821, 2026-10-29)."""
+    pending: set[str] = set()
+    for (fields,) in conn.execute("SELECT fields FROM kanban_sync_outbox WHERE table_name = 'tasks' AND row_uid = ? "
+                                  "AND state != 'rejected'", (ch.uid,)):
+        try:
+            pending.update(json.loads(fields or "{}"))
+        except ValueError:
+            continue
+    if not pending:
+        return ch.fields
+    return {k: v for k, v in ch.fields.items() if k not in pending}
 
 
 def _mirror_lease(conn: sqlite3.Connection, task_id: str, holder: Optional[str], expires: Optional[int],

@@ -7,6 +7,8 @@ raw stamp directly. ``_coerce_config_version`` stays module-private here.
 
 from __future__ import annotations
 
+import os
+import threading
 from typing import Optional, Tuple
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG
@@ -23,14 +25,55 @@ def _coerce_config_version(value) -> int:
     return max(version, 0)
 
 
+# [daveey] path -> (file_signature, root type name or None for a mapping, stamp or _NO_KEY).
+# ``/api/status`` reads the stamp on every poll; re-parsing a ~2500-line config.yaml there held the
+# GIL ~40 ms per call and, in a Desktop wake burst, stretched every other request queued behind it
+# (2026-10-29: /api/sessions/<id>, /api/session-kanban-tasks past the 5 s client timeout). Only
+# successful parses are cached; a parse error re-reads, warns and raises exactly as before.
+_NO_KEY = object()
+_stamp_cache: dict[str, tuple[tuple, Optional[str], object]] = {}
+_stamp_cache_lock = threading.Lock()
+
+
+def _parsed_stamp(config_path) -> tuple[Optional[str], object]:
+    """``(non-mapping root type name or None, stamp value or _NO_KEY)`` for config.yaml, re-parsed
+    only when its file signature changes. Parse errors propagate and are not cached."""
+    # Upstream routes config reads through hermes_cli.config_backend; the cache keys on its
+    # parse-cache signature and parses through it, so non-file backends work too.
+    from hermes_cli.config_backend import config_cache_version, read_config_doc
+
+    try:
+        sig = config_cache_version(config_path)
+    except OSError:
+        sig = None
+    key = str(config_path)
+    if sig is not None:
+        with _stamp_cache_lock:
+            hit = _stamp_cache.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1], hit[2]
+    config = read_config_doc(config_path)
+    if config is None:
+        config = {}  # empty file / bare document: valid first-run state
+    if isinstance(config, dict):
+        result: tuple[Optional[str], object] = (None, config.get("_config_version", _NO_KEY))
+    else:
+        result = (type(config).__name__, _NO_KEY)
+    if sig is not None:
+        with _stamp_cache_lock:
+            _stamp_cache[key] = (sig, result[0], result[1])
+    return result
+
+
 def read_config_version_stamp(*, raise_on_parse_error: bool = False) -> tuple[Optional[int], int]:
     """Single raw read behind ``check_config_version()``: ``(stamp, latest_version)`` where
     *stamp* is ``None`` when config.yaml parsed but carries no ``_config_version`` key (a
     never-stamped current-schema file, not an ancient install — ``migrate_config()`` gives it only
     the legacy-key steps). A missing file, or malformed YAML under a tolerant caller, reads as
-    ``latest`` exactly as ``check_config_version()`` always reported it."""
+    ``latest`` exactly as ``check_config_version()`` always reported it. The parse is cached on
+    the file's signature (``_parsed_stamp``), so a rewrite is seen on the next call."""
     from hermes_cli.config import InvalidUserConfigError, _warn_config_parse_failure, get_config_path
-    from hermes_cli.config_backend import config_exists, read_config_doc
+    from hermes_cli.config_backend import config_exists
 
     latest = _coerce_config_version(DEFAULT_CONFIG.get("_config_version", 1)) or 1
     config_path = get_config_path()
@@ -38,7 +81,7 @@ def read_config_version_stamp(*, raise_on_parse_error: bool = False) -> tuple[Op
         return latest, latest
 
     try:
-        config = read_config_doc(config_path)
+        non_mapping, value = _parsed_stamp(config_path)
     except Exception as e:
         _warn_config_parse_failure(config_path, e)
         if raise_on_parse_error:
@@ -47,20 +90,18 @@ def read_config_version_stamp(*, raise_on_parse_error: bool = False) -> tuple[Op
             ) from e
         return latest, latest
 
-    if config is None:
-        config = {}  # empty file / bare document: valid first-run state
-    if not isinstance(config, dict):
+    if non_mapping is not None:
         # A list/scalar root parses fine but is just as unusable as broken YAML: save_config()
         # would refuse it later, after .env was already rewritten. Strict callers see it up front.
         if raise_on_parse_error:
             raise InvalidUserConfigError(
                 f"Cannot inspect {config_path}: config.yaml top-level value must be "
-                f"a mapping, got {type(config).__name__}"
+                f"a mapping, got {non_mapping}"
             )
-        config = {}
-    if "_config_version" not in config:
         return None, latest
-    return _coerce_config_version(config.get("_config_version")), latest
+    if value is _NO_KEY:
+        return None, latest
+    return _coerce_config_version(value), latest
 
 
 def check_config_version(*, raise_on_parse_error: bool = False) -> tuple[int, int]:

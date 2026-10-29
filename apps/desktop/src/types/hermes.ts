@@ -1,6 +1,7 @@
 import type { ConnectionRequestPayload, FreeTierChallengePayload, ToolLabel } from '@hermes/shared'
 
 import type { ToolResultMetadata } from '@/lib/tool-result-metadata'
+import type { SessionOutcome } from '@/types/session-outcome'
 
 export type StoredToolCallLabels = Record<string, ToolLabel[]>
 
@@ -731,6 +732,10 @@ export interface SessionInfo {
   review_wait?: 'parked' | 'stuck'
   /** [daveey] The PR `review_wait` refers to. */
   review_wait_pr?: string
+  /** [daveey] Stored outcome (sessions.outcome_json); wins over derived status. Absent on older backends. */
+  outcome?: null | SessionOutcome
+  /** [daveey] ⌘B park, persisted (sessions.muted). Absent on older backends: the local list rules. */
+  muted?: boolean
   /** [daveey] The owning profile's `sessions.automated_sources` matched this
    *  row (bot / smoke-test traffic). Hidden from the sidebar unless "Show
    *  automated & test sessions" is on; see store/sidebar-automated.ts. */
@@ -800,6 +805,7 @@ export type TimelineDisplayMetadata =
   | { reactions: MessageReaction[] }
   | { tool_result_metadata: ToolResultMetadata }
   | { error?: string; error_surface?: unknown }
+  | { display_text?: string; stale?: boolean }
 
 /** One emoji reaction on a message. One per author, iOS-Tapback style. */
 export interface MessageReaction {

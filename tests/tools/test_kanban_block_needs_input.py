@@ -9,7 +9,7 @@ CUTOVER_REASON = (
     "it to this card or copy to ~/asg-ci-controller/, or tell me how to read a ci-gw docker box "
     "(docker3-5) config. 2) Then unblock this card"
 )
-ASK = {"action": "Copy GATEWAY-MIGRATION.md to the hub", "why_human": "only on the MacBook",
+ASK = {"action": "Copy GATEWAY-MIGRATION.md to the hub. Unblock = proceed; archive = drop it.", "why_human": "only on the MacBook",
        "interaction": "reply", "scope": "ASG CI cutover", "evidence": "file absent on hub"}
 
 

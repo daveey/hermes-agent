@@ -66,6 +66,11 @@ class CLIChatTurnMixin:
         self._last_turn_interrupted = False
         self._last_turn_failed = False
 
+        # Direct/oneshot callers skip run()'s preload. Restore before taking the
+        # turn-route snapshot, not inside _init_agent after its overrides exist.
+        if (getattr(self, "_resumed", False) and self._session_db and not self.conversation_history
+                and not self._load_resumed_history_late()):
+            return None
         if not self._ensure_runtime_credentials():
             return None
 

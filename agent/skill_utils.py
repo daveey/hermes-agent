@@ -87,6 +87,9 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     return frontmatter, body
 
 
+_DEFAULT_PARSE_FRONTMATTER = parse_frontmatter  # tools.skill_frontmatter_index: patched -> no persisted parses
+
+
 def skill_matches_platform_list(platforms: Any) -> bool:
     """Return True when *platforms* is compatible with the current OS."""
     if not platforms:

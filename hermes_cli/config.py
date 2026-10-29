@@ -3739,33 +3739,11 @@ def config_command(args):
     sys.exit(1)
 
 
-# ---- OPTIONAL_ENV_VARS injection from provider profiles and platform plugins (once, at import) ----
+# ---- OPTIONAL_ENV_VARS injection from provider profiles and platform plugins (once, on first use) ----
 
-def _inject_profile_env_vars() -> None:
-    """Expose env_vars of every ``auth_type="api_key"`` provider in providers/ via OPTIONAL_ENV_VARS
-    without editing this file."""
-    try:
-        from providers import list_providers
-        for _pp in list_providers():
-            if _pp.auth_type != "api_key":
-                continue
-            for _var in _pp.env_vars:
-                if _var in OPTIONAL_ENV_VARS:
-                    continue
-                _is_key = not _var.endswith(("_BASE_URL", "_URL"))
-                _label = _pp.display_name or _pp.name
-                OPTIONAL_ENV_VARS[_var] = {
-                    "description": f"{_label} {'API key' if _is_key else 'base URL override'}",
-                    "prompt": f"{_label} {'API key' if _is_key else 'base URL (leave empty for default)'}",
-                    "url": _pp.signup_url or None,
-                    "password": _is_key,
-                    "category": "provider",
-                    "advanced": True}
-    except Exception:
-        pass
+from hermes_cli import config_env_registry as _env_registry
+from hermes_cli.config_env_registry import _inject_profile_env_vars  # moved there [daveey]
 
-
-_inject_profile_env_vars()
 
 
 PlatformManifestSource = Literal["all", "bundled", "user"]
@@ -3895,7 +3873,7 @@ def _manifest_secret_envs(manifests) -> frozenset[str]:
     names = {name.upper() for _dir, manifest in manifests
              for name, is_secret, meta in _platform_manifest_env_entries(manifest)
              if is_secret and (meta.get("category") or "messaging") == "messaging"}
-    return frozenset(names - {n.upper() for n in CORE_DECLARED_ENV_NAMES})
+    return frozenset(names - {n.upper() for n in _derived_env_names("CORE_DECLARED_ENV_NAMES")})
 
 
 def platform_manifest_secret_envs(home: Optional[Path] = None, source: PlatformManifestSource = "user", *,
@@ -3903,8 +3881,9 @@ def platform_manifest_secret_envs(home: Optional[Path] = None, source: PlatformM
     """Secret env names declared by one source's platform plugin manifests: ``"user"`` reads only
     ``home``'s user-installed plugins, which belong to that profile alone; ``"bundled"`` returns
     the set read once at import (re-read strictly if that read hit an I/O error)."""
-    if source == "bundled" and BUNDLED_PLATFORM_SECRET_ENVS is not None:
-        return BUNDLED_PLATFORM_SECRET_ENVS
+    bundled = _derived_env_names("BUNDLED_PLATFORM_SECRET_ENVS")
+    if source == "bundled" and bundled is not None:
+        return bundled
     return _manifest_secret_envs(_platform_plugin_manifests(home, source, strict=strict))
 
 
@@ -3949,8 +3928,28 @@ def _inject_platform_plugin_env_vars() -> frozenset[str] | None:
     return _manifest_secret_envs(bundled) if bundled is not None else None
 
 
-# Names declared in core, before any platform manifest is read. A manifest never reclassifies
-# one: the config form keeps the core entry, and the child-env scrub keeps a plugin that lists
-# OPENAI_API_KEY from turning a provider key into an adapter secret.
-CORE_DECLARED_ENV_NAMES: frozenset[str] = frozenset(OPTIONAL_ENV_VARS)
-BUNDLED_PLATFORM_SECRET_ENVS: frozenset[str] | None = _inject_platform_plugin_env_vars()
+# The OPTIONAL_ENV_VARS additions run on first use, in this order (config_env_registry) [daveey].
+# CORE_DECLARED_ENV_NAMES: names declared in core, before any platform manifest is read. A
+# manifest never reclassifies one: the config form keeps the core entry, and the child-env scrub
+# keeps a plugin that lists OPENAI_API_KEY from turning a provider key into an adapter secret.
+def _env_registry_stages():
+    _inject_profile_env_vars()
+    yield "CORE_DECLARED_ENV_NAMES", frozenset(dict.keys(OPTIONAL_ENV_VARS))
+    yield "BUNDLED_PLATFORM_SECRET_ENVS", _inject_platform_plugin_env_vars()
+
+
+def _derived_env_names(name: str):
+    """A derived name as the eager global was read: an explicit module binding (a test's
+    monkeypatch) wins over the lazily computed value."""
+    if name in globals():
+        return globals()[name]
+    return _env_registry.value(name)
+
+
+def __getattr__(name: str):  # CORE_DECLARED_ENV_NAMES, BUNDLED_PLATFORM_SECRET_ENVS
+    if name in ("CORE_DECLARED_ENV_NAMES", "BUNDLED_PLATFORM_SECRET_ENVS"):
+        return _env_registry.value(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+_env_registry.install(_env_registry_stages, ensure_home=ensure_hermes_home)

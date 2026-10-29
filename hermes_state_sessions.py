@@ -1487,7 +1487,8 @@ class SessionSessionsMixin:
         # last_read_at is lineage-stamped, so root and tip watermarks agree.
         for s in sessions:
             s["unread"] = self.session_unread(s)
-        return sessions
+        from hermes_state_outcome import stamp_outcome_rows  # [daveey] stored outcome + mute, parsed
+        return stamp_outcome_rows(sessions)
 
     def session_lifecycle_statuses(self, session_ids: list[str]) -> dict[str, str]:
         """``{session_id: status}`` from each session's LAST message row (``'empty'`` when none); one

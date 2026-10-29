@@ -35,6 +35,9 @@ class _FakeDB:
     def __init__(self, archived):
         self._archived = archived
 
+    def maybe_archive_empty_drafts(self):
+        return 0
+
     def maybe_auto_archive(self, **kwargs):
         self._archived.append(kwargs)
 

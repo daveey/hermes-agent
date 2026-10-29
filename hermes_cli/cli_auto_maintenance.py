@@ -51,6 +51,7 @@ def _run_state_db_auto_maintenance(session_db) -> None:
             if count:
                 logger.info(done_msg, count)
 
+        session_db.maybe_archive_empty_drafts()  # [daveey] not gated by sessions.auto_archive
         cfg = (_load_full_config().get("sessions") or {})
 
         # Auto-archive is independent of auto_prune: run it before prune's early return.

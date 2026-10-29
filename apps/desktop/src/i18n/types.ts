@@ -31,6 +31,7 @@ import type { PluginPreviewAccessTranslations } from './types_plugin_preview_acc
 import type { PluginUpdateTranslations } from './types_plugin_update'
 import type { SidebarProjectsTranslations } from './types_projects'
 import type { RightSidebarTranslations } from './types_right_sidebar'
+import type { SessionRowStatusCopy } from './types_session_row_status'
 import type { SharedMetricsTranslations } from './types_shared_metrics'
 import type { ThemePickerCopy } from './types_theme_picker'
 import type { UninstallSectionTranslations } from './types_uninstall_section'
@@ -2838,7 +2839,7 @@ catalog: CatalogTranslations
     loadCount: (step: number) => string
     messageCount: (count: number) => string
     toolCallCount: (count: number) => string
-    row: {
+    row: SessionRowStatusCopy & {
       pin: string
       unpin: string
       markUnread: string
@@ -2883,13 +2884,6 @@ catalog: CatalogTranslations
       ageDay: string
       ageHour: string
       ageMin: string
-      kanbanTasks: (open: number, blocked: number) => string
-      kanbanAttention: (count: number) => string
-      kanbanStalled: (count: number) => string
-      backgroundProcesses: (count: number) => string
-      backgroundProcessUnnamed: string
-      stopProcess: string
-      stoppingProcess: string
     }
     dateDivider: {
       today: string
@@ -3905,6 +3899,8 @@ catalog: CatalogTranslations
       react: string
       dismissError: string
       responseStopped: string
+      /** [daveey] Label on a blocked kanban notice whose card has since moved on. */
+      staleNotice: string
       /** Layer titles for the structured error card (agent/error_surface.py).
        *  `generic` is the fallback when the backend sent no descriptor. */
       errorLayers: {

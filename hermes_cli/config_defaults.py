@@ -17,7 +17,7 @@ LEGACY_SANDBOX_IMAGE = LEGACY_SANDBOX_IMAGES[0]
 DEFAULT_VERCEL_IMAGE = "vercel/sandbox/universal:latest"
 LEGACY_VERCEL_RUNTIME = "node24"  # the seeded pre-49 default, never a user choice
 
-
+from hermes_cli.config_env_registry import EnvVarRegistry as _EnvVarRegistry
 from hermes_cli.config_defaults_routing import routing_defaults
 
 
@@ -2768,8 +2768,8 @@ DEFAULT_CONFIG = {
             "freshness_minutes": 15,
             "max_attempts": 2,  # Crash-loop breaker: max automatic re-runs of one interrupted turn.
             # Resume every interrupted session when the backend starts (app relaunch, `hermes update`),
-            # not only the ones the user re-opens. Same freshness/attempt guards apply.
-            "resume_on_startup": False,
+            # not only the ones the user re-opens. Same freshness/attempt guards apply. [daveey] on by default.
+            "resume_on_startup": True,
         },
         # Reopen a desktop app that `hermes update` / `hermes desktop --build-only` had to stop to
         # swap in the rebuilt bundle (macOS/Linux). Off = upstream behaviour: a headless update
@@ -2831,7 +2831,7 @@ from hermes_cli.config_defaults_env import _base_url, _env, _msg, _prov, _settin
 # Optional environment variables that enhance functionality. Feeds the dashboard keys page and setup
 # checklists; category: provider|tool|skill|messaging|setting, advanced=True hides from checklists,
 # tools=[...] lists the model tools the key unlocks.
-OPTIONAL_ENV_VARS = {
+OPTIONAL_ENV_VARS = _EnvVarRegistry({  # its import-time additions run on first use [daveey]
     # ── Provider (handled in provider selection, not shown in checklists) ──
     "NOUS_BASE_URL": _base_url("Nous Portal"),
     "HERMES_ANON_API_SECRET": _env(
@@ -3231,4 +3231,4 @@ OPTIONAL_ENV_VARS = {
     "HERMES_EPHEMERAL_SYSTEM_PROMPT": _setting(
         "Ephemeral system prompt injected at API-call time (never persisted to sessions)",
         "Ephemeral system prompt", None),
-}
+})

@@ -520,7 +520,10 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             changes = own_partition(conn, changes, partition)
         changes = without_pending(changes, pending_task_fields(conn))
         nxt = int(page.get("next", cursor))
-        sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers)
+        # [daveey] The pre-filter above can miss a local edit committed after it read the outbox (a claim in
+        # flight): ``local_pending_wins`` checks again inside the apply transaction.
+        sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
+                                  local_pending_wins=True)
         total += len(page.get("changes", []))
         cursor = nxt
         if not page.get("more"):
@@ -542,7 +545,8 @@ def resync(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool, p
             if partition is not None:
                 changes = own_partition(conn, changes, partition)
             cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
-            sync.apply_remote_changes(conn, changes, new_cursor=cursor, board=board, observers=observers)
+            sync.apply_remote_changes(conn, changes, new_cursor=cursor, board=board, observers=observers,
+                                      local_pending_wins=True)  # [daveey] an unpushed local edit outlives a rebuild
             count += len(rows)
             if not page.get("more"):
                 break
@@ -613,6 +617,8 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
                 resync(live, hub, slug, observers=True, partition=gateway)
         replica = open_shadow(slug, gateway)
         try:
+            from hermes_cli.kanban_sync_partition_repair import repair_partition_links
+            repair_partition_links(live, replica, gateway)
             if mode == "primary" and sync.refresh_remote_parents(live, replica):
                 sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
             result.repaired = repair_divergence(live, replica, gateway)

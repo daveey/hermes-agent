@@ -123,3 +123,20 @@ def test_e2e_upgrade_has_release_tags_for_n_minus_1():
     assert "refs/tags/v20*:refs/tags/v20*" in fetch["run"]
     # The step proves N-1 resolves instead of letting every N-1 test fail on its own.
     assert fetch["run"].rstrip().endswith("git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1")
+
+
+def test_termux_assembly_permissions_run_on_docker_ci_and_fail_on_skip():
+    # hermes-hub has no docker daemon, so the file's two parametrizations skip
+    # there. The ownership regression only counts if this lane runs it.
+    job = _workflows()["tests.yml"]["jobs"]["termux-assembly-permissions"]
+    assert _labels(job) == ["self-hosted", "docker-ci"]
+    assert "hermes-hub" not in _labels(job)
+    steps = job["steps"]
+    names = [s.get("name") for s in steps]
+    pull = steps[names.index("Pull the native Linux test image")]
+    run = steps[names.index("Run assembly permission tests")]
+    assert names.index("Pull the native Linux test image") < names.index("Run assembly permission tests")
+    assert "ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a" in pull["with"]["command"]
+    assert "--fail-on-skip" in run["run"]
+    assert "tests/scripts/test_termux_assembly_permissions.py" in run["run"]
+    assert steps[-1].get("uses") == "./.github/actions/check-clean-worktree"

@@ -41,6 +41,20 @@ def _add_refresh_prompts(sessions_subparsers) -> None:
     refresh.add_argument("--session", default=None, metavar="SESSION_ID",
         help="Refresh only this session (id or unique prefix)")
     _flag(refresh, "--json", help="Machine-readable output")
+def _add_outcome_parsers(sessions_subparsers) -> None:
+    """[daveey] Server-side mute and the stored chat outcome (hermes_state_outcome)."""
+    for name, verb in (("mute", "Mute"), ("unmute", "Unmute")):
+        sessions_subparsers.add_parser(name, help=f"{verb} session(s): no wakes, tiles or nags").add_argument(
+            "session_ids", nargs="+", help="Session ID(s) or unique prefix(es)")
+    sessions_outcome = sessions_subparsers.add_parser("outcome", help="Show a session's stored outcome")
+    sessions_outcome.add_argument("session_id", help="Session ID or unique prefix")
+    _flag(sessions_outcome, "--refresh", help="Re-derive and store the outcome first")
+    add_json_flag(sessions_outcome, "Emit JSON")
+    sessions_audit = sessions_subparsers.add_parser(
+        "outcome-audit", help="Every sidebar-listed session with its outcome (the status auditor's input)")
+    _flag(sessions_audit, "--refresh", help="Re-derive and store each outcome first")
+    sessions_audit.add_argument("--limit", type=int, default=100, help="Rows to audit (default: 100)")
+    add_json_flag(sessions_audit, "Emit JSON rows {id, title, kind, reason, age_h, on, items}")
 
 
 def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
@@ -292,7 +306,6 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
             "separate and every skipped range is recorded")
     sessions_recover.add_argument(
         "--report", type=Path, help="JSON report path (defaults to <output>.recovery.json)")
-
     sessions_subparsers.add_parser("stats", help="Show session store statistics")
     _add_rename_and_discard(sessions_subparsers)
 
@@ -310,6 +323,7 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     sessions_unpin.add_argument(
         "session_ids", nargs="+", help="Session ID(s) or unique prefix(es) to unpin")
 
+    _add_outcome_parsers(sessions_subparsers)
     sessions_pinned = sessions_subparsers.add_parser("pinned", help="List pinned sessions")
     add_json_flag(sessions_pinned, "Emit machine-readable JSON (for backup/restore scripting)")
 

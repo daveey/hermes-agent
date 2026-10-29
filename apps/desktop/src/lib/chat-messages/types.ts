@@ -39,6 +39,8 @@ export type ChatMessage = {
   /** Result body only; the system text remains the compact completion label. */
   asyncResult?: string
   asyncResultKind?: 'process'
+  /** [daveey] A blocked kanban notice whose card has since moved on: rendered dimmed, labelled outdated. */
+  staleNotice?: boolean
   timestamp?: number
   completedAt?: number
   pending?: boolean

@@ -179,6 +179,45 @@ jobs:
         # (a half-extracted download, a worktree its later cleanup never removed).
         uses: ./.github/actions/check-clean-worktree
 
+  termux-assembly-permissions:
+    # hermes-hub slices skip both parametrizations: no daemon, and the pinned
+    # native image is not pre-pulled. A green Python shard is not evidence the
+    # bind-mount ownership regression ran. This lane is that evidence.
+    name: Termux assembly permissions
+    runs-on: [self-hosted, docker-ci]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - name: Pull the native Linux test image
+        uses: ./.github/actions/retry
+        with:
+          command: docker pull -q python@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '[]'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Run assembly permission tests
+        # --fail-on-skip: a missing daemon or image must not go green.
+        # Bind-mount sources must live where the docker daemon can see them.
+        env:
+          HERMES_TEST_DOCKER_MOUNT_ROOT: ${{ runner.temp }}/termux-assembly
+        run: |
+          mkdir -p "$HERMES_TEST_DOCKER_MOUNT_ROOT"
+          if ! scripts/run_tests.sh --fail-on-skip \
+              tests/scripts/test_termux_assembly_permissions.py; then
+            echo "::error::termux assembly permission tests failed or skipped (a skip means docker or the pinned image was not available)"
+            exit 1
+          fi
+
+      - name: Check the checkout is clean
+        uses: ./.github/actions/check-clean-worktree
+
   e2e:
     # The core suites spawn real serve / gateway / tui_gateway / MCP / SQLite
     # writer processes per test; a 4-vCPU runner serialises them into timeouts.

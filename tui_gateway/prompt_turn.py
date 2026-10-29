@@ -1401,6 +1401,8 @@ def _run_admitted_prompt(
                 _emit_settled_session_info(sid, session, st.agent)
             finally:
                 try:
+                    from tui_gateway.turn_outcome import refresh_turn_outcome  # [daveey] every conclusion,
+                    refresh_turn_outcome(session, st.agent)  # before the profile scope resets
                     _post_turn_housekeeping(sid, session, st)
                 finally:
                     _rearm_carried_pause_watcher(sid, session, st)

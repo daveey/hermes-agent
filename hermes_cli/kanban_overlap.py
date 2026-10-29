@@ -6,15 +6,21 @@ open cards on every board of this gateway (live board DBs) and every other gatew
 ``hub.db``), so the answer no longer depends on which chat asks or which board the card lands on.
 
 An open card matches when:
-- the new card names its board, is not being created on that board, and the titles share a word, or
+- the new card names its board, is not being created on that board, and the titles share a word (for a
+  plain-word slug, 2 words that are a quarter of the longer title: one shared word or a hostname with any of
+  the hundreds of cards on ``bb`` or ``hermes`` is chance, not overlap), or
 - both titles share at least half of the longer title's significant words (3 or more).
 
-Naming a board means an explicit reference (``/<slug>``, ``board <slug>``, ``<slug> board``) in the
-title or body, or the slug itself in the title when the slug is not a single plain word
-(``unconventional-collab``, not ``runners`` or ``hermes``). A bare plain word that equals a board
-slug does not count.
+Naming a board means an explicit reference in the title or body: ``board <slug>``, ``--board <slug>``,
+``<slug> board``, ``@task:<slug>@...`` / ``@task:<slug>/...`` or ``<gateway>/<slug>`` for a known gateway
+(``hub/runners``). A plain-word slug (``hermes``, ``bb``, ``runners``) inside a URL, a filesystem path or a
+slash list is NOT a reference: ``github.com/daveey/hermes``, ``~/code/hermes``, ``Slack/Discord/BB Inbox``.
+A slug that is not one plain word (``unconventional-collab``) is specific enough that ``/<slug>`` anywhere
+or the slug itself in the title still names it (``Metta-AI/unconventional-collab``). A bare plain word that
+equals a board slug does not count.
 
-Never matched: closed cards, the creator's own card, the new card's parents, cards the same chat or the same
+Never matched: closed cards (a replica's stale legacy ``<board>/<id>`` row never outvotes its qualified
+``<profile>/<board>/<id>`` twin), the creator's own card, the new card's parents, cards the same chat or the same
 worker created (fan-out), the waiting card a capability-owner create quotes, and another capability-owner
 card for that same waiting card. A missing or unreadable replica is skipped and logged, never a block.
 ``kanban.create_overlap_check: false`` turns the check off.
@@ -34,6 +40,7 @@ EVENT = "create_overlap"
 OPEN = ("todo", "ready", "running", "scheduled", "blocked", "review", "triage")
 MAX_SHOWN = 8
 MIN_SHARED = 3
+PLAIN_BOARD_SCORE = 0.25
 _STOP = frozenset("""
 a an and are as at be by for from in into is it its of on or the then this that to via with without after before
 when not no all new card task fix add run make use using update ensure follow up followup self heal
@@ -58,22 +65,34 @@ def _plain_word_slug(slug: str) -> bool:
     return bool(re.fullmatch(r"[a-z]+", (slug or "").lower()))
 
 
-def _explicit_board_ref(slug: str, text: str) -> bool:
-    """``/<slug>`` (``hub/runners``, ``Metta-AI/<slug>``), ``board <slug>`` or ``<slug> board``."""
+_SEP = r"[\s:=`'\\\"]+"
+_END = r"(?![a-z0-9_-])"
+
+
+def _explicit_board_ref(slug: str, text: str, gateways: Iterable[str] = ()) -> bool:
+    """``board <slug>``, ``--board <slug>``, ``<slug> board``, ``@task:<slug>@gw/...``, ``<gateway>/<slug>``.
+
+    A plain-word slug after a ``/`` in a URL, path or slash list (``github.com/daveey/hermes``,
+    ``~/code/hermes``, ``Slack/Discord/BB Inbox``) is not a reference (hub t_01a189b2d186a986);
+    a slug that is not one plain word (``Metta-AI/unconventional-collab``) still is.
+    """
     s = re.escape((slug or "").lower())
     if not s:
         return False
-    return bool(re.search(
-        rf"(?:/|\bboard[\s:=`'\\\"]+){s}(?![a-z0-9_-])"
-        rf"|(?<![a-z0-9_-]){s}(?![a-z0-9_-])[\s:=`'\\\"]+board\b",
-        (text or "").lower(),
-    ))
+    forms = [rf"\bboard{_SEP}{s}{_END}", rf"(?<![a-z0-9_-]){s}{_END}{_SEP}board\b", rf"@task:{s}(?=[@/])"]
+    gws = "|".join(re.escape(g.lower()) for g in sorted(set(gateways)) if g)
+    if gws:
+        # ``hub/runners`` or ``hub/runners/t_...`` as a whole token, never a segment of a longer path or URL.
+        forms.append(rf"(?<![\w./:~@-])(?:{gws})/{s}{_END}(?!/(?!t_[0-9a-f]))")
+    if not _plain_word_slug(slug):
+        forms.append(rf"/{s}{_END}")
+    return bool(re.search("|".join(forms), (text or "").lower()))
 
 
-def _names_board(slug: str, title: str, body: str) -> bool:
+def _names_board(slug: str, title: str, body: str, gateways: Iterable[str] = ()) -> bool:
     if not slug or slug == "default":
         return False
-    if _explicit_board_ref(slug, title) or _explicit_board_ref(slug, body):
+    if _explicit_board_ref(slug, title, gateways) or _explicit_board_ref(slug, body, gateways):
         return True
     # A bare slug token in the title names the board only when it is not a plain word.
     # "runners" in "bb-linux runners can't run jobs" is not a board reference.
@@ -83,13 +102,21 @@ def _names_board(slug: str, title: str, body: str) -> bool:
     return bool(re.search(rf"(?<![a-z0-9_-]){s}(?![a-z0-9_-])", (title or "").lower()))
 
 
-def _reasons(card: dict, new_words: set[str], title: str, body: str, target_board: str) -> tuple[list[str], float]:
+def _reasons(card: dict, new_words: set[str], title: str, body: str, target_board: str,
+             gateways: Iterable[str] = ()) -> tuple[list[str], float]:
     reasons, score = [], 0.0
     theirs = words(card.get("title") or "")
     shared = new_words & theirs
-    # A board named in passing (a path, a log line) is not enough: the titles must share a word too.
-    if (card["board"] != target_board and shared - words(card["board"])
-            and _names_board(card["board"], title, body)):
+    # A board named in passing (a path, a log line) is not enough: the titles must share a word too. A plain-word
+    # board (``hermes``, ``bb``) holds hundreds of cards, so one common word ("skill", "create") or a hostname
+    # ("David-MBP") matches some card there by chance: it needs 2 shared words that are a quarter of the title.
+    named = shared - words(card["board"])
+    if _plain_word_slug(card["board"]):
+        named_enough = len(named) >= 2 and len(shared) / max(len(new_words), len(theirs)) >= PLAIN_BOARD_SCORE
+    else:
+        named_enough = bool(named)
+    if (card["board"] != target_board and named_enough
+            and _names_board(card["board"], title, body, gateways)):
         reasons.append(f"the new card names board {card['board']!r}")
     if new_words and theirs:
         score = len(shared) / max(len(new_words), len(theirs))
@@ -141,13 +168,21 @@ def _replica_cards(self_gw: Optional[str]) -> Iterable[dict]:
     marks = ",".join("?" * len(OPEN))
     try:
         with cached_ro(path) as c:
-            rows = c.execute(f"SELECT gw, data FROM replica WHERE coll = 'tasks' AND gw != ? "
+            rows = c.execute(f"SELECT gw, key, data FROM replica WHERE coll = 'tasks' AND gw != ? "
                              f"AND json_extract(data, '$.status') IN ({marks})", (self_gw or "", *OPEN)).fetchall()
+            keys = c.execute("SELECT gw, key FROM replica WHERE coll = 'tasks' AND gw != ?",
+                             (self_gw or "",)).fetchall()
     except sqlite3.Error as exc:
         _log.warning("kanban create overlap: replica %s unreadable, other gateways skipped (%s)", path, exc)
         return
+    # A legacy ``<board>/<id>`` row is a frozen pre-profile snapshot: t_d6973c6f was done under
+    # ``default/hermes/t_d6973c6f`` and still "running" under ``hermes/t_d6973c6f``. When a qualified
+    # ``<profile>/<board>/<id>`` twin exists it is the card's state, so the legacy row never counts.
+    qualified = {(gw, str(key).split("/", 1)[1]) for gw, key in keys if str(key).count("/") == 2}
     seen = set()
-    for gw, raw in rows:
+    for gw, rkey, raw in rows:
+        if str(rkey).count("/") == 1 and (gw, str(rkey)) in qualified:
+            continue
         try:
             t = json.loads(raw)
         except ValueError:
@@ -207,18 +242,21 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
         waiting = capability_owner_waiting_id(title, body)
         new_words = words(title)
         out = []
-        for source in (_local_cards(self_gw), _replica_cards(self_gw)):
-            for card in source:
-                if (card["id"] in skip or card["id"] == waiting
-                        or (waiting and _sibling_owner(card.get("title") or "", waiting))
-                        or (session_id and card["session_id"] == session_id)
-                        or (self_tid and card["creator_task_id"] == self_tid)
-                        or (family and card.get("key_family") == family)):
-                    continue
-                reasons, score = _reasons(card, new_words, title, body, target_board)
-                if reasons:
-                    out.append({**{k: card[k] for k in ("id", "board", "gateway", "status", "title", "chats")},
-                                "why": "; ".join(reasons), "_score": score, "_local": card["local"]})
+        cards = [*_local_cards(self_gw), *_replica_cards(self_gw)]
+        gateways = {g for g in (self_gw, *(c["gateway"] for c in cards)) if g}
+        if gateways & {"hub", "hermes-hub"}:
+            gateways |= {"hub", "hermes-hub"}
+        for card in cards:
+            if (card["id"] in skip or card["id"] == waiting
+                    or (waiting and _sibling_owner(card.get("title") or "", waiting))
+                    or (session_id and card["session_id"] == session_id)
+                    or (self_tid and card["creator_task_id"] == self_tid)
+                    or (family and card.get("key_family") == family)):
+                continue
+            reasons, score = _reasons(card, new_words, title, body, target_board, gateways)
+            if reasons:
+                out.append({**{k: card[k] for k in ("id", "board", "gateway", "status", "title", "chats")},
+                            "why": "; ".join(reasons), "_score": score, "_local": card["local"]})
         out.sort(key=lambda m: (-m["_score"], m["status"] not in ("running", "ready", "scheduled"), m["id"]))
         return out
     except Exception:  # health: allow BLE001 -- a broken check must never block creating a card
@@ -266,7 +304,10 @@ def record(conn: Optional[sqlite3.Connection], task_id: Optional[str], *, outcom
     payload = {"outcome": outcome, "title": title, "reason": reason or None, "session_id": session_id,
                "matches": [{"id": m["id"], "board": m["board"], "gateway": m["gateway"], "status": m["status"]}
                            for m in public(matches)]}
-    _log.info("kanban create overlap: %s %r (%d matches)", outcome, title, len(matches))
+    # The matched cards ride in the log line: a refusal whose matches are all on other gateways records no
+    # event anywhere, so this line is the only trace an audit can read (hub t_01a189b2d186a986).
+    _log.info("kanban create overlap: %s %r (%d matches: %s)", outcome, title, len(matches),
+              ", ".join(f"{m['gateway']}/{m['board']}/{m['id']} ({m['why']})" for m in matches[:MAX_SHOWN]))
     try:
         if conn is not None and task_id:
             with kb.write_txn(conn):

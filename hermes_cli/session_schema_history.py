@@ -215,6 +215,12 @@ SCHEMA_HISTORY: dict[str, _TableHistory] = {
         )),
         # GW-18 (package 10, #140968): write-side revision a transcript-derived cache keys on.
         ('32 2026-10-18T10:11Z 1fc1999769', (('+', 'transcript_revision', 'tool_names'),)),
+        # [daveey] Stored chat outcome + server-side mute (fork 41e8016f133), after upstream's 31-32.
+        ('33 2026-10-29T00:00Z session-outcome', (
+            ('+', 'outcome_json', 'transcript_revision'),
+            ('+', 'outcome_at', 'outcome_json'),
+            ('+', 'muted', 'outcome_at'),
+        )),
         ),
     ),
     "messages": _TableHistory(

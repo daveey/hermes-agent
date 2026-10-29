@@ -71,6 +71,7 @@ import type { SessionCreateResponse, SessionInfo, SessionResumeResult, SessionRu
 
 import type { ClientSessionState } from '../../../types'
 
+import { committedDuringTurn } from './committed-during-turn'
 import {
   committedReplyCovers,
   isStrictAnswerTextExtension,
@@ -142,15 +143,6 @@ function carryRowIdentity(next: ChatMessage, previous: ChatMessage): ChatMessage
     ...(rowId !== undefined ? { rowId } : {}),
     ...(reactions ? { reactions: [...reactions] } : {})
   }
-}
-
-/**
- * True only when a row was written after the live turn began. Text alone
- * cannot tell this turn's reply from the previous turn's answer to the same
- * resent prompt, so a missing timestamp (older runtime) never passes.
- */
-function committedDuringTurn(turnStartedAt: unknown, committedAt: unknown): boolean {
-  return typeof turnStartedAt === 'number' && typeof committedAt === 'number' && committedAt >= turnStartedAt
 }
 
 /**

@@ -13,8 +13,10 @@ one notice per terminal state (done, blocked), claimed in a small SQLite ledger 
 across every backend on this host. A claim is in flight (holder pid + process start, the same probe the local
 tui path uses) until the notice is in the chat transcript; only then is the row ``delivered``. A holder that
 died first is re-offered, unless that key is already in the transcript. A refused turn releases its claim
-(``release``) so the owner of the chat re-claims it. Only states that became terminal within ``FRESH_S`` are
-announced; older ones are recorded silently, so a first run never floods a chat with history. A legacy
+(``release``) so the owner of the chat re-claims it. Freshness is the later of the owner's terminal time
+and this host's durable first observation of that terminal state. The initial replica snapshot seeds old
+states silently (and frozen legacy keys never get a local window), so a fresh host never floods history.
+A legacy
 ``delivered=1`` row from before this (claimed before the write) inside ``FRESH_S`` whose notice is in no
 transcript of the chat is re-offered once.
 
@@ -134,11 +136,17 @@ def _index(path: Path) -> tuple[str, dict]:
         links = task.get("sessions") if isinstance(task.get("sessions"), list) else []
         for link in links:
             if (isinstance(link, dict) and link.get("gw") == me and link.get("rel") in LINK_RELS
-                    and link.get("session")):
+                    and link.get("session") and not _released(link)):
                 index.setdefault((str(link.get("profile") or "default"), str(link["session"])), []).append(
                     {"gw": str(gw), "key": str(key), "task": task})
     _index_memo = (str(path), sig, me, index)
     return me, index
+
+
+def _released(link: dict) -> bool:
+    """[daveey] The owner released this chat's link: its notices stop (session-outcome fan-out filter)."""
+    from tui_gateway.notice_fanout import link_released
+    return link_released(link)
 
 
 def _ledger(path: Optional[Path] = None) -> sqlite3.Connection:
@@ -360,6 +368,8 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
     try:
         with _lock:
             me, index = _index(path)
+        from tui_gateway.kanban_remote_observations import observe
+        fresh_times = observe(path, ledger, now)
         cards = []
         for sid in (session_key, *lineage):
             cards.extend(dict(c, sid=sid) for c in index.get((profile, sid), ()))
@@ -380,8 +390,10 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                 state = f"{task['status']}@{int(at) if at else 0}"
                 if (ref, state) in offered:
                     continue
-                at_fresh = _fresh_at(task)  # same bound as the sweep
+                at_fresh = fresh_times.get((card["gw"], card["key"], state), _fresh_at(task))
                 fresh = at_fresh is not None and now - at_fresh <= FRESH_S
+                if not fresh and (card["gw"], card["key"], state) not in fresh_times:
+                    continue  # partial sync: don't permanently settle a not-yet-observed arrival
                 if fresh and skip is not None and conn.execute(
                         "SELECT 1 FROM notices WHERE session=? AND ref=? AND state=?",
                         (session_key, ref, state)).fetchone() is None and skip(str(task["id"])):
@@ -508,7 +520,10 @@ def _record_swept(keys: list[tuple], ledger: Optional[Path]) -> None:
 
 def _reset_for_tests() -> None:
     """Forget this process's memos, as a restarted backend would (the ledger file stays)."""
+    from tui_gateway.kanban_remote_observations import _memo
+
     global _index_memo
+    _memo.clear()
     _index_memo = None
     _delivered.clear()
     _swept_loaded.clear()
@@ -563,9 +578,8 @@ def _sweep_payload(owner: str, key: str, task: dict, me: str, profile: str, sid:
     return event_key, metadata, format_notice(owner, key, task)
 
 
-def _sweep_cards(rows: list[tuple], me: str, now: float, counts: dict):
-    """``(owner, key, task, links)`` for canonical, freshly terminal cards linked to chats on ``me``. Linked
-    terminal cards older than ``FRESH_S`` (or of unknown age) are counted in ``counts['stale']``."""
+def _sweep_cards(rows: list[tuple], me: str):
+    """Canonical terminal cards linked here, before freshness or open-chat filtering."""
     for owner, key, _seq, raw in rows:
         try:
             task = json.loads(raw)
@@ -576,12 +590,8 @@ def _sweep_cards(rows: list[tuple], me: str, now: float, counts: dict):
         if not done and task.get("status") != "blocked":
             continue
         links = [link for link in task.get("sessions") or [] if isinstance(link, dict)
-                 and link.get("rel") == "shepherd" and link.get("gw") == me]
+                 and link.get("rel") == "shepherd" and link.get("gw") == me and not _released(link)]
         if not links:
-            continue
-        at = _fresh_at(task)
-        if at is None or now - at > FRESH_S:
-            counts["stale"] = counts.get("stale", 0) + 1
             continue
         yield owner, key, task, links
 
@@ -600,8 +610,13 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
         with session_db(profile, sid) as (db, tip):
             if db is None or not text:
                 return
+            from tui_gateway.notice_fanout import chat_skip_reason
+            if chat_skip_reason(db, sid) is not None:  # [daveey] archived chat or a copy moved to another gateway
+                return
             if not settled((sid, tip), ref, state):
                 row_id = db.append_kanban_notice(tip, text, metadata)
+                from hermes_state_outcome import refresh_outcomes_quietly
+                refresh_outcomes_quietly([tip], "notice", db=db)  # [daveey] unloaded sweeper's remote rows too
                 delivered.append({"task_id": task["id"], "session_id": tip, "message_row": row_id})
                 swept.append(memo_key)
                 ack({"session": sid, "ref": ref, "state": state, "notice_key": event_key}, ledger=ledger)
@@ -610,10 +625,15 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
         logger.debug("remote Kanban notice deferred for %s/%s", owner, key, exc_info=True)
 
 
-def _deliver_fresh(rows, me, now, path, live, session_db, ledger, settled, delivered, swept, counts) -> None:
-    for owner, key, task, links in _sweep_cards(rows, me, now, counts):
+def _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, settled, delivered, swept,
+                   counts) -> None:
+    for owner, key, task, links in cards:
         at = _terminal_at(task)
         ref, state = f"{owner}/{key}", f"{task['status']}@{int(at) if at else 0}"
+        observed_at = fresh_times.get((owner, key, state), _fresh_at(task))
+        if observed_at is None or now - observed_at > FRESH_S:
+            counts["stale"] = counts.get("stale", 0) + 1
+            continue
         for link in links:
             _deliver_link(owner, key, task, link, me=me, ref=ref, state=state, path=path, live=live,
                           session_db=session_db, ledger=ledger, settled=settled,
@@ -628,7 +648,7 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
     with ``collect``, so running both yields one transcript row.
 
     [daveey] Same guards as ``collect``: one canonical replica row per card (a frozen legacy-key row is never
-    read), only states that became terminal within ``FRESH_S``, and nothing the ledger already settled.
+    read), only states fresh by owner time or durable local arrival, and nothing the ledger already settled.
     A successful append is also recorded in the ledger's ``swept`` table, so a restart does not reopen
     state.db for a notice this process already persisted. Without the guards a rollout that changed the
     blocked notice key replayed 293 ``blocked`` notices from days earlier, of cards long done, into idle
@@ -650,6 +670,13 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
     except sqlite3.Error:
         logger.debug("remote Kanban replica unavailable", exc_info=True)
         return []
+    from tui_gateway.kanban_remote_observations import observe
+    cards = list(_sweep_cards(rows, me))
+    try:
+        fresh_times = observe(Path(path), ledger, now)
+    except (OSError, sqlite3.Error):
+        logger.debug("remote kanban observation failed; defer notices", exc_info=True)
+        return []
     _load_swept(ledger)
     delivered: list[dict] = []
     swept: list = []
@@ -667,7 +694,7 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
                         ledger_conn.append(None)
                 return _ledger_settled(ledger_conn[0], sessions, ref, state)
 
-            _deliver_fresh(rows, me, now, path, live, session_db, ledger, settled, delivered, swept, counts)
+            _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, settled, delivered, swept, counts)
         stale = counts.get("stale", 0)
         if stale and stale != _last_stale.get(str(path)):
             _last_stale[str(path)] = stale

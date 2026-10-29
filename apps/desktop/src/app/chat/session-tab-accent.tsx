@@ -2,8 +2,7 @@ import type { CSSProperties, ReactNode } from 'react'
 
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useSessionDotState } from '@/lib/use-session-dot-state'
-import { useStoreSelector } from '@/lib/use-session-slice'
-import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
+import { useSessionParked } from '@/lib/use-session-parked'
 import { kanbanStripeCounts, sessionStatusStripe } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -18,7 +17,7 @@ interface SessionTabAccentProps {
 export function SessionTabAccent({ children, session, storedSessionId }: SessionTabAccentProps) {
   const id = session?.id ?? storedSessionId
   const state = useSessionDotState(id, session)
-  const blocked = useStoreSelector($blockedSessionIds, ids => (id ? isSessionBlocked(id, ids) : false))
+  const blocked = useSessionParked(id, session)
 
   const stripe = session?.archived
     ? null
@@ -31,7 +30,8 @@ export function SessionTabAccent({ children, session, storedSessionId }: Session
         session?.review_wait,
         session?.kanban_attention,
         kanbanStripeCounts(session ?? {}).waiting,
-        kanbanStripeCounts(session ?? {}).stalled
+        kanbanStripeCounts(session ?? {}).stalled,
+        session?.outcome
       )
 
   return (
