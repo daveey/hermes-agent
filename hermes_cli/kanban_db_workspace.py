@@ -117,7 +117,8 @@ def _conn_uses_path(
             other_key = _path_key(Path(other).expanduser().resolve(strict=False))
         except OSError:
             continue
-        if other_key == key:
+        if (Path(other_key).is_relative_to(Path(key))
+                or Path(key).is_relative_to(Path(other_key))):
             return True
     return False
 

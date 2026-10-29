@@ -33,6 +33,48 @@ def retention_days() -> int:
         return 0
 
 
+def gc_task_scratch(conn: sqlite3.Connection) -> int:
+    """Retry terminal scratch cleanup, failing closed on any unreadable board.
+
+    Only task records establish ownership; never infer it from directory names.
+    Read every board before the first removal, even if an earlier board reports
+    a live sharer. Keep the selected owner locked against concurrent resumption.
+    """
+    import shutil
+
+    from hermes_cli import kanban_db as kb
+
+    removed = 0
+    with kb.write_txn(conn):
+        try:
+            rows = conn.execute(
+                "SELECT id, workspace_path FROM tasks WHERE workspace_kind='scratch' "
+                f"AND status IN {ws._TERMINAL_STATUSES_SQL}"
+            ).fetchall()
+            for board in ws._sibling_board_db_files(conn):
+                with _read_board(board) as other:
+                    other.execute("SELECT workspace_path FROM tasks").fetchall()
+        except (OSError, sqlite3.Error):
+            log.warning("Scratch GC aborted: cannot read all boards; preserving workspaces", exc_info=True)
+            return 0
+        for row in rows:
+            path = Path(row["workspace_path"] or (kb.workspaces_root() / row["id"])).expanduser()
+            if not path.is_dir() or path.is_symlink() or not ws._is_managed_scratch_path(path):
+                continue
+            if ws._has_active_children(conn, row["id"]):
+                continue
+            if not ws._scratch_tree_removable(path):
+                continue
+            if ws._defer_shared_workspace_cleanup(conn, row["id"], path):
+                continue
+            ws.release_lsp_clients(str(path))
+            shutil.rmtree(path, ignore_errors=True)
+            if not path.exists():
+                ws._log_scratch_removal(conn, row["id"], path, "scratch workspace (GC retry)")
+                removed += 1
+    return removed
+
+
 def gc_task_worktrees(conn: sqlite3.Connection, *, older_than_days: int = 7,
                      repo_root: str | None = None) -> int:
     """Reap terminal rows only, retaining active children and cross-board sharers.

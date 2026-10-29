@@ -15,7 +15,6 @@ from pathlib import Path
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
-from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
 
 
@@ -322,14 +321,12 @@ def _cmd_watch(args: argparse.Namespace) -> int:
 
 
 def _cmd_gc(args: argparse.Namespace) -> int:
-    """Remove archived tasks' scratch workspaces, old events, and old worker logs."""
-    import shutil
+    """Retry terminal workspace cleanup and remove old events and worker logs."""
     event_days = getattr(args, "event_retention_days", 30)
     log_days = getattr(args, "log_retention_days", 30)
     if event_days < 0 or log_days < 0:
         return _err("kanban gc: retention days must be >= 0 (0 disables that sweep)", 2)
-    scratch_root = kb.workspaces_root()
-    from hermes_cli.kanban_worktree_gc import gc_task_worktrees, retention_days
+    from hermes_cli.kanban_worktree_gc import gc_task_scratch, gc_task_worktrees, retention_days
     wt_days = getattr(args, "worktree_retention_days", None)
     wt_days = retention_days() if wt_days is None else wt_days
     if wt_days < 0:
@@ -337,27 +334,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         removed_ws = gc_task_worktrees(conn, older_than_days=wt_days)
     with kbc.connect_closing() as conn:
-        rows = conn.execute(
-            "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
-            "WHERE status = 'archived'"
-        ).fetchall()
-        for row in rows:
-            if row["workspace_kind"] == "worktree":
-                continue  # handled by the retention-aware sweep above
-            if row["workspace_kind"] != "scratch":
-                continue
-            path = Path(row["workspace_path"] or (scratch_root / row["id"]))
-            # Same containment predicate as completion cleanup (#28818): strictly below a
-            # managed root, never the root itself (which holds every task's scratch dir).
-            # Cheap existence/symlink check first: most rows were already cleaned at
-            # completion, and rmtree refuses a symlink (so it must not be counted).
-            if not path.is_dir() or path.is_symlink() or not kbw._is_managed_scratch_path(path):
-                continue
-            if kbw._defer_shared_workspace_cleanup(conn, row["id"], path):
-                continue
-            shutil.rmtree(path, ignore_errors=True)
-            if not path.exists():
-                removed_ws += 1
+        removed_ws += gc_task_scratch(conn)
 
     removed_events = 0
     if event_days:
