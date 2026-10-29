@@ -41,15 +41,56 @@ def test_fallback_status_including_terminal_records(replica, status, rc):
     assert text.split()[:2] == [TID, status]
 
 
+def parked_observation(events):
+    """The staleness note ``confirm_remote`` stored, not the wake_check echo of an earlier read."""
+    parks = [e.payload for e in events if e.kind == "scheduled" and isinstance(e.payload, dict)]
+    record = parks[-1].get("awaiting")
+    assert isinstance(record, dict)
+    observed = record.get("observed")
+    assert isinstance(observed, str)
+    return observed
+
+
+def pin_replica_clock(monkeypatch):
+    """Freeze ``time.time`` so ``stale_age=`` is the age written, not age plus a deschedule.
+
+    The reader reports live age (``time.time() - observed_at``, rounded). Hub CI freezes the
+    process for a second or two between the write and the re-read in ``confirm_remote``;
+    ``:.0f`` then prints 1239 for an age the test set to 1237. Pin before asserting the exact
+    second. Monkeypatch restores the clock when the test ends.
+    """
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    return now
+
+
 def make_stale(db, age):
     scope = {"task_scopes": [{"profile": "default", "board": "default", "state": "ok", "observed_at": time.time() - age}]}
     db.execute("UPDATE replica SET data=? WHERE coll='gateway'", (json.dumps(scope),))
     db.commit()
 
 
-def test_missing_is_error_and_stale_known_card_is_unknown_not_yet(replica):
+def test_deschedule_changes_rounded_stale_age_unless_clock_is_pinned(replica, monkeypatch):
+    # The CI miss: 2s of wall clock between the write and the read prints stale_age=1239s.
+    # A pin keeps the exact second the assertion asks for.
+    put(replica, "running")
+    base = float(2**31)
+    state = {"t": base}
+    monkeypatch.setattr(time, "time", lambda: state["t"])
+    make_stale(replica, 1237)
+    state["t"] = base + 2
+    assert "stale_age=1239s" in wait.check_remote("other", "task", TID)[1]
+    state["t"] = base
+    pin_replica_clock(monkeypatch)
+    make_stale(replica, 1237)
+    state["t"] = base + 2
+    assert "stale_age=1237s" in wait.check_remote("other", "task", TID)[1]
+
+
+def test_missing_is_error_and_stale_known_card_is_unknown_not_yet(replica, monkeypatch):
     assert wait.check_remote("other", "task", TID)[0] == 2
     put(replica, "done")
+    pin_replica_clock(monkeypatch)
     make_stale(replica, 1237)
     code, text = wait.check_remote("other", "task", TID)
     # Seen in the last replica of an offline gateway: unknown, not yet (3), never "broken" (2) and never "met".
@@ -130,6 +171,7 @@ def test_schedule_awaiting_card_on_stale_replica_is_accepted(replica, board, mon
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
     conn, tid = board
+    pin_replica_clock(monkeypatch)
     put(replica, "running")
     make_stale(replica, 1237)
     rc, out = wait.check_remote("other", "task", TID)
@@ -143,8 +185,8 @@ def test_schedule_awaiting_card_on_stale_replica_is_accepted(replica, board, mon
         "wake_check": probe, "check_every": 900,
         "awaiting": {"kind": "card", "ref": TID, "gateway": "other"}}))
     assert res.get("status") == "scheduled", res
-    park = [e for e in kb.list_events(conn, tid) if e.kind == "scheduled"][-1].payload
-    observed = json.dumps(park)
+    park = [e for e in kb.list_events(conn, tid) if e.kind == "scheduled"][-1]
+    observed = parked_observation([park])
     assert "stale_age=1237s" in observed and f"{TID} running" in observed
     # An orphan seen in the stale replica is still refused.
     replica.execute("DELETE FROM replica WHERE coll='tasks'")
@@ -171,12 +213,13 @@ def test_block_awaiting_card_on_stale_replica_is_accepted(replica, board, monkey
     from hermes_cli import kanban_db as kb
     conn, tid = board
     awaiting._REMOTE_CONFIRMED.clear()
+    pin_replica_clock(monkeypatch)
     put(replica, "running")
     make_stale(replica, 3176)
     res = _block_on_remote_card(conn, tid, monkeypatch)
     assert res.get("status") == "scheduled", res
     assert kb.get_task(conn, tid).status == "scheduled"
-    observed = json.dumps([e.payload for e in kb.list_events(conn, tid)])
+    observed = parked_observation(kb.list_events(conn, tid))
     assert "stale_age=3176s" in observed and f"{TID} running" in observed
 
 
