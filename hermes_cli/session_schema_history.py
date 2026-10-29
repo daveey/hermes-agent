@@ -207,6 +207,11 @@ SCHEMA_HISTORY: dict[str, _TableHistory] = {
         ('28 2026-09-25T23:25Z 2941aadffa', (('+', 'compression_overload_streak', 'compression_recovery_deadline'),)),
         ('29 2026-09-27T00:29Z d75f29934b', (('+', 'created_source', 'source'),)),
         ('30 2026-09-28T00:00Z #117713', (('+', 'auto_archived', 'archived'),)),
+        ('31 2026-10-29T00:00Z session-outcome', (
+            ('+', 'outcome_json', 'tool_names'),
+            ('+', 'outcome_at', 'outcome_json'),
+            ('+', 'muted', 'outcome_at'),
+        )),
         ),
     ),
     "messages": _TableHistory(

@@ -36,6 +36,7 @@ from gateway.session import (
 from gateway.session_transcript import TranscriptReadError
 from gateway.turn_context import TurnContext
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
+from gateway.turn_outcome import refresh_gateway_turn_outcome
 from hermes_constants import get_hermes_home_override
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -1680,8 +1681,7 @@ class GatewayTurnMixin:
         except Exception as e:
             logger.debug("Watch queue drain error: %s", e)
 
-    # One owner for the boundary copy (agent/turn_failure_copy.py): the core closer in
-    # agent/conversation_loop.py writes the same row on the paths that never reach this layer.
+    # One owner for the boundary copy (agent/turn_failure_copy.py): the core closer in agent/conversation_loop.py writes the same row on the paths that never reach this layer.
 
     def _hmwa_add_failed_turn_notice(self, response, notice):
         """Make failed-turn delivery explicit without replacing the provider-specific guidance."""
@@ -2264,8 +2264,8 @@ class GatewayTurnMixin:
 
         except Exception as e:
             return await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
-        finally:
-            # Restore session context variables to their pre-handler state
+        finally:  # [daveey] store the chat's outcome, then restore the pre-handler session context
+            await refresh_gateway_turn_outcome(self, session_entry)
             self._clear_session_env(_session_env_tokens)
 
     def _profile_scope_for_source(self, source: SessionSource):

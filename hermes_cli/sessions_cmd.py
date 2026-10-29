@@ -1207,7 +1207,16 @@ _DB_HANDLERS = {
     "retitle-skills": _cmd_retitle_skills, "browse": _cmd_browse, "optimize": _cmd_optimize,
     "clean-markers": _cmd_clean_markers, "optimize-storage": _cmd_optimize_storage,
     "repair-routing": _cmd_repair_routing, "repair-prompts": _cmd_repair_prompts, "stats": _cmd_stats,
+    "mute": lambda db, a: _outcome_cmd().cmd_mute(db, a, True),
+    "unmute": lambda db, a: _outcome_cmd().cmd_mute(db, a, False),
+    "outcome": lambda db, a: _outcome_cmd().cmd_outcome(db, a),
+    "outcome-audit": lambda db, a: _outcome_cmd().cmd_outcome_audit(db, a),
 }
+
+
+def _outcome_cmd():
+    from hermes_cli import sessions_cmd_outcome
+    return sessions_cmd_outcome
 
 
 def _print_empty_store(action: str, args) -> None:

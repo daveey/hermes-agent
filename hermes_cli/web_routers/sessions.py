@@ -28,7 +28,8 @@ from hermes_cli.review_session_activity import annotate_review_wait
 from hermes_cli.web_server_gateway import _strip_session_list_rows
 from hermes_cli.web_server_sessions import _maybe_auto_archive_for_profile, _session_latest_descendant
 from hermes_cli.web_models import (
-    BackgroundProcessStop, BulkDeleteSessions, SessionImport, SessionOwnerBackfill, SessionPrune, SessionRename)
+    BackgroundProcessStop, BulkDeleteSessions, SessionImport, SessionMute, SessionOwnerBackfill, SessionPrune,
+    SessionRename)
 from hermes_cli.web_routers._common import (
     CORRUPT_STORE_DETAIL, corrupt_store_as_status, log as _log, destructive_profile, http_failure,
 )
@@ -999,6 +1000,35 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
         return result
 
     return await asyncio.to_thread(_with_db, body.profile, _update, read_only=False)
+
+
+@manage_router.post("/api/sessions/{session_id}/mute")
+async def mute_session_endpoint(session_id: str, body: SessionMute):
+    """[daveey] Server-side mute (Desktop ⌘B park): stored on the lineage and reflected in the outcome."""
+    from hermes_state_outcome import set_muted
+
+    def _mute(db):
+        sid = _resolve_session_id(db, session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail=_NOT_FOUND)
+        return {"ok": True, "muted": body.muted, "outcome": set_muted(sid, body.muted, db=db)}
+
+    return await asyncio.to_thread(_with_db, body.profile, _mute, read_only=False)
+
+
+@manage_router.get("/api/sessions/{session_id}/outcome")
+async def get_session_outcome_endpoint(session_id: str, refresh: bool = False, profile: Optional[str] = None):
+    """[daveey] The chat's stored outcome; ``refresh=1`` re-derives and stores it first."""
+    from hermes_state_outcome import get_outcome, refresh_outcome
+
+    def _read(db):
+        sid = _resolve_session_id(db, session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail=_NOT_FOUND)
+        outcome = refresh_outcome(sid, "manual", db=db) if refresh else get_outcome(sid, db=db)
+        return {"session_id": sid, "outcome": outcome}
+
+    return await asyncio.to_thread(_with_db, profile, _read, read_only=not refresh)
 
 
 def _compact_json(obj) -> str:
