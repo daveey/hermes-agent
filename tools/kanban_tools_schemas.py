@@ -635,7 +635,11 @@ KANBAN_CREATE_SCHEMA = _schema(
         "orchestrator workers to fan out — decompose work into child "
         "tasks with specific assignees, link them into a pipeline, "
         "then complete your own task. The dispatcher picks up the new "
-        "tasks on its next tick and spawns the assigned profiles."
+        "tasks on its next tick and spawns the assigned profiles. "
+        "Count owners by board/project, not by your chat's links: a card "
+        "that open cards on any board or gateway already cover is refused "
+        "(code create_overlap, with their ids); continue that card, or pass "
+        "distinct_from + distinct_reason when the work really is separate."
     ),
     {
         "title": _prop("string", "Short task title (required)."),
@@ -708,6 +712,10 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "— a specifier profile is expected to flesh out "
                 "the body before work starts."
         )),
+        "distinct_from": {"type": "array", "items": {"type": "string"}, "description": (
+                "Ids of open cards a create_overlap refusal named that this card is NOT a duplicate of. "
+                "Needs distinct_reason; recorded as a create_overlap event on the new card.")},
+        "distinct_reason": _prop("string", "Why this card is separate work from the distinct_from cards."),
         "idempotency_key": _prop("string", (
                 "If a non-archived task with this key already "
                 "exists, return that task's id instead of creating "

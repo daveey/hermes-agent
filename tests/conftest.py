@@ -294,6 +294,9 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     # defaultHost and silently select the wrong nested config block. Tests of
     # custom host resolution override/delete this explicitly.
     monkeypatch.setenv("HERMES_HONCHO_HOST", "hermes")
+    # The hermes-hub replica (hub.db) lives under HOME, which stays real: point readers (kanban_create's overlap
+    # check, wait replicas) at an empty per-test dir so the host's live cards never leak into a test. [daveey]
+    monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "hermes-hub-state"))
 
     # 3. Isolate both inputs to profile/root resolution. HERMES_HOME alone
     #    is insufficient: get_default_hermes_root() resolves the native root

@@ -1899,13 +1899,13 @@ DEFAULT_CONFIG = {
     "kanban": {
         # Central sync (core patch 0193): true = boards opened afterwards get sync tables + outbox triggers. [daveey]
         "sync": {"enabled": False},
+        "create_overlap_check": True,  # kanban_create refuses work open cards already own (kanban_overlap) [daveey]
         # A board whose TABLE b-trees fail integrity_check (REINDEX can't fix it) pauses dispatch; true = the
         # gateway dispatcher also starts `hermes kanban recover` for it (salvage in a child process, fill from
         # the newest healthy backup, write back in place, loss report + follow-up card + sync reconcile). On
         # here: fail-closed alone left a board down until an agent noticed by chance. [daveey]
         "auto_recover_corruption": True,
-        # Assignee of the follow-up card an automatic recovery files on the recovered board. [daveey]
-        "recovery_card_assignee": "default",
+        "recovery_card_assignee": "default",  # assignee of the card an automatic recovery files [daveey]
         # Opt-in per-profile broker argv before gh (empty = ordinary login); never include tokens.
         "pr_acceptance": {"gh_command_prefix": []},
         # Calendar retention for terminal worktrees; archive commits to recovery

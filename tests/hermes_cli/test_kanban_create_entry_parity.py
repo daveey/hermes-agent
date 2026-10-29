@@ -281,3 +281,36 @@ def test_every_create_path_refuses_a_pin_the_managed_registry_rejects(chat, monk
             assert bad.status_code == 400 and "model_pin_not_in_routing_registry" in bad.text, bad.text
     with kbc.connect_closing() as conn:
         assert kb.list_tasks(conn) == []
+
+
+def test_placed_tool_create_is_overlap_checked_before_it_leaves(chat, tmp_path, monkeypatch):
+    """[daveey] A card the placement route sends to another gateway is checked against that gateway's open cards
+    (hermes-hub replica) first: a duplicate never reaches the courier; distinct work still does."""
+    import sqlite3
+
+    from hermes_cli import kanban_capability_registry as reg
+    from hermes_cli import kanban_placement as kp
+    from tools.registry import registry
+    hub_db = tmp_path / "hub-state" / "hub.db"
+    hub_db.parent.mkdir(parents=True)
+    db = sqlite3.connect(hub_db)
+    db.execute("CREATE TABLE replica (gw TEXT, coll TEXT, key TEXT, data TEXT)")
+    db.execute("INSERT INTO replica VALUES ('hub', 'tasks', 'default/research-x/t_live', ?)", (json.dumps(
+        {"id": "t_live", "board": "research-x", "gateway": "hub", "status": "running",
+         "title": "Stage B1: tuning matrix on rented GPUs", "sessions": []}),))
+    db.commit()
+    db.close()
+    monkeypatch.setenv("HERMES_HUB_STATE", str(hub_db.parent))
+    monkeypatch.setattr(reg, "self_gateway", lambda: "macbook")
+    monkeypatch.setattr(kp, "decide", lambda view, **kw: {"where": "hub", "why": "routed"})
+    sent = []
+    monkeypatch.setattr(kp, "create_remote", lambda view, **kw: sent.append(view["title"]) or
+                        {"ok": True, "request_id": "r1", "queued_only": True})
+    dup = json.loads(registry.dispatch("kanban_create", {
+        "title": "Stage B: run it", "body": "Execute Stage B for Metta-AI/research-x.", "assignee": "default",
+        "requires": []}))
+    assert dup["code"] == "create_overlap" and [m["id"] for m in dup["matches"]] == ["t_live"], dup
+    ok = json.loads(registry.dispatch("kanban_create", {"title": "Rotate the Telnyx key", "assignee": "default",
+                                                        "requires": []}))
+    assert ok["status"] == "queued" and ok["placed"]["gateway"] == "hub", ok
+    assert sent == ["Rotate the Telnyx key"]

@@ -20,7 +20,8 @@ from hermes_cli.goals import handoff_judge_goal, judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
-from tools.kanban_tools_placement import _placement_refused
+from hermes_cli import kanban_overlap
+from tools.kanban_tools_placement import _marker_placement_fields, _placement_refused, _runs_where
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
@@ -1692,22 +1693,6 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         return None, None
 
 
-def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
-    """Where a card created on this board runs, for the kanban_create result. Never raises."""
-    if runs_on is not None:
-        if pinned_machine:
-            return f"{pinned_machine} via the board lease (runs_on={runs_on})"
-        return f"a machine matching runs_on={runs_on} via the board lease"
-    if marker_placement and marker_placement.get("defer"):
-        return f"{marker_placement['defer']} once its parents finish"
-    try:
-        from hermes_cli import kanban_capability_registry as _reg
-        gw = _reg.self_gateway()
-    except Exception:
-        gw = None
-    return f"here ({gw})" if gw else "here"
-
-
 @_kanban_handler("kanban_create")
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
@@ -1793,6 +1778,12 @@ def _handle_create(args: dict, **kw) -> str:
             if runs_on is not None:
                 pinned_machine = str(args.get("placement")).strip()
                 args = {**args, "placement": "local"}
+        # [daveey] Refuse a second owner: open cards on every board/gateway, not this chat's links.
+        refused, after_create = kanban_overlap.check(conn, args, courier=origin_intent is not None,
+                                                     title=str(title).strip(), session_id=session_id,
+                                                     self_tid=self_tid, parents=parents)
+        if refused:
+            return refused
         if origin_intent is None and origin is None:
             check_tool_create(args.get("requires"), workspace_kind=workspace_kind, project_id=project_id,
                               skills=skills, assignee=str(assignee))  # before placement routes it away [daveey]
@@ -1852,22 +1843,8 @@ def _handle_create(args: dict, **kw) -> str:
             }}
         if origin is not None:
             extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
-        if marker_placement and marker_placement.get("defer"):
-            # [daveey] Run on the routed gateway once the parents finish (kanban_placement_forward).
-            from hermes_cli import kanban_placement_forward as _kpf
-            from hermes_cli.profiles import current_profile_name as _cpn
-            _kpf.record_deferral(conn, new_tid, target=marker_placement["defer"], origin_session=session_id,
-                                 origin_profile=_cpn("default") or "default")
-            extra["placement"] = {"where": "local", "defer": marker_placement["defer"],
-                                  "why": marker_placement["why"]}
-            extra["note"] = (f"Created here as {new_tid} so it can wait on its parents; it runs on "
-                             f"{marker_placement['defer']}, not here: when the parents finish the dispatcher "
-                             f"forwards it there and this card completes when that one does.")
-        elif marker_placement and marker_placement.get("runs_on"):
-            extra["placement"] = dict(marker_placement)
-        elif marker_placement:
-            extra["placement"] = {"where": marker_placement["where"], "why": marker_placement["why"]}
-            extra["remedy"] = marker_placement["remedy"]
+        extra.update(_marker_placement_fields(conn, new_tid, marker_placement, session_id))
+        after_create(conn, new_tid)
         if origin_intent is None and args.get("requires"):
             # Placement preflight: declared gateway needs this gateway lacks are owned first. [daveey]
             from hermes_cli.kanban_capability_routing import preflight
