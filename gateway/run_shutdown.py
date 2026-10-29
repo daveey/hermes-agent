@@ -30,6 +30,7 @@ from gateway.restart import (
 from gateway.run_common import _UNSET
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
 from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_watchdog_delay
+from gateway.run_shutdown_restart_wait import RESTART_CANCELLED, GatewayRestartWaitMixin
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -183,7 +184,7 @@ def _effective_watchdog_leash(runner: object) -> float:
     return effective_stop_watchdog_delay(runner, resolve_shutdown_watchdog_delay(effective_stop_drain_timeout(runner)))
 
 
-class GatewayShutdownMixin(GatewaySessionEndMixin):
+class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin):
     """Stop/drain/restart, scale-to-zero and active-work accounting methods for GatewayRunner."""
 
     @dataclasses.dataclass
@@ -1597,47 +1598,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             + self._restart_wait_cron_counts()["awaitable"]
         )
 
-    def _describe_active_work(self) -> list:
-        """One dict per in-flight work unit the restart wait is holding for, so an observer
-        (``hermes update``, ``hermes gateway status``) can name it instead of printing a bare count.
-
-        ``kind`` ∈ ``chat`` (session turn), ``cron`` (job id + external worker pid when the run was
-        handed to a restart-safe scope), ``api`` / ``deferred`` (count only — those sources expose
-        no identity). Best-effort: a source that can't be read is omitted, never raises.
-        """
-        from gateway.run import _AGENT_PENDING_SENTINEL
-        now = time.time()
-        units: list = []
-        for key, state in list(self._sessions_map().items()):
-            agent = state.turn.agent
-            if agent is None:
-                continue
-            unit: dict = {"kind": "chat", "session": key, "pid": os.getpid()}
-            if state.turn.started_ts:
-                unit["elapsed_s"] = round(now - state.turn.started_ts, 1)
-            if agent is not _AGENT_PENDING_SENTINEL:
-                unit["model"] = getattr(agent, "model", None)
-                summary_fn = getattr(agent, "get_activity_summary", None)
-                if callable(summary_fn):
-                    with suppress(Exception):
-                        summary = summary_fn()
-                        unit["current_tool"] = summary.get("current_tool")
-                        unit["idle_s"] = summary.get("seconds_since_activity")
-            units.append(unit)
-        with suppress(Exception):
-            from cron.scheduler import get_running_job_details, get_wedged_job_ids
-            wedged = get_wedged_job_ids()
-            for job in get_running_job_details():
-                units.append({"kind": "cron", "job_id": job["job_id"], "elapsed_s": job["elapsed_s"],
-                              "pid": job["worker_pid"] or os.getpid(), "external": bool(job["worker_pid"]),
-                              "wedged": job["job_id"] in wedged,
-                              "restart_safe": bool(job.get("restart_safe"))})
-        for kind, count in (("api", self._active_api_run_count()), ("deferred", self._active_deferred_agent_worker_count())):
-            units.extend({"kind": kind, "pid": os.getpid()} for _ in range(count))
-        return units
-
-    async def _await_active_work_before_restart(self) -> bool:
+    async def _await_active_work_before_restart(self) -> Any:
         """Wait for in-flight work before ``stop()`` so the requesting turn isn't force-interrupted.
+        ``RESTART_CANCELLED``: the core update behind it gave up (``_update_intent_withdrawn``).
 
         Wedged turns are excluded (restart is their remedy). True when drained to zero, False when the
         cap elapsed or only wedged work remains (caller proceeds to ``stop()``).
@@ -1670,8 +1633,11 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         last_status_at = 0.0
+        intent = getattr(self, "_restart_update_intent", None)
         while self._awaitable_work_count() > 0:
             now = loop.time()
+            if self._update_intent_withdrawn(intent):
+                return RESTART_CANCELLED
             if now >= deadline:
                 logger.warning(
                     "Restart after-turn wait timed out after %.0fs with %d "
@@ -1705,6 +1671,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
     def request_restart(self, *, detached: bool = False, via_service: bool = False) -> bool:
         if self._restart_task_started:
             return False
+        self._restart_update_intent = self._core_update_intent_path()
         self._restart_requested = True
         self._restart_detached = detached
         self._restart_via_service = via_service
@@ -1716,7 +1683,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         self._mark_api_runs_shutdown_requested()
 
         async def _run_restart() -> None:
-            await self._await_active_work_before_restart()
+            if await self._await_active_work_before_restart() is RESTART_CANCELLED:
+                self._cancel_restart()
+                return
             # Detached helper only AFTER the after-turn wait, or its drain_timeout+5 deadline fires mid-turn.
             if detached:
                 with _log_suppressed(logging.ERROR, "Failed to launch detached gateway restart helper: %s"):

@@ -90,6 +90,26 @@ def reserve(home):
             raise
 
 
+def extend(home):
+    """A reservation taken WITHOUT the hold check, for work already admitted under a live reservation
+    the caller still holds (a cron run registered inside its tick's reservation). The updater reads
+    reservations after setting the hold, so it sees the caller's or this one: never neither. [daveey]"""
+    import fcntl
+
+    with admission_lock(home, timeout=0.05) as root:
+        directory = root / "reservations"
+        directory.mkdir(exist_ok=True)
+        path = directory / uuid.uuid4().hex
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return Reservation(fd, path)
+        except BaseException:
+            os.close(fd)
+            path.unlink(missing_ok=True)
+            raise
+
+
 def _state_locked(root):
     import fcntl
 

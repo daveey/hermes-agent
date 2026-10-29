@@ -824,6 +824,7 @@ def try_register_running_job(job_id: str, *, owner=None, future=_FUTURE_PENDING)
     with retirement.work() as admitted, _running_lock:
         if not admitted or key in _running_job_ids:
             return False
+        _take_run_reservation(key)
         _running_job_ids.add(key)
         # Same critical section as the add: no window where an in-flight id lacks an age the sweep
         # can bound. Sentinel is replaced by the real future once ``pool.submit`` returns.
@@ -854,6 +855,38 @@ def release_running_job(
         _running_futures.pop(key, None)
         _running_worker_pids.pop(key, None)
         _scope_isolated_job_ids.discard(key)
+        _drop_run_reservation(key)
+
+
+# in-flight key -> its core-update admission reservation (``hermes_cli.admission_fence``). [daveey]
+_running_reservations: dict = {}
+
+
+def _take_run_reservation(key) -> None:
+    """Hold a core-update admission reservation for the whole run (caller holds ``_running_lock``).
+
+    hermes-sync's drain only reads reservations; the gateway's restart wait, which counts this run,
+    is invisible to it. Without this a cron run kept the restart open after the drain gave up and the
+    gateway restarted on the old code (t_01a189db034f3b2b). Taken with ``extend`` (no hold check): a
+    tick-dispatched run registers inside its tick's reservation, so the updater sees one or the other.
+    A manual run during a hold also counts, so the window waits for it instead of restarting under it.
+    Best-effort: an unavailable fence never blocks a run. The flock dies with this process.
+    """
+    try:
+        from hermes_cli.admission_fence import extend, SUPPORTED
+        if not SUPPORTED:
+            return
+        from hermes_constants import get_default_hermes_root
+        _running_reservations[key] = extend(get_default_hermes_root(home=key[0]))
+    except (ImportError, OSError, TimeoutError) as exc:
+        logger.debug("cron run %s: no update admission reservation (%s)", key[1], exc)
+
+
+def _drop_run_reservation(key) -> None:
+    reservation = _running_reservations.pop(key, None)
+    if reservation is not None:
+        with contextlib.suppress(Exception):
+            reservation.close()
 
 
 def _inflight_min_allowance_minutes() -> float:
@@ -1101,6 +1134,7 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
             _running_since.pop(key, None)
             _running_allowance_s.pop(key, None)
             _running_futures.pop(key, None)
+            _drop_run_reservation(key)
             _forced_release_count += 1
             stale.append((job_id, age, allowance, fut, reason))
 
