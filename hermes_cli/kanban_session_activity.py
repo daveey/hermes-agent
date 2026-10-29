@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_activity_identity as _identity
+from hermes_cli import kanban_scope_heartbeat as _scope_hb
+from hermes_cli.kanban_scope_heartbeat import scope_heartbeats as _scope_heartbeats
 from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases, _moved_evidence, _retire_moved
 import contextlib
 import json
@@ -580,9 +582,10 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
 # a card; distinct qualified profiles stay separate. Historical unqualified aliases
 # do not add another count when a qualified record for the same card is available.
 HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync for this long = stale
-# The owner collector publishes each scope heartbeat about every 180s (sawtooth 0..~200s as replicated), so a
-# 180s window flapped: a closed card was released half the time. Allow ~2.5 collector periods. [daveey]
-SCOPE_HEARTBEAT_FRESH_S = 450.0
+# Scope-heartbeat freshness is per owner: ``kanban_scope_heartbeat.scope_window`` derives it from the period the
+# owner's collector publishes (floor 450 s, the window every owner gets when it publishes none). A fixed 450 s
+# against a loaded hub's ~440 s cycle flapped closed cards between released and "never released". [daveey]
+SCOPE_HEARTBEAT_FRESH_S = _scope_hb.SCOPE_HEARTBEAT_FLOOR_S
 _REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority")
 _remote_last: list[dict[str, Any]] | None = None  # last good read (process lifetime)
 _remote_scope: tuple[str, ...] | None = None
@@ -600,35 +603,15 @@ def _meta_float(conn: sqlite3.Connection, key: str) -> float | None:
 TERMINAL_STATUSES = ("done", "archived")
 
 
-def _scope_heartbeats(info_rows: list[tuple[str, str]]) -> dict[tuple[str, str, str], float]:
-    """``(gateway, profile, board) -> observed_at`` for every scope its owner collector read cleanly.
-
-    Ambiguous scopes (listed twice) and scopes not in state ``ok`` are absent: they prove nothing."""
-    seen: dict[tuple[str, str, str], list] = {}
-    for gw, raw in info_rows:
-        try:
-            info = json.loads(raw)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(info, dict) or info.get('gateway') != gw or not isinstance(info.get('task_scopes'), list):
-            continue
-        for scope in info['task_scopes']:
-            if isinstance(scope, dict) and isinstance(scope.get('profile'), str) and isinstance(scope.get('board'), str):
-                seen.setdefault((str(gw), scope['profile'], scope['board']), []).append(scope)
-    return {key: scopes[0].get('observed_at') for key, scopes in seen.items()
-            if len(scopes) == 1 and scopes[0].get('state') == 'ok'
-            and type(scopes[0].get('observed_at')) in (int, float)}
-
-
 def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | None, board: str,
-                            heartbeats: dict[tuple[str, str, str], float], now: float, stale: bool,
+                            heartbeats: dict[tuple[str, str, str], tuple[float, float]], now: float, stale: bool,
                             evidence: dict[str, Any]) -> bool:
     """The owner itself, recently, published this card as closed.
 
     Release needs all of: a fresh hub sync; a profile-qualified record whose own identity fields match its
     key; a terminal status inside the owner collector's hash-bound observation (``origin_observation``, so a
     replica row edited or truncated in transit proves nothing); and that collector's per-scope heartbeat for
-    this exact (profile, board) within ``SCOPE_HEARTBEAT_FRESH_S``, so an offline owner's last word is not taken
+    this exact (profile, board) within that owner's window (``kanban_scope_heartbeat``), so an offline owner's last word is not taken
     as current. Absence of a row is never release. This is the same rule a local board applies to its own
     cards (``done``/``archived`` are not counted), applied only to evidence the owner signed. Pre-ledger
     cards had no other release path, so every one of them stayed open forever. ``evidence`` is the task's
@@ -647,7 +630,7 @@ def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | 
     if task.get('origin_bindings') and evidence.get('verified') is not True and task.get('status') != 'archived':
         return False
     beat = heartbeats.get((gw, owner_profile, board))
-    return beat is not None and 0 <= now - beat <= SCOPE_HEARTBEAT_FRESH_S
+    return beat is not None and _scope_hb.fresh(beat[0], now, beat[1])
 
 
 # (replica path, gw, record key) -> (row text, decoded row) from the last replica read: the projection rebuilds on
@@ -744,7 +727,7 @@ def _read_remote_links(path: Path, now: float | None = None, *,
     cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
                              qualified_out=qualified, owners_out=owners, seen_out=seen_at, moved_out=moved)
     # Reuse ends at the next scope-heartbeat cut-off; the hub-staleness cut-off is the ``stale`` comparison above.
-    beats = [beat + d for beat in _scope_heartbeats(info_rows).values() for d in (0.0, SCOPE_HEARTBEAT_FRESH_S)]
+    beats = [beat + d for beat, window in _scope_heartbeats(info_rows).values() for d in (0.0, window)]
     _remote_read_memo = (key, now, min((t for t in beats if t > now), default=float('inf')), list(cards),
                          frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
                          dict(seen_at), dict(moved))
@@ -776,7 +759,7 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
     heartbeats = _scope_heartbeats(info_rows)
     if horizon_out is not None:
-        cutoffs = [beat + d for beat in heartbeats.values() for d in (0.0, SCOPE_HEARTBEAT_FRESH_S)]
+        cutoffs = [beat + d for beat, window in heartbeats.values() for d in (0.0, window)]
         if not stale:
             cutoffs.append(last_ok + HUB_STALE_AFTER_S)
         horizon_out.extend(t for t in cutoffs if t > now)
@@ -825,7 +808,7 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         # (session, card) pair absent from it is a dropped link, not an unreadable replica.
         owners_out.update((gw, board, tid) for gw, _, board, tid in tasks)
     if moved_out is not None and not stale:
-        moved_out.update(_moved_evidence(tasks, heartbeats, now, SCOPE_HEARTBEAT_FRESH_S))
+        moved_out.update(_moved_evidence(tasks, heartbeats, now))
     blank_before = {key for key in tasks if key[1] is None}
     _fold_legacy_aliases(tasks, raw)
     # Only a proven-identity alias is the same card as its qualified twin (folded above, links carried

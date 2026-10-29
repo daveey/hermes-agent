@@ -6,6 +6,7 @@ import sqlite3
 import time
 
 from hermes_cli import kanban_capability_registry as registry
+from hermes_cli.kanban_scope_heartbeat import scope_window
 
 # Gateway task_scopes are refreshed each sync; task updated_at only changes on edits.
 MAX_AGE_SECONDS = 600
@@ -19,9 +20,9 @@ STATUSES = frozenset(("todo", "ready", "running", "scheduled", "review", "blocke
 class StaleReplica(ValueError):
     """The card was seen in the gateway's replica, but that replica is older than MAX_AGE_SECONDS."""
 
-    def __init__(self, gateway, board, age, task):
-        super().__init__(f"stale replica for {gateway}/{board} (age={age:.0f}s, limit={MAX_AGE_SECONDS}s)")
-        self.gateway, self.board, self.age, self.task = gateway, board, age, task
+    def __init__(self, gateway, board, age, task, limit=MAX_AGE_SECONDS):
+        super().__init__(f"stale replica for {gateway}/{board} (age={age:.0f}s, limit={limit:.0f}s)")
+        self.gateway, self.board, self.age, self.task, self.limit = gateway, board, age, task, limit
 
 
 def read_task(gateway, target, board=None):
@@ -42,15 +43,19 @@ def read_task(gateway, target, board=None):
                 or task.get("gateway") != gateway or task.get("profile") != "default"
                 or task.get("owner_profile") != "default"):
             raise ValueError(f"invalid replica task {target}")
-        scopes = []
+        scopes, limit = [], float(MAX_AGE_SECONDS)
         for (raw,) in db.execute("SELECT data FROM replica WHERE gw=? AND coll='gateway'", (gateway,)):
-            scopes.extend(json.loads(raw).get("task_scopes", []))
+            info = json.loads(raw)
+            scopes.extend(info.get("task_scopes", []))
+            # A slow owner collector publishes its period: never call a heartbeat stale that the release
+            # readers still count as fresh (kanban_scope_heartbeat). [daveey]
+            limit = max(limit, scope_window(info))
         matched = [s for s in scopes if s.get("profile") == "default" and s.get("board") == board]
         if len(matched) != 1 or matched[0].get("state") != "ok":
             raise ValueError(f"missing successful task-scope observation for {gateway}/{board}")
         age = time.time() - float(matched[0].get("observed_at") or 0)
-        if age > MAX_AGE_SECONDS:
-            raise StaleReplica(gateway, board, age, task)
+        if age > limit:
+            raise StaleReplica(gateway, board, age, task, limit)
         if age < -60:
             raise ValueError(f"stale replica for {gateway}/{board} (age={age:.0f}s, limit={MAX_AGE_SECONDS}s)")
         return task
@@ -88,7 +93,7 @@ def stale_message(target, stale):
     status = stale.task.get("status")
     orphan = " orphan producer;" if orphan_reason(stale.task) else ""
     return (f"{target} {status} (replica stale:{orphan} gateway={stale.gateway} not synced for {stale.age:.0f}s, "
-            f"stale_age={stale.age:.0f}s, limit={MAX_AGE_SECONDS}s; last seen {status}, unknown now: not yet)")
+            f"stale_age={stale.age:.0f}s, limit={stale.limit:.0f}s; last seen {status}, unknown now: not yet)")
 
 
 def check(gateway, target, *, board=None, until=(), since=()):

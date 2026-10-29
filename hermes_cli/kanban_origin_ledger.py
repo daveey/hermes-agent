@@ -19,6 +19,8 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Callable
 
+from hermes_cli.kanban_scope_heartbeat import SCOPE_HEARTBEAT_FLOOR_S, scope_window
+
 
 def _json(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -438,12 +440,13 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                         readable = (info.get('gateway') == owner['gateway'] and len(matching) == 1
                                     and matching[0].get('state') == 'ok')
                         heartbeat = matching[0].get('observed_at') if readable else None
+                        window = scope_window(info)
                     except (ValueError, TypeError, AttributeError):
-                        readable, heartbeat = False, None
+                        readable, heartbeat, window = False, None, SCOPE_HEARTBEAT_FLOOR_S
                     # Owner liveness: the collector's per-scope heartbeat (one record per sync) proves it read
                     # this whole board recently, so an unchanged, current task record is still observed. The
                     # per-task stamp is accepted too, for records published before scope heartbeats existed.
-                    live = (_recent(heartbeat, now, 450)
+                    live = (_recent(heartbeat, now, window)
                             or _recent(_owner_evidence(task).get('observed_at'), now))
                     current = current and readable and live
                 if (owner['gateway'], owner['profile']) == (gateway, profile):
