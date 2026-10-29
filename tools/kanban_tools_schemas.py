@@ -46,7 +46,7 @@ def _schema(name: str, description: str, properties: dict[str, Any], required: l
 
 KANBAN_ORIGIN_ADOPT_SCHEMA = _schema(
     "kanban_origin_adopt",
-    "Attach an existing exact owner task to an origin through the authenticated courier. "
+    "Attach an existing exact owner task to an origin via the authenticated courier. "
     "Requires trusted courier context; never creates or completes a task. A pending "
     "result is not a successful handoff: wait for the origin-owned receipt.",
     {"task_id": _prop("string", "Exact existing task ID, never a prefix.")},
@@ -350,8 +350,8 @@ KANBAN_BLOCK_SCHEMA = _schema(
 KANBAN_SCHEDULE_SCHEMA = _schema(
     "kanban_schedule",
     (
-        "Park your current task in the 'scheduled' state while it waits for "
-        "time or an external event. This ends the current run and makes the "
+        "Park your current task as 'scheduled' while it waits for time or an event. "
+        "This ends the current run and makes the "
         "task non-dispatchable until an orchestrator unblocks it, or until the "
         "time named by a ``SCHEDULED_UNTIL=<ISO8601>`` marker in ``reason`` "
         "(default 24h), or until ``wake_check`` exits 0. A wait needs a producer, "
@@ -384,7 +384,7 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
 KANBAN_MOVE_SCHEMA = _schema(
     "kanban_move",
     (
-        "Move your current task to another machine and end this run there: use when the work needs something "
+        "Move your current task to another machine and end this run. Use it when the work needs something "
         "this machine lacks (a Mac for Xcode/iOS/simulators, a GPU, a specific host's files or logs) or "
         "belongs on a less loaded machine. It saves your checkpoint, ends this run as 'continued', sets the "
         "card's runs_on to the labels you give and re-queues it, so ONLY a machine carrying every label claims "
@@ -826,8 +826,8 @@ KANBAN_CREATE_SCHEMA = _schema(
 KANBAN_UNBLOCK_SCHEMA = _schema(
     "kanban_unblock",
     (
-        "Unblock a Kanban task (blocked, scheduled, or a triage card a block "
-        "loop escalated). It moves to ready when all parents are done, "
+        "Unblock a Kanban task: blocked, scheduled, or a block-loop triage card. "
+        "It moves to ready when all parents are done, "
         "or todo while any parent remains open. Orchestrator-only, except "
         "one case: a self-heal fix card may unblock the single card named in "
         "its defect (`kanban card t_...`). A card that finished fix card "

@@ -15,8 +15,8 @@ from tools.registry import no_cache_check_fn, registry, tool_error, tool_result
 SESSION_MOVE_SCHEMA = {
     "name": "session_move",
     "description": (
-        "Move THIS chat to another gateway (machine) after the current turn ends, e.g. when the work needs files, "
-        "devices or tools that only exist there. The chat's whole history is copied, the other gateway becomes "
+        "Move THIS chat to another gateway (machine) after the current turn ends. Use it when the work needs "
+        "files, devices or tools that only exist there. The chat's whole history is copied, the other gateway becomes "
         "its owner and the copy here is archived; the user reopens the chat on the target. Only targets listed in "
         "sessions.move.hosts are allowed. Say what will happen and why before calling it; the move starts once "
         "this turn is over."),
