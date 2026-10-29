@@ -1,6 +1,13 @@
-import { Codecs, persistentAtom } from '@/lib/persisted'
+import { atom } from 'nanostores'
 
-import { $sessions, lineageAliases } from './session'
+import { setSessionMutedRemote } from '@/hermes'
+import { translateNow } from '@/i18n'
+import { isMissingRestEndpoint } from '@/lib/gateway-rpc'
+import { Codecs, persistentAtom } from '@/lib/persisted'
+import type { SessionInfo } from '@/types/hermes'
+
+import { notifyError } from './notifications'
+import { $sessions, lineageAliases, setSessions } from './session'
 
 /**
  * [daveey] Sessions the user marked "blocked" with ⌘B — parked on something
@@ -9,6 +16,12 @@ import { $sessions, lineageAliases } from './session'
  *
  * Local to this window's storage. Compression rotates a conversation's stored
  * id, so membership is checked across the whole lineage.
+ *
+ * [daveey] session-outcome: the backend owns the park now (`sessions.muted`,
+ * `POST /api/sessions/{id}/mute`, read back as `row.muted`). This list stays as
+ * the optimistic cache, and as the only record against a backend that predates
+ * `muted` (the row carries no `muted`, or the endpoint 404s): then ⌘B behaves
+ * exactly as before.
  */
 export const $blockedSessionIds = persistentAtom<string[]>(
   'hermes.desktop.blockedSessionIds',
@@ -16,7 +29,20 @@ export const $blockedSessionIds = persistentAtom<string[]>(
   Codecs.stringArray
 )
 
+/** [daveey] How long a ⌘B write outranks the row's `muted`: a list page already in flight when we POST can land
+ *  after the ack carrying the old value (same pattern as the unread write guard). */
+export const MUTE_WRITE_GUARD_MS = 10_000
+
+export interface MuteWrite {
+  at: number
+  value: boolean
+}
+
+/** [daveey] id → the park value we last wrote and when. Fresh entries outrank `row.muted`. */
+export const $muteWriteGuard = atom<ReadonlyMap<string, MuteWrite>>(new Map())
+
 type LineageRows = Parameters<typeof lineageAliases>[1]
+type MuteRow = Pick<SessionInfo, 'id'> & Partial<Pick<SessionInfo, 'connection_id' | 'muted' | 'profile'>>
 
 export function isSessionBlocked(
   id: string,
@@ -30,19 +56,131 @@ export function isSessionBlocked(
   return lineageAliases(id, sessions).some(alias => blocked.includes(alias))
 }
 
-/** Flip the flag; returns the new state. Unblocking clears every alias. */
-export function toggleSessionBlocked(id: string): boolean {
-  const sessions = $sessions.get()
-  const blocked = $blockedSessionIds.get()
-
-  if (isSessionBlocked(id, blocked, sessions)) {
-    const aliases = new Set(lineageAliases(id, sessions))
-    $blockedSessionIds.set(blocked.filter(entry => !aliases.has(entry)))
-
-    return false
+/** [daveey] The park a row shows: a fresh ⌘B write, else the backend's `row.muted`, else the local list (an older
+ *  backend that stamps no `muted`). Pure, so every surface resolves it the same way. */
+export function resolveSessionParked(
+  localBlocked: boolean,
+  row: null | Partial<Pick<SessionInfo, 'muted'>> | undefined,
+  write: MuteWrite | undefined,
+  now: number = Date.now()
+): boolean {
+  if (write && now - write.at < MUTE_WRITE_GUARD_MS) {
+    return write.value
   }
 
-  $blockedSessionIds.set([...blocked, id])
+  if (typeof row?.muted === 'boolean') {
+    return row.muted
+  }
 
-  return true
+  return localBlocked
+}
+
+/** [daveey] The ⌘B write recorded for any alias of `id`, if any. */
+export function muteWriteFor(
+  id: string,
+  guard: ReadonlyMap<string, MuteWrite> = $muteWriteGuard.get(),
+  sessions: LineageRows = $sessions.get()
+): MuteWrite | undefined {
+  if (guard.size === 0) {
+    return undefined
+  }
+
+  for (const alias of lineageAliases(id, sessions)) {
+    const write = guard.get(alias)
+
+    if (write) {
+      return write
+    }
+  }
+
+  return undefined
+}
+
+/** [daveey] Whether `id` is parked, reading the stores. Pass `row` when the caller holds it (a project-tree row is
+ *  not in `$sessions`). */
+export function isSessionParked(id: string, row?: null | Partial<Pick<SessionInfo, 'muted'>>): boolean {
+  const sessions = $sessions.get()
+  const listed = row ?? sessions.find(entry => entry.id === id)
+
+  return resolveSessionParked(isSessionBlocked(id, $blockedSessionIds.get(), sessions), listed, muteWriteFor(id))
+}
+
+function setLocalBlocked(id: string, blocked: boolean, sessions: LineageRows): void {
+  const current = $blockedSessionIds.get()
+
+  if (blocked) {
+    if (!isSessionBlocked(id, current, sessions)) {
+      $blockedSessionIds.set([...current, id])
+    }
+
+    return
+  }
+
+  const aliases = new Set(lineageAliases(id, sessions))
+  $blockedSessionIds.set(current.filter(entry => !aliases.has(entry)))
+}
+
+function setMuteWrite(id: string, write: MuteWrite | null): void {
+  const next = new Map($muteWriteGuard.get())
+
+  if (write) {
+    next.set(id, write)
+  } else {
+    next.delete(id)
+  }
+
+  $muteWriteGuard.set(next)
+}
+
+function setRowMuted(id: string, muted: boolean): void {
+  setSessions(rows => (rows.some(row => row.id === id) ? rows.map(row => (row.id === id ? { ...row, muted } : row)) : rows))
+}
+
+/** [daveey] Write a park through to the backend. Optimistic: the local list and the guard paint at once; a failed
+ *  POST rolls both back and shows the normal error toast. A backend without the endpoint keeps the local-only
+ *  park, as before. */
+export async function writeSessionMuted(
+  row: MuteRow,
+  muted: boolean,
+  post: (row: MuteRow, muted: boolean) => Promise<unknown> = setSessionMutedRemote
+): Promise<void> {
+  const sessions = $sessions.get()
+  const previous = isSessionParked(row.id, row)
+
+  setMuteWrite(row.id, { at: Date.now(), value: muted })
+  setLocalBlocked(row.id, muted, sessions)
+
+  try {
+    await post(row, muted)
+    setRowMuted(row.id, muted)
+  } catch (error) {
+    if (isMissingRestEndpoint(error)) {
+      // An older backend: the local list is the only record, exactly as before this endpoint existed.
+      setMuteWrite(row.id, null)
+
+      return
+    }
+
+    setMuteWrite(row.id, null)
+    setLocalBlocked(row.id, previous, $sessions.get())
+    notifyError(error, translateNow('sidebar.row.muteFailed'))
+  }
+}
+
+/** Flip the flag; returns the new state. Unblocking clears every alias. [daveey] A persisted row writes through to
+ *  the backend (`writeSessionMuted`); a draft with no row stays local-only. */
+export function toggleSessionBlocked(id: string): boolean {
+  const sessions = $sessions.get()
+  const row = sessions.find(entry => entry.id === id)
+  const next = !isSessionParked(id, row)
+
+  if (!row) {
+    setLocalBlocked(id, next, sessions)
+
+    return next
+  }
+
+  void writeSessionMuted(row, next)
+
+  return next
 }

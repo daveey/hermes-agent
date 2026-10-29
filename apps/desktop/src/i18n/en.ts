@@ -3386,6 +3386,36 @@ export const en: Translations = {
         `${count} done ${count === 1 ? 'card says' : 'cards say'} part of the work was dropped, with no follow-up card`,
       kanbanStalled: count =>
         `${count} ${count === 1 ? 'card has' : 'cards have'} stalled: waiting over 2 h on something only an agent can do, with nothing producing it`,
+      outcomeDone: 'Done',
+      outcomeDecision: 'Waiting on your decision',
+      outcomeMuted: 'Muted',
+      outcomeRunning: 'Running',
+      outcomeWaiting: 'Waiting',
+      outcomeUnresolved: reason => {
+        switch (reason) {
+          case 'notice_tail':
+            return 'Unresolved: a card update arrived and nothing answered it'
+
+          case 'no_summary':
+            return 'Unresolved: the last reply did not wrap the work up'
+
+          case 'turn_failed':
+            return 'Unresolved: the last turn failed'
+
+          case 'interrupted':
+            return 'Unresolved: the last turn was interrupted'
+
+          case 'subagent_killed':
+            return 'Unresolved: a subagent was stopped before it finished'
+
+          case 'empty':
+            return 'Unresolved: no messages yet'
+
+          default:
+            return 'Unresolved'
+        }
+      },
+      muteFailed: 'Could not update the parked state',
       backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
       backgroundProcessUnnamed: 'background process',
       stopProcess: 'Stop',
@@ -4613,6 +4643,7 @@ export const en: Translations = {
       react: 'React',
       dismissError: 'Dismiss error',
       responseStopped: 'Response stopped',
+      staleNotice: 'outdated: card moved on',
       errorLayers: {
         auth: 'Sign-in problem',
         billing: 'Out of credits',

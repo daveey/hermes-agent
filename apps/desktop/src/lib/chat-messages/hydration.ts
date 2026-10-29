@@ -227,6 +227,11 @@ function messageInterrupted(metadata: SessionMessage['display_metadata']): boole
   return parseDisplayMetadata(metadata)?.interrupted === true
 }
 
+// [daveey] A blocked-card notice the backend marked outdated once the card left `blocked` (session-outcome contract).
+function staleKanbanNotice(message: SessionMessage): boolean {
+  return message.display_kind === 'kanban_notice' && parseDisplayMetadata(message.display_metadata)?.stale === true
+}
+
 function messageReactions(metadata: SessionMessage['display_metadata']): MessageReaction[] {
   const reactions = parseDisplayMetadata(metadata)?.reactions
 
@@ -616,6 +621,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
         ? { asyncResult: asyncResultBody(displayContentForMessage(message.role, message.content || content)) }
         : {}),
       ...(message.display_kind === 'process_complete' ? { asyncResultKind: 'process' as const } : {}),
+      ...(staleKanbanNotice(message) ? { staleNotice: true } : {}),
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
       ...(rowId !== undefined ? { rowId } : {}),
       ...(pendingAbsorbedRows > 0 ? { serverRowSpan: pendingAbsorbedRows + 1 } : {}),

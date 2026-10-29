@@ -1,7 +1,7 @@
 import type { SessionInfo } from '@/types/hermes'
 
 import { $pinnedSessionIds, $sidebarShowAutomated } from './layout'
-import { isSessionBlocked } from './session-blocked'
+import { isSessionParked } from './session-blocked'
 import { $sessionDotStateById, kanbanStripeCounts, type SessionDotState, sessionStatusStripe } from './session-dot-state'
 
 /**
@@ -32,14 +32,15 @@ type AutomatedRow = Pick<
   | 'message_count'
   | 'pinned'
   | 'review_wait'
->
+> &
+  Partial<Pick<SessionInfo, 'muted' | 'outcome'>>
 
 export interface AutomatedRowContext {
   /** Dot state for the row; defaults to `$sessionDotStateById`. */
   dotState?: SessionDotState
   /** Local pin ids; defaults to `$pinnedSessionIds`. */
   pinnedIds?: readonly string[]
-  /** ⌘B parked flag; defaults to `isSessionBlocked(row.id)`. */
+  /** ⌘B parked flag; defaults to `isSessionParked(row.id, row)` (`row.muted`, else the local list). */
   userBlocked?: boolean
 }
 
@@ -58,7 +59,8 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
     row.review_wait,
     row.kanban_attention ?? 0,
     kanbanStripeCounts(row).waiting,
-    kanbanStripeCounts(row).stalled
+    kanbanStripeCounts(row).stalled,
+    row.outcome
   )
 
   return stripe === 'stuck' || stripe === 'blocked' || stripe === 'attention' || stripe === 'stalled'
@@ -80,7 +82,7 @@ export function sessionHiddenAsAutomated(
   }
 
   const state = ctx.dotState ?? $sessionDotStateById.get()[row.id] ?? 'idle'
-  const userBlocked = ctx.userBlocked ?? isSessionBlocked(row.id)
+  const userBlocked = ctx.userBlocked ?? isSessionParked(row.id, row)
 
   return !automatedRowNeedsAttention(row, state, userBlocked)
 }

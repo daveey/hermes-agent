@@ -8,6 +8,7 @@ import { SCAFFOLD_GLYPH_CLASS, SCAFFOLD_LABEL_CLASS, ScaffoldRow } from '@/compo
 import { Codicon } from '@/components/ui/codicon'
 import { LogView } from '@/components/ui/log-view'
 import { ToolIcon } from '@/components/ui/tool-icon'
+import { useI18n } from '@/i18n'
 import { LinkifiedText } from '@/lib/external-link'
 import { cn } from '@/lib/utils'
 
@@ -64,9 +65,35 @@ export const SystemMessage: FC = () => {
   const text = useAuiState(s => messageContentText(s.message.content))
   const asyncResult = useAuiState(s => s.message.metadata.custom?.asyncResult)
   const processResult = useAuiState(s => s.message.metadata.custom?.asyncResultKind === 'process')
+  const staleNotice = useAuiState(s => s.message.metadata.custom?.staleNotice === true)
+  const { t } = useI18n()
 
   if (!text) {
     return null
+  }
+
+  // [daveey] A blocked-card notice whose card has since left `blocked`: kept for the record, dimmed, and labelled so
+  // it no longer reads as a live ask.
+  if (staleNotice) {
+    const multiline = text.includes('\n')
+
+    return (
+      <MessagePrimitive.Root
+        className={cn(
+          'w-[60%] max-w-[44rem] self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/55 opacity-60',
+          multiline ? 'text-left' : 'text-center'
+        )}
+        data-role="system"
+        data-slot="aui_system-message-root"
+        data-stale-notice=""
+      >
+        <span className="mr-1.5 font-medium text-muted-foreground/70" data-slot="stale-notice-label">
+          {t.assistant.thread.staleNotice}
+        </span>
+        <LinkifiedText className="whitespace-pre-wrap" explicitOnly pretty={false} text={text} />{' '}
+        <MessageTimelineTimestamp className={cn(multiline ? 'mt-0.5 block' : 'ml-1.5')} />
+      </MessagePrimitive.Root>
+    )
   }
 
   if (processResult || (typeof asyncResult === 'string' && asyncResult)) {

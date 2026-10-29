@@ -25,8 +25,9 @@
 
 import { computed } from 'nanostores'
 
+import { outcomeStripe } from '@/lib/session-outcome'
 import { stableArray, stableRecord } from '@/lib/stable-array'
-import type { SessionBackgroundProcess, SessionInfo } from '@/types/hermes'
+import type { SessionBackgroundProcess, SessionInfo, SessionOutcome } from '@/types/hermes'
 
 import { $backgroundRunningSessionIds } from './composer-status'
 import { $kanbanObservationTick, hasFreshKanbanObservation } from './kanban-observation'
@@ -252,16 +253,16 @@ export type SessionStatusStripe = 'attention' | 'blocked' | 'done' | 'periodic' 
  *  beats a running watcher (`background`) and `done`, never a working turn. */
 export type ReviewWait = 'parked' | 'stuck'
 
-export const sessionStatusStripe = (
+const derivedStatusStripe = (
   state: SessionDotState,
   hasTurns: boolean,
-  userBlocked = false,
-  kanbanBlocked = 0,
-  periodic = false,
-  reviewWait: null | ReviewWait | undefined = null,
-  kanbanAttention = 0,
-  kanbanWaiting = 0,
-  kanbanStalled = 0
+  userBlocked: boolean,
+  kanbanBlocked: number,
+  periodic: boolean,
+  reviewWait: null | ReviewWait | undefined,
+  kanbanAttention: number,
+  kanbanWaiting: number,
+  kanbanStalled: number
 ): null | SessionStatusStripe =>
   userBlocked
     ? 'blocked'
@@ -283,6 +284,42 @@ export const sessionStatusStripe = (
         ? 'attention'
         : 'done'
       : null
+
+//  [daveey] `outcome`: the row's stored outcome (session-outcome contract). When present it wins over every derived
+//  input below; a ⌘B park and a live turn (working / quiet / needs-input) still beat it. Absent (an older backend)
+//  → the derivation below, unchanged.
+export const sessionStatusStripe = (
+  state: SessionDotState,
+  hasTurns: boolean,
+  userBlocked = false,
+  kanbanBlocked = 0,
+  periodic = false,
+  reviewWait: null | ReviewWait | undefined = null,
+  kanbanAttention = 0,
+  kanbanWaiting = 0,
+  kanbanStalled = 0,
+  outcome: null | SessionOutcome | undefined = null
+): null | SessionStatusStripe => {
+  if (!userBlocked && !hasLiveTurn(state)) {
+    const fromOutcome = outcomeStripe(outcome)
+
+    if (fromOutcome) {
+      return fromOutcome
+    }
+  }
+
+  return derivedStatusStripe(
+    state,
+    hasTurns,
+    userBlocked,
+    kanbanBlocked,
+    periodic,
+    reviewWait,
+    kanbanAttention,
+    kanbanWaiting,
+    kanbanStalled
+  )
+}
 
 type KanbanCounts = Pick<SessionInfo, 'kanban_active' | 'kanban_blocked' | 'kanban_held' | 'kanban_parked'> &
   Partial<Pick<SessionInfo, 'kanban_stalled'>>
@@ -569,7 +606,9 @@ export type StripeTraceRow = Pick<SessionInfo, 'id'> &
       | 'kanban_parked'
       | 'kanban_stalled'
       | 'kanban_waiting_on'
+      | 'muted'
       | 'offline_cached'
+      | 'outcome'
       | 'offline_synced_at'
       | 'profile'
     >
@@ -617,7 +656,9 @@ export function formatStripeTransition(
     ['background_active', row.background_active],
     ['delegating', $delegatingSessionIds.get().includes(row.id)],
     ['bg_running', $backgroundRunningSessionIds.get().includes(row.id)],
-    ['source', rowListSource(row)]
+    ['source', rowListSource(row)],
+    ['outcome', row.outcome?.kind],
+    ['muted', row.muted]
   ]
 
   if (suppressed > 0) {

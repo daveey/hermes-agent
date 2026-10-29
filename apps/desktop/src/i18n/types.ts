@@ -2951,6 +2951,14 @@ export interface Translations extends NoticeTranslations {
       kanbanTasks: (open: number, blocked: number) => string
       kanbanAttention: (count: number) => string
       kanbanStalled: (count: number) => string
+      /** [daveey] Status-stripe tooltips for a row's stored outcome (session-outcome contract). */
+      outcomeDone: string
+      outcomeDecision: string
+      outcomeMuted: string
+      outcomeRunning: string
+      outcomeWaiting: string
+      outcomeUnresolved: (reason: null | string) => string
+      muteFailed: string
       backgroundProcesses: (count: number) => string
       backgroundProcessUnnamed: string
       stopProcess: string
@@ -4017,6 +4025,8 @@ export interface Translations extends NoticeTranslations {
       react: string
       dismissError: string
       responseStopped: string
+      /** [daveey] Label on a blocked kanban notice whose card has since moved on. */
+      staleNotice: string
       /** Layer titles for the structured error card (agent/error_surface.py).
        *  `generic` is the fallback when the backend sent no descriptor. */
       errorLayers: {

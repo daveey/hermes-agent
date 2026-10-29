@@ -38,6 +38,12 @@ vi.mock('@/i18n', () => ({
           kanbanTasks: (open: number, blocked: number) => `${open} open, ${blocked} blocked`,
           kanbanAttention: (count: number) => `${count} dropped`,
           kanbanStalled: (count: number) => `${count} stalled`,
+          outcomeDone: 'Done',
+          outcomeDecision: 'Waiting on your decision',
+          outcomeMuted: 'Muted',
+          outcomeRunning: 'Running',
+          outcomeWaiting: 'Waiting',
+          outcomeUnresolved: (reason: null | string) => `Unresolved: ${reason}`,
           backgroundProcesses: (count: number) => `${count} background processes`,
           backgroundProcessUnnamed: 'background process',
           stopProcess: 'Stop',
@@ -851,4 +857,60 @@ it('does not paint a retained live turn as running on an offline row', () => {
   expect(screen.queryByTestId('session-row-background-processes')).toBeNull()
   expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
   act(() => clearAllSessionStates())
+})
+
+// [daveey] session-outcome: the stored outcome paints the stripe and explains it on hover.
+describe('SidebarSessionRow stored outcome', () => {
+  afterEach(() => {
+    clearAllSessionStates()
+  })
+
+  const stripeOf = (container: HTMLElement) => container.querySelector('[data-slot="session-status-stripe"]')
+
+  it.each([
+    [{ kind: 'done', summary: 'Shipped it' }, 'done', 'emerald', 'Shipped it'],
+    [{ kind: 'decision', items: [{ id: 'us_1', question: 'Merge PR #12?' }] }, 'stuck', 'red', 'Merge PR #12?'],
+    [{ kind: 'muted' }, 'blocked', 'zinc', 'Muted'],
+    [{ kind: 'waiting', on: [{ kind: 'capacity', id: 'hub', label: 'hub slot' }] }, 'waiting', 'zinc', 'capacity: hub slot'],
+    [{ kind: 'running', on: [] }, 'waiting', 'zinc', 'Running'],
+    [{ kind: 'unresolved', reason: 'notice_tail' }, 'attention', 'amber', 'Unresolved: notice_tail']
+  ] as const)('%j paints %s (%s) with its tooltip', (outcome, stripe, colour, tip) => {
+    const { container } = renderRow(
+      // Inputs the old logic would paint green, so the outcome is what decides.
+      makeSession({ message_count: 4, outcome, title: 'Outcome' } as Partial<SessionInfo> & { title: string })
+    )
+
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe(stripe)
+    expect(stripeOf(container)?.getAttribute('data-outcome')).toBe(outcome.kind)
+    expect(stripeOf(container)?.className).toContain(colour)
+    expect(stripeOf(container)?.getAttribute('aria-label')).toBe(tip)
+  })
+
+  it('without an outcome the row paints as before, with no outcome tooltip', () => {
+    const { container } = renderRow(makeSession({ message_count: 4, title: 'Legacy' }))
+
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('done')
+    expect(stripeOf(container)?.getAttribute('aria-label')).toBeNull()
+    expect(stripeOf(container)?.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('a live turn still overrides the outcome', () => {
+    publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
+
+    const { container } = renderRow(
+      makeSession({ message_count: 4, outcome: { kind: 'unresolved', reason: 'no_summary' }, title: 'Busy' } as Partial<
+        SessionInfo
+      > & { title: string })
+    )
+
+    expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
+  })
+
+  it('reads the park from row.muted', () => {
+    const { container } = renderRow(
+      makeSession({ message_count: 4, muted: true, title: 'Parked' } as Partial<SessionInfo> & { title: string })
+    )
+
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('blocked')
+  })
 })

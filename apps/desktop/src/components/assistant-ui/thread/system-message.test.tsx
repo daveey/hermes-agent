@@ -18,13 +18,13 @@ $displayTimestamps.set(true)
 const timestamp = new Date('2026-05-01T00:00:00.000Z')
 stubThreadEnvironment()
 
-function Harness({ text, asyncResult }: { text: string; asyncResult?: string }) {
+function Harness({ text, asyncResult, staleNotice }: { text: string; asyncResult?: string; staleNotice?: boolean }) {
   const message = {
     id: 'system-1',
     role: 'system',
     content: [{ type: 'text', text }],
     createdAt: timestamp,
-    metadata: { custom: { timelineTimestamp: timestamp.getTime() / 1000, asyncResult } }
+    metadata: { custom: { timelineTimestamp: timestamp.getTime() / 1000, asyncResult, staleNotice } }
   } as unknown as ThreadMessage
 
   const runtime = useExternalStoreRuntime<ThreadMessage>({
@@ -112,5 +112,28 @@ describe('system message timestamp text separation', () => {
     const { container } = render(<Harness text="steer:rerun tests" />)
 
     expectTimestampSeparated(container, 'rerun tests')
+  })
+})
+
+// [daveey] session-outcome: a blocked-card notice whose card has since left `blocked` stays in the transcript,
+// dimmed and labelled, so it no longer reads as a live ask.
+describe('stale kanban notice', () => {
+  it('renders dimmed and labelled "outdated: card moved on"', () => {
+    const { container } = render(<Harness staleNotice text="⏸ Kanban t_1 blocked — needs your OK" />)
+    const row = container.querySelector('[data-role="system"]')
+
+    expect(row?.hasAttribute('data-stale-notice')).toBe(true)
+    expect(row?.className).toContain('opacity-60')
+    expect(row?.querySelector('[data-slot="stale-notice-label"]')?.textContent).toBe('outdated: card moved on')
+    expect(row?.textContent).toContain('⏸ Kanban t_1 blocked — needs your OK')
+  })
+
+  it('a live notice renders as before, without the label', () => {
+    const { container } = render(<Harness text="⏸ Kanban t_1 blocked — needs your OK" />)
+    const row = container.querySelector('[data-role="system"]')
+
+    expect(row?.hasAttribute('data-stale-notice')).toBe(false)
+    expect(row?.querySelector('[data-slot="stale-notice-label"]')).toBeNull()
+    expect(row?.className).not.toContain('opacity-60')
   })
 })

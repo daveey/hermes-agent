@@ -238,6 +238,8 @@ const COMPARED_FIELDS = [
   'recovered',
   'asyncResult',
   'asyncResultKind',
+  // [daveey] Dims a kanban notice the backend marked outdated.
+  'staleNotice',
   'id',
   'role',
   'pending',

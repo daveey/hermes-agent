@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { toRuntimeMessage } from '@/lib/chat-runtime'
 import { toolResultRecord } from '@/lib/tool-result-metadata'
 import type { SessionMessage } from '@/types/hermes'
 
@@ -577,6 +578,40 @@ describe('toChatMessages', () => {
 
     expect(messages.map(message => message.role)).toEqual(['user', 'system'])
     expect(chatMessageText(messages[1])).toBe('✔ Kanban t_1 done — shipped')
+  })
+
+  // [daveey] session-outcome: the backend marks a blocked notice `stale` once its card leaves `blocked`.
+  it('flags a kanban notice the backend marked stale, and only that one', () => {
+    const messages = toChatMessages([
+      { role: 'user', content: 'start the cards', timestamp: 1 },
+      {
+        role: 'user',
+        content: '⏸ Kanban t_1 blocked',
+        display_kind: 'kanban_notice',
+        display_metadata: { display_text: '⏸ Kanban t_1 blocked', stale: true },
+        timestamp: 2
+      },
+      {
+        role: 'user',
+        content: '⏸ Kanban t_2 blocked',
+        display_kind: 'kanban_notice',
+        // An older backend serves display_metadata as raw JSON text.
+        display_metadata: JSON.stringify({ display_text: '⏸ Kanban t_2 blocked', stale: true }),
+        timestamp: 3
+      },
+      {
+        role: 'user',
+        content: '✔ Kanban t_3 done',
+        display_kind: 'kanban_notice',
+        display_metadata: { display_text: '✔ Kanban t_3 done' },
+        timestamp: 4
+      }
+    ])
+
+    expect(messages.map(message => message.role)).toEqual(['user', 'system', 'system', 'system'])
+    expect(messages.map(message => message.staleNotice === true)).toEqual([false, true, true, false])
+    expect(toRuntimeMessage(messages[1]).metadata.custom).toMatchObject({ staleNotice: true })
+    expect(toRuntimeMessage(messages[3]).metadata.custom).not.toHaveProperty('staleNotice')
   })
 
   it('never paints a background-process heartbeat wake as a user bubble', () => {

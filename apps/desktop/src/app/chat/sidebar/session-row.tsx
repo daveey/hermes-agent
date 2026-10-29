@@ -20,12 +20,14 @@ import { pathLeaf } from '@/lib/display-path'
 import { triggerHaptic } from '@/lib/haptics'
 import { middleClickHandlers } from '@/lib/middle-click'
 import { displayModelName } from '@/lib/model-status-label'
+import { outcomeStripe, outcomeTooltip } from '@/lib/session-outcome'
 import { sessionProjectLabel } from '@/lib/session-project-label'
 import { SESSION_ROW_AREAS } from '@/lib/session-row-slots'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { coarseElapsed } from '@/lib/time'
 import { useSessionDotState } from '@/lib/use-session-dot-state'
+import { useSessionParked } from '@/lib/use-session-parked'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
@@ -35,7 +37,6 @@ import { normalizeProfileKey } from '@/store/profile'
 import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
-import { $blockedSessionIds, isSessionBlocked } from '@/store/session-blocked'
 import {
   hasLiveTurn,
   kanbanStripeCounts,
@@ -374,7 +375,8 @@ function SidebarSessionRowImpl({
   // blocked on a human, or a PR it links waits on a review that's on you).
   // Working: no stripe. A review only others were asked for (<24h) is grey.
   // ⌘B parks a session as blocked: grey stripe, skipped by ⌘] / ⌘[.
-  const userBlocked = useStoreSelector($blockedSessionIds, ids => isSessionBlocked(session.id, ids))
+  // [daveey] The park is the backend's `row.muted` now; the local ⌘B list is its optimistic cache.
+  const userBlocked = useSessionParked(session.id, session)
 
   const statusStripe =
     !rowHasLiveStatus(session)
@@ -388,8 +390,17 @@ function SidebarSessionRowImpl({
           session.review_wait,
           session.kanban_attention,
           kanbanStripeCounts(session).waiting,
-          kanbanStripeCounts(session).stalled
+          kanbanStripeCounts(session).stalled,
+          session.outcome
         )
+
+  // [daveey] The stored outcome explains the stripe on hover: the summary, the open questions, what it waits on, or
+  // why it is unresolved. Only while the outcome is what painted it (a park or a live turn beats it).
+  const outcomeKind =
+    statusStripe && !userBlocked && !liveTurn && outcomeStripe(session.outcome) ? session.outcome?.kind : undefined
+
+  const stripeTipText = outcomeKind ? outcomeTooltip(session.outcome, r) : null
+  const stripeTip = stripeTipText ? <span className="whitespace-pre-line">{stripeTipText}</span> : null
 
   // [daveey] desktop.log trace of every stripe change with the row inputs that fed it (`stripe-transition <sid>`),
   // so the next "green while work is queued" report has the payload. Change-only and capped inside.
@@ -580,29 +591,41 @@ function SidebarSessionRowImpl({
         {/* [daveey] A session that owns a live cron job: a tiny grey loop
             glyph in the stripe's place — it recurs, so it is never "done". */}
         {(statusStripe === 'periodic' || statusStripe === 'waiting' || statusStripe === 'stalled') && (
-          <span
-            aria-hidden="true"
-            className={cn(
-              'pointer-events-none absolute top-1/2 -left-0.5 flex -translate-y-1/2 text-(--session-status-color)',
-              sessionStatusStripeColor(statusStripe)
-            )}
-            data-slot="session-status-stripe"
-            data-status-stripe={statusStripe}
-          >
-            {/* [daveey] `waiting`: open kanban cards hold it — the card glyph (amber when `stalled`). */}
-            <Codicon name={statusStripe === 'periodic' ? 'sync' : 'project'} size="0.5625rem" />
-          </span>
+          <Tip label={stripeTip}>
+            <span
+              aria-hidden={stripeTipText ? undefined : 'true'}
+              aria-label={stripeTipText ?? undefined}
+              className={cn(
+                'absolute top-1/2 -left-0.5 flex -translate-y-1/2 text-(--session-status-color)',
+                stripeTipText ? 'pointer-events-auto' : 'pointer-events-none',
+                sessionStatusStripeColor(statusStripe)
+              )}
+              data-outcome={outcomeKind}
+              data-slot="session-status-stripe"
+              data-status-stripe={statusStripe}
+              role={stripeTipText ? 'img' : undefined}
+            >
+              {/* [daveey] `waiting`: open kanban cards hold it — the card glyph (amber when `stalled`). */}
+              <Codicon name={statusStripe === 'periodic' ? 'sync' : 'project'} size="0.5625rem" />
+            </span>
+          </Tip>
         )}
         {statusStripe && statusStripe !== 'periodic' && statusStripe !== 'waiting' && statusStripe !== 'stalled' && (
-          <span
-            aria-hidden="true"
-            className={cn(
-              'pointer-events-none absolute top-1 bottom-1 left-0 w-[3px] rounded-full bg-(--session-status-color)',
-              sessionStatusStripeColor(statusStripe)
-            )}
-            data-slot="session-status-stripe"
-            data-status-stripe={statusStripe}
-          />
+          <Tip label={stripeTip}>
+            <span
+              aria-hidden={stripeTipText ? undefined : 'true'}
+              aria-label={stripeTipText ?? undefined}
+              className={cn(
+                'absolute top-1 bottom-1 left-0 w-[3px] rounded-full bg-(--session-status-color)',
+                stripeTipText ? 'pointer-events-auto' : 'pointer-events-none',
+                sessionStatusStripeColor(statusStripe)
+              )}
+              data-outcome={outcomeKind}
+              data-slot="session-status-stripe"
+              data-status-stripe={statusStripe}
+              role={stripeTipText ? 'img' : undefined}
+            />
+          </Tip>
         )}
         {/* #38072 finding 3: the row's body is a DIV, not a button — the
             reorder grabber (dnd-kit role="button" + tabIndex, kept for

@@ -441,6 +441,27 @@ export function setSessionUnreadRemote(id: string, unread: boolean, profile?: st
   })
 }
 
+/** [daveey] Persist a ⌘B park (session-outcome contract: `POST /api/sessions/{id}/mute`). The backend stores
+ *  `sessions.muted` and refreshes the chat's outcome to `muted`. Routes to the row's own gateway; the owning
+ *  profile travels in the body like every other session write (the handler picks its state.db from it). */
+export function setSessionMutedRemote(
+  row: Pick<SessionInfo, 'connection_id' | 'id' | 'profile'>,
+  muted: boolean
+): Promise<{ ok: boolean; muted?: boolean }> {
+  const owner = sessionWriteProfile(row.profile)
+
+  const scope: ProfileScope = row.connection_id
+    ? { connectionId: row.connection_id, profile: owner ?? 'default' }
+    : owner
+
+  return hermesApi<{ ok: boolean; muted?: boolean }>({
+    ...sessionScoped(scope),
+    path: `/api/sessions/${encodeURIComponent(row.id)}/mute`,
+    method: 'POST',
+    body: { muted, ...(owner ? { profile: owner } : {}) }
+  })
+}
+
 // Full-text search over one profile's sessions. Pass the profile the caller is
 // showing: an unscoped request lands on the primary backend, which searches
 // its launch profile's state.db whatever profile the sidebar is on. `null`
