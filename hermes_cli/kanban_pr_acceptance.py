@@ -18,6 +18,12 @@ from urllib.parse import quote
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
+# The way out of a contract that can never pass. A worker can't take it (orchestrator-only),
+# so the worker blocks WITHOUT a human_request: the owning chat clears agent-owned parks,
+# and David never gets a "approve closing this card" ask. [daveey]
+_REPOINT_HINT = ("this contract can never pass: the orchestrator (not this card's worker, and not a human ask) "
+                 "re-points it with `hermes kanban edit <task> --completion-contract <local-only|OWNER/REPO|PR URL> "
+                 "--reason \"...\"`; a worker blocks without a human_request and names the evidence.")
 
 
 def validate_contract(value: str | None) -> str:
@@ -54,6 +60,11 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
             raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}") from None
         if exc.returncode == 4:  # gh's authentication-required exit: this profile has no login
             raise _GateAuthError(f"gh has no login for {endpoint.split('?')[0]}") from None
+        # GraphQL NOT_FOUND makes gh exit 1 before the ``repository is None`` check below
+        # can classify it: a repo this login can't see, or one that was renamed, moved or
+        # suspended. Retrying never helps, so it is never ``infra``. [daveey]
+        if "Could not resolve to a Repository" in (exc.stderr or ""):
+            raise _GateAuthError(f"repository not found on {endpoint.split('?')[0]}") from None
         raise
     value = json.loads(result.stdout)
     if isinstance(value, dict) and value.get("errors"):
@@ -199,7 +210,8 @@ def collect_acceptance(contract: str, published_pr: str | None,
                                     for r in rule["parameters"]["required_status_checks"])
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
-            receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
+            receipt["detail"] = ("No repository-required checks are configured on the PR's base branch, so "
+                                 f"{_REPOINT_HINT} (Create non-CI tasks with a local-only contract.)")
             return receipt
         phase = "reading check runs"
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
@@ -245,7 +257,8 @@ def collect_acceptance(contract: str, published_pr: str | None,
         login = f"assignee profile {assignee!r}'s gh login" if assignee else "the ambient gh login"
         receipt.update(classification="auth",
                        detail=f"GitHub refused the acceptance read ({exc}) as {login}; "
-                              "fix that profile's GitHub credentials/access to the repository, then retry completion.")
+                              "fix that profile's GitHub credentials/access to the repository, then retry completion. "
+                              f"If the repository was renamed, moved or suspended instead, {_REPOINT_HINT}")
         return receipt
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError) as exc:
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.

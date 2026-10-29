@@ -33,6 +33,11 @@ def isolated_kanban_home_with_profiles(monkeypatch):
         del sys.modules[name]
     try:
         from hermes_cli import kanban_db
+        # conftest guard patches _system_memory_sample only on the module object
+        # imported before the purge above; dispatch uses the reimported module,
+        # which would read live host memory and flake under pressure.
+        from hermes_cli import kanban_db_dispatch
+        monkeypatch.setattr(kanban_db_dispatch, "_system_memory_sample", dict)
         yield kanban_db
     finally:
         for name in [

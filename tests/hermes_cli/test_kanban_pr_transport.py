@@ -94,3 +94,38 @@ def test_wrapper_interpolation_uses_assignee_scope(tmp_path, monkeypatch):
         assert gate._gh_command_prefix(str(target)) == [sys.executable, "target-scope"]
     finally:
         reset_secret_scope(token)
+
+
+@pytest.mark.platforms("posix")
+def test_graphql_repo_not_found_is_auth_with_the_repoint_path(tmp_path, monkeypatch):
+    """gh exits 1 on a GraphQL NOT_FOUND (a suspended, moved or invisible repo), before the
+    ``repository is None`` check runs. A retry never passes, so it is ``auth`` and names the
+    orchestrator's re-point, never ``infra``/"retry completion". [daveey]"""
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    gh = folder / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.stderr.write(\"gh: Could not resolve to a Repository with the name 'gone/repo'.\\n\")\n"
+        "sys.exit(1)\n"
+    )
+    gh.chmod(0o755)
+    receipt = gate.collect_acceptance("https://github.com/gone/repo/pull/336", None)
+    assert receipt["classification"] == "auth"
+    assert "repository not found on graphql" in receipt["detail"]
+    assert "--completion-contract" in receipt["detail"]
+    assert "Could not resolve" not in receipt["detail"]  # gh's stderr is never persisted
+
+
+def test_no_required_checks_names_the_repoint_path(monkeypatch):
+    pr = {"data": {"repository": {"pullRequest": {
+        "headRefOid": "a" * 40, "baseRefName": "feature/stack", "state": "OPEN",
+        "baseRef": {"branchProtectionRule": None}}}}}
+    monkeypatch.setattr(gate, "_api", lambda endpoint, **kw: pr if endpoint == "graphql" else [[]])
+    receipt = gate.collect_acceptance("https://github.com/acme/repo/pull/7", None)
+    assert receipt["ok"] is False and receipt["classification"] == "missing"
+    assert "No repository-required checks" in receipt["detail"]
+    assert "--completion-contract" in receipt["detail"]

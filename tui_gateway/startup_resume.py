@@ -22,18 +22,30 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tui_gateway.exit_job_receipts import JOBS_REASON, JOBS_RECEIPT_MAX_AGE_S
-from tui_gateway.turn_marker import _load, _marker_path, marker_writer_state, read_turn_marker
+from tui_gateway.turn_marker import (
+    UPDATE_HOLD_QUEUE_MAX_AGE_S,
+    UPDATE_HOLD_QUEUE_REASON,
+    _load,
+    _marker_path,
+    marker_writer_state,
+    read_turn_marker,
+)
 
 logger = logging.getLogger(__name__)
 
 _ids = itertools.count(1)
 # [daveey] Markers the boot sweep retries while an old writer may still be exiting: core-update pauses and
-# background-job receipts (``exit_job_receipts``). A receipt also outlives the turn freshness window.
-_RETRY_REASONS = frozenset({"core_update_pause", JOBS_REASON})
+# background-job receipts (``exit_job_receipts``), and prompts queued behind the update hold. A receipt and a
+# hold-queued prompt also outlive the turn freshness window.
+_RETRY_REASONS = frozenset({"core_update_pause", JOBS_REASON, UPDATE_HOLD_QUEUE_REASON})
 
 
 def _max_age(marker: dict, fresh: float) -> float:
-    return JOBS_RECEIPT_MAX_AGE_S if marker.get("reason") == JOBS_REASON else fresh
+    if marker.get("reason") == JOBS_REASON:
+        return JOBS_RECEIPT_MAX_AGE_S
+    if marker.get("reason") == UPDATE_HOLD_QUEUE_REASON:
+        return max(fresh, UPDATE_HOLD_QUEUE_MAX_AGE_S)
+    return fresh
 
 
 def _settings(cfg: dict | None) -> tuple[bool, float, int, float]:

@@ -49,3 +49,21 @@ def test_full_history_behind_release_is_proof(history, tmp_path, monkeypatch):
     monkeypatch.setattr(source_check, "_github_compare", lambda *a, **k: pytest.fail("no network on proof"))
     assert source_releases._head_containing(["git"], clone, shas[2], "o/r") is None
     assert source_releases._head_containing(["git"], clone, shas[0], "o/r") == shas[0]
+
+
+def test_ancestry_check_timeout_is_an_unknown_relation_that_keeps_head(history, tmp_path, monkeypatch):
+    """A loaded host can outlast the git budget; that must not fail the channel lookup."""
+    origin, shas = history
+    clone = tmp_path / "full"
+    _git(tmp_path, "clone", "-q", str(origin), str(clone))
+    real_run = subprocess.run
+
+    def slow_merge_base(cmd, *args, **kwargs):
+        if "merge-base" in cmd:
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(source_releases.subprocess, "run", slow_merge_base)
+    assert source_releases._head_containing(["git"], clone, shas[0], "o/r") == shas[2]
+    # The local git budget is generous enough for a loaded CI shard.
+    assert source_releases._LOCAL_GIT_TIMEOUT >= 60

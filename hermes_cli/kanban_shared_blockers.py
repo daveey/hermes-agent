@@ -115,6 +115,9 @@ class BlockerState:
     cleared_at: int = 0
     cleared_by: Optional[tuple[str, Optional[int]]] = None   # (task_id, run_id or None) that cleared it
     cleared_via: str = ""                           # "run" or "condition_met"
+    # Earliest clear after the newest assertion. A card woken for it has seen every later clear
+    # until X is re-asserted; ``cleared_at`` (the newest) is only for reporting. [daveey]
+    first_cleared_at: int = 0
     reason: str = ""                                # summary of the newest asserting run
     # task_id -> ended_at of the asserting run the card is still behind
     behind: dict[str, int] = field(default_factory=dict)
@@ -225,16 +228,20 @@ def _probe_parked_behind(conn: sqlite3.Connection, kb, task_id: str, met, blocke
 
 
 def _already_saw_clear(conn: sqlite3.Connection, kb, task_id: str, st: BlockerState) -> bool:
-    """True when ``task_id`` already acted after ``st``'s newest clear: it was woken for it (a
-    :data:`CLEARED_EVENT` for this blocker at or after ``cleared_at``) or a run of it started
-    after it. Such a card re-parked without the id on purpose (it checked and the wall still
-    stood for it); waking it again every tick looped forever (2026-10-28, t_01a180e8c9732286:
-    one wasted run per park). A LATER clear still wakes it. [daveey]"""
-    if st.probe_starts.get(task_id, 0) > st.cleared_at:
+    """True when ``task_id`` already acted after ``st``'s FIRST clear since its newest assertion:
+    it was woken for it (a :data:`CLEARED_EVENT` for this blocker at or after ``first_cleared_at``)
+    or a run of it started after it. Such a card re-parked without the id on purpose (it checked
+    and the wall still stood for it); waking it again every tick looped forever (2026-10-28,
+    t_01a180e8c9732286: one wasted run per park). Measuring against the first clear, not the
+    newest, makes a clear idempotent: a second card clearing X again with no re-assertion in
+    between is no new information (2026-10-28 15:53, t_e7dc822c woken twice). A later clear wakes
+    the card again only after X was re-asserted. [daveey]"""
+    since = st.first_cleared_at or st.cleared_at
+    if st.probe_starts.get(task_id, 0) > since:
         return True
     for row in conn.execute(
         "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND created_at >= ? "
-        "ORDER BY id DESC LIMIT 20", (task_id, CLEARED_EVENT, st.cleared_at),
+        "ORDER BY id DESC LIMIT 20", (task_id, CLEARED_EVENT, since),
     ):
         if normalize_blocker_id(kb._json_dict(row["payload"]).get("blocker_id")) == st.blocker_id:
             return True
@@ -243,6 +250,8 @@ def _already_saw_clear(conn: sqlite3.Connection, kb, task_id: str, st: BlockerSt
 
 def _mark_cleared(st: BlockerState, task_id: str, run_id: Optional[int], ended: int, *,
                   via: str = "run") -> None:
+    if ended > st.asserted_at and (not st.first_cleared_at or ended < st.first_cleared_at):
+        st.first_cleared_at = ended
     if ended >= st.cleared_at:
         st.cleared_at = ended
         st.cleared_by = (task_id, int(run_id) if run_id is not None else None)

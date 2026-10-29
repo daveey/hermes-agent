@@ -231,3 +231,125 @@ def test_reopen_requires_reason(kanban_home, capsys):
         _main(["reopen", tid])
     assert _main(["reopen", tid, "--reason", "   "]) == 2
     assert _show(tid)["task"]["status"] == "done"
+
+
+# --- completion contract -------------------------------------------------------
+# A finished card whose bound PR can never be read (its repo was suspended) used to
+# park on a human "approve closing this card" ask: nothing could re-point the gate.
+
+
+_GONE_PR = "https://github.com/gone-owner/repo/pull/336"
+
+
+def _contract_events(task_id: str) -> list[dict]:
+    with kbc.connect_closing() as conn:
+        return [e.payload for e in kb.list_events(conn, task_id) if e.kind == "contract_changed"]
+
+
+def _contract(task_id: str) -> str:
+    with kbc.connect_closing() as conn:
+        return conn.execute("SELECT completion_contract FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
+
+
+def _gate_reads_a_vanished_repo(monkeypatch) -> list:
+    """The real gate with only its GitHub read replaced: the bound repo no longer resolves."""
+    from hermes_cli import kanban_pr_acceptance as kpa
+
+    calls: list = []
+
+    def gone(contract, published_pr, assignee=None):
+        calls.append(contract)
+        return {"ok": False, "classification": "auth", "head_sha": None, "pr_url": contract,
+                "checks": [], "recovery": "x", "detail": "repository not found on graphql"}
+
+    monkeypatch.setattr(kpa, "collect_acceptance", gone)
+    return calls
+
+
+def test_contract_repoint_lets_a_card_bound_to_a_vanished_repo_complete(kanban_home, monkeypatch):
+    calls = _gate_reads_a_vanished_repo(monkeypatch)
+    tid = _new(completion_contract=_GONE_PR)
+    with kbc.connect_closing() as conn:
+        assert not kb.complete_task(conn, tid, summary="AC-8 passed live", force=True)
+    assert calls == [_GONE_PR]
+    rc = _main(["edit", tid, "--completion-contract", "local-only",
+                "--reason", "repo suspended; the merge commit is on the new home"])
+    assert rc == 0
+    assert _contract(tid) == "local-only"
+    with kbc.connect_closing() as conn:
+        assert kb.complete_task(conn, tid, summary="AC-8 passed live", force=True)
+    assert calls == [_GONE_PR]  # local-only: the gate is not consulted again
+    assert _show(tid)["task"]["status"] == "done"
+
+
+def test_contract_repoint_records_event_and_comment(kanban_home, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_PROFILE", "operator-x")
+    tid = _new(completion_contract=_GONE_PR)
+    assert _main(["edit", tid, "--completion-contract", "new-owner/repo", "--reason", "repo moved"]) == 0
+    assert f"completion_contract: '{_GONE_PR}' -> 'new-owner/repo'" in capsys.readouterr().out
+    assert _contract(tid) == "new-owner/repo"
+    events = _contract_events(tid)
+    assert len(events) == 1
+    assert events[0]["from"] == _GONE_PR and events[0]["to"] == "new-owner/repo"
+    assert events[0]["reason"] == "repo moved" and events[0]["actor"]
+    with kbc.connect_closing() as conn:
+        bodies = [c.body for c in kb.list_comments(conn, tid)]
+    assert f"CONTRACT CHANGED: {_GONE_PR} -> new-owner/repo: repo moved" in bodies
+
+
+def test_contract_repoint_works_on_a_blocked_card(kanban_home):
+    tid = _new(completion_contract=_GONE_PR)
+    with kbc.connect_closing() as conn:
+        assert kb.block_task(conn, tid, reason="gate can't read the PR")
+    assert _main(["edit", tid, "--completion-contract", "local-only", "--reason", "repo suspended"]) == 0
+    assert _contract(tid) == "local-only"
+    assert _show(tid)["task"]["status"] == "blocked"  # re-pointing never unblocks by itself
+
+
+def test_contract_repoint_same_value_appends_nothing(kanban_home, capsys):
+    tid = _new(completion_contract="owner/repo")
+    assert _main(["edit", tid, "--completion-contract", "owner/repo", "--reason", "noop"]) == 0
+    assert "unchanged" in capsys.readouterr().out
+    assert _contract_events(tid) == []
+
+
+@pytest.mark.parametrize("argv_tail, needle", [
+    (["--completion-contract", "local-only"], "requires --reason"),
+    (["--completion-contract", "local-only", "--reason", "   "], "requires --reason"),
+    (["--completion-contract", "not a contract", "--reason", "x"], "completion_contract must be"),
+    (["--completion-contract", "local-only", "--reason", "x", "--title", "renamed"], "can't be combined"),
+    (["--completion-contract", "local-only", "--reason", "x", "--max-retries", "3"], "can't be combined"),
+    (["--reason", "x", "--title", "renamed"], "--reason only applies"),
+])
+def test_contract_repoint_refusals_change_nothing(kanban_home, capsys, argv_tail, needle):
+    tid = _new(title="card", completion_contract=_GONE_PR)
+    assert _main(["edit", tid, *argv_tail]) == 2
+    assert needle in capsys.readouterr().err
+    assert _contract(tid) == _GONE_PR
+    assert _show(tid)["task"]["title"] == "card"
+    assert _contract_events(tid) == []
+
+
+def test_contract_repoint_is_refused_inside_a_kanban_worker(kanban_home, monkeypatch, capsys):
+    tid = _new(completion_contract=_GONE_PR)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    assert _main(["edit", tid, "--completion-contract", "local-only", "--reason", "let me out"]) == 2
+    assert "orchestrator-only" in capsys.readouterr().err
+    assert _contract(tid) == _GONE_PR
+    assert _contract_events(tid) == []
+
+
+@pytest.mark.parametrize("status", ["done", "archived"])
+def test_contract_repoint_refuses_closed_cards(kanban_home, capsys, status):
+    tid = _done() if status == "done" else _new()
+    if status == "archived":
+        with kbc.connect_closing() as conn:
+            assert kb.archive_task(conn, tid)
+    assert _main(["edit", tid, "--completion-contract", "owner/repo", "--reason", "x"]) == 2
+    assert "history" in capsys.readouterr().err
+    assert _contract(tid) == "local-only"
+
+
+def test_contract_repoint_refuses_unknown_task(kanban_home, capsys):
+    assert _main(["edit", "t_nope", "--completion-contract", "local-only", "--reason", "x"]) == 1
+    assert "unknown id" in capsys.readouterr().err

@@ -363,6 +363,92 @@ def _age_all(conn, seconds: int) -> None:
         conn.execute("UPDATE task_runs SET started_at = started_at - ?, "
                      "ended_at = CASE WHEN ended_at IS NULL THEN NULL ELSE ended_at - ? END", (seconds, seconds))
         conn.execute("UPDATE task_events SET created_at = created_at - ?", (seconds,))
+        conn.execute("UPDATE task_comments SET created_at = created_at - ?", (seconds,))
+
+
+# --- A redundant clear does not re-wake a card an earlier clear already released ----------
+# Repro of 2026-10-28 15:41-15:53 PDT: t_e7dc822c sat behind github-askevepodcast-suspended.
+# t_01a1800921b1ff50 cleared it (15:41, correct wake); t_e7dc822c re-parked without the id;
+# t_01a180e8c9732286 then also ended a run with clear_blocker=true (15:53, no re-assertion in
+# between), and t_e7dc822c was woken a second time for no new information.
+
+def _run_and_clear(monkeypatch, tid: str) -> None:
+    """``tid`` runs, sees the wall gone, and parks for another reason with clear_blocker=true."""
+    with kbc.connect_closing() as conn:
+        if kb.get_task(conn, tid).status != "ready":
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+            conn.commit()
+        _as_worker(monkeypatch, conn, tid)
+    out = json.loads(kt._handle_schedule({"reason": "account is back; waiting on a deploy now",
+                                          "clock_only": True, "clear_blocker": True}))
+    assert "error" not in out, out
+    _as_parent(monkeypatch)
+
+
+def _repark_without_id(monkeypatch, tid: str) -> None:
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "ready"
+        _as_worker(monkeypatch, conn, tid)
+    out = json.loads(kt._handle_continue({"checkpoint": "API still 404 for me; re-check later",
+                                          "resume_after_seconds": 3600, "wake_check": WAKE, "awaiting": AWAIT}))
+    assert "error" not in out, out
+    _as_parent(monkeypatch)
+
+
+def _dispatcher_comments(conn, tid: str) -> int:
+    return conn.execute("SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = 'dispatcher'",
+                        (tid,)).fetchone()[0]
+
+
+def _two_clears_in_sequence(monkeypatch) -> tuple[str, str, str]:
+    """A, B, C behind X; A clears (C woken once); C re-parks without the id; B clears again."""
+    with kbc.connect_closing() as conn:
+        a = _worker_block_behind(monkeypatch, conn, "a")
+        b = _worker_block_behind(monkeypatch, conn, "b")
+        c = _worker_block_behind(monkeypatch, conn, "c")
+        _age_all(conn, 600)
+    _run_and_clear(monkeypatch, a)
+    with kbc.connect_closing() as conn:
+        st = ksb.blocker_states(conn)[BID]
+        assert not st.is_open and st.cleared_by[0] == a
+        released = ksb.release_cleared_blockers(conn)
+        assert c in released and b in released
+        assert len(_cleared_events(conn, c)) == 1 and _dispatcher_comments(conn, c) == 1
+    _repark_without_id(monkeypatch, c)
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, c).status == "scheduled"
+        _age_all(conn, 120)
+    _run_and_clear(monkeypatch, b)
+    with kbc.connect_closing() as conn:
+        assert ksb.blocker_states(conn)[BID].cleared_by[0] == b   # newest clear, kept for reporting
+    return a, b, c
+
+
+def test_redundant_clear_by_another_card_does_not_rewake(kanban_home, monkeypatch):
+    _a, _b, c = _two_clears_in_sequence(monkeypatch)
+    with kbc.connect_closing() as conn:
+        assert ksb.release_cleared_blockers(conn) == []
+        assert kb.get_task(conn, c).status == "scheduled"
+        assert len(_cleared_events(conn, c)) == 1
+        assert _dispatcher_comments(conn, c) == 1
+        res = kbd.dispatch_once(conn, spawn_fn=_spawn_noop)
+        assert c not in (res.shared_blocker_released or [])
+        assert len(_cleared_events(conn, c)) == 1
+
+
+def test_clear_after_a_reassertion_still_wakes_after_a_redundant_clear(kanban_home, monkeypatch):
+    _a, _b, c = _two_clears_in_sequence(monkeypatch)
+    with kbc.connect_closing() as conn:
+        assert ksb.release_cleared_blockers(conn) == []
+        _age_all(conn, 120)
+        d = _worker_block_behind(monkeypatch, conn, "d")      # X re-asserted ...
+        assert ksb.blocker_states(conn)[BID].is_open
+        _age_all(conn, 60)
+        _clear_via_wake_check(conn, d)                      # ... then cleared by a run's probe
+        st = ksb.blocker_states(conn)[BID]
+        assert not st.is_open and st.cleared_by[0] == d
+        assert c in ksb.release_cleared_blockers(conn)
+        assert len(_cleared_events(conn, c)) == 2
 
 
 # --- A wake_check clears X only when the park that set it carried X -----------------------

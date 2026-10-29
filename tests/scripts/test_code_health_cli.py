@@ -91,6 +91,10 @@ def _add_engine(repo: Path, checker: bool = True) -> list[str]:
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO / rel, repo / rel)
     _write(repo, {"tests/README.md": "os-marker-fakes scans tests/\n"})
+    # The prompt-surface guard renders the whole product through its own dependencies, which this
+    # toy repo has none of; a stub that passes keeps the guard registered and the hooks' flow real.
+    # (The real guard is covered by tests/ci/test_prompt_surface.py.)
+    _write(repo, {"scripts/ci/prompt_surface.py": "import sys\n\nsys.exit(0)\n"})
     if checker:
         shutil.copy2(REPO / "scripts/check", repo / "scripts/check")
         shutil.copytree(REPO / "scripts/code_health", repo / "scripts/code_health",

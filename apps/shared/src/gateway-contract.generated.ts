@@ -4835,7 +4835,7 @@ export interface MessageInterimPayload {
   text: string
   already_streamed: boolean
 }
-/** ``prompt_turn._complete_turn_payload`` / ``session_auto_continue._emit_terminal_turn_error`` / ``agent_callbacks._mirror_subagent_to_child`` (child watch mirror: ``text`` only) / ``compute_host_bridge`` (``text`` + ``status``). */
+/** ``prompt_turn._complete_turn_payload`` / ``session_auto_continue._emit_terminal_turn_error`` / ``agent_callbacks._mirror_subagent_to_child`` (child watch mirror: ``text`` only) / ``compute_host_bridge`` (``text`` + ``status``) / ``update_pause.announce_pause`` (adds ``paused_for_update``). */
 export interface MessageCompletePayload {
   text?: string | unknown
   usage?: Usage | null
@@ -4856,6 +4856,7 @@ export interface MessageCompletePayload {
   error_surface?: ErrorSurface | null
   partial?: boolean | null
   persisted_turn?: PersistedTurn | null
+  paused_for_update?: boolean | null
 }
 /** ``prompt_turn._result_status``. */
 export type TurnStatus = 'complete' | 'error' | 'interrupted'

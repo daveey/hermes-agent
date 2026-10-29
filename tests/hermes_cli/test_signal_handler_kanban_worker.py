@@ -48,6 +48,26 @@ def _synthetic_worker_script() -> str:
         stuck = threading.Event()
         threading.Thread(target=stuck.wait, daemon=False).start()
 
+        # Bound this child's life to the test process: if the parent dies
+        # (SIGKILL, timeout, reaped slot) stdin hits EOF / we get reparented,
+        # and we exit instead of leaking forever as an orphan.
+        parent = os.getppid()
+
+        def _watchdog():
+            try:
+                sys.stdin.buffer.read()
+            except Exception:
+                pass
+            os._exit(1)
+
+        def _ppid_watch():
+            while os.getppid() == parent:
+                time.sleep(0.2)
+            os._exit(1)
+
+        threading.Thread(target=_watchdog, daemon=True).start()
+        threading.Thread(target=_ppid_watch, daemon=True).start()
+
         def handler(signum, frame):
             # Mirrors cli.py:_signal_handler_q. Real handler sleeps 1.5s; the
             # test uses a short grace so it runs fast.
@@ -125,6 +145,7 @@ def _spawn_synthetic(env_overrides: dict) -> subprocess.Popen:
     proc = subprocess.Popen(
         [sys.executable, "-u", "-c", _synthetic_worker_script()],
         env=env,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
@@ -144,6 +165,11 @@ def _cleanup(proc: subprocess.Popen) -> None:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+    if proc.stdin is not None:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
     try:
         proc.communicate(timeout=2)
     except subprocess.TimeoutExpired:
@@ -176,3 +202,54 @@ def test_sigterm_with_kanban_task_env_terminates_quickly():
         )
     finally:
         _cleanup(proc)
+
+
+# bypass: the orphaned child leaves the guard's process subtree once its
+# parent is SIGKILLed, and the cleanup must still be able to kill it.
+@pytest.mark.live_system_guard_bypass
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="kanban dispatcher is POSIX-only",
+)
+def test_synthetic_child_exits_when_parent_is_sigkilled():
+    """The stuck-thread child must not outlive a test process that dies
+    before it can send SIGTERM (run_tests.sh timeout, killed xdist worker)."""
+    parent_code = textwrap.dedent(
+        f"""
+        import importlib.util, sys, time
+        spec = importlib.util.spec_from_file_location("m", {__file__!r})
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        child = m._spawn_synthetic({{"HERMES_KANBAN_TASK": "t_test_28181"}})
+        print(child.pid, flush=True)
+        time.sleep(60)
+        """
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    child_pid = 0
+    try:
+        assert parent.stdout is not None
+        child_pid = int(parent.stdout.readline().strip())
+        assert _is_alive_like_dispatcher(child_pid)
+
+        parent.kill()
+        parent.wait(timeout=5)
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not _is_alive_like_dispatcher(child_pid):
+                return
+            time.sleep(0.05)
+        pytest.fail("synthetic child still alive 5s after its parent was SIGKILLed")
+    finally:
+        if child_pid:
+            try:
+                os.killpg(child_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        parent.kill()
+        parent.communicate()

@@ -94,3 +94,16 @@ def test_catalog_covers_the_whole_wire():
     from tui_gateway.contracts import registry
 
     registry.assert_complete(server._methods, emitted_event_names(), sent_server_requests())
+
+
+def test_message_complete_declares_the_update_pause_flag():
+    """``update_pause.announce_pause`` stamps ``paused_for_update`` on the terminal frame; the pydantic
+    model and the committed TypeScript type both carry it as an optional boolean."""
+    from tui_gateway.contracts.events import MessageCompletePayload
+
+    field = MessageCompletePayload.model_fields["paused_for_update"]
+    assert not field.is_required() and field.default is None
+    ts = _read(REPO / "apps" / "shared" / "src" / "gateway-contract.generated.ts")
+    block = ts[ts.index("export interface MessageCompletePayload {"):]
+    block = block[:block.index("\n}")]
+    assert re.search(r"^\s*paused_for_update\?: boolean \| null$", block, re.MULTILINE), block

@@ -25,6 +25,14 @@ _MAX_ENTRIES = 32
 # Enough to re-submit any realistic prompt; guards against a multi-megabyte paste being journaled.
 _MAX_PROMPT_CHARS = 64_000
 
+# A prompt accepted behind the core-update admission hold (session_auto_continue._queue_submit_behind_update_hold)
+# is journaled under this reason so the post-restart ``session.resume`` sends it. It is the user's own unsent
+# message, not a turn to redo, so it is not bound by the 15 min turn freshness window: hermes-sync's drain
+# window holds admission for up to 15 min and the apply then takes 1-4 min, plus the backend restart and the
+# Desktop reconnect. One hour covers that with margin; an older one is dropped (the row stays "not sent").
+UPDATE_HOLD_QUEUE_REASON = "update_hold_queue"
+UPDATE_HOLD_QUEUE_MAX_AGE_S = 3600.0
+
 _lock = threading.Lock()
 
 
@@ -116,7 +124,8 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> bool:
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
                       auto_continue: bool = True, notification_category: str | None = None,
-                      pauses: int = 0, killed_jobs: list | None = None, until_tool: bool = False) -> None:
+                      pauses: int = 0, killed_jobs: list | None = None, until_tool: bool = False,
+                      reason: str | None = None) -> None:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
     this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume.
     ``pauses`` = core-update pauses this logical turn already took (``mark_turn_paused``), counted apart
@@ -135,6 +144,8 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
         entry["until_tool"] = True
     if notification_category == "diagnostic":
         entry["notification_category"] = notification_category
+    if reason:
+        entry["reason"] = str(reason)
     # Identity only — never the prompt: this log is read on crash triage and must not carry turn content.
     logger.debug("turn marker recorded for session %s by writer pid %s", session_key, entry["writer_pid"])
     _update(home, session_key, lambda entries: {**_prune(entries, now), session_key: entry}, "record")
