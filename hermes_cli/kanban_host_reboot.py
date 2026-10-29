@@ -82,7 +82,8 @@ def parse_power_commands(journal_text: str) -> list[dict]:
 
 def _read_journal(boot: str) -> str:
     p = subprocess.run(["journalctl", "-b", boot, "_COMM=sudo", "--no-pager", "-q", "-o", "short-iso"],
-                       capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL, check=False)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+                       stdin=subprocess.DEVNULL, check=False)
     return p.stdout if p.returncode == 0 else ""
 
 
