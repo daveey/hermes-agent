@@ -23,6 +23,7 @@ from hermes_cli.kanban_capabilities import check_tool_create, declaration_requir
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import _marker_placement_fields, _placement_refused, _runs_where
 from tools.kanban_tools_db_hint import generic_tool_error
+from tools import kanban_tools_completion as _kc
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
@@ -151,6 +152,7 @@ COMPLETE_REJECTION_CLASSES = frozenset({
     "empty",          # no summary/result, or an evidence-free completion
     "live_claim",     # another live dispatcher worker owns the card
     "stale_run",      # run superseded, card already terminal, or unknown id
+    "pr_acceptance",  # completion contract's PR CI acceptance refused (pr_acceptance event ok=false)
     "parents",        # unsatisfied parent dependencies
     "not_owner",      # delegate child / other task / unbound run id
     "invalid_args",   # unknown parameter or malformed argument
@@ -943,18 +945,6 @@ def _handle_list(args: dict, **kw) -> str:
             "promoted": promoted})
 
 
-def _parked_by_own_run(conn, tid: str, run_id: int) -> bool:
-    """True when ``run_id`` is the card's latest run, ended by ``kanban_block``, and nothing has
-    claimed the card since (no current run, no claim lock, status ready/blocked)."""
-    row = conn.execute("SELECT status, current_run_id, claim_lock FROM tasks WHERE id = ?", (tid,)).fetchone()
-    if row is None or row["current_run_id"] is not None or row["claim_lock"] \
-            or row["status"] not in ("ready", "blocked"):
-        return False
-    last = conn.execute("SELECT id, outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-                        (tid,)).fetchone()
-    return bool(last and last["id"] == run_id and last["outcome"] == "blocked")
-
-
 @_kanban_handler("kanban_complete", classify_rejections=True)
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff. Every refusal
@@ -985,10 +975,11 @@ def _handle_complete(args: dict, **kw) -> str:
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             run_id = _worker_run_id(tid)
-            if run_id is not None and _parked_by_own_run(conn, tid, run_id):
+            if run_id is not None and _kc.parked_by_own_run(conn, tid, run_id):
                 # This worker parked its card with kanban_block, then edited its own edges (kanban_unlink):
                 # its run is over but nothing has claimed the card since, so it may still close its own card.
                 run_id = None
+            event_mark = _kc.event_mark(conn, tid)  # a refusal's own pr_acceptance event lands above it
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
                 created_cards=created_cards, expected_run_id=run_id, goal_verification=goal_verification)
@@ -1039,9 +1030,10 @@ def _handle_complete(args: dict, **kw) -> str:
                 raise _Reject(
                     f"could not complete {tid}: unsatisfied parent dependencies: "
                     f"{detail}; complete the parents first (done or archived)", "parents")
-            _check(False, (task.last_failure_error if task else None) or
-                   f"could not complete {tid} (unknown id, stale run, or already terminal)",
-                   "stale_run")
+            reason = (task.last_failure_error if task else None) or \
+                f"could not complete {tid} (unknown id, stale run, or already terminal)"
+            _check(False, reason, "pr_acceptance" if _kc.pr_acceptance_refused(conn, tid, event_mark)
+                   else "stale_run")
         run = kb.latest_run(conn, tid)
         # Artifact staging is atomic with the completion write, so a worker that
         # read `kanban_attachments` before completing saw an empty list and has
