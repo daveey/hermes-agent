@@ -407,12 +407,17 @@ def release(claim: dict, *, ledger: Optional[Path] = None) -> bool:
         return False
 
 
-# [daveey] Notices this process already persisted (or found persisted), keyed (replica, profile, session, notice_id).
+# [daveey] Notices already persisted (or found persisted), keyed (replica, profile, session, notice_id).
 # Without it every 30 s pass re-ran append_kanban_notice for every done/blocked remote card: one state.db writer txn
 # plus a lineage json scan each (441 per pass on the MacBook 2026-10-28, ~1 core of the Desktop backend, and write
-# contention for live turns). A restart re-checks each once; a new event has a new notice_id.
+# contention for live turns). The keys are also written to the ledger's ``swept`` table, so a restarted backend
+# loads them instead of re-writing every notice once (443 opens of the 13 GB state.db, ~7 min and ~200 s CPU after
+# each restart, 2026-10-29). A new event has a new notice_id; rows untouched for SWEPT_KEEP_S are pruned (a card
+# still in the replica then costs one deduplicated append).
 _DELIVERED_MAX = 50_000
+SWEPT_KEEP_S = 90 * 86400.0
 _delivered: dict[tuple, None] = {}
+_swept_loaded: set[str] = set()
 
 
 def _remember_delivered(key: tuple) -> None:
@@ -421,10 +426,55 @@ def _remember_delivered(key: tuple) -> None:
         _delivered.pop(next(iter(_delivered)))
 
 
+def _swept(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS swept (replica TEXT NOT NULL, profile TEXT NOT NULL, session TEXT NOT NULL, "
+                 "notice_id TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY (replica, profile, session, notice_id))")
+
+
+def _load_swept(ledger: Optional[Path]) -> None:
+    """Once per process and ledger: prune old ``swept`` rows and remember the rest. Unreadable: in-memory only."""
+    name = str(ledger or ledger_path())
+    if name in _swept_loaded:
+        return
+    try:
+        conn = _ledger(ledger)
+        try:
+            with conn:
+                _swept(conn)
+                conn.execute("DELETE FROM swept WHERE at < ?", (time.time() - SWEPT_KEEP_S,))
+            for row in conn.execute("SELECT replica, profile, session, notice_id FROM swept ORDER BY at"):
+                _remember_delivered(tuple(row))
+        finally:
+            conn.close()
+        _swept_loaded.add(name)
+    except sqlite3.Error:
+        logger.debug("remote notice ledger unreadable; delivered notices kept in memory only", exc_info=True)
+
+
+def _record_swept(keys: list[tuple], ledger: Optional[Path]) -> None:
+    if not keys:
+        return
+    try:
+        conn = _ledger(ledger)
+        try:
+            with conn:
+                _swept(conn)
+                now = time.time()
+                conn.executemany("INSERT OR REPLACE INTO swept (replica, profile, session, notice_id, at) "
+                                 "VALUES (?,?,?,?,?)", [(*key, now) for key in keys])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        logger.debug("remote notice ledger unwritable; %d delivered notices kept in memory only", len(keys),
+                     exc_info=True)
+
+
 def _reset_for_tests() -> None:
+    """Forget this process's memos, as a restarted backend would (the ledger file stays)."""
     global _index_memo
     _index_memo = None
     _delivered.clear()
+    _swept_loaded.clear()
 
 
 logger = logging.getLogger(__name__)
@@ -468,7 +518,16 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
     except sqlite3.Error:
         logger.debug("remote Kanban replica unavailable", exc_info=True)
         return []
-    delivered = []
+    _load_swept(ledger)
+    delivered, swept = [], []
+    try:
+        _sweep_rows(rows, me, live, path, session_db, ledger, delivered, swept)
+    finally:
+        _record_swept(swept, ledger)
+    return delivered
+
+
+def _sweep_rows(rows, me, live, path, session_db, ledger, delivered: list, swept: list) -> None:
     for owner, key, raw in rows:
         try:
             task = json.loads(raw)
@@ -503,6 +562,7 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
                     if db is not None and text:
                         row_id = db.append_kanban_notice(tip, text, metadata)
                         _remember_delivered(memo_key)
+                        swept.append(memo_key)
                         delivered.append({"task_id": task["id"], "session_id": tip, "message_row": row_id})
                         at = _terminal_at(task)
                         ack({"session": sid, "ref": f"{owner}/{key}",
@@ -510,4 +570,3 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
                              "notice_key": event_key}, ledger=ledger)
         except Exception:
             logger.debug("remote Kanban notice deferred for %s/%s", owner, key, exc_info=True)
-    return delivered
