@@ -27,12 +27,14 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     from hermes_cli import gateway_session_store
 
-    def create_titled(title):
+    # Fork: the fork's --source label rides session.create's ``source`` (gateway_session_store
+    # .create_titled_session(title, source=...)), so the stand-in writes it the way the gateway does.
+    def create_titled(title, source=None):
         from hermes_state import SessionDB
         db = SessionDB()
         try:
             sid = "local-" + "ab" * 32
-            db.create_session(sid, source="local")
+            db.create_session(sid, source=source or "cli")
             db.set_session_title(sid, title)
             return sid
         finally:
@@ -156,7 +158,8 @@ class TestChatCFailLoudlyOnStderr:
 
         created = []
         monkeypatch.setattr(store_mod, "create_titled_session",
-                            lambda title: created.append(title) or "local-" + "a" * 64, raising=False)
+                            lambda title, source=None: created.append(title) or "local-" + "a" * 64,
+                            raising=False)  # Fork: source= carries --source to the gateway
         args = type(
             "Args",
             (),
