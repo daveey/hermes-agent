@@ -400,8 +400,17 @@ def _ws_client_kind(ws: Any) -> str | None:
 def _authority_connection(ws: Any, transport: WSTransport, auth_identity: dict | None, operator: bool):
     """The session-authority connection for this socket (route scope, else app state), or None
     when this backend has no authority and requests go to the legacy ``server.dispatch``."""
-    authority = (getattr(ws, 'scope', None) or {}).get('hermes.session_authority') or getattr(
-        getattr(getattr(ws, 'app', None), 'state', None), 'session_authority', None)
+    scope = getattr(ws, 'scope', None) or {}
+    # [daveey] starlette's ``WebSocket.app`` is ``scope["app"]`` (KeyError, not AttributeError, when a bare
+    # ASGI scope carries no app), so read it from the scope when there is one.
+    app = scope.get('app') if isinstance(scope, dict) else None
+    if app is None:
+        try:
+            app = getattr(ws, 'app', None)
+        except KeyError:
+            app = None
+    authority = scope.get('hermes.session_authority') or getattr(
+        getattr(app, 'state', None), 'session_authority', None)
     if authority is None:
         return None
     from gateway.session_controls import AuthorityConnection
