@@ -94,9 +94,9 @@ class MachinePinRefused(Exception):  # not ValueError: label-syntax handlers mus
         self.machine = machine
         super().__init__(
             f"runs_on names machine:{machine}, but {why}, so no worker would ever claim the card on this board. "
-            f"Nothing was written. Create it on that machine's own gateway instead: kanban_create("
-            f"placement=\"{machine}\") (a cross-gateway create, origin-bound to this chat), or "
-            f"`hermes-hub create-task {machine} ...`.")
+            f"Nothing was written. Create it on that machine's own gateway instead (a cross-gateway create): "
+            f"kanban_create(placement=\"{machine}\") when this gateway's kanban.placement route targets "
+            f"{machine}, otherwise `hermes-hub create-task {machine} <title> --body ...`.")
 
     @property
     def tool_error_fields(self) -> dict:
