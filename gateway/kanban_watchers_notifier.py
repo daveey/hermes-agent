@@ -313,7 +313,7 @@ class _Collector:
             return None
         old_cursor, cursor, events = _kbn().claim_unseen_events_for_sub(
             conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
-            thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
+            thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS, durable=True,
         )
         if not events:
             return None
@@ -334,6 +334,11 @@ class _Collector:
         try:
             if self.gc_due:
                 self._gc_stale_subs(conn, slug)
+            # A claim whose holder died between claim and send is rewound before this tick claims again.
+            # Messaging has no transcript row to dedupe against, so a crash after a successful send and before
+            # the ack can deliver twice; that is the at-least-once trade the tui path already makes. [daveey]
+            with contextlib.suppress(Exception):
+                _kbn().recover_orphaned_notify_claims(conn)
             # No explicit init_db(): connect() already runs the migration once per
             # process, and init_db() would re-run it on a second connection racing
             # the first.

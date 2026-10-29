@@ -2,8 +2,10 @@
 
 Exit 0 = condition met, 1 = not yet, 2 = cannot tell (unknown card, unreachable gateway,
 unreadable DB). The wake-check scheduler treats 2 as broken (3 in a row wakes the card),
-never as "not yet". Arguments travel as argv (``shlex.join`` for ssh), so SQL/quoting
-never gets re-split by a remote shell.
+never as "not yet". 3 = unknown, not yet: the gateway is unreachable and its hermes-hub replica,
+which still holds the card, is stale (a sleeping Mac). The scheduler re-probes 3 without counting it
+as broken until the replica has been stale for ``kanban_wake_check.STALE_WAKE_AFTER``. Arguments
+travel as argv (``shlex.join`` for ssh), so SQL/quoting never gets re-split by a remote shell.
 
     hermes kanban wait-check task t_x [--gateway hub] [--board SLUG] [--until done,review,blocked,triage,scheduled,archived]
                                      [--from running]
@@ -127,7 +129,7 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
         words = (p.stdout or "").split()
         if len(words) >= 2 and words[0] == target and words[1] in set(since):
             return 1, f"{out} (unchanged since park)"
-    if p.returncode in (0, 1):
+    if p.returncode in (0, 1, 3):  # 3: the remote read a stale replica of a third gateway
         return p.returncode, out
     return 2, f"error: remote wait-check on {host} exited {p.returncode}: {out[-300:]}"
 

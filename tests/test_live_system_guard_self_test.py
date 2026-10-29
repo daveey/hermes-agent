@@ -179,6 +179,33 @@ def test_os_killpg_blocks_foreign_pgid():
         os.killpg(FOREIGN_PID, signal.SIGTERM)
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="killpg POSIX-only")
+def test_killpg_allows_own_child_when_parent_walk_loses_it(monkeypatch):
+    """A child that vanishes during the parent walk is a stale PID, not a foreign one.
+
+    Failing closed there is the other half of the LSP reader-exit flake: the
+    server is our session leader, then reaped between getpgid and the walk.
+    """
+    import psutil
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        def vanished(self):
+            raise psutil.NoSuchProcess(self.pid)
+
+        monkeypatch.setattr(psutil.Process, "parents", vanished)
+        os.killpg(proc.pid, signal.SIGKILL)
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
 # ──────────────────── subprocess regex bypasses ────────────────
 
 

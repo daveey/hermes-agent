@@ -21,7 +21,9 @@ when the notice is diagnostic-only, when the chat's wake budget is spent (``HERM
 default 4: a woken turn can create a card whose notice wakes it again) or when ``HERMES_KANBAN_UNLOADED_WAKE=0``.
 A chat another live backend holds reaching the sweeper means that backend's poller missed: it is logged with the
 holder ("poller miss"). Claimed events always end as a turn or a row: any error after the claim falls back to the row,
-and a failed row rewinds the claim. Once woken, the chat is live in that process, so later notices go through its live
+and a failed row rewinds the claim. The claim is durable (holder pid + start) until that row or the started
+turn is acked; a sweeper that dies in between is rewound by ``recover_orphaned_notify_claims`` on the next
+pass, the same guarantee as the live poller. Once woken, the chat is live in that process, so later notices go through its live
 poller like any open chat's. Residual: if submit raises after the turn thread already started, the row is written too.
 A chat mid-turn refuses the row (``SessionTurnLeaseLostError``): that is "busy, try later", so the claim is rewound
 with one INFO line and the next pass retries; a notice still stalled after ``OVERDUE_S`` logs one WARNING per card
@@ -254,12 +256,17 @@ def _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now)
             verdict = "error"
         if verdict == "started":
             _charge_wake(tip, now)
+            from hermes_cli import kanban_db_connect as _kbc
+            from hermes_cli import kanban_db_notify as _kbn
+            with contextlib.closing(_kbc.connect(board=slug)) as conn:
+                _kbn.ack_notify_claim(conn, upto=new, from_cursor=old, **ident)
         else:
             from hermes_cli import kanban_db_connect as _kbc
             from hermes_cli import kanban_db_notify as _kbn
             with contextlib.closing(_kbc.connect(board=slug)) as conn:
                 if not _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new):
                     return "deferred"
+                _kbn.ack_notify_claim(conn, upto=new, from_cursor=old, **ident)
         logger.info("kanban sweep wake of %s for %s/%s: %s", tip, slug, ident["task_id"],
                     "turn started" if verdict == "started" else f"{verdict}, notice row written")
         return verdict
@@ -347,7 +354,7 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
     with session_db(sub["chat_id"]) as (db, tip):
         if db is None or tip is None:
             return None  # no store holds this chat (deleted): leave the cursor alone
-        old, new, claimed = _kbn.claim_unseen_events_for_sub(conn, kinds=kinds, **ident)
+        old, new, claimed = _kbn.claim_unseen_events_for_sub(conn, kinds=kinds, durable=True, **ident)
         if not claimed:
             return None  # a live poller or another sweeper got there first
     texts = [t for t in (fmt(sub, task, ev, slug) for ev in claimed) if t]
@@ -375,6 +382,8 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
         persisted = _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new)
     if not persisted:
         return None  # chat busy: the claim is rewound and the next pass retries
+    with contextlib.suppress(Exception):
+        _kbn.ack_notify_claim(conn, upto=new, from_cursor=old, **ident)
     logger.info("kanban notice for unloaded session %s (board=%s task=%s events=%d wake=%s)",
                 tip, slug, ident["task_id"], len(texts), verdict)
     return {"board": slug, "task_id": ident["task_id"], "chat_id": ident["chat_id"], "session_id": tip,
@@ -455,7 +464,7 @@ def _loop(stop: threading.Event) -> None:
     while not stop.is_set():
         try:
             from tui_gateway.kanban_remote_notices import sweep_remote_notices
-            sweep_remote_notices()
+            sweep_remote_notices(live_ids=live_session_ids())
             sweep_once(live_session_ids(), grace_s=grace)
         except Exception:
             logger.warning("kanban unloaded sweep failed", exc_info=True)

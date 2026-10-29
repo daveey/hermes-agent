@@ -695,8 +695,14 @@ def _next_run_overdue_issue(next_run: str) -> Optional[str]:
     return f"next_run_at is {amount} overdue — job is not firing (is the scheduler running?)"
 
 
-def _cron_doctor_issues_for_job(job: dict[str, Any]) -> list[str]:
+def _cron_doctor_issues_for_job(job: dict[str, Any], cfg: Optional[dict] = None) -> list[str]:
     issues: list[str] = []
+    if cfg is not None and job.get("enabled", True):
+        # [daveey] A pin the managed routing registry rejects fails every run before the model.
+        from cron.managed_pin import job_pin_issue
+        with contextlib.suppress(Exception):
+            if pin_issue := job_pin_issue(job, cfg):
+                issues.append(pin_issue)
     last_status = str(job.get("last_status") or "").strip().lower()
     # "delivery_failed" = the agent run succeeded; the delivery issue below reports it.
     if last_status and last_status not in {"ok", "delivery_failed", "delivery_queued"}:
@@ -736,7 +742,11 @@ def cron_doctor() -> int:
     """Run read-only cron health checks and return a shell-friendly status."""
     from cron.jobs import list_jobs
     jobs = list_jobs(include_disabled=False)
-    findings = [(job, issues) for job in jobs if (issues := _cron_doctor_issues_for_job(job))]
+    cfg = None
+    with contextlib.suppress(Exception):
+        from cron.managed_pin import load_config
+        cfg = load_config()
+    findings = [(job, issues) for job in jobs if (issues := _cron_doctor_issues_for_job(job, cfg))]
     if not findings:
         print(color("✓ Cron doctor found no issues", Colors.GREEN))
         note = f"  Checked {len(jobs)} active job(s)." if jobs else "  No active jobs configured."

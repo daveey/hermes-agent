@@ -168,6 +168,78 @@ describe('remote project groups from the hub replica', () => {
     expect(remoteNode()?.label).toBe('Garden (live)')
   })
 
+  // [daveey] Replica records carry no task annotations. Swapping a gateway's rows for them must not wipe the
+  // kanban badge it last reported (audit: 17 rows of This device showed no open/blocked counts for 16 min after a
+  // restart while the hub was the active gateway).
+  const liveRow = (over: Record<string, unknown> = {}) => ({
+    id: 's_1', profile: 'default', title: 'mini chat', message_count: 3, started_at: 1, last_active: 5,
+    kanban_active: 2, kanban_blocked: 1, kanban_parked: 2, kanban_observed_at: 1000, ...over
+  })
+
+  const remoteRow = () => remoteNode()?.previewSessions?.find(row => row.id === 's_1')
+
+  it('keeps the last live kanban counts when a failed refresh falls back to the replica', async () => {
+    vi.mocked(hubGatewayProjects).mockResolvedValue([replicaNode()])
+    vi.mocked(hermesApi).mockResolvedValue({
+      active_id: null,
+      projects: [{ ...replicaNode(), members: undefined, previewSessions: [liveRow()] }],
+      scoped_session_ids: []
+    })
+    await refreshProjectTree()
+    await flush()
+    expect(remoteRow()).toMatchObject({ kanban_active: 2, kanban_blocked: 1 })
+
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000)
+
+    try {
+      vi.mocked(hermesApi).mockRejectedValue(new Error('ssh: connect timed out'))
+      vi.mocked(requestGatewayForAgent).mockRejectedValue(new Error('ssh: connect timed out'))
+      await refreshProjectTree()
+      await flush()
+    } finally {
+      clock.mockRestore()
+    }
+
+    expect(vi.mocked(hubGatewayProjects).mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(remoteRow()).toMatchObject({ kanban_active: 2, kanban_blocked: 1, kanban_observed_at: 1000 })
+  })
+
+  it('keeps the boot snapshot kanban counts while the first live answer is pending', async () => {
+    $projectTree.set([
+      {
+        ...(replicaNode() as never as SidebarProjectTree),
+        id: `gw:${conn}:p_garden`,
+        previewSessions: [liveRow({ connection_id: conn, kanban_active: 3 })] as never
+      }
+    ])
+    vi.mocked(hermesApi).mockReturnValue(new Promise(() => {}) as never)
+    vi.mocked(hubGatewayProjects).mockResolvedValue([replicaNode()])
+
+    await refreshProjectTree()
+    await flush()
+
+    expect(remoteRow()).toMatchObject({ connection_id: conn, kanban_active: 3, kanban_blocked: 1 })
+  })
+
+  it('never borrows task evidence from another gateway or invents it for an unseen row', async () => {
+    $projectTree.set([
+      {
+        ...(replicaNode() as never as SidebarProjectTree),
+        id: 'gw:other:p_garden',
+        previewSessions: [liveRow({ connection_id: 'other', kanban_active: 9 })] as never
+      }
+    ])
+    vi.mocked(hermesApi).mockReturnValue(new Promise(() => {}) as never)
+    vi.mocked(hubGatewayProjects).mockResolvedValue([replicaNode()])
+
+    await refreshProjectTree()
+    await flush()
+
+    expect(remoteRow()).toBeDefined()
+    expect(remoteRow()).not.toHaveProperty('kanban_active')
+    expect(remoteRow()).not.toHaveProperty('kanban_observed_at')
+  })
+
   it('renames a remote declared project as one shared set per declared member, and keeps the new name', async () => {
     vi.mocked(hermesApi).mockRejectedValue(new Error('asleep'))
     vi.mocked(requestGatewayForAgent).mockRejectedValue(new Error('asleep'))

@@ -209,11 +209,45 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     return gone
 
 
+def local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
+    """``{task_id: reason}`` for unclaimed ``status`` cards this gateway cannot lease: the Board's refusal
+    (:func:`eligible`) computed before the claim, so local dispatch never spends a slot on them. Only cards with
+    ``runs_on`` or another creator can be refused (a held machine is left to the lease). Empty when the board is
+    not primary or the registry is unreachable: the lease stays the authority and fails closed."""
+    if sync.board_mode(conn) != "primary":
+        return {}
+    own = _own(conn)
+    rows = conn.execute(
+        "SELECT id, runs_on, created_on, workspace_kind FROM tasks WHERE status = ? AND claim_lock IS NULL "
+        "AND (runs_on IS NOT NULL OR (created_on IS NOT NULL AND created_on != ?))", (status, own)).fetchall()
+    if not rows:
+        return {}
+    reg = registry()
+    if not reg:
+        return {}
+    machines = reg["machines"]
+    out: dict[str, str] = {}
+    for row in rows:
+        reason = eligible(dict(row), own, machines)
+        if reason is not None and reason != "held":
+            out[row["id"]] = reason
+    return out
+
+
 def candidates(replica: sqlite3.Connection, own: str, *, now_ms: Optional[int] = None) -> list[sqlite3.Row]:
+    """Foreign ``ready`` and ``review`` cards without a live lease, reviews first (they finish work in flight).
+    A review runs where its ``runs_on`` says, like its implementation run did: before 10-28 only ``ready`` was
+    picked up, so a ``runs_on=[machine:hub]`` card that asked for review sat in the MacBook's review column,
+    which the MacBook could never lease (``labels_mismatch``)."""
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     return replica.execute(
-        "SELECT * FROM tasks WHERE status = 'ready' AND created_on IS NOT NULL AND created_on != ? "
-        "AND (lease_holder IS NULL OR COALESCE(lease_expires, 0) < ?) ORDER BY priority DESC, created_at, id",
+        "SELECT * FROM tasks WHERE status IN ('ready', 'review') AND created_on IS NOT NULL AND created_on != ? "
+        "AND (lease_holder IS NULL OR COALESCE(lease_expires, 0) < ?) "
+        # The replica holds the whole board: a card with an open (or missing) parent would only be refused
+        # parents_not_done by the Board, and that refusal demotes it on every machine. [daveey]
+        "AND NOT EXISTS (SELECT 1 FROM task_links l LEFT JOIN tasks p ON p.id = l.parent_id "
+        "WHERE l.child_id = tasks.id AND COALESCE(p.status, '') NOT IN ('done', 'archived')) "
+        "ORDER BY status = 'review' DESC, priority DESC, created_at, id",
         (own, now_ms)).fetchall()
 
 
@@ -273,6 +307,8 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
     from hermes_cli import kanban_lockguard
     replica = kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
     replica.row_factory = sqlite3.Row
+    from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
+    review_enabled = review_dispatch_enabled()
     try:
         picked: list[str] = []
         for card in candidates(replica, own):
@@ -280,7 +316,9 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
                 break
             if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (card["id"],)).fetchone():
                 continue
-            if mode == "explicit" and card["runs_on"] is None:
+            if (mode == "explicit" or card["status"] == "review") and card["runs_on"] is None:
+                continue  # a default-placement review stays with its creator
+            if card["status"] == "review" and not review_enabled:
                 continue
             if eligible(dict(card), own, machines) is not None:
                 continue

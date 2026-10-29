@@ -324,6 +324,25 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
 
     # cmd_sessions lives in hermes_cli/sessions_cmd.py; the parser is threaded
     # in because the fallthrough branch calls sessions_parser.print_help().
+    # Session handover (hermes_cli.session_handover). [daveey]
+    sessions_move = sessions_subparsers.add_parser(
+        "move", help="Hand this chat over to another gateway (sessions.move.hosts); this gateway archives its copy")
+    sessions_move.add_argument("session_id", help="Session ID to move")
+    sessions_move.add_argument("--to", required=True, help="Target gateway (a key of sessions.move.hosts)")
+    sessions_move.add_argument("--reason", required=True, help="Why the chat must move (recorded on the Board)")
+    _flag(sessions_move, "--after-turn", help="Wait (up to 10 min) for a running turn to end instead of refusing")
+    _flag(sessions_move, "--force", help="Move even though open cards on other gateways notify this chat "
+                                         "(their notices reach the archived copy here)")
+    sessions_import_lineage = sessions_subparsers.add_parser(
+        "import-lineage", help="Import an exported session lineage (JSON; the target side of `sessions move`)")
+    sessions_import_lineage.add_argument("file", help="Payload file, or - for stdin")
+    _flag(sessions_import_lineage, "--hidden", help="Import it hidden (revealed later with `sessions reveal`)")
+    sessions_reveal = sessions_subparsers.add_parser("reveal", help="Unhide a session and its compression lineage")
+    sessions_reveal.add_argument("session_id", help="Session ID to reveal")
+    sessions_discard = sessions_subparsers.add_parser(
+        "discard-hidden", help="Delete sessions that are still hidden (undo an unrevealed `import-lineage`)")
+    sessions_discard.add_argument("session_ids", nargs="+", help="Session IDs (visible ones are never deleted)")
+
     # main() injects a lazy indirection so sessions_cmd is only imported when
     # the subcommand runs.
     def _dispatch_sessions(_args, *, sessions_parser=sessions_parser):

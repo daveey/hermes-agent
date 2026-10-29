@@ -1378,3 +1378,80 @@ describe('actual hub poller + list refresh freshness', () => {
     60_000
   )
 })
+
+// [daveey] A failed list leaves its owners stale (rows paint as cached copies: no stripe, no kanban badge) and only a
+// successful list repairs that. After a Desktop restart whose first list failed, nothing re-listed for 16 min.
+describe('re-lists while a failed list leaves owners stale', () => {
+  it('retries with backoff until a list succeeds, then stops', async () => {
+    const { _resetOfflineSessionsForTests, sessionOwnerIsFresh } = await import('@/store/offline-sessions')
+    _resetOfflineSessionsForTests()
+    vi.useFakeTimers()
+    const owner = row('mine', { connection_id: 'local' })
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [owner] }))
+    const { result, unmount } = renderHook(() => useSessionListActions({ profileScope: 'all' }))
+
+    try {
+      await act(async () => {
+        await result.current.refreshSessions()
+      })
+      listSidebarSessions.mockRejectedValue(new Error('Timed out connecting to Hermes backend'))
+      await act(async () => {
+        await result.current.refreshSessions().catch(() => undefined)
+      })
+      expect(sessionOwnerIsFresh('local', 'default')).toBe(false)
+      const callsAfterFailure = listSidebarSessions.mock.calls.length
+
+      // First retry at 15 s fails again; the next waits 30 s.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000)
+      })
+      expect(listSidebarSessions.mock.calls.length).toBe(callsAfterFailure + 1)
+      expect(sessionOwnerIsFresh('local', 'default')).toBe(false)
+
+      listSidebarSessions.mockResolvedValue(sidebar({ sessions: [owner] }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(29_000)
+      })
+      expect(listSidebarSessions.mock.calls.length).toBe(callsAfterFailure + 1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(listSidebarSessions.mock.calls.length).toBe(callsAfterFailure + 2)
+      expect(sessionOwnerIsFresh('local', 'default')).toBe(true)
+
+      // Fresh again: no more retries.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000)
+      })
+      expect(listSidebarSessions.mock.calls.length).toBe(callsAfterFailure + 2)
+    } finally {
+      unmount()
+      vi.useRealTimers()
+      _resetOfflineSessionsForTests()
+    }
+  })
+
+  it('does not re-list a gateway the status probe marked unreachable', async () => {
+    const { _resetOfflineSessionsForTests, recordSessionGatewayUnavailable } = await import('@/store/offline-sessions')
+    _resetOfflineSessionsForTests()
+    vi.useFakeTimers()
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('mine')] }))
+    const { result, unmount } = renderHook(() => useSessionListActions({ profileScope: 'all' }))
+
+    try {
+      await act(async () => {
+        await result.current.refreshSessions()
+      })
+      const calls = listSidebarSessions.mock.calls.length
+      act(() => recordSessionGatewayUnavailable('conn-mini'))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000)
+      })
+      expect(listSidebarSessions.mock.calls.length).toBe(calls)
+    } finally {
+      unmount()
+      vi.useRealTimers()
+      _resetOfflineSessionsForTests()
+    }
+  })
+})

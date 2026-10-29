@@ -250,11 +250,103 @@ def test_no_retirement_watchdog_continues_in_place_at_once(recovery, skewed, mon
 
 
 def test_skew_with_a_replacement_coming_does_not_continue_in_place(recovery, skewed, monkeypatch):
-    # Idle with a live watchdog: retirement is imminent, so the successor owns the continuation.
+    # Idle with a live watchdog: retirement is imminent, so the successor owns the continuation for as long
+    # as a watchdog needs to begin retiring an idle backend.
     clock = _VirtualClock()
-    _watch(monkeypatch, recovery, clock, max_s=up.LEAVE_GRACE_S - up.WATCH_POLL_S)
-    assert clock.now >= up.NO_REPLACEMENT_S * 3
+    _watch(monkeypatch, recovery, clock, max_s=up.HANDOFF_WAIT_S - up.WATCH_POLL_S)
+    assert clock.now >= up.NO_REPLACEMENT_S
     assert recovery.calls == [] and not recovery.done.is_set()
+
+
+def test_replacement_outlook_that_never_retires_continues_within_the_hand_off_bound(recovery, skewed, monkeypatch):
+    # 2nd attempt (live 2026-10-28 17:22): the idle proof held but no retirement began; the turn used to sit
+    # until the 300 s backstop. Not even preparing two watchdog polls after the move means nobody is coming.
+    clock = _VirtualClock()
+    _watch(monkeypatch, recovery, clock)
+    assert_continued(recovery)
+    assert up.HANDOFF_WAIT_S <= clock.now <= up.WATCH_POLL_S + up.HANDOFF_WAIT_S + up.WATCH_POLL_S
+
+
+def test_fluctuating_outlook_counts_from_the_move_not_from_the_last_flip(recovery, skewed, monkeypatch):
+    # The outlook flips between coming and blocked every poll: the bound still counts from the move.
+    def flip(now):
+        skewed.idle = not skewed.idle
+    clock = _VirtualClock(on_tick=flip)
+    _watch(monkeypatch, recovery, clock)
+    assert_continued(recovery)
+    assert clock.now <= up.WATCH_POLL_S + up.NO_REPLACEMENT_S + 2 * up.WATCH_POLL_S
+
+
+def test_automatic_turn_waits_for_the_paused_turn_once_the_window_is_over(recovery, skewed, monkeypatch):
+    # Live 2026-10-28 17:22:19 → 17:30:39: a kanban notice claimed the idle paused session 2 s after the
+    # checkout moved, ran 8 min over the pause and kept the backend busy. Now it is refused (callers requeue)
+    # until the paused turn's continuation has started.
+    session_box, refused = {}, []
+    def notice(now):
+        session = session_box.get("session")
+        if session is not None and now <= up.HANDOFF_WAIT_S:
+            refused.append(not server._notif_claim_turn(session))
+            assert not session.get("running")
+    clock = _VirtualClock(on_tick=notice)
+    real_start = up.start_in_place_watcher
+    def start(sid, session, key):
+        session_box["session"] = session
+        return real_start(sid, session, key)
+    monkeypatch.setattr(up, "start_in_place_watcher", start)
+    _watch(monkeypatch, recovery, clock)
+    assert refused and all(refused)
+    assert_continued(recovery)
+    assert clock.now <= up.WATCH_POLL_S + up.HANDOFF_WAIT_S + up.WATCH_POLL_S
+    # The hold is bounded: a kickoff that never records the continuation's marker frees automatic turns again.
+    assert up.continuation_due(session_box["session"])
+    clock.sleep(up.KICKOFF_HOLD_S + 1)
+    assert not up.continuation_due(session_box["session"])
+
+
+def test_a_continuation_that_never_schedules_stops_holding_automatic_turns(recovery, skewed, monkeypatch):
+    # e.g. a live foreign marker writer refuses every schedule: the watcher keeps retrying, but the chat's
+    # notices, loop ticks and heartbeats wait at most HOLD_MAX_S past the window's end, not 6 h.
+    skewed.armed = False
+    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a: None)
+    session_box, due = {}, []
+    def probe(now):
+        if (session := session_box.get("session")) is not None:
+            due.append((now, up.continuation_due(session)))
+    clock = _VirtualClock(on_tick=probe)
+    real_start = up.start_in_place_watcher
+    def start(sid, session, key):
+        session_box["session"] = session
+        return real_start(sid, session, key)
+    monkeypatch.setattr(up, "start_in_place_watcher", start)
+    _watch(monkeypatch, recovery, clock, max_s=up.HOLD_MAX_S + 60)
+    assert any(d for t, d in due if t <= up.HOLD_MAX_S)
+    assert not any(d for t, d in due if t >= up.HOLD_MAX_S + 3 * up.WATCH_POLL_S)
+
+
+def test_synthesized_turn_over_the_pause_then_continues_at_once(recovery, skewed, monkeypatch):
+    # A notice already running over the pause when the window ends: the move is clocked while it runs, so
+    # the paused turn continues on the first poll after it, not one more hand-off wait (or backstop) later.
+    session_box = {}
+    def carried(now):
+        session = session_box.get("session")
+        if session is None:
+            return
+        with session["history_lock"]:
+            if now <= 480:
+                session["running"], session["_paused_marker_carried"] = True, "paused"
+            elif session.get("_paused_marker_carried"):
+                session["running"] = False
+                session.pop("_paused_marker_carried")
+                session_box["ended"] = now
+    clock = _VirtualClock(on_tick=carried)
+    real_start = up.start_in_place_watcher
+    def start(sid, session, key):
+        session_box["session"] = session
+        return real_start(sid, session, key)
+    monkeypatch.setattr(up, "start_in_place_watcher", start)
+    _watch(monkeypatch, recovery, clock, max_s=up.LEAVE_GRACE_S * 3)
+    assert_continued(recovery)
+    assert clock.now <= session_box["ended"] + up.WATCH_POLL_S
 
 
 def test_requested_replacement_hands_off_and_the_successor_continues_once(recovery, skewed, monkeypatch):

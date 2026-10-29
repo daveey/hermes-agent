@@ -330,7 +330,9 @@ def confirm_remote(awaiting: Optional[dict]) -> None:
         return  # resolve reports the bad ref
     from hermes_cli import kanban_wait_check as kwait
     rc, out = kwait.check_remote(awaiting["gateway"], "task", ref, board=awaiting.get("board"))
-    if rc not in (0, 1):
+    # rc 3: the gateway is offline, but the card is in its last replica. Accept it on that observation (``observed``
+    # keeps the last-seen status and the staleness), so a card can still park on a card of a sleeping Mac.
+    if rc not in (0, 1, 3):
         raise AwaitingError(INVALID_AWAITING, f"cannot confirm producer card {ref} on {awaiting['gateway']}: "
                                               f"{out[-200:]}")
     words = out.split()
@@ -338,7 +340,7 @@ def confirm_remote(awaiting: Optional[dict]) -> None:
     if status in ("archived", "triage") or "orphan producer" in out or "agent-owned park:" in out:
         raise AwaitingError(AGENT_ACTION_WAIT, f"the producer card is not live: {ref} on {awaiting['gateway']} "
                                                f"is {status}, so nobody is producing it. {_REMEDY}")
-    _REMOTE_CONFIRMED[(awaiting["gateway"], ref)] = (time.monotonic(), out[-120:])
+    _REMOTE_CONFIRMED[(awaiting["gateway"], ref)] = (time.monotonic(), out[-240:] if rc == 3 else out[-120:])
 
 
 def _check_card(conn: sqlite3.Connection, task_id: str, awaiting: dict, text: str) -> None:

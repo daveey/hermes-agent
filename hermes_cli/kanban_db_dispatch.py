@@ -183,8 +183,17 @@ class DispatchResult:
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
     tick; separate bucket so dashboards show "profile busy" vs "stuck"."""
+    skipped_ineligible: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, reason)`` ready/review cards this machine cannot lease (``runs_on`` / creator labels exclude
+    it, ``pinned_only``): the Board would refuse the claim (``labels_mismatch``), so they are never candidates
+    and never hold a slot or the review reservation. [daveey]"""
+    claim_deferred: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, reason)`` whose claim the Board lease deferred this tick (``lease_held``, ``labels_mismatch``,
+    ``offline``). The tick moves on to the next candidate; the stuck warning names these. [daveey]"""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
+    remote_archived: list[str] = field(default_factory=list)
+    """Task ids archived on a stop request from another gateway (``kanban_remote_stop``)."""
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     agent_block_escalated: list[str] = field(default_factory=list)
@@ -250,6 +259,12 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.skipped_owned:
             counts["skipped_owned"] = counts.get("skipped_owned", 0) + 1
+        for _task_id, reason in res.claim_deferred:
+            key = f"claim_deferred({reason})"
+            counts[key] = counts.get(key, 0) + 1
+        for _task_id, reason in res.skipped_ineligible:
+            key = f"skipped_ineligible({reason})"
+            counts[key] = counts.get(key, 0) + 1
         if res.memory_pressure:
             pressure = res.memory_pressure
         if res.at_capacity:
@@ -260,6 +275,22 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
     if pressure:
         parts.append(f"memory_pressure={pressure}")
     return ", ".join(parts)
+
+
+def stuck_warning(bad_ticks: int, results: Iterable[Optional[DispatchResult]]) -> str:
+    """The "dispatcher stuck" line for the CLI daemon and the embedded gateway dispatcher.
+
+    When the Board deferred claims or the queue held cards this machine cannot lease, the line says so and points
+    at the Board leases and ``runs_on``; it only blames profile health when nothing else explains the zero."""
+    results = list(results)
+    held = describe_suppression(results)
+    msg = (f"kanban dispatcher stuck: ready queue non-empty for {bad_ticks} consecutive ticks but 0 workers "
+           f"spawned.{f' Last tick held back: {held}.' if held else ''}")
+    lease_bound = any(res is not None and (res.claim_deferred or res.skipped_ineligible) for res in results)
+    if lease_bound:
+        return (msg + " The Board lease refused or deferred claims: check the cards' runs_on / placement "
+                "(`hermes kanban show <id>`) and which machine holds or may take their Board lease.")
+    return msg + " Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`."
 
 
 def all_at_capacity(results: Iterable[Optional[DispatchResult]]) -> bool:
@@ -1274,7 +1305,7 @@ class _DeadWorker:
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
-    run_id: Optional[int] = None,
+    run_id: Optional[int] = None, conn: Optional[sqlite3.Connection] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -1286,8 +1317,10 @@ def _classify_dead_worker(
     failure = _worker_scope.read_failure(task_id, run_id, log or "") if task_id else None
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
-        if kind == "oom_killed":
-            _worker_scope.note_oom_kill(task_id, board)
+        if kind == "oom_killed" and task_id:
+            # On the reclaim connection. A second connect here re-runs the
+            # legacy-inflight backfill and deadlocks on this write txn.
+            _worker_scope.note_oom_kill(task_id, board, conn=conn)
         dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
                            {"pid": pid, "claimer": claimer, **failure})
     else:
@@ -1406,7 +1439,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
 
             pid = int(row["worker_pid"])
             dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board,
-                                         run_id=row["current_run_id"])
+                                         run_id=row["current_run_id"], conn=conn)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -2013,12 +2046,23 @@ def dispatch_profile_allowlist_summary() -> str:
             "profile, or the config could not be read — omit the key to allow any)")
 
 
+def _local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
+    """Cards in ``status`` this machine cannot lease (``kanban_worker_node.local_refusals``); never raises."""
+    try:
+        from hermes_cli.kanban_worker_node import local_refusals
+        return local_refusals(conn, status)
+    except Exception:  # health: allow BLE001 -- eligibility is advisory; the Board lease still decides
+        _kb._log.debug("kanban dispatch: local eligibility check failed", exc_info=True)
+        return {}
+
+
 def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
-    rows = conn.execute(
-        "SELECT DISTINCT assignee FROM tasks "
+    refused = _local_refusals(conn, status)
+    rows = [row for row in conn.execute(
+        "SELECT id, assignee FROM tasks "
         "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
         (status,),
-    ).fetchall()
+    ).fetchall() if row["id"] not in refused]
     if not rows:
         return False
     profile_exists = _profile_exists_fn()
@@ -2336,8 +2380,12 @@ def _dispatch_lane_task(
         _count_spawn(assignee)
         return True
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
+    _kb._sync.pop_claim_deferral(task_id)
     claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
     if claimed is None:
+        deferral = _kb._sync.pop_claim_deferral(task_id)
+        if deferral is not None:  # the Board said no this tick: the caller moves on to the next candidate
+            result.claim_deferred.append((task_id, deferral))
         return False
     try:
         resolved_branch_name = None
@@ -2443,6 +2491,13 @@ def _run_reclaim_phase(
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
     reap_worker_zombies()
     result.reaped_terminal_workers = reap_terminal_workers(conn)
+    # Stop requests another gateway sent for cards this gateway runs under its own Board lease (kanban_archive of a
+    # card running on this machine). Before the reclaim sweeps, so they see the archived card. [daveey]
+    from hermes_cli.kanban_remote_stop import apply_stop_requests
+    try:
+        result.remote_archived = apply_stop_requests(conn)
+    except Exception:
+        _kb._log.warning("kanban: applying remote stop requests failed", exc_info=True)
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
@@ -2678,10 +2733,14 @@ def _dispatch_once_locked(
         except Exception:
             _kb._log.debug("kanban dispatch: triage sweep failed", exc_info=True)
     _kb._sync.worker_pickup(conn, spawn_budget, dry_run, _profile_exists_fn)  # worker node (RFC "Placement")
-    ready_rows = lane_rows(conn, "ready")
+    # Cards this machine cannot lease (runs_on for another machine, ...) are never candidates: before 10-28 a
+    # review card pinned to the hub sat first in the MacBook's review lane, took the review reservation every
+    # tick, and the Board refused its lease every tick, so the eligible ready queue never started.
+    ready_rows = _eligible_rows(conn, lane_rows(conn, "ready"), "ready", result)
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
-    review_rows = lane_rows(conn, "review") if review_dispatch_enabled() else []
+    review_rows = (_eligible_rows(conn, lane_rows(conn, "review"), "review", result)
+                   if review_dispatch_enabled() else [])
     # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
     # skipped_unassigned — "busy, retry later" differs from "needs routing".
     # Resolved BEFORE the review reservation so the reservation can see which
@@ -2718,22 +2777,32 @@ def _dispatch_once_locked(
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
-    for row in ready_rows:
-        if ready_budget is not None and spawned >= ready_budget:
-            break
-        row_assignee = row["assignee"]
-        if not row_assignee:
-            # Honour kanban.default_assignee so an unassigned task doesn't
-            # park in 'ready' forever.
-            if not default_assignee or not _apply_default_assignee(
-                conn, row["id"], default_assignee, dry_run=dry_run,
-            ):
-                result.skipped_unassigned.append(row["id"])
-                continue
-            row_assignee = default_assignee
-            result.auto_assigned_default.append(row["id"])
-        if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
-            spawned += 1
+    next_ready = 0
+
+    def _run_ready(limit: Optional[int]) -> None:
+        # Resumable: a deferred or refused claim never ends the tick, the loop moves on to the next row, and
+        # a second call after the review lane continues where this one stopped.
+        nonlocal spawned, next_ready
+        while next_ready < len(ready_rows):
+            if limit is not None and spawned >= limit:
+                return
+            row = ready_rows[next_ready]
+            next_ready += 1
+            row_assignee = row["assignee"]
+            if not row_assignee:
+                # Honour kanban.default_assignee so an unassigned task doesn't
+                # park in 'ready' forever.
+                if not default_assignee or not _apply_default_assignee(
+                    conn, row["id"], default_assignee, dry_run=dry_run,
+                ):
+                    result.skipped_unassigned.append(row["id"])
+                    continue
+                row_assignee = default_assignee
+                result.auto_assigned_default.append(row["id"])
+            if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
+                spawned += 1
+
+    _run_ready(ready_budget)
 
     # A review agent (sdlc-review) approves (→ done) or requests changes
     # (→ ready/todo). Review spawns share max_spawn with ready tasks. The loop
@@ -2747,7 +2816,25 @@ def _dispatch_once_locked(
             continue
         if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
             spawned += 1
+    # The review reservation is only a hold: a slot no review took (its claim deferred, guarded, capped) goes
+    # back to the ready rows still waiting this tick.
+    _run_ready(spawn_budget)
     return result
+
+
+def _eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str,
+                   result: DispatchResult) -> list[sqlite3.Row]:
+    refused = _local_refusals(conn, status) if rows else {}
+    if not refused:
+        return rows
+    kept = []
+    for row in rows:
+        reason = refused.get(row["id"])
+        if reason is None:
+            kept.append(row)
+        else:
+            result.skipped_ineligible.append((row["id"], reason))
+    return kept
 
 
 def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:

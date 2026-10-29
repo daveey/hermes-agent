@@ -223,6 +223,38 @@ def probe_specs(cfg: dict) -> list[tuple[str, object]]:
     return specs
 
 
+# Per-profile configured tools (``profile-tools:<profile>:<terminal|file|git|kanban>``), published so
+# another gateway's placement can tell whether a card's ``requires`` would pass on this gateway's
+# profile before sending it here (:mod:`hermes_cli.kanban_placement`). host_repo is never published:
+# a checkout on this host says nothing about the creator's checkout. [daveey]
+PROFILE_TOOLS_NS = "profile-tools"
+PROFILE_TOOLS = ("terminal", "file", "git", "kanban")
+
+
+def profile_tool_entries() -> list[tuple[str, bool]]:
+    """(name, True) for each tool of :data:`PROFILE_TOOLS` each live profile's policy grants.
+
+    A profile whose policy cannot be read publishes nothing (reads as lacking every tool). Never raises.
+    """
+    out: list[tuple[str, bool]] = []
+    try:
+        from hermes_cli.kanban_capabilities import _profile_capabilities
+        from hermes_cli.profiles import list_profile_names
+        names = list_profile_names()
+    except Exception:
+        return out
+    for name in names:
+        try:
+            held = _profile_capabilities(name)
+        except Exception:
+            continue
+        for tool in PROFILE_TOOLS:
+            cap = f"{PROFILE_TOOLS_NS}:{name}:{tool}"
+            if tool in held and is_gateway_need(cap):
+                out.append((cap, True))
+    return out
+
+
 def refresh(cfg: Optional[dict] = None, *, now: Optional[float] = None) -> dict:
     """Run every probe now and atomically rewrite the registry file. Returns the record."""
     cfg = _config() if cfg is None else cfg
@@ -241,12 +273,17 @@ def refresh(cfg: Optional[dict] = None, *, now: Optional[float] = None) -> dict:
             gh = pool.submit(_builtin_github)
         else:
             gh = None
+        tools = pool.submit(profile_tool_entries) if cfg.get("profile_tools", True) else None
         for fut in futures:
             name, ok, at = fut.result()
             results[name] = {"name": name, "ok": ok, "checked_at": round(at, 3)}
         if gh is not None:
             at = round(time.time(), 3)
             for name, ok in gh.result():
+                results.setdefault(name, {"name": name, "ok": ok, "checked_at": at})
+        if tools is not None:
+            at = round(time.time(), 3)
+            for name, ok in tools.result():
                 results.setdefault(name, {"name": name, "ok": ok, "checked_at": at})
     record = {
         "schema": SCHEMA,
@@ -353,6 +390,27 @@ def remote_records(*, exclude: Optional[str] = None) -> dict[str, dict]:
         if isinstance(rec, dict) and rec.get("schema") == SCHEMA:
             out[gw] = rec
     return out
+
+
+def remote_gateway_profiles(gateway: str) -> Optional[list[str]]:
+    """The profile names ``gateway`` advertises in its hermes-hub ``gateway`` record (the client
+    publishes every profile home it serves), None when unknown/unreadable. [daveey]"""
+    try:
+        db = _ro(hub_db_path())
+    except Exception:
+        return None
+    try:
+        row = db.execute("SELECT data FROM replica WHERE gw = ? AND coll = 'gateway' AND key = 'info'",
+                         (gateway,)).fetchone()
+    except Exception:
+        row = None
+    finally:
+        db.close()
+    try:
+        profiles = json.loads(row[0]).get("profiles") if row else None
+    except (ValueError, AttributeError):
+        return None
+    return [str(p) for p in profiles] if isinstance(profiles, list) else None
 
 
 def locate(need: str, *, now: Optional[float] = None, cfg: Optional[dict] = None,

@@ -25,6 +25,13 @@ if TYPE_CHECKING:
 # Notifier reaction to a terminal event: "notify" = passive adapter.send only
 # (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only.
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
+# Subscription provenance (``delivery_metadata.reason``). Owning subs belong to the chat that created the
+# card (``create``: kanban_create's auto-sub; ``origin``: the cross-gateway origin binding) and are inherited
+# by its children; observer subs only watch that one card and are not (``kanban_db._inherit_notify_subs``).
+# ``shepherd`` = explicit notify-subscribe (incl. hermes-hub's shepherd action), ``touch`` = comment/unblock/link.
+# [daveey]
+OWNING_SUB_REASONS = ("create", "origin")
+OBSERVER_SUB_REASONS = ("shepherd", "touch")
 
 _SCALAR_TYPES = (str, int, float, bool)
 
@@ -107,6 +114,11 @@ def add_notify_sub(
         merged_metadata = dict(existing_metadata)
         if delivery_metadata:
             merged_metadata.update(delivery_metadata)
+            # Provenance only ever upgrades: re-subscribing the creating chat as a shepherd must not turn
+            # its owning sub into an observer that children stop inheriting. [daveey]
+            if (existing_metadata.get("reason") in OWNING_SUB_REASONS
+                    and merged_metadata.get("reason") not in OWNING_SUB_REASONS):
+                merged_metadata["reason"] = existing_metadata["reason"]
         metadata_json = _encode_notify_delivery_metadata(merged_metadata) if merged_metadata else None
         conn.execute(
             """
@@ -277,6 +289,114 @@ def remove_notify_sub(
             _sub_key(task_id, platform, chat_id, thread_id),
         )
     return cur.rowcount > 0
+
+
+# Origin bindings run in the creating call; a legacy (unstamped) 'hub' sub written later than this after its
+# card's creation is a hermes-hub shepherd. Also the fallback for rows still unstamped at inherit time. [daveey]
+LEGACY_ORIGIN_BIND_WINDOW_S = 120
+
+_UNSTAMPED_SQL = ("(CASE WHEN delivery_metadata IS NULL THEN 1 WHEN NOT json_valid(delivery_metadata) THEN 1 "
+                  "WHEN json_type(delivery_metadata) != 'object' THEN 1 "
+                  "WHEN json_extract(delivery_metadata, '$.reason') IS NULL THEN 1 ELSE 0 END) = 1")
+
+
+def stamp_legacy_hub_sub_provenance(conn: sqlite3.Connection) -> int:
+    """One-shot backfill: give every unstamped 'hub' sub a ``reason`` (``origin`` or ``shepherd``). [daveey]
+
+    Before provenance stamping, the origin binding and hermes-hub shepherd subs were both bare 'hub' rows, and
+    inheritance copied them to children with the CHILD's creation time, so a copied observer looked exactly
+    like a fresh origin binding and kept spreading down the program. Resolve each row through the card graph:
+    a row whose chat also sits on one of the card's parents or its creator task, written no later than the row,
+    is an inherited copy and takes that ancestor's resolved reason; any other row is the card's own, ``origin``
+    when written within ``LEGACY_ORIGIN_BIND_WINDOW_S`` of the card's creation, else ``shepherd``. Known
+    ambiguity: where old code collapsed a copied observer and the same chat's origin binding into one row
+    (``INSERT OR IGNORE``), it is stamped ``shepherd`` (under-inherits, never over-inherits). Idempotent and
+    cheap once done (no unstamped rows left). Returns the number of rows stamped."""
+    rows = conn.execute(
+        "SELECT s.task_id, s.chat_id, s.thread_id, s.created_at AS sub_at, t.created_at AS task_at "
+        "FROM kanban_notify_subs s LEFT JOIN tasks t ON t.id = s.task_id "
+        f"WHERE s.platform = 'hub' AND {_UNSTAMPED_SQL.replace('delivery_metadata', 's.delivery_metadata')}"
+    ).fetchall()
+    if not rows:
+        return 0
+    pending = {(r["task_id"], r["chat_id"]): r for r in rows}
+    task_ids = sorted({r["task_id"] for r in rows})
+    ancestors: dict[str, set[str]] = {}
+
+    def _ancestors(task_id: str) -> set[str]:
+        if task_id not in ancestors:
+            found = {r[0] for r in conn.execute("SELECT parent_id FROM task_links WHERE child_id = ?", (task_id,))}
+            for (payload,) in conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created' ORDER BY id LIMIT 1",
+                    (task_id,)):
+                try:
+                    creator = (json.loads(payload or "{}") or {}).get("creator_task_id")
+                except (TypeError, ValueError, AttributeError):
+                    creator = None
+                if creator:
+                    found.add(str(creator))
+            found.discard(task_id)
+            ancestors[task_id] = found
+        return ancestors[task_id]
+
+    resolved: dict[tuple[str, str], str] = {}
+
+    def _row(task_id: str, chat_id: str) -> Optional[tuple[Optional[str], int]]:
+        """``(reason or None, created_at)`` of the card's hub row for ``chat_id``; None without one."""
+        key = (task_id, chat_id)
+        if key in pending:
+            return None if key not in resolved else (resolved[key], int(pending[key]["sub_at"] or 0))
+        row = conn.execute(
+            "SELECT delivery_metadata, created_at FROM kanban_notify_subs WHERE task_id = ? AND platform = 'hub' "
+            "AND chat_id = ? ORDER BY thread_id LIMIT 1", (task_id, chat_id)).fetchone()
+        if row is None:
+            return None
+        return (_decode_notify_delivery_metadata(row["delivery_metadata"]).get("reason") or "origin",
+                int(row["created_at"] or 0))
+
+    def _resolve(task_id: str, chat_id: str, seen: frozenset) -> Optional[str]:
+        key = (task_id, chat_id)
+        if key in resolved:
+            return resolved[key]
+        if key not in pending:
+            got = _row(task_id, chat_id)
+            return got[0] if got else None
+        row = pending[key]
+        sub_at = int(row["sub_at"] or 0)
+        # Only an ancestor row written no later than this one can be its source: a copy is written after the
+        # row it copies. A later same-chat row on an ancestor is an independent shepherd of that ancestor.
+        inherited = []
+        for anc in sorted(_ancestors(task_id)):
+            if anc in seen:
+                continue
+            reason = _resolve(anc, chat_id, seen | {task_id})
+            got = _row(anc, chat_id)
+            if reason is not None and got is not None and got[1] <= sub_at:
+                inherited.append(reason)
+        if inherited:
+            reason = "shepherd" if all(r in OBSERVER_SUB_REASONS for r in inherited) else "origin"
+        else:
+            bound_at_creation = (row["task_at"] is not None and row["sub_at"] is not None
+                                 and sub_at <= int(row["task_at"]) + LEGACY_ORIGIN_BIND_WINDOW_S)
+            reason = "origin" if bound_at_creation else "shepherd"
+        resolved[key] = reason
+        return reason
+
+    with _kb.write_txn(conn, allow_nested=True):
+        for task_id in task_ids:
+            for (tid, chat_id) in [k for k in pending if k[0] == task_id]:
+                _resolve(tid, chat_id, frozenset())
+        for (task_id, chat_id), reason in resolved.items():
+            conn.execute(
+                "UPDATE kanban_notify_subs SET delivery_metadata = CASE "
+                "WHEN delivery_metadata IS NULL THEN json_object('reason', ?) "
+                "WHEN NOT json_valid(delivery_metadata) THEN json_object('reason', ?) "
+                "WHEN json_type(delivery_metadata) = 'object' THEN json_set(delivery_metadata, '$.reason', ?) "
+                "ELSE json_object('reason', ?) END "
+                f"WHERE task_id = ? AND platform = 'hub' AND chat_id = ? AND {_UNSTAMPED_SQL}",
+                (reason, reason, reason, reason, task_id, chat_id),
+            )
+    return len(rows)
 
 
 def purge_stale_done_notify_subs(conn: sqlite3.Connection, *, max_age_days: int = 30) -> int:
@@ -632,6 +752,65 @@ def rewind_notify_cursor(
             except sqlite3.OperationalError:
                 pass  # pre-migration board
     return cur.rowcount > 0
+
+
+def _inherit_notify_subs(
+    conn: sqlite3.Connection, child_id: str, parents: Iterable[str], *,
+    created_at: Optional[int] = None,
+) -> None:
+    """Moved from ``kanban_db`` (file-size cap). Copy parents' notify subscriptions to a child, cursor caught up to the
+    child's current event so a late ``link_tasks`` never replays history.
+
+    Single owner of inheritance (create_task, link_tasks, decompose). It must
+    copy EVERY routing/delivery column: dropping ``chat_type`` made DM-originated
+    completions wake a fresh group session instead of the originating DM.
+
+    Omitting columns here silently degrades routing: a DM-originated child completion falls back to
+    chat_type='group' and wakes a fresh group-scoped session instead of the originating DM (issue #73030).
+
+    Only OWNING subscriptions are inherited (``_owning_sub_clause``). Observer subs (``shepherd``: explicit
+    ``notify-subscribe`` incl. hermes-hub's shepherd action; ``touch``: a comment/unblock/link) watch THAT card,
+    not the program under it: copying them made every chat that ever watched a shepherd card own all of its
+    descendants (runners-panel chat d48ade owned 4 foreign cards via t_82f80db4's 44 subs). [daveey]
+    """
+    parent_ids = tuple(dict.fromkeys(p for p in parents if p))
+    if not parent_ids:
+        return
+    row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events WHERE task_id = ?", (child_id,),
+    ).fetchone()
+    cursor = int(row["cursor"] if row is not None else 0)
+    placeholders = ",".join("?" * len(parent_ids))
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO kanban_notify_subs
+            (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
+             chat_type, notifier_profile, delivery_mode, delivery_metadata,
+             created_at, last_event_id)
+        SELECT ?, s.platform, s.chat_id, s.thread_id, s.user_id, s.user_id_alt,
+               COALESCE(s.chat_type, 'dm'), s.notifier_profile,
+               COALESCE(s.delivery_mode, 'notify'), s.delivery_metadata, ?, ?
+          FROM kanban_notify_subs s
+          LEFT JOIN tasks p ON p.id = s.task_id
+         WHERE s.task_id IN ({placeholders}) AND {_owning_sub_clause()}
+        """,
+        (child_id, int(created_at if created_at is not None else time.time()), cursor, *parent_ids),
+    )
+
+
+def _owning_sub_clause() -> str:
+    """SQL predicate (aliases ``s`` = sub, ``p`` = its task) for a subscription a child inherits.
+
+    Stamped provenance (``delivery_metadata.reason``) decides: ``shepherd``/``touch`` are observers and never
+    inherit; ``create``/``origin`` (and any other value) do. Legacy 'hub' rows are stamped once at board open
+    (``kanban_db_notify.stamp_legacy_hub_sub_provenance``); a 'hub' row still unstamped (written by an older
+    process since) counts as the origin binding only when written at creation (``LEGACY_ORIGIN_BIND_WINDOW_S``).
+    Every other unstamped row keeps the old inherit-everything behaviour (gateway DM subs carry no reason)."""
+    observers = ", ".join(f"'{r}'" for r in OBSERVER_SUB_REASONS)
+    reason = ("CASE WHEN json_valid(s.delivery_metadata) "
+              "THEN json_extract(s.delivery_metadata, '$.reason') END")
+    return (f"COALESCE({reason} IN ({observers}), 0) = 0 AND ({reason} IS NOT NULL OR s.platform != 'hub' "
+            f"OR s.created_at <= COALESCE(p.created_at, 0) + {LEGACY_ORIGIN_BIND_WINDOW_S})")
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this

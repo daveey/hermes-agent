@@ -41,13 +41,162 @@ def test_fallback_status_including_terminal_records(replica, status, rc):
     assert text.split()[:2] == [TID, status]
 
 
-def test_missing_and_stale_are_errors(replica):
+def make_stale(db, age):
+    scope = {"task_scopes": [{"profile": "default", "board": "default", "state": "ok", "observed_at": time.time() - age}]}
+    db.execute("UPDATE replica SET data=? WHERE coll='gateway'", (json.dumps(scope),))
+    db.commit()
+
+
+def test_missing_is_error_and_stale_known_card_is_unknown_not_yet(replica):
     assert wait.check_remote("other", "task", TID)[0] == 2
     put(replica, "done")
-    replica.execute("UPDATE replica SET data=? WHERE coll='gateway'", (json.dumps({"task_scopes": [{"profile": "default", "board": "default", "state": "ok", "observed_at": 1}]}),))
-    replica.commit()
+    make_stale(replica, 1237)
     code, text = wait.check_remote("other", "task", TID)
-    assert code == 2 and "stale" in text
+    # Seen in the last replica of an offline gateway: unknown, not yet (3), never "broken" (2) and never "met".
+    assert code == 3, text
+    assert text.split()[:2] == [TID, "done"] and "stale_age=1237s" in text and "gateway=other" in text
+    assert not wake.output_error(text)
+    # A missing card on a stale replica is still an error: there is nothing to have seen.
+    replica.execute("DELETE FROM replica WHERE coll='tasks'")
+    replica.commit()
+    assert wait.check_remote("other", "task", TID)[0] == 2
+    # A replica stamped far in the future is a broken clock, not an offline gateway.
+    put(replica, "running")
+    make_stale(replica, -3600)
+    assert wait.check_remote("other", "task", TID)[0] == 2
+
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    kb.init_db()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="waiter", assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        yield conn, tid
+    wake._shutdown_for_tests()
+
+
+def _probe_results(conn, tid, cmd, rc, out, n, *, start=1000):
+    for i in range(n):
+        gen = wake.get_state(conn, tid)["generation"]
+        wake.apply_result(conn, tid, cmd, rc, out, generation=gen, now=start + i * 900)
+
+
+def test_stale_macbook_replica_is_not_marked_broken_after_three_checks(replica, board):
+    from hermes_cli import kanban_db as kb
+    conn, tid = board
+    put(replica, "running")
+    make_stale(replica, 1237)
+    rc, out = wait.check_remote("other", "task", TID)
+    assert rc == 3
+    cmd = f"hermes kanban wait-check task {TID} --gateway other --until done,blocked"
+    assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", wake_check=cmd, check_every=900)
+    _probe_results(conn, tid, cmd, rc, out, wake.BROKEN_AFTER + 2)
+    assert kb.get_task(conn, tid).status == "scheduled"
+    state = wake.get_state(conn, tid)
+    assert state["fails"] == 0 and state["last_rc"] == 3
+    assert not [e for e in kb.list_events(conn, tid) if e.kind == wake.BROKEN_EVENT]
+    # Control: the old rc 2 "error: replica ..." still wakes as broken after BROKEN_AFTER checks.
+    _probe_results(conn, tid, cmd, 2, "error: replica other: stale replica", wake.BROKEN_AFTER, start=9000)
+    broken = [e for e in kb.list_events(conn, tid) if e.kind == wake.BROKEN_EVENT]
+    assert broken and broken[-1].payload.get("reason") is None and kb.get_task(conn, tid).status == "ready"
+
+
+def test_gateway_offline_past_cap_wakes_with_offline_note(replica, board):
+    from hermes_cli import kanban_db as kb
+    conn, tid = board
+    put(replica, "running")
+    make_stale(replica, wake.STALE_WAKE_AFTER + 2 * 3600)
+    rc, out = wait.check_remote("other", "task", TID)
+    cmd = f"hermes kanban wait-check task {TID} --gateway other"
+    assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", wake_check=cmd, check_every=900)
+    _probe_results(conn, tid, cmd, rc, out, 1)
+    assert kb.get_task(conn, tid).status == "ready"
+    ev = [e for e in kb.list_events(conn, tid) if e.kind == wake.BROKEN_EVENT][-1].payload
+    assert ev["reason"] == "gateway_offline" and ev["gateway"] == "other"
+    assert "Gateway other offline for 26 h" in ev["note"]
+    assert "producer's gateway is offline" in wake.render_wake_context(conn, tid)
+
+
+def test_schedule_awaiting_card_on_stale_replica_is_accepted(replica, board, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+    conn, tid = board
+    put(replica, "running")
+    make_stale(replica, 1237)
+    rc, out = wait.check_remote("other", "task", TID)
+    assert rc == 3
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, tid).current_run_id))
+    # The probe replays the stale reply (exit 3), so the park-time dry run sees exactly what wait-check prints.
+    probe = f"printf '%s\\n' {json.dumps(out)}; exit 3"
+    res = json.loads(kt._handle_schedule({
+        "reason": f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on {TID} on other",
+        "wake_check": probe, "check_every": 900,
+        "awaiting": {"kind": "card", "ref": TID, "gateway": "other"}}))
+    assert res.get("status") == "scheduled", res
+    park = [e for e in kb.list_events(conn, tid) if e.kind == "scheduled"][-1].payload
+    observed = json.dumps(park)
+    assert "stale_age=1237s" in observed and f"{TID} running" in observed
+    # An orphan seen in the stale replica is still refused.
+    replica.execute("DELETE FROM replica WHERE coll='tasks'")
+    put(replica, "archived")
+    make_stale(replica, 1237)
+    with pytest.raises(awaiting.AwaitingError):
+        awaiting.confirm_remote(dict(kind="card", ref=TID, gateway="other"))
+
+
+def _block_on_remote_card(conn, tid, monkeypatch):
+    """The observed call: kanban_block(kind='time', awaiting={kind: card, gateway}) with no wake_check."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, tid).current_run_id))
+    return json.loads(kt._handle_block({
+        "kind": "time", "reason": f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on {TID} on other",
+        "awaiting": {"kind": "card", "ref": TID, "gateway": "other"}}))
+
+
+def test_block_awaiting_card_on_stale_replica_is_accepted(replica, board, monkeypatch):
+    # Regression: a stale replica (the producer's Mac asleep) refused the park with invalid_awaiting
+    # "cannot confirm producer card ... stale replica"; it is unknown, not invalid.
+    from hermes_cli import kanban_db as kb
+    conn, tid = board
+    awaiting._REMOTE_CONFIRMED.clear()
+    put(replica, "running")
+    make_stale(replica, 3176)
+    res = _block_on_remote_card(conn, tid, monkeypatch)
+    assert res.get("status") == "scheduled", res
+    assert kb.get_task(conn, tid).status == "scheduled"
+    observed = json.dumps([e.payload for e in kb.list_events(conn, tid)])
+    assert "stale_age=3176s" in observed and f"{TID} running" in observed
+
+
+@pytest.mark.parametrize("case", ["missing", "archived"])
+def test_block_awaiting_card_on_stale_replica_refuses_missing_or_archived(replica, board, monkeypatch, case):
+    # A stale replica that positively shows the card missing or archived is still refused.
+    from hermes_cli import kanban_db as kb
+    conn, tid = board
+    awaiting._REMOTE_CONFIRMED.clear()
+    if case == "archived":
+        put(replica, "archived")
+    make_stale(replica, 3176)
+    res = _block_on_remote_card(conn, tid, monkeypatch)
+    assert res.get("ok") is not True and "error" in json.dumps(res), res
+    want = "invalid_awaiting" if case == "missing" else "agent_action_wait"
+    assert want in json.dumps(res), res
+    assert kb.get_task(conn, tid).status == "running"
+    with pytest.raises(awaiting.AwaitingError) as exc:
+        awaiting.confirm_remote(dict(kind="card", ref=TID, gateway="other"))
+    assert exc.value.code == want
 
 
 def test_since_and_until_preserved(replica):

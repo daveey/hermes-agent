@@ -378,3 +378,41 @@ def test_hub_and_worker_never_both_run_one_card(gws, svc):
                       and _runs(conn, tid)[-1]["status"] == "running"
                       and conn.execute("SELECT claim_lock FROM tasks WHERE id = ?", (tid,)).fetchone()[0]]
         assert len(local_runs) == 1, tid  # exactly one gateway holds a live local claim
+
+
+def test_tool_create_sends_heavy_work_to_the_worker_by_runs_on(gws, monkeypatch):
+    """kanban.placement.heavy_route: a MacBook-style gateway (here worker-1's role is played by the hub's
+    registry entry for WORKER) creates a test/bench card locally with runs_on=[machine:<worker>] instead of
+    queuing it on the routed gateway; light cards still take the route."""
+    hub, _ = gws
+    hub.enter()
+    from hermes_cli import kanban_placement as kp
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
+    monkeypatch.setattr(kp, "config", lambda: {"route": {HUB: "elsewhere"}, "heavy_route": {HUB: WORKER}})
+    monkeypatch.setattr(kp, "target_live", lambda *a, **k: None)
+    sent = []
+    monkeypatch.setattr(kp, "create_remote", lambda view, **kw: sent.append(kw["target"]) or {
+        "ok": True, "request_id": "req-1", "queued_only": True})
+    out = _tool_create({"title": "Fix the re-wake loop + regression test", "assignee": "default"})
+    assert sent == [] and out["runs_on"] == ["machine:worker-1"], out
+    assert out["placement"]["runs_on"] == ["machine:worker-1"] and out["placement"]["why"].startswith("heavy work")
+    assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?",
+                                       (out["task_id"],)).fetchone()[0]) == ["machine:worker-1"]
+    assert "machine:worker-1" in out["runs_where"]
+    out = _tool_create({"title": "Summarise the failing CI jobs", "assignee": "default"})
+    assert sent == ["elsewhere"] and out["placed"]["gateway"] == "elsewhere", out
+
+
+def test_tool_create_heavy_route_works_when_the_registry_has_no_pickup_field(gws, monkeypatch):
+    """Production 10-28: GET /v2/machines entries carry labels/state but no ``pickup``."""
+    hub, _ = gws
+    hub.enter()
+    from hermes_cli import kanban_placement as kp
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": [
+        {k: v for k, v in MACHINES[m].items() if k != "pickup"} for m in (HUB, WORKER, "macbook")]})
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
+    monkeypatch.setattr(kp, "config", lambda: {"route": {HUB: "elsewhere"}, "heavy_route": {HUB: WORKER}})
+    monkeypatch.setattr(kp, "target_live", lambda *a, **k: None)
+    monkeypatch.setattr(kp, "create_remote", lambda view, **kw: {"ok": True, "request_id": "r", "queued_only": True})
+    out = _tool_create({"title": "Run the bench-v2 benchmark", "assignee": "default"})
+    assert out["runs_on"] == ["machine:worker-1"], out

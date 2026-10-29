@@ -1,5 +1,6 @@
 """Managed Chrome entry paths use owner leases, never ambient/shared daemons."""
 import json
+import os
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -161,7 +162,8 @@ def test_managed_setup_failure_and_missing_owner_never_dispatch(managed, monkeyp
 
 def test_unrelated_override_does_not_use_managed_control(managed, monkeypatch):
     _, calls, executions = managed
-    monkeypatch.setattr(cli, '_base_subprocess_env', lambda: {'BU_CDP_URL': 'http://127.0.0.1:19001'})
+    monkeypatch.setattr(cli, '_base_subprocess_env', lambda: {'BU_CDP_URL': 'http://127.0.0.1:19001',
+                                                              'BH_RUNTIME_DIR': os.environ['BH_RUNTIME_DIR']})
     assert json.loads(cli.browser_exec('print(1)', task_id='owner'))['success']
     assert not calls
     assert executions[0][1]['BU_CDP_URL'] == 'http://127.0.0.1:19001'

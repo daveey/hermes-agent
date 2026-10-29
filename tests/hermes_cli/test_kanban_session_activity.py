@@ -980,3 +980,111 @@ def test_poll_during_annotation_refresh_returns_previous_counts(kanban_root, mon
     assert other[0].get("kanban_active") == 2
     assert "kanban_unknown" not in other[0]
 
+
+
+def _scoped_reader(monkeypatch, *, slow_scope=None, fail_scopes=()):
+    """Per-thread origin scope (one server, several profiles) and a recording ``_read_annotation_parts``.
+
+    The ``slow_scope`` read waits until another poll is queued on the flight lock, so the
+    overlap is deterministic. A scope in ``fail_scopes`` raises on its first ``fail_scopes[scope]`` reads.
+    """
+    import threading
+    import time
+
+    local = threading.local()
+    monkeypatch.setattr(ksa, "_origin_scope", lambda: (getattr(local, "scope", "A"),))
+    reads: list[str] = []
+    fails = dict(fail_scopes)
+    entered = threading.Event()
+
+    def read():
+        scope = ksa._origin_scope()[0]
+        reads.append(scope)
+        if scope == slow_scope and not entered.is_set():
+            entered.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and ksa._annotate_waiters < 1:
+                time.sleep(0.005)
+            assert ksa._annotate_waiters >= 1
+        if fails.get(scope, 0) > 0:
+            fails[scope] -= 1
+            raise sqlite3.OperationalError(f"board read failed for {scope}")
+        return ({f"s_{scope}": 3}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+
+    monkeypatch.setattr(ksa, "_read_annotation_parts", read)
+    return local, reads, entered
+
+
+def _run_overlap(local, entered, leader_scope, waiter_scope, waiter_rows):
+    import threading
+
+    errors: list[BaseException] = []
+
+    def leader():
+        local.scope = leader_scope
+        try:
+            ksa.annotate_kanban_activity([{"id": f"s_{leader_scope}"}])
+        except BaseException as exc:  # surfaced below
+            errors.append(exc)
+
+    holder = threading.Thread(target=leader)
+    holder.start()
+    assert entered.wait(2)
+    local.scope = waiter_scope
+    ksa.annotate_kanban_activity(waiter_rows)
+    holder.join(3)
+    assert not holder.is_alive()
+    assert not errors
+
+
+def test_cold_profile_poll_behind_another_profiles_read_gets_its_own_counts(kanban_root, monkeypatch):
+    """[daveey] One server serves several profiles. A cold profile-B poll that queued behind profile A's
+    in-flight read used to find no B result and stamp every row kanban_unknown (kanban-d0ba67426d)."""
+    local, reads, entered = _scoped_reader(monkeypatch, slow_scope="A")
+    rows = [{"id": "s_B"}]
+    _run_overlap(local, entered, "A", "B", rows)
+    assert "kanban_unknown" not in rows[0]
+    assert rows[0].get("kanban_active") == 3
+    assert sorted(reads) == ["A", "B"]  # one read per scope
+    assert ksa._last_annotation[("B",)][0] == {"s_B": 3}
+
+
+def test_cold_poll_behind_a_failed_read_retries_once(kanban_root, monkeypatch):
+    """[daveey] Same profile: the leader's read raised; the queued cold poll reads again instead of unknown."""
+    local, reads, entered = _scoped_reader(monkeypatch, slow_scope="A", fail_scopes={"A": 1})
+    rows = [{"id": "s_A"}]
+    _run_overlap(local, entered, "A", "A", rows)
+    assert "kanban_unknown" not in rows[0]
+    assert rows[0].get("kanban_active") == 3
+    assert reads == ["A", "A"]
+
+
+def test_cold_poll_whose_retry_also_fails_is_unknown_with_the_real_error(kanban_root, monkeypatch, caplog):
+    """[daveey] If the waiter's own read fails too, rows are kanban_unknown and the log carries that read's
+    traceback (the real error self-heal needs), not a synthetic 'annotation unavailable'."""
+    import logging
+
+    local, reads, entered = _scoped_reader(monkeypatch, slow_scope="A", fail_scopes={"A": 2})
+    rows = [{"id": "s_A"}]
+    with caplog.at_level(logging.WARNING, logger=ksa._log.name):
+        _run_overlap(local, entered, "A", "A", rows)
+    assert rows[0]["kanban_unknown"] is True
+    assert reads == ["A", "A"]
+    failures = [r for r in caplog.records if "kanban activity unavailable" in r.getMessage()]
+    assert len(failures) == 2  # leader and waiter each logged their own read failure
+    assert all(r.exc_info and isinstance(r.exc_info[1], sqlite3.OperationalError) for r in failures)
+    assert "kanban annotation unavailable" not in caplog.text
+
+
+def test_snapshot_none_logs_one_line_without_a_synthetic_traceback(kanban_root, monkeypatch, caplog):
+    """[daveey] Detection guard: a None snapshot (no read error) is one WARNING line, never a traceback."""
+    import logging
+
+    monkeypatch.setattr(ksa, "_annotation_snapshot", lambda: None)
+    rows = [{"id": "s1", "kanban_active": 4}]
+    with caplog.at_level(logging.WARNING, logger=ksa._log.name):
+        ksa.annotate_kanban_activity(rows)
+    assert rows[0]["kanban_unknown"] is True and "kanban_active" not in rows[0]
+    records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(records) == 1 and not records[0].exc_info
+    assert "Traceback" not in caplog.text

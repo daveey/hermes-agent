@@ -1916,15 +1916,31 @@ def _read_annotation_parts() -> tuple:
         active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention))
 
 
-def _annotation_snapshot() -> tuple | None:
+def _refresh_annotation_locked(scope: tuple[str, ...]) -> tuple:
+    """Read this scope's parts and publish them. Caller holds ``_annotate_refresh_lock``."""
+    global _annotate_flight_scope, _annotate_flight_result
+    _annotate_flight_scope = scope
+    _annotate_flight_result = None
+    parts = _read_annotation_parts()
+    _last_annotation[scope] = parts
+    _annotate_flight_result = parts
+    return parts
+
+
+def _annotation_snapshot() -> tuple:
     """One in-flight annotation read, shared by overlapping polls.
 
     Returns the last good parts when a refresh is already running, so those polls
     do not occupy an AnyIO worker for the whole waiting-source and attention pass.
-    A cold start (nothing served yet) waits for that pass. None means the read
-    failed and the caller stamps ``kanban_unknown``.
+    A cold start (nothing served yet) waits for that pass. Raises the read's own
+    error when it fails; the caller stamps ``kanban_unknown``.
+
+    [daveey] One server process serves several profiles and the result is per scope.
+    A cold poll that waited behind another scope's read, or behind a read that failed,
+    used to get None and mark every row unknown (kanban-d0ba67426d). It now reads its
+    own scope while it holds the lock; same-scope overlapping polls still share one read.
     """
-    global _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
+    global _annotate_waiters
     scope = _origin_scope()
     if not _annotate_refresh_lock.acquire(blocking=False):
         _annotate_waiters += 1
@@ -1932,19 +1948,21 @@ def _annotation_snapshot() -> tuple | None:
             stale = _last_annotation.get(scope)
             if stale is not None:
                 return stale
-            with _annotate_refresh_lock:
-                if _annotate_flight_scope == scope and _annotate_flight_result is not None:
-                    return _annotate_flight_result
-                return _last_annotation.get(scope)
+            _annotate_refresh_lock.acquire()
         finally:
             _annotate_waiters -= 1
+        try:
+            if _annotate_flight_scope == scope and _annotate_flight_result is not None:
+                return _annotate_flight_result
+            cached = _last_annotation.get(scope)
+            if cached is not None:
+                return cached
+            # No usable result for this scope: another profile's flight, or a failed one.
+            return _refresh_annotation_locked(scope)
+        finally:
+            _annotate_refresh_lock.release()
     try:
-        _annotate_flight_scope = scope
-        _annotate_flight_result = None
-        parts = _read_annotation_parts()
-        _last_annotation[scope] = parts
-        _annotate_flight_result = parts
-        return parts
+        return _refresh_annotation_locked(scope)
     finally:
         _annotate_refresh_lock.release()
 
@@ -1969,6 +1987,17 @@ def one_annotation_snapshot() -> Iterator[None]:
         _annotation_scope.reads = _annotation_scope.attention = _annotation_scope.links = None
 
 
+def _mark_kanban_unknown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for row in rows:
+        for key in ("kanban_active", "kanban_blocked", "kanban_unseen", "kanban_attention", "kanban_remote_stale",
+                    "kanban_parked", "kanban_held", "kanban_stalled"):
+            row.pop(key, None)
+        row.pop("kanban_observed_at", None)
+        row.pop("kanban_waiting_on", None)
+        row["kanban_unknown"] = True
+    return rows
+
+
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_waiting_on`` (local open card ids), ``kanban_unseen`` (finished cards whose result the
     session has not been handed yet) and ``kanban_attention`` (done cards a registered check flags) on each session row
@@ -1987,7 +2016,10 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         else:
             parts = _annotation_snapshot()
             if parts is None:
-                raise RuntimeError("kanban annotation unavailable")
+                # [daveey] Not a read error (those raise with their own traceback): one line, no synthetic
+                # traceback for self-heal to chase.
+                _log.warning("kanban annotation unavailable (no snapshot); rows marked kanban_unknown")
+                return _mark_kanban_unknown(rows)
             (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra,
              attention) = parts
             if shared is not None:
@@ -1998,14 +2030,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
         # row off done) and drop the counts rather than present them as fresh.
         _log.warning("kanban activity unavailable; rows marked kanban_unknown", exc_info=True)
-        for row in rows:
-            for key in ("kanban_active", "kanban_blocked", "kanban_unseen", "kanban_attention", "kanban_remote_stale",
-                        "kanban_parked", "kanban_held", "kanban_stalled"):
-                row.pop(key, None)
-            row.pop("kanban_observed_at", None)
-            row.pop("kanban_waiting_on", None)
-            row["kanban_unknown"] = True
-        return rows
+        return _mark_kanban_unknown(rows)
     if attention is None:
         attention = getattr(_annotation_scope, "attention", None)
     if attention is None:

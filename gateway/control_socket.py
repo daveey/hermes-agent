@@ -371,11 +371,13 @@ def rescan_gateway_profiles(home: Path, *, timeout: float = 8.0) -> Optional[dic
 
 
 def request_unserve_profile(home: Path, name: str) -> Optional[dict[str, Any]]:
-    return query_gateway_control(home, "unserve-profile", params={"name": name}, timeout=8.0)
+    # Outlast the handler's ``_PROFILE_VERB_WAIT_S`` (30s) so a throttled gateway's
+    # answer is read, not dropped. A missing socket still fails at connect.
+    return query_gateway_control(home, "unserve-profile", params={"name": name}, timeout=45.0)
 
 
 def request_serve_profile_hot(home: Path, name: str) -> Optional[dict[str, Any]]:
-    return query_gateway_control(home, "serve-profile", params={"name": name}, timeout=8.0)
+    return query_gateway_control(home, "serve-profile", params={"name": name}, timeout=45.0)
 
 
 def migrate_gateway_profile_identity(home: Path, old_name: str, new_name: str, *,

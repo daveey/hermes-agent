@@ -20,11 +20,12 @@ from hermes_cli.goals import handoff_judge_goal, judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
-from tools.kanban_tools_placement import _placement_refused
+from hermes_cli import kanban_overlap
+from tools.kanban_tools_placement import _marker_placement_fields, _placement_refused, _runs_where
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
-    KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
+    KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_MOVE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_ORIGIN_ADOPT_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_ARCHIVE_SCHEMA,
     KANBAN_UNLINK_SCHEMA)
@@ -117,7 +118,7 @@ def _check_kanban_orchestrator_mode() -> bool:
 # would silently skip the run-ownership CAS in kanban_db. Non-lifecycle tools
 # (heartbeat / attach / attach_url) do not terminate a run and are not gated.
 _RUN_LIFECYCLE_TOOLS = frozenset({
-    "kanban_complete", "kanban_block", "kanban_schedule", "kanban_continue",
+    "kanban_complete", "kanban_block", "kanban_schedule", "kanban_continue", "kanban_move",
     "kanban_request_review", "kanban_request_changes",
 })
 
@@ -210,6 +211,9 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                        f"{tool_name}: unknown parameter(s): {', '.join(unknown)}. "
                        f"Valid parameters: {', '.join(sorted(properties))}. Nothing changed.",
                        "invalid_args")
+                refused = _remote_lease_refusal(tool_name, args)
+                if refused is not None:
+                    return refused
                 out = fn(args, **kw)
                 if classify_rejections and isinstance(out, str) and out.startswith('{"error"'):
                     out = _tag_rejection(out, "invalid_args")
@@ -248,6 +252,40 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                 return tool_error(f"{tool_name}: {e}")
         return wrapper
     return deco
+
+
+# Tools whose write moves a card's lifecycle columns, which the Board fences to the lease holder (``live_claim``).
+# kanban_archive is not here: it sends the holder a stop request instead (kanban_remote_stop). [daveey]
+_LEASE_FENCED_TOOLS = frozenset({
+    "kanban_complete", "kanban_block", "kanban_unblock", "kanban_schedule", "kanban_continue",
+    "kanban_request_review", "kanban_request_changes",
+})
+
+
+def _remote_lease_refusal(tool_name: str, args: dict) -> Optional[str]:
+    """A typed refusal when the target card runs under another machine's live Board lease, else None.
+
+    Such a write would be committed here and then rejected by the Board (``live_claim``) after the tool had
+    reported success: the card reads back as before and the caller never learns. Refusing up front says so."""
+    if tool_name not in _LEASE_FENCED_TOOLS:
+        return None
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return None
+    try:
+        from hermes_cli.kanban_remote_stop import remote_holder
+        with _board(args.get("board"), quiet_close=True) as (_kb, conn):
+            holder = remote_holder(conn, str(tid))
+    except Exception:
+        logger.debug("%s: remote lease check for %s failed", tool_name, tid, exc_info=True)
+        return None  # the handler reports its own board errors
+    if holder is None:
+        return None
+    return tool_error(
+        f"{tool_name} refused: {tid} is running under {holder}'s live lease on the Board, which accepts "
+        f"lifecycle writes only from the lease holder. Nothing changed. Act on {holder}, use kanban_archive "
+        f"(it sends {holder} a stop request), or wait for the run to end.",
+        rejection="live_claim", code="remote_live_lease", holder=holder)
 
 
 def _reject_delegated_child_mutation(tool_name: str) -> None:
@@ -1317,6 +1355,27 @@ def _handle_continue(args: dict, **kw) -> str:
                           wake_at=res.get("wake_at"), next=note)
 
 
+@_kanban_handler("kanban_move")
+def _handle_move(args: dict, **kw) -> str:
+    """[daveey] Checkpoint, end this run and re-queue the card with new runs_on labels (hermes_cli.kanban_move)."""
+    tid = _worker_guard("kanban_move", args)
+    checkpoint = _redact(_require_text(
+        args, "checkpoint", "checkpoint is required — write what is done, what is not portable and the next "
+        "steps so the run on the other machine can resume"))
+    reason = _require_text(args, "reason", "reason is required — say what this machine lacks")
+    runs_on = args.get("runs_on")
+    _check(isinstance(runs_on, list) and runs_on, "runs_on must be a non-empty list of labels, e.g. ['machine:worker-1']")
+    from hermes_cli.kanban_move import move_task
+    with _board(args.get("board")) as (kb, conn):
+        res = move_task(conn, tid, runs_on=runs_on, reason=reason, checkpoint=checkpoint,
+                        expected_run_id=_worker_run_id(tid), force=bool(args.get("force")))
+        _check(res.get("ok"), f"could not move {tid}: {res.get('error')}")
+        note = (f"Moved: the card is re-queued for {res['runs_on']} (eligible now: {', '.join(res['matches'])}); "
+                "this run is over. End your turn with a one-line reply; do not call more tools.")
+        return _ok_landed(kb, conn, tid, res["status"], runs_on=res["runs_on"], matches=res["matches"],
+                          move_no=res["move_no"], next=note)
+
+
 @_kanban_handler("kanban_request_review")
 def _handle_request_review(args: dict, **kw) -> str:
     """Move implementation into the first-class review phase."""
@@ -1546,14 +1605,15 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
         state.close()
 
 
-def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id
+def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id, conn=None
                   ) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
 
     Returns ``(tool_result, None)`` when the card was queued there or the pin was refused,
     ``(None, None)`` to create it locally for any other reason, or ``(None, placement)`` when a
     text marker kept it here. ``placement`` is ``{where, why, remedy}`` so the create result can
-    say so. Never raises.
+    say so, or ``{where, why, runs_on}`` for heavy work created here and run on a worker node through
+    the Board lease (``kanban.placement.heavy_route``). Never raises.
     """
     try:
         from hermes_cli import kanban_placement as kp
@@ -1562,7 +1622,11 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
 
         view = {**args, "assignee": assignee, "skills": skills, "parents": parents,
                 "project_id": project_id}
-        decision = kp.decide(view)
+        from hermes_cli import kanban_worker_node as _wn
+        # runs_on only works on a board that syncs as primary; the machine check is kp._machine_picks_up.
+        machine_ok = ((lambda m: _wn.sync.board_mode(conn) == "primary" and kp._machine_picks_up(m))
+                      if conn is not None else None)
+        decision = kp.decide(view, machine_ok=machine_ok)
         target = decision["where"]
         if target == "refuse":
             return _placement_refused(decision["pin"], decision.get("why", "")), None
@@ -1571,6 +1635,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             if decision.get("defer"):
                 # Parents are local links: created here, forwarded to the target once they finish.
                 return None, {"where": "local", "defer": decision["defer"], "why": why}
+            if decision.get("runs_on"):
+                logger.info("kanban placement: local, runs_on %s (%s)", decision["runs_on"], why)
+                return None, {"where": "local", "runs_on": decision["runs_on"], "why": why}
             if why.startswith("local marker"):
                 logger.info("kanban placement: local (%s)", why)
                 return None, {"where": "local", "why": why, "remedy": kp.LOCAL_MARKER_REMEDY}
@@ -1624,22 +1691,6 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         if pin:
             return _placement_refused(pin, f"placement failed: {exc}"), None
         return None, None
-
-
-def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
-    """Where a card created on this board runs, for the kanban_create result. Never raises."""
-    if runs_on is not None:
-        if pinned_machine:
-            return f"{pinned_machine} via the board lease (runs_on={runs_on})"
-        return f"a machine matching runs_on={runs_on} via the board lease"
-    if marker_placement and marker_placement.get("defer"):
-        return f"{marker_placement['defer']} once its parents finish"
-    try:
-        from hermes_cli import kanban_capability_registry as _reg
-        gw = _reg.self_gateway()
-    except Exception:
-        gw = None
-    return f"here ({gw})" if gw else "here"
 
 
 @_kanban_handler("kanban_create")
@@ -1727,15 +1778,23 @@ def _handle_create(args: dict, **kw) -> str:
             if runs_on is not None:
                 pinned_machine = str(args.get("placement")).strip()
                 args = {**args, "placement": "local"}
+        # [daveey] Refuse a second owner: open cards on every board/gateway, not this chat's links.
+        refused, after_create = kanban_overlap.check(conn, args, courier=origin_intent is not None,
+                                                     title=str(title).strip(), session_id=session_id,
+                                                     self_tid=self_tid, parents=parents)
+        if refused:
+            return refused
         if origin_intent is None and origin is None:
             check_tool_create(args.get("requires"), workspace_kind=workspace_kind, project_id=project_id,
                               skills=skills, assignee=str(assignee))  # before placement routes it away [daveey]
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
             remote, marker_placement = _place_remote(
                 args, assignee=str(assignee), skills=skills, parents=parents,
-                project_id=project_id, session_id=session_id)
+                project_id=project_id, session_id=session_id, conn=conn)
             if remote is not None:
                 return remote
+            if marker_placement and marker_placement.get("runs_on") and runs_on is None:
+                runs_on = marker_placement["runs_on"]
         elif origin_intent is None and args.get("placement"):
             # An origin-bound card is created here by design, so a pin to another gateway cannot be honoured.
             from hermes_cli import kanban_capability_registry as _reg
@@ -1784,20 +1843,8 @@ def _handle_create(args: dict, **kw) -> str:
             }}
         if origin is not None:
             extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
-        if marker_placement and marker_placement.get("defer"):
-            # [daveey] Run on the routed gateway once the parents finish (kanban_placement_forward).
-            from hermes_cli import kanban_placement_forward as _kpf
-            from hermes_cli.profiles import current_profile_name as _cpn
-            _kpf.record_deferral(conn, new_tid, target=marker_placement["defer"], origin_session=session_id,
-                                 origin_profile=_cpn("default") or "default")
-            extra["placement"] = {"where": "local", "defer": marker_placement["defer"],
-                                  "why": marker_placement["why"]}
-            extra["note"] = (f"Created here as {new_tid} so it can wait on its parents; it runs on "
-                             f"{marker_placement['defer']}, not here: when the parents finish the dispatcher "
-                             f"forwards it there and this card completes when that one does.")
-        elif marker_placement:
-            extra["placement"] = {"where": marker_placement["where"], "why": marker_placement["why"]}
-            extra["remedy"] = marker_placement["remedy"]
+        extra.update(_marker_placement_fields(conn, new_tid, marker_placement, session_id))
+        after_create(conn, new_tid)
         if origin_intent is None and args.get("requires"):
             # Placement preflight: declared gateway needs this gateway lacks are owned first. [daveey]
             from hermes_cli.kanban_capability_routing import preflight
@@ -2004,13 +2051,17 @@ def _handle_archive(args: dict, **kw) -> str:
     tid = args.get("task_id")
     _check(tid, "task_id is required")
     tid = str(tid)
-    with _board(args.get("board")) as (kb, conn):
+    with _board(args.get("board")) as (_kb, conn):
         from hermes_cli.kanban import worker_archive_scope
         refusal, via = worker_archive_scope(conn, tid)
         if refusal:
             raise _Reject(refusal)
-        _check(kb.archive_task(conn, tid, via=via), f"cannot archive {tid}")
-        return _ok(task_id=tid, status="archived")
+        # A card another machine runs under its live Board lease is not archived here: the Board would reject the
+        # status write (live_claim) and the remote worker would keep running. Send it a stop request instead. [daveey]
+        from hermes_cli.kanban_remote_stop import archive as _archive
+        out = _archive(conn, tid, via=via)
+        _check(out, f"cannot archive {tid}")
+        return _ok(task_id=tid, **out)
 
 
 @_kanban_handler("kanban_link")
@@ -2092,6 +2143,7 @@ _TOOLS = (
     ("kanban_block", KANBAN_BLOCK_SCHEMA, _handle_block, "⏸"),
     ("kanban_schedule", KANBAN_SCHEDULE_SCHEMA, _handle_schedule, "⏰"),
     ("kanban_continue", KANBAN_CONTINUE_SCHEMA, _handle_continue, "⏭"),
+    ("kanban_move", KANBAN_MOVE_SCHEMA, _handle_move, "🚚"),
     ("kanban_request_review", KANBAN_REQUEST_REVIEW_SCHEMA, _handle_request_review, "👀"),
     ("kanban_request_changes", KANBAN_REQUEST_CHANGES_SCHEMA, _handle_request_changes, "↩"),
     ("kanban_heartbeat", KANBAN_HEARTBEAT_SCHEMA, _handle_heartbeat, "💓"),

@@ -8,7 +8,7 @@ routing_home = fixtures.routing_home
 streaming_route = fixtures.streaming_route
 
 
-def test_paid_cron_job_fails_without_send(managed):
+def _run_paid_job():
     from cron.scheduler import run_job
     with patch('model_tools.get_tool_definitions', return_value=[]), \
          patch('cron.scheduler_delivery._resolve_origin', return_value=None), \
@@ -18,6 +18,24 @@ def test_paid_cron_job_fails_without_send(managed):
          patch('httpx.Client.send') as send:
         success, _, _, error = run_job({'id': 'stale-paid-cron', 'name': 'paid cron',
                                        'model': 'vendor/paid', 'provider': 'openrouter', 'prompt': 'Say ok'})
-        assert not success
-        assert 'Managed subscription policy' in error
-        send.assert_not_called()
+    return success, error, send
+
+
+def test_paid_cron_job_fails_without_send(managed):
+    # [daveey] The preflight now refuses the stale pin as blocked_config (alert once) before any
+    # runtime is built; the run still fails and nothing is sent.
+    success, error, send = _run_paid_job()
+    assert not success
+    assert '[blocked_config]' in error and 'model_pin_not_in_routing_registry' in error
+    send.assert_not_called()
+
+
+def test_paid_cron_job_fails_without_send_when_preflight_is_off(managed, tmp_path):
+    """``cron.preflight: false``: the runtime policy itself still refuses the pin with no send."""
+    from hermes_cli.config import atomic_config_write
+    managed['cron'] = {'preflight': False}
+    atomic_config_write(tmp_path / 'config.yaml', managed)
+    success, error, send = _run_paid_job()
+    assert not success
+    assert 'Managed subscription policy' in error
+    send.assert_not_called()

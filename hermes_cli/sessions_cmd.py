@@ -1185,7 +1185,16 @@ def _cmd_set_journal_mode(args):
     return cmd_set_journal_mode(args)
 
 
+def _cmd_handover(args):
+    """``sessions move`` / ``import-lineage`` / ``reveal`` / ``discard-hidden`` (hermes_cli.session_handover). [daveey]"""
+    from hermes_cli import session_handover as sh
+    return {"move": sh.cmd_move, "import-lineage": sh.cmd_import_lineage, "reveal": sh.cmd_reveal,
+            "discard-hidden": sh.cmd_discard_hidden}[args.sessions_action](args)
+
+
 _PRE_DB_HANDLERS = {
+    "move": _cmd_handover, "import-lineage": _cmd_handover, "reveal": _cmd_handover,
+    "discard-hidden": _cmd_handover,
     "repair": _cmd_repair, "recover": _cmd_recover, "import": _cmd_import,
     "repair-profiles": _cmd_repair_profiles,  # opens every profile's store itself
     "set-journal-mode": _cmd_set_journal_mode,  # offline: must not open the store it converts

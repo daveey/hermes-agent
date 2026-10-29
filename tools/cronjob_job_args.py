@@ -413,6 +413,25 @@ def _validate_cron_base_url(
         "for a custom base_url.")
 
 
+def _validate_managed_pin(model: Optional[str], provider: Optional[str],
+                          job_id: Optional[str] = None) -> Optional[str]:
+    """[daveey] Refuse a model pin the managed routing registry rejects (cron sibling of kanban's
+    create-time check): otherwise every woken run dies before the model. None when no managed
+    policy, no pin, or the config can't be read (the scheduler preflight still guards the run)."""
+    model = (model or "").strip()
+    if not model:
+        return None
+    from cron.managed_pin import load_config, rejected_pin, rejection_message
+    try:
+        allowed = rejected_pin(model, provider, load_config())
+    except Exception:
+        logger.debug("managed pin check failed open", exc_info=True)
+        return None
+    if allowed is None:
+        return None
+    return rejection_message(model, (provider or "").strip() or None, allowed, job_id=job_id)
+
+
 def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
     """Scripts must be relative paths within HERMES_HOME/scripts/ (absolute / ~ / drive-letter
     rejected — prompt-injection guard). Error string if blocked, else None; empty = clear."""

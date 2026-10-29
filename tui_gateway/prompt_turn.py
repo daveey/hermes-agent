@@ -140,7 +140,9 @@ def _admit_prompt_turn(
             return None
     held_lease = session.get("active_session_lease")
     # When the session already holds its lease this is a cheap dict check. See #94778.
-    if not session.get("_closing") and (ownership_refusal := _ensure_active_session_slot(sid, session)) is not None:
+    # [daveey] A chat handed over to another gateway (hermes sessions move) is fenced here, before the slot claim.
+    if not session.get("_closing") and (ownership_refusal := (
+            _session_moved_refusal(session) or _ensure_active_session_slot(sid, session))) is not None:
         logger.info(
             "Refusing turn for session %s at _run_prompt_submit: %s",
             session.get("session_key") or sid,
@@ -254,15 +256,22 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     marker_text = session.pop("_auto_continue_prompt", None) or text
     session.pop("_paused_marker_carried", None)
     synthesized = session.pop("_synthesized_turn", False)
+    until_tool = bool(session.pop("_marker_until_tool", False))
     # [daveey] A core-update pause kept the previous turn's marker; this turn owns (and retires) its own.
     session.pop("_update_pause_marker_key", None)
+    if not synthesized:  # the continuation (or a typed message) started: automatic turns may run again
+        session.pop("_update_pause_due_until", None)
     if synthesized and not marker_attempt and _carry_paused_marker(session, marker_home, marker_key):
         return ""
     if isinstance(marker_text, str) and marker_text.strip():
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
+            # [daveey] _on_tool_start switches an at-most-once turn's marker off before its first tool runs.
+            session["_until_tool_marker_key"] = marker_key if until_tool and auto_continue else ""
         record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
-                          auto_continue=auto_continue, **({"killed_jobs": killed_jobs} if killed_jobs else {}),
+                          auto_continue=auto_continue,
+                          **({"until_tool": True} if until_tool and auto_continue else {}),
+                          **({"killed_jobs": killed_jobs} if killed_jobs else {}),
                           **({"pauses": marker_pauses} if marker_pauses else {}),
                           **({"notification_category": "diagnostic"}
                              if notification_category == "diagnostic" else {}))
@@ -543,6 +552,22 @@ def _dispatch_claimed_followup(rid, sid, session, prompt, what, *, on_done=None,
         _notif_release_turn(session)
 
 
+def _goal_waits_for_paused_turn(session: dict) -> bool:
+    """[daveey] A /goal continuation must not run ahead of a turn paused for a core update. It claims the session
+    directly (not through ``_notif_claim_turn``) and is a real turn, so it would record its own marker over the
+    paused one and retire it: the paused request was replaced, not continued. Skip the tick instead; the paused
+    turn's continuation (or the user's next message) ends with its own goal evaluation."""
+    with session["history_lock"]:
+        pending = bool(session.get("_paused_marker_carried") or session.get("_update_pause_marker_key"))
+    if not pending:
+        from tui_gateway.update_pause import continuation_due
+        pending = continuation_due(session)
+    if pending:
+        logger.info("core-update pause: goal continuation for %s waits for the paused turn",
+                    session.get("session_key") or "")
+    return pending
+
+
 def _run_post_turn_followups(
     rid, sid: str, session: dict, result: Any, goal_followup: str | None) -> None:
     """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
@@ -555,6 +580,8 @@ def _run_post_turn_followups(
             _enqueue_prompt(session, steer, session.get("transport"))
     if _drain_queued_prompt(rid, sid, session):
         return
+    if goal_followup and _goal_waits_for_paused_turn(session):
+        goal_followup = None  # the paused turn's own end runs the goal judge again
     if goal_followup:
         with _session_turn_admission(session) as admitted:
             if not admitted or session.get("running"):

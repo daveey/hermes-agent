@@ -63,7 +63,8 @@ from tools.cronjob_job_args import (
     _validate_bot_chat_deliver,
     _validate_context_from_refs,
     _validate_cron_base_url,
-    _validate_cron_script_path)
+    _validate_cron_script_path,
+    _validate_managed_pin)
 from tools.registry import registry, tool_error
 
 
@@ -678,6 +679,8 @@ def _action_create(a: dict[str, Any]) -> str:
         # A model-supplied base_url must not route a named provider's stored credential
         # to an attacker endpoint.
         or _validate_cron_base_url(a["provider"], a["base_url"])
+        # A pin the managed routing registry rejects would fail every run before the model.
+        or _validate_managed_pin(a["model"], a["provider"])
         # bot-chat targets are machine-local: fail the CREATE, not the run.
         or _validate_bot_chat_deliver(deliver)
         # failure_deliver shares deliver's grammar and validators.
@@ -864,6 +867,12 @@ def _update_core_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[st
         updates["model"] = _normalize_optional_job_value(a["model"])
     if a["provider"] is not None:
         updates["provider"] = _normalize_optional_job_value(a["provider"])
+    if a["model"] is not None or a["provider"] is not None:
+        # Only when this update sets the pin, so a stale-pinned job can still be renamed/paused.
+        pin_error = _validate_managed_pin(
+            _pick(updates, job, "model"), _pick(updates, job, "provider"), job.get("id"))
+        if pin_error:
+            return pin_error
     if a["pinned"] is not None:
         updates["pinned"] = bool(a["pinned"])
     if a["base_url"] is not None:

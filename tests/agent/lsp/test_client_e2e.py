@@ -136,6 +136,37 @@ async def test_reader_exit_at_end_of_initialization_retires_client(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_cleanup_kill_carries_the_spawn_stamp(tmp_path, monkeypatch):
+    """Hard-kill must name the incarnation captured at spawn, not whatever owns the PID later."""
+    calls: list[tuple] = []
+
+    def record(pid, sig=None, create_time=None):
+        calls.append((pid, create_time))
+        return True
+
+    monkeypatch.setattr("agent.deadline.kill_process_tree", record)
+    client = _client(tmp_path, "slow")
+    start = asyncio.create_task(client.start())
+    while client._proc is None:
+        await asyncio.sleep(0)
+    proc = client._proc
+    pid = proc.pid
+    born = client._proc_born
+    assert born is not None
+    try:
+        await client._cleanup_process()
+        assert calls == [(pid, born)]
+    finally:
+        if not start.done():
+            start.cancel()
+            await asyncio.gather(start, return_exceptions=True)
+        if proc.returncode is None:
+            proc.kill()
+            with contextlib.suppress(ProcessLookupError, asyncio.TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_start_terminates_spawned_server(tmp_path: Path):
     """An outer startup budget may cancel initialize before the manager registers the client."""
     client = _client(tmp_path, "slow")

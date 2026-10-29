@@ -633,6 +633,9 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
 
     from tools.browser_agent_lifecycle import release_task
     _best_effort("Managed browser task release", lambda: release_task(task_id))
+    # [daveey] Close the tabs this task's browser_exec calls opened in the shared Chrome (tab ledger).
+    from tools.browser_use_cli import close_agent_tabs
+    _best_effort("Agent tab close", lambda: close_agent_tabs(task_id))
     session_keys = [task_id]
     sidecar_key = f"{task_id}{_bt._LOCAL_SUFFIX}"
     with _bt._cleanup_lock:

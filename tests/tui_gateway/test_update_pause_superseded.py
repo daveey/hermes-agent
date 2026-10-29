@@ -105,7 +105,7 @@ def test_watcher_waits_while_a_synthesized_turn_runs_over_the_pause(env):
     session = _paused_session(env.home)
     session["running"] = True
     session["_paused_marker_carried"] = "session-key"
-    assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "wait"
+    assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "carried"
     session.pop("_paused_marker_carried")
     assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "done"
 
@@ -182,3 +182,59 @@ def test_fresh_backend_notification_turn_refused_at_prepare_still_rearms_the_wat
     monkeypatch.setattr(server, "_prepare_turn_input", lambda *a, **k: None)
     server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
     _assert_paused_turn_continues(env, session)
+
+
+# --- /goal continuation after a carried notice turn (t_01a18533d0a0182d). _run_post_turn_followups claimed the
+# session directly for the goal continuation (no _notif_claim_turn gate) and did not mark it synthesized, so it
+# wrote its own marker over the paused one and retired it: the paused request was replaced, not continued.
+
+def _goal_after(monkeypatch, prompts):
+    """The goal judge asks for a continuation after every turn whose prompt is in ``prompts``."""
+    def _fake(sid, session, result, status, raw):
+        return "[goal] keep going" if session.get("_test_last_prompt") in prompts else None
+    real_submit = server._run_prompt_submit
+
+    def _spy(rid, sid, session, text, *a, **kw):
+        session["_test_last_prompt"] = text
+        session.setdefault("_test_prompts", []).append(text)
+        return real_submit(rid, sid, session, text, *a, **kw)
+
+    monkeypatch.setattr(server, "_goal_followup_after_turn", _fake)
+    monkeypatch.setattr(server, "_run_prompt_submit", _spy)
+
+
+def test_goal_continuation_after_a_carried_notice_turn_keeps_the_paused_turn(env, monkeypatch):
+    session = _paused_session(env.home)
+    notice = "[Background process proc_1 finished]"
+    _goal_after(monkeypatch, {notice})
+
+    session["running"] = True  # the notification poller claimed the idle session
+    assert server._notif_run_submit("__notif__1", "ui-sid", session, notice)
+
+    assert session["_test_prompts"] == [notice], "the goal continuation ran ahead of the paused turn"
+    marker = read_turn_marker(env.home, "session-key")
+    assert marker is not None, "the goal continuation replaced the paused request"
+    assert marker["reason"] == up.PAUSE_REASON and marker["prompt"] == "the long task"
+    assert not session.get("running")
+    assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "resume"
+
+
+def test_goal_continuation_waits_while_a_paused_turn_continuation_is_due(env, monkeypatch):
+    session = _paused_session(env.home)
+    _goal_after(monkeypatch, {"some turn"})
+    monkeypatch.setattr(up, "continuation_due", lambda s: True)
+    session.pop("_update_pause_marker_key", None)
+    server._run_post_turn_followups("rid", "ui-sid", session, {}, "[goal] keep going")
+    assert "_test_prompts" not in session and not session.get("running")
+
+
+def test_goal_continuation_still_runs_once_the_pause_is_retired(env, monkeypatch):
+    session = _paused_session(env.home)
+    typed = "actually, do something else"
+    _goal_after(monkeypatch, {typed})
+
+    session["running"] = True
+    server._run_prompt_submit("rid-2", "ui-sid", session, typed)  # the user moved on: pause retired
+
+    assert session["_test_prompts"] == [typed, "[goal] keep going"]
+    assert read_turn_marker(env.home, "session-key") is None

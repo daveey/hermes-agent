@@ -58,7 +58,7 @@ class SyncUnavailable(RuntimeError):
 class HubError(RuntimeError):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(f"hub {status}: {detail}")
-        self.status = status
+        self.status, self.detail = status, detail
 
 
 class Resync(Exception):
@@ -128,9 +128,29 @@ class Hub:
     def leases(self, board: str, body: dict) -> dict:
         return self._call("POST", f"/v2/boards/{board}/leases", body)
 
+    def sessions(self, board: str, body: dict) -> dict:
+        """Session owners (session handover, :mod:`hermes_cli.session_owner`): ``get`` / ``move``. A 409 refusal
+        returns its body (``{reason, owner}``) instead of raising."""
+        try:
+            return self._call("POST", f"/v2/boards/{board}/sessions", body)
+        except HubError as exc:
+            if exc.status != 409:
+                raise
+            try:
+                res = json.loads(exc.detail)
+            except ValueError:
+                raise exc from None
+            if not isinstance(res, dict) or not res.get("reason"):
+                raise
+            return res
+
     def machines(self) -> dict:
         """The machine registry (RFC "One machine registry"): ``{me, machines: [{name, labels, pinned_only, ...}]}``."""
         return self._call("GET", "/v2/machines")
+
+    def report_metrics(self, metrics: dict) -> dict:
+        """This machine's own load for the registry (display only; see hermes_cli.machine_metrics)."""
+        return self._call("POST", "/v2/machines/me/metrics", metrics)
 
 
 # --- boards ---------------------------------------------------------------------------------------
@@ -266,7 +286,7 @@ def transient_rejection(res: dict) -> bool:
     reason = str(res.get("reason") or "")
     detail = str(res.get("detail") or "")
     return (reason in TRANSIENT_REASONS or (reason == "invalid" and "unknown table" in detail)
-            or (reason == "not_found" and detail.startswith("no task")))  # its card is sent first next round
+            or (reason == "not_found" and detail.startswith(("no task", "unknown task"))))  # card goes first next round
 
 
 def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -> list[tuple[dict, str]]:
@@ -278,12 +298,19 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
     in_batch = {r["row_uid"] for r in rows if r["table_name"] == "tasks"}
     wanted: list[str] = []
     for r in rows:
-        if r["table_name"] in ("tasks", "task_links"):
+        if r["table_name"] == "tasks":
             continue
-        fields = r["fields"] if isinstance(r["fields"], dict) else json.loads(r["fields"] or "{}")
-        tid = fields.get("task_id")
-        if tid and tid not in in_batch and tid not in wanted:
-            wanted.append(tid)
+        if r["table_name"] == "task_links":
+            if r["op"] != "upsert":
+                continue
+            # Both ends of a new link: a link must never reach the Board ahead of a card it names. [daveey]
+            tids = list(str(r["row_uid"]).split(">", 1))
+        else:
+            fields = r["fields"] if isinstance(r["fields"], dict) else json.loads(r["fields"] or "{}")
+            tids = [fields.get("task_id")]
+        for tid in tids:
+            if tid and tid not in in_batch and tid not in wanted:
+                wanted.append(tid)
     out: list[tuple[dict, str]] = []
     for tid in wanted:
         task = conn.execute("SELECT * FROM tasks WHERE id = ? AND sync_version IS NULL", (tid,)).fetchone()
@@ -293,6 +320,18 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
               "fields": _wire_fields("tasks", _row_fields(conn, "tasks", task)), "hlc": _next_hlc(conn, gateway)}
         out.append((op, tid))
     return out
+
+
+def _record_live_claim_rejection(conn: sqlite3.Connection, row: dict, reason: str) -> None:
+    """A card write the Board refused because another gateway holds the card's live lease leaves a
+    ``sync_rejected`` event on the card (inside the push txn), so ``kanban show`` says the write never happened
+    instead of the card silently reverting to the service's row. [daveey]"""
+    from hermes_cli import kanban_db as kb
+    fields = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"] or "{}")
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (row["row_uid"],)).fetchone() is None:
+        return
+    kb._append_event(conn, row["row_uid"], "sync_rejected",
+                     {"reason": reason[:300], "fields": sorted(fields), "op_id": row["op_id"]})
 
 
 @dataclass
@@ -369,6 +408,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                                  "WHERE op_id = ?", (reason[:500], op_id))
                     out.rejected += 1
                     _log.warning("kanban sync: %s %s %s rejected (%s)", board, row["table_name"], row["row_uid"], reason)
+                    if row["table_name"] == "tasks" and res.get("reason") == "live_claim":
+                        _record_live_claim_rejection(conn, row, reason)
                     if primary and res.get("row"):
                         authoritative.append(_row_change(row["table_name"], res["row"]))
         if authoritative:
@@ -426,7 +467,12 @@ def own_partition(conn: sqlite3.Connection, changes: list[sync.RemoteChange], ga
     """The changes for cards this gateway created (``created_on`` = it, or unset) and their child rows.
 
     A primary board's live file holds only its own cards, so the dispatcher's sweeps (stale claims, orphans,
-    concurrency counts) never see another gateway's work; the replica copy holds the whole board."""
+    concurrency counts) never see another gateway's work; the replica copy holds the whole board.
+
+    A link is kept when its CHILD is ours, even if the parent is another gateway's card: the edge gates our card,
+    and the Board's claim check counts it. Dropping it made the local promoter re-promote a child the Board refused
+    to lease (60 promoted/claim_rejected events in 7 min, 2026-10-28). The parent's status comes from the replica
+    (``kanban_db_sync.refresh_remote_parents``). [daveey]"""
     kept: list[sync.RemoteChange] = []
     mine: set[str] = set()
 
@@ -444,8 +490,8 @@ def own_partition(conn: sqlite3.Connection, changes: list[sync.RemoteChange], ga
             if not is_mine(ch.uid):
                 continue
         elif ch.table == "task_links":
-            parent, _, child = ch.uid.partition(">")
-            if not (is_mine(parent) and is_mine(child)):
+            _parent, _, child = ch.uid.partition(">")
+            if not is_mine(child):
                 continue
         elif not is_mine(ch.fields.get("task_id") if ch.op == "upsert" else
                          _child_task(conn, ch.table, ch.uid)):
@@ -566,6 +612,8 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
                 resync(live, hub, slug, observers=True, partition=gateway)
         replica = open_shadow(slug, gateway)
         try:
+            if mode == "primary" and sync.refresh_remote_parents(live, replica):
+                sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
             result.repaired = repair_divergence(live, replica, gateway)
         finally:
             replica.close()
@@ -717,6 +765,8 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     wake = threading.Event()
     watchers: dict[str, threading.Thread] = {}
     next_links = 0.0
+    from hermes_cli.machine_metrics import Reporter
+    metrics = Reporter(hub.report_metrics)
     while keep_running():
         boards = board_paths()
         for slug, _path in boards:
@@ -731,6 +781,7 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
         if time.monotonic() >= next_links:
             reconcile_links(boards, ident.gateway)
             next_links = time.monotonic() + LINKS_EVERY_S
+        metrics.report_due()
         wait_for_work(wake, [p for _s, p in boards], period, keep_running)
 
 

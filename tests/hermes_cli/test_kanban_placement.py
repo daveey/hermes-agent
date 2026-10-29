@@ -21,6 +21,8 @@ from hermes_cli import kanban_placement as kp
 ROUTE = {"route": {"macbook": "hub"}, "creator_session": {"hub": "20261023_052109_5b3dee"}}
 ALIVE = lambda target: None
 NOWHERE = lambda need: {"need": need, "local": "absent", "holders": [], "stale": []}
+# The target advertises nothing (an older hub client/core): profiles unknown, profile tools unpublished.
+SILENT = lambda target: {"profiles": None, "tools": None}
 
 
 def decide(args, **kw):
@@ -28,6 +30,7 @@ def decide(args, **kw):
     kw.setdefault("self_gw", "macbook")
     kw.setdefault("live", ALIVE)
     kw.setdefault("locate", NOWHERE)
+    kw.setdefault("info", SILENT)
     kw.setdefault("carries", False)  # a hermes-hub client without create-task --option (< 1.8.0)
     return kp.decide(args, **kw)
 
@@ -58,7 +61,7 @@ def test_no_route_is_upstream_behaviour():
     ({"initial_status": "blocked"}, "initial_status"),
     ({"project_id": "p_1"}, "project_id"),
     ({"completion_contract": "daveey/hermes"}, "completion_contract"),
-    ({"requires": ["terminal"]}, "profile tools"),
+    ({"requires": ["terminal"]}, "not carried by this hermes-hub client"),
 ])
 def test_cards_hub_create_cannot_express_stay_local(extra, why):
     d = decide({"title": "Fix the flaky test", **extra})
@@ -199,6 +202,120 @@ def test_decide_never_raises():
         raise RuntimeError("replica gone")
     d = decide({"title": "x", "requires": ["ssh:hub"]}, locate=boom)
     assert d["where"] == "local" and "failed" in d["why"]
+
+
+# --- requires and assignees (an honest `requires` list no longer pins a card here) ---------------
+
+HONEST = ["terminal", "file", "git", "kanban"]
+HUB_PROFILES = ["default", "alpha", "bb-tuner", "coach", "ci-sweeper"]
+HUB_TOOLS = {"default": {"terminal", "file", "git", "kanban"}, "coach": {"terminal", "file", "git"},
+             "alpha": {"terminal", "file", "git"}}
+ADVERTISED = lambda target: {"profiles": HUB_PROFILES, "tools": HUB_TOOLS}
+
+
+def test_honest_requires_with_the_default_assignee_goes_to_the_target():
+    d = decide({"title": "Fix the flaky test", "requires": HONEST}, carries=True)
+    assert d["where"] == "hub", d
+    # The same when the target publishes its profile tools and its default profile has them all.
+    assert decide({"title": "Fix the flaky test", "requires": HONEST}, carries=True,
+                  info=ADVERTISED)["where"] == "hub"
+
+
+def test_host_repo_and_unknown_requires_stay_local():
+    for req in (["terminal", "host_repo"], ["teleport"]):
+        d = decide({"title": "Fix the flaky test", "requires": req}, carries=True, info=ADVERTISED)
+        assert d["where"] == "local" and "carried_requires" in d["why"], d
+
+
+def test_carried_requires_is_configurable():
+    cfg = {**ROUTE, "carried_requires": ["terminal"]}
+    assert decide({"title": "x", "requires": ["terminal"]}, carries=True, cfg=cfg)["where"] == "hub"
+    d = decide({"title": "x", "requires": ["terminal", "file"]}, carries=True, cfg=cfg)
+    assert d["where"] == "local" and "file" in d["why"], d
+
+
+def test_requires_a_target_profile_lacks_stays_local():
+    d = decide({"title": "x", "assignee": "coach", "requires": ["terminal", "kanban"]}, carries=True,
+               info=ADVERTISED)
+    assert d["where"] == "local" and "kanban" in d["why"] and "coach" in d["why"], d
+    # ci-sweeper publishes no tools at all: lacks every one.
+    d = decide({"title": "x", "assignee": "ci-sweeper", "requires": ["terminal"]}, carries=True,
+               info=ADVERTISED)
+    assert d["where"] == "local" and "lacks" in d["why"], d
+
+
+def test_assignee_the_target_has_a_profile_for_goes_there():
+    d = decide({"title": "Coach plugin build", "assignee": "coach", "requires": ["terminal", "file", "git"]},
+               carries=True, info=ADVERTISED)
+    assert d["where"] == "hub", d
+
+
+def test_unknown_assignee_stays_local():
+    d = decide({"title": "x", "assignee": "links"}, info=ADVERTISED)
+    assert d["where"] == "local" and "no profile on hub" in d["why"], d
+    # A target that advertises no profile list keeps the old rule: only `assignees` travel.
+    d = decide({"title": "x", "assignee": "coach"})
+    assert d["where"] == "local" and "not placed remotely" in d["why"], d
+
+
+def test_target_info_reads_the_gateway_record_and_fresh_profile_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path))
+    now = time.time()
+    db = sqlite3.connect(tmp_path / "hub.db")
+    db.executescript(HUB_SCHEMA)
+    db.execute("INSERT INTO replica VALUES ('hub','gateway','info',1,1,?,0)",
+               (json.dumps({"gateway": "hub", "profiles": ["default", "coach"]}),))
+    db.commit()
+    db.close()
+    caps = [{"name": "profile-tools:default:terminal", "ok": True, "checked_at": now - 10},
+            {"name": "profile-tools:coach:file", "ok": True, "checked_at": now - 99999},  # stale
+            {"name": "ssh:mini", "ok": True, "checked_at": now}]
+    got = kp.target_info("hub", now=now, remote={"hub": {"schema": 1, "capabilities": caps}})
+    assert got == {"profiles": ["default", "coach"], "tools": {"default": {"terminal"}}}
+    # No profile-tools entry at all: tools unknown (None), not "lacks everything".
+    got = kp.target_info("mini", now=now, remote={"mini": {"schema": 1, "capabilities": caps[2:]}})
+    assert got == {"profiles": None, "tools": None}
+
+
+def test_registry_publishes_each_profiles_tools(monkeypatch):
+    from hermes_cli import kanban_capabilities as kc
+    from hermes_cli import profiles as pr
+    monkeypatch.setattr(pr, "list_profile_names", lambda: ["default", "coach", "broken"])
+
+    def caps(name):
+        if name == "broken":
+            raise ValueError("bad config")
+        return {"default": {"terminal", "file", "git", "kanban", "host_repo"},
+                "coach": {"terminal", "git"}}[name]
+    monkeypatch.setattr(kc, "_profile_capabilities", caps)
+    names = [n for n, ok in reg.profile_tool_entries() if ok]
+    assert names == ["profile-tools:default:terminal", "profile-tools:default:file",
+                     "profile-tools:default:git", "profile-tools:default:kanban",
+                     "profile-tools:coach:terminal", "profile-tools:coach:git"]
+    assert all(reg.is_gateway_need(n) for n in names)
+
+
+# --- marker narrowing ------------------------------------------------------------------------------
+
+def test_babybear_skill_or_repo_in_the_body_does_not_pin_the_card():
+    # t_01a18329fe89fefb / t_01a18491e6b20fc9: metta disk checks kept on the MacBook by a BB skill name.
+    d = decide({"title": "Disk H4: metta4 silent 81 h (unreachable, 12 runners offline)",
+                "body": "Skills: babybear-ship-and-ops, five-whys.\nRemove the worktree ~/code/babybear-h4 "
+                        "once daveey/babybear PR 1823 has merged."})
+    assert d["where"] == "hub", d
+    # Baby Bear named as the subject of the title still pins it.
+    d = decide({"title": "Baby Bear voice listening regressed", "body": "x"})
+    assert d["where"] == "local" and "baby bear" in d["why"], d
+
+
+def test_macos_ci_runner_labels_do_not_pin_the_card():
+    d = decide({"title": "Move hermes-state CI to GitHub-hosted runners",
+                "body": "runs-on: macos-latest; see .github/workflows/hermes-state-macos.yml"})
+    assert d["where"] == "hub", d
+    d = decide({"title": "test_gateway_start_refused.py: teardown ERRORs on macOS.", "body": ""})
+    assert d["where"] == "local" and "macos" in d["why"], d
+    d = decide({"title": "Teardown fails", "body": "Only on macOS, never on Linux."})
+    assert d["where"] == "local" and "macos" in d["why"], d
 
 
 # --- liveness -----------------------------------------------------------------------------------
@@ -1023,3 +1140,77 @@ def test_hermes_hub_pin_on_the_hub_itself_creates_locally(mac, monkeypatch):
     out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hermes-hub"}))
     assert out.get("ok") and out["task_id"] and "placed" not in out, out
     assert _local_count() == 1
+
+
+# --- heavy work goes to a worker node (kanban.placement.heavy_route) ------------------------------------
+
+HEAVY = {**ROUTE, "heavy_route": {"macbook": "worker-1"}}
+PICKS_UP = lambda name: True
+
+
+@pytest.mark.parametrize("args", [
+    {"title": "Kanban blockers: fix the re-wake loop + regression test"},
+    {"title": "Model gate bench-v2 scores Opus and Astra the same"},
+    {"title": "CI red on main", "body": "Reproduce with scripts/run_tests.sh tests/hermes_cli/ -j 4"},
+    {"title": "Coach report_only fix", "body": "run pytest on plugins/coach before pushing"},
+])
+def test_heavy_work_runs_on_the_worker_through_the_board_lease(args):
+    d = decide(args, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "local" and d["runs_on"] == ["machine:worker-1"], d
+    assert d["why"].startswith("heavy work") and "worker-1" in d["why"]
+
+
+def test_heavy_work_with_parents_still_runs_on_the_worker():
+    d = decide({"title": "Run the benchmark", "parents": ["t_1"]}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["runs_on"] == ["machine:worker-1"] and "defer" not in d, d
+
+
+def test_light_work_keeps_the_gateway_route():
+    d = decide({"title": "daveey/hermes CI: summarise the failing jobs"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "hub" and "runs_on" not in d, d
+
+
+def test_mac_only_heavy_work_stays_local_without_runs_on():
+    d = decide({"title": "Fix flaky macOS test in the pytest suite"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "local" and "runs_on" not in d and d["why"].startswith("local marker"), d
+
+
+def test_heavy_work_that_names_the_target_host_keeps_the_route():
+    d = decide({"title": "Run the regression tests on hermes-hub"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "hub" and "runs_on" not in d, d
+
+
+def test_heavy_work_falls_back_to_the_route_when_the_worker_does_not_pick_up():
+    d = decide({"title": "Run the benchmark"}, cfg=HEAVY, machine_ok=lambda name: False)
+    assert d["where"] == "hub" and "runs_on" not in d, d
+
+
+def test_heavy_route_is_off_unless_configured_and_an_explicit_pin_wins():
+    assert decide({"title": "Run the benchmark"}, machine_ok=PICKS_UP)["where"] == "hub"
+    assert decide({"title": "Run the benchmark"}, cfg=HEAVY, self_gw="mini", machine_ok=PICKS_UP)["where"] == "local"
+    d = decide({"title": "Run the benchmark", "placement": "hub"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "hub" and "runs_on" not in d, d
+    d = decide({"title": "Run the benchmark", "placement": "local"}, cfg=HEAVY, machine_ok=PICKS_UP)
+    assert d["where"] == "local" and "runs_on" not in d, d
+
+
+def test_configured_heavy_markers_replace_the_builtin_list():
+    cfg = {**HEAVY, "heavy_markers": [r"\bcrunch\b"]}
+    assert decide({"title": "Run the benchmark"}, cfg=cfg, machine_ok=PICKS_UP)["where"] == "hub"
+    assert decide({"title": "crunch the logs"}, cfg=cfg, machine_ok=PICKS_UP)["runs_on"] == ["machine:worker-1"]
+
+
+@pytest.mark.parametrize("entry,ok", [
+    ({"state": "active", "labels": ["linux"]}, True),           # the Board publishes no pickup field (10-28)
+    ({"state": "active", "pickup": "explicit"}, True),
+    ({"state": "active", "pickup": "off"}, False),
+    ({"state": "active", "pickup": False}, False),
+    ({"state": "active", "hold": True}, False),
+    ({"state": "revoked"}, False),
+    (None, False),
+])
+def test_heavy_route_machine_check_reads_the_board_registry(monkeypatch, entry, ok):
+    from hermes_cli import kanban_worker_node as wn
+    machines = {"worker-1": entry} if entry else {}
+    monkeypatch.setattr(wn, "registry", lambda: {"me": "macbook", "machines": machines})
+    assert kp._machine_picks_up("worker-1") is ok

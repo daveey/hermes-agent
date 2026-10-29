@@ -65,16 +65,43 @@ export const $sessionListFreshness = atom<Record<string, boolean>>({})
 const ownerKey = (connection: string | undefined, profile: string | undefined) =>
   `${connection?.trim() || 'local'}\u0000${profileOf(profile)}`
 
-function publishFreshness(next: Record<string, boolean>): void {
+/** [daveey] desktop.log line per owner whose freshness changed, with what changed it. A stale owner's rows paint as
+ *  cached copies (no stripe, no kanban badge), and a 16 min stretch of that after a restart left no trace of which
+ *  list failed. Diagnostics only; never throws. */
+function logFreshnessFlips(previous: Record<string, boolean>, next: Record<string, boolean>, reason: string): void {
+  try {
+    const flips = [...new Set([...Object.keys(previous), ...Object.keys(next)])]
+      .filter(key => previous[key] !== next[key])
+      .map(key => `${key.replace('\u0000', '/')}:${previous[key] ?? '-'}->${next[key] ?? '-'}`)
+
+    if (flips.length && typeof window !== 'undefined') {
+      window.hermesDesktop?.logLine?.(`[session-freshness] ${flips.join(' ')} reason=${reason}`)
+    }
+  } catch {
+    // diagnostics only
+  }
+}
+
+function publishFreshness(next: Record<string, boolean>, reason: string): void {
   const previous = $sessionListFreshness.get()
 
   if (
     Object.keys(previous).length !== Object.keys(next).length ||
     Object.keys(next).some(key => previous[key] !== next[key])
   ) {
+    logFreshnessFlips(previous, next, reason)
     $sessionListFreshness.set(next)
   }
 }
+
+/** [daveey] Owner keys a sidebar LIST marked stale (failed request, or an error naming them). A gateway the hub-sync
+ *  status probe calls unreachable is not here: re-listing it would only flap against the probe. */
+const listStaleOwners = new Set<string>()
+
+/** [daveey] Owners whose last list failed (`connection/profile`) and are still stale. Only a successful list makes
+ *  them live again, so the sidebar re-lists while this is non-empty instead of waiting for an unrelated refresh. */
+export const staleSessionOwners = (state = $sessionListFreshness.get()): string[] =>
+  [...listStaleOwners].filter(key => state[key] === false).map(key => key.replace('\u0000', '/'))
 
 export function sessionOwnerIsFresh(
   connection: string | undefined,
@@ -92,7 +119,7 @@ export function recordSessionGatewayUnavailable(connection: string): void {
   )
 
   next[ownerKey(connection, '*')] = false
-  publishFreshness(next)
+  publishFreshness(next, `gateway-unavailable conn=${connection}`)
 }
 
 /** Called only by the owning, non-superseded sidebar refresh. */
@@ -127,13 +154,28 @@ export function recordSessionListResult(
   }
 
   const returnedOwners = new Set(incoming.map(row => ownerKey(row.connection_id, row.profile)))
+  // [daveey] The primary backend's list can carry other gateways' rows, so its failure is everyone's. A REMOTE
+  // backend's list answers only for that gateway: a failed list on the hub (the window's request scope follows the
+  // focused chat) used to mark this Mac's own rows stale too, so the sidebar swapped them for stamp-less fallback
+  // copies and every local stripe (periodic, waiting, stuck, done) blanked until the next local list. Primary rows
+  // carry no connection_id: one identity for both spellings.
+  const primary = $connectionsRegistry.get()?.primary?.trim() || 'local'
+  const gatewayOf = (id: null | string | undefined) => id?.trim() || primary
+  const requestGateway = gatewayOf(connection)
+
+  const covers = (ownerConnection: null | string | undefined, errorConnection?: null | string) =>
+    errorConnection?.trim()
+      ? gatewayOf(errorConnection) === gatewayOf(ownerConnection)
+      : requestGateway === primary || gatewayOf(ownerConnection) === requestGateway
 
   for (const [key, owner] of owners) {
+    const onRequestGateway = gatewayOf(owner.connection_id) === requestGateway
+
     const ownerFailed =
-      failed ||
+      (failed && covers(owner.connection_id)) ||
       errors.some(
         error =>
-          (!error.connection_id || error.connection_id === owner.connection_id) &&
+          covers(owner.connection_id, error.connection_id) &&
           (error.profile === 'all' || profileOf(error.profile) === profileOf(owner.profile))
       )
 
@@ -141,12 +183,23 @@ export function recordSessionListResult(
       next[key] = true
     } else if (ownerFailed) {
       next[key] = false
-    } else if ((owner.connection_id || 'local') === (connection || 'local')) {
+    } else if (onRequestGateway && !failed) {
       next[key] = true
     }
   }
 
-  publishFreshness(next)
+  for (const [key, fresh] of Object.entries(next)) {
+    if (fresh) {
+      listStaleOwners.delete(key)
+    } else if (owners.has(key)) {
+      listStaleOwners.add(key)
+    }
+  }
+
+  publishFreshness(
+    next,
+    `list conn=${connection?.trim() || 'local'} profile=${profile}${failed ? ' failed' : ''}${errors.length ? ` errors=${errors.length}` : ''}`
+  )
 }
 
 /**
@@ -318,8 +371,17 @@ export function mergeOfflineFallback(
     return effective
   })
 
+  // [daveey] This Mac's own fallback rows are the cold-start boot snapshot: frozen at launch and without activity
+  // stamps (cron_active, kanban_*, goal_active, ...). Once the own backend has put any live row in the list it has
+  // answered this launch, and its older chats paint from the live (stamped) projects tree instead; re-adding the boot
+  // copies after a failed list blanked their stripes.
+  const ownBackendAnswered = live.some(
+    row => !row.offline_cached && (row.connection_id?.trim() || primary) === primary
+  )
+
   const added = offline.filter(
     row =>
+      !(ownBackendAnswered && (row.connection_id?.trim() || primary) === primary) &&
       !freshOwners.has(ownerKey(row.connection_id, row.profile)) &&
       freshness[ownerKey(row.connection_id, row.profile)] !== true &&
       !seen.has(ownedIdentity(row, row.id))
@@ -354,6 +416,7 @@ export function hideOfflineSession(row: SessionInfo): void {
 
 export function _resetOfflineSessionsForTests(): void {
   archivedWhileOffline.clear()
+  listStaleOwners.clear()
   $sessionListFreshness.set({})
   $offlineSessions.set([])
 }

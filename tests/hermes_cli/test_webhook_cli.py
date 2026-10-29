@@ -106,8 +106,9 @@ class TestSubscribe:
             subscriptions = original_load()
             if threading.current_thread().name == "stale-webhook-update":
                 pause["loaded"].set()
-                if not pause["allow"].wait(timeout=5):
-                    raise AssertionError("timed out waiting to resume stale update")
+                # This is an ordering barrier, not a performance deadline: the
+                # main thread always releases it in finally, even on failure.
+                pause["allow"].wait()
             return subscriptions
 
         monkeypatch.setattr("hermes_cli.webhook._load_subscriptions", load_with_paused_update)
@@ -120,36 +121,32 @@ class TestSubscribe:
             except BaseException as exc:  # surfaced in the test thread below
                 errors.append(exc)
 
-        def start_stale_update():
+        def run_stale_update(concurrent_mutation):
             worker = threading.Thread(target=update_route, name="stale-webhook-update")
             worker.start()
-            assert pause["loaded"].wait(timeout=5)
-            return worker
+            try:
+                assert pause["loaded"].wait(timeout=60)
+                concurrent_mutation()
+            finally:
+                pause["allow"].set()
+                worker.join(timeout=60)
+            assert not worker.is_alive()
+            assert errors == []
 
-        worker = start_stale_update()
-        webhook_command(_make_args(webhook_action="remove", name="notifier"))
-        pause["allow"].set()
-        worker.join(timeout=5)
-
-        assert not worker.is_alive()
-        assert errors == []
+        run_stale_update(
+            lambda: webhook_command(_make_args(webhook_action="remove", name="notifier"))
+        )
         assert "notifier" not in original_load()
 
         webhook_command(_make_args(
             webhook_action="subscribe", name="notifier", secret="replacement"
         ))
         pause = {"loaded": threading.Event(), "allow": threading.Event()}
-        worker = start_stale_update()
 
         def disable(subscriptions):
             subscriptions["notifier"]["enabled"] = False
 
-        webhook_module._mutate_subscriptions(disable)
-        pause["allow"].set()
-        worker.join(timeout=5)
-
-        assert not worker.is_alive()
-        assert errors == []
+        run_stale_update(lambda: webhook_module._mutate_subscriptions(disable))
         assert original_load()["notifier"]["enabled"] is False
 
     def test_profile_rebind_rotates_secret_without_exposing_mixed_record(

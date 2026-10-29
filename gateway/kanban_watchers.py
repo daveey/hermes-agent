@@ -10,6 +10,7 @@ in ``kanban_watchers_common``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import os
 import time
@@ -164,6 +165,10 @@ class GatewayKanbanWatchersMixin:
 
     def _kanban_advance(self, sub: dict, cursor: int, board: Optional[str] = None) -> None:
         self._kanban_sub_op(board, "advance_notify_cursor", sub, new_cursor=cursor)
+        # Claim was durable: the send finished, so clear the in-flight holder. A crash before this
+        # rewinds the claim (recover_orphaned_notify_claims) and the next tick sends again. [daveey]
+        with contextlib.suppress(Exception):
+            self._kanban_sub_op(board, "ack_notify_claim", sub, upto=cursor)
 
     def _kanban_unsub(self, sub: dict, board: Optional[str] = None) -> None:
         self._kanban_sub_op(board, "remove_notify_sub", sub)
@@ -350,14 +355,8 @@ class GatewayKanbanWatchersMixin:
                         bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned and not capped else 0
                     now = int(time.time())
                     if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
-                        held = _kbd.describe_suppression(res for _slug, res in (results or []))
-                        logger.warning(
-                            "kanban dispatcher stuck: ready queue non-empty for "
-                            "%d consecutive ticks but 0 workers spawned.%s Check "
-                            "profile health (venv, PATH, credentials) and "
-                            "`hermes kanban list --status ready`.",
-                            bad_ticks, f" Last tick held back: {held}." if held else "",
-                        )
+                        # Names deferred Board claims / unleasable cards when those explain the zero.
+                        logger.warning("%s", _kbd.stuck_warning(bad_ticks, (res for _slug, res in (results or []))))
                         last_warn_at = now
                 except asyncio.CancelledError:
                     logger.debug("kanban dispatcher: cancelled")

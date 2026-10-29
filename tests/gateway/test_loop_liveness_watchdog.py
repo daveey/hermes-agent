@@ -278,11 +278,58 @@ def test_loop_liveness_watchdog_marks_runtime_degraded_before_restart():
             loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=2
         )
         assert handle is not None
-        assert fired.wait(timeout=2.0), "watchdog did not reach its restart exit"
+        # Returns as soon as the exit is reached. Must outlast the pre-exit
+        # status persist, which itself waits out a throttled writer.
+        assert fired.wait(timeout=30.0), "watchdog did not reach its restart exit"
         handle.stop()
-        handle.join(timeout=1.0)
+        handle.join(timeout=5.0)
 
     record = read_runtime_status()
+    assert exit_codes == [75]
+    assert record["gateway_state"] == "degraded"
+    assert record["exit_reason"] == "loop_liveness_watchdog"
+    assert record["restart_requested"] is True
+
+def test_loop_liveness_watchdog_status_stamp_survives_a_slow_persist(monkeypatch):
+    """The degraded stamp must be on disk before ``os._exit`` when persist is slow.
+
+    ``os._exit`` kills the background status writer, so a wait that returns
+    first drops the stamp. A 0.25s bound did that on a throttled runner: exit
+    code 75 was recorded and ``gateway_state.json`` was still ``running``.
+    Hold the write past that old deadline; the wait must return only once the
+    snapshot is durable, not on a fixed short clock.
+    """
+    from gateway import status
+
+    original = status._write_json_file
+
+    def slow_write(path, payload):
+        time.sleep(0.40)  # longer than the old 0.25s pre-exit wait
+        return original(path, payload)
+
+    monkeypatch.setattr(status, "_write_json_file", slow_write)
+    status.write_runtime_status(gateway_state="running", exit_reason=None)
+    loop = MagicMock(spec=asyncio.AbstractEventLoop)
+    fired = threading.Event()
+    exit_codes = []
+
+    def fake_exit(code: int) -> None:
+        exit_codes.append(code)
+        fired.set()
+
+    with (
+        patch("gateway.shutdown_watchdog.faulthandler.dump_traceback"),
+        patch("gateway.shutdown_watchdog.os._exit", side_effect=fake_exit),
+    ):
+        handle = start_loop_liveness_watchdog(
+            loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=2
+        )
+        assert handle is not None
+        assert fired.wait(timeout=30.0), "watchdog did not reach its restart exit"
+        handle.stop()
+        handle.join(timeout=5.0)
+
+    record = status.read_runtime_status()
     assert exit_codes == [75]
     assert record["gateway_state"] == "degraded"
     assert record["exit_reason"] == "loop_liveness_watchdog"

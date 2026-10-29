@@ -18,13 +18,19 @@ FENCED = {"status", "current_run_uid", "result", "started_at", "completed_at"}
 
 
 class FakeService:
-    def __init__(self, *, lease_runs: bool = False) -> None:
+    def __init__(self, *, lease_runs: bool = False, machines: Optional[dict] = None) -> None:
         self.boards: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str, Any]] = []
         self.offline = False
         # Like transitions.ts grantLease/releaseTask: a grant writes the card running plus its run row, a release
         # ends that run and returns the card to ready. Off by default (the older tests count rows).
         self.lease_runs = lease_runs
+        # Opt-in placement, like transitions.ts checkPlacement's runs_on rule: a grant needs every runs_on label
+        # on the claiming machine ({name: {"labels": [...]}}; machine:<name> is implicit). None = no check.
+        self.machines = machines
+        # Session owners (worker/src/board.ts ``sessions``): {board: {session_id: owner}} plus the move audit.
+        self.session_owners: dict[str, dict[str, dict]] = {}
+        self.session_audit: list[dict] = []
 
     def board(self, bid: str) -> dict[str, Any]:
         return self.boards.setdefault(bid, {"seq": 0, "floor": 0, "changes": [], "rows": {}, "applied": {}, "leases": {}})
@@ -80,7 +86,19 @@ class FakeService:
             for k in won:
                 clocks[k] = op["hlc"]
             row = self._put(b, table, uid, won, gw, op["client_op_id"], op["hlc"])
+            # As rows.ts: the holder moving its card out of `running` ends the lease (opt-in with lease_runs).
+            if self.lease_runs and lease and lease["holder"] == gw and "status" in won and won["status"] != "running":
+                b["leases"].pop(uid, None)  # clearLease: the lease row and the task's lease mirror
+                row = self._put(b, table, uid, {"lease_holder": None, "lease_expires": None}, gw, op["client_op_id"],
+                                op["hlc"])
             return {"status": "applied" if len(won) == len(f) else "merged", "row": row}
+        if table == "task_links":
+            # rows.ts upsertLink: a link needs both of its cards on the Board.
+            tasks = b["rows"].get("tasks", {})
+            missing = [x for x in (f.get("parent_id"), f.get("child_id"))
+                       if x not in tasks or tasks[x].get("deleted_at")]
+            if missing:
+                return {"status": "rejected", "reason": "not_found", "detail": f"unknown task(s): {', '.join(map(str, missing))}"}
         return {"status": "applied", "row": self._put(b, table, uid, f, gw, op["client_op_id"], op["hlc"])}
 
     def compact(self, bid: str) -> None:
@@ -144,6 +162,12 @@ class FakeHub:
         if body["action"] == "grant":
             if cur and cur["holder"] != self.gateway:
                 return {"status": "rejected", "reason": "lease_held", "lease": cur}
+            card = b["rows"].get("tasks", {}).get(task) or {}
+            if self.svc.machines is not None and card.get("runs_on"):
+                want = json.loads(card["runs_on"]) if isinstance(card["runs_on"], str) else card["runs_on"]
+                mine = set((self.svc.machines.get(self.gateway) or {}).get("labels") or []) | {f"machine:{self.gateway}"}
+                if set(want or []) - mine:
+                    return {"status": "rejected", "reason": "labels_mismatch", "lease": cur}
             b["leases"][task] = {"task_id": task, "holder": self.gateway, "run_uid": run, "expires": 9_999_999_999_999}
             if self.svc.lease_runs and task in b["rows"].get("tasks", {}):
                 self.svc._put(b, "task_runs", run, {"task_id": task, "status": "running", "started_at": 1,
@@ -172,3 +196,39 @@ class FakeHub:
                                                  "lease_expires": None}, gw, op_id, hlc)
             return {"status": "applied", "lease": None}
         return {"status": "applied", "lease": b["leases"][task], "version": version}
+
+    def sessions(self, board: str, body: dict) -> dict:
+        """As board.ts ``sessions``: ``get`` -> {owners}; ``move`` is a CAS signed by the current owner. The target
+        must be an active, unheld registry machine (with ``machines`` None, any name) other than the caller.
+        A refusal is the 409 body ``{reason, owner}`` (what :meth:`ksc.Hub.sessions` returns for a 409)."""
+        self._check()
+        self.svc.calls.append(("sessions", board, body))
+        owners = self.svc.session_owners.setdefault(board, {})
+        if body["action"] == "get":
+            ids = body["session_ids"]
+            assert isinstance(ids, list) and len(ids) <= 200
+            return {"owners": {sid: copy.deepcopy(owners[sid]) for sid in ids if sid in owners}}
+        sid, to, expect = body["session_id"], body["to"], body["expect_epoch"]
+        cur = copy.deepcopy(owners.get(sid))
+
+        def refuse(reason: str) -> dict:
+            return {"reason": reason, "owner": cur}
+
+        if cur and cur["gateway"] != self.gateway:
+            return refuse("not_owner")
+        if (cur["epoch"] if cur else 0) != expect:
+            return refuse("epoch_mismatch")
+        if to == self.gateway:
+            return refuse("same_gateway")
+        if self.svc.machines is not None:
+            m = self.svc.machines.get(to)
+            if not m or m.get("state", "active") != "active" or m.get("hold"):
+                return refuse("unknown_target")
+        elif not to:
+            return refuse("unknown_target")
+        owners[sid] = {"gateway": to, "epoch": expect + 1, "moved_at": int(time.time() * 1000),
+                       "moved_by": self.gateway}
+        self.svc.session_audit.append({"session_id": sid, "actor": self.gateway,
+                                       "from_gateway": cur["gateway"] if cur else None, "to_gateway": to,
+                                       "epoch": expect + 1, "reason": body.get("reason")})
+        return {"status": "moved", "owner": copy.deepcopy(owners[sid])}

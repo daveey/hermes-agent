@@ -9,7 +9,19 @@ from hermes_cli import kanban_capability_registry as registry
 
 # Gateway task_scopes are refreshed each sync; task updated_at only changes on edits.
 MAX_AGE_SECONDS = 600
+# Exit code for "cannot tell, not yet": the producer card is known from the last replica, but its gateway has not
+# synced for longer than MAX_AGE_SECONDS (a sleeping Mac). The wake-check dispatcher re-probes it without counting it
+# as broken, up to kanban_wake_check.STALE_WAKE_AFTER. [daveey]
+STALE_RC = 3
 STATUSES = frozenset(("todo", "ready", "running", "scheduled", "review", "blocked", "triage", "done", "archived"))
+
+
+class StaleReplica(ValueError):
+    """The card was seen in the gateway's replica, but that replica is older than MAX_AGE_SECONDS."""
+
+    def __init__(self, gateway, board, age, task):
+        super().__init__(f"stale replica for {gateway}/{board} (age={age:.0f}s, limit={MAX_AGE_SECONDS}s)")
+        self.gateway, self.board, self.age, self.task = gateway, board, age, task
 
 
 def read_task(gateway, target, board=None):
@@ -37,7 +49,9 @@ def read_task(gateway, target, board=None):
         if len(matched) != 1 or matched[0].get("state") != "ok":
             raise ValueError(f"missing successful task-scope observation for {gateway}/{board}")
         age = time.time() - float(matched[0].get("observed_at") or 0)
-        if not -60 <= age <= MAX_AGE_SECONDS:
+        if age > MAX_AGE_SECONDS:
+            raise StaleReplica(gateway, board, age, task)
+        if age < -60:
             raise ValueError(f"stale replica for {gateway}/{board} (age={age:.0f}s, limit={MAX_AGE_SECONDS}s)")
         return task
     finally:
@@ -68,9 +82,21 @@ def observe_wait(conn, target, *, now):
                                  (info.get("agent_owned_certain") or info.get("wait_state") == "stalled")))}
 
 
+def stale_message(target, stale):
+    """``<id> <last seen status> (...)``: words 0-1 keep the shape every reader parses; ``stale_age=`` and
+    ``gateway=`` are what the wake-check dispatcher reads to cap the wait. Never starts with ``error:``."""
+    status = stale.task.get("status")
+    orphan = " orphan producer;" if orphan_reason(stale.task) else ""
+    return (f"{target} {status} (replica stale:{orphan} gateway={stale.gateway} not synced for {stale.age:.0f}s, "
+            f"stale_age={stale.age:.0f}s, limit={MAX_AGE_SECONDS}s; last seen {status}, unknown now: not yet)")
+
+
 def check(gateway, target, *, board=None, until=(), since=()):
     try:
-        task = read_task(gateway, target, board)
+        try:
+            task = read_task(gateway, target, board)
+        except StaleReplica as stale:
+            return STALE_RC, stale_message(target, stale)
         status = task["status"]
         orphan = orphan_reason(task)
         suffix = " (replica; orphan producer)" if orphan else " (replica)"

@@ -384,6 +384,35 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
 )
 
 
+KANBAN_MOVE_SCHEMA = _schema(
+    "kanban_move",
+    (
+        "Move your current task to another machine and end this run there: use when the work needs something "
+        "this machine lacks (a Mac for Xcode/iOS/simulators, a GPU, a specific host's files or logs) or "
+        "belongs on a less loaded machine. It saves your checkpoint, ends this run as 'continued', sets the "
+        "card's runs_on to the labels you give and re-queues it, so ONLY a machine carrying every label claims "
+        "the next run (the Board enforces it). Refused when no other active machine matches, after "
+        "kanban.move.max_moves moves, when moving back to a machine the card already left (pass force), and "
+        "for dir/worktree cards. After it returns, end your turn with a one-line reply; do not call more tools."
+    ),
+    {
+        "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "runs_on": {"type": "array", "items": {"type": "string"}, "description": (
+            "Labels the next machine must have, e.g. [\"machine:worker-1\"], [\"macos\"], [\"linux\"]. "
+            "machine:<name> pins one registered machine."
+        )},
+        "reason": _prop("string", "Why the card must move (what this machine lacks). Logged on the card."),
+        "checkpoint": _prop("string", (
+            "Everything the next run needs to resume on the other machine: what is done (commits, branches, "
+            "pushed work, with ids), what is NOT portable (local files, processes) and the exact next steps. "
+            "Markdown. No secrets."
+        )),
+        "force": {"type": "boolean", "description": "Allow moving back to a machine this card already left."},
+    },
+    ["runs_on", "reason", "checkpoint"],
+)
+
+
 KANBAN_CONTINUE_SCHEMA = _schema(
     "kanban_continue",
     (
@@ -606,7 +635,11 @@ KANBAN_CREATE_SCHEMA = _schema(
         "orchestrator workers to fan out — decompose work into child "
         "tasks with specific assignees, link them into a pipeline, "
         "then complete your own task. The dispatcher picks up the new "
-        "tasks on its next tick and spawns the assigned profiles."
+        "tasks on its next tick and spawns the assigned profiles. "
+        "Count owners by board/project, not by your chat's links: a card "
+        "that open cards on any board or gateway already cover is refused "
+        "(code create_overlap, with their ids); continue that card, or pass "
+        "distinct_from + distinct_reason when the work really is separate."
     ),
     {
         "title": _prop("string", "Short task title (required)."),
@@ -679,6 +712,10 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "— a specifier profile is expected to flesh out "
                 "the body before work starts."
         )),
+        "distinct_from": {"type": "array", "items": {"type": "string"}, "description": (
+                "Ids of open cards a create_overlap refusal named that this card is NOT a duplicate of. "
+                "Needs distinct_reason; recorded as a create_overlap event on the new card.")},
+        "distinct_reason": _prop("string", "Why this card is separate work from the distinct_from cards."),
         "idempotency_key": _prop("string", (
                 "If a non-archived task with this key already "
                 "exists, return that task's id instead of creating "

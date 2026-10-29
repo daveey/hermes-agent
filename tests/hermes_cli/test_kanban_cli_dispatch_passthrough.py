@@ -8,6 +8,7 @@ operator footgun that only manifests in long-running setups.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 import tempfile
@@ -17,16 +18,37 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _hermes_module(name: str) -> bool:
+    return name.startswith("hermes_cli") or name.startswith("hermes_state") or name == "hermes_constants"
+
+
+@contextlib.contextmanager
+def reimported_hermes_modules():
+    """Drop hermes modules so the next import sees the current HERMES_HOME.
+
+    Restores the process's module objects on the way out. A wipe that is not
+    undone splits the process: a later file patches the object it imported at
+    collection, and the code path runs the other copy.
+    """
+    saved = {name: mod for name, mod in list(sys.modules.items()) if _hermes_module(name)}
+    for name in saved:
+        del sys.modules[name]
+    try:
+        yield
+    finally:
+        for name in [n for n in list(sys.modules) if _hermes_module(n)]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+
+
 @pytest.fixture()
 def isolated_kanban_home(monkeypatch):
     """Spin up a fresh HERMES_HOME with a clean kanban DB."""
     test_home = tempfile.mkdtemp(prefix="kanban_cli_passthrough_")
     os.makedirs(os.path.join(test_home, "profiles", "default"), exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", test_home)
-    for mod in list(sys.modules.keys()):
-        if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
-            del sys.modules[mod]
-    yield test_home
+    with reimported_hermes_modules():
+        yield test_home
 
 
 def test_cli_dispatch_passes_max_in_progress_from_config(isolated_kanban_home, monkeypatch):
@@ -94,5 +116,19 @@ def test_cli_max_flag_overrides_config_max_spawn(isolated_kanban_home, monkeypat
     assert captured.get("max_spawn") == 2, (
         f"CLI --max=2 must override config kanban.max_spawn=10; got {captured.get('max_spawn')!r}"
     )
+
+
+def test_reimported_hermes_modules_restores_process_objects():
+    """A later file in the same process must see the module object it imported."""
+    import importlib
+
+    import hermes_cli.kanban_db as kb
+
+    before = sys.modules["hermes_cli.kanban_db"]
+    assert before is kb
+    with reimported_hermes_modules():
+        fresh = importlib.import_module("hermes_cli.kanban_db")
+        assert fresh is not before
+    assert sys.modules["hermes_cli.kanban_db"] is before
 
 

@@ -230,6 +230,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
             session["_auto_continue_pauses"] = pauses
             session["_auto_continue_killed_jobs"] = marker.get("killed_jobs", [])
+            # [daveey] A continued at-most-once turn keeps the contract: off again at its first tool.
+            session["_marker_until_tool"] = bool(marker.get("until_tool"))
         try:
             from gateway.warning_notifications import render_notification
             diagnostic = marker.get("notification_category") == "diagnostic"

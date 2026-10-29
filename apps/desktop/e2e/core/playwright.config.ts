@@ -15,13 +15,21 @@ import { defineConfig } from '@playwright/test'
  *  - 180 s per test (green runs take 6-36 s): a stalled stream fails the one
  *    test fast instead of the 30-min job timeout cancelling the whole lane
  *    before it reports.
+ *  - globalSetup refuses a host whose /dev/shm cannot paint Electron, and
+ *    maxFailures stops a lane-wide failure after 3 specs (~9 min). Both keep
+ *    the run inside the job limit so the list reporter's end-of-run failure
+ *    details reach the job log; with the artifact quota hit, that log is the
+ *    only evidence there is (CI 40785530488: 9 blank-window timeouts, then a
+ *    cancel, no error text and no artifact).
  */
 export default defineConfig({
   testDir: '.',
   testMatch: '*.spec.ts',
+  globalSetup: './global-setup.ts',
   timeout: 180_000,
   expect: { timeout: 60_000 },
   retries: 0,
+  maxFailures: 3,
   /* A required lane must also refuse a stray `.only`, not just stop
    * retrying it: `forbidOnly: true` unconditionally — locally and in CI —
    * because a focused test here would silently shrink a required job. */

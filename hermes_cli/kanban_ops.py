@@ -111,6 +111,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 for (tid, reason) in res.respawn_guarded
             ],
             "rate_limited": res.rate_limited,
+            # Cards this machine cannot lease (runs_on / placement) and claims the Board deferred. [daveey]
+            "skipped_ineligible": [{"task_id": tid, "reason": reason} for (tid, reason) in res.skipped_ineligible],
+            "claim_deferred": [{"task_id": tid, "reason": reason} for (tid, reason) in res.claim_deferred],
             "shared_blocker_released": res.shared_blocker_released,
             "shared_blocker_probed": res.shared_blocker_probed,
             "skipped_locked": res.skipped_locked,
@@ -158,6 +161,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
+    for tid, reason in res.skipped_ineligible:
+        print(f"Skipped (this machine cannot lease it: {reason}): {tid}")
+    for tid, reason in res.claim_deferred:
+        print(f"Claim deferred by the Board ({reason}): {tid}")
     if res.rate_limited:
         print(f"Rate-limited (released to ready, no failure counted): {', '.join(res.rate_limited)}")
     if res.shared_blocker_released:
@@ -240,14 +247,9 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         if health_state["bad_ticks"] >= HEALTH_WINDOW:
             now = int(time.time())
             if now - health_state["last_warn_at"] >= 300:
-                held = kbd.describe_suppression([res])
-                held = f" Last tick held back: {held}." if held else ""
                 print(
-                    f"[{_fmt_ts(now)}] WARN dispatcher stuck: ready queue non-empty for "
-                    f"{health_state['bad_ticks']} consecutive ticks but 0 workers spawned "
-                    f"successfully.{held} Check profile health (venv, PATH, credentials) and `hermes "
-                    f"kanban list --status ready` / `hermes kanban list --status blocked` for "
-                    f"recent spawn_failed tasks.",
+                    f"[{_fmt_ts(now)}] WARN {kbd.stuck_warning(health_state['bad_ticks'], [res])}"
+                    " See `hermes kanban list --status blocked` for recent spawn_failed tasks.",
                     file=sys.stderr, flush=True,
                 )
                 health_state["last_warn_at"] = now

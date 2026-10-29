@@ -123,7 +123,12 @@ def _dispatch(server, rid, sid, session, text, profile):
         # Only the committed transaction winner projects this row, before any
         # model output. An unstarted cancellation must never paint permission.
         server._emit("message.admitted", sid, user_event)
-        server._run_after_agent_ready(rid, sid, session, text, None, None, None, auto_continue=False)
+        # Dispatch is never replayed, but a turn a restart stops BEFORE its first tool ran has done nothing
+        # irreversible: its marker stays auto-continuable until then (turn_marker.mark_turn_tool_started), so the
+        # next boot continues the decision instead of dropping it (self-heal desktop-3a6213ce74).
+        with session["history_lock"]:
+            session["_marker_until_tool"] = True
+        server._run_after_agent_ready(rid, sid, session, text, None, None, None, auto_continue=True)
 
     worker = server._start_session_work(run, name="prompt-admission", session=session)
     if worker is None:

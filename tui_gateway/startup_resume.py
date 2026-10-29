@@ -69,7 +69,23 @@ def _homes(home: Path) -> list[tuple[str | None, Path]]:
     return out
 
 
-def pending_resumes(home: Path, cfg: dict | None, *, now: float | None = None) -> list[dict[str, Any]]:
+def _skip_reason(m: dict | None, now: float, fresh: float, max_attempts: int) -> str | None:
+    """Why the sweep leaves this marker alone, or None when it resumes it."""
+    if m is None:
+        return "unreadable or empty prompt"
+    if not m.get("auto_continue", True):
+        return "auto_continue off (a tool already ran in an at-most-once turn, or its owner recovers it)"
+    if now - m["started_at"] > _max_age(m, fresh):
+        return f"older than the {_max_age(m, fresh) / 60:.0f} min freshness window"
+    if m["attempts"] >= max_attempts:
+        return f"attempt cap reached ({m['attempts']}/{max_attempts})"
+    if marker_writer_state(m) == "alive":
+        return f"writer pid {m.get('writer_pid')} is still alive"
+    return None
+
+
+def pending_resumes(home: Path, cfg: dict | None, *, now: float | None = None,
+                    log_skips: bool = True) -> list[dict[str, Any]]:
     """Markers the sweep would resume: fresh, auto-continuable, under the attempt cap, writer process gone."""
     _, fresh, max_attempts, _ = _settings(cfg)
     now = time.time() if now is None else now
@@ -77,12 +93,11 @@ def pending_resumes(home: Path, cfg: dict | None, *, now: float | None = None) -
     for profile, h in _homes(home):
         for key in list(_load(_marker_path(h))):
             m = read_turn_marker(h, key)
-            if m is None or not m.get("auto_continue", True):
+            # [daveey] Every skip is logged with its reason: a silent skip hid a lost decision (desktop-3a6213ce74).
+            if (why := _skip_reason(m, now, fresh, max_attempts)) is not None:
+                if log_skips:
+                    logger.info("startup resume: marker %s (profile=%s) skipped: %s", key, profile or "default", why)
                 continue
-            if now - m["started_at"] > _max_age(m, fresh) or m["attempts"] >= max_attempts:
-                continue
-            if marker_writer_state(m) == "alive":
-                continue  # a live sibling backend owns this turn
             out.append({"profile": profile, "home": str(h), "session_key": key, "started_at": m["started_at"]})
     out.sort(key=lambda r: r["started_at"], reverse=True)
     return out
@@ -92,7 +107,7 @@ def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, 
                                 *, paused_only: bool = False) -> list[dict]:
     """Call ``resume(rid, params)`` (the ``session.resume`` handler) for each pending marker; returns outcomes."""
     results = []
-    for row in pending_resumes(home, cfg):
+    for row in pending_resumes(home, cfg, log_skips=not paused_only):
         if paused_only and (read_turn_marker(row["home"], row["session_key"]) or {}).get("reason") not in _RETRY_REASONS:
             continue
         # [daveey] No client is attached: run as the session's stored source, not this process's env default.

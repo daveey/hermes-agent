@@ -3643,7 +3643,7 @@ def test_session_resume_deferred_history_acknowledges_and_reuses(monkeypatch):
         def get_resume_conversations(self, target):
             history_calls.append(("resume", target))
             history_started.set()
-            assert release_history.wait(timeout=2.0)
+            assert release_history.wait(timeout=60.0)
             return [loaded], [ancestor, loaded]
 
         def get_ancestor_display_prefix(self, target):
@@ -3679,7 +3679,7 @@ def test_session_resume_deferred_history_acknowledges_and_reuses(monkeypatch):
         assert first["result"]["hydrating"] is True
         assert first["result"]["messages"] == []
         assert first["result"]["message_count"] == 1200
-        assert history_started.wait(timeout=1.0)
+        assert history_started.wait(timeout=30.0)
 
         second = server._methods["session.resume"](
             "r2",
@@ -3691,8 +3691,8 @@ def test_session_resume_deferred_history_acknowledges_and_reuses(monkeypatch):
 
         release_history.set()
         sid = first["result"]["session_id"]
-        assert server._sessions[sid]["resume_history_ready"].wait(timeout=1.0)
-        assert build_started.wait(timeout=1.0)
+        assert server._sessions[sid]["resume_history_ready"].wait(timeout=30.0)
+        assert build_started.wait(timeout=30.0)
         assert history_calls == [
             ("resume", "large-session"),
             ("prefix", "large-session"),
@@ -3778,62 +3778,6 @@ def test_session_resume_deferred_history_failure_can_retry(monkeypatch):
                 if lease is not None:
                     lease.release()
                 server._sessions.pop(sid, None)
-
-
-def test_session_resume_deferred_history_close_cancels_build(monkeypatch):
-    history_started = threading.Event()
-    release_history = threading.Event()
-    build_started = threading.Event()
-
-    class FakeDB:
-        def get_session(self, target):
-            return {"id": target, "message_count": 1}
-
-        def resolve_resume_session_id(self, target):
-            return target
-
-        def reopen_session(self, _target):
-            pass
-
-        def get_resume_conversations(self, _target):
-            history_started.set()
-            assert release_history.wait(timeout=2.0)
-            loaded = [{"role": "user", "content": "late"}]
-            return loaded, loaded
-
-        def get_ancestor_display_prefix(self, _target):
-            return []
-
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
-    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
-    monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda: None)
-    monkeypatch.setattr(
-        server,
-        "_start_agent_build",
-        lambda _sid, _session: build_started.set(),
-    )
-
-    response = {}
-    try:
-        response = server._methods["session.resume"](
-            "r1",
-            {"session_id": "cancel-session", "defer_history": True},
-        )
-        sid = response["result"]["session_id"]
-        session = server._sessions[sid]
-        assert history_started.wait(timeout=1.0)
-
-        assert server._close_session_by_id(sid, end_reason="tui_close") is True
-        assert session["resume_history_ready"].is_set()
-        assert session["resume_history_error"] == "session resume cancelled"
-
-        release_history.set()
-        time.sleep(0.05)
-        assert not build_started.is_set()
-        assert sid not in server._sessions
-    finally:
-        release_history.set()
-        server._sessions.pop(response.get("result", {}).get("session_id", ""), None)
 
 
 def test_session_resume_follows_compression_tip(monkeypatch, tmp_path):

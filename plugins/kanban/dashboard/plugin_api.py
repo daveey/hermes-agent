@@ -566,13 +566,28 @@ class CreateTaskBody(BaseModel):
     provider_override: Optional[str] = None
     reasoning_effort: Optional[str] = None  # none|minimal|…|ultra; None inherits the profile's level
     project_id: Optional[str] = None  # None inherits the board's scoped project (if any)
+    # [daveey] create_overlap override (same as the kanban_create tool): open cards this is not a duplicate of.
+    distinct_from: list[str] = Field(default_factory=list)
+    distinct_reason: Optional[str] = None
 
 
 @router.post("/tasks")
 def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     with _board_conn(board) as (board, conn), _value_error_400():
-        # CreateTaskBody field names match create_task's keyword parameters.
-        task_id = kanban_db.create_task(conn, created_by="dashboard", board=board, **payload.model_dump())
+        fields = payload.model_dump()
+        overlap_args = {"body": fields.get("body"), "idempotency_key": fields.get("idempotency_key"),
+                        "board": None if (board or kanban_db.DEFAULT_BOARD) == kanban_db.DEFAULT_BOARD else board,
+                        "distinct_from": fields.pop("distinct_from"), "distinct_reason": fields.pop("distinct_reason")}
+        # [daveey] Refuse a second owner, exactly as the kanban_create tool does (hermes_cli/kanban_overlap.py).
+        from hermes_cli import kanban_overlap
+        refused, after_create = kanban_overlap.check(
+            conn, overlap_args, courier=False, title=payload.title.strip(), session_id=None, self_tid=None,
+            parents=list(payload.parents), entry="rest")
+        if refused:
+            raise HTTPException(status_code=409, detail=json.loads(refused))
+        # CreateTaskBody field names (less the overlap override) match create_task's keyword parameters.
+        task_id = kanban_db.create_task(conn, created_by="dashboard", board=board, **fields)
+        after_create(conn, task_id)
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(
             task, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)
@@ -813,19 +828,32 @@ _OVERRIDE_OPS = (
 )
 
 
-def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_deferred: bool) -> None:
+def _archive(conn, task_id: str) -> tuple[bool, Optional[str]]:
+    """Archive, or send a stop request when another machine runs the card under its live Board lease
+    (``kanban_remote_stop``): ``(ok, holder)``, holder set when the archive is pending there. [daveey]"""
+    from hermes_cli.kanban_remote_stop import RemoteArchiveRefused, archive
+    try:
+        out = archive(conn, task_id)
+    except RemoteArchiveRefused as exc:
+        raise _conflict(str(exc)) from exc
+    return bool(out), (out or {}).get("holder") if (out or {}).get("status") == "archive_pending" else None
+
+
+def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_deferred: bool) -> Optional[str]:
     """PATCH status phase: 400 on a rejected verb, 409 when the transition is refused
-    (naming the blocking parent(s) for ``ready``/``done``/``review`` so the UI renders an actionable toast)."""
+    (naming the blocking parent(s) for ``ready``/``done``/``review`` so the UI renders an actionable toast).
+    Returns the lease holder when an archive is pending on another machine."""
     s = payload.status
+    pending: Optional[str] = None
     if s == "archived":
-        ok = kanban_db.archive_task(conn, task_id)
+        ok, pending = _archive(conn, task_id)
     else:
         with _map_errors(400, _StatusRejected, ValueError):
             ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
         if s == "review" and ok and review_assignee_deferred and not payload.assignee:
             ok = kanban_db.assign_task(conn, task_id, None)
     if ok:
-        return
+        return pending
     blockers = _parents_blocking_ready(conn, task_id) if s == "ready" else []
     if blockers:
         names = ", ".join(f"{p['title']!r} ({p['id']}, status={p['status']})" for p in blockers)
@@ -885,8 +913,9 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if payload.assignee is not None and not review_assignee_deferred:
             with _map_errors(409, RuntimeError), _value_error_400():
                 _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
+        pending = None
         if payload.status is not None:
-            _patch_status(conn, task_id, payload, review_assignee_deferred)
+            pending = _patch_status(conn, task_id, payload, review_assignee_deferred)
         for wanted, apply, _refused in _OVERRIDE_OPS:
             if wanted(payload):
                 with _map_errors(400, ValueError, RuntimeError):
@@ -899,7 +928,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         updated = kanban_db.get_task(conn, task_id)
         return {"task": _task_dict(
             updated, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)
-        ) if updated else None}
+        ) if updated else None, **({"archive_pending": pending} if pending else {})}
 
 
 @router.delete("/tasks/{task_id}")
@@ -1020,8 +1049,17 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
         if not _classify_request(conn, tid, payload, actor):
             entry.update(ok=False, error="classification requires parked card without a current run")
         return
-    if payload.archive and not kanban_db.archive_task(conn, tid):
-        entry.update(ok=False, error="archive refused")
+    if payload.archive:
+        try:
+            ok, pending = _archive(conn, tid)
+        except HTTPException as exc:
+            ok, pending = False, None
+            entry.update(ok=False, error=str(exc.detail))
+        else:
+            if not ok:
+                entry.update(ok=False, error="archive refused")
+            elif pending:
+                entry.update(archive_pending=pending)
     if payload.status is not None and not payload.archive:
         s = payload.status
         if not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):

@@ -387,6 +387,14 @@ def _empty_requested_mcp_toolsets(job: dict, cfg: dict) -> Optional[str]:
         "the job's toolsets.")
 
 
+def _preflight_check_managed_pin(job: dict, cfg: dict) -> Optional[str]:
+    """The model this job would run on fails the managed routing registry (``pin_policy``).
+
+    Config, not a transient: the run would die before the model on every wake. [daveey]"""
+    from cron.managed_pin import job_pin_issue
+    return job_pin_issue(job, cfg)
+
+
 def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
     """Pre-dispatch validation: return a reason (missing key, unconfigured delivery, unready skill)
     so the caller refuses BEFORE building agent machinery or burning an LLM call. Every check fails
@@ -396,6 +404,9 @@ def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
     follows the alert-once pattern from the dead-pin auto-pause (#73506).
     """
     for name, check in (
+        # Before provider_key: that probe treats the policy's ManagedPinRejectedError as a non-auth
+        # error and fails open, so a stale pin died at every woken run instead of blocking once.
+        ("managed_pin", lambda: _preflight_check_managed_pin(job, cfg)),
         ("provider_key", lambda: _preflight_check_provider_key(job, cfg)),
         ("skills", lambda: _preflight_check_skills(job)),
         ("delivery", lambda: _preflight_check_delivery(job))):

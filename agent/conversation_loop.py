@@ -1815,6 +1815,12 @@ def _redact_display_metadata(metadata: dict) -> dict:
     return {k: _redact(v) for k, v in metadata.items()}
 
 
+def _stopped_by_backend_exit(agent, result: dict) -> bool:
+    """[daveey] The turn was interrupted by the backend shutting down (``_stop_turns_before_exit``)."""
+    return (getattr(agent, "_tool_interrupt_reason", None) == "backend_exit"
+            or "(backend_exit)" in str(result.get("turn_exit_reason") or ""))
+
+
 def _close_durable_failed_turn(agent, result: Any) -> None:
     """Append a Hermes-authored assistant boundary when a failed turn left ``user`` as the
     durable conversation tail (in place, on ``result["messages"]`` and in SessionDB).
@@ -1851,7 +1857,8 @@ def _close_durable_failed_turn(agent, result: Any) -> None:
         start = result.get("current_turn_user_idx")
         turn_messages = messages[start:] if isinstance(start, int) and 0 <= start < len(messages) else messages
         boundary = {
-            "role": "assistant", "content": failed_turn_notice(turn_messages), "display_kind": FAILED_TURN_DISPLAY_KIND,
+            "role": "assistant", "display_kind": FAILED_TURN_DISPLAY_KIND,
+            "content": failed_turn_notice(turn_messages, restarted=_stopped_by_backend_exit(agent, result)),
         }
         if failure := _failed_turn_display_metadata(agent, result):
             boundary["display_metadata"] = failure

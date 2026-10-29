@@ -247,7 +247,7 @@ def _profile_author() -> str:
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
-    "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
+    "init", "create", "swarm", "assign", "reclaim", "move", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
@@ -430,6 +430,28 @@ def _cmd_create(args: argparse.Namespace) -> int:
         idem_hit = bool(idem_key) and conn.execute(
             "SELECT 1 FROM tasks WHERE idempotency_key = ? AND status != 'archived' LIMIT 1",
             (idem_key,)).fetchone() is not None
+        # [daveey] Refuse a second owner, exactly as the kanban_create tool does (hermes_cli/kanban_overlap.py):
+        # open cards on every board/gateway, skipping parents, the creator's own fan-out and its key family.
+        from hermes_cli import kanban_overlap
+        board = getattr(args, "board", None) or kb.get_current_board()
+        refused, after_create = kanban_overlap.check(
+            conn, {"body": body, "idempotency_key": idem_key,
+                   "board": None if board == kb.DEFAULT_BOARD else board,
+                   "distinct_from": getattr(args, "distinct_from", None) or [],
+                   "distinct_reason": getattr(args, "distinct_reason", None)},
+            courier=False, title=str(args.title).strip(), session_id=session_id,
+            self_tid=os.environ.get("HERMES_KANBAN_TASK") if in_worker else None,
+            parents=list(args.parent or ()), entry="cli")
+        if refused:
+            if getattr(args, "json", False):
+                print(refused)
+            else:
+                ref = json.loads(refused)
+                print(f"kanban: {ref['code']}: {ref['note']}", file=sys.stderr)
+                for m in ref["matches"]:
+                    print(f"  {m['id']}  {m['gateway']}/{m['board']}  ({m['status']})  {m['title']}  — {m['why']}",
+                          file=sys.stderr)
+            return 2
         from hermes_cli.kanban_db_workspace import WorktreeWorkspaceConfigError
         from hermes_cli.kanban_capabilities import CapabilityMismatchError
         from hermes_cli.kanban_pin_provider import PinProviderUnresolvedError
@@ -468,6 +490,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             return _err(f"kanban: {exc.code}: {exc}", 2)
         except (PinProviderUnresolvedError, ModelProviderMismatchError) as exc:
             return _err(f"kanban: {exc}", 2)
+        if not idem_hit:
+            after_create(conn, task_id)  # records an accepted --distinct-from override on the new card
         if session_key and not idem_hit:
             # Same completion subscription the kanban_create tool adds, so the chat
             # that shelled out hears when the card lands (and its row stays busy).
@@ -785,6 +809,37 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
     return _ok_or_err(ok, f"cannot reclaim {args.task_id} (not running or unknown id)",
                       f"Reclaimed {args.task_id}")
 
+
+def _cmd_move(args: argparse.Namespace) -> int:
+    """[daveey] ``hermes kanban move``: the card's own worker (HERMES_KANBAN_TASK + run id) moves its running card;
+    otherwise a queued card is relabelled, or with --reclaim a card running here is stopped first."""
+    from hermes_cli import kanban_move as km
+    labels = [x.strip() for x in str(args.runs_on).split(",") if x.strip()]
+    own_run = os.environ.get("HERMES_KANBAN_TASK") == args.task_id and os.environ.get("HERMES_KANBAN_RUN_ID")
+    with kbc.connect_closing() as conn:
+        status = (conn.execute("SELECT status FROM tasks WHERE id = ?", (args.task_id,)).fetchone() or {"status": None})
+        if own_run and not (args.checkpoint or "").strip():
+            res = {"ok": False, "reason_code": "checkpoint_required",
+                   "error": "--checkpoint is required when a worker moves its own running card"}
+        elif own_run:
+            res = km.move_task(conn, args.task_id, runs_on=labels, reason=args.reason, checkpoint=args.checkpoint,
+                               expected_run_id=int(os.environ["HERMES_KANBAN_RUN_ID"]), force=args.force)
+        elif status["status"] == "running":
+            if not args.reclaim:
+                res = {"ok": False, "reason_code": "running",
+                       "error": f"{args.task_id} is running: its worker moves it (kanban_move), or pass --reclaim"}
+            else:
+                res = km.move_reclaim(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force)
+        else:
+            res = km.move_queued(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force)
+    if getattr(args, "json", False):
+        print(json.dumps(res))
+    elif res.get("ok"):
+        print(f"Moved {args.task_id} to {res['runs_on']} (eligible: {', '.join(res['matches'])}; "
+              f"move {res['move_no']}; now {res['status']})")
+    else:
+        print(f"kanban move: {res.get('error')} [{res.get('reason_code')}]", file=sys.stderr)
+    return 0 if res.get("ok") else 1
 
 def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
@@ -1539,8 +1594,30 @@ def _cmd_archive(args: argparse.Namespace) -> int:
             refusal, vias[tid] = worker_archive_scope(conn, tid)
             if refusal:
                 return _err(refusal)
-        return _bulk_apply(ids, lambda tid: kb.archive_task(conn, tid, via=vias.get(tid)),
-                           lambda tid: f"Archived {tid}", lambda tid: f"cannot archive {tid}")
+        # A card another machine runs under its live Board lease gets a stop request, not a local status write
+        # the Board would reject (kanban_remote_stop). [daveey]
+        from hermes_cli.kanban_remote_stop import RemoteArchiveRefused, archive as _archive
+        outcomes: dict[str, dict] = {}
+        refusals: dict[str, str] = {}
+
+        def _one(tid: str) -> bool:
+            try:
+                out = _archive(conn, tid, via=vias.get(tid))
+            except RemoteArchiveRefused as exc:
+                refusals[tid] = str(exc)
+                return False
+            if out:
+                outcomes[tid] = out
+            return bool(out)
+
+        def _ok_line(tid: str) -> str:
+            out = outcomes[tid]
+            if out.get("status") == "archive_pending":
+                return (f"Archive pending {tid}: running on {out['holder']} under its live lease; a stop request "
+                        f"was sent and {out['holder']} archives it at its next dispatcher tick")
+            return f"Archived {tid}"
+
+        return _bulk_apply(ids, _one, _ok_line, lambda tid: refusals.get(tid) or f"cannot archive {tid}")
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:
@@ -1572,9 +1649,11 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         )
         if value
     }
-    if args.platform == "tui":
+    if args.platform in ("tui", "hub"):
         # An explicit subscribe is a shepherd: the chat's sidebar row stays busy until the card
-        # lands (kanban_session_activity.COUNTED_SUB_REASONS). Upgrades an earlier touch sub. [daveey]
+        # lands (kanban_session_activity.COUNTED_SUB_REASONS). Upgrades an earlier touch sub, never
+        # downgrades an owning create/origin sub (add_notify_sub). 'hub' is hermes-hub's shepherd
+        # action: stamped so children do not inherit it (_inherit_notify_subs). [daveey]
         delivery_metadata["reason"] = "shepherd"
     with kbc.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
@@ -1742,7 +1821,7 @@ _HANDLERS = {
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show, "wait-check": _cmd_wait_check,
     "capabilities": _cmd_capabilities,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
-    "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
+    "reclaim": _cmd_reclaim, "move": _cmd_move, "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,
     "comment": _cmd_comment, "attach": _cmd_attach,

@@ -560,6 +560,7 @@ export type StripeTraceRow = Pick<SessionInfo, 'id'> &
       SessionInfo,
       | 'background_active'
       | 'connection_id'
+      | 'cron_active'
       | 'goal_active'
       | 'kanban_active'
       | 'kanban_blocked'
@@ -569,6 +570,7 @@ export type StripeTraceRow = Pick<SessionInfo, 'id'> &
       | 'kanban_stalled'
       | 'kanban_waiting_on'
       | 'offline_cached'
+      | 'offline_synced_at'
       | 'profile'
     >
   >
@@ -583,9 +585,12 @@ function rowListSource(row: StripeTraceRow): string {
 
   const conn = row.connection_id ?? ''
 
-  return $sessions.get().some(s => s.id === row.id && (s.connection_id ?? '') === conn)
-    ? sessionListSource
-    : 'project-tree'
+  if ($sessions.get().some(s => s.id === row.id && (s.connection_id ?? '') === conn)) {
+    return sessionListSource
+  }
+
+  // [daveey] A hub-replica / boot-snapshot fallback row (carries no activity stamps), not a projects-tree row.
+  return row.offline_synced_at !== undefined ? 'fallback' : 'project-tree'
 }
 
 /** Build the desktop.log line for one transition. Exported for tests. */
@@ -608,6 +613,7 @@ export function formatStripeTransition(
     ['kanban_waiting_on', row.kanban_waiting_on],
     ['kanban_observed_at', row.kanban_observed_at],
     ['goal_active', row.goal_active],
+    ['cron_active', row.cron_active],
     ['background_active', row.background_active],
     ['delegating', $delegatingSessionIds.get().includes(row.id)],
     ['bg_running', $backgroundRunningSessionIds.get().includes(row.id)],

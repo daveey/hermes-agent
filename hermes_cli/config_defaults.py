@@ -1899,13 +1899,13 @@ DEFAULT_CONFIG = {
     "kanban": {
         # Central sync (core patch 0193): true = boards opened afterwards get sync tables + outbox triggers. [daveey]
         "sync": {"enabled": False},
+        "create_overlap_check": True,  # kanban_create refuses work open cards already own (kanban_overlap) [daveey]
         # A board whose TABLE b-trees fail integrity_check (REINDEX can't fix it) pauses dispatch; true = the
         # gateway dispatcher also starts `hermes kanban recover` for it (salvage in a child process, fill from
         # the newest healthy backup, write back in place, loss report + follow-up card + sync reconcile). On
         # here: fail-closed alone left a board down until an agent noticed by chance. [daveey]
         "auto_recover_corruption": True,
-        # Assignee of the follow-up card an automatic recovery files on the recovered board. [daveey]
-        "recovery_card_assignee": "default",
+        "recovery_card_assignee": "default",  # assignee of the card an automatic recovery files [daveey]
         # Opt-in per-profile broker argv before gh (empty = ordinary login); never include tokens.
         "pr_acceptance": {"gh_command_prefix": []},
         # Calendar retention for terminal worktrees; archive commits to recovery
@@ -1959,7 +1959,10 @@ DEFAULT_CONFIG = {
         # hermes-hub name to a target gateway (e.g. {"macbook": "hub"}); kanban_create then creates a
         # card with no local-only need on the target, bound to the creating chat. Other keys:
         # creator_session ({target: session id}), local_markers / extra_local_markers /
-        # local_skill_markers (regex lists), assignees, hub_live_seconds, wait_seconds, hub_cli.
+        # local_skill_markers (regex lists), assignees (always placed; any profile the target
+        # advertises is placed too), carried_requires (profile tools the target is trusted to
+        # satisfy when it publishes no profile-tools; default terminal/file/git/kanban),
+        # hub_live_seconds, wait_seconds, hub_cli.
         # Empty = upstream behaviour (every card is created here).
         "placement": {},
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names

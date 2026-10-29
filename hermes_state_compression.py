@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -51,6 +52,29 @@ _CHAIN_STEP_SQL = f"""
 
 # Turn-lease rows expired longer than this are swept by the next acquisition of any conversation.
 _TURN_LEASE_SWEEP_GRACE_S = 86400.0
+
+# Turn-lease holders of THIS process whose release DELETE failed on a busy state.db, keyed by
+# (db path, holder). Their turn has finished, so the row they left is not a live turn: the next
+# acquire may take it at once instead of waiting out the TTL (a same-process holder is never
+# "dead", so nothing else frees it early). Discarded when a retry deletes the row or a successor
+# claims it. Per process on purpose: only the process that ran the turn knows it is over.
+_ABANDONED_TURN_LEASE_HOLDERS: set[tuple[str, str]] = set()
+_ABANDONED_TURN_LEASE_LOCK = threading.Lock()
+
+
+def _turn_lease_abandoned(db_path, holder: str) -> bool:
+    with _ABANDONED_TURN_LEASE_LOCK:
+        return (str(db_path), holder) in _ABANDONED_TURN_LEASE_HOLDERS
+
+
+def _mark_turn_lease_abandoned(db_path, holder: str) -> None:
+    with _ABANDONED_TURN_LEASE_LOCK:
+        _ABANDONED_TURN_LEASE_HOLDERS.add((str(db_path), holder))
+
+
+def _forget_abandoned_turn_lease(db_path, holder: str) -> None:
+    with _ABANDONED_TURN_LEASE_LOCK:
+        _ABANDONED_TURN_LEASE_HOLDERS.discard((str(db_path), holder))
 
 
 def _cooldown_row(exists: bool, cooldown_until, error) -> dict[str, Any]:
@@ -581,6 +605,7 @@ class SessionCompressionMixin:
             return False
         now = time.time()
         expires_at = now + max(0.1, float(ttl_seconds))
+        db_path = getattr(self, "db_path", None)
         def _do(conn):
             # Sweep rows that expired long ago: a holder that died without releasing leaves its row
             # behind, and nothing else revisits a conversation nobody resumes. The grace keeps the
@@ -591,24 +616,33 @@ class SessionCompressionMixin:
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             return _claim_lease_row(
                 conn, "session_turn_leases", "conversation_id", conversation_id, holder, now, expires_at,
-                lambda h, e: float(e) <= now or _compression_lock_holder_process_is_dead(h),
-            )[0]
-        return bool(self._execute_write(_do, patience_s=patience_s))
+                lambda h, e: (float(e) <= now or _compression_lock_holder_process_is_dead(h)
+                              or _turn_lease_abandoned(db_path, h)),
+            )
+        acquired, reclaimed_holder = self._execute_write(_do, patience_s=patience_s)
+        if reclaimed_holder and _turn_lease_abandoned(db_path, reclaimed_holder):
+            _forget_abandoned_turn_lease(db_path, reclaimed_holder)
+            logger.info("Reclaimed turn lease whose release hit a busy state.db (holder=%s)", reclaimed_holder)
+        return bool(acquired)
 
     def acquire_session_turn_lease(
         self, session_id: str, holder: str, *, ttl_seconds: float = 300.0,
         wait_seconds: float = 1800.0, poll_interval_seconds: float = 1.0, on_wait=None,
         wait_notice_interval_seconds: float = 15.0, should_abort=None, acquire_patience_s: float = 0.5,
-        on_contended=None,
+        on_contended=None, contended_wait_seconds: float = 0.0,
     ) -> bool:
         """Wait for a cross-process turn lease without holding a SQLite lock. ``on_wait(elapsed)`` is
         best-effort: called when another holder has the lease and about every
         ``wait_notice_interval_seconds`` after. A busy database is not a holder: the attempt is
         retried at once with a longer write patience, and ``on_contended()`` is called instead,
-        since the busy writer may be the holder's last flush. ``should_abort()`` True (e.g.
-        ``/stop``) returns False at once."""
+        since the busy writer may be the holder's last flush. ``contended_wait_seconds`` floors the
+        budget for that busy-database retry, so a caller that will not wait for a holder
+        (``wait_seconds=0``) still rides out a brief write-lock spike instead of reporting it as a
+        holder. ``should_abort()`` True (e.g. ``/stop``) returns False at once."""
         from hermes_state import classify_persistence_error
-        deadline = time.monotonic() + max(0.0, float(wait_seconds))
+        started = time.monotonic()
+        deadline = started + max(0.0, float(wait_seconds))
+        contended_deadline = max(deadline, started + max(0.0, float(contended_wait_seconds)))
         patience = acquire_patience_s
         wait_started = None
         last_notice_at = None
@@ -636,8 +670,8 @@ class SessionCompressionMixin:
                     except Exception:
                         logger.debug("session turn lease on_contended callback failed", exc_info=True)
                 patience = min(acquire_patience_s + max(0.0, float(poll_interval_seconds)),
-                               max(acquire_patience_s, deadline - time.monotonic()))
-                if not self._sleep_before_write_retry(deadline, 0.0):
+                               max(acquire_patience_s, contended_deadline - time.monotonic()))
+                if not self._sleep_before_write_retry(contended_deadline, 0.0):
                     return False
                 continue
             patience = acquire_patience_s
@@ -698,16 +732,30 @@ class SessionCompressionMixin:
             ).rowcount > 0
         return bool(self._execute_write(_do, patience_s=patience_s))
 
-    def release_session_turn_lease(self, session_id: str, holder: str) -> None:
-        """Release a turn lease iff ``holder`` still owns it; idempotent."""
+    def release_session_turn_lease(
+        self, session_id: str, holder: str, *, patience_s: Optional[float] = None,
+    ) -> None:
+        """Release a turn lease iff ``holder`` still owns it; idempotent.
+
+        A DELETE that loses the write lock re-raises, but first marks ``holder`` abandoned in this
+        process so the next acquire here can take the leftover row (the caller's turn is over) while
+        the caller retries the DELETE for other processes."""
+        from hermes_state import classify_persistence_error
         if not session_id or not holder:
             return
+        db_path = getattr(self, "db_path", None)
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             conn.execute(
                 "DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
                 (conversation_id, holder))
-        self._execute_write(_do)
+        try:
+            self._execute_write(_do, patience_s=patience_s)
+        except sqlite3.Error as exc:
+            if classify_persistence_error(exc) == "locked":
+                _mark_turn_lease_abandoned(db_path, holder)
+            raise
+        _forget_abandoned_turn_lease(db_path, holder)
 
     def get_compression_lock_holder(self, session_id: str) -> Optional[str]:
         """Current (non-expired) holder for ``session_id``, or None. Diagnostic only."""
