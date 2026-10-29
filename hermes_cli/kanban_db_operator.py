@@ -71,6 +71,53 @@ def edit_operator_fields(
     return changes
 
 
+def set_completion_contract(
+    conn: sqlite3.Connection, task_id: str, contract: str, *, reason: str, actor: str,
+    board: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Operator re-point of a card's completion contract (``hermes kanban edit
+    --completion-contract``). The PR gate binds a published PR once and a worker
+    can't replace it, so a contract that can never pass (the repo was suspended or
+    moved, or its base branch has no required checks) used to park a finished card
+    on a human ask forever. ``contract`` is validated like ``kanban_create``'s
+    (``local-only``, ``OWNER/REPO`` or an exact PR URL). Refuses
+    (:class:`KanbanEditRefused`) an empty ``reason``, an invalid value, or a
+    ``done``/``archived`` card. Returns ``{"old", "new"}`` (``{}`` when unchanged),
+    ``None`` for an unknown id. Appends a ``contract_changed`` event (from, to,
+    reason, actor) and a ``CONTRACT CHANGED:`` comment. [daveey]"""
+    from hermes_cli.kanban_pr_acceptance import validate_contract
+
+    reason = (reason or "").strip()
+    actor = (actor or "").strip() or "operator"
+    if not reason:
+        raise KanbanEditRefused("--completion-contract requires --reason (recorded as an event and a comment)")
+    try:
+        new = validate_contract((contract or "").strip())
+    except ValueError as exc:
+        raise KanbanEditRefused(str(exc)) from None
+    now = int(time.time())
+    with _kb.write_txn(conn):
+        row = conn.execute(
+            "SELECT status, completion_contract FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["status"] in ("done", "archived"):
+            raise KanbanEditRefused(
+                f"{task_id} is {row['status']}; a closed card's completion contract is history"
+            )
+        old = (row["completion_contract"] or "").strip() or "local-only"
+        if old == new:
+            return {}
+        conn.execute("UPDATE tasks SET completion_contract = ? WHERE id = ?", (new, task_id))
+        _kb._append_event(conn, task_id, "contract_changed", {
+            "from": old, "to": new, "reason": reason[:2000], "actor": actor,
+        })
+        _kb._insert_comment(conn, task_id, actor, f"CONTRACT CHANGED: {old} -> {new}: {reason}", now)
+    _kb.notify_task_updated(conn, task_id, ["completion_contract"], board=board)
+    return {"old": old, "new": new}
+
+
 def reopen_done_task(
     conn: sqlite3.Connection, task_id: str, *, reason: str, actor: str,
 ) -> Optional[str]:

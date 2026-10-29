@@ -431,8 +431,13 @@ _SPECS = [
         _arg("--session-id", metavar="SID", dest="session_id",
              help="Backfill the originating chat session id (refuses to overwrite one without --force)"),
         _arg("--force", action="store_true", help="With --session-id: overwrite a non-empty session_id"),
-    ], help="Edit task fields, operator fields (retries, goal mode, runtime cap, session), "
-            "or recovery fields on an already-completed task"),
+        _arg("--completion-contract", metavar="CONTRACT", dest="completion_contract",
+             help="Orchestrator only: re-point the completion gate (local-only, OWNER/REPO or an exact "
+                  "PR URL) when the bound one can never pass, e.g. the repo moved or was suspended. "
+                  "Requires --reason; can't be combined with other edit flags"),
+        _arg("--reason", help="With --completion-contract: why (recorded as an event and a comment)"),
+    ], help="Edit task fields, operator fields (retries, goal mode, runtime cap, session, completion "
+            "contract), or recovery fields on an already-completed task"),
     _cmd("reopen", [
         _TASK_ID,
         _arg("--reason", required=True, help="Why the done task is reopened (event + comment)"),

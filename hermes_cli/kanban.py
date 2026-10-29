@@ -1301,7 +1301,45 @@ def _cmd_complete(args: argparse.Namespace) -> int:
 _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id")
 
 
+def _cmd_edit_contract(args: argparse.Namespace) -> int:
+    """``hermes kanban edit <id> --completion-contract X --reason Y``: the audited way out
+    of a completion gate that can never pass. Orchestrator-only, like unblock: a worker
+    that could re-point its own card's gate would make the gate meaningless. [daveey]"""
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return _err(
+            "kanban edit: --completion-contract is orchestrator-only; a worker can't change its own "
+            "card's gate. Block without a human_request so the owning chat re-points it", 2,
+        )
+    others = [f"--{name.replace('_', '-')}" for name in (
+        "title", "body", "priority", "result", "summary", "metadata", *_OPERATOR_EDIT_FLAGS,
+    ) if getattr(args, name, None) is not None]
+    if others or getattr(args, "force", False):
+        return _err(
+            "kanban edit: --completion-contract can't be combined with other edit flags "
+            f"({', '.join(others) or '--force'}); run them as separate edits", 2,
+        )
+    with kbc.connect_closing() as conn:
+        try:
+            change = kbo.set_completion_contract(
+                conn, args.task_id, args.completion_contract,
+                reason=getattr(args, "reason", None) or "", actor=_profile_author(),
+            )
+        except kbo.KanbanEditRefused as exc:
+            return _err(f"kanban edit: {exc}", 2)
+    if change is None:
+        return _err(f"cannot edit {args.task_id} (unknown id)")
+    if not change:
+        print(f"Edited {args.task_id} (completion_contract unchanged)")
+        return 0
+    print(f"Edited {args.task_id} (completion_contract: {change['old']!r} -> {change['new']!r})")
+    return 0
+
+
 def _cmd_edit(args: argparse.Namespace) -> int:
+    if getattr(args, "completion_contract", None) is not None:
+        return _cmd_edit_contract(args)
+    if getattr(args, "reason", None) is not None:
+        return _err("kanban edit: --reason only applies to --completion-contract", 2)
     result = getattr(args, "result", None)
     raw_metadata = getattr(args, "metadata", None)
     summary = getattr(args, "summary", None)
@@ -1317,7 +1355,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     if all(value is None for value in (title, body, priority, result)) and not has_operator:
         return _err(
             "kanban edit: provide --title, --body, --priority, --result, --max-retries, --goal-mode, "
-            "--goal-max-turns, --max-runtime-seconds, or --session-id", 2,
+            "--goal-max-turns, --max-runtime-seconds, --session-id, or --completion-contract", 2,
         )
     if getattr(args, "force", False) and operator["session_id"] is None:
         return _err("kanban edit: --force only applies to --session-id", 2)
