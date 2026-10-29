@@ -44,11 +44,12 @@ def _macos_mem_used_pct(memsize: int, vm_stat: str) -> Optional[float]:
 def _mem_used_pct() -> Optional[float]:
     try:
         if sys.platform.startswith("linux"):
-            return _linux_mem_used_pct(Path("/proc/meminfo").read_text())
+            return _linux_mem_used_pct(Path("/proc/meminfo").read_text(encoding="utf-8"))
         if sys.platform == "darwin":
             memsize = int(subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
-                                         timeout=5, check=True).stdout.strip())
-            vm = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True, timeout=5, check=True).stdout
+                                         encoding="utf-8", errors="replace", timeout=5, check=True).stdout.strip())
+            vm = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=5, check=True).stdout
             return _macos_mem_used_pct(memsize, vm)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
