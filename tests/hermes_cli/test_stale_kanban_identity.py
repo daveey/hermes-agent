@@ -150,8 +150,11 @@ def test_drop_line_is_on_stderr_even_when_a_handler_exists(monkeypatch, tmp_path
 
 def test_main_drops_identity_before_plugins_load():
     from hermes_cli.main import main
+    from hermes_cli.top_level_env import scrub_for_top_level_launch
     src = inspect.getsource(main)
-    drop_at = src.index("drop_finished_kanban_identity")
-    assert drop_at < src.index("_prepare_agent_startup")
-    assert drop_at < src.index("_try_fast_chat_launch")
-    assert drop_at < src.index("_try_fast_serve_launch")
+    scrub_at = src.index("scrub_for_top_level_launch")
+    assert scrub_at < src.index("_prepare_agent_startup")
+    assert scrub_at < src.index("_try_fast_chat_launch")
+    assert scrub_at < src.index("_try_fast_serve_launch")
+    scrub_src = inspect.getsource(scrub_for_top_level_launch)
+    assert scrub_src.index("drop_finished_kanban_identity") < scrub_src.index("TOP_LEVEL_COMMANDS")

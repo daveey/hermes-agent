@@ -49,7 +49,8 @@ def _board_db(env: Mapping[str, str]) -> Optional[Path]:
     try:
         from hermes_cli.kanban_db import kanban_db_path
         return kanban_db_path()
-    except Exception:
+    except Exception:  # health: allow BLE001 -- unreadable board path must keep the pair, not abort startup
+        log.debug("kanban board path unavailable", exc_info=True)
         return None
 
 

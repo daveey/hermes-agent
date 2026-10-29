@@ -3538,13 +3538,6 @@ def _default_to_chat(args) -> None:
 
 def main():
     """Main entry point for hermes CLI."""
-    # A finished run's identity (a terminal app that outlived its worker) must not
-    # survive into plugin load. Before any fast path. [daveey]
-    try:
-        from hermes_cli.kanban_identity import drop_finished_kanban_identity
-        drop_finished_kanban_identity()
-    except Exception:
-        pass
     # A Desktop/serve/dashboard/gateway launched from inside a kanban worker must not inherit
     # the worker's identity env (it fences every chat's kanban tools). Before any fast path. [daveey]
     try:
