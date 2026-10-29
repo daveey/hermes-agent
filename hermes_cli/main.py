@@ -1523,6 +1523,17 @@ def _import_foreign_resume(args) -> None:
     args.resume = _imported_id
 
 
+def _refuse_moved_session(session_id: str) -> None:
+    """``hermes --resume <id>`` (chat, TUI and ``-z``) of a chat handed over to another gateway exits 1 with the
+    ``SESSION_MOVED`` refusal (hermes_cli.session_owner, the same check the TUI admission gate runs). [daveey]"""
+    from hermes_cli.session_owner import refusal
+    from hermes_cli.active_sessions import format_refusal_stderr
+    message = refusal(session_id)
+    if message is not None:
+        print(format_refusal_stderr(message), file=sys.stderr)
+        sys.exit(1)
+
+
 def _resolve_chat_session_args(args, use_tui: bool) -> None:
     """Normalize --in / --resume / --continue on ``args`` before agent init.
 
@@ -1556,6 +1567,7 @@ def _resolve_chat_session_args(args, use_tui: bool) -> None:
     if resume_val:
         # On miss keep the original so _init_agent reports "Session not found" with it.
         args.resume = _resolve_session_by_name_or_id(resume_val) or resume_val
+        _refuse_moved_session(args.resume)
 
     # cd back into a resumed session's recorded cwd (opt out: --no-restore-cwd;
     # --worktree owns its own dir). A missing dir warns and stays put.

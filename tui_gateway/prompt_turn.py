@@ -140,7 +140,9 @@ def _admit_prompt_turn(
             return None
     held_lease = session.get("active_session_lease")
     # When the session already holds its lease this is a cheap dict check. See #94778.
-    if not session.get("_closing") and (ownership_refusal := _ensure_active_session_slot(sid, session)) is not None:
+    # [daveey] A chat handed over to another gateway (hermes sessions move) is fenced here, before the slot claim.
+    if not session.get("_closing") and (ownership_refusal := (
+            _session_moved_refusal(session) or _ensure_active_session_slot(sid, session))) is not None:
         logger.info(
             "Refusing turn for session %s at _run_prompt_submit: %s",
             session.get("session_key") or sid,

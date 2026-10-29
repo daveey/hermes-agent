@@ -126,6 +126,22 @@ def _durable_owner_refusal(session: dict):
         f"Writer: {holder}", SESSION_NOT_OWNED)
 
 
+def _session_moved_refusal(session: dict):
+    """``SESSION_MOVED`` when the Board's owner record for this chat's lineage names another gateway (it was handed
+    over with ``hermes sessions move``), else None. No record, sync off or an unreachable Board without a cached
+    answer admit the turn (hermes_cli.session_owner). [daveey]"""
+    key = str(session.get("session_key") or "")
+    if not key:
+        return None
+    from hermes_cli import session_owner
+    try:
+        with _session_db(session) as db:
+            return session_owner.refusal(key, db=db)
+    except Exception:
+        logger.warning("Could not check the session owner record for %s", key, exc_info=True)
+        return None
+
+
 def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool = True) -> str | None:
     """Claim this session's cap slot on its first real turn; None when ok. session.create/resume deliberately
     do NOT claim: tile paints, reconnect-resumes and abandoned drafts would hold invisible slots (no DB row)

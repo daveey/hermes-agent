@@ -58,7 +58,7 @@ class SyncUnavailable(RuntimeError):
 class HubError(RuntimeError):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(f"hub {status}: {detail}")
-        self.status = status
+        self.status, self.detail = status, detail
 
 
 class Resync(Exception):
@@ -127,6 +127,22 @@ class Hub:
 
     def leases(self, board: str, body: dict) -> dict:
         return self._call("POST", f"/v2/boards/{board}/leases", body)
+
+    def sessions(self, board: str, body: dict) -> dict:
+        """Session owners (session handover, :mod:`hermes_cli.session_owner`): ``get`` / ``move``. A 409 refusal
+        returns its body (``{reason, owner}``) instead of raising."""
+        try:
+            return self._call("POST", f"/v2/boards/{board}/sessions", body)
+        except HubError as exc:
+            if exc.status != 409:
+                raise
+            try:
+                res = json.loads(exc.detail)
+            except ValueError:
+                raise exc from None
+            if not isinstance(res, dict) or not res.get("reason"):
+                raise
+            return res
 
     def machines(self) -> dict:
         """The machine registry (RFC "One machine registry"): ``{me, machines: [{name, labels, pinned_only, ...}]}``."""
