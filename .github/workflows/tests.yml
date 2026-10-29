@@ -197,7 +197,11 @@ jobs:
 
       - name: Run assembly permission tests
         # --fail-on-skip: a missing daemon or image must not go green.
+        # Bind-mount sources must live where the docker daemon can see them.
+        env:
+          HERMES_TEST_DOCKER_MOUNT_ROOT: ${{ runner.temp }}/termux-assembly
         run: |
+          mkdir -p "$HERMES_TEST_DOCKER_MOUNT_ROOT"
           if ! scripts/run_tests.sh --fail-on-skip \
               tests/scripts/test_termux_assembly_permissions.py; then
             echo "::error::termux assembly permission tests failed or skipped (a skip means docker or the pinned image was not available)"

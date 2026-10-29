@@ -37,8 +37,13 @@ def test_assembly_publishes_facts_as_termux_uid_and_returns_host_owned_output(tm
     if image.returncode:
         pytest.skip(f"Pre-pull the native Linux test image: docker pull {IMAGE}")
 
-    payload = tmp_path / "payload"
-    payload.mkdir()
+    # The docker daemon resolves bind-mount sources on ITS filesystem. On the
+    # docker-ci runner pytest's /var/tmp basetemp is not visible to the daemon
+    # (it mounts an empty dir, so chown /assembly/tools fails); the workflow
+    # points this at a runner-temp dir the daemon shares.
+    mount_root = os.environ.get("HERMES_TEST_DOCKER_MOUNT_ROOT")
+    payload = (Path(mount_root) / tmp_path.name if mount_root else tmp_path) / "payload"
+    payload.mkdir(parents=True)
     for name in ("python", "uv"):
         entry = payload / name
         entry.mkdir()
@@ -84,3 +89,5 @@ docker run --rm --user 1000:1000 --network none \
     assert {path: (path.stat().st_uid, path.stat().st_gid, path.stat().st_mode)
             for path in before} == before
     shutil.rmtree(assembly)
+    if mount_root:
+        shutil.rmtree(payload.parent, ignore_errors=True)
