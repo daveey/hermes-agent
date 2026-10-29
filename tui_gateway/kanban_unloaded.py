@@ -464,14 +464,79 @@ def open_subscription_sessions(session_ids: list[str]) -> dict[str, int]:
     return counts
 
 
+class _RemoteWaker:
+    """Wake policy for remote cards' notices (``kanban_remote_notices.sweep_remote_notices``), shared with local
+    ones: the same skip reasons, per-chat budget, parallel-wake slots and worker thread. A notice that cannot wake
+    its chat is written as the passive row. [daveey]
+
+    Before, the remote sweep only wrote the row: on 2026-10-29 two hub cards' notices sat as rows in an idle
+    David-MBP chat for 2 h and 3.5 h, until a local card's wake ran a turn that finally read them."""
+
+    def __init__(self, wake: Callable[[str, str, dict], str], spawn: Callable[[Callable[[], str]], str],
+                 grace_s: float) -> None:
+        self.wake, self.spawn, self.grace_s = wake, spawn, grace_s
+
+    def deliver(self, tip: str, text: str, metadata: dict, task: dict, now: float, *,
+                persist: Callable[[], bool], started: Callable[[], None]) -> str:
+        """Start one turn with ``text`` in ``tip``, else ``persist()`` the row. Returns the verdict. Never raises."""
+        try:
+            from types import SimpleNamespace
+            view = SimpleNamespace(status=task.get("status"), human_request=task.get("human_request"),
+                                   block_kind=task.get("block_kind"))
+            skip = _wake_skip_reason(view, [text]) or (None if _has_wake_budget(tip, now) else "skipped:budget")
+        except Exception:
+            logger.warning("remote kanban wake routing for %s failed; writing the notice row", tip, exc_info=True)
+            skip = "error"
+        if skip:
+            persist()
+            return skip
+        if not _wake_slots.acquire(blocking=False):
+            persist()
+            return "skipped:slots"
+
+        def job() -> str:
+            try:
+                try:
+                    verdict = str(self.wake(tip, text, {**metadata, "display_text": text, "woken": True}) or "error")
+                except Exception:
+                    logger.warning("remote kanban wake of %s failed", tip, exc_info=True)
+                    verdict = "error"
+                if verdict == "started":
+                    _charge_wake(tip, now)
+                    started()
+                else:
+                    persist()
+                logger.info("remote kanban notice for %s (task=%s): %s", tip, task.get("id"),
+                            "turn started" if verdict == "started" else f"{verdict}, notice row written")
+                return verdict
+            except Exception:
+                logger.warning("remote kanban wake job for %s failed", tip, exc_info=True)
+                return "error"
+            finally:
+                _wake_slots.release()
+
+        try:
+            return self.spawn(job)
+        except Exception:
+            _wake_slots.release()
+            logger.warning("remote kanban sweep could not start a wake for %s", tip, exc_info=True)
+            persist()
+            return "error"
+
+
+def sweep_remote_once(live_ids: set[str], *, grace_s: float = GRACE_S, **kwargs) -> list[dict]:
+    """One remote-notice pass with waking (the production entry; ``kwargs`` go to ``sweep_remote_notices``)."""
+    from tui_gateway.kanban_remote_notices import sweep_remote_notices
+    return sweep_remote_notices(live_ids=live_ids, waker=_RemoteWaker(wake_turn, _spawn_thread, grace_s), **kwargs)
+
+
 def _loop(stop: threading.Event) -> None:
     interval = max(1.0, _env_float("HERMES_KANBAN_UNLOADED_SWEEP_S", INTERVAL_S))
     grace = _env_float("HERMES_KANBAN_UNLOADED_GRACE_S", GRACE_S)
     stop.wait(_env_float("HERMES_KANBAN_UNLOADED_FIRST_S", FIRST_RUN_DELAY_S))
     while not stop.is_set():
         try:
-            from tui_gateway.kanban_remote_notices import sweep_remote_notices
-            sweep_remote_notices(live_ids=live_session_ids())
+            sweep_remote_once(live_session_ids(), grace_s=grace)
             sweep_once(live_session_ids(), grace_s=grace)
         except Exception:
             logger.warning("kanban unloaded sweep failed", exc_info=True)
