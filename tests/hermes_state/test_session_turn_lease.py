@@ -762,3 +762,140 @@ def test_turn_lease_fence_walks_continuation_that_inherited_fork_markers(tmp_pat
     ]
     db.release_session_turn_lease("delegate-continuation", delegate_holder)
     db.release_session_turn_lease("branch-continuation", branch_holder)
+
+
+# --- A release that hit a busy state.db must not look like a live turn (agent-db9dfa2d4e) ---
+
+
+class _HeldWriteLock:
+    """Another connection holding the state.db write lock (BEGIN IMMEDIATE) until released."""
+
+    def __init__(self, path):
+        self.conn = sqlite3.connect(str(path), timeout=0, isolation_level=None)
+        self.conn.execute("BEGIN IMMEDIATE")
+
+    def release(self):
+        if self.conn is not None:
+            self.conn.execute("COMMIT")
+            self.conn.close()
+            self.conn = None
+
+
+def _lease_rows(path):
+    conn = sqlite3.connect(str(path))
+    try:
+        return [tuple(r) for r in conn.execute("SELECT conversation_id, holder FROM session_turn_leases")]
+    finally:
+        conn.close()
+
+
+def _locked_release(db, path, session_id, holder):
+    """Release ``holder`` while another connection holds the write lock; return the lock."""
+    db._WRITE_PATIENCE_S = 0.2
+    lock = _HeldWriteLock(path)
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        db.release_session_turn_lease(session_id, holder)
+    return lock
+
+
+def test_locked_release_frees_the_lease_for_the_next_same_process_turn(tmp_path):
+    """A desktop turn (wait_seconds=0) after a lock-failed release in the same process is admitted."""
+    path = tmp_path / "state.db"
+    db = SessionDB(path)
+    db.create_session("chat", source="desktop")
+    first = f"pid={os.getpid()}:turn=first:platform=desktop"
+    second = f"pid={os.getpid()}:turn=second:platform=desktop"
+    assert db.try_acquire_session_turn_lease("chat", first, ttl_seconds=300)
+
+    lock = _locked_release(db, path, "chat", first)
+    lock.release()
+    db._WRITE_PATIENCE_S = SessionDB._WRITE_PATIENCE_S
+
+    assert _lease_rows(path) == [("chat", first)]  # the failed DELETE left the row behind
+    assert db.acquire_session_turn_lease("chat", second, ttl_seconds=300, wait_seconds=0)
+    assert _lease_rows(path) == [("chat", second)]
+    db.release_session_turn_lease("chat", second)
+
+
+def test_live_same_process_lease_is_still_refused(tmp_path):
+    """Only an abandoned holder is reclaimable early: a live same-process turn keeps its lease."""
+    path = tmp_path / "state.db"
+    db = SessionDB(path)
+    db.create_session("chat", source="desktop")
+    live = f"pid={os.getpid()}:turn=live:platform=desktop"
+    other = f"pid={os.getpid()}:turn=other:platform=desktop"
+    assert db.try_acquire_session_turn_lease("chat", live, ttl_seconds=300)
+    assert not db.acquire_session_turn_lease("chat", other, ttl_seconds=300, wait_seconds=0)
+    # An abandoned holder on another db file does not leak into this one.
+    other_path = tmp_path / "other.db"
+    other_db = SessionDB(other_path)
+    other_db.create_session("chat", source="desktop")
+    assert other_db.try_acquire_session_turn_lease("chat", live, ttl_seconds=300)
+    _locked_release(other_db, other_path, "chat", live).release()
+    assert not db.try_acquire_session_turn_lease("chat", other, ttl_seconds=300)
+    assert _lease_rows(path) == [("chat", live)]
+    db.release_session_turn_lease("chat", live)
+
+
+def test_facade_release_retries_a_locked_delete_in_the_background(tmp_path, caplog):
+    """DurableTurnLease.release defers a locked DELETE: WARNING now, row gone once the lock clears,
+    so another process (a second SessionDB) can take the lease without waiting out the TTL."""
+    import logging
+
+    from agent.turn_facade_lease import DurableTurnLease
+
+    path = tmp_path / "state.db"
+    db = SessionDB(path)
+    db.create_session("chat", source="desktop")
+    holder = f"pid={os.getpid()}:turn=first:platform=desktop"
+    assert db.try_acquire_session_turn_lease("chat", holder, ttl_seconds=300)
+    agent = SimpleNamespace(_active_session_turn_lease_holder=holder, _active_session_turn_lease_ttl_seconds=300)
+    lease = DurableTurnLease(agent, db, "chat", holder, expires_at=time.time() + 300)
+
+    db._WRITE_PATIENCE_S = 0.2
+    lock = _HeldWriteLock(path)
+    with caplog.at_level(logging.WARNING):
+        lease.release()  # must not block on the lock or raise
+        assert agent._active_session_turn_lease_holder is None
+        assert _lease_rows(path) == [("chat", holder)]
+        time.sleep(0.5)
+        lock.release()
+        deadline = time.monotonic() + 10
+        while _lease_rows(path) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    assert _lease_rows(path) == []
+    assert any("lease release deferred" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+    other_process = SessionDB(path)
+    assert other_process.try_acquire_session_turn_lease(
+        "chat", "pid=999999999:turn=elsewhere:platform=desktop", ttl_seconds=300)
+
+
+def test_facade_release_logs_error_when_retries_run_out(tmp_path, caplog):
+    """A DELETE that stays locked until the lease expires logs one ERROR (the detector's signal)."""
+    import logging
+
+    from agent.turn_facade_lease import DurableTurnLease
+
+    path = tmp_path / "state.db"
+    db = SessionDB(path)
+    db.create_session("chat", source="desktop")
+    holder = f"pid={os.getpid()}:turn=stuck:platform=desktop"
+    assert db.try_acquire_session_turn_lease("chat", holder, ttl_seconds=300)
+    lease = DurableTurnLease(SimpleNamespace(), db, "chat", holder, expires_at=time.time() + 1.0)
+
+    db._WRITE_PATIENCE_S = 0.2
+    lock = _HeldWriteLock(path)
+    try:
+        with caplog.at_level(logging.WARNING):
+            lease.release()
+            deadline = time.monotonic() + 10
+            while (not any("lease release retries exhausted" in r.getMessage() for r in caplog.records)
+                   and time.monotonic() < deadline):
+                time.sleep(0.05)
+    finally:
+        lock.release()
+    exhausted = [r for r in caplog.records if "lease release retries exhausted" in r.getMessage()]
+    assert len(exhausted) == 1 and exhausted[0].levelno == logging.ERROR

@@ -32,6 +32,44 @@ _REFRESH_WRITE_PATIENCE_S = 20.0
 _REFRESH_EXPIRY_MARGIN_S = 2.0
 
 
+_RELEASE_RETRY_FIRST_DELAY_S = 0.25
+_RELEASE_RETRY_MAX_DELAY_S = 10.0
+
+
+def _retry_lease_release(db, session_id: str, holder: str, give_up_at: float) -> None:
+    """Background retry of a lock-failed turn-lease DELETE, with backoff, until ``give_up_at``
+    (wall clock). Logs one ERROR if every attempt failed; the store forgets the abandoned holder
+    once a DELETE commits."""
+    from hermes_state_errors import classify_persistence_error
+    delay = _RELEASE_RETRY_FIRST_DELAY_S
+    attempts = 0
+    while True:
+        remaining = give_up_at - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(delay, remaining))
+        delay = min(delay * 2, _RELEASE_RETRY_MAX_DELAY_S)
+        remaining = give_up_at - time.time()
+        if remaining <= 0:
+            break
+        attempts += 1
+        try:
+            db.release_session_turn_lease(
+                session_id, holder, patience_s=min(_REFRESH_WRITE_PATIENCE_S, max(0.1, remaining)),
+            )
+        except Exception as exc:
+            if classify_persistence_error(exc) == "locked":
+                continue
+            logger.error("Session turn lease release retry failed: %s", session_id, exc_info=True)
+            return
+        logger.info("Session turn lease released after %d deferred attempt(s): %s", attempts, session_id)
+        return
+    logger.error(
+        "Session turn lease release retries exhausted after %d attempt(s); the row expires on its own: %s",
+        attempts, session_id,
+    )
+
+
 class DurableTurnLease:
     """An admitted session turn lease plus the periodic timers that keep it alive and watch the turn.
 
@@ -128,15 +166,36 @@ class DurableTurnLease:
             handle.cancel(wait=timeout)
 
     def release(self) -> None:
-        """Release the row and drop the agent's holder attrs (only if they still name this lease)."""
+        """Release the row and drop the agent's holder attrs (only if they still name this lease).
+
+        A DELETE that loses the state.db write lock is not a failure yet: the store marks the holder
+        abandoned (so this process's next turn can take the row) and a daemon thread retries the
+        DELETE until the lease would have expired anyway, so other processes are not kept waiting."""
+        from hermes_state_errors import classify_persistence_error
         agent = self.agent
         try:
             self.db.release_session_turn_lease(self.session_id, self.holder)
-        except Exception:
-            logger.error("Failed to release session turn lease: %s", self.session_id, exc_info=True)
+        except Exception as exc:
+            if classify_persistence_error(exc) == "locked":
+                logger.warning(
+                    "Session turn lease release deferred (state.db busy); retrying in the background: %s (%s)",
+                    self.session_id, exc,
+                )
+                self._start_release_retry()
+            else:
+                logger.error("Failed to release session turn lease: %s", self.session_id, exc_info=True)
         if getattr(agent, "_active_session_turn_lease_holder", None) == self.holder:
             agent._active_session_turn_lease_holder = None
             agent._active_session_turn_lease_ttl_seconds = None
+
+    def _start_release_retry(self) -> None:
+        # Retry until the row would expire on its own (plus the expiry margin): past that point any
+        # acquirer reclaims it, so further retries buy nothing.
+        give_up_at = max(self._authority_deadline, time.time()) + _REFRESH_EXPIRY_MARGIN_S
+        threading.Thread(
+            target=_retry_lease_release, args=(self.db, self.session_id, self.holder, give_up_at),
+            name=f"turn-lease-release-retry:{self.session_id}", daemon=True,
+        ).start()
 
     def is_turn_active(self) -> bool:
         with self._lock:
