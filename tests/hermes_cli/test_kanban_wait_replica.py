@@ -133,6 +133,7 @@ def test_schedule_awaiting_card_on_stale_replica_is_accepted(replica, board, mon
     put(replica, "running")
     make_stale(replica, 1237)
     rc, out = wait.check_remote("other", "task", TID)
+    assert rc == 3
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, tid).current_run_id))
     # The probe replays the stale reply (exit 3), so the park-time dry run sees exactly what wait-check prints.
