@@ -139,23 +139,12 @@ KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024  # one cap for dashboard, tools a
 
 
 def _assert_not_delegated_child_mutation(path: str | Path | None = None) -> None:
-    """Reject Kanban mutations from ``delegate_task`` child contexts.
+    """Reject Kanban mutations from fenced contexts (delegate_task children, worker-tool
+    descendants); see :mod:`hermes_cli.kanban_db_fence`. Every ``write_txn`` user and
+    board-metadata mutator calls this, so the invariant fails closed below the UX guards."""
+    from hermes_cli.kanban_db_fence import assert_not_fenced
 
-    The tool/CLI fast-fail guards are UX, not a trust boundary (a child can shell
-    out or import this module); the invariant lives here so every ``write_txn``
-    user and board-metadata mutator fails closed before touching durable state.
-    *path* is the board DB / metadata root being mutated; ``None`` means the
-    lineage's own board (``kanban_home()``).
-    """
-    from agent.delegation_context import kanban_path_is_fenced
-
-    if kanban_path_is_fenced(kanban_home() if path is None else path):
-        msg = "delegate_task child contexts cannot mutate Kanban tasks or boards"
-        from agent.delegation_context import is_delegated_child_context
-        if not is_delegated_child_context():  # env-inherited fence: name a leaked worker env [daveey]
-            from hermes_cli.top_level_env import delegated_child_refusal
-            msg = delegated_child_refusal(msg)
-        raise PermissionError(msg)
+    assert_not_fenced(kanban_home() if path is None else path)
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
