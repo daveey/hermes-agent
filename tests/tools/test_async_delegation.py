@@ -972,19 +972,27 @@ def test_ungrouped_task_completes_alone_and_group_completes_together(monkeypatch
     by_group = {tuple(u["task_indexes"]): u["group"] for u in handle["units"]}
     assert by_group == {(0,): None, (1, 2): "cmp", (3,): None}
 
+    ids = {tuple(u["task_indexes"]): u["delegation_id"] for u in handle["units"]}
+
+    # Match on each unit's delegation_id: a straggler event from an earlier test can land in the shared queue
+    # after the fixture's drain, and a CPU-throttled runner needs generous (but early-returning) timeouts.
     gates[3].set()
-    evt = _drain_one()
+    evt = _drain_for(ids[(3,)], timeout=60)
+    assert evt is not None, "no completion for PR 2"
     assert [r["task_index"] for r in evt["results"]] == [3]  # PR 2 landed while everything else still runs
     assert "review PR 2" in format_process_notification(evt)
 
     gates[1].set()
-    assert _drain_one(timeout=0.5) is None  # half a group is not a completion
+    assert _drain_for(ids[(1, 2)], timeout=0.5) is None  # half a group is not a completion
     gates[2].set()
-    evt = _drain_one()
+    evt = _drain_for(ids[(1, 2)], timeout=60)
+    assert evt is not None, "no completion for group cmp"
     assert evt["group"] == "cmp" and [r["task_index"] for r in evt["results"]] == [1, 2]
 
     gates[0].set()
-    assert [r["task_index"] for r in _drain_one()["results"]] == [0]
+    evt = _drain_for(ids[(0,)], timeout=60)
+    assert evt is not None, "no completion for PR 1"
+    assert [r["task_index"] for r in evt["results"]] == [0]
 
 
 def test_units_of_one_call_share_a_single_capacity_slot():
