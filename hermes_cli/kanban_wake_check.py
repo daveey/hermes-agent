@@ -8,6 +8,11 @@ dispatcher probes it off-thread on each tick:
   honoured, like ``wake_due_continuations``) with a ``condition_met`` event carrying the
   stdout tail, which the next worker's context shows;
 * exit 1 -> not yet: probe again ``check_every`` seconds later;
+* exit 3 (``UNKNOWN_RC``) with a ``stale_age=<N>s`` line -> unknown, not yet: ``hermes kanban
+  wait-check`` read the card from a stale replica of an offline gateway (a sleeping Mac). Probed
+  again without counting toward ``BROKEN_AFTER``, until the replica is ``STALE_WAKE_AFTER`` old;
+  then the card wakes (``wake_check_broken`` with ``reason=gateway_offline``) saying how long the
+  gateway has been offline;
 * anything else, or a timeout, ``BROKEN_AFTER`` times in a row -> the card wakes with a
   ``wake_check_broken`` event so a worker fixes the probe. A broken probe is never silent.
 
@@ -48,6 +53,11 @@ MAX_CONCURRENT = 4
 # ``run_due_wake_checks(wait=True)`` never waits longer than this; the dispatcher never waits.
 TICK_BUDGET_SECONDS = 60
 BROKEN_AFTER = 3
+# "Unknown, not yet" (kanban_wait_replica.STALE_RC): the producer's gateway is offline and its replica stale.
+UNKNOWN_RC = 3
+STALE_WAKE_AFTER = 24 * 3600
+STALE_AGE_RE = re.compile(r"\bstale_age=(\d+)s\b")
+STALE_GATEWAY_RE = re.compile(r"\bgateway=(\S+)")
 GUARD_SECONDS = 2 * 3600
 OUTPUT_TAIL_CHARS = 500
 MAX_CMD_CHARS = 2000
@@ -60,6 +70,14 @@ ERROR_OUTPUT_RE = re.compile(
     r"Traceback \(most recent call last\)|^\s*(?:\S+: )?(?:line \d+: )?.*(?:syntax error|command not found"
     r"|No such file or directory|unexpected EOF)|OperationalError|database is locked"
     r"|unable to open database file|^\s*error:", re.IGNORECASE | re.MULTILINE)
+
+
+def stale_age(rc: Any, out: str) -> Optional[int]:
+    """Seconds the producer's replica has been stale when this result is "unknown, not yet", else None."""
+    if rc != UNKNOWN_RC or output_error(out):
+        return None
+    m = STALE_AGE_RE.search(out or "")
+    return int(m.group(1)) if m else None
 
 
 def output_error(out: str) -> Optional[str]:
@@ -81,6 +99,8 @@ def dry_run_error(cmd: Optional[str], *, cwd: Optional[str] = None, env: Optiona
     if rc == "timeout":
         return None
     bad = None
+    if stale_age(rc, out) is not None:
+        return None  # unknown, not yet: the producer's gateway is offline right now
     if not isinstance(rc, int) or rc >= 2:
         bad = f"exited {rc}"
     elif output_error(out):
@@ -423,6 +443,23 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
                 "next_at = ? WHERE task_id = ?", (now, tail, now + int(state["every"]), task_id))
             return None
+        age = stale_age(rc, out)
+        if age is not None:
+            if age >= STALE_WAKE_AFTER:
+                m = STALE_GATEWAY_RE.search(out or "")
+                gw = m.group(1).rstrip(",;)") if m else "the producer's gateway"
+                hours = age / 3600
+                return _wake(conn, task_id, BROKEN_EVENT, {
+                    "wake_check": cmd, "rc": rc, "fails": 0, "output": tail, "reason": "gateway_offline",
+                    "gateway": gw, "offline_seconds": age,
+                    "note": (f"Gateway {gw} offline for {hours:.0f} h: its replica has not synced, so the producer "
+                             "card's status is unknown. Check whether that machine is up, then re-check and park "
+                             "again (or replan without it).")})
+            # Not broken: the gateway is just offline. Keep any real-failure streak from before as it was.
+            conn.execute(
+                "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, "
+                "next_at = ? WHERE task_id = ?", (now, rc, tail, now + int(state["every"]), task_id))
+            return None
         fails = int(state["fails"] or 0) + 1
         if rc == 1:  # exit 1 with error output: a crashed probe posing as "not yet"
             rc, rc_col = f"exit 1 with error output: {output_error(out)}", 1
@@ -555,6 +592,9 @@ def _render_wake_context(conn: sqlite3.Connection, task_id: str) -> str:
             lines.append("## Woken by wake check (condition met)")
             lines.append(f"The park's wake_check `{payload.get('wake_check')}` exited 0, so this card "
                          "woke before its deadline. Its output:")
+        elif payload.get("reason") == "gateway_offline":
+            lines.append("## Woken because the producer's gateway is offline")
+            lines.append(f"{payload.get('note')} Probe: `{payload.get('wake_check')}`. Last output:")
         else:
             lines.append("## Woken because the wake check is broken")
             lines.append(f"The park's wake_check `{payload.get('wake_check')}` failed "
