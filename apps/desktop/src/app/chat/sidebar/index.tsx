@@ -1466,7 +1466,17 @@ export function ChatSidebar({
   // Recents and every messaging platform resolve owner groups the same way
   // ([connectionId, profile]), so a platform's groups line up with recents.
   const ownerGrouped = profileScope === ALL_PROFILES && grouping === 'profile'
-  const profileGroups = useGatewaySessionGroups(agentSessions, ownerGrouped, filtersNarrow)
+
+  // [daveey] Hiding automated chats is the fork's default view, not a narrowed one: a profile whose
+  // chats are all automated (or none) still keeps its empty section.
+  const profileListNarrow =
+    hiddenGatewayIds.length > 0 ||
+    statusFilter.length > 0 ||
+    projectFilter.length > 0 ||
+    prFilter.length > 0 ||
+    (showAllProfiles && profileFilter.length > 0)
+
+  const profileGroups = useGatewaySessionGroups(agentSessions, ownerGrouped, profileListNarrow)
   const connectionsRegistry = useStore($connectionsRegistry)
   const profileColors = useStore($profileColors)
 

@@ -717,11 +717,16 @@ describe('respondToApprovalAction', () => {
 })
 
 describe('app sounds mute', () => {
-  afterEach(() => setHapticsMuted(false))
+  afterEach(() => {
+    setHapticsMuted(false)
+    setSessions([])
+  })
 
   const fire = () => {
     const sessionId = freshSession()
     setActiveSessionId(sessionId)
+    // Fork: a turnDone needs a fresh kanban projection showing no open work.
+    setSessions([{ id: sessionId, kanban_observed_at: Date.now() / 1000 } as never])
     dispatchNativeNotification({ kind: 'turnDone', sessionId, title: 'done' })
     dispatchPluginNativeNotification(freshSession(), { title: 'Opportunity' })
 

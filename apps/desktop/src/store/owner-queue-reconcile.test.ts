@@ -22,7 +22,8 @@ vi.mock('@/store/gateway', async importOriginal => {
 const connectionAt = (wsUrl: string) => ({ mode: 'local', wsUrl }) as HermesConnection
 
 const row = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
-  ({ id, message_count: 4, source: 'desktop', started_at: 0, title: id, ...extra }) as SessionInfo
+  // Fork: a row without a fresh kanban read stays `background` (see kanban-observation.ts).
+  ({ id, kanban_observed_at: Date.now() / 1000, message_count: 4, source: 'desktop', started_at: 0, title: id, ...extra }) as SessionInfo
 
 // The owner's list after a restart cut the running turn: the turn is `unknown` (only Discard
 // resolves it) and the send queued behind it waits.

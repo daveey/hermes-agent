@@ -20,6 +20,9 @@ import { truncateRewoundMessages } from './slash-session-commands'
 // behaviour on the same gateway), never as `slash.exec`, which the shared gateway refuses.
 
 vi.mock('@/hermes', () => ({
+  // Fork: onboarding scope capture reads the request connection/profile.
+  getApiRequestConnection: () => null,
+  getApiRequestProfile: () => null,
   getLatestSessionMessages: vi.fn(async () => ({ messages: [], session_id: 'session' })),
   getProfiles: vi.fn(async () => ({ profiles: [] })),
   getSession: vi.fn(),

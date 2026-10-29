@@ -12,6 +12,7 @@ import {
   startManualOnboarding,
   startManualProviderOAuth
 } from '@/store/onboarding'
+import { markOnboardingDecided } from '@/store/onboarding-presence'
 import type * as SessionModule from '@/store/session'
 import { setModelPickerOpen } from '@/store/session'
 
@@ -65,6 +66,8 @@ describe('exhausted recovery', () => {
     requestDesktopOnboardingForCredentialWarning('Quota reached', failure, scope, 'chat')
     const pending = consumePendingCredentialWarning(scope, 'chat')
     expect(pending).toEqual({ reason: 'Quota reached', failure, scope })
+    // Upstream gates requested onboarding on first-run's due check having answered.
+    markOnboardingDecided()
     requestDesktopOnboarding('Quota reached', failure, scope)
     expect($desktopOnboarding.get()).toMatchObject({
       exhausted: failure,

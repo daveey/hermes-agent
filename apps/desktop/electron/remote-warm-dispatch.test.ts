@@ -262,7 +262,8 @@ describe('main.ts wiring', () => {
 
   it('prewarms registry SSH connections through ensureRegistryBackend with a forced keepalive probe', () => {
     expect(main).toMatch(/connection\.kind === 'ssh'/)
-    expect(main).toMatch(/ensureRegistryBackend\(connectionId, profile, '', \{ forceProbe, spawnPriority: 'background' \}\)/)
+    // Upstream retired spawn priorities with the local-backend pool (c63d465dbc2).
+    expect(main).toMatch(/ensureRegistryBackend\(connectionId, profile, '', \{ forceProbe \}\)/)
     expect(main).toMatch(/prewarmTargets\(\n\s+readDesktopConnectionsRegistry\(\)/)
   })
 

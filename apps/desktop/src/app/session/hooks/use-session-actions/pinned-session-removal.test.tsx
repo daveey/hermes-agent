@@ -22,6 +22,11 @@ vi.mock('@/hermes', async importOriginal => ({
 
 type Handle = Pick<ReturnType<typeof useSessionActions>, 'archiveSession' | 'removeSession'>
 
+// Fork: archive first checks for linked work (async); these cases are about the pin race, so skip that
+// prompt and wait for the single server mutation before asserting the optimistic state.
+const runRemoval = (handle: Handle, action: 'archiveSession' | 'removeSession') =>
+  action === 'archiveSession' ? handle.archiveSession('tip', { skipLinkedConfirm: true }) : handle.removeSession('tip')
+
 function Harness({ onReady }: { onReady: (handle: Handle) => void }) {
   const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
 
@@ -106,8 +111,9 @@ it.each(['archiveSession', 'removeSession'] as const)('%s does not issue a compe
   )
 
   await act(async () => {
-    const removal = handle[action]('tip')
-    // The row disappears immediately while the single server mutation is pending.
+    const removal = runRemoval(handle, action)
+    await vi.waitFor(() => expect(mutate).toHaveBeenCalled())
+    // The row is gone while the single server mutation is pending.
     expect($sessions.get()).toEqual([])
     expect($pinnedSessionIds.get()).toEqual([])
     expect(setSessionPinnedRemote).not.toHaveBeenCalled()
@@ -134,7 +140,7 @@ it.each(['archiveSession', 'removeSession'] as const)(
     const mutate = action === 'archiveSession' ? vi.mocked(setSessionArchived) : vi.mocked(deleteSession)
     mutate.mockRejectedValue(new Error('permission_denied'))
 
-    await act(() => handle[action]('tip'))
+    await act(() => runRemoval(handle, action))
 
     expect($sessions.get().map(row => row.id)).toEqual(['tip'])
     expect($pinnedSessionIds.get()).toEqual(['root'])

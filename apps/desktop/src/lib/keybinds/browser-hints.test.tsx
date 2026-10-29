@@ -52,7 +52,7 @@ it('renders the resolved browser binding in the first-run tip, tooltips and sett
 
   const search = view.getByRole('textbox', { name: 'Search shortcuts…' })
   fireEvent.change(search, { target: { value: 'session.new' } })
-  const row = within(view.getByTestId('settings')).getByText('New session').parentElement!
+  const row = within(view.getByTestId('settings')).getByText('New session on saved gateway').parentElement! // fork label
   expect(within(row).getByText('Alt')).toBeTruthy()
   expect(within(row).getByText('N')).toBeTruthy()
   expect(within(row).queryByRole('button', { name: 'Reset to default' })).toBeNull()

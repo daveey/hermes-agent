@@ -38,7 +38,10 @@ const BROWSER_RESERVED = {
 const shortcuts = [
   { id: 'session.new', native: ['mod+n'], mac: 'mod+ctrl+n', other: 'alt+n' },
   { id: 'session.newTab', native: ['mod+t'], mac: 'mod+ctrl+t', other: 'alt+t' },
-  { id: 'session.newWindow', native: ['mod+shift+n'], mac: 'mod+ctrl+shift+n', other: 'alt+shift+n' },
+  // Fork: ⌘⇧N belongs to session.newSameGateway (new window ships unbound), and
+  // ⌘⇧P is the fork's session.moveToProject.
+  { id: 'session.newSameGateway', native: ['mod+shift+n'], mac: 'mod+ctrl+shift+n', other: 'alt+shift+n' },
+  { id: 'session.moveToProject', native: ['mod+shift+p'], mac: 'mod+ctrl+shift+p', other: 'alt+shift+p' },
   { id: 'session.next', native: ['ctrl+tab', 'ctrl+pagedown'], mac: 'mod+ctrl+]', other: 'alt+]' },
   { id: 'session.prev', native: ['ctrl+shift+tab', 'ctrl+pageup'], mac: 'mod+ctrl+[', other: 'alt+[' },
   { id: 'view.closeTab', native: ['mod+w'], mac: 'mod+ctrl+w', other: 'alt+w' },

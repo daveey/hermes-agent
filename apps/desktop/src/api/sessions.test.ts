@@ -160,12 +160,13 @@ describe('setSessionArchived profile scoping', () => {
   it('routes an object owner to ITS connection (All-Gateways row on another gateway)', async () => {
     // Regression: archiving a mac-mini row from the MacBook sidebar sent the
     // PATCH to the active (local) backend, which 404'd; the row reappeared.
-    hermesApi.mockResolvedValue({ ok: true } as never)
+    // Fork: archive mutations read a runtime snapshot first.
+    hermesApi.mockResolvedValue({ ok: true, exists: true, runtime_revision: 5, runtime_generation: 2 } as never)
     vi.mocked(client.capabilityScoped).mockReturnValue({ profile: 'default', connectionId: 'mac-mini' })
 
     await setSessionArchived('sess-remote', true, { connectionId: 'mac-mini', profile: 'default' })
 
-    expect(hermesApi.mock.calls[0][0]).toMatchObject({
+    expect(hermesApi.mock.calls.filter(([request]) => request.method)[0][0]).toMatchObject({
       connectionId: 'mac-mini',
       method: 'PATCH',
       path: '/api/sessions/sess-remote',
