@@ -32,6 +32,7 @@ export const ruProjects: NonNullable<TranslationOverrides['sidebar']>['projects'
   movedTo: name => `Перемещено в ${name}`,
   moveFailed: 'Не удалось переместить сеанс',
   moveNoFolder: 'У этого проекта нет папки для перемещения',
+  moveBusy: 'Остановите текущий ход, затем переместите чат',
   moveNoProjects: 'Нет других проектов',
   movePlaceholder: title => `Переместить «${title}» в…`,
   createAndMove: name => `Создать проект «${name}»`,

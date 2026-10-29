@@ -1,7 +1,6 @@
 import { expect, test, vi } from 'vitest'
 
 import { ManagedConnectionUpdateGate } from './managed-ssh-update'
-import { createPoolStopper } from './pool-stop'
 import { createRegistryReconnectService } from './registry-reconnect-service'
 import type { createRegistryRetirementClient } from './registry-retirement-http'
 
@@ -119,20 +118,13 @@ test('direct profile deletion cannot evict a resident during reconnect commit', 
 
     return request(descriptor, path, options)
   })
-  const stopChild = vi.fn()
-
-  const stopper = createPoolStopper({
-    pool: f.pool,
-    assertCanStop: key => f.service.assertCanStop(key),
-    stopChild,
-    waitForExit: async () => {}
-  })
 
   const running = f.service.run(target)
   await vi.waitFor(() => expect(commit).toBeTypeOf('function'))
-  expect(() => stopper.stop('conn:hub::default')).toThrow('reconnect in progress')
+  // main.ts stopPoolBackend calls assertCanStop before its synchronous pool delete
+  // (the fence pool-stop.ts used to carry), so a throw here means the resident stays.
+  expect(() => f.service.assertCanStop('conn:hub::default')).toThrow('reconnect in progress')
   expect(f.pool.get('conn:hub::default')).toBe(f.entry)
-  expect(stopChild).not.toHaveBeenCalled()
   commit()
   expect((await running).ok).toBe(true)
   expect(f.gate.owner('hub')).toBeNull()

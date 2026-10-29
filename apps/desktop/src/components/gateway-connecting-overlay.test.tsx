@@ -1,10 +1,12 @@
 import { act, cleanup, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $desktopBoot } from '@/store/boot'
 import { $bootSnapshot, _resetBootSnapshotForTests } from '@/store/boot-snapshot'
 import { $gatewaySwitching } from '@/store/gateway-switch'
 import { $desktopOnboarding } from '@/store/onboarding'
+import { $introView } from '@/store/onboarding-intro'
+import { markOnboardingDecided } from '@/store/onboarding-presence'
 import { setGatewayState } from '@/store/session'
 
 import { BootFailureOverlay } from './boot-failure-overlay'
@@ -198,6 +200,36 @@ describe('connecting overlay vs the sidebar boot snapshot', () => {
     coldBoot()
     $bootSnapshot.set({ ...$bootSnapshot.get(), painted: true })
     render(<GatewayConnectingOverlay />)
+
+    expect(isConnectingShown()).toBe(false)
+  })
+})
+
+describe('first-run starting screen', () => {
+  afterEach(() => {
+    $introView.set('off')
+    vi.useRealTimers()
+  })
+
+  it('comes back over a booted app while Run onboarding again opens its chat, then leaves', async () => {
+    vi.useFakeTimers()
+    setGatewayState('open')
+    markOnboardingDecided()
+
+    await act(async () => {
+      render(<GatewayConnectingOverlay />)
+    })
+    expect(isConnectingShown()).toBe(false)
+
+    await act(async () => $introView.set('starting'))
+    expect(isConnectingShown()).toBe(true)
+
+    await act(async () => $introView.set('intro'))
+
+    // The exit choreography: text out, then the overlay fades.
+    for (let step = 0; step < 3; step += 1) {
+      await act(async () => vi.advanceTimersByTime(1_000))
+    }
 
     expect(isConnectingShown()).toBe(false)
   })

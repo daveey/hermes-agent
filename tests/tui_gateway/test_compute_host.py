@@ -45,8 +45,12 @@ def test_compute_host_line_json_hello_and_shutdown():
     assert proc.stdin is not None
     out = _stdout_queue(proc)
     try:
-        # Cold import of tui_gateway.server on a loaded runner exceeds 2s.
-        hello = _read_json_line(out, timeout=30.0)
+        # The hello waits behind the child's cold imports: hold it to at least the supervisor's own
+        # budget, not a tighter one that only a quiet machine meets (~1.3s idle, 5s+ loaded).
+        # [daveey] Never below 30s: cold import of tui_gateway.server on a loaded runner exceeds it.
+        from tui_gateway.host_supervisor import _HELLO_TIMEOUT_SECS
+
+        hello = _read_json_line(out, timeout=max(30.0, _HELLO_TIMEOUT_SECS))
         assert hello["type"] == "hello"
         assert hello["host_pid"] == proc.pid
 

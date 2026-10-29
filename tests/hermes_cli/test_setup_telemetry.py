@@ -13,16 +13,39 @@ def test_shared_metrics_are_registered_disabled_by_default():
     assert DEFAULT_CONFIG["telemetry"]["shared_metrics"]["enabled"] is False
 
 
-def test_setup_telemetry_enables_shared_metrics(monkeypatch):
-    config = {}
+def test_setup_telemetry_one_answer_sets_both_keys(monkeypatch):
+    """One question: yes collects and sends, no turns both off. Collect-only is not offered."""
+    asked = []
     monkeypatch.setattr(
         "hermes_cli.setup.prompt_yes_no",
-        lambda _question, default: not default,
+        lambda question, default: asked.append(question) or not default,
     )
+    config = {}
+
+    setup_telemetry(config)
+    assert config["telemetry"]["shared_metrics"]["enabled"] is True
+    assert config["telemetry"]["shared_metrics"]["send"] is True
+
+    setup_telemetry(config)
+    assert config["telemetry"]["shared_metrics"]["enabled"] is False
+    assert config["telemetry"]["shared_metrics"]["send"] is False
+    assert asked == ["Send shared metrics to Nous?"] * 2
+
+
+def test_setup_telemetry_defaults_a_collect_only_profile_to_no(monkeypatch):
+    """A retired collect-only answer is not sharing: the question defaults to no, and no turns
+    collection off too."""
+    defaults = []
+    monkeypatch.setattr(
+        "hermes_cli.setup.prompt_yes_no",
+        lambda _question, default: defaults.append(default) or default,
+    )
+    config = {"telemetry": {"shared_metrics": {"enabled": True, "send": False}}}
 
     setup_telemetry(config)
 
-    assert config["telemetry"]["shared_metrics"]["enabled"] is True
+    assert defaults == [False]
+    assert config["telemetry"]["shared_metrics"]["enabled"] is False
 
 
 def test_disabling_collection_closes_the_send_consent_window(monkeypatch, tmp_path):

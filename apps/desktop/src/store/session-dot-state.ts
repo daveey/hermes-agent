@@ -30,6 +30,7 @@ import type { SessionBackgroundProcess, SessionInfo } from '@/types/hermes'
 
 import { $backgroundRunningSessionIds } from './composer-status'
 import { $kanbanObservationTick, hasFreshKanbanObservation } from './kanban-observation'
+import { $pausedQueueSessionIds } from './owner-queue-reconcile'
 import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
 import {
   $attentionSessionIds,
@@ -379,7 +380,8 @@ export const $sessionDotStateById = computed(
     $unreadFinishedSessionIds,
     $draftSessionIds,
     $sessions,
-    $unreadWriteGuard
+    $unreadWriteGuard,
+    $pausedQueueSessionIds
   ],
   (
     attention,
@@ -394,7 +396,8 @@ export const $sessionDotStateById = computed(
     unread,
     draft,
     sessions,
-    unreadWriteGuard
+    unreadWriteGuard,
+    paused
   ) => {
     const next: Record<string, SessionDotState> = {}
 
@@ -457,6 +460,9 @@ export const $sessionDotStateById = computed(
     claim(kanbanBusy, 'background')
     // A standing goal will start its next turn by itself: same claim.
     claim(goalActive, 'background')
+    // A queue paused behind a turn lost in a restart waits on the user's Discard, and a turn that
+    // never finished must not read as finished-unread. A turn actually running speaks over it.
+    claim(paused, 'needs-input')
     claim(working, 'working')
 
     // Stalled REFINES working rather than rivalling it — the turn is still

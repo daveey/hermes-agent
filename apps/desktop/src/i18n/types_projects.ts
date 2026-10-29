@@ -32,6 +32,7 @@ export interface SidebarProjectsTranslations {
   movedTo: (name: string) => string
   moveFailed: string
   moveNoFolder: string
+  moveBusy: string
   moveNoProjects: string
   movePlaceholder: (title: string) => string
   createAndMove: (name: string) => string

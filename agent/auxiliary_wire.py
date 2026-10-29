@@ -45,3 +45,12 @@ def translate_anthropic_response_format(anthropic_kwargs: dict[str, Any], respon
         output_config = {}
         anthropic_kwargs["output_config"] = output_config
     output_config["format"] = {"type": "json_schema", "schema": schema}
+
+
+def relay_chat_metadata(metadata: dict) -> dict:
+    """Relay metadata for an auxiliary attempt.
+
+    Relay intercepts ``client.chat.completions.create``, so it decodes a chat-completions
+    request even when the adapter speaks Responses or Messages to its provider.
+    """
+    return {**metadata, "api_mode": "chat_completions"}

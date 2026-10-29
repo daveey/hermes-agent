@@ -33,7 +33,8 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
-  useValue
+  useValue,
+  writeClipboardText
 } from '@hermes/plugin-sdk'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 
@@ -251,7 +252,7 @@ function Diagnostics({
     } else if (action.kind === 'unblock') {
       onUnblock()
     } else if (action.kind === 'cli_hint') {
-      void navigator.clipboard.writeText(String(action.payload?.command ?? action.label))
+      void writeClipboardText(String(action.payload?.command ?? action.label))
       host.notify({ kind: 'info', message: k.commandCopied })
     }
   }
@@ -1020,7 +1021,7 @@ export function TaskDrawer({
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem
                       onSelect={() => {
-                        void navigator.clipboard.writeText(task.id)
+                        void writeClipboardText(task.id)
                         host.notify({ kind: 'info', message: k.copiedId(task.id) })
                       }}
                     >
@@ -1029,7 +1030,7 @@ export function TaskDrawer({
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       onSelect={() => {
-                        void navigator.clipboard.writeText(task.title || task.id)
+                        void writeClipboardText(task.title || task.id)
                         host.notify({ kind: 'info', message: k.copiedTitle })
                       }}
                     >

@@ -127,7 +127,30 @@ class ProcessCheckpointMixin:
         entries.extend(item for item in self._foreign_live_entries(own_ids | tracked_ids)
                        if item.get("session_id") not in tracked_ids)
         from utils import atomic_json_write
-        atomic_json_write(_checkpoint_path(), entries)
+        path = _checkpoint_path()
+        # Every interpreter of the profile (owner, each managed worker) rewrites this file from
+        # its own table; a worker's output-log handoff is its only path to the next one, so a
+        # writer keeps the handoffs it does not track. The caller holds _checkpoint_file_lock
+        # (the same processes.json.lock upstream's _FileLock takes), so no second lock here.
+        tracked_ids = {item.get("session_id") for item in entries}
+        entries.extend(item for item in self._foreign_handoffs(path, own_ids | tracked_ids)
+                       if item.get("session_id") not in tracked_ids)
+        atomic_json_write(path, entries)
+
+    def _foreign_handoffs(self, path, known) -> list[dict[str, Any]]:
+        """On-disk worker handoffs this registry never tracked whose log still decides an outcome:
+        the process is alive (same start time) or its recorded exit is waiting to be read."""
+        from pathlib import Path
+        from tools.process_registry_output_log import _exit_path, adoptable_log
+        try:
+            on_disk = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return []
+        return [entry for entry in on_disk if isinstance(entry, dict) and entry.get("session_id") not in known
+                and (log := adoptable_log(entry.get("output_log"))) and Path(log).exists()
+                and (_exit_path(log).exists() or self._detached_host_fate(
+                    entry.get("pid"), entry.get("host_start_time")) == "running")]
+
 
     def reassert_checkpoint(self) -> bool:
         """Rewrite processes.json when it lacks one of this registry's live sessions; True if
@@ -181,7 +204,11 @@ class ProcessCheckpointMixin:
             _CHECKPOINT_DEFAULTS, _WATCHER_ROUTE_KEYS, _stop_systemd_unit,
         )
         from tools.process_registry_readopt import OWNER_TUI, owner_accepts
+        from tools.process_registry_output_log import adoptable_log
 
+        # This host adopts what a crashed predecessor left running, so the jobs it starts must
+        # survive its own crash for the next one: they stay out of the owner-death supervisor.
+        self._jobs_outlive_host = True
         checkpoint_path = _checkpoint_path()
         if not checkpoint_path.exists():
             return 0
@@ -219,6 +246,11 @@ class ProcessCheckpointMixin:
             # completion. A positive mismatch means the number was recycled:
             # do not adopt it and do not signal it.
             fate = self._detached_host_fate(pid, entry.get("host_start_time"))
+            # A worker spawn's output log and recorded exit outlive both the spawner and the PID,
+            # so its reader decides the outcome (a recycled PID is never signalled: fate != running).
+            log = adoptable_log(entry.get("output_log"))
+            if log:
+                fate = "running"
             if fate == "reused":
                 logger.info(
                     "Not recovering session %s: pid %d is alive but its "
@@ -238,12 +270,17 @@ class ProcessCheckpointMixin:
                         systemd_unit, pid)
                     unresolved_scope_entries.append(entry)
                 continue
-            # detached: can't read output, but can report status + kill
+            # detached: no Popen handle, but can report status + kill; a worker spawn's output log
+            # (and recorded exit) outlives its spawner, so tail it from the start.
             session = self._session_from_entry(entry)
-            # A TUI backend reports the eventual exit (status unknown) to the owning chat.
+            session.output_log = log
+            # A TUI backend reports the eventual exit (status unknown) to the owning chat. [daveey]
             session._report_lost_exit = owner == OWNER_TUI
-            with self._lock:
-                self._running[session.id] = session
+            if session.output_log:
+                self._track_started(session, self._log_reader_loop, f"proc-log-reader-{session.id}")
+            else:
+                with self._lock:
+                    self._running[session.id] = session
             recovered += 1
             logger.info("Recovered detached process: %s (pid=%d)", session.command[:60], pid)
             # Re-enqueue watcher so gateway can resume notifications

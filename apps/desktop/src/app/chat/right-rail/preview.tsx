@@ -42,7 +42,8 @@ export function PreviewTilePane({ onClose, tabId }: PreviewTilePaneProps) {
     }
   }, [previewTabs, tabId])
 
-  const target = (previewTabs.find(tab => tab.id === tabId) ?? offViewTabs.find(tab => tab.id === tabId))?.target
+  const tab = previewTabs.find(candidate => candidate.id === tabId) ?? offViewTabs.find(candidate => candidate.id === tabId)
+  const target = tab?.target
 
   useEffect(() => (target ? registerPreviewPaneMount(tabId) : undefined), [tabId, target])
 
@@ -58,6 +59,7 @@ export function PreviewTilePane({ onClose, tabId }: PreviewTilePaneProps) {
       onClose={onClose}
       onRestartServer={target.kind === 'url' ? (restartPreviewServer ?? undefined) : undefined}
       reloadRequest={previewReloadRequest}
+      sessionId={tab?.sessionId}
       tabId={tabId}
       target={target}
     />

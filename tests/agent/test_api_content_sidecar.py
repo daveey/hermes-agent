@@ -843,7 +843,7 @@ class TestFlushSanitizeDivergenceCapture:
     def test_user_content_sanitize_would_rewrite_is_captured(self, tmp_path):
         """Native canonical user tags and the exact wire bytes both survive reload.
         Assistant sanitization is unchanged."""
-        from agent.memory_manager import sanitize_context
+        from agent.memory_context import sanitize_context
 
         db = SessionDB(db_path=tmp_path / "state.db")
         sid = "sess-fence"

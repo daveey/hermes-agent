@@ -1,4 +1,5 @@
-"""An unchosen default channel never moves a checkout backward on a guess."""
+"""An unchosen default channel never moves a checkout backward on a guess, and an ancestry probe
+that never answered never refuses the update (regression for #137646)."""
 import subprocess
 
 import pytest
@@ -51,19 +52,35 @@ def test_full_history_behind_release_is_proof(history, tmp_path, monkeypatch):
     assert source_releases._head_containing(["git"], clone, shas[0], "o/r") == shas[0]
 
 
-def test_ancestry_check_timeout_is_an_unknown_relation_that_keeps_head(history, tmp_path, monkeypatch):
-    """A loaded host can outlast the git budget; that must not fail the channel lookup."""
-    origin, shas = history
-    clone = tmp_path / "full"
-    _git(tmp_path, "clone", "-q", str(origin), str(clone))
-    real_run = subprocess.run
+def _timeout_git_probe(monkeypatch, subcommand: str):
+    """Simulate only the unanswered probe; other commands keep real git and their normal bounds.
 
-    def slow_merge_base(cmd, *args, **kwargs):
-        if "merge-base" in cmd:
-            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+    Inject TimeoutExpired instead of shortening a shared timeout: the strict HEAD read must not
+    become load-sensitive before the test reaches the ancestry probe.
+    """
+    real_run = subprocess.run
+    timed_out = []
+
+    def run(cmd, *args, **kwargs):
+        if cmd[:2] == ["git", subcommand]:
+            timed_out.append(cmd)
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
         return real_run(cmd, *args, **kwargs)
 
-    monkeypatch.setattr(source_releases.subprocess, "run", slow_merge_base)
-    assert source_releases._head_containing(["git"], clone, shas[0], "o/r") == shas[2]
-    # The local git budget is generous enough for a loaded CI shard.
+    monkeypatch.setattr(source_releases.subprocess, "run", run)
+    return timed_out
+
+
+@pytest.mark.parametrize("compare, keeps_head", [({"status": "ahead"}, True), ({"status": "behind"}, False)])
+def test_a_probe_that_never_answered_leaves_the_relation_unknown(history, monkeypatch, compare, keeps_head):
+    """A killed probe is an unknown relation, not a reason to refuse the channel (#137646)."""
+    origin, shas = history
+    timed_out = _timeout_git_probe(monkeypatch, "merge-base")
+    monkeypatch.setattr(source_check, "_github_compare", lambda *a, **k: compare)
+    assert source_releases._head_containing(["git"], origin, shas[2], "o/r") == (shas[2] if keeps_head else None)
+    assert timed_out == [["git", "merge-base", "--is-ancestor", shas[2], shas[2]]]
+
+
+def test_local_git_budget_is_generous_for_a_loaded_host():
+    """[daveey] Local git on a loaded host (CI shards, cold caches) can take well over 10s."""
     assert source_releases._LOCAL_GIT_TIMEOUT >= 60

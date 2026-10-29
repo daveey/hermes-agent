@@ -33,6 +33,7 @@ export const zhProjects: NonNullable<TranslationOverrides['sidebar']>['projects'
   movedTo: name => `已移动到 ${name}`,
   moveFailed: '无法移动会话',
   moveNoFolder: '该项目没有可移入的文件夹',
+  moveBusy: '请先停止正在运行的回合，再移动该聊天',
   moveNoProjects: '没有其他项目',
   movePlaceholder: title => `将“${title}”移至…`,
   createAndMove: name => `创建项目“${name}”`,

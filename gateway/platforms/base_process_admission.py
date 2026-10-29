@@ -41,10 +41,12 @@ async def handle_message(self, event: MessageEvent) -> None:
                        expected_session_key, session_key)
         return
     inbound(self, event, session_key)
+    from gateway.session_ingress_burst import burst_gate
+    behind_burst = await burst_gate(self, event, session_key)  # a serial reader's command waits too
     # On-entry self-heal: clear a guard whose owner task already exited.
     if session_key in self._active_sessions:
         self._heal_stale_session_lock(session_key)
-    if session_key in self._active_sessions:
+    if session_key in self._active_sessions or behind_burst:
         await self._handle_message_while_active(event, session_key)
         return
     # Guard installed synchronously BEFORE the task spawns so a second message can't race in.

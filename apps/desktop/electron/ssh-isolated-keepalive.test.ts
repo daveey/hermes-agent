@@ -5,7 +5,7 @@
  * the scope. Sticky artifacts (nonce / token file / lockfile) are NOT liveness.
  *
  * The pool-stop teardown fence that closes this socket is asserted in
- * pool-stop.test.ts (afterStop) — AGENTS.md forbids reading `.ts` source from tests.
+ * main.ts stopPoolBackend (pool-stop.ts was retired upstream) — AGENTS.md forbids reading `.ts` source from tests.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 

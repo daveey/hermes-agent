@@ -55,9 +55,16 @@ import {
   sessionPinId
 } from '@/store/session'
 import { $sessionColorOverrides, setSessionColorOverride } from '@/store/session-color'
+import { ambientRequestFor } from '@/store/session-gone-latch'
 import { $sessionRenameTarget, closeSessionRename } from '@/store/session-rename'
 import { sessionOwnerRouteFromRow } from '@/store/session-request-router'
-import { $sessionStates, $sessionTiles, closeAllOpenSessionTiles, runtimeSessionOwner } from '@/store/session-states'
+import {
+  $sessionStates,
+  $sessionTiles,
+  closeAllOpenSessionTiles,
+  requestForOwnedSession,
+  runtimeSessionOwner
+} from '@/store/session-states'
 import { ackStoredSessionId } from '@/store/session-unread'
 import { canOpenSessionInTerminal, canOpenSessionWindow, openSessionInTerminal } from '@/store/windows'
 
@@ -154,9 +161,17 @@ export async function renameSessionPreferringRpc(
     try {
       const params = { session_id: runtimeId, title }
 
+      // An explicitly selected row names its owner [daveey]; otherwise the
+      // runtime lives on its owner's backend and the ambient socket would
+      // refuse a secondary profile's session and drop us to REST.
       const result = owner
         ? await requestGatewayForAgent<SessionTitleResponse>(owner.connectionId, owner.profile, 'session.title', params)
-        : await gateway!.request<SessionTitleResponse>('session.title', params)
+        : await requestForOwnedSession<SessionTitleResponse>(
+            runtimeId,
+            ambientRequestFor(gateway!),
+            'session.title',
+            params
+          )
 
       return { title: result?.title ?? title }
     } catch (err) {
@@ -704,11 +719,20 @@ function DeleteSessionDialog({ open, onOpenChange, onConfirm, sessionTitle }: De
 }
 
 interface SessionActionsMenuProps
-  extends SessionActions, Pick<React.ComponentProps<typeof ActionsMenu>, 'align' | 'sideOffset'> {
+  extends
+    SessionActions,
+    Pick<React.ComponentProps<typeof ActionsMenu>, 'align' | 'onOpenChange' | 'open' | 'sideOffset'> {
   children: React.ReactNode
 }
 
-export function SessionActionsMenu({ children, align = 'end', sideOffset = 6, ...actions }: SessionActionsMenuProps) {
+export function SessionActionsMenu({
+  children,
+  align = 'end',
+  onOpenChange,
+  open,
+  sideOffset = 6,
+  ...actions
+}: SessionActionsMenuProps) {
   const { t } = useI18n()
   const { deleteDialog, onCloseAutoFocus, renameDialog, renderItems } = useSessionActions(actions)
 
@@ -720,6 +744,8 @@ export function SessionActionsMenu({ children, align = 'end', sideOffset = 6, ..
         contentClassName="w-40"
         items={renderItems}
         onCloseAutoFocus={onCloseAutoFocus}
+        onOpenChange={onOpenChange}
+        open={open}
         sideOffset={sideOffset}
       >
         {children}

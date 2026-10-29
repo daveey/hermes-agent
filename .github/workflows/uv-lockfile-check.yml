@@ -45,6 +45,11 @@ name: uv.lock check
 
 on:
   workflow_call:
+    inputs:
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
     outputs:
       review_status:
         description: "JSON review status for the review-status aggregator"
@@ -54,8 +59,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: uv-lockfile-check-${{ (github.ref_type == 'tag' || github.ref == 'refs/heads/main') && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: uv-lockfile-check-${{ (github.ref_type == 'tag' || github.ref == 'refs/heads/main' || inputs.commit != '') && github.run_id || github.ref }}
+  # fork: main pushes keep their own run; upstream: a stable dispatch (inputs.commit) never queues behind or cancels a push.
+  cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.commit == '' }}
 
 jobs:
   check:
@@ -66,7 +72,9 @@ jobs:
       review_status: ${{ steps.verify.outputs.review_status }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
+        with:
+          ref: ${{ inputs.commit }}
 
       - uses: ./.github/actions/setup-pm
         with:

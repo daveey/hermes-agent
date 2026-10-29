@@ -12,17 +12,11 @@ import {
   startManualOnboarding,
   startManualProviderOAuth
 } from '@/store/onboarding'
-import type * as OnboardingGateModule from '@/store/onboarding-gate'
 import type * as SessionModule from '@/store/session'
 import { setModelPickerOpen } from '@/store/session'
 
 import { ExhaustedRecovery } from './exhausted'
 
-vi.mock('@/store/onboarding-gate', async importOriginal => ({
-  ...(await importOriginal<typeof OnboardingGateModule>()),
-  afterOnboardingStateRead: (callback: () => void) => callback(),
-  guidedOnboardingActive: () => false
-}))
 vi.mock('@/store/onboarding', async importOriginal => ({
   ...(await importOriginal<typeof OnboardingModule>()),
   closeManualOnboarding: vi.fn(),

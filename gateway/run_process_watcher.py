@@ -6,17 +6,25 @@ logger = logging.getLogger("gateway.run")
 
 
 class GatewayProcessWatcherMixin:
-    async def _run_process_watcher(self, watcher):
+    async def _run_process_watcher(self, watcher: dict) -> None:
+        """Run :meth:`_watch_process` inside the owning profile's scope, start to finish. A watcher starts
+        in an empty context (live-armed from a tool thread, or recovered at startup), and the output it
+        prepares runs that profile's own ``transform_terminal_output`` hooks before any delivery.
+        [daveey] ``watching`` records the watcher's liveness for the process-consumer health report."""
         from tools.process_registry import process_registry
         from gateway.process_consumer_health import watching
         with watching(self, watcher, process_registry):
-            await self._run_process_watcher_body(watcher)
+            async with self._completion_event_scope(watcher):
+                await self._watch_process(watcher)
 
-    async def _run_process_watcher_body(self, watcher: dict) -> None:
+    async def _watch_process(self, watcher: dict) -> None:
         """Poll a background process and push updates until it exits. Mode
         (``display.background_process_notifications``): concise (default one-liner; failures append
         the output tail) / all (running updates + final raw) / result (final raw) / error (final raw
         if exit != 0) / off."""
+        from agent.retry_utils import jittered_backoff
+        from gateway.run_notifications import (
+            _COMPLETION_INJECTION_RETRY_MAX_DELAY, _MAX_COMPLETION_INJECTION_ATTEMPTS)
         from tools.process_registry import process_registry
         from tools.process_registry_notifications import format_process_notification, should_surface_notification
         session_id = watcher["session_id"]
@@ -25,24 +33,22 @@ class GatewayProcessWatcherMixin:
         chat_id = watcher.get("chat_id", "")
         thread_id = watcher.get("thread_id", "")
         agent_notify = watcher.get("notify_on_complete", False)
-        # The mode belongs to the profile that started the process; recovered watchers run in the
-        # root context, so resolve it under the owning profile's scope (no-op for the default).
-        async with self._completion_event_scope(watcher):
-            notify_mode = self._load_background_notifications_mode()
+        notify_mode = self._load_background_notifications_mode()  # the owning profile's (scope bound above)
         logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
                       session_id, interval, notify_mode, agent_notify)
         silent = notify_mode == "off" and not agent_notify
         last_output_len = 0
+        completion_attempts = 0
+        retry_interval = interval
         while True:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(retry_interval)
             session = process_registry.get(session_id)
             if session is None:
                 break
-            async with self._completion_event_scope(watcher):
-                surface = should_surface_notification({
-                    "owner_task_id": getattr(session, "owner_task_id", ""),
-                    "task_id": getattr(session, "task_id", ""),
-                })
+            surface = should_surface_notification({
+                "owner_task_id": getattr(session, "owner_task_id", ""),
+                "task_id": getattr(session, "task_id", ""),
+            })
             if not surface:
                 # Recheck live ownership next tick: handoff retains notification intent.
                 if session.exited:
@@ -68,20 +74,43 @@ class GatewayProcessWatcherMixin:
                     # turn itself installs the guard).
                     turn_busy = await self._launching_turn_active(platform_name, watcher)
                     delivered = await self._enqueue_process_completion_notification(synth_text, completion_evt)
-                    if delivered is False:
-                        # The process remains terminal; retry after failed adapter injection instead
-                        # of suppressing the result.
+                    if delivered is not False:
+                        # The agent normally reports the result itself, so the chat gets no separate
+                        # receipt. While the launching turn is still running the injection only queues a
+                        # follow-up, and the chat would stay mute for as long as that turn lasts
+                        # (#112033): send the concise receipt now.
+                        if turn_busy and (notify_mode in {"concise", "all", "result"} or (
+                            notify_mode == "error" and session.exit_code not in {0, None}
+                        )):
+                            message_text = self._format_process_final_message(session_id, session, "concise")
+                            await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
+                        break
+                    # A refusal may clear (adapter reconnecting, store draining), so retry with backoff
+                    # for a few minutes, then fall through to the plain notice instead of dropping it.
+                    completion_attempts += 1
+                    if completion_attempts < _MAX_COMPLETION_INJECTION_ATTEMPTS:
+                        retry_interval = jittered_backoff(
+                            completion_attempts, base_delay=max(interval, 1) * 2,
+                            max_delay=_COMPLETION_INJECTION_RETRY_MAX_DELAY, jitter_ratio=0.0)
                         continue
-                    # The agent normally reports the result itself, so the chat gets no separate receipt.
-                    # While the launching turn is still running the injection only queues a follow-up, and
-                    # the chat would stay mute for as long as that turn lasts (#112033): send the concise
-                    # receipt now.
-                    if turn_busy and (notify_mode in {"concise", "all", "result"} or (
-                        notify_mode == "error" and session.exit_code not in {0, None}
-                    )):
-                        message_text = self._format_process_final_message(session_id, session, "concise")
-                        await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
-                    break
+                    if (getattr(self, 'session_authority', None) is not None
+                            and self._completion_delivery_identity(completion_evt) is not None):
+                        from gateway.session_automation import completion_admission
+                        try:
+                            # The owning profile's authority, as on the delivery path.
+                            async with self._completion_event_scope(completion_evt):
+                                committed = completion_admission(self, completion_evt) is not None
+                        except Exception:
+                            # Failing open sends the notice; a dead watcher would send nothing.
+                            logger.debug("Process watcher: admission recheck failed for %s", session_id,
+                                         exc_info=True)
+                            committed = False
+                        if committed:
+                            break  # The last refusal was a lost ACK: the turn is committed.
+                    logger.warning(
+                        "Process watcher: completion for %s was refused %d times; falling back to the "
+                        "notify_mode=%s notice", session_id, completion_attempts, notify_mode,
+                    )
                 # Text-only notification; skip when already consumed via wait/log (the agent_notify branch
                 # FALLS THROUGH here, hence the re-check).
                 if process_registry.is_completion_consumed(session_id):
@@ -95,11 +124,10 @@ class GatewayProcessWatcherMixin:
                 ):
                     message_text = self._format_process_final_message(session_id, session, notify_mode)
                     from gateway.warning_notifications import present_notification
-                    async with self._completion_event_scope(watcher):
-                        # Non-zero exit is the automatic diagnostic; a clean completion is the requested result.
-                        await present_notification(
-                            lambda: self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher),
-                            platform=platform_name, diagnostic=session.exit_code not in {0, None})
+                    # Non-zero exit is the automatic diagnostic; a clean completion is the requested result.
+                    await present_notification(
+                        lambda: self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher),
+                        platform=platform_name, diagnostic=session.exit_code not in {0, None})
                 break
             elif has_new_output and notify_mode == "all" and not agent_notify:
                 # New output — deliver a status update (only in "all" mode; agent_notify watchers
@@ -108,3 +136,6 @@ class GatewayProcessWatcherMixin:
                     platform_name, chat_id, thread_id, self._format_process_running_message(session), watcher,
                 )
         logger.debug("Process watcher ended%s: %s", " (silent)" if silent else "", session_id)
+
+    # Former name of the poll loop (fork tests and callers).
+    _run_process_watcher_body = _watch_process

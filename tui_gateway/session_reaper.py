@@ -267,13 +267,13 @@ def _session_owns_running_process(session: dict) -> bool:
 
 
 def _session_is_reapable(sid: str, session: dict) -> bool:
-    """Reaper eligibility: the LRU exemptions, and not the sole driver of an active /loop or /heartbeat
-    (closing the session stops the notification poller that fires it, freezing the schedule until a client
-    reattaches), and not the owner of a running background job (closing would kill it — see
-    ``_session_owns_running_process``). Kept out of ``_sessions_quiescent``: an idle session with a schedule
-    or a background job does not block a memory trim."""
-    return (_session_is_lru_evictable(sid, session)
-            and not _session_owns_live_wakeup_schedule(session)
+    """Reaper eligibility: the LRU exemptions, and not the sole receiver of a pending wake-up — an active /loop or
+    /heartbeat, or a running background process that will notify it (closing the session stops the notification
+    poller that delivers both, and ``agent_close`` kills the process). [daveey] Nor the owner of ANY running
+    background job (closing would kill it — see ``_session_owns_running_process``). Kept out of
+    ``_sessions_quiescent``: an idle session waiting on a wake-up does not block a memory trim."""
+    return (_session_is_lru_evictable(sid, session) and not _session_owns_live_wakeup_schedule(session)
+            and not _session_owns_pending_process_notification(session)
             and not _session_owns_running_process(session))
 
 

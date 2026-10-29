@@ -19,6 +19,10 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
       release:
         description: 'Stable-release candidate run (ignored by the jobs; uniform callable surface).'
         required: false
@@ -41,11 +45,10 @@ jobs:
     runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
-          # github.sha is the exact candidate commit on a stable tag-dispatched
-          # caller and the head SHA on every other event.
-          ref: ${{ github.sha }}
+          # A stable run passes the claim commit. Every other event tests its own head SHA.
+          ref: ${{ inputs.commit || github.sha }}
           persist-credentials: false
       - name: Install the native linker test prerequisite
         run: |
@@ -72,11 +75,10 @@ jobs:
     runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
-          # github.sha is the exact candidate commit on a stable tag-dispatched
-          # caller and the head SHA on every other event.
-          ref: ${{ github.sha }}
+          # A stable run passes the claim commit. Every other event tests its own head SHA.
+          ref: ${{ inputs.commit || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-pm
         with:
@@ -127,11 +129,10 @@ jobs:
       CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
       CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
-          # github.sha is the exact candidate commit on a stable tag-dispatched
-          # caller and the head SHA on every other event.
-          ref: ${{ github.sha }}
+          # A stable run passes the claim commit. Every other event tests its own head SHA.
+          ref: ${{ inputs.commit || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-pm
         with:

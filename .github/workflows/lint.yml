@@ -15,6 +15,10 @@ name: Lint (ruff + ty)
 on:
   workflow_call:
     inputs:
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
       event_name:
         description: The event name from the calling orchestrator (pull_request or push).
         type: string
@@ -28,8 +32,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: lint-${{ (github.ref_type == 'tag' || github.ref == 'refs/heads/main') && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: lint-${{ (github.ref_type == 'tag' || github.ref == 'refs/heads/main' || inputs.commit != '') && github.run_id || github.ref }}
+  # fork: main pushes keep their own run; upstream: a stable dispatch (inputs.commit) never queues behind or cancels a push.
+  cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.commit == '' }}
 
 jobs:
   lint-diff:
@@ -39,8 +44,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
+          ref: ${{ inputs.commit }}
           fetch-depth: 0 # need full history for merge-base + worktree
 
       - uses: ./.github/actions/setup-pm
@@ -51,7 +57,7 @@ jobs:
       - name: Install ruff + ty
         uses: ./.github/actions/retry
         with:
-          command: python -m scripts.ci.python_packages "$(python -m scripts.code_health --print-pins)" ty==0.0.82
+          command: python -m scripts.ci.python_packages "$(python -m scripts.code_health --print-pins)" ty==0.0.89
 
       - name: Determine base ref
         id: base
@@ -145,7 +151,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
+        with:
+          ref: ${{ inputs.commit }}
 
       - uses: ./.github/actions/setup-pm
         with:
@@ -181,8 +189,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
+          ref: ${{ inputs.commit }}
           fetch-depth: 2 # the merge commit and its first parent (the base branch tip)
 
       - uses: ./.github/actions/setup-pm
@@ -216,7 +225,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
+        with:
+          ref: ${{ inputs.commit }}
 
       - uses: ./.github/actions/setup-pm
         with:
@@ -237,10 +248,21 @@ jobs:
       - name: Forbid literal /tmp paths outside the baseline
         run: python scripts/check_no_tmp_literals.py
 
+      # A child in its own session/group (start_new_session, os.setsid/setpgid) does not die with
+      # a SIGKILLed Hermes. Long-lived children start through process_identity.spawn_owned; a line
+      # that must stay detached says why with `detached-spawn: ok — <why>`.
+      - name: Forbid detached spawns outside the owned-child helper
+        run: python scripts/check_detached_spawns.py
+
       # config.yaml is hand-edited and commented; a PyYAML dump of it destroys every comment
       # (#92554, regressed repeatedly). All writers go through the hermes_cli.config writer seam.
       - name: Forbid config.yaml writers that bypass the comment-preserving writer
         run: python scripts/check_config_yaml_writers.py
+
+      # Every read of a user config.yaml goes through hermes_cli.config_backend, so a non-file
+      # config backend (config-config design §4.1) sees every reader.
+      - name: Forbid config.yaml readers that bypass the config backend
+        run: python scripts/check_config_yaml_readers.py
 
       # The OS lanes import only files carrying the matching marker, so a test that fakes
       # macOS (is_macos -> True, sys.platform -> "darwin") without `platforms("macos")` is green on

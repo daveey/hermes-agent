@@ -34,6 +34,7 @@ from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_admission import admission_hold_set, claim_transaction, claim_and_open_run
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
+from utils import unlink_files_older_than
 
 _log = logging.getLogger(__name__)
 
@@ -2497,7 +2498,10 @@ def release_stale_claims(
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
         "  AND claim_expires < ?", (now,),
     ).fetchall()
+    from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, reclaim_error
     for row in stale:
+        if owner_reclaim_blocked(conn, row["id"]):
+            continue
         host_local = _claim_is_local(row["claim_lock"], host_prefix)
         hb = _to_epoch(row["last_heartbeat_at"])
         # Backstop: a heartbeat older than the max-stale threshold means no
@@ -2521,7 +2525,11 @@ def release_stale_claims(
             )
             continue
         with write_txn(conn):
-            retry_status = _retry_status_for_run(conn, row["id"])
+            # Again under the write lock: an interpreter that bound since the check above
+            # changes neither claim_lock nor worker_pid, so the CAS below cannot see it.
+            if owner_reclaim_blocked_after_kill(conn, row["id"], signalled=bool(termination.get("termination_attempted"))):
+                continue
+            retry_status, error = _retry_status_for_run(conn, row["id"]), reclaim_error(conn, row["id"], row["claim_lock"])
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
@@ -2535,7 +2543,7 @@ def release_stale_claims(
                 continue
             run_id = _record_reclaim(
                 conn, row["id"], termination, outcome="lease_lost" if lease_lost else "reclaimed",
-                error=f"stale_lock={row['claim_lock']}",
+                error=error,
                 payload={
                     "stale_lock": row["claim_lock"],
                     "worker_pid": _opt_int(row["worker_pid"]),
@@ -2552,7 +2560,7 @@ def release_stale_claims(
         # the run ended without a verdict, so it counts toward the breaker and a
         # trip flips the task to ``blocked`` + ``gave_up`` on top of ``reclaimed``.
         _record_task_failure(
-            conn, row["id"], f"stale_lock={row['claim_lock']}",
+            conn, row["id"], error,
             outcome="reclaimed", failure_limit=failure_limit,
             release_claim=False, end_run=False,
             event_payload_extra={"worker_pid": _opt_int(row["worker_pid"]), "retry_status": retry_status},
@@ -4219,6 +4227,10 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
+    from hermes_cli.kanban_db_context import (
+        _ctx_attachments, _ctx_comments, _ctx_header, _ctx_parent_results, _ctx_prior_attempts,
+        _ctx_role_history,
+    )
     # One clock reading so every relative age in this rendering agrees.
     now = int(time.time())
     lines: list[str] = []
@@ -4247,139 +4259,6 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     return "\n".join(lines).rstrip() + "\n" + build_recovery_context(conn, task_id)
 
 
-def _ctx_header(lines: list[str], task: Task) -> None:
-    lines.append(f"# Kanban task {task.id}: {task.title}")
-    lines.append("")
-    lines.append(f"Assignee: {task.assignee or '(unassigned)'}")
-    lines.append(f"Status:   {task.status}")
-    if task.tenant:
-        lines.append(f"Tenant:   {task.tenant}")
-    lines.append(f"Workspace: {task.workspace_kind} @ {task.workspace_path or '(unresolved)'}")
-    if task.max_runtime_seconds is not None:
-        terminal_timeout = _worker_terminal_timeout_env(
-            task.max_runtime_seconds, os.environ.get("TERMINAL_TIMEOUT"),
-        )
-        effective_terminal_timeout = terminal_timeout or os.environ.get("TERMINAL_TIMEOUT")
-        lines.append(f"Max runtime: {task.max_runtime_seconds}s")
-        if effective_terminal_timeout:
-            lines.append(f"Terminal timeout: {effective_terminal_timeout}s")
-    if task.branch_name:
-        lines.append(f"Branch:   {task.branch_name}")
-    lines.append("")
-    if task.body and task.body.strip():
-        lines.append("## Body")
-        lines.append(_ctx_cap(task.body, _CTX_MAX_BODY_BYTES))
-        lines.append("")
-
-
-def _ctx_attachments(lines: list[str], attachments: list[Attachment]) -> None:
-    """Absolute on-disk paths so the worker's file tools read them directly
-    (remote terminal backends need the attachments dir mounted)."""
-    if not attachments:
-        return
-    lines.append("## Attachments")
-    lines.append(
-        "Files attached to this task. Read them with the file/terminal "
-        "tools at the absolute paths below:"
-    )
-    for att in attachments:
-        size_kb = max(1, (att.size + 1023) // 1024) if att.size else 0
-        size_str = f", {size_kb} KB" if size_kb else ""
-        ctype = f", {att.content_type}" if att.content_type else ""
-        lines.append(f"- `{att.filename}`{ctype}{size_str} → `{att.stored_path}`")
-    lines.append("")
-
-
-def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
-    """Closed runs on this task (the active run is this worker), newest
-    ``_CTX_MAX_PRIOR_ATTEMPTS`` in full, older ones as a one-line marker."""
-    all_prior = [r for r in list_runs(conn, task_id) if r.ended_at is not None]
-    shown, omitted_note = _ctx_tail(all_prior, _CTX_MAX_PRIOR_ATTEMPTS, "attempt")
-    if not shown:
-        return
-    first_shown_idx = len(all_prior) - len(shown) + 1
-    lines.append("## Prior attempts on this task")
-    if omitted_note:
-        lines.append(omitted_note)
-    for offset, run in enumerate(shown):
-        profile = run.profile or "(unknown)"
-        outcome = run.outcome or run.status
-        lines.append(
-            f"### Attempt {first_shown_idx + offset} — {outcome} ({profile}, {_ctx_stamp(run.started_at, now)})"
-        )
-        if run.summary and run.summary.strip():
-            lines.append(_ctx_cap(run.summary))
-        if run.error and run.error.strip():
-            lines.append(f"_error_: {_ctx_cap(run.error)}")
-        meta_line = _ctx_metadata_line(run.metadata)
-        if meta_line:
-            lines.append(meta_line)
-        lines.append("")
-
-
-def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
-    """Done-parent handoffs: newest ``completed`` run's summary+metadata,
-    falling back to ``task.result`` for pre-runs-table data. Stamped with a
-    relative age so the worker re-verifies stale upstream results."""
-    parent_rows = conn.execute(
-        "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id", (task_id,),
-    ).fetchall()
-    wrote_header = False
-    for pid in (r["parent_id"] for r in parent_rows):
-        pt = get_task(conn, pid)
-        if not pt or pt.status != "done":
-            continue
-        runs = [r for r in list_runs(conn, pid) if r.outcome == "completed"]
-        runs.sort(key=lambda r: r.started_at, reverse=True)
-        run = runs[0] if runs else None
-        if not wrote_header:
-            lines.append("## Parent task results")
-            lines.append(
-                "_Handoffs from upstream tasks, captured when each parent "
-                "completed (see age below). These are point-in-time "
-                "snapshots, not live state — if a result drives your "
-                "current work and it's not recent, re-verify against the "
-                "source before acting on it as current._"
-            )
-            wrote_header = True
-        done_ts = run.ended_at if run is not None and run.ended_at else (pt.completed_at or None)
-        age = _relative_age(done_ts, now)
-        lines.append(f"### {pid}" + (f" (completed {age})" if age else ""))
-        if run is not None and run.summary and run.summary.strip():
-            lines.append(_ctx_cap(run.summary))
-        elif pt.result:
-            lines.append(_ctx_cap(pt.result))
-        else:
-            lines.append("(no result recorded)")
-        meta_line = _ctx_metadata_line(run.metadata) if run is not None else None
-        if meta_line:
-            lines.append(meta_line)
-        lines.append("")
-
-
-def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, now: int) -> None:
-    """The assignee's 5 most recent completed runs on OTHER tasks — implicit
-    role continuity without wiring anything into SOUL.md / MEMORY.md."""
-    if not task.assignee:
-        return
-    role_rows = conn.execute(
-        "SELECT t.id, t.title, r.summary, r.ended_at "
-        "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
-        "WHERE r.profile = ? AND r.task_id != ? "
-        "  AND r.outcome = 'completed' "
-        "ORDER BY r.ended_at DESC LIMIT 5", (task.assignee, task.id),
-    ).fetchall()
-    if not role_rows:
-        return
-    lines.append(f"## Recent work by @{task.assignee}")
-    for row in role_rows:
-        first = _first_line(row["summary"], 200) or "(no summary)"
-        lines.append(
-            f"- {row['id']} — {row['title']} ({_ctx_stamp(_to_epoch(row['ended_at']) or 0, now)}): {first}"
-        )
-    lines.append("")
-
-
 def _ctx_standing(lines: list[str], task: Task, comments: list[Comment]) -> None:
     """Every ``standing:`` line in the body or ANY comment, word for word, ahead of everything else. [daveey]
 
@@ -4397,28 +4276,6 @@ def _ctx_standing(lines: list[str], task: Task, comments: list[Comment]) -> None
     lines.append("(These still govern this run: e.g. a standing \"don't wait\" means decide it yourself instead "
                  "of blocking on the user, unless only a human can act — a credential, a physical step.)")
     lines.append("")
-
-
-def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
-    """Newest ``_CTX_MAX_COMMENTS`` comments. The explicit "comment from
-    worker" framing stops an operator-controlled HERMES_PROFILE like
-    "hermes-system" being read as a system directive above an
-    attacker-influenceable body (defense-in-depth)."""
-    shown, omitted_note = _ctx_tail(comments, _CTX_MAX_COMMENTS, "comment")
-    if not shown:
-        return
-    lines.append("## Comment thread")
-    if omitted_note:
-        lines.append(omitted_note)
-    for c in shown:
-        # Render author with explicit "comment from worker" framing so operator-controlled HERMES_PROFILE
-        # values like "hermes-system" or "operator" can't be misread by the next worker as a system
-        # directive above the (attacker-influenceable) comment body. Defense-in-depth — the LLM-controlled
-        # author-forgery surface was already closed in #22435. See #22452.
-        safe_author = (c.author or "").replace("`", "")
-        lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
-        lines.append(_ctx_cap(c.body, _CTX_MAX_COMMENT_BYTES))
-        lines.append("")
 
 
 # --- Stats + SLA helpers ---
@@ -4518,14 +4375,7 @@ def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[
     log_dir = worker_logs_dir(board=board)
     if not log_dir.exists():
         return 0
-    cutoff = time.time() - older_than_seconds
-    removed = 0
-    for p in log_dir.iterdir():
-        with contextlib.suppress(OSError):
-            if p.is_file() and p.stat().st_mtime < cutoff:
-                p.unlink()
-                removed += 1
-    return removed
+    return unlink_files_older_than(log_dir, "*", older_than_seconds)
 
 
 # --- Worker log accessor ---
@@ -4577,7 +4427,7 @@ def list_profiles_on_disk() -> list[str]:
         names.add("default")
     if profiles_dir.is_dir():
         try:
-            names.update(e.name for e in profiles_dir.iterdir() if e.is_dir() and (e / "config.yaml").is_file())
+            names.update(e.name for e in profiles_dir.iterdir() if e.is_dir() and (e / "config.yaml").is_file())  # config-reader: ok — profile directory discovery marker
         except OSError:
             pass
     return sorted(names)
@@ -4697,18 +4547,6 @@ from hermes_cli.kanban_db_boards import (
     read_board_metadata,
     remove_board,
     write_board_metadata,
-)
-from hermes_cli.kanban_db_context import (
-    _CTX_MAX_BODY_BYTES,
-    _CTX_MAX_COMMENT_BYTES,
-    _CTX_MAX_COMMENTS,
-    _CTX_MAX_FIELD_BYTES,
-    _CTX_MAX_PRIOR_ATTEMPTS,
-    _ctx_cap,
-    _ctx_metadata_line,
-    _ctx_stamp,
-    _ctx_tail,
-    _relative_age,
 )
 from hermes_cli.kanban_db_connect import (
     _INITIALIZED_PATHS,

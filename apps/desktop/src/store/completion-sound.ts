@@ -1,31 +1,23 @@
 import { atom } from 'nanostores'
 
+import { persistStore } from '@/lib/persist-store'
 import { persistString, storedString } from '@/lib/storage'
 
 const STORAGE_KEY = 'hermes.desktop.completionSoundVariantId'
 
 export const DEFAULT_COMPLETION_SOUND_VARIANT_ID = 1
 
-// 0 = Off (no completion sound). 1–14 are the curated presets in
-// lib/completion-sound.ts. Validating by range (not membership) keeps this
-// store free of a dependency on the lib, which imports the atom back.
-export const COMPLETION_SOUND_OFF_ID = 0
+// "None": variant 0 disables the turn-end cue but stays a selectable settings value.
+export const NO_COMPLETION_SOUND_VARIANT_ID = 0
 
-// Range mirrors COMPLETION_SOUND_VARIANTS in lib/completion-sound.ts. Validating
-// by range (not membership) keeps this store free of a dependency on the lib,
-// which imports the atom back — a membership check would close that cycle.
+// Range mirrors COMPLETION_SOUND_VARIANTS in lib/completion-sound.ts (0 = no
+// sound). Validating by range (not membership) keeps this store free of a
+// dependency on the lib, which imports the atom back — a membership check would
+// close that cycle.
 const VARIANT_COUNT = 14
 
-export function isCompletionSoundOff(variantId: number): boolean {
-  return variantId === COMPLETION_SOUND_OFF_ID
-}
-
 export function resolveCompletionSoundVariantId(variantId: number): number {
-  if (variantId === COMPLETION_SOUND_OFF_ID) {
-    return COMPLETION_SOUND_OFF_ID
-  }
-
-  return Number.isInteger(variantId) && variantId >= 1 && variantId <= VARIANT_COUNT
+  return Number.isInteger(variantId) && variantId >= 0 && variantId <= VARIANT_COUNT
     ? variantId
     : DEFAULT_COMPLETION_SOUND_VARIANT_ID
 }
@@ -38,7 +30,11 @@ function load(): number {
 
 export const $completionSoundVariantId = atom(load())
 
-$completionSoundVariantId.subscribe(id => persistString(STORAGE_KEY, String(id)))
+persistStore(
+  $completionSoundVariantId,
+  (id, options) => persistString(STORAGE_KEY, String(id), options),
+  DEFAULT_COMPLETION_SOUND_VARIANT_ID
+)
 
 export function setCompletionSoundVariantId(variantId: number) {
   $completionSoundVariantId.set(resolveCompletionSoundVariantId(variantId))

@@ -34,10 +34,19 @@ UPDATE_HOLD_QUEUE_REASON = "update_hold_queue"
 UPDATE_HOLD_QUEUE_MAX_AGE_S = 3600.0
 
 _lock = threading.Lock()
+_file_lock_holder = threading.local()
 
 
 def _marker_path(home: Path | str) -> Path:
     return Path(home) / "desktop" / "interrupted_turns.json"
+
+
+def _cross_process_lock(path: Path):
+    """Sibling backends on one HERMES_HOME (#94778) don't share ``_lock``; without this flock one's stale
+    load → store resurrects a marker the other just cleared (a finished turn auto-continues again)."""
+    from hermes_cli.auth import _file_lock
+    return _file_lock(path.with_name(f"{path.name}.lock"), _file_lock_holder, 5.0,
+                      f"Timed out waiting for the turn-marker lock ({path})")
 
 
 def _started_at(entry: dict) -> float:
@@ -125,8 +134,8 @@ def _store(path: Path, entries: dict[str, dict]) -> None:
 def _update(home: Path | str, session_key: str, mutate, what: str) -> bool:
     """Load → ``mutate(entries)`` → store under the lock; ``mutate`` returns None to skip the write."""
     try:
-        with _lock:
-            path = _marker_path(home)
+        path = _marker_path(home)
+        with _lock, _cross_process_lock(path):
             entries = mutate(_load(path))
             if entries is not None:
                 _store(path, entries)

@@ -26,7 +26,7 @@ from tools.tool_search_catalog import (
     build_catalog, build_catalog_listing_with_form, search_catalog)
 from tools.tool_search_validation import (
     canonical_bridge_tool_name, local_batch_error, normalize_tool_call_entries, not_deferrable_error,
-    validate_deferred_call_args)
+    session_unavailable_error, unavailable_in_session_reason, validate_deferred_call_args)
 from tools.connectors import CONNECTOR_BATCH_SENTINEL, is_connector_name
 from tools.connectors.search import (
     connections_in_scope, connector_entries_by_group, connectors_unavailable, remote_schemas_for)
@@ -224,6 +224,13 @@ def _tool_def_names(tool_defs: Iterable[dict[str, Any]]) -> Iterable[str]:
     return (_fn(td).get("name", "") for td in tool_defs)
 
 
+def session_tool_names(tool_defs: Iterable[dict[str, Any]]) -> frozenset[str]:
+    """Every tool name in the session's ``tool_defs`` — what this session can actually
+    reach. Public wrapper over the private name extractor so callers outside this module
+    (the ``model_tools`` dispatcher) can scope error messages to the real session."""
+    return frozenset(n for n in _tool_def_names(tool_defs) if n)
+
+
 def classify_tools(tool_defs: list[dict[str, Any]], defer_tools: Optional[frozenset] = None,
                    eager_tools: frozenset = frozenset(),
                    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -282,8 +289,9 @@ def _bridge_schema(name: str, description: str, properties: dict[str, Any],
 
 
 _CONNECTIONS_HINT = (
-    " `connectors__` names are tools of the user's app accounts (Gmail, Linear, ...); "
-    "`manage_connections` checks or authorizes an account.")
+    " Searches also cover the user's connected app accounts, whose tools are hosted and so "
+    "never listed here (results named `connectors__<app>__<tool>`); `manage_connections` checks "
+    "or connects an account.")
 
 
 def _search_description(deferred_count: int, listing: Optional[str], listing_form: str,
@@ -561,6 +569,7 @@ def dispatch_tool_describe(args: dict[str, Any], *, current_tool_defs: list[dict
     not_found: list[str] = []
     undescribed: list[str] = []
     errors: dict[str, str] = {}
+    session_names = session_tool_names(current_tool_defs)
     for name in names:
         if name not in by_name and name not in remote_schemas:
             name = canonical_bridge_tool_name(name)  # OAuth wire form (mcp__<tool>) -> registered
@@ -574,12 +583,15 @@ def dispatch_tool_describe(args: dict[str, Any], *, current_tool_defs: list[dict
                            "parameters": remote_fn.get("parameters", {})}
         elif is_connector_name(name):
             (undescribed if hosted_failure else not_found).append(name)
+        elif unavailable := session_unavailable_error(name, session_names):
+            # A core tool absent here, deferred or not: tool_search cannot surface it.
+            errors[name] = unavailable
         elif _registry_entry(name) is not None and not is_deferrable_tool_name(
             name, (_cfg := load_config_readonly()).effective_defer_tools, _cfg.eager_tools):
             # Registered but bridge/core/GUI-surface: a real name, wrong door — unless it is absent from
             # this session's schemas (toolset off for the platform), which needs a different fix. [daveey]
             errors[name] = not_deferrable_error(
-                name, in_session=name in set(_tool_def_names(current_tool_defs)))
+                name, session_names, in_session=name in set(_tool_def_names(current_tool_defs)))
         else:
             not_found.append(name)
     result: dict[str, Any] = {"tools": tools}
@@ -622,7 +634,18 @@ def out_of_scope_reason(name: str) -> Optional[str]:
     return None
 
 
-def resolve_underlying_call(args: dict[str, Any]) -> tuple[Optional[str], dict[str, Any], Optional[str]]:
+def scope_block_reason(name: str) -> str:
+    """Block message for a ``tool_call`` naming a tool outside the session's scope. A core tool
+    (deferred by ``defer:`` or not) names its real reason, since tool_search cannot surface it
+    here; anything else keeps the search hint."""
+    return (out_of_scope_reason(name)
+            or (unavailable_in_session_reason(name)
+                if name in _core_tool_names() and _registry_entry(name) is not None else None)
+            or f"'{name}' is not available in this session. Use tool_search to find tools you can call.")
+
+
+def resolve_underlying_call(args: dict[str, Any], session_tool_names: Optional[Iterable[str]] = None,
+                            ) -> tuple[Optional[str], dict[str, Any], Optional[str]]:
     """Parse a ``tool_call`` invocation into (underlying_name, args, error_msg).
 
     Used by:
@@ -635,6 +658,10 @@ def resolve_underlying_call(args: dict[str, Any]) -> tuple[Optional[str], dict[s
     one dispatch unit owned by the ``model_tools`` bridge branch, and the
     sentinel is what planners/display layers see. A single local entry keeps
     the historical single-tool contract unchanged.
+
+    ``session_tool_names`` is the session's own tool list, when the caller has it. Passed
+    through so a core tool this session cannot reach reports *unavailable* rather than
+    "call it directly" — the static core list cannot tell the two apart.
 
     On parse error, returns ``(None, {}, error_message)``.
     """
@@ -650,12 +677,15 @@ def resolve_underlying_call(args: dict[str, Any]) -> tuple[Optional[str], dict[s
     name = entries[0]["name"]
     raw_args = entries[0]["arguments"]
     _cfg = load_config_readonly()
+    unavailable = session_unavailable_error(name, session_tool_names)
+    if unavailable:
+        return None, {}, unavailable
     if not is_deferrable_tool_name(name, _cfg.effective_defer_tools, _cfg.eager_tools):
         if _cfg.forward_direct_calls and _registry_entry(name) is not None:
             # [daveey] Directly-listed tool sent through the bridge: run it (callers still
             # apply the session-scope gate via scoped_deferrable_names).
             return name, raw_args, None
-        return None, {}, not_deferrable_error(name)
+        return None, {}, not_deferrable_error(name, session_tool_names)
     return name, raw_args, None
 
 
@@ -684,6 +714,7 @@ __all__ = [
     "normalize_tool_call_entries",
     "out_of_scope_reason",
     "resolve_underlying_call",
+    "scope_block_reason",
     "scoped_deferrable_names",
     "search_catalog",
     "should_activate",

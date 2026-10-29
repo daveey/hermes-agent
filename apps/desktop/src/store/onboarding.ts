@@ -1,11 +1,13 @@
 import type { ModelOptionProvider } from '@hermes/shared'
 import { atom } from 'nanostores'
 
+import { invalidateAllConnectors } from '@/app/capabilities/connectors/data/keys'
 import {
   cancelOAuthSession,
   getGlobalModelOptions,
   getRecommendedDefaultModel,
   listOAuthProviders,
+  OAUTH_LONG_POLL_SECONDS,
   pollOAuthSession,
   type ProfileScope,
   setEnvVar,
@@ -14,25 +16,47 @@ import {
   validateProviderCredential
 } from '@/hermes'
 import { translateNow } from '@/i18n'
+import { writeClipboardText } from '@/lib/clipboard'
+import { restOfLongPollGap } from '@/lib/long-poll'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import {
   type CredentialFailureMetadata,
   evaluateRuntimeReadiness,
   type RuntimeReadinessResult
 } from '@/lib/runtime-readiness'
-import { ackFreeTierNotice, freeTierReadyPending, refreshFreeTierStatus, setFreeTierRoute } from '@/store/free-tier'
+import { readKey, writeKey } from '@/lib/storage'
+import {
+  $freeTierStatus,
+  ackFreeTierNotice,
+  freeTierReadyPending,
+  refreshFreeTierStatus,
+  setFreeTierRoute
+} from '@/store/free-tier'
+import { followHandoff, handoffStillMoving } from '@/store/free-tier-sign-in'
 import { $gatewayBootGeneration } from '@/store/live-sync'
 import { setMainModelAssignment } from '@/store/model-assignment'
 import { dismissNotification, notify, notifyError } from '@/store/notifications'
-import { afterOnboardingStateRead, guidedOnboardingActive } from '@/store/onboarding-gate'
+import { afterOnboardingSurfaceClear, onboardingSurfaceOpen } from '@/store/onboarding-presence'
 import { captureOnboardingScope, type OnboardingScope } from '@/store/onboarding-scope'
 import { $activeSessionId } from '@/store/session'
-import type { OAuthProvider, OAuthStartResponse } from '@/types/hermes'
+import type { AppHandoffStatus, OAuthPollResponse, OAuthProvider, OAuthStartResponse } from '@/types/hermes'
 
 type PkceStart = Extract<OAuthStartResponse, { flow: 'pkce' }>
 type DeviceStart = Extract<OAuthStartResponse, { flow: 'device_code' }>
 
 export type OnboardingMode = 'apikey' | 'oauth'
+
+export interface OnboardingSignedIn {
+  email: null | string
+  handoff: AppHandoffStatus | null
+}
+
+function signedInFrom(result: OAuthPollResponse): OnboardingSignedIn | undefined {
+  const email = result.account_email ?? null
+  const handoff = result.handoff_status ?? null
+
+  return email || handoff ? { email, handoff } : undefined
+}
 
 export type OnboardingFlow =
   | { status: 'idle' }
@@ -62,6 +86,8 @@ export type OnboardingFlow =
       pendingEndpoint?: { apiKey: string; baseUrl: string }
       providerSlug: string
       saving: boolean
+      // A Nous sign-in's account and what the free tier's apps did, shown on the screen it happened on.
+      signedIn?: OnboardingSignedIn
       status: 'confirming_model'
     }
   | { detail?: string; message: string; provider?: OAuthProvider; start?: OAuthStartResponse; status: 'error' }
@@ -112,7 +138,6 @@ export interface OnboardingContext {
 
 const CONFIGURED_CACHE_KEY = 'hermes-desktop-onboarded-v1'
 const SKIP_CACHE_KEY = 'hermes-onboarding-skipped-v1'
-const POLL_MS = 2000
 const COPY_FLASH_MS = 1500
 export const DEFAULT_ONBOARDING_REASON = 'No inference provider is configured.'
 export const DEFAULT_MANUAL_ONBOARDING_REASON = 'Add or switch inference provider.'
@@ -145,31 +170,15 @@ function writeCachedConfigured(value: boolean) {
   }
 }
 
+// Through the storage choke point: the skip is a machine-level preference,
+// so every browser and origin of this machine honours it (#145600).
 function readCachedSkipped(): boolean {
-  if (typeof window === 'undefined') {
-    return false
-  }
-
-  try {
-    return window.localStorage.getItem(SKIP_CACHE_KEY) === '1'
-  } catch {
-    return false
-  }
+  return typeof window !== 'undefined' && readKey(SKIP_CACHE_KEY) === '1'
 }
 
 function writeCachedSkipped(value: boolean) {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  try {
-    if (value) {
-      window.localStorage.setItem(SKIP_CACHE_KEY, '1')
-    } else {
-      window.localStorage.removeItem(SKIP_CACHE_KEY)
-    }
-  } catch {
-    // localStorage unavailable — degrade silently.
+  if (typeof window !== 'undefined') {
+    writeKey(SKIP_CACHE_KEY, value ? '1' : null)
   }
 }
 
@@ -190,7 +199,6 @@ export const $desktopOnboarding = atom<DesktopOnboardingState>(INITIAL)
 
 let flowGeneration = 0
 let flowScope: OnboardingScope | undefined
-let pollTimer: number | null = null
 let providersRefreshPromise: null | Promise<void> = null
 
 const errMessage = (e: unknown) => (e instanceof Error ? e.message : String(e))
@@ -214,12 +222,8 @@ const setFlow = (flow: OnboardingFlow) => patch(flow.status === 'idle' ? { flow 
 
 const sessionIdFor = (flow: OnboardingFlow) => ('start' in flow && flow.start ? flow.start.session_id : undefined)
 
+// The poll loop itself ends with its flow (see `pollSession`); only the expiry floor is a timer.
 function clearPoll() {
-  if (pollTimer !== null) {
-    window.clearInterval(pollTimer)
-    pollTimer = null
-  }
-
   clearPollExpiry()
 }
 
@@ -459,7 +463,8 @@ async function completeWithModelConfirm(
   // When true, a failing runtime check no longer blocks progression — the
   // user is allowed through onboarding regardless. Used by the API-key path,
   // where we intentionally don't validate the key (it blocked too many users).
-  ignoreRuntimeGate = false
+  ignoreRuntimeGate = false,
+  signedIn?: OnboardingSignedIn
 ) {
   const generation = flowGeneration
 
@@ -468,6 +473,9 @@ async function completeWithModelConfirm(
   if (!ctx.scope?.profile) {
     await ctx.requestGateway('reload.env').catch(() => undefined)
   }
+
+  // A sign-in can change the account the apps ride on.
+  invalidateAllConnectors()
 
   if (generation !== flowGeneration) {
     return
@@ -549,8 +557,36 @@ async function completeWithModelConfirm(
     currentModel: defaults.defaultModel,
     label: providerLabel,
     saving: false,
-    ...(defer ? { deferPersist: true } : {})
+    ...(defer ? { deferPersist: true } : {}),
+    signedIn
   })
+
+  void followSignedInMove(signedIn, generation, ctx.scope)
+}
+
+// Keep the confirm screen's line about the moving apps current until the move settles or the screen goes.
+async function followSignedInMove(signedIn: OnboardingSignedIn | undefined, generation: number, scope?: ProfileScope) {
+  const moving = signedIn?.handoff
+
+  if (!signedIn || !moving || !handoffStillMoving(moving)) {
+    return
+  }
+
+  const shown = () => {
+    const { flow } = $desktopOnboarding.get()
+
+    return generation === flowGeneration && flow.status === 'confirming_model' ? flow : null
+  }
+
+  const publish = (handoff: AppHandoffStatus) => {
+    const flow = shown()
+
+    if (flow) {
+      setFlow({ ...flow, signedIn: { email: signedIn.email, handoff } })
+    }
+  }
+
+  await followHandoff(moving, () => shown() !== null, publish, scope)
 }
 
 function providerResolutionFailure(reason: null | string) {
@@ -608,16 +644,12 @@ export function requestDesktopOnboarding(
   profile?: ProfileScope
 ) {
   const targetScope = captureOnboardingScope(profile)
-  // Not during the guided first launch. The free tier carries inference
-  // there, and a credential probe that fires anyway (a free-tier token mid
-  // refresh, a setup-profile session before its runtime settles) would drop
-  // the provider picker over the guide the user is in the middle of. Sign-in
-  // is offered where the guide chooses to, on its own ready screen.
-  afterOnboardingStateRead(() => {
-    if (guidedOnboardingActive()) {
-      return
-    }
-
+  // Not over first-run onboarding. The free account may still be in
+  // the making, and a credential probe that fires meanwhile would drop the
+  // provider picker over it; onboarding hands over to the picker
+  // itself when the account fails. [daveey] An exhausted provider (failure
+  // metadata) opens as such, on the profile that hit it, not as first-run setup.
+  afterOnboardingSurfaceClear(() =>
     patch({
       reason: reason.trim() || DEFAULT_ONBOARDING_REASON,
       requested: true,
@@ -625,7 +657,7 @@ export function requestDesktopOnboarding(
       exhausted: failure?.failure_kind === 'exhausted' ? failure : undefined,
       ...(failure?.failure_kind === 'exhausted' ? { configured: true, manual: false, freeTierReady: false } : {})
     })
-  })
+  )
 }
 
 /** Credential warning delivered passively (session create/activate/resume
@@ -654,7 +686,8 @@ export function requestDesktopOnboardingForCredentialWarning(
 ) {
   const warning = reason?.trim()
 
-  if ((!failure?.failure_kind && (!warning || !isProviderSetupErrorMessage(warning))) || guidedOnboardingActive()) {
+  // Stash while the due check is still undecided: submit consumes it later. Drop only under an open onboarding.
+  if ((!failure?.failure_kind && (!warning || !isProviderSetupErrorMessage(warning))) || onboardingSurfaceOpen()) {
     pendingCredentialWarning = null
 
     return
@@ -946,18 +979,13 @@ export async function refreshOnboarding(ctx: OnboardingContext, stillWanted?: ()
  */
 async function applyFreeTierIntro(ctx: OnboardingContext, runtime: RuntimeReadinessResult) {
   setFreeTierRoute(runtime.freeTier)
-  const status = await refreshFreeTierStatus(ctx.requestGateway)
+  await refreshFreeTierStatus(ctx.requestGateway)
 
-  // The guided first launch IS the introduction. Raising the ready screen on
-  // top of it (a readiness round fires when the layout pick assembles the
-  // window) covered the guide mid-conversation, and dismissing it remounted
-  // the card the user had just answered.
-  afterOnboardingStateRead(() => {
-    if (guidedOnboardingActive()) {
-      return
-    }
-
-    if (freeTierReadyPending(status, runtime.freeTier ?? null)) {
+  // The onboarding intro is the introduction: opening it acks the notice
+  // (store/onboarding-run.ts). Read the status when the overlay is free, not
+  // now, so that ack is honoured.
+  afterOnboardingSurfaceClear(() => {
+    if (freeTierReadyPending($freeTierStatus.get(), runtime.freeTier ?? null)) {
       patch({ freeTierReady: true })
     }
   })
@@ -1043,7 +1071,7 @@ export async function startProviderOAuth(provider: OAuthProvider, ctx: Onboardin
         message: translateNow('onboarding.signInExpired')
       })
     )
-    pollTimer = window.setInterval(() => void pollSession(provider, start, ctx, generation), POLL_MS)
+    void pollSession(provider, start, ctx, generation)
   } catch (error) {
     if (generation !== flowGeneration) {
       return
@@ -1053,31 +1081,59 @@ export async function startProviderOAuth(provider: OAuthProvider, ctx: Onboardin
   }
 }
 
-// Poll a session-backed device-code flow until it resolves.
+// Long-poll a session-backed device-code flow until it resolves. The loop ends with its flow: a
+// cancel, a newer flow, or the local expiry floor all move the flow off this session's `polling`.
 async function pollSession(provider: OAuthProvider, start: DeviceStart, ctx: OnboardingContext, generation: number) {
+  const live = () => {
+    const { flow } = $desktopOnboarding.get()
+
+    return generation === flowGeneration && flow.status === 'polling' && sessionIdFor(flow) === start.session_id
+  }
+
   try {
-    const { error_message, status } = await pollOAuthSession(provider.id, start.session_id, ctx.scope)
+    for (;;) {
+      const askedAt = Date.now()
+      const result = await pollOAuthSession(provider.id, start.session_id, ctx.scope, OAUTH_LONG_POLL_SECONDS)
 
-    if (generation !== flowGeneration) {
-      return
-    }
+      if (!live()) {
+        return
+      }
 
-    if (status === 'approved') {
-      clearPoll()
-      setFlow({ status: 'success', provider })
-      await completeWithModelConfirm(ctx, provider.name, [provider.id], reason =>
+      if (result.status === 'approved') {
+        clearPoll()
+        setFlow({ status: 'success', provider })
+        await completeWithModelConfirm(
+          ctx,
+          provider.name,
+          [provider.id],
+          reason => setFlow({ status: 'error', provider, message: providerResolutionFailure(reason) }),
+          false,
+          signedInFrom(result)
+        )
+
+        return
+      }
+
+      if (result.status !== 'pending') {
+        clearPoll()
         setFlow({
           status: 'error',
           provider,
-          message: providerResolutionFailure(reason)
+          start,
+          ...signInDidNotFinish(provider, result.error_message || result.status)
         })
-      )
-    } else if (status !== 'pending') {
-      clearPoll()
-      setFlow({ status: 'error', provider, start, ...signInDidNotFinish(provider, error_message || status) })
+
+        return
+      }
+
+      await restOfLongPollGap(askedAt)
+
+      if (!live()) {
+        return
+      }
     }
   } catch (error) {
-    if (generation !== flowGeneration) {
+    if (!live()) {
       return
     }
 
@@ -1150,7 +1206,7 @@ export function cancelOnboardingFlow() {
 
 async function copyAndFlash(text: string, predicate: (flow: OnboardingFlow) => boolean) {
   try {
-    await navigator.clipboard.writeText(text)
+    await writeClipboardText(text)
   } catch {
     return
   }

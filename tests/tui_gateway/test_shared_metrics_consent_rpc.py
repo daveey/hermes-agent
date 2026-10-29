@@ -74,6 +74,12 @@ def test_status_reads_an_unanswered_profile_as_no_thanks(tmp_path, monkeypatch):
     _call("shared_metrics.set", {"profile": "code", "enabled": True, "send": False})
     assert _call("shared_metrics.status", {"profile": "code"}) == {**off, "enabled": True}
 
+    # A collect-only answer (no longer offered) from before the offer had versions stays decided.
+    (worker / "config.yaml").write_text(
+        yaml.safe_dump({"telemetry": {"shared_metrics": {"enabled": True, "send": False}}}), encoding="utf-8")
+    assert _call("shared_metrics.status", {"profile": "code"}) == {
+        "enabled": True, "send": False, "decided": True, "reask": False}
+
 
 def test_only_the_first_run_answer_records_desktop_setup_completed(tmp_path, monkeypatch):
     _launch, _worker = _bind_homes(monkeypatch, tmp_path)

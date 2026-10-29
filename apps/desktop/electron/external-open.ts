@@ -15,6 +15,8 @@
 
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 
+import { externalUrlTarget } from '../../shared/src/external-url'
+
 import { absolutizeProtocolRelativeUrl, looksLikeLocalFilesystemPath } from './local-filesystem-path'
 
 export type ExternalOpenResult =
@@ -67,8 +69,6 @@ export interface ExternalOpenDeps {
   notifyFailure: (url: string, message: string) => void
   log: (line: string) => void
 }
-
-const SUPPORTED_WEB = ['http:', 'https:', 'mailto:']
 
 export function externalOpenErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -137,17 +137,15 @@ export async function openExternalUrl(rawUrl: string, deps: ExternalOpenDeps): P
     return { ok: true }
   }
 
-  let parsed: URL
+  const target = externalUrlTarget(raw)
 
-  try {
-    parsed = new URL(raw)
-  } catch {
+  if (!target) {
     return { ok: false, reason: 'invalid' }
   }
 
-  if (parsed.protocol === 'file:') {
+  if (target.kind === 'file') {
     try {
-      await deps.openFile(raw)
+      await deps.openFile(target.url)
     } catch {
       // main's openFile handles its own fallback; never surfaced here
     }
@@ -155,11 +153,7 @@ export async function openExternalUrl(rawUrl: string, deps: ExternalOpenDeps): P
     return { ok: true }
   }
 
-  if (!SUPPORTED_WEB.includes(parsed.protocol)) {
-    return { ok: false, reason: 'invalid' }
-  }
-
-  const url = parsed.toString()
+  const { url } = target
 
   if (deps.isWsl) {
     return openViaWsl(url, deps)

@@ -168,9 +168,9 @@ export const NO_PROJECT_ID = '__no_project__'
 
 /**
  * A session with nowhere to be placed: no cwd and no recorded repo root. These
- * are the rows the Home bucket owns, and the only ones the live overlay can
- * hand it — a row WITH a cwd that the backend still couldn't place (junk root,
- * deleted workspace) needs the backend's probes, so it waits for the snapshot.
+ * are the rows the Home bucket owns on sight — a row WITH a cwd that the
+ * backend couldn't place (junk root, deleted workspace) needs the backend's
+ * probes, so Home takes it only once the snapshot's owner map files it there.
  */
 export const isDetachedSession = (session: SessionInfo): boolean =>
   !(session.cwd || '').trim() && !(session.git_repo_root || '').trim()
@@ -561,6 +561,12 @@ export function sessionBucketId(
   owners: ReadonlyMap<string, string> = NO_OWNERS,
   known?: KnownProjects
 ): null | string {
+  // The backend filed it in Home (the bare home dir, a deleted workspace): its
+  // cwd alone would make it a phantom project named after that folder (#139909).
+  if (ownerOf(owners, session) === NO_PROJECT_ID) {
+    return NO_PROJECT_ID
+  }
+
   const projectId = liveSessionProjectId(session, explicitProjects, owners)
 
   // Only a guess (no owner, no named project) that names no known node needs
@@ -959,7 +965,9 @@ export function overlayRepoLanes(
 /**
  * Home's overlay uses the same visible placement as previews and filters.
  * Upsert its live sessions into the single lane — a brand-new project-less chat
- * shows the instant it's created, matching the flat Recents list. A chat the
+ * shows the instant it's created, matching the flat Recents list, and a chat the
+ * backend put in Home despite its cwd (the bare home dir, a deleted workspace)
+ * shows even though the unhydrated tree carries only its id (#139909). A chat the
  * authoritative owner map gives to a named project stays out, even while its
  * live copy is briefly detached (else it lists in both places).
  */
