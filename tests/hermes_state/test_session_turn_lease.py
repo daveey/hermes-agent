@@ -402,6 +402,43 @@ def test_acquire_turn_lease_retries_sqlite_lock(tmp_path, monkeypatch):
     db.release_session_turn_lease("shared", holder)
 
 
+def test_zero_wait_acquire_rides_out_sqlite_lock(tmp_path, monkeypatch):
+    """Desktop/TUI pass wait_seconds=0 (no waiting on a holder). A busy write lock is not a
+    holder: with a contended budget the retry wins the lease instead of failing as 'another
+    active writer' (2026-10-28, chat 20261025_234720_c405df)."""
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("shared", source="test")
+    holder = f"pid={os.getpid()}:turn=desktop"
+    attempts = {"n": 0}
+    original = db.try_acquire_session_turn_lease
+
+    def flaky_acquire(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(db, "try_acquire_session_turn_lease", flaky_acquire)
+    assert db.acquire_session_turn_lease(
+        "shared", holder, wait_seconds=0.0, contended_wait_seconds=5.0, acquire_patience_s=0.05,
+    )
+    assert attempts["n"] >= 2
+    db.release_session_turn_lease("shared", holder)
+
+
+def test_zero_wait_acquire_still_fails_fast_on_a_real_holder(tmp_path):
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("shared", source="test")
+    other = f"pid={os.getpid()}:turn=other"
+    assert db.try_acquire_session_turn_lease("shared", other, ttl_seconds=60)
+    started = time.monotonic()
+    assert not db.acquire_session_turn_lease(
+        "shared", f"pid={os.getpid()}:turn=desktop", wait_seconds=0.0, contended_wait_seconds=5.0,
+    )
+    assert time.monotonic() - started < 1.0
+    db.release_session_turn_lease("shared", other)
+
+
 def test_acquire_turn_lease_locked_for_the_whole_wait_times_out(tmp_path, monkeypatch):
     db = SessionDB(tmp_path / "state.db")
     db.create_session("shared", source="test")

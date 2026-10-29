@@ -25,6 +25,7 @@ _REASON_LEASE_LOST = "session turn lease lost"
 
 LEASE_TTL_SECONDS = 300.0
 LEASE_WAIT_SECONDS = 1800.0
+BUSY_DB_WAIT_SECONDS = 15.0  # floor for riding out a state.db write-lock spike, even with no holder wait
 # SessionDB's default write patience: a renewal waits this long for the write lock, never past the authority.
 _REFRESH_WRITE_PATIENCE_S = 20.0
 # Headroom before expiry for one BEGIN IMMEDIATE blocked in the writer's 1s busy handler, plus jitter.
@@ -454,6 +455,9 @@ def admit_durable_turn_lease(
         wait_seconds=0.0 if task_context['platform'] in {"desktop", "tui"} else LEASE_WAIT_SECONDS,
         on_wait=_on_wait, on_contended=_on_contended,
         should_abort=lambda: getattr(agent, "_interrupt_requested", False),
+        # A busy state.db is not another writer: Desktop/TUI skip the holder wait but must not
+        # turn a write-lock spike into "This chat has another active writer".
+        contended_wait_seconds=BUSY_DB_WAIT_SECONDS,
     ):
         admission.early_result = _lease_not_acquired_result(agent, session_id, conversation_history)
         return admission

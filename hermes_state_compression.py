@@ -599,16 +599,20 @@ class SessionCompressionMixin:
         self, session_id: str, holder: str, *, ttl_seconds: float = 300.0,
         wait_seconds: float = 1800.0, poll_interval_seconds: float = 1.0, on_wait=None,
         wait_notice_interval_seconds: float = 15.0, should_abort=None, acquire_patience_s: float = 0.5,
-        on_contended=None,
+        on_contended=None, contended_wait_seconds: float = 0.0,
     ) -> bool:
         """Wait for a cross-process turn lease without holding a SQLite lock. ``on_wait(elapsed)`` is
         best-effort: called when another holder has the lease and about every
         ``wait_notice_interval_seconds`` after. A busy database is not a holder: the attempt is
         retried at once with a longer write patience, and ``on_contended()`` is called instead,
-        since the busy writer may be the holder's last flush. ``should_abort()`` True (e.g.
-        ``/stop``) returns False at once."""
+        since the busy writer may be the holder's last flush. ``contended_wait_seconds`` floors the
+        budget for that busy-database retry, so a caller that will not wait for a holder
+        (``wait_seconds=0``) still rides out a brief write-lock spike instead of reporting it as a
+        holder. ``should_abort()`` True (e.g. ``/stop``) returns False at once."""
         from hermes_state import classify_persistence_error
-        deadline = time.monotonic() + max(0.0, float(wait_seconds))
+        started = time.monotonic()
+        deadline = started + max(0.0, float(wait_seconds))
+        contended_deadline = max(deadline, started + max(0.0, float(contended_wait_seconds)))
         patience = acquire_patience_s
         wait_started = None
         last_notice_at = None
@@ -636,8 +640,8 @@ class SessionCompressionMixin:
                     except Exception:
                         logger.debug("session turn lease on_contended callback failed", exc_info=True)
                 patience = min(acquire_patience_s + max(0.0, float(poll_interval_seconds)),
-                               max(acquire_patience_s, deadline - time.monotonic()))
-                if not self._sleep_before_write_retry(deadline, 0.0):
+                               max(acquire_patience_s, contended_deadline - time.monotonic()))
+                if not self._sleep_before_write_retry(contended_deadline, 0.0):
                     return False
                 continue
             patience = acquire_patience_s
