@@ -47,6 +47,15 @@ DEFAULT_STATE = Path(os.path.expanduser("~/.hermes/state/ci-flaky-cards.json"))
 EXCERPT_LIMIT = 3000
 
 
+class CreateRefused(RuntimeError):
+    """`hermes kanban create --json` refused (exit 2, the JSON on STDOUT, stderr blank): open cards already look
+    like this work (code create_overlap). Not a failure: the matches own the incident."""
+
+    def __init__(self, note: str, matches: list[dict[str, Any]]) -> None:
+        super().__init__(note)
+        self.matches = matches
+
+
 class Board(Protocol):
     def create(self, title: str, body: str, key: str) -> str: ...
     def status(self, card_id: str) -> str | None: ...
@@ -65,8 +74,16 @@ class CliBoard:
     def _run(self, *args: str, stdin: str | None = None) -> str:
         proc = subprocess.run([*self.hermes, "kanban", *args], input=stdin, capture_output=True,
                               text=True, timeout=120, check=False)
+        if proc.returncode == 2 and args[0] == "create":
+            try:
+                ref = json.loads(proc.stdout)
+            except ValueError:
+                ref = None
+            if isinstance(ref, dict) and ref.get("created") is False and ref.get("code") == "create_overlap":
+                raise CreateRefused(str(ref.get("note") or ""), list(ref.get("matches") or []))
         if proc.returncode != 0:
-            raise RuntimeError(f"hermes kanban {args[0]} failed ({proc.returncode}): {proc.stderr.strip()[:400]}")
+            detail = proc.stderr.strip() or proc.stdout.strip()
+            raise RuntimeError(f"hermes kanban {args[0]} failed ({proc.returncode}): {detail[:400]}")
         return proc.stdout
 
     def create(self, title: str, body: str, key: str) -> str:
@@ -220,7 +237,20 @@ def file_cards(entries: Iterable[dict[str, str]], *, run_url: str, branch: str, 
             continue
         generation = recorded_generation + (1 if known else 0)
         key = f"deflake:{test_id}" + (f"#{generation}" if generation else "")
-        card = board.create(f"Deflake {test_id}", _card_body(entry, run_url, branch, (known or {}).get("card")), key)
+        try:
+            card = board.create(f"Deflake {test_id}", _card_body(entry, run_url, branch, (known or {}).get("card")), key)
+        except CreateRefused as refused:
+            # The core overlap guard says open work already covers this: that card owns the incident (guard kept).
+            owner = next((m["id"] for m in refused.matches if m.get("id")), None)
+            if owner is None:
+                raise
+            try:
+                board.comment(owner, excerpt_comment)
+            except RuntimeError:
+                pass  # owner lives on another board/gateway; core already recorded the refusal
+            state["cards"][test_id] = {"card": owner, "generation": recorded_generation}
+            log.append(f"appended {owner} {test_id} (create refused: open card already covers it)")
+            continue
         state["cards"][test_id] = {"card": card, "generation": generation}
         log.append(f"opened {card} {test_id}")
     return log
