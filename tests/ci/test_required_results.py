@@ -60,7 +60,24 @@ def test_selected_update_consumers_must_succeed(lane, jobs, result):
 def test_release_exclusion_policy():
     assert required_results.EXCLUDED_JOBS == {
         "history-check", "lockfile-diff", "prompt-surface-diff", "supply-chain", "e2e-desktop",
+        *required_results.FORK_DISABLED_JOBS,
     }
+
+
+@pytest.mark.fork_guard
+def test_every_job_ci_turns_off_is_a_tolerated_release_skip():
+    """A ci.yaml job with ``if: false`` always skips; if the strict gate needs it, no release run can pass
+    (release run 40864619088: 38 lanes green, gate red on the fork-disabled OS lane)."""
+    import hermes_yaml
+
+    ci = hermes_yaml.safe_load((SCRIPT.parents[2] / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8"))
+    gate = next(j for j in ci["jobs"].values() if j.get("name") == "All required checks pass (v2)")
+    off = {name for name, job in ci["jobs"].items() if job.get("if") is False}
+    untolerated = sorted((off & set(gate["needs"])) - required_results.EXCLUDED_JOBS)
+    assert not untolerated, f"always-skipped job(s) the strict gate still requires: {untolerated}"
+    # The gate agrees: a release run where only these are skipped passes.
+    needs = {name: {"result": "skipped" if name in off else "success"} for name in gate["needs"]}
+    assert evaluate_gate(needs, release=True)["ok"], evaluate_gate(needs, release=True)
 
 
 @pytest.mark.parametrize("needs", [{}, None])

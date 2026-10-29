@@ -25,7 +25,10 @@ from typing import Any
 # Desktop E2E. These are the only skips a strict run tolerates.
 PR_ONLY_JOBS = ("history-check", "lockfile-diff", "prompt-surface-diff", "supply-chain")
 DEFERRED_JOBS = ("e2e-desktop",)
-EXCLUDED_JOBS = frozenset((*PR_ONLY_JOBS, *DEFERRED_JOBS))
+# [daveey] fork-ci-runner: ci.yaml turns these off with ``if: false`` (no macOS/Windows runner), so a
+# strict release run that required them could never pass the gate however green every lane was.
+FORK_DISABLED_JOBS = ("tests-os",)
+EXCLUDED_JOBS = frozenset((*PR_ONLY_JOBS, *DEFERRED_JOBS, *FORK_DISABLED_JOBS))
 
 NEEDS_JSON_OUTPUT = "needs-json"
 

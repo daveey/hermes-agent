@@ -150,7 +150,9 @@ _FORK_OS_LANE_RE = _fork_re.compile(r"tests-os|e2e-windows|_windows_desktop_upda
 def pytest_runtest_makereport(item, call):
     outcome = yield
     rep = outcome.get_result()
-    if _FORK_NO_OS_LANE and rep.when == "call" and rep.failed and _FORK_OS_LANE_RE.search(str(rep.longrepr)):
+    # A fork_guard test asserts the fork's own wiring: its failure is real even when it names tests-os.
+    if (_FORK_NO_OS_LANE and rep.when == "call" and rep.failed and not item.get_closest_marker("fork_guard")
+            and _FORK_OS_LANE_RE.search(str(rep.longrepr))):
         rep.outcome = "skipped"
         rep.longrepr = (str(item.path), item.location[1] or 0, "fork: asserts the macOS/Windows tests-os lane, which is off on daveey/hermes")
 PY
