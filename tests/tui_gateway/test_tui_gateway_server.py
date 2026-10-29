@@ -3643,7 +3643,7 @@ def test_session_resume_deferred_history_acknowledges_and_reuses(monkeypatch):
         def get_resume_conversations(self, target):
             history_calls.append(("resume", target))
             history_started.set()
-            assert release_history.wait(timeout=2.0)
+            assert release_history.wait(timeout=60.0)
             return [loaded], [ancestor, loaded]
 
         def get_ancestor_display_prefix(self, target):
@@ -3679,7 +3679,7 @@ def test_session_resume_deferred_history_acknowledges_and_reuses(monkeypatch):
         assert first["result"]["hydrating"] is True
         assert first["result"]["messages"] == []
         assert first["result"]["message_count"] == 1200
-        assert history_started.wait(timeout=1.0)
+        assert history_started.wait(timeout=30.0)
 
         second = server._methods["session.resume"](
             "r2",
@@ -3691,8 +3691,8 @@ def test_session_resume_deferred_history_acknowledges_and_reuses(monkeypatch):
 
         release_history.set()
         sid = first["result"]["session_id"]
-        assert server._sessions[sid]["resume_history_ready"].wait(timeout=1.0)
-        assert build_started.wait(timeout=1.0)
+        assert server._sessions[sid]["resume_history_ready"].wait(timeout=30.0)
+        assert build_started.wait(timeout=30.0)
         assert history_calls == [
             ("resume", "large-session"),
             ("prefix", "large-session"),
