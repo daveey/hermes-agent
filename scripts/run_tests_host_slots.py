@@ -293,7 +293,11 @@ def acquire_host_slot(on_wait=None) -> int | None:
 
 
 def release_host_slot(fd: int | None) -> None:
+    """Clear the holder record, then free the slot. A record left behind would be read as the holder of
+    the next acquirer that writes none (an older checkout's runner) and misjudge it as gone."""
     if fd is not None:
+        with contextlib.suppress(OSError):
+            os.ftruncate(fd, 0)
         with contextlib.suppress(OSError):
             os.close(fd)
 

@@ -334,6 +334,15 @@ def test_live_young_holder_is_not_reclaimed(slot_env, monkeypatch, tmp_path):
         child.wait(5)
 
 
+def test_release_clears_the_holder_record(slot_env, monkeypatch):
+    """A record left after release would name a dead pid as the holder of an older runner that writes none."""
+    monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "1")
+    fd = slots.acquire_host_slot()
+    assert (slot_env / "0.lock").read_text().startswith("{")
+    slots.release_host_slot(fd)
+    assert (slot_env / "0.lock").read_text() == ""
+
+
 def test_slot_max_age_env_and_config(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_TEST_SLOT_CONFIG", str(tmp_path / "absent.yaml"))
     monkeypatch.delenv(slots.MAX_AGE_ENV, raising=False)

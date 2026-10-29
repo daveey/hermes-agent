@@ -1359,9 +1359,12 @@ def _release_host_test_slot(config) -> None:
     fd = getattr(config, "_hermes_host_slot_fd", None)
     if fd is not None:
         try:
-            os.close(fd)
-        except OSError:
-            pass
+            _host_slots_module().release_host_slot(fd)  # clears the holder record, then closes
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         config._hermes_host_slot_fd = None
 
 
