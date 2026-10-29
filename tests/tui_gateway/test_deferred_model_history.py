@@ -70,6 +70,23 @@ def test_deferred_resume_preserves_model_history_and_db_ownership(tmp_path, monk
     monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *args: None)
     monkeypatch.setattr(server, "_start_agent_build", lambda *args: built.set())
     monkeypatch.setattr(server, "_emit", lambda kind, sid, payload: events.append((kind, payload)))
+    reopened = []
+    original_tail = db.latest_conversation_tail
+    original_schedule = server._schedule_resume_hydration
+
+    def tail(key):
+        if closed.is_set():  # a read after close() silently reopens the handle (#94736)
+            reopened.append(key)
+        return original_tail(key)
+
+    def schedule_and_finish(*args, **kwargs):
+        # Starve the response thread: the worker finishes (and closes) before the handler continues.
+        original_schedule(*args, **kwargs)
+        if kwargs.get("close_db"):
+            assert closed.wait(5)
+
+    monkeypatch.setattr(db, "latest_conversation_tail", tail)
+    monkeypatch.setattr(server, "_schedule_resume_hydration", schedule_and_finish)
     sid = None
     try:
         response = server.handle_request({"id": "resume", "method": "session.resume", "params": {
@@ -91,6 +108,7 @@ def test_deferred_resume_preserves_model_history_and_db_ownership(tmp_path, monk
         if profile:
             assert closed.wait(5)
             assert db._conn is None
+            assert not reopened, "resume read the profile db after the hydration worker closed it"
         else:
             assert not closed.is_set()
             assert db.get_session("tip") is not None
