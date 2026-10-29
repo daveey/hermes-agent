@@ -115,7 +115,7 @@ def test_host_owner_refusal_logs_start_refused_host_refused(monkeypatch, live_pi
 @pytest.mark.parametrize("lost", ["running_pid", "runtime_lock", "pid_race"])
 def test_pid_claim_loss_logs_start_refused_pid_claim(monkeypatch, live_pid, lost):
     """Losing the runtime lock / PID file to a concurrent start is a refusal, not a crash."""
-    gateway_cli, gateway_run = _prepare_cli(monkeypatch)
+    gateway_cli, _gateway_run = _prepare_cli(monkeypatch)
     from gateway import status
 
     # What get_running_pid() answers on each call: the pre-claim check, then the owner lookup.
@@ -134,7 +134,9 @@ def test_pid_claim_loss_logs_start_refused_pid_claim(monkeypatch, live_pid, lost
     def _fake_run(coro):
         coro.close()
         reset_start_refusal()
-        return gateway_run._start_gateway_claim_pid_file()
+        # Fork: upstream moved start_gateway's PID-file claim from gateway.run into gateway.run_bootstrap.
+        from gateway import run_bootstrap
+        return run_bootstrap._start_gateway_claim_pid_file()
 
     monkeypatch.setattr(gateway_cli.asyncio, "run", _fake_run)
     assert _run_cli(gateway_cli) == 1
