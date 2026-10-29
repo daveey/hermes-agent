@@ -17,6 +17,8 @@ import pytest
 from hermes_cli import admission_fence as af
 from tui_gateway import server
 from tui_gateway import update_pause as up
+from tui_gateway.contracts.events import MessageCompletePayload
+from tui_gateway.contracts.registry import STRICT, check_payload
 from tui_gateway.turn_marker import mark_turn_paused, read_turn_marker, record_turn_start
 
 CFG = {"desktop": {"auto_continue": {"enabled": True, "resume_on_startup": True, "freshness_minutes": 240,
@@ -117,7 +119,13 @@ def turn_env(monkeypatch, tmp_path, home):
     frames: list = []
     watchers: list = []
     monkeypatch.setattr(server.threading, "Thread", _InlineThread)
-    monkeypatch.setattr(server, "_emit", lambda event, sid, payload=None, *a, **k: frames.append((event, payload)))
+    def _emit(event, sid, payload=None, *a, **k):
+        # The real wire contract checks every frame (strict under the test suite): replacing ``_emit``
+        # with a bare recorder once hid a terminal frame MessageCompletePayload rejects.
+        check_payload(event, payload)
+        frames.append((event, payload))
+
+    monkeypatch.setattr(server, "_emit", _emit)
     monkeypatch.setattr(server, "_wire_callbacks", lambda sid: None)
     monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda sid, session: None)
     monkeypatch.setattr(server, "_session_cwd", lambda session: str(tmp_path))
@@ -154,6 +162,35 @@ def test_paused_turn_releases_its_reservation_keeps_its_marker_and_says_so(turn_
     assert session["running"] is False
     assert agent.step_boundary_pause is None  # per-turn hook, never left on the cached agent
     assert turn_env.watchers == [("ui-sid", "session-key")]
+
+
+def test_announce_pause_frame_satisfies_the_message_complete_contract(monkeypatch):
+    """The producer's own output, not a hand-built dict: ``announce_pause`` stamps the deliberate
+    ``paused_for_update`` signal on the terminal frame, and the declared contract accepts it."""
+    assert STRICT  # the suite's strict mode is what turns a violation into a failure
+    emitted: list = []
+    monkeypatch.setattr(server, "_emit", lambda event, sid, p=None, *a, **k: emitted.append((event, p)))
+    payload = {"text": "partial answer", "status": "interrupted", "rendered": "<p>partial answer</p>"}
+    up.announce_pause("ui-sid", payload)
+    assert payload["paused_for_update"] is True and "rendered" not in payload
+    check_payload("message.complete", payload)
+    assert MessageCompletePayload.model_validate(payload).paused_for_update is True
+    assert [e for e, _ in emitted] == ["status.update"]
+    check_payload("status.update", emitted[0][1])
+
+
+def test_ordinary_stop_is_not_reported_as_a_pause(turn_env, home):
+    """An interrupted turn the update did not pause keeps the plain terminal frame: no pause flag,
+    no pause text, no in-place watcher."""
+    def _run(message, **kwargs):
+        return {"final_response": "", "messages": [], "interrupted": True, "completed": False}
+
+    agent = types.SimpleNamespace(session_id="session-key", run_conversation=_run, clear_interrupt=lambda: None)
+    server._run_prompt_submit("rid", "ui-sid", _session(agent=agent, running=True, profile_home=str(home)), "go")
+    (complete,) = [p for e, p in turn_env.frames if e == "message.complete"]
+    assert "paused_for_update" not in complete
+    assert up.PAUSE_STATUS_TEXT not in str(complete.get("text"))
+    assert turn_env.watchers == []
 
 
 def test_turn_without_a_request_ends_normally(turn_env, home):

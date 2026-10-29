@@ -215,7 +215,8 @@ class PersistedTurn(Payload):
 class MessageCompletePayload(Payload):
     """``prompt_turn._complete_turn_payload`` / ``session_auto_continue._emit_terminal_turn_error`` /
     ``agent_callbacks._mirror_subagent_to_child`` (child watch mirror: ``text`` only) /
-    ``compute_host_bridge`` (``text`` + ``status``)."""
+    ``compute_host_bridge`` (``text`` + ``status``) / ``update_pause.announce_pause`` (adds
+    ``paused_for_update``)."""
 
     text: str | JsonValue = ""
     usage: Usage | None = None
@@ -237,6 +238,9 @@ class MessageCompletePayload(Payload):
     error_surface: ErrorSurface | None = None
     partial: bool | None = None
     persisted_turn: PersistedTurn | None = None
+    #: [daveey] The turn paused at a step boundary for a Hermes core update and continues automatically
+    #: (``update_pause.announce_pause``). Absent on every other ending, including an ordinary Stop.
+    paused_for_update: bool | None = None
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")
