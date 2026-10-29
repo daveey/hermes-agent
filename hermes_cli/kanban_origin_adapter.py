@@ -80,6 +80,9 @@ def receive(request: dict) -> dict:
             or request.get('to_gw') != gateway
             or request.get('key') != f"{profile}/{binding['origin']['session']}"):
         raise ValueError('origin_route_mismatch')
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(binding['origin']['session']):
+        return {'status': 'skipped', 'code': 'origin_placeholder_session', 'handoff_complete': True}
     # A distinct wire action makes pre-attestation adapters reject before they
     # consume the immutable receipt ID. Ordinary origin-bind stays compatible.
     alias = request['args'].get('legacy_alias')

@@ -640,6 +640,10 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
     2-3.5 h until an unrelated local card woke it (David-MBP 2026-10-29). A state younger than the waker's grace
     window is left for the chat's live poller, which may run in another backend on this host. [daveey]"""
     profile, sid = link.get("profile"), link.get("session")
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(sid):
+        logger.warning("Dropped Kanban notice to placement placeholder %s", sid)
+        return
     if not profile or not sid or sid in live:
         return
     try:

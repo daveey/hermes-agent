@@ -234,6 +234,16 @@ def config() -> dict:
         return {}
 
 
+def is_placeholder_session(value: str) -> bool:
+    """Placement attribution IDs must never become notification destinations."""
+    session = str(value or "").rsplit("/", 1)[-1]
+    if session.startswith(DEFAULT_CREATOR_SESSION):
+        return True
+    configured = config().get("creator_session")
+    values = configured.values() if isinstance(configured, dict) else (configured,)
+    return bool(session) and session in values
+
+
 def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
     """The first local-only hit, or None. Host-name markers (see
     :data:`TITLE_ONLY_LOCAL_MARKERS`) scan the title only, unless the caller replaced the list."""

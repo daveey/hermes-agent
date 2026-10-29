@@ -350,6 +350,11 @@ def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt,
 
 def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, kinds, fmt, wake, holders,
                  spawn) -> Optional[dict]:
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(sub["chat_id"]):
+        logger.warning("Dropped Kanban notice to placement placeholder %s", sub["chat_id"])
+        _kbn.remove_notify_sub(conn, **ident)
+        return None
     task = _kb.get_task(conn, sub["task_id"])
     with session_db(sub["chat_id"]) as (db, tip):
         if db is None or tip is None:

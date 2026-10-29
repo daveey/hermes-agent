@@ -41,6 +41,9 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
     out: dict[str, dict[str, Any]] = {}
 
     def add(task_id: str, session: str, kind: str, created_at: Any) -> None:
+        from hermes_cli.kanban_placement import is_placeholder_session
+        if is_placeholder_session(session):
+            return
         uid = link_uid(task_id, gateway, None, session, kind)
         out[uid] = {"uid": uid, "task_id": task_id, "chat_gateway": gateway, "chat_profile": None,
                     "chat_session": session, "kind": kind, "released": 0, "created_at": int(created_at or now)}
@@ -66,6 +69,9 @@ def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for card in _remote_links():
         if card.get("board") != board or card.get("origin_gateway") not in (None, gateway) or not card.get("session"):
+            continue
+        from hermes_cli.kanban_placement import is_placeholder_session
+        if is_placeholder_session(card["session"]):
             continue
         kind = "created" if card.get("via") == "origin" else "shepherd"
         profile = card.get("origin_profile")
