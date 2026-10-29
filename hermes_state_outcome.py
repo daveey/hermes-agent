@@ -203,7 +203,8 @@ def _row(db: Any, sid: str) -> Optional[dict[str, Any]]:
 def _tail(db: Any, sid: str) -> list[dict[str, Any]]:
     """The last active transcript rows, newest first."""
     rows = db._read_all(
-        "SELECT id, role, content, tool_calls, tool_name, finish_reason, display_kind, timestamp FROM messages"
+        "SELECT id, role, content, tool_calls, tool_name, finish_reason, display_kind, display_metadata, timestamp"
+        " FROM messages"
         " WHERE session_id = ? AND active = 1 AND role IN ('user', 'assistant', 'tool')"
         " ORDER BY id DESC LIMIT ?", (sid, _TAIL_ROWS))
     return [dict(r) for r in rows]
@@ -360,7 +361,8 @@ def _declaration_holds(declared: dict, tail: list[dict]) -> bool:
 def _tail_reason(tail: list[dict]) -> Optional[str]:
     last = tail[0]
     if last.get("display_kind") == _NOTICE_KIND:
-        return "notice_tail"
+        # The orphan reap's notice to a parent whose subagent a restart killed (tui_gateway/reap_notices.py).
+        return "subagent_killed" if '"subagent_killed"' in str(last.get("display_metadata") or "") else "notice_tail"
     if last["role"] in ("user", "tool") or (last["role"] == "assistant" and last.get("tool_calls")):
         return "interrupted"
     if (last.get("finish_reason") or "").strip().lower() in _ERROR_FINISH_REASONS:

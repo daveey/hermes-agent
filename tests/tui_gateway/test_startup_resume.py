@@ -24,8 +24,9 @@ CFG = {"desktop": {"auto_continue": {"enabled": True, "resume_on_startup": True,
                                      "max_attempts": 2}}}
 
 
-def test_disabled_by_default():
-    assert sr._settings({})[0] is False
+def test_enabled_by_default_and_explicit_false_disables():
+    assert sr._settings({})[0] is True  # [daveey] session-outcome contract: on unless turned off
+    assert sr._settings({"desktop": {"auto_continue": {"resume_on_startup": False}}})[0] is False
     assert sr._settings(CFG)[0] is True
     off = {"desktop": {"auto_continue": {"enabled": False, "resume_on_startup": True}}}
     assert sr._settings(off)[0] is False
@@ -77,5 +78,5 @@ def test_one_failure_does_not_stop_the_sweep(tmp_path):
 
 def test_start_is_noop_when_disabled(monkeypatch):
     from hermes_cli import config
-    monkeypatch.setattr(config, "load_config", dict)
+    monkeypatch.setattr(config, "load_config", lambda: {"desktop": {"auto_continue": {"resume_on_startup": False}}})
     assert sr.start_startup_resume_sweep() is None

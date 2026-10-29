@@ -867,6 +867,8 @@ def _kb_persist_batch(session: dict, batch: list, diagnostic: bool) -> tuple:
             row_id, inserted = db.record_kanban_notice(target, text, metadata, message=staged)
             if not inserted:
                 return "busy", batch, {}  # raced another consumer for some of these keys: re-filter next poll
+            from hermes_state_outcome import refresh_outcomes_quietly
+            refresh_outcomes_quietly([target], "notice", db=db)  # [daveey] until its turn ends, the notice is the tail
     except (SessionTurnLeaseLostError, CompressionSessionClosedError):
         return "busy", batch, {}
     except Exception as exc:

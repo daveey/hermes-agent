@@ -2765,8 +2765,8 @@ DEFAULT_CONFIG = {
             "freshness_minutes": 15,
             "max_attempts": 2,  # Crash-loop breaker: max automatic re-runs of one interrupted turn.
             # Resume every interrupted session when the backend starts (app relaunch, `hermes update`),
-            # not only the ones the user re-opens. Same freshness/attempt guards apply.
-            "resume_on_startup": False,
+            # not only the ones the user re-opens. Same freshness/attempt guards apply. [daveey] on by default.
+            "resume_on_startup": True,
         },
         # Reopen a desktop app that `hermes update` / `hermes desktop --build-only` had to stop to
         # swap in the rebuilt bundle (macOS/Linux). Off = upstream behaviour: a headless update

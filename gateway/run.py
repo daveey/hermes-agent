@@ -4566,8 +4566,9 @@ def _profile_sessions_dir(launch: Optional[tuple[Path, Path]]) -> Path:
 
 
 def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = None) -> None:
-    """Stale-session auto-archive plus auto-prune/VACUUM for ONE profile's state.db; both are gated
-    by sessions.min_interval_hours (VACUUM additionally by its own throttles). Opens its own
+    """Empty-draft archive (hourly, ungated), stale-session auto-archive and auto-prune/VACUUM for ONE
+    profile's state.db; the last two are gated by sessions.min_interval_hours (VACUUM additionally by its
+    own throttles). Opens its own
     SessionDB — SQLite connections are thread-bound.
 
     Profile-scoped by its caller: ``acquire()``, ``get_hermes_home()`` and ``load_config()`` all
@@ -4579,10 +4580,9 @@ def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = Non
     from hermes_cli.config import load_config as _load_full_config
     from hermes_state_registry import acquire, release_or_close
     _sess_cfg = (_load_full_config().get("sessions") or {})
-    if not (_sess_cfg.get("auto_archive", False) or _sess_cfg.get("auto_prune", False)):
-        return
     _adb = acquire()
     try:
+        _adb.maybe_archive_empty_drafts()  # [daveey] ungated: empty drafts > 24 h are never a chat to resolve
         if _sess_cfg.get("auto_archive", False):
             _adb.maybe_auto_archive(
                 idle_days=float(_sess_cfg.get("auto_archive_days", 3)),

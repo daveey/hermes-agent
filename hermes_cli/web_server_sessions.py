@@ -216,7 +216,7 @@ _last_auto_archive_check: dict[str, float] = {}
 
 
 def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
-    """Config-gated stale-session auto-archive for ``profile``; never raises.
+    """Config-gated stale-session auto-archive plus the ungated empty-draft archive for ``profile``; never raises.
     ``hermes serve`` runs neither CLI nor gateway startup hooks, so this
     session-list trigger is what makes ``sessions.auto_archive`` work there."""
     try:
@@ -240,8 +240,6 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
             cfg = (_load_full_config().get("sessions") or {})
         finally:
             reset_hermes_home_override(_home_token)
-        if not cfg.get("auto_archive", False):
-            return
         from hermes_cli.profiles import _check_gateway_running
 
         # A live gateway owns this profile's store and runs the same sweep on its own
@@ -256,9 +254,11 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
             return
         db = _open_session_db_for_profile(profile, read_only=False)
         try:
-            db.maybe_auto_archive(
-                idle_days=float(cfg.get("auto_archive_days", 3)),
-                min_interval_hours=int(cfg.get("min_interval_hours", 24)))
+            db.maybe_archive_empty_drafts()  # [daveey] not gated by sessions.auto_archive
+            if cfg.get("auto_archive", False):
+                db.maybe_auto_archive(
+                    idle_days=float(cfg.get("auto_archive_days", 3)),
+                    min_interval_hours=int(cfg.get("min_interval_hours", 24)))
         finally:
             db.close()
     except Exception as exc:

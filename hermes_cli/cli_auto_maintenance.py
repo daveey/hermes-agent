@@ -44,6 +44,7 @@ def _run_state_db_auto_maintenance(session_db) -> None:
             except Exception as _exc:
                 logger.debug(skip_msg, _exc)
 
+        session_db.maybe_archive_empty_drafts()  # [daveey] not gated by sessions.auto_archive
         cfg = (_load_full_config().get("sessions") or {})
 
         # Auto-archive is independent of auto_prune: run it before prune's early return.

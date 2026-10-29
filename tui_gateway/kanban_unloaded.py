@@ -354,9 +354,14 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
     with session_db(sub["chat_id"]) as (db, tip):
         if db is None or tip is None:
             return None  # no store holds this chat (deleted): leave the cursor alone
-        old, new, claimed = _kbn.claim_unseen_events_for_sub(conn, kinds=kinds, durable=True, **ident)
+        from tui_gateway.notice_fanout import chat_skip_reason
+        skip = chat_skip_reason(db, sub["chat_id"])  # [daveey] archived / moved copy: the notice goes nowhere
+        old, new, claimed = _kbn.claim_unseen_events_for_sub(conn, kinds=kinds, durable=skip is None, **ident)
         if not claimed:
             return None  # a live poller or another sweeper got there first
+    if skip is not None:
+        logger.info("kanban notice for %s/%s not delivered to chat %s: %s", slug, ident["task_id"], tip, skip)
+        return None
     texts = [t for t in (fmt(sub, task, ev, slug) for ev in claimed) if t]
     if task and getattr(task, "status", "") == "archived":
         with contextlib.suppress(Exception):
@@ -418,6 +423,8 @@ def _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new
             if db is None:
                 raise RuntimeError(f"chat {ident['chat_id']} disappeared before its notice was written")
             db.append_kanban_notice(tip, text, metadata)
+            from hermes_state_outcome import refresh_outcomes_quietly
+            refresh_outcomes_quietly([tip], "notice", db=db)  # [daveey] a passive row is the chat's last word
         return True
     except SessionTurnLeaseLostError:
         with contextlib.suppress(Exception):
@@ -468,6 +475,11 @@ def _loop(stop: threading.Event) -> None:
             sweep_once(live_session_ids(), grace_s=grace)
         except Exception:
             logger.warning("kanban unloaded sweep failed", exc_info=True)
+        # [daveey] Session outcome: refresh chats whose cards moved, then make sure no notice ends a chat unanswered.
+        from tui_gateway.notice_fanout import card_change_pass
+        from tui_gateway.notice_guarantee import guarantee_pass
+        card_change_pass()
+        guarantee_pass()
         stop.wait(interval)
 
 

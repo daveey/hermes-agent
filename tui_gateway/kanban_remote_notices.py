@@ -136,11 +136,17 @@ def _index(path: Path) -> tuple[str, dict]:
         links = task.get("sessions") if isinstance(task.get("sessions"), list) else []
         for link in links:
             if (isinstance(link, dict) and link.get("gw") == me and link.get("rel") in LINK_RELS
-                    and link.get("session")):
+                    and link.get("session") and not _released(link)):
                 index.setdefault((str(link.get("profile") or "default"), str(link["session"])), []).append(
                     {"gw": str(gw), "key": str(key), "task": task})
     _index_memo = (str(path), sig, me, index)
     return me, index
+
+
+def _released(link: dict) -> bool:
+    """[daveey] The owner released this chat's link: its notices stop (session-outcome fan-out filter)."""
+    from tui_gateway.notice_fanout import link_released
+    return link_released(link)
 
 
 def _ledger(path: Optional[Path] = None) -> sqlite3.Connection:
@@ -584,7 +590,7 @@ def _sweep_cards(rows: list[tuple], me: str):
         if not done and task.get("status") != "blocked":
             continue
         links = [link for link in task.get("sessions") or [] if isinstance(link, dict)
-                 and link.get("rel") == "shepherd" and link.get("gw") == me]
+                 and link.get("rel") == "shepherd" and link.get("gw") == me and not _released(link)]
         if not links:
             continue
         yield owner, key, task, links
@@ -604,8 +610,13 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
         with session_db(profile, sid) as (db, tip):
             if db is None or not text:
                 return
+            from tui_gateway.notice_fanout import chat_skip_reason
+            if chat_skip_reason(db, sid) is not None:  # [daveey] archived chat or a copy moved to another gateway
+                return
             if not settled((sid, tip), ref, state):
                 row_id = db.append_kanban_notice(tip, text, metadata)
+                from hermes_state_outcome import refresh_outcomes_quietly
+                refresh_outcomes_quietly([tip], "notice", db=db)  # [daveey] unloaded sweeper's remote rows too
                 delivered.append({"task_id": task["id"], "session_id": tip, "message_row": row_id})
                 swept.append(memo_key)
                 ack({"session": sid, "ref": ref, "state": state, "notice_key": event_key}, ledger=ledger)
