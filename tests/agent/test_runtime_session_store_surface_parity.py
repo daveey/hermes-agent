@@ -4,6 +4,7 @@ owner's SessionDB (Adolanium reg-1 was one missing keyword; the sweep found two 
 the failed-turn boundary's tail role and in-place compaction's held-row liveness)."""
 import ast
 import inspect
+import json
 from pathlib import Path
 import re
 
@@ -62,6 +63,66 @@ def test_tail_reads_answer_like_the_owner(tmp_path):
             assert store.latest_conversation_role('s') == db.latest_conversation_role('s') == 'user'
             for row_id in [*rows, 10**6]:  # another transcript's row is not this session's
                 assert store.get_message_role('s', row_id) == db.get_message_role('s', row_id)
+        finally:
+            store.close()
+    finally:
+        db.close()
+
+
+def _worker_store(db, tmp_path, session_id='s'):
+    epoch = begin_runtime_epoch(db, instance_id='fixture')
+    scope = dict(epoch=epoch, execution_id='w', session_id=session_id, generation=0)
+    register_worker_execution(db, **scope, kind='compute', adoption_secret='secret')
+    return RuntimeSessionStore(lambda method, **p: mutate_worker_execution(db, **p), scope, tmp_path / 'outbox')
+
+
+def test_update_session_model_writes_like_the_owner(tmp_path):
+    """[daveey] Class-metadata persistence calls update_session_model on the worker's store."""
+    db = SessionDB(tmp_path / 'state.db')
+    try:
+        db.create_session('s', 'cli', model='old', model_config={'browser_model_lock': 'x', 'keep': 1,
+                                                                  'model_routing': {'class': 'c'}})
+        store = _worker_store(db, tmp_path)
+        try:
+            store.update_session_model('s', 'new-model')
+            row = db.get_session('s')
+            assert row['model'] == 'new-model'
+            config = json.loads(row['model_config'])
+            assert config == {'keep': 1, 'model': 'new-model', 'model_routing': {'class': 'c'}}
+            store.update_session_model('s', 'm2', 'prov', base_url='https://x', clear_model_routing=True)
+            config = json.loads(db.get_session('s')['model_config'])
+            # Same merge as the owner's SessionDB.update_session_model (None deletes a key).
+            db.create_session('o', 'cli', model='old', model_config={'browser_model_lock': 'x', 'keep': 1,
+                                                                      'model_routing': {'class': 'c'}})
+            db.update_session_model('o', 'new-model')
+            db.update_session_model('o', 'm2', 'prov', base_url='https://x', clear_model_routing=True)
+            assert config == json.loads(db.get_session('o')['model_config'])
+            assert config['gateway_runtime']['provider'] == 'prov' and config['model'] == 'm2'
+            assert 'model_routing' not in config and 'browser_model_lock' not in config
+            with pytest.raises(Exception):
+                store.update_session_model('other', 'm')
+        finally:
+            store.close()
+    finally:
+        db.close()
+
+
+def test_lease_key_answers_only_inside_the_workers_lineage(tmp_path):
+    """[daveey] session_was_taken_over compares lineage keys through the worker's store."""
+    db = SessionDB(tmp_path / 'state.db')
+    try:
+        db.create_session('root', 'cli')
+        db.end_session('root', 'compression')
+        db.create_session('tip', 'cli', parent_session_id='root')
+        db.create_session('a', 'cli')
+        db.create_session('b', 'cli')
+        assert db._session_turn_lease_key('tip') == 'root'
+        store = _worker_store(db, tmp_path, session_id='tip')
+        try:
+            assert store._session_turn_lease_key('tip') == store._session_turn_lease_key('root') == 'root'
+            assert store._session_turn_lease_key('a') != store._session_turn_lease_key('b')
+            assert store._session_turn_lease_key('a') != 'root'
+            assert store._session_turn_lease_key('a') != db._session_turn_lease_key('a')
         finally:
             store.close()
     finally:

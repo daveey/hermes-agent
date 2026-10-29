@@ -183,7 +183,47 @@ def worker_user_content(db, conn, session_id, payload):
         (db._encode_content(payload['content']), _row_id(payload), session_id)).rowcount}
 
 
+
+def worker_model(db, conn, session_id, payload):
+    """``SessionDB.update_session_model`` on the receipt connection (model column + model_config
+    route, Browser lock dropped). [daveey] The fork's class-metadata persistence calls it."""
+    if (set(payload) != {'model', 'provider', 'base_url', 'api_mode', 'clear_model_routing'}
+            or any(payload[k] is not None and not isinstance(payload[k], str)
+                   for k in ('model', 'provider', 'base_url', 'api_mode'))
+            or not isinstance(payload['clear_model_routing'], bool)):
+        raise RuntimeStoreError('invalid_params')
+    patch = {'browser_model_lock': None}
+    if payload['clear_model_routing']:
+        patch['model_routing'] = None
+    if payload['model']:
+        patch['model'] = payload['model']
+    if payload['provider']:
+        route = {'provider': payload['provider'], 'base_url': payload['base_url'] or None,
+                 'api_mode': payload['api_mode'] or None}
+        patch.update(route, gateway_runtime=route)
+    from hermes_state_sessions import _MODEL_CONFIG_ROW_MISSING
+    merged = db._merge_model_config_json(conn, session_id, patch)
+    if merged is not _MODEL_CONFIG_ROW_MISSING:
+        conn.execute('UPDATE sessions SET model=?, model_config=? WHERE id=?', (payload['model'], merged, session_id))
+    return {'value': None}
+
+
+def worker_lease_key(db, conn, session_id, payload):
+    """``SessionDB._session_turn_lease_key`` for this session's lineage only. [daveey] A target outside
+    it answers an opaque key that matches nothing, so a worker can neither read another conversation's
+    lineage nor be told two foreign ids share one."""
+    if set(payload) != {'target'} or not isinstance(payload['target'], str):
+        raise RuntimeStoreError('invalid_params')
+    target = payload['target']
+    key = db._session_turn_lease_key_on_conn(conn, target)
+    if target != session_id and key != db._session_turn_lease_key_on_conn(conn, session_id):
+        return {'value': f'foreign:{target}'}
+    return {'value': key}
+
+
 WORKER_LIFECYCLE_HANDLERS = {
+    'session.model': worker_model,
+    'session.lease_key': worker_lease_key,
     'session.title': worker_title,
     'session.title_source': worker_title_source,
     'session.next_title': worker_next_title,

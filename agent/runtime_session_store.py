@@ -377,7 +377,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
     def acquire_session_turn_lease(self, session_id, holder, *, ttl_seconds=300.0,
             wait_seconds=1800.0, poll_interval_seconds=1.0, on_wait=None,
             wait_notice_interval_seconds=15.0, should_abort=None, acquire_patience_s=0.5,
-            on_contended=None):
+            on_contended=None, contended_wait_seconds=0.0):
         # Reuse only the local polling orchestrator, not the SQLite mixin surface. Same signature
         # as the owner's (``on_contended``: a busy-database notice; the RPC try never raises it).
         from hermes_state_compression import SessionCompressionMixin
@@ -386,14 +386,15 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             poll_interval_seconds=poll_interval_seconds, on_wait=on_wait,
             wait_notice_interval_seconds=wait_notice_interval_seconds,
             should_abort=should_abort, acquire_patience_s=acquire_patience_s,
-            on_contended=on_contended)
+            on_contended=on_contended, contended_wait_seconds=contended_wait_seconds)
 
     def refresh_session_turn_lease(self, session_id, holder, *, ttl_seconds=300.0, patience_s=None):
         self._session(session_id)
         return self._apply('turn.renew', {'holder': holder, 'ttl_seconds': ttl_seconds})['value']
 
-    def release_session_turn_lease(self, session_id, holder):
-        # DurableTurnLease retains its admission target across physical rotation.
+    def release_session_turn_lease(self, session_id, holder, *, patience_s=None):
+        # DurableTurnLease retains its admission target across physical rotation. ``patience_s`` (the
+        # owner's local write-lock patience) has no meaning for a receipt RPC.
         self._apply('turn.cleanup', {'target': session_id, 'holder': holder})
 
     def queue_token_counts(self, session_id, **usage):
@@ -475,6 +476,18 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
     def update_system_prompt(self, session_id, system_prompt):
         self._session(session_id)
         self._apply('session.prompt', {'system_prompt': system_prompt})
+
+    def update_session_model(self, session_id, model, provider=None, *, base_url=None, api_mode=None,
+                             clear_model_routing=False):
+        self._session(session_id)
+        self._apply('session.model', {'model': model, 'provider': provider, 'base_url': base_url,
+                                      'api_mode': api_mode, 'clear_model_routing': bool(clear_model_routing)})
+
+    def _session_turn_lease_key(self, session_id):
+        # The stand-down latch compares lineage keys; the owner answers only within this lineage.
+        if not session_id:
+            return session_id
+        return self._apply('session.lease_key', {'target': session_id})['value']
 
     def patch_session_model_config(self, session_id, patch):
         self._session(session_id)
