@@ -258,7 +258,7 @@ def _mentions(text: str, test_id: str) -> bool:
 
 
 _GH_JOB_URL = re.compile(r"(https://github\.com/[^/\s]+/[^/\s]+/actions/runs/\d+)/job/(\d+)")
-_TEST_ID = re.compile(r"tests/[\w./-]+\.py(?:::[\w\[\]./-]+)+")
+_TEST_ID = re.compile(r"tests/[\w./-]+\.py(?:::[\w\[\]./-]*[\w\]])+")  # ends on a word char or ']', not on "."
 
 
 def _cites_job(text: str, url: str) -> bool:
@@ -284,16 +284,31 @@ def _existing_cards(board: Board, run_url: str, test_id: str) -> tuple[list[dict
     citing, open_for_test = [], []
     url = run_url if run_url.startswith(("http://", "https://")) else None
     for card in board.list_cards():
+        # Only a card ABOUT this test (see _is_about) owns it: a report that lists it among others does not.
+        if not _is_about(card, test_id):
+            continue
         text = f"{card.get('title') or ''}\n{card.get('body') or ''}"
-        about_test, has_url = _mentions(text, test_id), bool(url) and _cites_job(text, url)
-        if url and (about_test or has_url) and not (about_test and has_url):
-            notes = "\n".join(board.comments(card["id"]))
-            about_test, has_url = about_test or _mentions(notes, test_id), has_url or _cites_job(f"{text}\n{notes}", url)
-        if about_test and has_url:
+        has_url = bool(url) and _cites_job(text, url)
+        if url and not has_url:
+            has_url = _cites_job(f"{text}\n" + "\n".join(board.comments(card["id"])), url)
+        if has_url:
             citing.append(card)
-        elif about_test and card.get("status") not in CLOSED:
+        elif card.get("status") not in CLOSED:
             open_for_test.append(card)
     return citing, open_for_test
+
+
+def _is_about(card: dict[str, Any], test_id: str) -> bool:
+    """The card is about THIS test: its title or its body's lead paragraph names the test id and no other, or its
+    key is ``deflake:<id>[#n]``. A card that only quotes the id further down (a report about this cron listing
+    several dropped tests, t_01a189b2c78e9005 itself) is not the card that fixes it."""
+    key = str(card.get("idempotency_key") or "")
+    if key == f"deflake:{test_id}" or key.startswith(f"deflake:{test_id}#"):
+        return True
+    lead = str(card.get("body") or "").strip().split("\n\n", 1)[0]
+    subject = f"{card.get('title') or ''}\n{lead}"
+    others = {t for t in _TEST_ID.findall(subject) if t != test_id and not test_id.startswith(t)}
+    return _mentions(subject, test_id) and not others
 
 
 def file_cards(entries: Iterable[dict[str, str]], *, run_url: str, branch: str, board: Board,
@@ -371,14 +386,7 @@ class _Flake:
         """Open and about THIS test: its title or its body's lead paragraph names the test id and no other, or its
         key is ``deflake:<id>[#n]``. A card that only quotes the id further down (a report about this cron that
         lists several dropped tests, t_01a189b2c78e9005 itself) is not the card that fixes it."""
-        if card.get("status") not in OPEN:
-            return False
-        key = str(card.get("idempotency_key") or "")
-        lead = str(card.get("body") or "").strip().split("\n\n", 1)[0]
-        subject = f"{card.get('title') or ''}\n{lead}"
-        others = {t for t in _TEST_ID.findall(subject) if t != self.test_id and not self.test_id.startswith(t)}
-        return ((_mentions(subject, self.test_id) and not others)
-                or key == f"deflake:{self.test_id}" or key.startswith(f"deflake:{self.test_id}#"))
+        return card.get("status") in OPEN and _is_about(card, self.test_id)
 
     def deliver(self, card: dict[str, Any]) -> tuple[bool | None, str]:
         """Comment ``card`` and read the comment back. ``(True, how)``, ``(False, why)`` or ``(None, pending)``."""

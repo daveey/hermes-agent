@@ -308,3 +308,20 @@ def test_a_card_that_only_quotes_the_test_id_among_others_is_not_its_owner(env):
     new = [c for c in cards.values() if c["id"].startswith("t_new")]
     assert len(new) == 1 and sorted(new[0]["distinct_from"]) == ["t_pair", "t_report"]
     assert log == [f"opened {new[0]['id']} {TEST} (distinct from t_report, t_pair)"]
+
+
+def test_board_scan_skips_a_report_card_that_cites_the_job_and_lists_several_tests(env):
+    """Live (repair run): the default-board scan took t_01a189b2c78e9005, whose body lists the three dropped
+    tests with their job URLs, as the card 'citing this job' and commented it instead of filing a card."""
+    other = "tests/y.py::test_b"
+    env.card("t_report", "running", "ci-flaky-cards drops flaky tests when the overlap guard names an unrelated card",
+             f"Found while verifying the fix.\n\n| test | job |\n| {TEST} | {RUN} |\n| {other} | {RUN} |")
+    state = fk.load_state(env.tmp / "absent.json")
+
+    log = _file(env, state)
+
+    cards = env.kanban()["cards"]
+    assert cards["t_report"]["comments"] == []
+    new = [c for c in cards.values() if c["id"].startswith("t_new")]
+    assert len(new) == 1 and new[0]["title"] == f"Deflake {TEST}"
+    assert log == [f"opened {new[0]['id']} {TEST}"]
