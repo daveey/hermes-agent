@@ -90,3 +90,59 @@ def test_parallel_calls_do_not_share_parser_or_emitter_state():
     with pytest.raises(yaml.YAMLError):
         yaml.safe_dump(object())
     assert yaml.safe_load(yaml.safe_dump({"healthy": True})) == {"healthy": True}
+
+
+class TestParsedDocumentDiskCache:
+    """Large documents are cached on disk by content; semantics must not change."""
+
+    @staticmethod
+    def _big(extra: str = "") -> str:
+        return "# pad\n" * 4000 + "flag: yes\nname: x\n" + extra
+
+    def test_second_load_skips_the_parser_and_matches(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(yaml, "_cache_dir", lambda: tmp_path)
+        doc = self._big()
+        first = yaml.safe_load(doc)
+        assert first == {"flag": True, "name": "x"}  # YAML 1.1 boolean
+        assert len(list(tmp_path.glob("*.bin"))) == 1
+
+        def boom(*_a, **_k):
+            raise AssertionError("parser ran on a cache hit")
+
+        monkeypatch.setattr(yaml, "_load", boom)
+        second = yaml.safe_load(doc)
+        assert second == first and second is not first
+        second["name"] = "mutated"
+        assert yaml.safe_load(doc)["name"] == "x"
+
+    def test_changed_content_misses(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(yaml, "_cache_dir", lambda: tmp_path)
+        assert yaml.safe_load(self._big())["name"] == "x"
+        assert yaml.safe_load(self._big("other: 1\n"))["other"] == 1
+
+    def test_duplicate_keys_still_rejected_and_not_cached(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(yaml, "_cache_dir", lambda: tmp_path)
+        doc = self._big("name: y\n")
+        for _ in range(2):
+            with pytest.raises(Exception):
+                yaml.safe_load(doc)
+        assert not list(tmp_path.glob("*.bin"))
+
+    def test_non_marshalable_values_are_not_cached(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(yaml, "_cache_dir", lambda: tmp_path)
+        out = yaml.safe_load(self._big("when: 2026-10-29\n"))
+        assert str(out["when"]) == "2026-10-29"
+        assert not list(tmp_path.glob("*.bin"))
+
+    def test_corrupt_entry_falls_back_to_parse(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(yaml, "_cache_dir", lambda: tmp_path)
+        doc = self._big()
+        yaml.safe_load(doc)
+        for f in tmp_path.glob("*.bin"):
+            f.write_bytes(b"\x00garbage")
+        assert yaml.safe_load(doc)["name"] == "x"
+
+    def test_small_documents_bypass_the_cache(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(yaml, "_cache_dir", lambda: tmp_path)
+        assert yaml.safe_load("a: 1\n") == {"a": 1}
+        assert not list(tmp_path.glob("*.bin"))

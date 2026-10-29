@@ -490,11 +490,13 @@ def read_yaml_layers(home: Path) -> dict:
     yaml_cfg: dict = {}
     if config_yaml_path.exists():
         # The installer seeds config.yaml by copying cli-config.yaml.example (~120 KB, almost all
-        # comments), and nothing caches this loader — so the pure-Python parser dominates the load.
-        from utils import fast_safe_load
+        # comments); the pure-Python parser dominates the load, and GET /api/status runs this on
+        # every request. Re-parse only when the file changes; the cached object is shared, so copy.
+        import copy
 
-        with open(config_yaml_path, encoding="utf-8-sig") as f:
-            yaml_cfg = fast_safe_load(f) or {}
+        from utils import load_yaml_file_readonly
+
+        yaml_cfg = copy.deepcopy(load_yaml_file_readonly(config_yaml_path, encoding="utf-8-sig") or {})
 
     from hermes_cli.config import _expand_env_vars
 

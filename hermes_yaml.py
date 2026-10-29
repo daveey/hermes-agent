@@ -4,7 +4,11 @@ Ruamel's native schema includes bare y/n booleans and rejects duplicate keys.
 Every operation owns its parser/emitter; instances must not be shared by threads.
 """
 
+import hashlib
+import marshal
+import os
 from io import StringIO
+from pathlib import Path
 from typing import Any, IO, overload
 
 from ruamel.yaml import YAML
@@ -25,6 +29,55 @@ def _load(document: str | bytes, *, pure: bool) -> Any:
     return yaml.load(document)
 
 
+# Parsed-document cache. The pure-Python parser costs ~0.07 s per 120 KB config and ~0.4 s for the
+# largest bundled locale; a freshly started backend parses every profile's config plus every locale
+# while serving its first requests, so those parses compete with them for the GIL. Large documents are
+# therefore kept on disk, keyed by the sha256 of their exact bytes (+ parser version), so a restart
+# re-reads instead of re-parsing. ``marshal`` only round-trips plain str/int/float/bool/None/list/dict
+# and loads without executing code; a document with anything else (timestamps, ...) is not cached.
+_CACHE_MIN_BYTES = 16 * 1024
+_CACHE_MAX_ENTRIES = 256
+_CACHE_TAG = "hy1"
+
+
+def _cache_dir() -> Path | None:
+    try:
+        from hermes_constants import get_default_hermes_root
+
+        return get_default_hermes_root() / "cache" / "yaml-parse"
+    except (ImportError, OSError):
+        return None
+
+
+def _cache_key(document: bytes) -> str:
+    import ruamel.yaml
+
+    h = hashlib.sha256(f"{_CACHE_TAG}|{ruamel.yaml.__version__}|".encode())
+    h.update(document)
+    return h.hexdigest()
+
+
+def _cache_read(path: Path) -> tuple[bool, Any]:
+    try:
+        return True, marshal.loads(path.read_bytes())
+    except (OSError, ValueError, EOFError, TypeError):
+        return False, None
+
+
+def _cache_write(directory: Path, path: Path, value: Any) -> None:
+    try:
+        blob = marshal.dumps(value)
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_bytes(blob)
+        os.replace(tmp, path)
+        entries = sorted(directory.glob("*.bin"), key=lambda p: p.stat().st_mtime)
+        for old in entries[: max(0, len(entries) - _CACHE_MAX_ENTRIES)]:
+            old.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+
+
 def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:
     """Read standard YAML data; existing configs use YAML 1.1 booleans.
 
@@ -32,10 +85,20 @@ def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:
     documents the pure parser accepts (``[{url: http://h}]``), so a C rejection is re-read pure.
     """
     document = stream if isinstance(stream, (str, bytes)) else stream.read()
+    raw = document.encode("utf-8") if isinstance(document, str) else document
+    directory = _cache_dir() if len(raw) >= _CACHE_MIN_BYTES else None
+    path = directory / f"{_cache_key(raw)}.bin" if directory is not None else None
+    if path is not None:
+        hit, value = _cache_read(path)
+        if hit:
+            return value
     try:
-        return _load(document, pure=False)
+        value = _load(document, pure=False)
     except YAMLError:
-        return _load(document, pure=True)
+        value = _load(document, pure=True)
+    if path is not None:
+        _cache_write(directory, path, value)
+    return value
 
 
 @overload
