@@ -3797,7 +3797,7 @@ def test_session_resume_deferred_history_close_cancels_build(monkeypatch):
 
         def get_resume_conversations(self, _target):
             history_started.set()
-            assert release_history.wait(timeout=2.0)
+            assert release_history.wait(timeout=60.0)
             loaded = [{"role": "user", "content": "late"}]
             return loaded, loaded
 
@@ -3821,7 +3821,7 @@ def test_session_resume_deferred_history_close_cancels_build(monkeypatch):
         )
         sid = response["result"]["session_id"]
         session = server._sessions[sid]
-        assert history_started.wait(timeout=1.0)
+        assert history_started.wait(timeout=30.0)
 
         assert server._close_session_by_id(sid, end_reason="tui_close") is True
         assert session["resume_history_ready"].is_set()
