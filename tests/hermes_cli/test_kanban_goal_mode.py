@@ -254,7 +254,7 @@ class TestCLIJudgeGate:
             lambda **kw: (verdict, reason, False, None, False),
         )
 
-        args = argparse.Namespace(task_ids=["t1"], summary=summary, result=None, metadata=None)
+        args = argparse.Namespace(task_ids=["t_plain0001"], summary=summary, result=None, metadata=None)
         return _cmd_complete(args), complete_calls
 
     def test_judge_rejects_premature_completion(self, monkeypatch):
@@ -271,7 +271,7 @@ class TestCLIJudgeGate:
         """Plain (non-goal_mode) tasks are never sent to the judge."""
         rc, complete_calls = self._run(monkeypatch, goal_mode=False)
         assert rc == 0
-        assert complete_calls == ["t1"]
+        assert complete_calls == ["t_plain0001"]
 
     def test_judge_blocked_verdict_rejects_completion(self, monkeypatch):
         """#100954: an unachievable goal must not complete silently.
