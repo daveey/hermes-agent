@@ -1020,9 +1020,19 @@ def _task_rows(conn: sqlite3.Connection, ids: Optional[set[str]] = None) -> dict
     return out
 
 
-def _child_uids(conn: sqlite3.Connection, table: str, task_ids: set[str]) -> set[tuple[str, str]]:
+def _child_uids(conn: sqlite3.Connection, table: str, task_ids: set[str],
+                gateway: Optional[str] = None) -> set[tuple[str, str]]:
+    """Child row uids of ``task_ids``. With ``gateway``, chat links of OTHER gateways' chats on a card created
+    elsewhere are left out: a picked-up copy of a foreign card carries no chat links (``import_cards`` copies
+    only runs/comments/attachments/events, and the creator's chats are read from the replica), so counting them
+    made every running foreign copy a permanent ``task_chat_links`` mismatch with nothing in flight."""
     if table == "task_links":
         return {(p, f"{p}>{c}") for p, c in conn.execute("SELECT parent_id, child_id FROM task_links") if c in task_ids}
+    if table == "task_chat_links" and gateway is not None:
+        rows = conn.execute(
+            "SELECT l.task_id, l.uid FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id WHERE l.uid IS NOT NULL "
+            "AND NOT (t.created_on IS NOT NULL AND t.created_on != ?1 AND COALESCE(l.chat_gateway, '') != ?1)", (gateway,))
+        return {(t, u) for t, u in rows if t in task_ids}
     return {(t, u) for t, u in conn.execute(f"SELECT task_id, uid FROM {table} WHERE uid IS NOT NULL") if t in task_ids}
 
 
@@ -1053,8 +1063,8 @@ def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> 
             fields[tid] = bad
     children: dict[str, int] = {}
     for table in ("task_links", "task_comments", "task_runs", "task_chat_links"):
-        lv = _child_uids(live, table, checked)
-        sh = _child_uids(shadow, table, checked)
+        lv = _child_uids(live, table, checked, gateway)
+        sh = _child_uids(shadow, table, checked, gateway)
         n = len(lv ^ sh)
         if n:
             children[table] = n
