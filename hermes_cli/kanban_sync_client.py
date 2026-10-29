@@ -612,6 +612,7 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
             if mode == "primary" and sync.refresh_remote_parents(live, replica):
                 sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
             result.repaired = repair_divergence(live, replica, gateway)
+            repair_missing_children(live, replica, gateway)
             if mode == "primary":
                 heal_clobbered_completions(live)
         finally:
@@ -1011,13 +1012,47 @@ def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> 
             "child_mismatch": children, "rejected_ops": rejected, "foreign_cards": foreign}
 
 
+def repair_missing_children(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> None:
+    """Heal capture-gap links, including app-assigned uids the NULL-uid install heal cannot find.
+
+    Only absence is evidence here: never overwrite an existing replica child. Equal acknowledged
+    task versions and no outstanding ops distinguish settled local inserts from unpulled work.
+    Serialize the live scan and queue so concurrent rounds cannot enqueue the same row twice.
+    """
+    from hermes_cli.kanban_db_connect import write_txn
+    seen = {r[0]: r[1] for r in shadow.execute(
+        "SELECT id, sync_version FROM tasks WHERE (created_on = ? OR created_on IS NULL) AND sync_version IS NOT NULL",
+        (gateway,))}
+    with write_txn(live):
+        held = {(t, u) for t, u in live.execute(
+            "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state IN ('pending', 'rejected')")}
+        held |= {(t, u) for t, u in live.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")}
+        held |= {(t, u) for t, u in shadow.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")}
+        settled = {r[0] for r in live.execute("SELECT id, sync_version FROM tasks WHERE sync_version IS NOT NULL")
+                   if seen.get(r[0]) == r[1] and ("tasks", r[0]) not in held}
+        for table in ("task_links", "task_chat_links"):
+            remote = _live_uids(shadow, table)
+            for row in live.execute(f"SELECT * FROM {table}").fetchall():
+                uid = _row_uid(table, row)
+                parents = {row["parent_id"], row["child_id"]} if table == "task_links" else {row["task_id"]}
+                if not uid or uid in remote or (table, uid) in held or not parents <= settled:
+                    continue
+                live.execute(
+                    "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
+                    "VALUES (?, ?, ?, 'upsert', ?, NULL, '', ?)",
+                    (sync.uuid7(), table, uid, json.dumps(_row_fields(live, table, row)), time.time_ns() // 1_000_000))
+                _log.warning("kanban sync: %s %s absent from the service with nothing in flight "
+                             "(an uncaptured write); re-queued", table, uid)
+
+
 def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> dict[str, list[str]]:
     """Queue the local values of this gateway's cards that the service never received.
 
     A card whose live ``sync_version`` equals the replica's, with no outbox op in flight, has seen every service
     write. Any synced field that still differs was then written locally with no capture trigger, e.g. in the
-    window while another process re-installed the triggers. The gap heal in ``install_or_remove`` only finds
-    child rows (they have no uid yet). A task row has no such marker, so this is the only place that finds it.
+    window while another process re-installed the triggers. The install heal only finds NULL-uid children;
+    ``repair_missing_children`` handles settled missing links. A task row has no missing-row marker, so this
+    field comparison is the only place that finds its uncaptured edits.
     Hub incident 2026-10-28: a ``scheduled -> ready`` wake reached the service as its event but not as its
     status, and the service refused every lease as ``not_claimable`` for 3 h. Returns {task id: fields queued}."""
     from hermes_cli.kanban_db_connect import write_txn
