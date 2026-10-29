@@ -79,13 +79,13 @@ def module_name(rel: str) -> str | None:
 
 def tracked_py(repo: Path) -> list[str]:
     out = subprocess.run(["git", "-C", str(repo), "ls-files", "*.py"], check=True, capture_output=True,
-                         text=True).stdout
+                         text=True, timeout=60).stdout
     return [f for f in out.splitlines() if f and "node_modules/" not in f]
 
 
 def imports_of(repo: Path, rel: str, modules: set[str]) -> set[str]:
     try:
-        tree = ast.parse((repo / rel).read_text(encoding="utf-8", errors="replace"))
+        tree = ast.parse((repo / rel).read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, SyntaxError, ValueError):
         return set()
     me = module_name(rel) or ""
@@ -138,14 +138,14 @@ def importers(repo: Path, changed_modules: set[str]) -> set[str]:
 
 def _read(repo: Path, rel: str) -> str:
     try:
-        return (repo / rel).read_text(encoding="utf-8", errors="replace")
+        return (repo / rel).read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return ""
 
 
 def estimate_seconds(repo: Path, files: list[str]) -> float:
     try:
-        durations = json.loads((repo / "test_durations.json").read_text(encoding="utf-8"))
+        durations = json.loads((repo / "test_durations.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         durations = {}
     return sum(float(durations.get(f, DEFAULT_FILE_SECONDS)) for f in files)
@@ -194,7 +194,7 @@ def plan(repo: Path, changed: list[str], full_reason: str | None = None) -> dict
 
 def changed_files(repo: Path, base: str, head: str) -> list[str]:
     out = subprocess.run(["git", "-C", str(repo), "diff", "--name-only", f"{base}...{head}"], check=True,
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True, timeout=60).stdout
     return [line for line in out.splitlines() if line]
 
 
@@ -216,9 +216,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             changed = changed_files(repo, args.base, args.head)
-        except subprocess.CalledProcessError as exc:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             # No diff means no evidence for a narrower run.
-            changed, args.full = [], f"git diff {args.base}...{args.head} failed: {exc.stderr.strip()[:200]}"
+            detail = (exc.stderr or "").strip()[:200] if isinstance(exc.stderr, str) else "timed out"
+            changed, args.full = [], f"git diff {args.base}...{args.head} failed: {detail}"
     result = plan(repo, changed, args.full)
     if args.files_out:
         Path(args.files_out).write_text("".join(f"{f}\n" for f in result["files"]), encoding="utf-8")
