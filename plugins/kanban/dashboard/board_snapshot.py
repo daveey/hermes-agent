@@ -14,7 +14,10 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-CACHE_TTL_S = 15.0
+CACHE_TTL_S = 30.0
+# A busy board moves the db signature on nearly every poll. Re-reading costs ~1.3s of
+# CPU, so a changed signature only refreshes a snapshot at least this old.
+MIN_REFRESH_S = 20.0
 _cache: dict[tuple, tuple] = {}
 _cache_lock = threading.Lock()
 _refresh_lock = threading.Lock()
@@ -77,6 +80,8 @@ def serve(key, sig, read: Callable[[], dict], now: Optional[float] = None) -> di
     if hit is not None and hit[0] == sig and now - hit[1] < CACHE_TTL_S:
         return dict(hit[2], now=int(time.time()))
     if hit is not None:
+        if now - hit[1] < MIN_REFRESH_S:
+            return dict(hit[2], now=int(time.time()))
         _schedule(read, key, sig, now)
         return dict(hit[2], now=int(time.time()))
     result = read()
