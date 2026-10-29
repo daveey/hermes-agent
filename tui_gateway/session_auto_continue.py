@@ -138,7 +138,7 @@ def _adopt_stored_continuation_source(sid: str, session: dict, session_key: str)
         _clear_session_context(tokens)
 
 
-UPDATE_HOLD_QUEUE_REASON = "update_hold_queue"
+from tui_gateway.turn_marker import UPDATE_HOLD_QUEUE_MAX_AGE_S, UPDATE_HOLD_QUEUE_REASON
 
 
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
@@ -172,7 +172,11 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     # [daveey] A background-job receipt is a delivery, not a turn to redo: it keeps longer than a turn.
     from tui_gateway.exit_job_receipts import JOBS_REASON, JOBS_RECEIPT_MAX_AGE_S, jobs_stopped_note
     receipt = marker.get("reason") == JOBS_REASON
-    if not enabled or age > (JOBS_RECEIPT_MAX_AGE_S if receipt else freshness_secs) or marker["attempts"] >= max_attempts:
+    # An update-hold queued prompt waited out the drain window + apply: its own bound (turn_marker.py).
+    max_age = (JOBS_RECEIPT_MAX_AGE_S if receipt
+               else max(freshness_secs, UPDATE_HOLD_QUEUE_MAX_AGE_S) if marker.get("reason") == UPDATE_HOLD_QUEUE_REASON
+               else freshness_secs)
+    if not enabled or age > max_age or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
     with session["history_lock"]:

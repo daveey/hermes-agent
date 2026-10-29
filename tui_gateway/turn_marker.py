@@ -25,6 +25,14 @@ _MAX_ENTRIES = 32
 # Enough to re-submit any realistic prompt; guards against a multi-megabyte paste being journaled.
 _MAX_PROMPT_CHARS = 64_000
 
+# A prompt accepted behind the core-update admission hold (session_auto_continue._queue_submit_behind_update_hold)
+# is journaled under this reason so the post-restart ``session.resume`` sends it. It is the user's own unsent
+# message, not a turn to redo, so it is not bound by the 15 min turn freshness window: hermes-sync's drain
+# window holds admission for up to 15 min and the apply then takes 1-4 min, plus the backend restart and the
+# Desktop reconnect. One hour covers that with margin; an older one is dropped (the row stays "not sent").
+UPDATE_HOLD_QUEUE_REASON = "update_hold_queue"
+UPDATE_HOLD_QUEUE_MAX_AGE_S = 3600.0
+
 _lock = threading.Lock()
 
 
