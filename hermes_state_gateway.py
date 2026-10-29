@@ -971,8 +971,10 @@ class SessionGatewayMixin:
             f" AND handoff_state IN ({', '.join('?' for _ in states)})" if states else "")
         return self._write_rowcount(sql, (error[:500], session_id, *states)) > 0
 
-    def reclaim_stale_running_handoffs(self, error: str) -> list[str]:
-        """Fail every handoff stuck in ``running``; returns the ids reclaimed. Only the gateway watcher sets
+    def reclaim_stale_running_handoffs(self, error: str) -> Optional[list[str]]:
+        """Fail every handoff stuck in ``running``; returns the ids reclaimed (``[]`` = nothing stranded),
+        or ``None`` when the write failed (e.g. the write lock stayed busy) so the caller retries instead of
+        mistaking a failure for "nothing to reclaim" (agent-9cbeb4e676). Only the gateway watcher sets
         ``running``, for one in-process dispatch — so a ``running`` row at watcher startup belongs to a
         PREVIOUS gateway that died mid-dispatch. It is poisonous: ``request_handoff`` only accepts
         NULL/``completed``/``failed``, so the session could never hand off again, with no error surfaced.
@@ -993,4 +995,4 @@ class SessionGatewayMixin:
             logger.warning(
                 "reclaim_stale_running_handoffs failed; stranded 'running' "
                 "handoff rows (if any) were left in place", exc_info=True)
-            return []
+            return None

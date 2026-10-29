@@ -250,6 +250,152 @@ async def test_reclaim_runs_per_profile_store(monkeypatch):
     )
 
 
+class _FlakyReclaimDB(_ReclaimDB):
+    """Reclaim fails (None) for the first ``fail_times`` calls, then reclaims ``stale_ids``."""
+
+    def __init__(self, fail_times=1, stale_ids=("s1",)):
+        super().__init__(stale_ids=stale_ids)
+        self.fail_times = fail_times
+        self.results = []
+
+    async def reclaim_stale_running_handoffs(self, error):
+        self.reclaim_calls.append(error)
+        result = None if len(self.reclaim_calls) <= self.fail_times else list(self.stale_ids)
+        self.results.append(result)
+        return result
+
+
+def _fake_clock(monkeypatch, step):
+    """Each read advances a fake monotonic clock by ``step`` seconds (the watcher's backoff clock)."""
+    from gateway import run_handoff_reclaim
+    now = [1000.0]
+
+    def _clock():
+        now[0] += step
+        return now[0]
+
+    monkeypatch.setattr(run_handoff_reclaim, "reclaim_clock", _clock)
+    return now
+
+
+def _no_sleep_patch(monkeypatch):
+    async def _no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(run.asyncio, "sleep", _no_sleep)
+
+
+def _watch_fake(db, ticks):
+    fake = types.SimpleNamespace()
+    fake._session_db = db
+    fake._running = _running_flag(ticks)
+
+    async def _process_handoff(row, profile_name=None):
+        return None
+
+    fake._process_handoff = _process_handoff
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_failed_startup_reclaim_is_retried_until_it_succeeds(monkeypatch):
+    """A reclaim that fails at startup (busy state.db: None, not []) is retried on a later tick.
+
+    Before the fix the startup reclaim ran exactly once and a failure looked like "nothing to do",
+    so a store locked at startup kept its poisonous 'running' rows until the next gateway restart
+    (agent-9cbeb4e676).
+    """
+    monkeypatch.setattr(run, "_handoff_watch_scopes", lambda _r: [(None, None)])
+    _no_sleep_patch(monkeypatch)
+    _fake_clock(monkeypatch, step=40.0)  # every tick is past the 30s minimum backoff
+
+    db = _FlakyReclaimDB(fail_times=1, stale_ids=["s1"])
+    coro = run.GatewayRunner._handoff_watcher(_watch_fake(db, ticks=5), interval=0.0, drain_timeout=0.01)
+    await asyncio.wait_for(coro, timeout=5)
+
+    assert len(db.reclaim_calls) == 2, f"expected startup + one retry, got {len(db.reclaim_calls)}"
+    assert db.results == [None, ["s1"]], "the retry must actually reclaim the stranded row"
+
+
+@pytest.mark.asyncio
+async def test_reclaim_retry_respects_backoff(monkeypatch):
+    """No retry storm: ticks inside the 30s minimum backoff do not call reclaim again."""
+    monkeypatch.setattr(run, "_handoff_watch_scopes", lambda _r: [(None, None)])
+    _no_sleep_patch(monkeypatch)
+    _fake_clock(monkeypatch, step=1.0)  # ~10 ticks ≈ 20s of clock reads, all inside the backoff
+
+    db = _FlakyReclaimDB(fail_times=99)
+    coro = run.GatewayRunner._handoff_watcher(_watch_fake(db, ticks=10), interval=0.0, drain_timeout=0.01)
+    await asyncio.wait_for(coro, timeout=5)
+
+    assert len(db.reclaim_calls) == 1, f"retried inside the backoff window: {len(db.reclaim_calls)} calls"
+
+
+@pytest.mark.asyncio
+async def test_reclaim_that_keeps_failing_logs_one_error(monkeypatch, caplog):
+    """After 3 failed attempts the watcher logs ONE ERROR naming the store (detector signal)."""
+    import logging
+
+    monkeypatch.setattr(run, "_handoff_watch_scopes", lambda _r: [(None, None)])
+    _no_sleep_patch(monkeypatch)
+    _fake_clock(monkeypatch, step=400.0)  # past the 5 min cap: every tick retries
+
+    db = _FlakyReclaimDB(fail_times=99)
+    caplog.set_level(logging.DEBUG)
+    coro = run.GatewayRunner._handoff_watcher(_watch_fake(db, ticks=6), interval=0.0, drain_timeout=0.01)
+    await asyncio.wait_for(coro, timeout=5)
+
+    assert len(db.reclaim_calls) >= 4, f"expected retries to continue, got {len(db.reclaim_calls)}"
+    errors = [r for r in caplog.records
+              if r.levelno == logging.ERROR and "reclaim" in r.getMessage().lower()]
+    assert len(errors) == 1, [r.getMessage() for r in errors]
+    assert "root" in errors[0].getMessage(), errors[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_reclaim_retry_skipped_while_a_handoff_is_inflight(monkeypatch):
+    """A retry must never fail this gateway's OWN live dispatch: it waits until nothing is in flight."""
+    monkeypatch.setattr(run, "_handoff_watch_scopes", lambda _r: [(None, None)])
+    _no_sleep_patch(monkeypatch)
+    _fake_clock(monkeypatch, step=400.0)
+
+    class _DB(_FlakyReclaimDB):
+        def __init__(self):
+            super().__init__(fail_times=99)
+            self.claimed = []
+
+        async def list_pending_handoffs(self):
+            return [{"id": "slow-row"}]
+
+        async def claim_handoff(self, sid):
+            if sid in self.claimed:
+                return False
+            self.claimed.append(sid)
+            return True
+
+        async def complete_handoff(self, sid):
+            return None
+
+        async def fail_handoff(self, sid, err):
+            return None
+
+    db = _DB()
+    fake = _watch_fake(db, ticks=6)
+
+    async def _process_handoff(row, profile_name=None):
+        await asyncio.Event().wait()  # in flight for the whole run
+
+    fake._process_handoff = _process_handoff
+    coro = run.GatewayRunner._handoff_watcher(fake, interval=0.0, drain_timeout=0.01)
+    await asyncio.wait_for(coro, timeout=5)
+
+    assert db.claimed == ["slow-row"]
+    # Startup + tick 1's retry (it runs BEFORE tick 1 claims the row); once the row is in flight,
+    # later ticks (each past the backoff on this clock) must not retry.
+    assert len(db.reclaim_calls) == 2, (
+        f"retried reclaim while this gateway had a handoff in flight: {len(db.reclaim_calls)} calls")
+
+
 
 
 def test_reclaim_stale_running_handoffs_flips_only_running_rows(tmp_path):
