@@ -29,7 +29,12 @@ from hermes_cli import kanban_owner_recovery
 
 NOW = int(time.time())
 HOST = kb._claimer_id().split(":", 1)[0]
-FINGERPRINT = "6a232414-2dbf-40ab-a534-d9b71db05658:116|4162240"
+# Fork: the fork's dead-worker sweep books a worker whose spawn fingerprint names an EARLIER boot as
+# ``host_reboot`` (uncounted; hermes_cli/kanban_host_reboot.py). These cases are crashes on a live
+# host, so the fingerprint names this boot (the upstream literal named a foreign boot id).
+from hermes_cli.kanban_host_reboot import current_boot as _current_boot
+
+FINGERPRINT = f"{_current_boot() or '6a232414-2dbf-40ab-a534-d9b71db05658'}:116|4162240"
 CLAIM_LAPSED = -1800  # claim_expires_in for a claim that expired half an hour ago
 
 
@@ -159,7 +164,9 @@ def test_a_killed_managed_worker_blocks_the_card_at_the_failure_limit(board):
     board.conn.commit()
     board.tick()
     row = board.state("t_killed")
-    assert row["status"] == "blocked"
+    # Fork: automatic stop paths (the failure-limit breaker included) park the card in agent
+    # ``triage``, not the human ``blocked`` inbox (faa4f93b50a, kanban_block_routing).
+    assert row["status"] == "triage"
     assert row["consecutive_failures"] == kbd.DEFAULT_FAILURE_LIMIT
     kinds = [r["kind"] for r in board.conn.execute(
         "SELECT kind FROM task_events WHERE task_id = 't_killed' ORDER BY id")]
