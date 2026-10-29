@@ -51,9 +51,9 @@ def test_remote_completion_reaches_only_addressed_chat_and_is_idempotent(tmp_pat
             assert profile == "default"
             yield db, db.get_compression_tip(sid) or sid
 
-        for _ in range(2):
-            out = sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)
-            assert len(out) == 2
+        assert len(sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)) == 2
+        # Already persisted: later passes skip it without opening the store (no writer txn per pass).
+        assert sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener) == []
         messages = db.get_messages(CHAT)
         assert len(messages) == 1
         assert messages[0]["display_kind"] == "kanban_notice"
@@ -347,3 +347,46 @@ def test_legacy_fresh_rows_reoffered_once_and_stale_rows_left(tmp_path, caplog):
     assert "left 1 delivered notice" in caplog.text
     assert krn.collect(PENDING_SESSION, "default", hub_db=replica, ledger=ledger, now=now,
                        transcript_has=lambda key, tid: False) == []
+
+
+def test_sweep_skips_persisted_notices_without_opening_store_until_restart(tmp_path):
+    from tui_gateway import kanban_remote_notices as krn
+
+    krn._reset_for_tests()
+    _tid, replica = _replicate(tmp_path, f"FINAL SEND for @session:default@macbook/{CHAT}: memo proof")
+    opens = []
+    with SessionDB(tmp_path / "state.db") as db:
+        for sid in (CHAT, OTHER):
+            db.create_session(sid, "desktop")
+
+        @contextlib.contextmanager
+        def opener(profile, sid):
+            opens.append(sid)
+            yield db, db.get_compression_tip(sid) or sid
+
+        assert len(sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)) == 2
+        assert len(opens) == 2
+        for _ in range(3):
+            assert sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener) == []
+        assert len(opens) == 2
+        krn._reset_for_tests()  # a restarted backend re-checks once and finds the rows: still one notice per chat
+        assert len(sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)) == 2
+        assert len(opens) == 4 and len(db.get_messages(CHAT)) == 1
+
+
+def test_sweep_does_not_remember_a_notice_it_could_not_write(tmp_path):
+    from tui_gateway import kanban_remote_notices as krn
+
+    krn._reset_for_tests()
+    _tid, replica = _replicate(tmp_path, "retry proof")
+    with SessionDB(tmp_path / "state.db") as db:
+        db.create_session(CHAT, "desktop")
+        missing = True
+
+        @contextlib.contextmanager
+        def opener(profile, sid):
+            yield (None, None) if missing or sid != CHAT else (db, sid)
+
+        assert not sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)
+        missing = False
+        assert len(sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener)) == 1

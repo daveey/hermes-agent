@@ -407,9 +407,24 @@ def release(claim: dict, *, ledger: Optional[Path] = None) -> bool:
         return False
 
 
+# [daveey] Notices this process already persisted (or found persisted), keyed (replica, profile, session, notice_id).
+# Without it every 30 s pass re-ran append_kanban_notice for every done/blocked remote card: one state.db writer txn
+# plus a lineage json scan each (441 per pass on the MacBook 2026-10-28, ~1 core of the Desktop backend, and write
+# contention for live turns). A restart re-checks each once; a new event has a new notice_id.
+_DELIVERED_MAX = 50_000
+_delivered: dict[tuple, None] = {}
+
+
+def _remember_delivered(key: tuple) -> None:
+    _delivered[key] = None
+    while len(_delivered) > _DELIVERED_MAX:
+        _delivered.pop(next(iter(_delivered)))
+
+
 def _reset_for_tests() -> None:
     global _index_memo
     _index_memo = None
+    _delivered.clear()
 
 
 logger = logging.getLogger(__name__)
@@ -481,9 +496,13 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
                     metadata = {"notice_id": event_key, "board": task.get("board", "default"),
                                 "task_id": task["id"], "gateway": owner, "kanban_event_keys": [event_key]}
                     text = format_notice(owner, key, task)
+                memo_key = (str(path), profile, sid, metadata["notice_id"])
+                if memo_key in _delivered:
+                    continue
                 with session_db(profile, sid) as (db, tip):
                     if db is not None and text:
                         row_id = db.append_kanban_notice(tip, text, metadata)
+                        _remember_delivered(memo_key)
                         delivered.append({"task_id": task["id"], "session_id": tip, "message_row": row_id})
                         at = _terminal_at(task)
                         ack({"session": sid, "ref": f"{owner}/{key}",
