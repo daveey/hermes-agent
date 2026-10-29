@@ -252,6 +252,15 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
         # of its own and a bare lock-file probe would report stopped.
         if _check_gateway_running(profile_home):
             return
+        if not cfg.get("auto_archive", False):
+            # Draft sweep only: opening the store writable bumps the WAL data_version even when
+            # nothing is archived, which a GET /api/sessions poll must not do. Ask read-only first.
+            probe = _open_session_db_for_profile(profile, read_only=True)
+            try:
+                if not probe.empty_draft_ids():
+                    return
+            finally:
+                probe.close()
         db = _open_session_db_for_profile(profile, read_only=False)
         try:
             db.maybe_archive_empty_drafts()  # [daveey] not gated by sessions.auto_archive

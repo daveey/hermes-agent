@@ -59,3 +59,14 @@ def test_gateway_maintenance_tick_archives_drafts_without_auto_archive(monkeypat
     run._housekeeping_state_db_maintenance()
 
     assert _archived(db, "old")
+
+
+def test_empty_sweep_writes_nothing_and_ids_are_listed_read_only(db):
+    """A sweep that finds no draft stamps no state_meta row (GET /api/sessions polls reach it), and
+    ``empty_draft_ids`` lets a read-only handle ask before the store is opened writable."""
+    _draft(db, "young", 2)
+    assert db.empty_draft_ids() == []
+    assert db.maybe_archive_empty_drafts() == 0
+    assert db.get_meta("last_draft_archive") is None
+    _draft(db, "old", 30)
+    assert db.empty_draft_ids() == ["old"]

@@ -324,12 +324,12 @@ class SessionMaintenanceMixin:
     DRAFT_MAX_AGE_S = 86400.0
     DRAFT_SWEEP_INTERVAL_S = 3600.0
 
-    def archive_empty_drafts(self, *, older_than_s: float = DRAFT_MAX_AGE_S) -> int:
-        """Archive (soft-hide, sweep provenance) interactive rows that never got a message and were last
-        touched ``older_than_s`` ago. Pinned rows, the hidden canonical Bot Chat and compression
-        continuations are exempt. Returns rows archived."""
+    def empty_draft_ids(self, *, older_than_s: float = DRAFT_MAX_AGE_S) -> list:
+        """Ids of interactive rows that never got a message and were last touched ``older_than_s`` ago
+        (read-only, so a read-only handle can ask before anyone opens the store writable). Pinned rows,
+        the hidden canonical Bot Chat and compression continuations are exempt."""
         cutoff = time.time() - float(older_than_s)
-        rows = self._read_all(
+        return [r[0] for r in self._read_all(
             f"""
             SELECT s.id FROM sessions s
             WHERE s.archived = 0
@@ -342,24 +342,29 @@ class SessionMaintenanceMixin:
               AND NOT EXISTS (SELECT 1 FROM sessions p WHERE p.id = s.parent_session_id
                                 AND p.end_reason = 'compression')
               AND {_LAST_ACTIVE_SQL} < ?
-            """, (*self.DRAFT_SOURCES, self.CANONICAL_BOT_CHAT_TITLE, cutoff))
+            """, (*self.DRAFT_SOURCES, self.CANONICAL_BOT_CHAT_TITLE, cutoff))]
+
+    def archive_empty_drafts(self, *, older_than_s: float = DRAFT_MAX_AGE_S) -> int:
+        """Archive (soft-hide, sweep provenance) the :meth:`empty_draft_ids` rows. Returns rows archived."""
+        rows = self.empty_draft_ids(older_than_s=older_than_s)
         for row in rows:
-            self._auto_archive_lineage(row[0])
+            self._auto_archive_lineage(row)
         if rows:
             logger.info("state.db: archived %d empty draft session(s) older than %.0fh", len(rows),
                         older_than_s / 3600)
         return len(rows)
 
     def maybe_archive_empty_drafts(self) -> int:
-        """:meth:`archive_empty_drafts` at most once per ``DRAFT_SWEEP_INTERVAL_S`` (state_meta
-        ``last_draft_archive``). Runs whatever ``sessions.auto_archive`` says. Never raises."""
+        """:meth:`archive_empty_drafts` at most once per ``DRAFT_SWEEP_INTERVAL_S`` after a sweep
+        that archived rows (state_meta ``last_draft_archive``; an empty sweep is read-only). Runs whatever ``sessions.auto_archive`` says. Never raises."""
         try:
             now = time.time()
             since = _seconds_since(now, self.get_meta("last_draft_archive"))
             if since is not None and since < self.DRAFT_SWEEP_INTERVAL_S:
                 return 0
             count = self.archive_empty_drafts()
-            self.set_meta("last_draft_archive", str(now))
+            if count:  # a sweep that found nothing writes nothing: GET /api/sessions polls reach here
+                self.set_meta("last_draft_archive", str(now))
             return count
         except Exception:  # health: allow BLE001 -- a maintenance chore must never break its tick; logged
             logger.warning("state.db empty-draft archive failed", exc_info=True)
