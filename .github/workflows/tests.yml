@@ -289,10 +289,18 @@ jobs:
           set -euo pipefail
           shards=$(python3 - <<'PY'
           import json, pathlib
+          # A directory with more files than one slot runs at once is split into <dir>-<i>of<n>
+          # chunks (the run step takes every n-th file from i): a bwrap slot has 4 CPUs, and 9 git
+          # files at 6 workers starved their own deadlines (fetch watchdog, 30 s gateway restart).
+          CHUNK = 4
           root = pathlib.Path("tests/e2e/core/upgrade")
-          shards = ["core"] if any(root.glob("test_*.py")) else []
-          shards += sorted(d.name for d in root.iterdir()
-                           if d.is_dir() and not d.name.startswith(("_", ".")) and any(d.rglob("test_*.py")))
+          groups = {"core": sorted(root.glob("test_*.py"))}
+          groups.update((d.name, sorted(d.rglob("test_*.py"))) for d in sorted(root.iterdir())
+                        if d.is_dir() and not d.name.startswith(("_", ".")))
+          shards = []
+          for name, files in groups.items():
+              n = -(-len(files) // CHUNK)
+              shards += [name] if n == 1 else [f"{name}-{i}of{n}" for i in range(1, n + 1)]
           print(json.dumps(shards))
           PY
           )
@@ -432,22 +440,30 @@ jobs:
         run: |
           set -euo pipefail
           source .venv/bin/activate
-          if [ "$SHARD" = core ]; then
-            mapfile -t files < <(find tests/e2e/core/upgrade -maxdepth 1 -name 'test_*.py' | sort)
-          else
-            mapfile -t files < <(find "tests/e2e/core/upgrade/$SHARD" -name 'test_*.py' | sort)
+          suite=$SHARD part=1 parts=1
+          if [[ "$SHARD" =~ ^(.+)-([0-9]+)of([0-9]+)$ ]]; then
+            suite=${BASH_REMATCH[1]} part=${BASH_REMATCH[2]} parts=${BASH_REMATCH[3]}
           fi
+          if [ "$suite" = core ]; then
+            mapfile -t all < <(find tests/e2e/core/upgrade -maxdepth 1 -name 'test_*.py' | LC_ALL=C sort)
+          else
+            mapfile -t all < <(find "tests/e2e/core/upgrade/$suite" -name 'test_*.py' | LC_ALL=C sort)
+          fi
+          files=()
+          for i in "${!all[@]}"; do
+            [ $(( i % parts )) -eq $(( part - 1 )) ] && files+=("${all[$i]}")
+          done
           # A shard that collects nothing is a wiring bug, not a pass.
           [ "${#files[@]}" -gt 0 ] || { echo "no test files for shard $SHARD" >&2; exit 1; }
           printf 'shard %s: %s\n' "$SHARD" "${files[*]}"
+          # One worker per CPU this slot really has (cpuset), at most 6: each file drives real
+          # installs/updaters, and more workers than CPUs starves their deadlines.
+          cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)
+          export HERMES_TEST_WORKERS=$(( cpus < 6 ? cpus : 6 ))
           scripts/run_tests.sh --include-integration "${files[@]}"
         env:
           SHARD: ${{ matrix.shard }}
           HERMES_E2E_STRICT_ACCEPTANCE: ${{ inputs.strict_acceptance }}
-          # Each file drives real installs/updaters (process trees plus uv and
-          # git I/O); cpu_count of them at once starves their deadlines. A
-          # shard holds at most ~7 files, so this runs each shard in one wave.
-          HERMES_TEST_WORKERS: "6"
           HERMES_TEST_FILE_TIMEOUT: "3000"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""

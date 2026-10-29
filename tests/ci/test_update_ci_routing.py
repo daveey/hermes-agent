@@ -844,3 +844,30 @@ def test_run_tests_forwards_the_strict_switch():
     text = (_REPO / "scripts/run_tests.sh").read_text(encoding="utf-8-sig")
     allow = re.search(r"for _test_var in (.*?); do", text, re.DOTALL)
     assert allow and "HERMES_E2E_STRICT_ACCEPTANCE" in allow.group(1).split()
+
+
+def test_e2e_upgrade_shards_cover_every_file_once_and_fit_one_slot():
+    """Each e2e-upgrade shard runs at most 4 files (one per CPU of a bwrap slot), and together the shards
+    select every upgrade test file exactly once. The 9-file git directory used to be one shard at 6
+    workers on a 4-CPU slot, and its fetch watchdog / 30 s gateway restart deadlines flaked under load
+    (release run 40821597683)."""
+    lanes = {k: False for k in cc.classify(["README.md"])}
+    lanes["e2e_upgrade"] = True
+    node = _reached(_ci_run(lanes), "tests", "e2e-upgrade")
+    assert node is not None
+    body, ctx = node["body"], node["ctx"]
+    step = next(s for s in body["steps"] if s.get("name", "").startswith("Run upgrade e2e tests"))
+    shards = gha.render(body["strategy"]["matrix"]["shard"], ctx)
+    seen: dict[str, str] = {}
+    for shard in shards:
+        cell = {**ctx, "matrix": {"shard": shard}, "runner": {"os": "Linux", "arch": "X64"}}
+        files = workflow_steps.selected_files(step, cell, _REPO)
+        assert 0 < len(files) <= 4, f"shard {shard} runs {len(files)} files: {sorted(files)}"
+        for f in files:
+            assert f not in seen, f"{f} runs in both {seen[f]} and {shard}"
+            seen[f] = shard
+    upgrade = _REPO / "tests" / "e2e" / "core" / "upgrade"
+    expected = {p.relative_to(_REPO).as_posix() for p in upgrade.rglob("test_*.py")
+                if not any(part.startswith(("_", ".")) for part in p.relative_to(upgrade).parts[:-1])}
+    assert set(seen) == expected, f"missing {sorted(expected - set(seen))}, extra {sorted(set(seen) - expected)}"
+    assert any(s.startswith("git-") for s in shards), shards  # the 9-file git suite is split
