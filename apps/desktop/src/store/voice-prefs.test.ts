@@ -20,14 +20,25 @@ import {
   applyVoiceStopPhraseFromConfig
 } from './voice-prefs'
 
+// Node 26's vitest.setup.ts stand-in is a plain object, so setItem is an own
+// property and a Storage.prototype spy never runs (the write succeeds, and the
+// quota/security cases see "false" instead of null). jsdom is the opposite:
+// localStorage.setItem IS Storage.prototype.setItem, and an own-property spy
+// is ignored. Spy whichever function the live call actually invokes.
+function spyLiveSetItem() {
+  const storage = window.localStorage
+  const target = storage.setItem === Storage.prototype.setItem ? Storage.prototype : storage
+
+  return vi.spyOn(target, 'setItem')
+}
+
 it('keeps the desktop toggle local across config refreshes', async () => {
   for (const fails of [false, true]) {
     for (const enabled of [false, true]) {
       localStorage.clear()
       vi.resetModules()
       const prefs = await import('./voice-prefs')
-      // jsdom's Storage ignores an own-property spy on the instance; patch the prototype.
-      const write = vi.spyOn(Storage.prototype, 'setItem')
+      const write = spyLiveSetItem()
 
       if (fails) {
         write.mockImplementation(() => {
@@ -56,8 +67,7 @@ it('migrates the legacy preference once, not on every refresh', async () => {
       localStorage.clear()
       vi.resetModules()
       const prefs = await import('./voice-prefs')
-      // jsdom's Storage ignores an own-property spy on the instance; patch the prototype.
-      const write = vi.spyOn(Storage.prototype, 'setItem')
+      const write = spyLiveSetItem()
 
       if (fails) {
         write.mockImplementation(() => {
