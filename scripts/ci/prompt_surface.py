@@ -13,6 +13,7 @@ both through the production code into ``tests/fixtures/prompt_surface/``, which 
 * a repository ruleset requires a hermes-agent-core approval for that directory.
 
     python scripts/ci/prompt_surface.py render            # regenerate the committed snapshot
+    python scripts/ci/prompt_surface.py check             # exit 1 when the committed snapshot is stale
     python scripts/ci/prompt_surface.py diff BASE HEAD --output FILE   # Markdown summary
 
 ``render`` runs in a throwaway ``HERMES_HOME`` (stock config, bundled skills synced) with the clock,
@@ -92,6 +93,23 @@ def _pin_environment() -> None:
     # The toolchain probe line reports the host's python/node/pip; it is environment, not code.
     from tools import env_probe
     env_probe.get_environment_probe_line = lambda **_k: ""  # type: ignore[assignment]
+    _bound_workspace_discovery()
+
+
+def _bound_workspace_discovery() -> None:
+    """Workspace discovery must stop at the throwaway home. It walks up from the cwd looking for a
+    ``.git`` or a project marker (AGENTS.md, Makefile...), and a caller whose TMPDIR sits under a
+    real directory with one (hub: ``~/.hermes/cache/scratch`` under ``~/AGENTS.md``) would otherwise
+    render its own checkout's workspace into the snapshot."""
+    from agent import coding_context
+    home = Path(os.environ["HOME"]).resolve()
+    git_root, marker_root = coding_context._git_root, coding_context._marker_root
+
+    def inside(path: Path | None) -> Path | None:
+        return path if path is not None and (path == home or home in path.parents) else None
+
+    coding_context._git_root = lambda cwd: inside(git_root(cwd))  # type: ignore[assignment]
+    coding_context._marker_root = lambda cwd: inside(marker_root(cwd))  # type: ignore[assignment]
 
 
 class _ImportFailures(logging.Handler):
@@ -223,6 +241,39 @@ def render(out: Path) -> int:
     return 0
 
 
+def tree_differences(committed: Path, rendered: Path) -> list[str]:
+    """Paths that differ between two snapshot trees, byte for byte."""
+    out: list[str] = []
+    names = {p.relative_to(d).as_posix() for d in (committed, rendered) for p in d.rglob("*") if p.is_file()}
+    for name in sorted(names):
+        left, right = committed / name, rendered / name
+        if not left.exists():
+            out.append(f"not committed: {name}")
+        elif not right.exists():
+            out.append(f"only in committed: {name}")
+        elif left.read_bytes() != right.read_bytes():
+            out.append(f"stale: {name}")
+    return out
+
+
+REGENERATE = "scripts/run-in-hermes-env python scripts/ci/prompt_surface.py render"
+
+
+def check(snapshot: Path = SNAPSHOT) -> int:
+    """Exit 1 (naming the stale files) when *snapshot* is not what this checkout renders."""
+    with tempfile.TemporaryDirectory(prefix="prompt-surface-check-") as tmp:
+        rendered = Path(tmp) / "prompt_surface"
+        if (code := render(rendered)) != 0:
+            return code
+        differences = tree_differences(snapshot, rendered)
+    if differences:
+        print("prompt surface is stale: the system prompt or tool schemas changed without the snapshot.\n"
+              f"Regenerate and commit it:\n    {REGENERATE}\n" + "\n".join(differences[:20]))
+        return 1
+    print("prompt surface: snapshot is current")
+    return 0
+
+
 # ── diff (stdlib only) ───────────────────────────────────────────────────────
 
 def _signed(n: int) -> str:
@@ -331,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("render", help="regenerate the committed snapshot (default) or --out DIR")
     r.add_argument("--out", type=Path, default=SNAPSHOT)
+    sub.add_parser("check", help="fail when the committed snapshot is stale")
     d = sub.add_parser("diff", help="Markdown summary of two snapshot directories")
     d.add_argument("base", type=Path)
     d.add_argument("head", type=Path)
@@ -340,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "render":
         return render(args.out.resolve())
+    if args.cmd == "check":
+        return check()
     if args.cmd == "_child":
         return _render_child(args.out)
     text = summarize(args.base, args.head)
