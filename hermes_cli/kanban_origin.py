@@ -259,7 +259,10 @@ def bind(conn: Any, task_id: str, origin: Origin, *, board: Optional[str] = None
     """Subscribe ``origin`` to ``task_id`` (platform 'hub'); idempotent. Returns the binding receipt."""
     from hermes_cli import kanban_db_notify as kbn
 
-    kbn.add_notify_sub(conn, task_id=task_id, platform="hub", chat_id=origin.chat_id)
+    # ``reason: origin`` marks the binding as owning: children inherit it (``_inherit_notify_subs``),
+    # unlike the hermes-hub ``shepherd`` subs that only watch this card. [daveey]
+    kbn.add_notify_sub(conn, task_id=task_id, platform="hub", chat_id=origin.chat_id,
+                       delivery_metadata={"reason": "origin"})
     me, _ = gateway_names()
     target = f"{me}/{board or 'default'}/{task_id}"
     return {"origin": origin.ref, "chat_id": origin.chat_id, "task": target, "readback": "pending",

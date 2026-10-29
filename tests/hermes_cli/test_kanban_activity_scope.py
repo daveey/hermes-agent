@@ -68,3 +68,29 @@ def test_attention_cache_does_not_leak_between_profiles(scoped, monkeypatch, tmp
     assert activity.attention_task_counts() == {'same': 1}
     scoped[0] = 'work'
     assert activity.attention_task_counts() == {}
+
+
+def test_shepherd_chat_counts_its_card_not_the_cards_children(scoped, monkeypatch, tmp_path):
+    """A chat that shepherds a card (explicit notify-subscribe) counts that card, not every card the card's
+    worker fans out: children inherit only owning subs. The creating chat still counts the whole program.
+    Regression: runners-panel chat d48ade showed 5 unfinished cards it never created. [daveey]"""
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    board = tmp_path / 'board.db'
+    monkeypatch.setattr(activity, '_board_db_paths', lambda: [board])
+    conn = kbc.connect(board)
+    try:
+        parent = kanban_db.create_task(conn, title='shepherd', assignee='default', session_id='creator')
+        kbn.add_notify_sub(conn, task_id=parent, platform='tui', chat_id='creator',
+                           delivery_metadata={'reason': 'create'})
+        for chat in ('panel', 'other-panel'):
+            kbn.add_notify_sub(conn, task_id=parent, platform='tui', chat_id=chat,
+                               delivery_metadata={'reason': 'shepherd'})
+        for i in range(2):
+            kanban_db.create_task(conn, title=f'fan-out {i}', assignee='w', creator_task_id=parent)
+    finally:
+        conn.close()
+    counts = activity._read_counts(board)
+    assert counts == {'creator': 3, 'panel': 1, 'other-panel': 1}

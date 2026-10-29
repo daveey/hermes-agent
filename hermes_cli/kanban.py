@@ -1625,9 +1625,11 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         )
         if value
     }
-    if args.platform == "tui":
+    if args.platform in ("tui", "hub"):
         # An explicit subscribe is a shepherd: the chat's sidebar row stays busy until the card
-        # lands (kanban_session_activity.COUNTED_SUB_REASONS). Upgrades an earlier touch sub. [daveey]
+        # lands (kanban_session_activity.COUNTED_SUB_REASONS). Upgrades an earlier touch sub, never
+        # downgrades an owning create/origin sub (add_notify_sub). 'hub' is hermes-hub's shepherd
+        # action: stamped so children do not inherit it (_inherit_notify_subs). [daveey]
         delivery_metadata["reason"] = "shepherd"
     with kbc.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
