@@ -22,7 +22,9 @@ def test_refused_notification_retains_result_without_spending_attempts(tmp_path,
         'type': 'completion', 'session_id': 'owned-process', 'session_key': 'owned'}
     session = {'history_lock': threading.RLock(), '_closing': True, 'running': True}
     emitted = []
-    namespace = dict(time=time, logger=logging.getLogger(__name__),
+    # Fork: with the requeue backoff bound below, the ten refusals would sleep ~30 s of real time.
+    fake_time = SimpleNamespace(time=time.time, monotonic=time.monotonic, sleep=lambda _s: None)
+    namespace = dict(time=fake_time, logger=logging.getLogger(__name__),
         _emit=lambda *args: emitted.append(args),
         _session_turn_admission=_session_turn_admission,
         _ensure_active_session_slot=lambda *args: None,
@@ -35,6 +37,21 @@ def test_refused_notification_retains_result_without_spending_attempts(tmp_path,
     # Also bind the retry helper when present; old code must fail on the receipt, not an absent test import.
     if hasattr(session_notifications, '_notif_defer_event'):
         namespace['_notif_defer_event'] = rebind(session_notifications._notif_defer_event, namespace)
+    # Fork: the fork's owner-refusal backoff (_notif_owner_refused / _notif_owner_preflight) and per-session
+    # hold (_notif_hold_for) sit on the same claim/submit/requeue path; bind them into the isolated namespace
+    # too, else the rebound dispatcher dies on a NameError instead of exercising the refusal.
+    for name in ('_notif_run_submit', '_notif_owner_refused', '_notif_owner_preflight', '_notif_note_owner_refusal',
+                 '_notif_refusal_backoff', '_notif_hold_for', '_notif_retry_completions',
+                 '_notification_event_requires_owner'):
+        if hasattr(session_notifications, name):
+            namespace[name] = rebind(getattr(session_notifications, name), namespace)
+    for name in ('_OWNER_REFUSAL_CODES', '_NOTIF_REFUSAL_BACKOFF_S', '_NOTIF_REFUSAL_BACKOFF_MAX_S',
+                 '_notif_held_lock'):
+        if hasattr(session_notifications, name):
+            namespace[name] = getattr(session_notifications, name)
+    # Fork: _run_prompt_submit stages the turn, then runs it through _run_admitted_prompt.
+    if hasattr(prompt_turn, '_run_admitted_prompt'):
+        namespace['_run_admitted_prompt'] = rebind(prompt_turn._run_admitted_prompt, namespace)
     # The dispatcher binds the session's DB row before admission; this session has no store.
     namespace['_ensure_session_db_row'] = lambda _session: True
     original_queue = process_registry.completion_queue
