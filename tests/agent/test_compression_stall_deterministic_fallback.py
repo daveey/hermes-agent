@@ -324,6 +324,8 @@ def test_deterministic_pinned_retry_outlasts_the_llm_idle_window():
         dict(DETERMINISTIC_SUMMARY_ROUTE),
         worker=worker, messages=original, system_prompt_fallback="degraded-prompt",
         idle_timeout_seconds=llm_idle, total_ceiling_seconds=llm_idle,
+        # Upstream's shared pre-commit ceiling (6fb41c9eabf); spent before the slow commit ends.
+        precommit_deadline_monotonic=time.monotonic() + llm_idle,
         on_commit_overrun=None, on_timeout_cause=None, telemetry_agent=None, new_fence=None,
     )
     elapsed = time.monotonic() - started

@@ -45,9 +45,12 @@ def test_unresolved_error_surface_names_runtime_not_provider():
 
 
 def test_unbuffered_progress_preview_unchanged(agent):
-    Run(agent, ["Ordinary response."])
+    # Upstream relays only extracted reasoning as ``reasoning.available``, never the visible reply
+    # (#132477); an unbuffered gate leaves that preview as it is.
+    Run(agent, ["<think>Ordinary plan.</think>Ordinary response."])
     progress = []
     agent.tool_progress_callback = lambda *args: progress.append(args)
     result = _run(agent, lambda **kwargs: None)
     assert result["completed"]
-    assert "Ordinary response." in str(progress)
+    assert "Ordinary plan." in str(progress)
+    assert "Ordinary response." not in str(progress)

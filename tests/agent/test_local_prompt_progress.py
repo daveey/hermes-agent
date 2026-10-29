@@ -67,10 +67,10 @@ class TestPromptProgressHelpers:
         assert prompt_progress_percent({"total": "x"}) is None
 
 
-def _local_agent(provider="llamacpp", base_url="http://127.0.0.1:18434/v1"):
+def _local_agent(provider="llamacpp", base_url="http://127.0.0.1:18434/v1", model="qwen"):
     from run_agent import AIAgent
 
-    agent = AIAgent(api_key="k", base_url=base_url, provider=provider, model="qwen",
+    agent = AIAgent(api_key="k", base_url=base_url, provider=provider, model=model,
                     quiet_mode=True, skip_context_files=True, skip_memory=True)
     agent.api_mode = "chat_completions"
     agent._interrupt_requested = False
@@ -103,9 +103,10 @@ class TestMainStreamProgress:
         client = MagicMock()
         client.chat.completions.create.return_value = iter([_text_chunk("ok", finish_reason="stop")])
         mock_create.return_value = client
-        agent = _local_agent(provider="openrouter", base_url="https://openrouter.ai/api/v1")
+        # Fork: the model/provider guard refuses a bare vendor id on OpenRouter before any request.
+        agent = _local_agent(provider="openrouter", base_url="https://openrouter.ai/api/v1", model="qwen/qwen")
 
-        agent._interruptible_streaming_api_call({"model": "qwen", "messages": [{"role": "user", "content": "hi"}]})
+        agent._interruptible_streaming_api_call({"model": "qwen/qwen", "messages": [{"role": "user", "content": "hi"}]})
 
         sent = client.chat.completions.create.call_args.kwargs
         assert "return_progress" not in (sent.get("extra_body") or {})

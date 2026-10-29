@@ -365,7 +365,9 @@ class TestBuildApiKwargsNousPortal:
     ])
     def test_connector_data_use_asks_for_a_no_training_route_and_never_reaches_the_wire(
             self, monkeypatch, data_use, provider):
-        agent = _make_agent(monkeypatch, "nous", base_url="https://inference-api.nousresearch.com/v1", model="gpt-5")
+        # Fork: the model/provider guard refuses a bare vendor id on Nous before any request.
+        agent = _make_agent(monkeypatch, "nous", base_url="https://inference-api.nousresearch.com/v1",
+                            model="openai/gpt-5")
         tool = {"role": "tool", "tool_call_id": "c1", "content": "inbox"}
         messages = [
             {"role": "user", "content": "read my mail"},
