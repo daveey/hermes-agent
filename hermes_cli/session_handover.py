@@ -159,6 +159,20 @@ def _handed_away(db, sid: str) -> bool:
     return bool(row and row.get("archived") and str(row.get("end_reason") or "").startswith(END_REASON_PREFIX))
 
 
+def _lift_deletion_fence(db, session_ids: list) -> None:
+    """[daveey] A handed-away copy replaced by the chat coming back, or an unrevealed push discarded after a
+    failed move, is not deleted by the user. Upstream's
+    ``delete_session`` fences every deleted id for good (``hermes_state_mutation_retirement``) and
+    ``import_sessions`` then refuses that id, so a move back would drop the chat on both gateways. Clear only
+    the id marker; the delete's receipt/media retirement stands, and the import recreates the row."""
+    from hermes_state_mutation_retirement import RETIRED_PREFIX
+
+    def _do(conn):
+        conn.executemany("DELETE FROM state_meta WHERE key = ?", [(RETIRED_PREFIX + sid,) for sid in session_ids])
+
+    db._execute_write(_do)
+
+
 def import_lineage(payload: dict, *, hidden: bool = False, db=None, home: Optional[str] = None) -> dict[str, Any]:
     """Import an ``export_session_lineage(include_inactive=True)`` payload (``source_home`` remapped to this home)."""
     own = db is None
@@ -175,6 +189,8 @@ def import_lineage(payload: dict, *, hidden: bool = False, db=None, home: Option
         replaced = [s["id"] for s in segments if s.get("id") and _handed_away(db, s["id"])]
         for sid in reversed(replaced):  # the tip first: a compression child never outlives its parent here
             db.delete_session(sid)
+        if replaced:
+            _lift_deletion_fence(db, replaced)
         res = db.import_sessions(segments)
         ids = [s["id"] for s in segments if s.get("id")]
         if res.get("ok") and hidden:
@@ -218,6 +234,8 @@ def discard_hidden(session_ids: Iterable[str], *, db=None) -> dict[str, Any]:
                 continue
             if db.delete_session(sid):
                 deleted.append(sid)
+        if deleted:  # an unrevealed push, not a user delete: a later move may bring the chat here again
+            _lift_deletion_fence(db, deleted)
         return {"ok": not kept, "deleted": deleted, "kept_visible": kept}
     finally:
         if own:
