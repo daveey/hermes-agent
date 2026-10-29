@@ -3,12 +3,16 @@
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger("tools.process_registry")
+
+# This thread's nesting depth inside the processes.json flock (see _checkpoint_file_lock).
+_CHECKPOINT_LOCK_HELD = threading.local()
 
 
 class ProcessCheckpointMixin:
@@ -41,6 +45,16 @@ class ProcessCheckpointMixin:
 
         @contextlib.contextmanager
         def _lock():
+            # [daveey] Reentrant per thread: recovery holds the lock across its read-decide-write
+            # and adopts sessions through _track_started, which writes the checkpoint again. A
+            # second flock on a fresh descriptor would wait on this thread's own lock forever.
+            if getattr(_CHECKPOINT_LOCK_HELD, "depth", 0):
+                _CHECKPOINT_LOCK_HELD.depth += 1
+                try:
+                    yield
+                finally:
+                    _CHECKPOINT_LOCK_HELD.depth -= 1
+                return
             path = _checkpoint_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             lock_path = str(path) + ".lock"
@@ -49,9 +63,11 @@ class ProcessCheckpointMixin:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 except OSError:
                     pass
+                _CHECKPOINT_LOCK_HELD.depth = 1
                 try:
                     yield
                 finally:
+                    _CHECKPOINT_LOCK_HELD.depth = 0
                     with contextlib.suppress(OSError):
                         fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         return _lock()
