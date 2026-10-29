@@ -1351,6 +1351,8 @@ def create_task(
     from hermes_cli.kanban_capabilities import validate_assignment
     required = validate_assignment(assignee, requires=requires, workspace_kind=workspace_kind,
                                    workspace_path=workspace_path, skills=skills_list, require_declaration=require_declaration)
+    from hermes_cli.kanban_runs_on_capabilities import check_create  # [daveey] where runs_on lands it
+    check_create(conn, runs_on, assignee=assignee, requires=required, workspace_kind=workspace_kind)
     from hermes_cli.kanban_model_assignment import validate_model_assignment
     validate_model_assignment(assignee, model_override, provider_override)
     # [daveey] Bind a provider-less concrete pin now (or refuse), never late-bind it to config at spawn.
@@ -3711,11 +3713,8 @@ def request_changes(
         if implementer is None:
             return False, "review handoff has no valid implementer provenance"
         reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
-        from hermes_cli.kanban_capabilities import validate_assignment
-
-        task = get_task(conn, task_id)
-        validate_assignment(implementer, requires=task.requires,
-                            workspace_kind=task.workspace_kind, workspace_path=task.workspace_path, skills=task.skills)
+        from hermes_cli.kanban_runs_on_capabilities import verdict_warning  # [daveey] never refuse a verdict
+        capability_warning = verdict_warning(implementer, get_task(conn, task_id))
 
         new_status = _landing_status_after_parents(conn, task_id)
         # consecutive_failures deliberately PRESERVED: a review transition is
@@ -3746,6 +3745,7 @@ def request_changes(
                 "implementer": implementer,
                 "reviewer": reviewer,
                 "status": new_status,
+                **capability_warning,
             },
             run_id=run_id,
         )

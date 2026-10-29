@@ -324,6 +324,11 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
                 continue
             if profile_exists is not None and card["assignee"] and not profile_exists(card["assignee"]):
                 continue
+            # [daveey] Never claim a card this machine's profile cannot satisfy: it would run, then fail its own
+            # handoffs here (t_01a184ac93d31979). Left on the Board for a machine that can.
+            from hermes_cli.kanban_runs_on_capabilities import claim_refusal
+            if claim_refusal(dict(card), me=own) is not None:
+                continue
             picked.append(card["id"])
         imported = import_cards(conn, replica, picked)
     finally:
