@@ -89,6 +89,14 @@ class FakeService:
             # As rows.ts: the holder moving its card out of `running` ends the lease (opt-in with lease_runs).
             if self.lease_runs and lease and lease["holder"] == gw and "status" in won and won["status"] != "running":
                 b["leases"].pop(uid, None)  # clearLease: the lease row and the task's lease mirror
+                # endLeaseRun: a run the holder has not ended yet ends with a placeholder (the holder's own end
+                # "normally follows in the same batch and overwrites this generic one").
+                run = b["rows"].get("task_runs", {}).get(lease["run_uid"])
+                if run is not None and run.get("ended_at") is None:
+                    self._put(b, "task_runs", lease["run_uid"],
+                              {"status": "released", "outcome": "released",
+                               "error": f"card left running ({won['status']})", "ended_at": int(time.time())},
+                              gw, op["client_op_id"], op["hlc"])
                 row = self._put(b, table, uid, {"lease_holder": None, "lease_expires": None}, gw, op["client_op_id"],
                                 op["hlc"])
             return {"status": "applied" if len(won) == len(f) else "merged", "row": row}

@@ -254,3 +254,64 @@ def test_the_dangling_sweep_keeps_the_real_end_of_a_run_the_card_already_finishe
     assert (row["status"], row["outcome"], row["error"]) == ("done", "completed", None)
     assert row["ended_at"] == live.execute(
         "SELECT created_at FROM task_events WHERE run_id = ? AND kind = 'completed'", (done["id"],)).fetchone()[0]
+
+
+def _complete_in_capture_gap(live, kanban_home, tid, summary):
+    """``complete_task`` landing while another process had the capture triggers down (hub, 10-29 00:33)."""
+    with kbc.write_txn(live):
+        sync.drop_triggers(live)
+    assert kb.complete_task(live, tid, summary=summary, force=True)
+    other = kbc.connect(kanban_home / "kanban.db")  # the next process re-installs the triggers (uid-less gap heal)
+    other.close()
+
+
+def test_a_completion_in_a_capture_gap_reaches_the_board_as_completed_not_released(live, kanban_home, svc):
+    """Hub t_01a185075c59bd52 (10-29): the uncaptured completion was healed for the tasks row only. The Board took
+    ``done`` while the lease's run was still open and ended it ``released`` ("card left running (done)"); that
+    row came back over the local ``done/completed`` run, the owner published the card unverified, and the origin
+    chat never released it. The run row must reach the Board with the card."""
+    tid, uid = _claimed(live, kanban_home, svc, "gap completion")
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)  # settled: board, replica and Board agree on the task and run versions
+    _complete_in_capture_gap(live, kanban_home, tid, "shipped it")
+    for _ in range(3):
+        _round(kanban_home, svc)
+    _assert_completed(live, svc, uid)
+
+
+def test_a_run_the_boards_placeholder_clobbered_is_restored_from_its_completion(live, kanban_home, svc):
+    """Repair of rows already hit: the card is done, its latest ``completed`` event names the run, and the run reads
+    the Board's placeholder end. The heal restores ``done/completed`` locally and on the Board."""
+    tid, uid = _claimed(live, kanban_home, svc, "clobbered")
+    _round(kanban_home, svc)
+    assert kb.complete_task(live, tid, summary="real end", force=True)
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    # The state the race left on the hub: placeholder end on the Board and, through the pull, locally.
+    b = svc.board(BOARD)
+    svc._put(b, "task_runs", uid, {"status": "released", "outcome": "released", "summary": None,
+                                   "error": "card left running (done)"}, "server", None,
+             f"{9_999_999_999_999:013d}-0000-server")
+    _round(kanban_home, svc)  # the pull lands the placeholder; the heal right after it restores the run
+    _round(kanban_home, svc)
+    _assert_completed(live, svc, uid)
+    assert live.execute("SELECT summary FROM task_runs WHERE uid = ?", (uid,)).fetchone()[0] == "real end"
+
+
+def test_the_completion_heal_leaves_a_run_released_for_another_reason(live, kanban_home, svc):
+    """Guard: a placeholder-ended run that is not the one the card's completion names is not a completion."""
+    tid, uid = _claimed(live, kanban_home, svc, "not this run")
+    _round(kanban_home, svc)
+    with kbc.write_txn(live):
+        live.execute("UPDATE task_runs SET status = 'released', outcome = 'released', "
+                     "error = 'card left running (done)', ended_at = 5 WHERE uid = ?", (uid,))
+        live.execute("UPDATE tasks SET status = 'done', completed_at = 5, current_run_id = NULL WHERE id = ?", (tid,))
+    assert ksc.heal_clobbered_completions(live) == []  # no completed event names this run
+    assert tuple(_run(live, uid))[:2] == ("released", "released")
+
+
+def _assert_completed(live, svc, uid):
+    local = _run(live, uid)
+    assert (local["status"], local["outcome"]) == ("done", "completed"), dict(local)
+    board = _board_run(svc, uid)
+    assert (board["status"], board["outcome"]) == ("done", "completed"), board

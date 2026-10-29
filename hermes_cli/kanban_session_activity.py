@@ -654,6 +654,38 @@ def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | 
     return beat is not None and 0 <= now - beat <= SCOPE_HEARTBEAT_FRESH_S
 
 
+def _moved_evidence(tasks: dict[tuple, dict[str, Any]], heartbeats: dict[tuple[str, str, str], float],
+                    now: float) -> dict[str, Any]:
+    """What a fresh replica proves about where each card lives (``_retire_moved``): the gateways publishing a
+    profile-qualified record per ``(board, id, created_at)``, and the owner scopes whose collector read cleanly within
+    ``SCOPE_HEARTBEAT_FRESH_S``. [daveey]"""
+    published: dict[tuple[str, str, Any], set[str]] = {}
+    for (gw, owner_profile, board, tid), t in tasks.items():
+        if owner_profile is not None and t.get('created_at') is not None:
+            published.setdefault((board, tid, t.get('created_at')), set()).add(gw)
+    live = {scope for scope, beat in heartbeats.items() if 0 <= now - beat <= SCOPE_HEARTBEAT_FRESH_S}
+    return {'published': {k: frozenset(v) for k, v in published.items()}, 'live_scopes': frozenset(live)}
+
+
+def _retire_moved(card: dict[str, Any], moved: dict[str, Any]) -> bool:
+    """A remembered row whose card a fresh replica proves lives on ANOTHER gateway: retire it, never release it.
+
+    A worker node runs another gateway's card from a copy in its own board file, and its collector used to publish
+    that copy as its own (``hub/default/default/t_1f359ff1`` for a MacBook card, 10-29). Once the copy was evicted
+    the record vanished, and absence is never closure, so the origin kept the row stale and open forever, naming an
+    owner that has no such card. It is retired only on proof: the named owner is publishing that exact
+    profile/board scope right now without the card, and another gateway publishes a qualified record with the
+    same board, id and ``created_at`` (a copy keeps its ``created_at``). The real owner's record then speaks for
+    the card: its own links, or this gateway's local board when the card is local. [daveey]"""
+    if card.get('ownership_state') != 'qualified' or card.get('created_at') is None:
+        return False
+    scope = (card.get('gateway'), card.get('owner_profile'), card.get('board'))
+    if scope not in moved.get('live_scopes', ()):
+        return False
+    gateways = moved.get('published', {}).get((card.get('board'), card.get('id'), card.get('created_at')), ())
+    return any(gw != card.get('gateway') for gw in gateways)
+
+
 def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, dict[str, Any]]) -> None:
     """Merge each unqualified ``board/id`` record into its proven profile-qualified twin, in place.
 
@@ -724,7 +756,8 @@ _REPLICA_PROBE = ("SELECT count(*), count(seq), max(seq), total(seq), total(vers
 
 def _read_remote_links(path: Path, now: float | None = None, *,
                        qualified_out: set | None = None,
-                       owners_out: set | None = None) -> list[dict[str, Any]]:
+                       owners_out: set | None = None,
+                       moved_out: dict | None = None) -> list[dict[str, Any]]:
     """Replica cards linked to a session on this gateway, one row per (session, card).
 
     Open and unproven cards come back ``unfinished``; cards their owner attests closed
@@ -763,27 +796,32 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                     qualified_out.update(memo[4])
                 if owners_out is not None:
                     owners_out.update(memo[5])
+                if moved_out is not None:
+                    moved_out.update(memo[9])
                 return list(memo[3])  # cards are read-only, as in ``_links_cache``
         rows = conn.execute(f"SELECT gw, key, data, updated_at, {version_column} FROM replica WHERE coll = 'tasks'").fetchall()
     finally:
         conn.close()
     if key is None:
         return _project_replica(path, now, me, rows, info_rows, last_ok, offline,
-                                qualified_out=qualified_out, owners_out=owners_out)
+                                qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out)
     qualified: set = set()
     owners: set = set()
+    moved: dict = {}
     seen_at: dict[str, float] = {}
     cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
-                             qualified_out=qualified, owners_out=owners, seen_out=seen_at)
+                             qualified_out=qualified, owners_out=owners, seen_out=seen_at, moved_out=moved)
     # Reuse ends at the next scope-heartbeat cut-off; the hub-staleness cut-off is the ``stale`` comparison above.
     beats = [beat + d for beat in _scope_heartbeats(info_rows).values() for d in (0.0, SCOPE_HEARTBEAT_FRESH_S)]
     _remote_read_memo = (key, now, min((t for t in beats if t > now), default=float('inf')), list(cards),
                          frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
-                         dict(seen_at))
+                         dict(seen_at), dict(moved))
     if qualified_out is not None:
         qualified_out.update(qualified)
     if owners_out is not None:
         owners_out.update(owners)
+    if moved_out is not None:
+        moved_out.update(moved)
     return cards
 
 
@@ -799,7 +837,8 @@ def _replica_synced(seen_at: dict[str, float], last_ok: float | None) -> tuple:
 def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: list, last_ok: float | None,
                      offline: float | None, *, qualified_out: set | None = None, owners_out: set | None = None,
                      horizon_out: list[float] | None = None,
-                     seen_out: dict[str, float] | None = None) -> list[dict[str, Any]]:
+                     seen_out: dict[str, float] | None = None,
+                     moved_out: dict | None = None) -> list[dict[str, Any]]:
     """``_read_remote_links`` of rows already read. ``horizon_out`` collects every wall time after ``now`` at which
     the same rows could project differently (hub-sync staleness, scope-heartbeat freshness)."""
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
@@ -853,6 +892,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         # A fresh replica that still carries the owner row is authoritative about its links: a remembered
         # (session, card) pair absent from it is a dropped link, not an unreadable replica.
         owners_out.update((gw, board, tid) for gw, _, board, tid in tasks)
+    if moved_out is not None and not stale:
+        moved_out.update(_moved_evidence(tasks, heartbeats, now))
     blank_before = {key for key in tasks if key[1] is None}
     _fold_legacy_aliases(tasks, raw)
     # Only a proven-identity alias is the same card as its qualified twin (folded above, links carried
@@ -1279,7 +1320,8 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
             raise FileNotFoundError("no hub.db")
         qualified: set[tuple[str, str, str]] = set()
         owners: set[tuple[str, str, str]] = set()
-        cards = _read_remote_links(path, qualified_out=qualified, owners_out=owners)
+        moved: dict[str, Any] = {}
+        cards = _read_remote_links(path, qualified_out=qualified, owners_out=owners, moved_out=moved)
     except Exception as exc:  # a broken replica must never break the sidebar
         if previous is None:
             if path is not None:
@@ -1306,7 +1348,9 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                  # Fresh replica + owner row present but this session's link gone: expire the ghost.
                  and (c.get("gateway"), c.get("board"), c.get("id")) not in owners
                  and not (c.get("ownership_state") == "unknown"
-                          and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now))
+                          and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now)
+                 # Fresh replica: the named owner publishes the scope without it, another gateway owns the card.
+                 and not _retire_moved(c, moved))
     if _snapshot_saved != (scope, cards):
         # The durable snapshot only speeds a cold start. Losing a write race (database is locked) must not
         # fail this read: the sidebar would mark every row kanban_unknown. The next changed read retries.
