@@ -201,12 +201,13 @@ jobs:
           HERMES_TEST_DOCKER_MOUNT_ROOT: ${{ runner.temp }}/termux-assembly
         run: |
           set +e
-          D="$HERMES_TEST_DOCKER_MOUNT_ROOT/diag"; mkdir -p "$D/sub"; touch "$D/sub/marker"
-          id; ls -ld "$D" "$D/sub"; mount | grep -i docker-ci | head; echo "DOCKER_HOST=$DOCKER_HOST"
-          docker info 2>&1 | grep -i "rootless\|userns\|Docker Root\|Storage Driver"
-          docker run --rm --user 0:0 --entrypoint ls -v "$D:/m" python@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a -laR /m
-          docker run --rm --user 0:0 --entrypoint ls -v "$RUNNER_TEMP:/m" python@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a -la /m
-          echo "RUNNER_TEMP=$RUNNER_TEMP"; ls -la "$RUNNER_TEMP" | head -20
+          IMG=python@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+          P="$HERMES_TEST_DOCKER_MOUNT_ROOT/diag2"; mkdir -p "$P"
+          A="$(mktemp -d "$P/.environments-XXXXXX")"; mkdir "$A/tools"
+          ls -lad "$A" "$A/tools"
+          docker run --rm --user 0:0 --entrypoint sh -v "$A:/assembly" $IMG -c 'id; ls -lan /assembly; stat /assembly/tools; chown 1000:1000 /assembly /assembly/tools; echo rc=$?'
+          chmod 755 "$A"
+          docker run --rm --user 0:0 --entrypoint sh -v "$A:/assembly" $IMG -c 'ls -lan /assembly; chown 1000:1000 /assembly /assembly/tools; echo rc755=$?'
           true
 
       - name: Run assembly permission tests
