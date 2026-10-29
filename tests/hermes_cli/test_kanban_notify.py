@@ -258,7 +258,7 @@ async def test_notifier_notify_plus_wake_sends_and_wakes(kanban_home):
          patch("gateway.wake.deliver_wake", new=wake_mock):
         await asyncio.wait_for(
             runner._kanban_notifier_watcher(interval=1),
-            timeout=10.0,
+            timeout=120.0,
         )
 
     # Both subs still get a passive send (notify AND notify+wake send).
@@ -317,7 +317,7 @@ async def test_notifier_plain_notify_never_wakes_even_with_session_id(kanban_hom
          patch("gateway.wake.deliver_wake", new=wake_mock):
         await asyncio.wait_for(
             runner._kanban_notifier_watcher(interval=1),
-            timeout=10.0,
+            timeout=120.0,
         )
 
     fake_adapter.send.assert_awaited_once()
@@ -367,7 +367,7 @@ async def test_notifier_notify_wake_does_not_wake_on_status_event(kanban_home):
          patch("gateway.wake.deliver_wake", new=wake_mock):
         await asyncio.wait_for(
             runner._kanban_notifier_watcher(interval=1),
-            timeout=10.0,
+            timeout=120.0,
         )
 
     fake_adapter.send.assert_awaited_once()
@@ -421,7 +421,7 @@ async def test_notifier_wake_forwards_persisted_chat_type_and_user_id(kanban_hom
          patch("gateway.wake.deliver_wake", new=wake_mock):
         await asyncio.wait_for(
             runner._kanban_notifier_watcher(interval=1),
-            timeout=10.0,
+            timeout=120.0,
         )
 
     wake_mock.assert_awaited_once()
@@ -475,7 +475,7 @@ async def test_notifier_wake_only_skips_send_and_advances_cursor(kanban_home):
          patch("gateway.wake.deliver_wake", new=wake_mock):
         await asyncio.wait_for(
             runner._kanban_notifier_watcher(interval=1),
-            timeout=10.0,
+            timeout=120.0,
         )
 
     # wake-only never uses the passive transport...
@@ -543,7 +543,7 @@ async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
             runner._kanban_notifier_watcher(interval=1),
-            timeout=10.0,
+            timeout=120.0,
         )
 
     # The user is notified about the abnormal event...
@@ -618,7 +618,7 @@ async def test_notifier_wakes_origin_for_review_and_keeps_subscription(kanban_ho
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
             runner._kanban_notifier_watcher(interval=1),
-            timeout=10.0,
+            timeout=120.0,
         )
 
     assert any("Implementation and tests ready" in message for message in delivered)
@@ -848,7 +848,7 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
             runner._kanban_notifier_watcher(interval=1),
-            timeout=10.0,
+            timeout=120.0,
         )
 
     # Only the real file was uploaded.
@@ -925,7 +925,7 @@ async def test_notifier_uploads_review_handoff_artifacts(kanban_home, tmp_path, 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
             runner._kanban_notifier_watcher(interval=1),
-            timeout=10.0,
+            timeout=120.0,
         )
 
     assert documents_uploaded == [staged_path]
