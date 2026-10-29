@@ -520,6 +520,18 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
     return scan.verdicts[base]
 
 
+# Same contract as the Darwin clean-verdict cache, for the Linux /proc walk.
+# Positive verdicts are never stored. ``_darwin_clean_key`` is the invalidation
+# (directory mtime + sidecar identity): a WAL write touches neither.
+_LINUX_FD_CLEAN_TTL_SECONDS = 30.0
+_linux_clean_until: dict[str, tuple[float, tuple]] = {}
+
+
+def _linux_clean_cached(base: str, key: tuple) -> bool:
+    cached = _linux_clean_until.get(base)
+    return cached is not None and cached[0] > time.monotonic() and cached[1] == key
+
+
 def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
     """Return processes holding an unlinked ``state.db-wal`` / ``-shm`` sidecar for *db_path*.
 
@@ -530,6 +542,12 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
     that path holds.  Windows returns ``[]`` -- it cannot unlink a held sidecar, so no retired
     generation can exist; any other platform returns ``[]`` as before.
 
+    A clean verdict is reused for ``_LINUX_FD_CLEAN_TTL_SECONDS`` (same contract as the Darwin
+    cache): every writer open used to walk every fd of every process, which scales with the
+    host's process count. Positive verdicts are never cached. The cache key is taken before
+    the walk; a directory mtime or sidecar-identity change (unlink, replace — not a WAL write)
+    misses it.
+
     Includes this process: on the open/write refuse path the in-process writer holding the orphan
     inode must not mint a replacement WAL (``_foreign_state_db_holders`` skips this PID)."""
     if sys.platform == "win32":
@@ -539,12 +557,21 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
         if sys.platform == "darwin":
             holders = _iter_darwin_sidecar_holders(db_path)
         elif sys.platform.startswith("linux"):
+            base = os.path.realpath(os.path.abspath(os.fspath(db_path)))
+            key = _darwin_clean_key(base)
+            if _linux_clean_cached(base, key):
+                return []
             watched = _watched_sqlite_sidecar_paths(db_path)
             for pid, target, fd_path in _iter_proc_fd_targets():
                 canonical = canonical_sqlite_path(target)
                 if (" (deleted)" in target and canonical in watched
                         and _fd_is_truly_unlinked(fd_path, watched[canonical])):
                     holders.append((pid, target))
+            # Key taken before the walk: a sidecar retired during it must not be published
+            # as clean under the new key. A positive verdict is never cached.
+            if not holders and _darwin_clean_key(base) == key:
+                _linux_clean_until[base] = (
+                    time.monotonic() + _LINUX_FD_CLEAN_TTL_SECONDS, key)
     except Exception as exc:
         logger.debug("deleted-WAL holder scan failed for %s: %s", db_path, exc)
     return holders

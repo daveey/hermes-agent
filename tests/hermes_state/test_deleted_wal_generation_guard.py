@@ -688,3 +688,55 @@ def test_darwin_clean_verdict_is_dropped_once_a_sidecar_is_unlinked(tmp_path, fa
     wal.unlink()
     assert hermes_state_dbfile._iter_darwin_sidecar_holders(path) == []
     assert fake_darwin_scan["calls"] == 2, "an unlinked sidecar must force a fresh pass"
+
+
+def test_linux_clean_holder_scan_is_reused_until_a_sidecar_changes(tmp_path, monkeypatch):
+    """A clean Linux /proc walk is not repeated on the next writer open.
+
+    Darwin already caches a clean verdict, invalidated by directory mtime or
+    sidecar identity. Linux used to walk every process fd on every open
+    (~0.4s on a busy host, scaling with process count). A WAL write keeps the
+    cache; unlinking a sidecar drops it.
+    """
+    monkeypatch.setattr(hermes_state_dbfile.sys, "platform", "linux")
+    monkeypatch.setattr(hermes_state_dbfile, "_linux_clean_until", {}, raising=False)
+    path = tmp_path / "state.db"
+    path.write_bytes(b"")
+    wal = Path(str(path) + "-wal")
+    wal.write_bytes(b"generation 1")
+    calls = {"n": 0}
+
+    def scan():
+        calls["n"] += 1
+        yield from ()
+
+    monkeypatch.setattr(hermes_state_dbfile, "_iter_proc_fd_targets", scan)
+    assert iter_deleted_sqlite_sidecar_holders(path) == []
+    assert iter_deleted_sqlite_sidecar_holders(path) == []
+    assert calls["n"] == 1, "an unchanged directory reuses the clean verdict"
+    with wal.open("ab") as handle:
+        handle.write(b" more frames")  # a WAL write keeps the cache
+    assert iter_deleted_sqlite_sidecar_holders(path) == []
+    assert calls["n"] == 1, "a WAL write must not drop the clean verdict"
+    wal.unlink()
+    assert iter_deleted_sqlite_sidecar_holders(path) == []
+    assert calls["n"] == 2, "an unlinked sidecar must force a fresh pass"
+
+
+def test_linux_positive_holder_scan_is_not_cached(tmp_path, monkeypatch):
+    """A process holding a deleted sidecar is re-checked on the next open."""
+    monkeypatch.setattr(hermes_state_dbfile.sys, "platform", "linux")
+    monkeypatch.setattr(hermes_state_dbfile, "_linux_clean_until", {}, raising=False)
+    path = tmp_path / "state.db"
+    path.write_bytes(b"")
+    calls = {"n": 0}
+
+    def scan():
+        calls["n"] += 1
+        yield (os.getpid(), str(path) + "-wal (deleted)", "/dev/null")
+
+    monkeypatch.setattr(hermes_state_dbfile, "_iter_proc_fd_targets", scan)
+    monkeypatch.setattr(hermes_state_dbfile, "_fd_is_truly_unlinked", lambda *_a, **_k: True)
+    assert iter_deleted_sqlite_sidecar_holders(path)
+    assert iter_deleted_sqlite_sidecar_holders(path)
+    assert calls["n"] == 2, "a positive verdict must not be reused"
