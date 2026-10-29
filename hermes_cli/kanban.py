@@ -32,6 +32,10 @@ from hermes_cli.kanban_output import (
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_cli_park import (
+    _REASON_FLAG_HINT, _REASON_WORDS_HINT, _cli_awaiting, _cli_wake_check, _commented, _guarded_park, _ids_error,
+    _parked_msg,
+)
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_recover, _cmd_repair, _cmd_tail, _cmd_watch,
 )
@@ -301,12 +305,15 @@ def _bulk_ids(args: argparse.Namespace) -> list[str]:
     return [args.task_id] + list(getattr(args, "ids", None) or [])
 
 
-def _require_ids(args: argparse.Namespace) -> tuple[list[str], int]:
-    """``args.task_ids`` -> ``(ids, 0)`` or ``([], 1)`` after printing the standard error."""
+def _require_ids(args: argparse.Namespace, hint: str = 'Free text goes in its flag, e.g. --reason "..."',
+                 ) -> tuple[list[str], int]:
+    """``args.task_ids`` -> ``(ids, 0)``, ``([], 1)`` when empty, or ``([], 2)`` when a token is not
+    task-id shaped (``_ids_error``), after printing the error."""
     ids = list(args.task_ids or [])
     if not ids:
         return ids, _err("at least one task_id is required")
-    return ids, 0
+    rc = _ids_error(ids, hint)
+    return ([], rc) if rc else (ids, 0)
 
 
 def _parse_duration(val) -> Optional[int]:
@@ -1373,83 +1380,6 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
     return 0
 
 
-def _commented(conn, reason: Optional[str], author, prefix: str, op):
-    """Wrap a per-task ``op`` so a ``reason`` is first recorded as a ``PREFIX: reason`` comment."""
-    def run(tid):
-        if reason:
-            kb.add_comment(conn, tid, author, f"{prefix}: {reason}")
-        return op(tid)
-    return run
-
-
-def _cli_wake_check(args: argparse.Namespace):
-    """``(wake_check, check_every, clock_only)`` from ``--wake-check/--check-every/--clock-only``."""
-    from hermes_cli import kanban_wake_check as kwc
-
-    cmd = kwc.normalize_cmd(getattr(args, "wake_check", None))
-    every = kwc.normalize_every(getattr(args, "check_every", None)) if cmd else None
-    err = kwc.dry_run_error(cmd)
-    if err:
-        raise ValueError(err)
-    return cmd, every, bool(getattr(args, "clock_only", False))
-
-
-def _cli_awaiting(args: argparse.Namespace, wake):
-    """``(awaiting, wake)`` from ``--awaiting KIND:REF|JSON`` (+ ``--awaiting-why``); a card wait
-    with no ``--wake-check`` gets ``hermes kanban wait-check task`` as its probe. [daveey]"""
-    from hermes_cli import kanban_awaiting as kaw
-
-    raw = getattr(args, "awaiting", None)
-    if not raw:
-        return None, wake
-    awaiting = kaw.normalize(raw)
-    why = getattr(args, "awaiting_why", None)
-    if why and awaiting is not None:
-        awaiting["why"] = why.strip()[:600]
-    probe = None if wake[0] else kaw.card_probe(awaiting)
-    if probe:
-        from hermes_cli import kanban_wake_check as kwc
-        wake = (probe, kwc.normalize_every(None), wake[2])
-    kaw.confirm_remote(awaiting)  # ssh, so before the park's write txn
-    return awaiting, wake
-
-
-def _guarded_park(conn, op: str, wake, refused: dict, park, awaiting=None, **plan):
-    """Per-task op: refuse a park > 2 h out with no probe (``kanban_wake_check.guard_error``)
-    or one nothing would produce (``kanban_awaiting``), before its comment is written. [daveey]"""
-    from hermes_cli import kanban_awaiting as kaw
-    from hermes_cli import kanban_wake_check as kwc
-
-    def run(tid):
-        wake_at = kwc.planned_wake(conn, tid, op=op, **plan)
-        err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
-        if err:
-            refused[tid] = f"cannot {op} {tid}: {err}"
-            return False
-        try:
-            if wake_at is not None:
-                kaw.resolve(conn, tid, awaiting=awaiting, reason=plan.get("reason"), wake_check=wake[0],
-                            clock_only=wake[2], op=op)
-            return park(tid)
-        except kaw.AwaitingError as exc:
-            refused[tid] = f"cannot {op} {tid}: {exc}"
-            return False
-        except ValueError as exc:   # e.g. a wake_check on a block that is not a timed park
-            refused[tid] = f"cannot {op} {tid}: {exc}"
-            return False
-    return run
-
-
-def _parked_msg(conn, verb: str, suffix: str):
-    """``ok_msg`` for a park that may have escalated to an owner card instead."""
-    from hermes_cli import kanban_awaiting as kaw
-
-    def msg(tid):
-        owner = kaw.escalated_owner(conn, tid)
-        return kaw.escalation_message(tid, owner) if owner else f"{verb} {tid}{suffix}"
-    return msg
-
-
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)
@@ -1465,6 +1395,10 @@ def _cmd_block(args: argparse.Namespace) -> int:
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
+        rc = _ids_error(ids, _REASON_WORDS_HINT, conn)
+        if rc:
+            return rc
+
         def ok_msg(tid):
             # Report where it landed: dependency blocks -> todo, tripped unblock-loop breaker -> triage.
             landed = kb.get_task(conn, tid)
@@ -1494,9 +1428,9 @@ def _cmd_block(args: argparse.Namespace) -> int:
             return _err(f"kanban block: {policy}", 2)
         refused: dict = {}
         op = _guarded_park(conn, "block", wake, refused, _commented(
-            conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
+            reason, author, "BLOCKED", lambda tid, comment: kb.block_task(
                 conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid),
-                human_request=request, awaiting=awaiting,
+                human_request=request, awaiting=awaiting, comment=comment,
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
             awaiting=awaiting, reason=reason, kind=kind)
         return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}")
@@ -1511,6 +1445,9 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
+        rc = _ids_error(ids, _REASON_WORDS_HINT, conn)
+        if rc:
+            return rc
         try:
             wake = _cli_wake_check(args)
             awaiting, wake = _cli_awaiting(args, wake)
@@ -1518,25 +1455,30 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
             return _err(f"kanban schedule: {exc}", 2)
         refused: dict = {}
         op = _guarded_park(conn, "schedule", wake, refused, _commented(
-            conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
+            reason, author, "SCHEDULED", lambda tid, comment: kb.schedule_task(
                 conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid), awaiting=awaiting,
-                wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
+                wake_check=wake[0], check_every=wake[1], clock_only=wake[2], comment=comment)),
             awaiting=awaiting, reason=reason)
+        from hermes_cli.kanban_reason_comment import human_answer_refusal
         return _bulk_apply(ids, op, _parked_msg(conn, "Scheduled", suffix),
-                           lambda tid: refused.get(tid) or f"cannot schedule {tid}")
+                           lambda tid: (refused.get(tid) or human_answer_refusal(conn, tid, "schedule")
+                                        or f"cannot schedule {tid}"))
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
     if os.environ.get("HERMES_KANBAN_TASK"):
         return _err("kanban unblock is orchestrator-only; workers must hand off their assigned task")
-    ids, rc = _require_ids(args)
+    ids, rc = _require_ids(args, _REASON_FLAG_HINT)
     if rc:
         return rc
     reason = _stripped_or_none(getattr(args, "reason", None))
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
-        op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
+        rc = _ids_error(ids, _REASON_FLAG_HINT, conn)
+        if rc:
+            return rc
+        op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment))
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
                            lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
 

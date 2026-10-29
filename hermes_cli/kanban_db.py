@@ -3319,6 +3319,7 @@ def block_task(
     blocker_id: Optional[str] = None, wake_check: Optional[str] = None,
     check_every: Optional[int] = None, clock_only: bool = False,
     human_request: Optional[dict] = None, awaiting: Any = None, clear_blocker: bool = False,
+    comment: Optional[tuple[str, str]] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`kanban_block_routing.route_block`). A wait on time -- ``kind='time'``, a ``dependency``
@@ -3341,12 +3342,16 @@ def block_task(
     ``assignment`` is agent-owned: a capable configured supervisor receives a
     durable repair card and the original waits in ``todo`` on that dependency
     (including explicit classification of a breaker-parked card).
+
+    ``comment`` (``(author, body)``) is written in the same txn, before the transition event,
+    and only when the block lands (``kanban_reason_comment``).
     """
     from hermes_cli.kanban_human_request import reject_timed_request, validate_human_request
+    from hermes_cli.kanban_reason_comment import reason_comment
     human_request = validate_human_request(human_request, kind=kind)
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
-    with write_txn(conn):
+    with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         cur_row = conn.execute(
             "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
@@ -3376,11 +3381,12 @@ def block_task(
                 mode = "timed"
             if mode is not None:
                 reject_timed_request(human_request)
-                return ktp.park(conn, task_id, reason=reason, requested_kind=kind, source_status="ready",
-                                from_untyped_block=True, wake_check=wake_check,
-                                check_every=check_every, clock_only=clock_only, awaiting=awaiting,
-                                blocker_id=blocker_id, blocker_wake=mode == "blocker",
-                                run_metadata=_clear_meta(clear_blocker))
+                return noted.keep(ktp.park(
+                    conn, task_id, reason=reason, requested_kind=kind, source_status="ready",
+                    from_untyped_block=True, wake_check=wake_check,
+                    check_every=check_every, clock_only=clock_only, awaiting=awaiting,
+                    blocker_id=blocker_id, blocker_wake=mode == "blocker",
+                    run_metadata=_clear_meta(clear_blocker)))
             _refuse_untimed_probe(kind, wake_check, clock_only)
             requested_kind, rekind_reason = kind, None
             if kind == "assignment":
@@ -3401,7 +3407,7 @@ def block_task(
             if kind == "assignment":
                 assignment_routing.route(conn, get_task(conn, task_id), payload)
             _append_event(conn, task_id, "blocked", payload)
-            return True
+            return noted.keep(True)
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else cur_row["status"]
         requested_kind, rekind_reason = kind, None
         from hermes_cli.kanban_block_routing import classify_stop
@@ -3421,11 +3427,12 @@ def block_task(
             mode = "timed"
         if mode is not None:
             reject_timed_request(human_request)
-            return ktp.park(conn, task_id, reason=reason, requested_kind=kind,
-                            source_status=source_status, expected_run_id=expected_run_id,
-                            wake_check=wake_check, check_every=check_every, clock_only=clock_only, awaiting=awaiting,
-                            blocker_id=blocker_id, blocker_wake=mode == "blocker",
-                            run_metadata=_clear_meta(clear_blocker))
+            return noted.keep(ktp.park(
+                conn, task_id, reason=reason, requested_kind=kind,
+                source_status=source_status, expected_run_id=expected_run_id,
+                wake_check=wake_check, check_every=check_every, clock_only=clock_only, awaiting=awaiting,
+                blocker_id=blocker_id, blocker_wake=mode == "blocker",
+                run_metadata=_clear_meta(clear_blocker)))
         _refuse_untimed_probe(kind, wake_check, clock_only)
         # Parent-less ``dependency`` behind a shared blocker with a human ask: sticky ``needs_input``.
         if kind == "dependency" and no_open_parent:
@@ -3483,6 +3490,7 @@ def block_task(
             payload["rekind_reason"] = rekind_reason
             assignment_routing.route(conn, get_task(conn, task_id), payload)
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
+        noted.keep()
         blocked_task = get_task(conn, task_id)
         if kind == "dependency":
             # Historical ordering: the dependency lane fires inside the txn.
@@ -3827,13 +3835,15 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tuple[str, str]] = None) -> bool:
     """``blocked``/``scheduled``/``triage`` -> its resumable phase (parent
     re-gated; ``review`` when that is where it left off), closing any leaked run
     first. ``triage`` is accepted so a card a block loop escalated can go back
-    to work without the specifier/decomposer rewriting it. [daveey]"""
+    to work without the specifier/decomposer rewriting it. ``comment`` is written in the same
+    txn and only when the unblock lands (``kanban_reason_comment``). [daveey]"""
+    from hermes_cli.kanban_reason_comment import reason_comment
     now = int(time.time())
-    with write_txn(conn):
+    with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         resume_status = (
             _resume_status_from_events(conn, task_id)
             if _task_status(conn, task_id) in ("blocked", "triage")
@@ -3870,7 +3880,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
                 else None
             ),
         )
-        return True
+        return noted.keep(True)
 
 
 def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -4208,24 +4218,6 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
         _delete_task_relations(conn, task_id)
     recompute_ready(conn)
     return True
-
-
-def _awaiting_human_answer(conn: sqlite3.Connection, task_id: str) -> bool:
-    """True when the card's outstanding ask is for a human: a human-kind ``block_kind``
-    (``needs_input``/``capability``) whose latest ``blocked``/``block_loop_detected`` event
-    has had no ``unblocked`` and no new run (``claimed``) since. [daveey]"""
-    row = conn.execute("SELECT status, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    if row is None or _row_get(row, "block_kind") not in ("needs_input", "capability"):
-        return False
-    ask = conn.execute(
-        "SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind IN ('blocked', 'block_loop_detected')",
-        (task_id,)).fetchone()[0]
-    if ask is None:
-        return row["status"] == "blocked"
-    answered = conn.execute(
-        "SELECT 1 FROM task_events WHERE task_id = ? AND id > ? AND kind IN ('unblocked', 'claimed') LIMIT 1",
-        (task_id, ask)).fetchone()
-    return answered is None
 
 
 # --- Worker context builder (what a spawned worker sees) ---
@@ -4705,6 +4697,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
 from hermes_cli.kanban_db_schedule import schedule_task
+from hermes_cli.kanban_reason_comment import _awaiting_human_answer
 from hermes_cli.kanban_db_notify import _inherit_notify_subs, _owning_sub_clause
 from hermes_cli.kanban_db_boards import (
     _default_board_display_name,

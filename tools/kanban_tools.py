@@ -20,7 +20,7 @@ from hermes_cli.goals import handoff_judge_goal, judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
-from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap
+from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import _marker_placement_fields, _placement_refused, _runs_where
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_schemas import (
@@ -1303,8 +1303,8 @@ def _handle_schedule(args: dict, **kw) -> str:
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid),
             wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting,
             clear_blocker=clear_blocker)
-        _check(ok, f"could not schedule {tid} (unknown id, not in todo/ready/running/blocked, or it "
-                   "waits on a human answer: needs_input/capability asks stay blocked, never scheduled)")
+        _check(ok, "" if ok else krc.human_answer_refusal(conn, tid, "schedule")
+               or f"could not schedule {tid} (unknown id, or not in todo/ready/running/blocked)")
         escalated = _escalated(kb, conn, tid)
         if escalated:
             return escalated
