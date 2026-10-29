@@ -639,6 +639,19 @@ class _TurnRun:
     receipt_attempted: bool = False
 
 
+def _history_row_ids(history: list) -> set:
+    """Durable row ids the in-memory history stands for: each message's own id plus the ids a merge carrier
+    absorbed (``_absorbed_row_ids``, kept by ``_merge_consecutive_users`` and the other repair passes)."""
+    held: set = set()
+    for m in history:
+        if not isinstance(m, dict):
+            continue
+        if (rid := _message_row_id(m)) is not None:
+            held.add(rid)
+        held.update(r for r in (m.get("_absorbed_row_ids") or ()) if isinstance(r, int) and not isinstance(r, bool))
+    return held
+
+
 def _adopt_out_of_band_turns(session: dict) -> None:
     """Fold turns another surface appended to this session (Telegram reply, cron run) into the model-facing
     history before the turn snapshots it. The desktop already repaints them from the DB (#86588); without
@@ -653,8 +666,11 @@ def _adopt_out_of_band_turns(session: dict) -> None:
     boundary cannot key on anything and the store-ahead fallback takes over (#81951)."""
     with session["history_lock"]:
         history, version = list(session.get("history") or ()), int(session.get("history_version", 0))
-    seen = max((rid for m in history if isinstance(m, dict) and (rid := _message_row_id(m)) is not None),
-               default=None)
+    # A merge carrier (a cold resume repairs user;user runs into their FIRST row) holds the rows it absorbed
+    # too: they count as seen, or a newer absorbed row is "foreign", gets appended again and the turn's repair
+    # welds it into the carrier a second time (n1+n2+n2+local, t_01a1895bbfae2d67).
+    held = _history_row_ids(history)
+    seen = max(held, default=None)
     ceiling = _message_row_id(session.get("_submit_user_row") or {})
 
     def _below_ceiling(rid) -> bool:
@@ -664,7 +680,7 @@ def _adopt_out_of_band_turns(session: dict) -> None:
         return
 
     def _foreign(rid) -> bool:
-        return _below_ceiling(rid) and rid > seen
+        return _below_ceiling(rid) and rid > seen and rid not in held
     # Keyset probe first: the common turn has nothing to adopt and must not pay a full transcript decode.
     # Address the live session, not session_key: a rotation moves the tip mid-session, so the parent
     # holds none of the foreign rows (Telegram reply, cron) this function exists to adopt and the model
