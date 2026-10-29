@@ -84,23 +84,11 @@ def run_is_live(env: Mapping[str, str], task: str, run_id: int) -> Optional[bool
     return row is not None
 
 
-def _info_visible() -> bool:
-    current = log
-    seen = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if any(getattr(h, "level", logging.NOTSET) <= logging.INFO for h in current.handlers):
-            return True
-        if not current.propagate:
-            return False
-        current = current.parent
-    return False
-
-
 def _emit(msg: str) -> None:
     log.info(msg)
-    if not _info_visible():
-        print(msg, file=sys.stderr)
+    # A one-shot process often has only a queue handler, which has not flushed
+    # by the time --version exits. stderr is the line the operator can see.
+    print(msg, file=sys.stderr)
 
 
 def drop_finished_kanban_identity(

@@ -131,6 +131,23 @@ def test_noop_when_unset(monkeypatch):
     assert drop_finished_kanban_identity() == []
 
 
+def test_drop_line_is_on_stderr_even_when_a_handler_exists(monkeypatch, tmp_path, capsys):
+    """A one-shot process often has only a queue handler. The drop line must still be visible."""
+    db = _board(tmp_path / "kanban.db", live=False)
+    _pin(monkeypatch, db)
+    root = logging.getLogger()
+    handler = logging.NullHandler()
+    root.addHandler(handler)
+    try:
+        drop_finished_kanban_identity()
+    finally:
+        root.removeHandler(handler)
+    err = capsys.readouterr().err
+    assert "dropped finished kanban identity" in err
+    assert f"HERMES_KANBAN_TASK={TASK}" in err
+    assert f"HERMES_KANBAN_RUN_ID={RUN}" in err
+
+
 def test_main_drops_identity_before_plugins_load():
     from hermes_cli.main import main
     src = inspect.getsource(main)
