@@ -231,6 +231,9 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+DONE_WHEN = "Done when the PR is merged to main and the test passes on main's next CI run."
+
+
 def _card_body(entry: dict[str, str], run_url: str, branch: str, previous: str | None) -> str:
     excerpt = (entry.get("first_attempt_excerpt") or "")[-EXCERPT_LIMIT:]
     lines = [
@@ -243,6 +246,12 @@ def _card_body(entry: dict[str, str], run_url: str, branch: str, previous: str |
         "lease) that a CPU-throttled container misses. Wait on events or use generous timeouts that return",
         "as soon as the condition holds. Reproduce by starving the process (SIGSTOP/SIGCONT duty cycle) rather",
         "than on a quiet laptop.",
+        "",
+        DONE_WHEN,
+        "Opening a PR is not done. Once the PR is open, stay on the card: kanban_block(kind='dependency'/",
+        "'time') or kanban_continue until the PR is merged (merge it yourself once its required checks are",
+        "green on the current head), then confirm the test passes on main's next CI run. Do not call",
+        "kanban_complete while the PR is open.",
     ]
     if previous:
         lines += ["", f"An earlier deflake card {previous} was closed, but the test flaked again."]

@@ -183,6 +183,50 @@ class _QueuedPluginEvent:
 _HOOK_CALLBACK_TIMEOUT_SECS = 30.0
 _MAX_HOOK_CALLBACK_TIMEOUT_SECS = 600.0
 _HOOK_SKIPPED = object()  # returned by _run_hook_callback_bounded on skip/timeout
+# [daveey] A callback may declare its own wall-clock budget with this attribute (seconds, > 0), e.g. a
+# turn-end checker that makes bounded model calls. It replaces ``plugins.hook_callback_timeout`` for that
+# callback only, is clamped to ``_MAX_HOOK_CALLBACK_TIMEOUT_SECS``, and applies only on the bounded path
+# (it never turns the threaded path on when the global timeout is <= 0, nor bounds an unbounded hook).
+HOOK_CALLBACK_TIMEOUT_ATTR = "hermes_hook_timeout"
+
+
+class HookCallBudget:
+    """The host's deadline for one bounded hook-callback call, visible to the callback on its worker
+    thread through :func:`current_hook_call`. ``abandoned`` is set the moment the host stops waiting,
+    so a late callback can tell its result will be discarded (and must not claim it was delivered)."""
+
+    __slots__ = ("abandoned", "deadline", "hook_name", "timeout")
+
+    def __init__(self, hook_name: str, timeout: float, deadline: float) -> None:
+        self.hook_name = hook_name
+        self.timeout = timeout
+        self.deadline = deadline  # time.monotonic() value
+        self.abandoned = threading.Event()
+
+    def remaining(self) -> float:
+        """Seconds until the host gives up (0 once abandoned or past the deadline)."""
+        if self.abandoned.is_set():
+            return 0.0
+        return max(0.0, self.deadline - time.monotonic())
+
+
+_CURRENT_HOOK_CALL: contextvars.ContextVar[Optional[HookCallBudget]] = contextvars.ContextVar(
+    "hermes_current_hook_call", default=None)
+
+
+def current_hook_call() -> Optional[HookCallBudget]:
+    """The :class:`HookCallBudget` of the bounded hook call running on this thread, else ``None``
+    (synchronous/unbounded hooks, or code not running inside a hook callback)."""
+    return _CURRENT_HOOK_CALL.get()
+
+
+def hook_callback_timeout_for(cb: Callable, default: float) -> float:
+    """Effective budget for *cb*: its ``hermes_hook_timeout`` attribute when a positive number
+    (clamped to the max), else *default*."""
+    raw = getattr(cb, HOOK_CALLBACK_TIMEOUT_ATTR, None)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not raw > 0:
+        return default
+    return min(float(raw), _MAX_HOOK_CALLBACK_TIMEOUT_SECS)
 
 
 def _hook_call_identity(kwargs: dict[str, Any], hook_name: str = "") -> Optional[str]:
@@ -198,6 +242,11 @@ def _hook_call_identity(kwargs: dict[str, Any], hook_name: str = "") -> Optional
         value = kwargs.get(field)
         if isinstance(value, str) and value:
             return value
+    # [daveey] Turn-scoped hooks with no call id (pre_verify) fire at most once at a time per session:
+    # another session's running call is different work, not a duplicate to skip.
+    value = kwargs.get("session_id")
+    if isinstance(value, str) and value:
+        return f"session:{value}"
     return None
 
 
@@ -303,7 +352,8 @@ class PluginDispatchMixin:
         for cb in callbacks:
             try:
                 if use_timeout:
-                    ret = self._run_hook_callback_bounded(hook_name, cb, kwargs, timeout)
+                    ret = self._run_hook_callback_bounded(
+                        hook_name, cb, kwargs, hook_callback_timeout_for(cb, timeout))
                     if ret is _HOOK_SKIPPED:
                         if failed is not None:
                             failed.append(cb)
@@ -385,6 +435,8 @@ class PluginDispatchMixin:
             self._hook_running_callbacks[gate_key] = token
 
         context = contextvars.copy_context()
+        budget = HookCallBudget(hook_name, timeout, time.monotonic() + timeout)
+        context.run(_CURRENT_HOOK_CALL.set, budget)
         done = threading.Event()
         outcome: dict[str, Any] = {}
         failure: dict[str, BaseException] = {}
@@ -407,6 +459,10 @@ class PluginDispatchMixin:
             finally:
                 _release_token()
                 done.set()
+                if budget.abandoned.is_set():
+                    logger.warning(
+                        "Hook '%s' callback %s finished %.1fs after the host stopped waiting — result discarded",
+                        hook_name, callback_name, time.monotonic() - budget.deadline)
 
         thread = threading.Thread(target=_runner, name=f"hermes-hook-{callback_name}"[:40], daemon=True)
         try:
@@ -418,6 +474,7 @@ class PluginDispatchMixin:
                 hook_name, callback_name, exc)
             return _HOOK_SKIPPED
         if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
+            budget.abandoned.set()  # before any bookkeeping: the callback must see it as soon as possible
             with self._hook_timeout_lock:
                 # See #6622.
                 self._hook_timeout_suppressed_until[suppression_key] = (
