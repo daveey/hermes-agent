@@ -138,6 +138,9 @@ def _adopt_stored_continuation_source(sid: str, session: dict, session_key: str)
         _clear_session_context(tokens)
 
 
+UPDATE_HOLD_QUEUE_REASON = "update_hold_queue"
+
+
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
     """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths). Returns a descriptor
     for the resume payload when scheduled, else None. The turn runs on a background thread after the deferred agent
@@ -179,7 +182,11 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         session["_auto_continue_scheduled"] = True
     # [daveey] A core-update pause is not a crash: no attempt is used and the note says the step finished.
     paused = marker.get("reason") == "core_update_pause"
-    if paused:
+    # A prompt accepted behind the update hold never started: replay it verbatim, no attempt used, no note.
+    held = marker.get("reason") == UPDATE_HOLD_QUEUE_REASON
+    if held:
+        attempt, text = marker["attempts"], marker["prompt"]
+    elif paused:
         from tui_gateway.update_pause import pause_note
         attempt, text = marker["attempts"], pause_note(marker["prompt"], marker.get("killed_jobs"))
     elif receipt:
@@ -237,12 +244,13 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             diagnostic = marker.get("notification_category") == "diagnostic"
             with _session_profile_runtime_scope(session):
                 def announce():
-                    _emit("status.update", sid, {"kind": "process", "text": "Resuming paused turn…" if paused
+                    _emit("status.update", sid, {"kind": "process", "text": "Sending your queued message…" if held
+                                                 else "Resuming paused turn…" if paused
                                                  else "Reporting stopped background jobs…" if receipt
                                                  else "Resuming interrupted turn…"})
                     _emit("message.start", sid)
                 render_notification(announce, platform="tui", diagnostic=diagnostic)
-                _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue",
+                _run_prompt_submit(rid, sid, session, text, display_kind=None if held else "auto_continue",
                     **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
@@ -597,11 +605,18 @@ def _queue_submit_behind_update_hold(rid, sid: str, session: dict, text: Any, tr
         if envelope is not None:
             _persist_queued_user_row(session, envelope, display_kind)
         session["last_active"] = time.time()
+        # Durable replay: the in-memory queue dies with this process when the update restarts the backend
+        # (and the accept row is retired on the next resume), so journal the merged text as a turn marker
+        # that the post-restart ``session.resume`` replays through auto-continue.
+        if envelope is not None and (queued_now := session.get("queued_prompt")):
+            from tui_gateway.turn_marker import record_turn_start
+            record_turn_start(_session_home(session), str(session.get("session_key") or ""),
+                              str(queued_now.get("text") or text), reason=UPDATE_HOLD_QUEUE_REASON)
         if not retry_queued_prompt(rid, sid, session) and session.get("queued_prompt"):
             # Retirement raced in between: the queue is the client's to replay; keep the 5035.
             logger.info("update-hold queue for session %s: retry unavailable, kept queued", sid)
     logger.info("prompt.submit for session %s queued behind the core-update admission hold", sid)
-    return _ok(rid, {"status": "queued", "reason": "update_hold"})
+    return _ok(rid, {"status": "queued"})
 
 
 def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:

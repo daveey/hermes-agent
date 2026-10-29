@@ -112,3 +112,42 @@ def test_without_a_hold_the_submit_is_admitted_normally(held, monkeypatch):
     resp = _submit()
     assert resp["result"]["status"] == "streaming"
     assert ran and not held.session.get("queued_prompt")
+
+
+def test_hold_reply_validates_as_prompt_submit_result(held):
+    """The reply is a wire reply: an extra field is rejected by the generated contract (t_01a186190e59f122)."""
+    from tui_gateway.contracts.prompt_voice import PromptSubmitResult
+    resp = _submit()
+    assert resp["result"] == {"status": "queued"}
+    assert PromptSubmitResult.model_validate(resp["result"]).status == "queued"
+
+
+def test_queued_hold_prompt_is_dispatched_after_the_update_restart(held, monkeypatch):
+    """The update restarts the backend while the hold is up: the in-memory queue is gone, the marker is not."""
+    from tui_gateway.turn_marker import read_turn_marker
+    _submit()
+    marker = read_turn_marker(held.home, "session-key")
+    assert marker and marker["reason"] == "update_hold_queue" and marker["prompt"] == "hello there"
+
+    # --- process restart: the old queue/timers vanish, the old writer pid is dead ---
+    held.timers.clear()
+    server._sessions.pop("sid", None)
+    af.clear_hold(held.home)
+    monkeypatch.setattr(server, "marker_writer_state", lambda entry: "dead")
+    reborn = {
+        "agent": types.SimpleNamespace(valid_tool_names=set()), "session_key": "session-key", "history": [],
+        "history_lock": threading.RLock(), "history_version": 0, "running": False, "transport": None,
+        "attached_images": [], "profile_home": str(held.home),
+    }
+    server._sessions["sid"] = reborn
+    ran = []
+    monkeypatch.setattr(server, "_start_session_work", lambda target, **kw: target() or True)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_adopt_stored_continuation_source", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_run_prompt_submit",
+                        lambda rid, sid, session, text, **kw: ran.append((text, kw.get("display_kind"))))
+    assert server._maybe_schedule_auto_continue("sid", reborn, "session-key") is not None
+    assert ran == [("hello there", None)], "the user's own text, verbatim, not an auto-continue note"

@@ -116,7 +116,8 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> bool:
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
                       auto_continue: bool = True, notification_category: str | None = None,
-                      pauses: int = 0, killed_jobs: list | None = None, until_tool: bool = False) -> None:
+                      pauses: int = 0, killed_jobs: list | None = None, until_tool: bool = False,
+                      reason: str | None = None) -> None:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
     this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume.
     ``pauses`` = core-update pauses this logical turn already took (``mark_turn_paused``), counted apart
@@ -135,6 +136,8 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
         entry["until_tool"] = True
     if notification_category == "diagnostic":
         entry["notification_category"] = notification_category
+    if reason:
+        entry["reason"] = str(reason)
     # Identity only — never the prompt: this log is read on crash triage and must not carry turn content.
     logger.debug("turn marker recorded for session %s by writer pid %s", session_key, entry["writer_pid"])
     _update(home, session_key, lambda entries: {**_prune(entries, now), session_key: entry}, "record")
