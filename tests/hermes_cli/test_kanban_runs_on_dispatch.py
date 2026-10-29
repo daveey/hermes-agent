@@ -85,6 +85,20 @@ def test_dry_run_never_lists_a_card_this_machine_cannot_lease(gws):
     assert {t for t, _r in res.skipped_ineligible} >= {review, other}
 
 
+def test_cli_dispatch_dry_run_json_names_ineligible_cards(gws):
+    """The MacBook readback: `hermes kanban dispatch --dry-run --json` lists the refused card, not as spawned."""
+    import json
+
+    from hermes_cli import kanban as kcli
+    hub, worker = gws
+    review = _review_card_pinned_to_worker(hub, worker)
+    hub.enter()
+    out = json.loads(kcli.run_slash("dispatch --dry-run --json"))
+    assert review not in [s["task_id"] for s in out["spawned"]]
+    assert {"task_id": review, "reason": "labels_mismatch"} in out["skipped_ineligible"]
+    assert out["claim_deferred"] == []
+
+
 def test_health_probe_does_not_count_ineligible_cards(gws):
     hub, worker = gws
     _review_card_pinned_to_worker(hub, worker)
