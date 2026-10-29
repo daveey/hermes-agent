@@ -3042,6 +3042,11 @@ def _run_oneshot_from_args(args) -> None:
     Bypasses cli.py entirely; the transport launcher never returns.
     """
     from hermes_cli.gateway_chat_startup import launch_gateway_chat
+    # [daveey] -z --resume of a chat handed over to another gateway fails fast with SESSION_MOVED before
+    # any turn, as chat and the TUI do (_resolve_chat_session_args); upstream's gateway route skipped it.
+    resume_val = getattr(args, "resume", None)
+    if isinstance(resume_val, str) and resume_val.strip() and resume_val.strip().lower() != "latest":
+        _refuse_moved_session(_resolve_session_by_name_or_id(resume_val) or resume_val)
     sys.exit(launch_gateway_chat(args))
 
 

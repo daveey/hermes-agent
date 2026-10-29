@@ -205,7 +205,8 @@ def _resume_args(**kw):
 def test_cli_resume_of_a_moved_session_exits_with_session_moved(gw, monkeypatch, capsys):
     from hermes_cli import main as hm
     monkeypatch.setattr(hm, "_apply_in_dir", lambda args: None)
-    monkeypatch.setattr(hm, "_import_foreign_resume", lambda args: None)
+    # Fork: upstream moved the foreign-resume import out of main into main_resume_args.
+    monkeypatch.setattr("hermes_cli.main_resume_args.import_foreign_resume", lambda args: None)
     monkeypatch.setattr(hm, "_resolve_session_by_name_or_id", lambda value: value)
     hm._resolve_chat_session_args(_resume_args(), use_tui=False)  # not moved: resumes
     _moved_away(gw)
@@ -219,11 +220,14 @@ def test_cli_resume_of_a_moved_session_exits_with_session_moved(gw, monkeypatch,
 def test_oneshot_resume_of_a_moved_session_exits_before_the_turn(gw, monkeypatch, capsys):
     from hermes_cli import main as hm
     monkeypatch.setattr(hm, "_apply_in_dir", lambda args: None)
-    monkeypatch.setattr(hm, "_import_foreign_resume", lambda args: None)
+    # Fork: upstream moved the foreign-resume import out of main into main_resume_args.
+    monkeypatch.setattr("hermes_cli.main_resume_args.import_foreign_resume", lambda args: None)
     monkeypatch.setattr(hm, "_resolve_session_by_name_or_id", lambda value: value)
     monkeypatch.setattr(hm, "_confirm_startup_expensive_model_override", lambda args: None)
     ran = []
     monkeypatch.setattr(hm, "_run_and_exit_oneshot", lambda *a, **k: ran.append(k))
+    # Fork: upstream runs -z through the gateway chat launcher; the moved fence must stop it too.
+    monkeypatch.setattr("hermes_cli.gateway_chat_startup.launch_gateway_chat", lambda args: ran.append(args) or 0)
     _moved_away(gw)
     with pytest.raises(SystemExit) as exc:
         hm._run_oneshot_from_args(_resume_args(oneshot="hi"))
