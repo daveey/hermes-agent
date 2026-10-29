@@ -836,9 +836,11 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     (
         "Unblock a Kanban task (blocked, scheduled, or a triage card a block "
         "loop escalated). It moves to ready when all parents are done, "
-        "or todo while any parent remains open. Orchestrator-only — only "
-        "profiles with the kanban toolset can unblock routed work; "
-        "dispatcher-spawned task workers never see this tool."
+        "or todo while any parent remains open. Orchestrator-only, except "
+        "one case: a self-heal fix card may unblock the single card named in "
+        "its defect (`kanban card t_...`). A card that finished fix card "
+        "created may do the same. Any other worker call is refused, and the "
+        "worker shell stays fenced."
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),

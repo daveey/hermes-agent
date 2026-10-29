@@ -109,7 +109,7 @@ def _check_kanban_mode() -> bool:
 
 @no_cache_check_fn
 def _check_kanban_orchestrator_mode() -> bool:
-    """Board-routing tools (kanban_list, kanban_unblock): hidden from task workers."""
+    """Board-routing tools (kanban_list): hidden from task workers."""
     return _visible(to_env_worker=False)
 
 
@@ -2019,22 +2019,6 @@ def _maybe_subscribe_on_touch(conn: Any, task_id: str) -> bool:
                                  reason="touch")
 
 
-@_kanban_handler("kanban_unblock")
-def _handle_unblock(args: dict, **kw) -> str:
-    """Transition a blocked (or triage/scheduled) task to ready, or todo while parents remain open."""
-    _reject_delegated_child_mutation("kanban_unblock")
-    _require_orchestrator_tool("kanban_unblock")
-    tid = args.get("task_id")
-    _check(tid, "task_id is required")
-    tid = str(tid)
-    _enforce_worker_task_ownership(tid)
-    with _board(args.get("board")) as (kb, conn):
-        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
-        subscribed = _maybe_subscribe_on_touch(conn, tid)
-        return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)),
-                   **({"subscribed": True} if subscribed else {}))
-
-
 @_kanban_handler("kanban_archive")
 def _handle_archive(args: dict, **kw) -> str:
     """Archive an unclaimed card this worker's task created, or any card for an orchestrator."""
@@ -2125,8 +2109,13 @@ def _handle_origin_adopt(args: dict, **kw) -> str:
 
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
-# kanban_list / kanban_unblock route the board and are hidden from task workers.
-_ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_unblock"})
+# kanban_list routes the board and is hidden from task workers. kanban_unblock's
+# gate lives in kanban_tools_self_heal (orchestrators, plus a self-heal requeue grant).
+_ORCHESTRATOR_TOOLS = frozenset({"kanban_list"})
+from tools.kanban_tools_self_heal import check_unblock as _check_kanban_unblock_fn
+from tools.kanban_tools_self_heal import handle_unblock as _handle_unblock_fn
+_check_kanban_unblock = no_cache_check_fn(_check_kanban_unblock_fn)
+_handle_unblock = _kanban_handler("kanban_unblock")(_handle_unblock_fn)
 _TOOLS = (
     ("kanban_show", KANBAN_SHOW_SCHEMA, _handle_show, "📋"),
     ("kanban_list", KANBAN_LIST_SCHEMA, _handle_list, "📋"),
@@ -2150,6 +2139,11 @@ _TOOLS = (
     ("kanban_archive", KANBAN_ARCHIVE_SCHEMA, _handle_archive, "🗄"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:
-    _gate = _check_kanban_orchestrator_mode if _name in _ORCHESTRATOR_TOOLS else _check_kanban_mode
+    if _name == "kanban_unblock":
+        _gate = _check_kanban_unblock
+    elif _name in _ORCHESTRATOR_TOOLS:
+        _gate = _check_kanban_orchestrator_mode
+    else:
+        _gate = _check_kanban_mode
     registry.register(name=_name, toolset="kanban", schema=_sch, handler=_handler, emoji=_emoji,
                       check_fn=_gate)

@@ -1136,6 +1136,59 @@ def _is_stranded_runs_on_copy(conn, task) -> bool:
     return False
 
 
+_SELF_HEAL_FIX_KEY = re.compile(r"^selfheal:[a-z0-9]+(?:-[a-z0-9]+)*(?::r[1-9]\d*)?:fix$")
+_NAMED_DEFECT_CARD = re.compile(
+    r"\bkanban card (t_[0-9a-f]{16}|t_[0-9a-f]{8})\b", re.IGNORECASE,
+)
+_PLURAL_DEFECT = re.compile(r"\bkanban cards\b", re.IGNORECASE)
+
+
+def _is_self_heal_fix_card(task) -> bool:
+    """A self-heal FIX card, not an investigation (``created_by`` alone is both)."""
+    if task is None or (task.created_by or "") != "self-heal":
+        return False
+    return bool(_SELF_HEAL_FIX_KEY.fullmatch(task.idempotency_key or ""))
+
+
+def named_defect_card(task) -> Optional[str]:
+    """The one ``kanban card t_...`` id in title/body, else None.
+
+    A sibling batch (``kanban cards``) or two different ids is not a single
+    defect, so it is not a grant.
+    """
+    if task is None:
+        return None
+    text = f"{task.title or ''}\n{task.body or ''}"
+    if _PLURAL_DEFECT.search(text):
+        return None
+    found = list(dict.fromkeys(_NAMED_DEFECT_CARD.findall(text)))
+    return found[0] if len(found) == 1 else None
+
+
+def self_heal_requeue_grant(conn, worker_task_id: str) -> tuple[Optional[str], Optional[str]]:
+    """``(target_id, fix_card_id)`` this worker may unblock, else ``(None, None)``.
+
+    A self-heal fix card may unblock the single card named in its defect. A
+    card that fix card created may do the same once the fix card is done, so a
+    finished repair is not stranded when the fix card can no longer call tools.
+    Any other worker, and any other target, stays refused. [daveey]
+    """
+    worker = kb.get_task(conn, worker_task_id)
+    if worker is None:
+        return None, None
+    if _is_self_heal_fix_card(worker):
+        target = named_defect_card(worker)
+        return (target, worker.id) if target else (None, None)
+    creator = _creator_task_id(conn, worker_task_id)
+    if not creator:
+        return None, None
+    fix = kb.get_task(conn, creator)
+    if fix is None or not _is_self_heal_fix_card(fix) or fix.status != "done":
+        return None, None
+    target = named_defect_card(fix)
+    return (target, fix.id) if target else (None, None)
+
+
 def worker_archive_scope(conn, task_id: str) -> tuple[Optional[str], Optional[str]]:
     """``(refusal, via)`` for archiving ``task_id`` from this process.
 
