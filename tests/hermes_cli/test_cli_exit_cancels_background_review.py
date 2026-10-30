@@ -106,8 +106,7 @@ def test_cli_exit_without_a_review_is_a_no_op(monkeypatch):
 
 def _cli_capturing_agent_kwargs(monkeypatch, *, single_query: bool):
     import cli as cli_mod
-    import run_agent
-    from hermes_cli import mcp_startup
+    from hermes_cli import gateway_agent
 
     cli = cli_mod.HermesCLI(compact=True)
     cli._session_db = object()
@@ -115,16 +114,17 @@ def _cli_capturing_agent_kwargs(monkeypatch, *, single_query: bool):
     cli.conversation_history = []
     cli._install_tool_callbacks = lambda: None
     cli._ensure_runtime_credentials = lambda: True
+    cli._ensure_gateway_session = lambda: None  # no gateway here: the kwargs are the contract
     if single_query:
         cli._single_query_mode = True
-    monkeypatch.setattr(mcp_startup, "ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
     captured = {}
 
     def _fake_agent(*_a, **kw):
         captured.update(kw)
         return types.SimpleNamespace()
 
-    monkeypatch.setattr(run_agent, "AIAgent", _fake_agent)
+    # _init_agent builds the gateway-backed agent (hermes_cli.gateway_agent.GatewayAgent), not run_agent.AIAgent.
+    monkeypatch.setattr(gateway_agent, "GatewayAgent", _fake_agent)
     assert cli._init_agent() is True
     return captured
 
