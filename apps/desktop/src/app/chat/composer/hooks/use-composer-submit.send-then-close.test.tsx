@@ -1,5 +1,7 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
+
 import { useStore } from '@nanostores/react'
-import { act, cleanup, render, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { useLayoutEffect, useRef } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 
@@ -53,6 +55,40 @@ vi.mock('@assistant-ui/react', () => ({
   useComposerRuntime: () => composer.runtime
 }))
 
+// Each case runs under its own abort signal (Vitest aborts it when the case times out). A timed-out
+// case is not cancelled: its suspended body resumes later, inside the next case. Every helper that
+// touches the page or storage checks the signal of the case that called it, found through async
+// context (it follows that body's awaits and timers), so a stale body stops at its next step
+// instead of unmounting the next case's page or writing its drafts and outbox.
+const caseSignal = new AsyncLocalStorage<AbortSignal>()
+
+function stillRunning() {
+  const signal = caseSignal.getStore()
+
+  if (signal?.aborted) {
+    throw new Error('this case already ended (timed out); its body must not touch the next case', {
+      cause: signal.reason
+    })
+  }
+}
+
+function scenario(name: string, body: () => Promise<void>, timeout?: number) {
+  it(name, ({ signal }) => caseSignal.run(signal, body), timeout)
+}
+
+// The composer graph's first load is a one-time transform (seconds on an idle host, past 30s on a
+// saturated CI runner). Pay it while the file is collected, outside every case's timeout; the reset
+// then gives the first page a fresh graph like every later one (transforms stay cached).
+await Promise.all([
+  import('@/store/pending-submissions'),
+  import('./use-composer-draft'),
+  import('./use-composer-submit'),
+  import('@/store/composer'),
+  import('@/store/notifications'),
+  import('../rich-editor')
+])
+vi.resetModules()
+
 interface Handles {
   attach: (id: string) => void
   detach: (id: string) => void
@@ -77,6 +113,7 @@ async function openPage(onSubmit: ChatBarProps['onSubmit'], pending: unknown[] =
   const { useComposerSubmit } = await import('./use-composer-submit')
   const { mainComposerScope } = await import('@/store/composer')
   const { composerPlainText } = await import('../rich-editor')
+  stillRunning()
 
   function Page() {
     const attachments = useStore(mainComposerScope.$attachments)
@@ -111,10 +148,23 @@ async function openPage(onSubmit: ChatBarProps['onSubmit'], pending: unknown[] =
 
     useLayoutEffect(() => {
       handles = {
-        attach: id => mainComposerScope.add({ id, kind: 'url', label: id, refText: `@url:${id}` }),
-        detach: id => mainComposerScope.remove(id),
-        editor: () => composerPlainText(draft.editorRef.current!).trim(),
-        submitDraft: submit.submitDraft
+        attach: id => {
+          stillRunning()
+          mainComposerScope.add({ id, kind: 'url', label: id, refText: `@url:${id}` })
+        },
+        detach: id => {
+          stillRunning()
+          mainComposerScope.remove(id)
+        },
+        editor: () => {
+          stillRunning()
+
+          return composerPlainText(draft.editorRef.current!).trim()
+        },
+        submitDraft: () => {
+          stillRunning()
+          submit.submitDraft()
+        }
       }
     })
 
@@ -128,6 +178,7 @@ async function openPage(onSubmit: ChatBarProps['onSubmit'], pending: unknown[] =
 }
 
 function closeWindow() {
+  stillRunning()
   act(() => window.dispatchEvent(new Event('pagehide')))
   cleanup()
   vi.resetModules()
@@ -155,6 +206,7 @@ const attachmentsNotice = async () =>
 
 // Seeds the draft as a first launch reads it: the v3 list counts only before any page wrote the v4 stash.
 const saveDraft = (text: string) => {
+  stillRunning()
   window.localStorage.removeItem('hermes:composer-drafts:v4')
   window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': text }))
 }
@@ -171,44 +223,67 @@ async function sendThenClose(text: string): Promise<string | undefined> {
   return cutOff.mock.calls[0][1]?.submission_id
 }
 
-it('a message sent right before the window closes is never lost and never sent twice', async () => {
-  saveDraft('answered question')
+// The guard itself: a body whose case already timed out resumes into the next case and stops
+// before it renders a page, unmounts one, or writes the drafts the next case reads.
+it('a body resumed after its case timed out never touches the next case', async () => {
+  saveDraft('next case draft')
+  const drafts = window.localStorage.getItem('hermes:composer-drafts:v3')
+  const ended = AbortSignal.abort(new Error('timed out'))
+  const stale = (body: () => unknown) => caseSignal.run(ended, async () => body())
 
-  // Control: an acknowledged send leaves nothing behind for the next page.
+  await expect(stale(() => openPage(async () => true))).rejects.toThrow('this case already ended')
+  await expect(stale(() => saveDraft('stale words'))).rejects.toThrow('this case already ended')
+  await expect(stale(() => closeWindow())).rejects.toThrow('this case already ended')
+  expect(screen.queryByTestId('editor')).toBeNull()
+  expect(window.localStorage.getItem('hermes:composer-drafts:v3')).toBe(drafts)
+
   await openPage(async () => true)
-  expect(handles.editor()).toBe('answered question')
-  await act(async () => handles.submitDraft())
-  closeWindow()
+  await expect(stale(() => handles.submitDraft())).rejects.toThrow('this case already ended')
+  expect(handles.editor()).toBe('next case draft')
+})
 
-  const relaunched = vi.fn<ChatBarProps['onSubmit']>(async () => true)
-  await openPage(relaunched)
-  await act(async () => {})
-  expect(handles.editor()).toBe('')
-  expect(await attachmentsNotice()).toBeUndefined()
-  closeWindow()
+scenario(
+  'a message sent right before the window closes is never lost and never sent twice',
+  async () => {
+    saveDraft('answered question')
 
-  // Enter, then the window closes before the send chain reaches prompt.submit.
-  saveDraft('my long question')
-  const cutOff = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
-  await openPage(cutOff)
-  act(() => handles.submitDraft())
-  expect(cutOff).toHaveBeenCalledTimes(1)
-  const firstId = cutOff.mock.calls[0][1]?.submission_id
-  expect(handles.editor()).toBe('')
-  closeWindow()
+    // Control: an acknowledged send leaves nothing behind for the next page.
+    await openPage(async () => true)
+    expect(handles.editor()).toBe('answered question')
+    await act(async () => handles.submitDraft())
+    closeWindow()
 
-  const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
-  await openPage(reopened)
-  await waitFor(() => expect(handles.editor()).toBe('my long question'))
+    const relaunched = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+    await openPage(relaunched)
+    await act(async () => {})
+    expect(handles.editor()).toBe('')
+    expect(await attachmentsNotice()).toBeUndefined()
+    closeWindow()
 
-  // Sending it again is the explicit retry of the same admission, so the owner runs it once.
-  await act(async () => handles.submitDraft())
-  expect(reopened).toHaveBeenCalledTimes(1)
-  expect(reopened.mock.calls[0][0].trim()).toBe('my long question')
-  expect(reopened.mock.calls[0][1]?.submission_id).toBe(firstId)
-}, 30_000)
+    // Enter, then the window closes before the send chain reaches prompt.submit.
+    saveDraft('my long question')
+    const cutOff = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
+    await openPage(cutOff)
+    act(() => handles.submitDraft())
+    expect(cutOff).toHaveBeenCalledTimes(1)
+    const firstId = cutOff.mock.calls[0][1]?.submission_id
+    expect(handles.editor()).toBe('')
+    closeWindow()
 
-it('a send the owner admitted before the window closed is never offered again as the draft', async () => {
+    const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+    await openPage(reopened)
+    await waitFor(() => expect(handles.editor()).toBe('my long question'))
+
+    // Sending it again is the explicit retry of the same admission, so the owner runs it once.
+    await act(async () => handles.submitDraft())
+    expect(reopened).toHaveBeenCalledTimes(1)
+    expect(reopened.mock.calls[0][0].trim()).toBe('my long question')
+    expect(reopened.mock.calls[0][1]?.submission_id).toBe(firstId)
+  },
+  30_000
+)
+
+scenario('a send the owner admitted before the window closed is never offered again as the draft', async () => {
   // Admitted and run (its stored user row names it), admitted and still queued (the resume snapshot
   // lists it), or listed only by a snapshot that came after the draft was offered.
   const queued = (id: string, text: string) => [{ admission_id: 'adm-1', input_id: id, status: 'queued', text }]
@@ -254,80 +329,86 @@ it('a send the owner admitted before the window closed is never offered again as
   }
 })
 
-it('an interrupted send with attachments comes back once, under its id, even when the saved draft kept its words', async () => {
-  // Offered back as text (the attachment did not outlive the page): Enter is still the retry.
-  const offeredId = await sendThenClose('offered words')
-  const offered = vi.fn<ChatBarProps['onSubmit']>(async () => true)
-  await openPage(offered)
-  await waitFor(() => expect(handles.editor()).toBe('offered words'))
-  expect(await attachmentsNotice()).toBe(
-    "Attachments from your unsent message weren't restored. Attach them again before you send it."
-  )
-  await act(async () => handles.submitDraft())
-  expect(offered.mock.calls[0][1]?.submission_id).toBe(offeredId)
-  closeWindow()
-  window.localStorage.clear()
+scenario(
+  'an interrupted send with attachments comes back once, under its id, even when the saved draft kept its words',
+  async () => {
+    // Offered back as text (the attachment did not outlive the page): Enter is still the retry.
+    const offeredId = await sendThenClose('offered words')
+    const offered = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+    await openPage(offered)
+    await waitFor(() => expect(handles.editor()).toBe('offered words'))
+    expect(await attachmentsNotice()).toBe(
+      "Attachments from your unsent message weren't restored. Attach them again before you send it."
+    )
+    await act(async () => handles.submitDraft())
+    expect(offered.mock.calls[0][1]?.submission_id).toBe(offeredId)
+    closeWindow()
+    window.localStorage.clear()
 
-  // The saved draft persisted the words before the send cleared the composer (the close raced it).
-  const savedId = await sendThenClose('saved words')
-  saveDraft('saved words')
-  const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
-  await openPage(reopened)
-  expect(handles.editor()).toBe('saved words')
-  expect(await attachmentsNotice()).toBeTruthy()
-  await act(async () => handles.submitDraft())
-  expect(reopened.mock.calls[0][1]?.submission_id).toBe(savedId)
-  closeWindow()
+    // The saved draft persisted the words before the send cleared the composer (the close raced it).
+    const savedId = await sendThenClose('saved words')
+    saveDraft('saved words')
+    const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+    await openPage(reopened)
+    expect(handles.editor()).toBe('saved words')
+    expect(await attachmentsNotice()).toBeTruthy()
+    await act(async () => handles.submitDraft())
+    expect(reopened.mock.calls[0][1]?.submission_id).toBe(savedId)
+    closeWindow()
 
-  // Never offered a second time beside the copy that was sent.
-  const later = vi.fn<ChatBarProps['onSubmit']>(async () => true)
-  await openPage(later)
-  await waitFor(() => expect(outboxKeys()).toEqual([]))
-  await act(async () => {})
-  expect(handles.editor()).toBe('')
-  closeWindow()
-  window.localStorage.clear()
+    // Never offered a second time beside the copy that was sent.
+    const later = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+    await openPage(later)
+    await waitFor(() => expect(outboxKeys()).toEqual([]))
+    await act(async () => {})
+    expect(handles.editor()).toBe('')
+    closeWindow()
+    window.localStorage.clear()
 
-  // A send whose outcome is unknown (timed out) is given back with its id; after a reload the saved
-  // draft has its words but not its attachment, and Enter on it still retries that send.
-  saveDraft('unknown words')
+    // A send whose outcome is unknown (timed out) is given back with its id; after a reload the saved
+    // draft has its words but not its attachment, and Enter on it still retries that send.
+    saveDraft('unknown words')
 
-  const timedOut = vi.fn<ChatBarProps['onSubmit']>(async () => {
-    throw new Error('request timed out')
-  })
+    const timedOut = vi.fn<ChatBarProps['onSubmit']>(async () => {
+      throw new Error('request timed out')
+    })
 
-  await openPage(timedOut)
-  act(() => handles.attach('example.com/b'))
-  await act(async () => handles.submitDraft())
-  await waitFor(() => expect(handles.editor()).toBe('unknown words'))
-  closeWindow()
+    await openPage(timedOut)
+    act(() => handles.attach('example.com/b'))
+    await act(async () => handles.submitDraft())
+    await waitFor(() => expect(handles.editor()).toBe('unknown words'))
+    closeWindow()
 
-  const retried = vi.fn<ChatBarProps['onSubmit']>(async () => true)
-  await openPage(retried)
-  expect(handles.editor()).toBe('unknown words')
-  expect(await attachmentsNotice()).toBeTruthy()
-  await act(async () => handles.submitDraft())
-  expect(retried.mock.calls[0][1]?.submission_id).toBe(timedOut.mock.calls[0][1]?.submission_id)
-})
+    const retried = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+    await openPage(retried)
+    expect(handles.editor()).toBe('unknown words')
+    expect(await attachmentsNotice()).toBeTruthy()
+    await act(async () => handles.submitDraft())
+    expect(retried.mock.calls[0][1]?.submission_id).toBe(timedOut.mock.calls[0][1]?.submission_id)
+  }
+)
 
-it('a restored send retried while a turn runs is queued under its id, never steered as a new message', async () => {
-  saveDraft('busy words')
-  const cutOff = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
-  await openPage(cutOff)
-  act(() => handles.submitDraft())
-  const firstId = cutOff.mock.calls[0][1]?.submission_id
-  closeWindow()
+scenario(
+  'a restored send retried while a turn runs is queued under its id, never steered as a new message',
+  async () => {
+    saveDraft('busy words')
+    const cutOff = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
+    await openPage(cutOff)
+    act(() => handles.submitDraft())
+    const firstId = cutOff.mock.calls[0][1]?.submission_id
+    closeWindow()
 
-  const onSteer = vi.fn(async () => true)
-  const queueCurrentDraft = vi.fn((_submissionId?: string) => true)
-  await openPage(async () => true, [], { busy: true, onSteer, queueCurrentDraft })
-  await waitFor(() => expect(handles.editor()).toBe('busy words'))
-  await act(async () => handles.submitDraft())
-  expect(onSteer).not.toHaveBeenCalled()
-  expect(queueCurrentDraft).toHaveBeenCalledWith(firstId)
-})
+    const onSteer = vi.fn(async () => true)
+    const queueCurrentDraft = vi.fn((_submissionId?: string) => true)
+    await openPage(async () => true, [], { busy: true, onSteer, queueCurrentDraft })
+    await waitFor(() => expect(handles.editor()).toBe('busy words'))
+    await act(async () => handles.submitDraft())
+    expect(onSteer).not.toHaveBeenCalled()
+    expect(queueCurrentDraft).toHaveBeenCalledWith(firstId)
+  }
+)
 
-it('recovery never discards a file the user attached while it was running', async () => {
+scenario('recovery never discards a file the user attached while it was running', async () => {
   const attached = async () =>
     (await import('@/store/composer')).mainComposerScope.$attachments.get().map(attachment => attachment.id)
 
@@ -361,40 +442,48 @@ it('recovery never discards a file the user attached while it was running', asyn
   expect(handles.editor()).toBe('late words')
 })
 
-it('equal words typed again after an interrupted send are a new message, never that send', async () => {
-  const firstId = await sendThenClose('same words')
-  const { at } = JSON.parse(window.localStorage.getItem(outboxKeys()[0])!) as { at: number }
+scenario(
+  'equal words typed again after an interrupted send are a new message, never that send',
+  async () => {
+    const firstId = await sendThenClose('same words')
+    const { at } = JSON.parse(window.localStorage.getItem(outboxKeys()[0])!) as { at: number }
 
-  // The draft holding those words was saved after the send: the user typed them again.
-  window.localStorage.setItem(
-    'hermes:composer-drafts:v4',
-    JSON.stringify({ drafts: { 'stored-B': { at: at + 1000, text: 'same words' } } })
-  )
-  const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
-  await openPage(reopened)
-  await act(async () => {})
-  expect(handles.editor()).toBe('same words')
-  await act(async () => handles.submitDraft())
-  expect(reopened.mock.calls[0][1]?.submission_id).not.toBe(firstId)
-}, 30_000)
+    // The draft holding those words was saved after the send: the user typed them again.
+    window.localStorage.setItem(
+      'hermes:composer-drafts:v4',
+      JSON.stringify({ drafts: { 'stored-B': { at: at + 1000, text: 'same words' } } })
+    )
+    const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+    await openPage(reopened)
+    await act(async () => {})
+    expect(handles.editor()).toBe('same words')
+    await act(async () => handles.submitDraft())
+    expect(reopened.mock.calls[0][1]?.submission_id).not.toBe(firstId)
+  },
+  30_000
+)
 
-it('a file removed from a given-back draft is never resent under the old send', async () => {
-  saveDraft('trimmed words')
+scenario(
+  'a file removed from a given-back draft is never resent under the old send',
+  async () => {
+    saveDraft('trimmed words')
 
-  const timedOut = vi.fn<ChatBarProps['onSubmit']>(async () => {
-    throw new Error('request timed out')
-  })
+    const timedOut = vi.fn<ChatBarProps['onSubmit']>(async () => {
+      throw new Error('request timed out')
+    })
 
-  await openPage(timedOut)
-  act(() => handles.attach('example.com/c'))
-  await act(async () => handles.submitDraft())
-  await waitFor(() => expect(handles.editor()).toBe('trimmed words'))
-  act(() => handles.detach('example.com/c'))
-  closeWindow()
+    await openPage(timedOut)
+    act(() => handles.attach('example.com/c'))
+    await act(async () => handles.submitDraft())
+    await waitFor(() => expect(handles.editor()).toBe('trimmed words'))
+    act(() => handles.detach('example.com/c'))
+    closeWindow()
 
-  const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
-  await openPage(reopened)
-  await act(async () => handles.submitDraft())
-  expect(reopened.mock.calls[0][1]?.submission_id).not.toBe(timedOut.mock.calls[0][1]?.submission_id)
-  expect(await attachmentsNotice()).toBeUndefined()
-}, 30_000)
+    const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+    await openPage(reopened)
+    await act(async () => handles.submitDraft())
+    expect(reopened.mock.calls[0][1]?.submission_id).not.toBe(timedOut.mock.calls[0][1]?.submission_id)
+    expect(await attachmentsNotice()).toBeUndefined()
+  },
+  30_000
+)
