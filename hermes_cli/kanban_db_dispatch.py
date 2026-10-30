@@ -37,6 +37,7 @@ from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code
 from hermes_cli.kanban_db_dispatch_allowlist import _dispatch_profile_allowlist, dispatch_profile_allowlist_summary
 from hermes_cli import kanban_worker_scope as _worker_scope
 from hermes_cli import kanban_host_reboot as _host_reboot, kanban_owner_unavailable as _ou  # [daveey]
+from hermes_cli import kanban_owner_death as _owner_death, kanban_systemic_crash as _systemic  # [daveey]
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
 from hermes_cli.kanban_db_dispatch_queries import lane_rows, skip_reap
 
@@ -1398,6 +1399,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                                          run_id=row["current_run_id"], conn=conn)
             _host_reboot.note(dead, row, now_boot, reboot_victims)  # [daveey]
             apply_attempt_note(conn, row["id"], pid, dead)
+            _owner_death.note(dead, conn, row["id"], row["current_run_id"])  # owner died under it [daveey]
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1469,9 +1471,22 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
     """
     auto_blocked: list[str] = []
     fp_counts: dict[str, int] = {}
-    for _, _, _, dead in crash_details:
+    fp_tasks: dict[str, list[str]] = {}
+    for tid, _, _, dead in crash_details:
+        if dead.event_payload.get("owner_death_pid") is not None:
+            continue  # an owner-death repeat (crash-loop guard) is charged normally, never systemic [daveey]
         fp = _error_fingerprint(dead.error_text)
         fp_counts[fp] = fp_counts.get(fp, 0) + 1
+        if not (dead.protocol_violation or dead.terminal_provider or dead.unknown_skill or dead.stdlib_shadow
+                or dead.reboot_culprit):
+            fp_tasks.setdefault(fp, []).append(tid)
+    # One visible owner per systemic fingerprint: a fix card the tripped cards wait on. [daveey]
+    fix_cards: dict[str, Optional[str]] = {}
+    for fp, tids in fp_tasks.items():
+        if fp_counts.get(fp, 0) >= 3:
+            sample = next(d.error_text for t, _, _, d in crash_details if t == tids[0])
+            arow = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (tids[0],)).fetchone()
+            fix_cards[fp] = _systemic.ensure_fix_card(conn, fp, tids, sample, arow["assignee"] if arow else None)
     for tid, pid, claimer, dead in crash_details:
         error_text = dead.error_text
         if dead.protocol_violation:
@@ -1522,10 +1537,17 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
             if dead.reboot_culprit:
                 _host_reboot.comment_culprit(conn, tid, dead.reboot_culprit)
         else:
-            is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
+            fp = _error_fingerprint(error_text)
+            is_systemic = dead.event_payload.get("owner_death_pid") is None and fp_counts.get(fp, 0) >= 3
+            fix_id = fix_cards.get(fp) if is_systemic else None
+            if fix_id == tid:
+                fix_id = None  # the fix card itself died of it: hold it for an operator
             extra = {"pid": pid, "claimer": claimer}
-            if is_systemic:
-                # Trips at 1, below any ``failure_limit``: hold it for an operator.
+            if fix_id:
+                # Trips at 1 and waits on the fingerprint's fix card (linked below), not a silent hold.
+                extra["fix_card"] = fix_id
+            elif is_systemic:
+                # No fix card could be opened: trips at 1, held for an operator.
                 extra["sticky"] = True
             tripped = _record_task_failure(
                 conn, tid,
@@ -1536,6 +1558,9 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 end_run=False,
                 event_payload_extra=extra,
             )
+            if tripped and fix_id and not _systemic.attach(conn, fix_id, tid):
+                with _kb.write_txn(conn):  # unlinked: never let recompute_ready respawn it into the same wall
+                    _kb._append_event(conn, tid, "gave_up", {**extra, "sticky": True, "fix_card_link_failed": True})
         if tripped:
             auto_blocked.append(tid)
     return auto_blocked
