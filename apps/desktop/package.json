@@ -79,6 +79,12 @@
     "test:e2e:update-snapshots": "npm run build && WLR_BACKENDS=headless WLR_NO_HARDWARE_CURSORS=1 cage -- npx playwright test e2e/ --reporter=list --update-snapshots",
     "repro:short-session-hang": "node scripts/run-short-session-hang-repro.mjs"
   },
+  "checkMemoryMiB": {
+    "check:test:ui": 3584,
+    "check:lint": 3328,
+    "check:test:desktop:all": 2816,
+    "check:test:desktop:platforms": 1536
+  },
   "dependencies": {
     "@assistant-ui/core": "0.2.23",
     "@assistant-ui/react": "0.14.29",
