@@ -241,10 +241,10 @@ def _completion_text(gw: str, key: str, task: dict, me: str, profile: str, sid: 
     notice = task.get("completion_notice")
     if task.get("status") != "done" or not isinstance(notice, dict) or "event_id" not in notice:
         return None
-    from tui_gateway.session_notifications import _format_kanban_event_text
+    from tui_gateway import server
     sub = {"task_id": task["id"], "chat_id": f"{me}/{profile}/{sid}"}
     ev = SimpleNamespace(kind="completed", payload=notice.get("payload"))
-    return _format_kanban_event_text(sub, SimpleNamespace(**task), ev, task.get("board", "default"))
+    return server._format_kanban_event_text(sub, SimpleNamespace(**task), ev, task.get("board", "default"))
 
 
 def _notice_item(card: dict, session_key: str, me: str, profile: str) -> dict:

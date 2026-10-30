@@ -188,8 +188,8 @@ def _profile_store(profile: Optional[str]) -> Iterator[Any]:
 
 
 def _stores() -> Iterator[Any]:
-    from tui_gateway.session_notifications import _readopt_wake_profiles
-    for profile in _readopt_wake_profiles():
+    from tui_gateway import server
+    for profile in server._readopt_wake_profiles():
         try:
             with _profile_store(profile) as db:
                 if db is not None:

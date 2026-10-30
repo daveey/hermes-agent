@@ -29,7 +29,6 @@ LOGGER = "tui_gateway.kanban_unloaded"
 @pytest.fixture
 def db(tmp_path, monkeypatch):
     from tui_gateway import server
-    from tui_gateway import session_notifications as sn
 
     d = SessionDB(tmp_path / "state.db")
     d.create_session(CHAT, "desktop")
@@ -40,7 +39,7 @@ def db(tmp_path, monkeypatch):
         yield d if not params else None  # launch store holds the chat; the named profile has none
 
     monkeypatch.setattr(server, "_profile_db", profile_db)
-    monkeypatch.setattr(sn, "_readopt_wake_profiles", lambda: [None, "other"])
+    monkeypatch.setattr(server, "_readopt_wake_profiles", lambda: [None, "other"])
     monkeypatch.setenv("HERMES_KANBAN_UNLOADED_WAKE", "0")
     ku._reset_overdue_for_tests()
     yield d

@@ -152,10 +152,9 @@ def find_session_db(chat_id: str) -> Iterator[tuple[Any, Optional[str]]]:
     raised by the caller's block propagates unchanged (it is never caught here: catching at the ``yield`` and
     yielding again turns it into "generator didn't stop after throw()", kanban-e5babca565)."""
     from tui_gateway import server
-    from tui_gateway.session_notifications import _readopt_wake_profiles
     with contextlib.ExitStack() as stack:
         found: tuple[Any, Optional[str]] = (None, None)
-        for profile in _readopt_wake_profiles():
+        for profile in server._readopt_wake_profiles():
             scope = contextlib.ExitStack()
             try:
                 db = scope.enter_context(server._profile_db({"profile": profile} if profile else None, writer=True))
@@ -292,7 +291,8 @@ def sweep_once(
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
-    from tui_gateway.session_notifications import _KANBAN_NOTIFY_KINDS, _format_kanban_event_text
+    from tui_gateway import server
+    from tui_gateway.session_notifications import _KANBAN_NOTIFY_KINDS
     now = time.time() if now is None else now
     delivered: list[dict] = []
     for slug in _board_slugs(_kb):
@@ -318,7 +318,7 @@ def sweep_once(
                     continue
                 try:
                     done = _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn,
-                                      _KANBAN_NOTIFY_KINDS, _format_kanban_event_text, wake, holders, spawn)
+                                      _KANBAN_NOTIFY_KINDS, server._format_kanban_event_text, wake, holders, spawn)
                 except Exception:
                     logger.warning("kanban unloaded sweep failed for %s/%s", slug, sub.get("task_id"), exc_info=True)
                     continue

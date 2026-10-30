@@ -81,8 +81,6 @@ def turn_env(monkeypatch, tmp_path, db):
     }.items():
         monkeypatch.setattr(server, name, stub)
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
-    from tui_gateway import session_workdir
-    monkeypatch.setattr(session_workdir, "_get_db", lambda: db, raising=False)
     yield monkeypatch
     for sid in [s for s in server._sessions if s.startswith("ui-outcome-")]:
         server._sessions.pop(sid, None)
@@ -102,6 +100,28 @@ def test_every_turn_conclusion_refreshes_the_stored_outcome(turn_env, db, reply,
     stored = so.get_outcome("row-o", db=db)
     assert stored is not None, "the turn end must store an outcome"
     assert (stored["kind"], stored.get("reason")) == (kind, reason)
+
+
+def test_refresh_uses_server_bound_session_db(monkeypatch, db, caplog):
+    """Only ``server._get_db`` is stubbed, as in production: session_workdir's raw module copy has no ``_get_db``
+    (it is rebound onto server globals), so the refresh must reach ``_session_db`` through ``server``."""
+    import logging
+
+    from tui_gateway import session_workdir
+    from tui_gateway.turn_outcome import refresh_turn_outcome
+
+    assert not hasattr(session_workdir, "_get_db"), "the split module must not carry server's _get_db"
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    db.create_session("row-bound", source="desktop")
+    db.append_message("row-bound", role="user", content="rotate the key")
+    db.append_message("row-bound", role="assistant", content=SUMMARY)
+
+    with caplog.at_level(logging.WARNING, logger="tui_gateway.turn_outcome"):
+        refresh_turn_outcome({"session_key": "row-bound"}, agent=None)
+
+    assert not [r for r in caplog.records if "turn-end outcome refresh failed" in r.getMessage()]
+    stored = so.get_outcome("row-bound", db=db)
+    assert stored is not None and stored["kind"] == "done"
 
 
 def test_orphan_reap_refreshes_each_reaped_row(monkeypatch, db):

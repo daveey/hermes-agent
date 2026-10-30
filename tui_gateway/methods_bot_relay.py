@@ -129,10 +129,10 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
         # The sender fields are whatever the relaying client says. The author labels memory only and grants nothing.
         from tools.bot_relay import (
             DeliveryAuthor, delivery_env, delivery_turn_author, relaying_principal_author)
-        from tui_gateway.methods_browser_control import _is_authenticated_identity, _principal_digest
+        from tui_gateway import server
         sender_fields = ("from_profile", "from_handle", "from_connection")
         identity = getattr(current_transport(), "auth_identity", None)
-        if _is_authenticated_identity(identity):
+        if server._is_authenticated_identity(identity):
             # A logged-in client's sender fields are NOT trusted — but the delivery is not refused
             # either: the Desktop is itself a logged-in client on every gateway that requires sign-in
             # (it mints a ws-ticket carrying the signed-in {user_id, provider} —
@@ -144,7 +144,7 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             # bot-authored. The author is derived from the caller's minted identity instead — stable,
             # unspoofable, and ``is_bot`` — whether or not the client named a sender. The human-facing
             # "Message from 🤖 …" signature stays in the text the sender composed.
-            author = relaying_principal_author(_principal_digest(identity))
+            author = relaying_principal_author(server._principal_digest(identity))
         else:
             author = delivery_turn_author(*(params.get(k) for k in sender_fields))
 
@@ -165,8 +165,8 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             record = deliver_to_live_owner(owner_home, owner, message, author=author)
             record = await_delivery(owner_home, record["delivery_id"], _LIVE_WAIT_SECONDS) or record
             if record["status"] == "settled":
-                from tui_gateway.prompt_turn import _bot_mode_delivery_text
-                return _ok(rid, {"reply": _bot_mode_delivery_text((record.get("reply") or "").strip(), successful=True)})
+                from tui_gateway import server
+                return _ok(rid, {"reply": server._bot_mode_delivery_text((record.get("reply") or "").strip(), successful=True)})
             if record["status"] in ("queued", "claimed"):
                 # Admitted but not answered within the budget: the receipt stays, the turn still runs.
                 reply = (f"Queued for @{resolved}'s open Bot Chat; it runs as that chat's next turn and the reply "
@@ -231,8 +231,8 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
         # Use the same canonical whole-response predicate as live Bot Chat
         # completion.  A marker remains a successful turn, but is never sent
         # back to the relay caller as visible prose.
-        from tui_gateway.prompt_turn import _bot_mode_delivery_text
-        reply = _bot_mode_delivery_text((proc.stdout or "").strip(), successful=True)
+        from tui_gateway import server
+        reply = server._bot_mode_delivery_text((proc.stdout or "").strip(), successful=True)
         return _ok(rid, {"reply": reply})
     except subprocess.TimeoutExpired:
         # Every classified refusal has to ride `data.reason`: the Desktop forwards only that field,
