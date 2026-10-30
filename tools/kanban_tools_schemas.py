@@ -903,11 +903,13 @@ KANBAN_UNLINK_SCHEMA = _schema(
 KANBAN_ARCHIVE_SCHEMA = _schema(
     "kanban_archive",
     (
-        "Archive a card. A dispatcher worker may archive an unclaimed card "
-        "its own task created (creator_task_id is the caller's task) — the "
+        "Archive a card. A dispatcher worker may archive an unclaimed or done card "
+        "its own task created (creator_task_id is the caller's task): the "
         "cleanup when kanban_create kept a card local because of a text "
-        "marker and the work does not need this machine. Re-create it with "
-        "placement='hub'. It may also archive a done or unclaimed capability "
+        "marker and the work does not need this machine (re-create it with "
+        "placement='hub'), or of a scratch card (e.g. a live-proof waiter) that "
+        "has finished. A done card is refused while an open card lists it as a "
+        "parent. It may also archive a done or unclaimed capability "
         "owner card (idempotency_key capability-owner:<card>:...) when <card> "
         "is its own task or a card its task created. A claimed card, a card another task created, and "
         "the worker's own assigned task are refused. With no "

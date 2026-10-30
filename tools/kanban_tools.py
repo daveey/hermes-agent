@@ -1981,7 +1981,7 @@ def _maybe_subscribe_on_touch(conn: Any, task_id: str) -> bool:
 
 @_kanban_handler("kanban_archive")
 def _handle_archive(args: dict, **kw) -> str:
-    """Archive an unclaimed card this worker's task created, or any card for an orchestrator."""
+    """Archive an unclaimed or done card this worker's task created, or any card for an orchestrator."""
     _reject_delegated_child_mutation("kanban_archive")
     tid = args.get("task_id")
     _check(tid, "task_id is required")
