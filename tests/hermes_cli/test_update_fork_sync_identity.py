@@ -79,7 +79,7 @@ def test_a_local_branch_named_upstream_main_never_changes_what_the_sync_counts_o
     assert _git(origin, "rev-parse", "refs/heads/main") == commits[0]
     gate.finish(commits[2], "success")
     _push_synced_fork(["git"], clone)
-    assert _git(origin, "rev-parse", "refs/heads/main") == commits[2]
+    assert gate.landed(commits[2])
 
 
 def _fork_behind_upstream(tmp_path, monkeypatch):
