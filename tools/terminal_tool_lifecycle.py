@@ -144,11 +144,12 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     try:
         from tools.process_registry import process_registry
         for task_id in list(_last_activity.keys()):
-            # A workspace container is keyed by its digest, not the spawning task id: also keep it
-            # while any process it hosts is still running (stopping it would kill that process).
-            if process_registry.has_active_processes(task_id) or (
-                    _is_workspace_key(task_id)
-                    and process_registry._any_running(lambda s, key=task_id: s.task_id == key)):
+            # ``has_active_processes`` matches the RAW owner id, but envs are keyed by the collapsed
+            # container key (``profile:<name>``, ``default``, a workspace digest): also keep the env
+            # while any process it hosts is still running. Reaping it kills the job's watcher, which
+            # then reported a still-running job as lost (alpha-askeve, 2026-10-30). [daveey]
+            if process_registry.has_active_processes(task_id) or process_registry._any_running(
+                    lambda s, key=task_id: s.task_id == key):
                 _last_activity[task_id] = current_time
     except ImportError:
         pass
