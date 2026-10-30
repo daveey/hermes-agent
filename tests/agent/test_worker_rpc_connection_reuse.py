@@ -271,3 +271,77 @@ def test_an_owner_error_reply_keeps_the_connection_for_the_next_call(owner, tmp_
     assert rpc('worker.persist') == {'n': 2}
     assert owner.requests == ['fail', 'worker.persist']
     assert (owner.connections, owner.tickets) == (1, 1)
+
+
+def test_connect_steps_share_the_receipt_budget_not_a_fixed_five_seconds(owner, tmp_path, monkeypatch):
+    """Discovery, identify and the WebSocket upgrade wait on the same owner: none of them may give up
+    before the owner-stall budget a receipt gets (David-MBP 10-30 13:15: a 5 s upgrade deadline
+    failed the whole run while the owner's loop stalled)."""
+    from websockets.sync import client
+    from hermes_cli import gateway_runtime
+    import hermes_cli.gateway_runtime_discovery as discovery
+    from agent.runtime_session_store import WorkerRPC
+    from hermes_state_runtime import worker_receipt_timeout_s
+    seen = {}
+    real_discover, real_identify, real_connect = (gateway_runtime.discover_gateway_endpoint,
+                                                  discovery.query_identify, client.connect)
+
+    def discover(home, timeout):
+        seen['discover'] = timeout
+        return real_discover(home, timeout)
+
+    def identify(home, timeout):
+        seen['identify'] = timeout
+        return real_identify(home, timeout)
+
+    def connect(*args, **kwargs):
+        seen['connect'] = kwargs['open_timeout']
+        return real_connect(*args, **kwargs)
+    monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint', discover)
+    monkeypatch.setattr(discovery, 'query_identify', identify)
+    monkeypatch.setattr(client, 'connect', connect)
+    assert WorkerRPC(tmp_path)('worker.persist') == {'n': 1}
+    budget = worker_receipt_timeout_s()
+    assert set(seen) == {'discover', 'identify', 'connect'}, seen
+    for step, timeout in seen.items():
+        # One deadline: each step gets what is left of it (milliseconds spent so far), never 5 s.
+        assert budget - 5 < timeout <= budget, (step, timeout, budget)
+
+
+_UPGRADE_WORKER = r'''
+import json, sys, time
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+from hermes_cli import gateway_client, gateway_runtime
+import hermes_cli.gateway_runtime_discovery as discovery
+endpoint = SimpleNamespace(api_origin='http://127.0.0.1:' + sys.argv[2], control_home=None)
+gateway_runtime.discover_gateway_endpoint = lambda home, timeout: SimpleNamespace(state='ready', endpoint=endpoint)
+discovery.query_identify = lambda home, timeout: {'pid': -1}
+gateway_client._session_ticket = lambda home, endpoint, purpose: 'ticket-child'
+from agent.runtime_session_store import WorkerRPC
+started = time.monotonic()
+reply = WorkerRPC(sys.argv[3])('worker.persist', operation='message.append')
+print(json.dumps({'reply': reply, 'elapsed': time.monotonic() - started}))
+'''
+
+
+@pytest.mark.platforms("linux")
+def test_worker_process_survives_an_owner_upgrade_reply_delayed_eight_seconds(owner, tmp_path):
+    """A worker process whose owner answers the WebSocket upgrade 8 s late still lands its first
+    ``worker.persist`` and exits 0 (with the old ``open_timeout=5`` it died on the handshake)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ, HERMES_HOME=str(tmp_path / 'home'))
+    (tmp_path / 'home').mkdir()
+    owner.relay.stall(8)  # the owner's loop holds every byte it writes, the 101 reply included
+    result = subprocess.run([sys.executable, '-c', _UPGRADE_WORKER, str(root), str(owner.relay.port),
+                             str(tmp_path)], cwd=root, env=env, capture_output=True, text=True, timeout=60,
+                            check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    proof = json.loads(result.stdout.strip().splitlines()[-1])
+    assert proof['reply'] == {'n': 1, 'operation': 'message.append'}, proof
+    assert proof['elapsed'] >= 7.5, proof
+    assert owner.requests == ['worker.persist']
