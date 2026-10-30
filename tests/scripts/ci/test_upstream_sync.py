@@ -304,8 +304,57 @@ def test_pre_push_guard_refuses_a_hand_pushed_sync_and_allows_fork_work(world):
 
 
 def test_github_transport_reads_all_pages(monkeypatch):
+    monkeypatch.setattr(sync.shutil, "which", lambda *a, **kw: "gh")
+
     def run(command, **kwargs):
         assert command[:4] == ["gh", "api", "--paginate", "--slurp"]
         return subprocess.CompletedProcess(command, 0, json.dumps([{"jobs": []}, {"jobs": []}]), "")
     monkeypatch.setattr(subprocess, "run", run)
     assert len(sync.github_pages("repos/example/fork/actions/runs/1/jobs?per_page=100")) == 2
+
+
+def executable(path, body):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!{sys.executable}\n" + body)
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize("broker", [False, True])
+def test_github_transport_finds_home_bin_with_updater_path(tmp_path, monkeypatch, broker):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    which = sync.shutil.which
+    monkeypatch.setattr(sync.shutil, "which",
+                        lambda name, **kw: None if name == "gh" and not kw else which(name, **kw))
+    executable(tmp_path / "bin/gh", "import os, sys\n"
+               + ("if not os.environ.get('BROKER_TEST'): sys.exit(1)\n" if broker else "")
+               + "print('[{\"jobs\": []}, {\"jobs\": []}]')\n")
+    if broker:
+        executable(tmp_path / ".local/bin/token-broker",
+                   "import os, sys\nos.environ['BROKER_TEST']='1'\n"
+                   "args=sys.argv[sys.argv.index('--')+1:]\nos.execv(args[0], args)\n")
+    assert sync.github_pages("repos/example/fork/jobs") == [{"jobs": []}, {"jobs": []}]
+
+
+def test_github_transport_missing_locally_can_use_broker(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(sync.shutil, "which", lambda *a, **kw: None)
+    executable(tmp_path / ".local/bin/token-broker",
+               "import sys\nassert sys.argv[sys.argv.index('--')+1:] == "
+               "['gh', 'api', '--paginate', '--slurp', 'repos/example/fork/jobs']\n"
+               "print('[{\"jobs\": []}]')\n")
+    assert sync.github_pages("repos/example/fork/jobs") == [{"jobs": []}]
+
+
+def test_github_transport_missing_everywhere_refuses_cleanly(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(sync.shutil, "which", lambda *a, **kw: None)
+    assert sync.advance(tmp_path, None, gh_repo="example/fork", request=sync.github_pages) == sync.REFUSED
+    output = capsys.readouterr().out
+    assert "REFUSED:" in output and "gh not found" in output
+    assert "Traceback" not in output

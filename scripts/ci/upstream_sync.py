@@ -76,8 +76,15 @@ def _gate_env(stage: str) -> dict:
 
 def github_pages(endpoint):
     """Every page of a GitHub API GET: the logged-in gh, else the broker's ``user/github`` scope."""
-    argv = ["gh", "api", "--paginate", "--slurp", endpoint]
-    proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=120, check=False)
+    # This standalone gate also runs before the core environment is activated, under systemd's PATH.
+    install_dirs = (Path.home() / "bin", Path.home() / ".local/bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin"))
+    gh = shutil.which("gh") or shutil.which("gh", path=os.pathsep.join(map(str, install_dirs)))
+    argv = [gh or "gh", "api", "--paginate", "--slurp", endpoint]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=120, check=False)
+    except FileNotFoundError:
+        # A broker may supply its own PATH; missing locally must not skip that recovery path.
+        proc = subprocess.CompletedProcess(argv, 127, "", "gh not found in PATH or known install directories")
     broker = shutil.which("token-broker") or str(Path.home() / ".local/bin/token-broker")
     if proc.returncode and Path(broker).exists():
         proc = subprocess.run([broker, "exec", "--scope", "user/github", "--reason",
