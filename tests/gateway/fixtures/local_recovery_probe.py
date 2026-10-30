@@ -71,9 +71,12 @@ def stop_child(proc, timeout=10):
     proc.wait(timeout=10)
 
 
+RPC_DEADLINE = 120  # a hang bound, not a delay: the reply returns at once; a CPU-throttled runner's cold daemon can exceed 20 s
+
+
 async def rpc(ws, method, **params):
     await ws.send(json.dumps({'jsonrpc': '2.0', 'id': method, 'method': method, 'params': params}))
-    async with asyncio.timeout(20):
+    async with asyncio.timeout(RPC_DEADLINE):
         while True:
             reply = json.loads(await ws.recv())
             if reply.get('id') == method:
