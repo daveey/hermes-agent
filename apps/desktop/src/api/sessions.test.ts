@@ -187,7 +187,7 @@ describe('setSessionArchived profile scoping', () => {
 
     const calls = hermesApi.mock.calls.map(([request]) => request as Record<string, any>)
     const read = calls.find(request => String(request.path).includes('/mutation-snapshot'))
-    const patch = calls.find(request => request.method === 'PATCH')
+    const patch = calls.find(request => request.method === 'PATCH')!
 
     expect(read).toMatchObject({ connectionId: 'hermes-hub', path: expect.stringContaining('/api/sessions/sess-hub/mutation-snapshot') })
     expect(patch).toMatchObject({ connectionId: 'hermes-hub', method: 'PATCH', path: '/api/sessions/sess-hub' })
