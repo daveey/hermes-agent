@@ -643,26 +643,64 @@ export async function mintLocalGatewayTicket(endpoint: GatewayEndpoint, purpose:
 
   if (groupWritable.length) {return mintGroupWritableHome(endpoint, purpose, groupWritable)}
 
-  let socketPath: string
-
-  try { socketPath = await resolveControlSocket(controlHome) } catch (error) {
-    // `gateway stop` unlinks both the socket and its pointer: the owner is gone,
-    // which the redial must treat as stale rather than as a raw filesystem error.
-    if (isMissingNodeError(error)) {throw new Error('Gateway ticket control socket missing')}
-    throw error
+  const controlSocket = async () => {
+    try { return await resolveControlSocket(controlHome) } catch (error) {
+      // `gateway stop` unlinks both the socket and its pointer: the owner is gone,
+      // which the redial must treat as stale rather than as a raw filesystem error.
+      if (isMissingNodeError(error)) {throw new Error('Gateway ticket control socket missing')}
+      throw error
+    }
   }
 
+  const request = { profile_id: home, instance_id: endpoint.instance_id, purpose, ...ticketScope(purpose) }
+
+  try {
+    return await requestGatewayTicket(await controlSocket(), request, endpoint.instance_id, home)
+  } catch (error) {
+    if (!TRANSIENT_TICKET_FAILURES.has((error as GatewayTicketError)?.code ?? '')) {throw error}
+  }
+
+  // One retry for a listener that was momentarily full or stalled (load spikes on the Mac):
+  // a single stall otherwise fails every caller sharing this mint. A socket that vanished
+  // meanwhile is a stopped owner, reported as missing without a second dial.
+  await new Promise(resolve => setTimeout(resolve, gatewayTicketTiming.retryDelayMs))
+
+  return requestGatewayTicket(await controlSocket(), request, endpoint.instance_id, home)
+}
+
+/** Timing knobs for the control-socket ticket dial; tests shorten them. */
+export const gatewayTicketTiming = { deadlineMs: 5000, retryDelayMs: 300 }
+
+/** Connect failures worth one more dial: a full/stalled listener or a reply that missed the deadline. */
+const TRANSIENT_TICKET_FAILURES = new Set(['ECONNREFUSED', 'EAGAIN', 'deadline'])
+
+export type GatewayTicketError = Error & { code?: string }
+
+/** `Gateway ticket bootstrap failed (<cause>)` with `code` = the errno or 'deadline', so the log
+ *  tells a stalled gateway loop from a dead socket. The prefix stays what callers match on. */
+function ticketBootstrapFailure(code: string, detail = code): GatewayTicketError {
+  return Object.assign(new Error(`Gateway ticket bootstrap failed (${detail})`), { code })
+}
+
+function requestGatewayTicket(socketPath: string, params: Record<string, unknown>, instanceId: string, home: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath)
+    const deadlineMs = gatewayTicketTiming.deadlineMs
     let buffer = ''
-    const deadline = setTimeout(() => socket.destroy(new Error('Gateway ticket deadline')), 5000)
-    socket.on('error', () => reject(new Error('Gateway ticket bootstrap failed')))
+
+    const deadline = setTimeout(() => socket.destroy(ticketBootstrapFailure('deadline', `deadline ${deadlineMs}ms`)), deadlineMs)
+
+    socket.on('error', error => {
+      const code = (error as GatewayTicketError).code
+
+      reject(error.message.startsWith('Gateway ticket bootstrap failed') ? error : ticketBootstrapFailure(code || 'unknown', code || error.message || 'unknown'))
+    })
     socket.on('close', () => { clearTimeout(deadline); reject(new Error('Gateway ticket connection closed')) })
-    socket.on('connect', () => socket.write(JSON.stringify({ protocol: 1, id: 1, verb: 'session-ticket', params: { profile_id: home, instance_id: endpoint.instance_id, purpose, ...ticketScope(purpose) } }) + '\n'))
+    socket.on('connect', () => socket.write(JSON.stringify({ protocol: 1, id: 1, verb: 'session-ticket', params }) + '\n'))
     socket.on('data', chunk => {
       buffer += chunk.toString()
 
-      if (buffer.length > 65536) {return socket.destroy(new Error('Oversized gateway ticket response'))}
+      if (buffer.length > 65536) {return socket.destroy(ticketBootstrapFailure('oversized', 'oversized response'))}
 
       if (!buffer.includes('\n')) {return}
 
@@ -670,7 +708,7 @@ export async function mintLocalGatewayTicket(endpoint: GatewayEndpoint, purpose:
         const reply = JSON.parse(buffer.split('\n')[0])
         const grant = reply.result
 
-        if (!reply.ok || reply.protocol !== 1 || reply.id !== 1 || grant?.instance_id !== endpoint.instance_id || grant?.profile_id !== home || typeof grant?.ticket !== 'string') {throw new Error('Invalid gateway ticket')}
+        if (!reply.ok || reply.protocol !== 1 || reply.id !== 1 || grant?.instance_id !== instanceId || grant?.profile_id !== home || typeof grant?.ticket !== 'string') {throw new Error('Invalid gateway ticket')}
         resolve(grant.ticket)
       } catch { reject(new Error('Invalid gateway ticket response')) }
 
