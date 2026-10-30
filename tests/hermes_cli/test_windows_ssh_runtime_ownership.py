@@ -5,11 +5,19 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import psutil
 import pytest
 
 from hermes_cli.windows_ssh_runtime import process_state
+
+
+def _cmdline(pid):
+    try:
+        return psutil.Process(pid).cmdline()
+    except psutil.Error:
+        return []
 
 
 @pytest.mark.platforms("posix")
@@ -25,6 +33,13 @@ def test_isolated_bootstrap_is_owned_without_accepting_foreign_source(tmp_path):
     env = {"PATH": os.defpath, "HOME": str(tmp_path)}
     child = subprocess.Popen([sys.executable, "-I", "-c", source, "serve", "--isolated", "--ssh-owner-nonce", nonce], env=env)
     try:
+        # Between fork and exec the child's cmdline is empty/unreadable; wait
+        # (event-style poll, generous deadline) until the exec'd argv is visible.
+        deadline = time.monotonic() + 60
+        while nonce not in " ".join(_cmdline(child.pid)):
+            assert time.monotonic() < deadline, "child argv never became visible"
+            assert child.poll() is None, "child exited early"
+            time.sleep(0.02)
         created = int(psutil.Process(child.pid).create_time() * 1_000_000_000)
         launcher = str(tmp_path / "hermes.exe")
         state = process_state(child.pid, created, launcher, nonce)
