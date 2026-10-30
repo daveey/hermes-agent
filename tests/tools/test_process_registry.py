@@ -12,6 +12,7 @@ import time
 import pytest
 from unittest.mock import MagicMock, patch
 
+from tests.tools import process_registry_fixtures
 from tools.environments.local_env_policy import _HERMES_PROVIDER_ENV_FORCE_PREFIX
 from tools.process_registry import (
     ProcessRegistry,
@@ -19,6 +20,9 @@ from tools.process_registry import (
     FINISHED_TTL_SECONDS,
     MAX_PROCESSES,
 )
+
+
+orphan_pipe = process_registry_fixtures.orphan_pipe
 
 
 @pytest.fixture()
@@ -2019,7 +2023,7 @@ class TestHandleProcessTransformHook:
 # Reader loop: orphaned grandchild holding the stdout pipe (issue #68915)
 # =========================================================================
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: select() on pipes")
+@pytest.mark.platforms("posix")
 class TestReaderLoopOrphanedPipe:
     """Regression tests for issue #68915.
 
@@ -2032,18 +2036,9 @@ class TestReaderLoopOrphanedPipe:
     a descendant still holds the pipe open.
     """
 
-    def test_reader_exits_when_orphan_holds_pipe(self, registry):
-        """Reader loop must return promptly after the direct child exits,
-        even though a backgrounded descendant keeps the pipe open."""
-        proc = subprocess.Popen(
-            ["sh", "-c", "echo started; sleep 30 & exit 0"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            start_new_session=True,
-        )
+    def test_reader_exits_when_orphan_holds_pipe(self, registry, orphan_pipe):
+        """Completion must not require EOF from the orphan-held stdout pipe."""
+        proc = orphan_pipe
         s = _make_session(sid="proc_orphan_reader")
         s.process = proc
         s.pid = proc.pid
@@ -2058,9 +2053,9 @@ class TestReaderLoopOrphanedPipe:
         t = threading.Thread(target=_run, daemon=True)
         t.start()
         try:
-            # The direct child exits immediately; the reader must notice and
-            # return well before the 30s descendant releases the pipe.
-            assert done.wait(timeout=10.0), (
+            # The fixture still holds the orphan's stdin open, so stdout cannot
+            # reach EOF even if this runner is descheduled for a long time.
+            assert done.wait(timeout=60.0), (
                 "_reader_loop is still blocked on the orphan-held pipe "
                 "(issue #68915) — session.exited would never flip and "
                 "notify_on_complete would never fire"
@@ -2071,23 +2066,12 @@ class TestReaderLoopOrphanedPipe:
             assert "started" in s.output_buffer
             assert s.id in registry._finished
         finally:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            proc.stdin.close()
+            t.join(timeout=60)
 
-    def test_reader_exit_fires_notify_on_complete(self, registry):
-        """The autonomous completion notification must not depend on a
-        poll()/wait() call when an orphan holds the pipe."""
-        proc = subprocess.Popen(
-            ["sh", "-c", "sleep 30 & echo bg-started"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            start_new_session=True,
-        )
+    def test_reader_exit_fires_notify_on_complete(self, registry, orphan_pipe):
+        """Autonomous notification must not depend on a poll()/wait() call."""
+        proc = orphan_pipe
         s = _make_session(sid="proc_orphan_notify")
         s.process = proc
         s.pid = proc.pid
@@ -2103,7 +2087,7 @@ class TestReaderLoopOrphanedPipe:
         t = threading.Thread(target=_run, daemon=True)
         t.start()
         try:
-            assert done.wait(timeout=10.0), (
+            assert done.wait(timeout=60.0), (
                 "_reader_loop blocked — completion notification lost (#68915)"
             )
             # Exactly one completion event must have been queued.
@@ -2112,10 +2096,8 @@ class TestReaderLoopOrphanedPipe:
             assert item["session_id"] == s.id
             assert item["exit_code"] == 0
         finally:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            proc.stdin.close()
+            t.join(timeout=60)
 
 # =========================================================================
 # systemd cgroup isolation for gateway-spawned local executors (#70716)

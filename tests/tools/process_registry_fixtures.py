@@ -1,0 +1,48 @@
+"""Real-process fixtures for process-registry pipe regressions."""
+
+import os
+import signal
+import subprocess
+import sys
+
+import pytest
+
+
+@pytest.fixture()
+def orphan_pipe():
+    """An exited direct child with stdout held by an explicitly released orphan."""
+    # A sleep would eventually release stdout and let a broken blocking reader
+    # pass. Keep the orphan alive until teardown, regardless of runner load.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", """
+import os
+# orphan-pipe-fixture
+if os.fork() == 0:
+    os.read(0, 1)
+    os._exit(0)
+print('started', flush=True)
+os._exit(0)
+"""],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        # Child startup is not reader completion: establish that precondition
+        # separately so descheduling the child doesn't consume the reader budget.
+        assert proc.wait(timeout=60) == 0
+        yield proc
+    finally:
+        # The known group ID survives reaping its leader; getpgid(proc.pid)
+        # doesn't, and would leak the orphan after wait()/poll().
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=60)
+        proc.stdin.close()
+        proc.stdout.close()
