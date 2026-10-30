@@ -103,6 +103,22 @@ def start_detached_replacement(profile_home: Path, *, force: bool = False) -> in
     ``gateway ensure`` starts an absent one. In the foreground, the restarting client (Desktop's
     bounded, piped call) would itself become the long-lived gateway it only meant to restart."""
     import time
+    # [daveey] A service manager that owns this home (any label, gateway-e2cd786685) starts the
+    # replacement; an unmanaged spawn here would hold the home against that supervisor's restarts.
+    from hermes_cli.gateway_runtime_service import discover_existing_gateway_service, start_existing_gateway_service
+    deadline = time.monotonic() + 30
+    try:
+        service = discover_existing_gateway_service(profile_home, deadline=deadline)
+    except (RuntimeStartError, TimeoutError):
+        service = None  # unknown supervisor state: keep the old spawn rather than leave the home down
+    if service is not None:
+        try:
+            start_existing_gateway_service(service, deadline=deadline)
+        except (RuntimeStartError, TimeoutError) as exc:
+            print(f"✗ Could not start the gateway's service ({' '.join(service.start_argv)}): {exc}", file=sys.stderr)
+            return 1
+        print(f"✓ Handed the restart to the gateway's service ({' '.join(service.start_argv)})")
+        return 0
     try:
         spawn_unmanaged_gateway(profile_home, deadline=time.monotonic() + 30, force=force)
     except RuntimeStartError as exc:

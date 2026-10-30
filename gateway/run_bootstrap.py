@@ -27,6 +27,41 @@ def _start_deferred_state_db_integrity_check(evidence: dict) -> None:
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
+
+def _hand_home_back_to_supervisor(existing_pid: int) -> None:
+    """[daveey] A supervised start refused by a MANUAL owner of this home asks that owner to drain.
+
+    gateway-e2cd786685: during a KeepAlive job's restart gap a client spawned an unmanaged gateway for
+    the job's home (it has no idle exit), and every supervised restart after that was refused by it,
+    forever. This start still refuses (exit 1, the supervisor's normal retry); it only writes the
+    owner's planned-stop marker, which the owner's own watcher turns into a graceful drain, so the
+    supervisor's next restart finds the home free. Only when this process runs for an external
+    supervisor (``--external-supervisor``) and the owner itself answers ``identify`` with this pid and
+    ``launch_supervisor == "manual"``: a supervised owner (an old copy still draining, gateway-cc28b19bca),
+    a Desktop-managed one, or one that does not answer is never asked to stop.
+    """
+    import sys
+    if "--external-supervisor" not in sys.argv[1:]:
+        return
+    try:
+        from gateway.control_socket import identify_gateway, launch_supervisor
+        from gateway.run import get_hermes_home
+        identity = identify_gateway(get_hermes_home()) or {}
+        if identity.get("pid") != existing_pid or launch_supervisor(identity) != "manual":
+            return
+        from gateway.status import write_planned_stop_marker
+        if not write_planned_stop_marker(existing_pid):
+            return
+    except Exception:  # health: allow BLE001 -- the handback is best-effort; the refusal stands either way
+        logger.debug("Supervisor handback for PID %d failed", existing_pid, exc_info=True)
+        return
+    logger.warning("Asked the unsupervised gateway (PID %d) holding this home to drain so its "
+                   "supervisor can take over; the supervisor's next restart starts here.", existing_pid)
+    from gateway.run_exit_reason import last_start_refusal
+    refusal = last_start_refusal()
+    if refusal is not None:
+        refusal["handback"] = "planned_stop_requested"
+
 async def _start_gateway_replace_existing_instance(existing_pid: int, replace: bool) -> bool:
     """Handle a live gateway PID under this HERMES_HOME: replace it (``--replace``) or refuse.
     Returns False when startup must abort (refused, permission denied, target still alive)."""
@@ -47,6 +82,7 @@ async def _start_gateway_replace_existing_instance(existing_pid: int, replace: b
             f"   Or stop it first:    hermes gateway stop\n")
         from gateway.run_exit_reason import note_start_refused
         note_start_refused("already_running", owner_pid=existing_pid)
+        _hand_home_back_to_supervisor(existing_pid)
         return False
 
     # Never signal a process not provably ours (a poisoned PID record → cross-profile restart loop).

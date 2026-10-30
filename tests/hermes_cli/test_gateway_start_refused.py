@@ -175,3 +175,42 @@ def test_reset_clears_the_refusal(monkeypatch, live_pid):
     note_start_refused("already_running", owner_pid=live_pid)
     reset_start_refusal()
     assert last_start_refusal() is None
+
+
+# [daveey] gateway-e2cd786685: a client-spawned (manual) gateway owned the home that a KeepAlive job
+# supervises, so every supervised restart was refused forever. A supervised start refused by a live
+# MANUAL owner of the same home asks that owner to drain (planned-stop marker) and still exits 1, so
+# the supervisor's next restart takes the home over. A supervised owner is never asked.
+@pytest.mark.parametrize("owner_supervisor,supervised_start,expect_handback", [
+    ("manual", True, True),        # the live failure
+    ("launchd", True, False),      # an old supervised copy still draining (gateway-cc28b19bca): wait, never stop it
+    ("external", True, False),
+    ("desktop", True, False),
+    ("manual", False, False),      # a plain second `gateway run` never stops anyone
+    (None, True, False),           # owner did not answer identify: unknown, leave it
+])
+def test_supervised_start_refused_by_manual_owner_hands_the_home_back(
+        monkeypatch, live_pid, owner_supervisor, supervised_start, expect_handback):
+    gateway_cli, gateway_run = _prepare_cli(monkeypatch)
+    from gateway import control_socket, status
+
+    async def _no_host_decision(replace, force=False):
+        return None
+
+    monkeypatch.setattr(gateway_run, "_host_attach_or_none", _no_host_decision)
+    monkeypatch.setattr(status, "get_running_pid", lambda *a, **k: live_pid)
+    identity = {} if owner_supervisor is None else {"pid": live_pid, "launch_supervisor": owner_supervisor}
+    monkeypatch.setattr(control_socket, "identify_gateway", lambda *a, **k: identity)
+    marked = []
+    monkeypatch.setattr(status, "write_planned_stop_marker", lambda pid: marked.append(pid) or True)
+    argv = ["hermes", "gateway", "run", *(["--external-supervisor"] if supervised_start else [])]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert _run_cli(gateway_cli) == 1  # still a refusal: launchd's next restart takes over
+    row = _assert_refused("already_running", live_pid, True)
+    if expect_handback:
+        assert marked == [live_pid]
+        assert row["handback"] == "planned_stop_requested"
+    else:
+        assert marked == []
+        assert "handback" not in row
