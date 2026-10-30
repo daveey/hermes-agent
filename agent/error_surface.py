@@ -40,7 +40,7 @@ _REASON_TO_LAYER = {
     "pre_final_gate_unresolved": LAYER_GATEWAY,
     "session_turn_lease_lost": LAYER_GATEWAY,  # [daveey] tui_gateway/prompt_turn._surface_system_interrupt
     "gateway_connection": LAYER_GATEWAY, "host_error": LAYER_GATEWAY, "workspace_unavailable": LAYER_GATEWAY,
-    "launch_credentials_unavailable": LAYER_GATEWAY,
+    "launch_credentials_unavailable": LAYER_GATEWAY, "route_refused": LAYER_GATEWAY,
     "truncated": LAYER_PROVIDER, "empty_response": LAYER_PROVIDER, "invalid_response": LAYER_PROVIDER,
     "context_overflow": LAYER_PROVIDER,  # a bigger-window model IS the fix, so Switch provider applies
 }
@@ -58,7 +58,7 @@ _FREE_TIER_RETRYABLE_KINDS = {"rate_limited", "at_capacity", "outage"}
 _NON_RETRYABLE_REASONS = {
     "auth", "auth_permanent", "billing", "billing_unverified", "content_policy_blocked",
     "provider_policy_blocked", "data_policy_denied", "model_not_found", "format_error", "ssl_cert_verification",
-    "context_overflow", "interpreter_shutdown", "upstream_blocked", "pre_final_gate_unresolved",
+    "context_overflow", "interpreter_shutdown", "upstream_blocked", "pre_final_gate_unresolved", "route_refused",
 }
 
 # Providers whose base_url is user-supplied rather than a known vendor.

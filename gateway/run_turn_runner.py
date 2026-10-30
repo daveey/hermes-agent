@@ -139,6 +139,7 @@ def _settle_api_runtime_lock(agent, result, captured):
 def _resolution_failure_reply(exc: Exception, platform: Platform) -> tuple[str, str, bool]:
     """``(chat text, failure_reason, retryable)`` for a model/credential resolution failure before the turn."""
     from agent.error_classifier import FailoverReason
+    from agent.model_routing import ModelRoutingError
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
     from hermes_state_runtime import RuntimeStoreError
     auth_permanent = FailoverReason.auth_permanent.value
@@ -169,7 +170,8 @@ def _resolution_failure_reply(exc: Exception, platform: Platform) -> tuple[str, 
     if platform == Platform.LOCAL:
         # The local operator reads the terminal: the resolver's own sentence ("provider 'custom'
         # resolved without credentials ...") is the diagnosis; /login is not.
-        return f"⚠️ {exc}", auth_permanent, False
+        # [daveey] A routing refusal is a policy verdict, not a credential one: no provider saw this turn.
+        return f"⚠️ {exc}", "route_refused" if isinstance(exc, ModelRoutingError) else auth_permanent, False
     seen: set[int] = set()
     host = auth = False
     link: BaseException | None = exc

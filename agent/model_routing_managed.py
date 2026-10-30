@@ -19,6 +19,22 @@ def managed_config(config=None):
     return config
 
 
+def overrides_endpoint(provider, base_url, config):
+    """True when *base_url* asks for anything but *provider*'s own endpoint. [daveey]
+
+    Adoption freezes a Desktop chat's saved endpoint into its launch request, so a native URL reaches
+    the resolver as "explicit" while overriding nothing. ``auto`` and bare ``custom`` have no endpoint
+    of their own, and an unknown host proves nothing, so those stay overrides.
+    """
+    if not base_url:
+        return False
+    from hermes_cli.providers import normalize_provider
+    from hermes_cli.route_identity import provider_owns_route
+    canonical = normalize_provider(str(provider or "").strip().lower())
+    return (canonical in ("", "auto", "custom", "local")
+            or provider_owns_route(canonical, base_url, config) is not True)
+
+
 class ManagedPinRejectedError(ModelRoutingError):
     """A concrete pin the registry cannot serve. Config, not a transient: a retry never heals it. [daveey]"""
 
