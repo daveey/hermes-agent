@@ -257,6 +257,11 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     marker_pauses = int(session.pop("_auto_continue_pauses", 0) or 0)
     killed_jobs = session.pop("_auto_continue_killed_jobs", None)
     marker_text = session.pop("_auto_continue_prompt", None) or text
+    session.pop("_refused_turn_marker_key", None)
+    refused_prompt = session.pop("_refused_turn_prompt", None)
+    session.pop("_refused_turn_earlier", None)
+    if refused_prompt and not marker_attempt:  # a new message overtook the replay: if it is refused too, it carries it
+        session["_refused_turn_earlier"] = refused_prompt
     session.pop("_paused_marker_carried", None)
     synthesized = session.pop("_synthesized_turn", False)
     until_tool = bool(session.pop("_marker_until_tool", False))
@@ -641,6 +646,7 @@ class _TurnRun:
     error_detail: str = ""
     prompt_text: str = ""
     marker_key: str = ""
+    display_kind: Any = None
     receipt_attempted: bool = False
 
 
@@ -1155,6 +1161,7 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
             **({"error": str(error_value or raw)} if status == "error" else {})})
         st.receipt_committed = True
     if st.receipt_committed:
+        _hold_refused_turn(session, st.marker_key, getattr(st, "display_kind", None), _error_surface)
         _retire_turn_marker(session, st.marker_key)
     return payload, raw, status
 
@@ -1338,6 +1345,7 @@ def _run_admitted_prompt(
             receipt_committed=terminal_callback is None)
         st.marker_key = _record_turn_marker(session, text, auto_continue=auto_continue and terminal_callback is None,
             notification_category=(display_metadata or {}).get("notification_category"))
+        st.display_kind = display_kind
         goal_followup = None
         try:
             prepared = _prepare_turn_input(sid, session, st, text, images)
@@ -1367,6 +1375,7 @@ def _run_admitted_prompt(
                 from tui_gateway.free_tier_task_done import note_task_done
                 note_task_done(session, st.result, st.agent, display_kind)
             _emit("message.complete", sid, payload)
+            _schedule_refused_turn_retry(sid, session, st.marker_key)
             if paused_for_update:
                 # The new backend continues it; if no update replaces this one, continue it here.
                 from tui_gateway import update_pause

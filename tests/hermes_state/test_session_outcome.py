@@ -238,3 +238,107 @@ def test_list_sessions_rich_rows_carry_outcome_and_muted(db):
     so.set_muted("chat", True, db=db)
     row = next(r for r in db.list_sessions_rich(limit=5) if r["id"] == "chat")
     assert row["outcome"]["kind"] == "muted" and row["muted"] is True
+
+
+# ── A lost request and a recurring cron do not hide behind live work ───────
+
+def failed_turn(db, text=None, **kw):
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE
+    say(db, "assistant", text or FAILED_TURN_NOTICE, display_kind=FAILED_TURN_DISPLAY_KIND, **kw)
+
+
+def test_failed_typed_request_outranks_an_open_card(db, board):
+    add_card(board, "t_run", "chat", "scheduled")
+    say(db, "user", "archive my receipts")
+    failed_turn(db)
+    out = so.refresh_outcome("chat", "turn_end", db=db)
+    assert (out["kind"], out["reason"]) == ("unresolved", "turn_failed")
+
+
+def test_failed_request_outranks_a_cron_and_a_later_refused_automation_row(db, board, monkeypatch):
+    monkeypatch.setattr(so, "_cron_items", lambda ids: [{"kind": "cron", "id": "j", "label": "sweep"}])
+    say(db, "user", "and mercury notices")
+    failed_turn(db)
+    say(db, "user", "[IMPORTANT: Background process done]", display_kind="process_complete")
+    failed_turn(db)
+    out = so.refresh_outcome("chat", "turn_end", db=db)
+    assert (out["kind"], out["reason"]) == ("unresolved", "turn_failed")
+
+
+def test_failed_turn_with_no_live_work_is_turn_failed_not_judged(db):
+    so.register_outcome_judge(lambda sid, text, source=None: True)
+    say(db, "user", "archive my receipts")
+    failed_turn(db)
+    assert so.derive_outcome("chat", db=db)["reason"] == "turn_failed"
+
+
+def test_a_real_reply_after_the_failure_clears_it(db, board):
+    add_card(board, "t_run", "chat", "scheduled")
+    say(db, "user", "archive my receipts")
+    failed_turn(db)
+    say(db, "user", "try again")
+    say(db, "assistant", SUMMARY)
+    assert so.derive_outcome("chat", db=db)["kind"] == "waiting"
+
+
+def test_interrupted_automation_delivery_does_not_paint_a_waiting_chat(db, board):
+    from agent.turn_failure_copy import AUTOMATION_INTERRUPTED_NOTICE
+    add_card(board, "t_run", "chat", "scheduled")
+    say(db, "user", "a cron delivery with no display kind")
+    failed_turn(db, AUTOMATION_INTERRUPTED_NOTICE)
+    assert so.derive_outcome("chat", db=db)["kind"] == "waiting"
+
+
+def test_a_typed_row_nobody_answered_outranks_an_open_card(db, board):
+    add_card(board, "t_run", "chat", "scheduled")
+    say(db, "user", "are you there")
+    out = so.derive_outcome("chat", db=db)
+    assert (out["kind"], out["reason"]) == ("unresolved", "interrupted")
+
+
+def test_a_kanban_notice_tail_stays_a_wait_when_the_card_is_open(db, board):
+    add_card(board, "t_run", "chat", "scheduled")
+    say(db, "assistant", SUMMARY)
+    say(db, "user", "card moved", display_kind=so._NOTICE_KIND)
+    assert so.derive_outcome("chat", db=db)["kind"] == "waiting"
+
+
+def test_an_open_decision_still_outranks_a_failed_request(db, board):
+    add_card(board, "t_ask", "chat", "blocked", request=HUMAN_REQUEST)
+    say(db, "user", "archive my receipts")
+    failed_turn(db)
+    assert so.derive_outcome("chat", db=db)["kind"] == "decision"
+
+
+def test_a_recurring_cron_is_not_a_wait_a_finished_chat_is_done_and_names_it(db, monkeypatch):
+    monkeypatch.setattr(so, "_cron_items", lambda ids: [{"kind": "cron", "id": "j1", "label": "sweep"}])
+    so.register_outcome_judge(lambda sid, text, source=None: True)
+    turn(db, SUMMARY)
+    out = so.refresh_outcome("chat", "turn_end", db=db)
+    assert out["kind"] == "done"
+    assert [(c["id"], c["label"]) for c in out["crons"]] == [("j1", "sweep")]
+
+
+def test_a_declared_done_keeps_naming_its_cron(db, monkeypatch):
+    monkeypatch.setattr(so, "_cron_items", lambda ids: [{"kind": "cron", "id": "j1", "label": "sweep"}])
+    say(db, "user", "do it")
+    so.declare_outcome("chat", {"kind": "done", "summary": "Shipped."}, db=db)
+    say(db, "tool", "ok", tool_name="session_outcome", tool_call_id="c1")
+    out = so.derive_outcome("chat", db=db)
+    assert (out["kind"], out["source"]) == ("done", "declared")
+    assert out["crons"][0]["id"] == "j1"
+
+
+def test_an_open_card_still_waits_beside_a_cron(db, board, monkeypatch):
+    monkeypatch.setattr(so, "_cron_items", lambda ids: [{"kind": "cron", "id": "j1", "label": "sweep"}])
+    add_card(board, "t_run", "chat", "scheduled")
+    turn(db, SUMMARY)
+    out = so.derive_outcome("chat", db=db)
+    assert out["kind"] == "waiting" and [w["id"] for w in out["on"]] == ["t_run"]
+
+
+def test_a_declared_wait_on_a_cron_is_still_honoured(db):
+    say(db, "user", "do it")
+    so.declare_outcome("chat", {"kind": "waiting", "on": [{"kind": "cron", "id": "j1"}]}, db=db)
+    say(db, "tool", "ok", tool_name="session_outcome", tool_call_id="c1")
+    assert so.derive_outcome("chat", db=db)["kind"] == "waiting"

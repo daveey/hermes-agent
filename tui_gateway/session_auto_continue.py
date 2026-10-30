@@ -17,6 +17,9 @@ from .method_ctx import bind_module
 # done this for restart-interrupted sessions since #27856); if it's stale, clear the marker and let the
 # recovered partial transcript speak for itself — the user can ask to continue manually.
 _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
+# [daveey] Waits before each replay of a turn refused for a retryable reason (a stale ownership lease during a core
+# update, a rate limit). One per attempt; ``desktop.auto_continue.max_attempts`` can only lower the count.
+_REFUSED_RETRY_DELAYS_S = (45.0, 180.0)
 
 
 def _resume_reuse_live_locked(ctx, sid: str, session: dict) -> dict:
@@ -67,7 +70,7 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
     client's answer, and quitting in that window would leave a marker that re-runs a finished turn). Extra ``keys``
     cover a session_key that compression rotated mid-turn. A turn stopped by backend shutdown keeps its marker
     (``_stop_turns_before_exit`` flags it) so the next boot auto-continues it like a crash."""
-    if session.get("_exit_keeps_turn_marker"):
+    if session.get("_exit_keeps_turn_marker") or session.get("_refused_turn_marker_key"):
         return
     # [daveey] A core-update pause keeps its marker: the next backend (or the in-place watcher) continues it.
     if session.get("_update_pause_marker_key") or session.get("_paused_marker_carried"):
@@ -76,6 +79,53 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
         if key:
             clear_turn_marker(home, key)
+
+
+def _hold_refused_turn(session: dict, marker_key: str, display_kind, error_surface) -> None:
+    """[daveey] Keep the marker of a turn refused for a retryable reason, so the crash path replays it instead of the
+    user's message ending on "send it again": ``_schedule_refused_turn_retry`` replays it here, the boot sweep replays
+    it if the backend goes first. Both keep the auto-continue guards. Only a person's turn or its replay; a later
+    refused turn joins the earlier prompt, because one marker carries one replay."""
+    if not (error_surface or {}).get("retryable") or display_kind not in (None, "auto_continue"):
+        return
+    if session.get("source") == "bot_room":
+        return
+    home = _session_home(session)
+    marker = read_turn_marker(home, marker_key) if marker_key else None
+    enabled, _fresh, max_attempts = _auto_continue_config()
+    if not enabled or marker is None or not marker.get("auto_continue", True):
+        return
+    attempts = marker["attempts"]
+    if attempts >= min(max_attempts, len(_REFUSED_RETRY_DELAYS_S)) or _active_goal_manager(session) is not None:
+        return  # a goal has its own bounded retry (``_goal_followup_after_turn``)
+    prompt, earlier = marker["prompt"], session.pop("_refused_turn_earlier", None)
+    if earlier:
+        prompt = f"{earlier}\n\n{prompt}"
+        record_turn_start(home, marker_key, prompt, attempts=attempts)
+    delay = _REFUSED_RETRY_DELAYS_S[attempts]
+    session.update(_refused_turn_marker_key=marker_key, _refused_turn_prompt=prompt, _refused_turn_delay=delay,
+                   _auto_continue_retry_after=time.monotonic() + delay - 1.0)
+
+
+def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str) -> None:
+    """Start the wait ``_hold_refused_turn`` armed. A skewed backend leaves the marker for its replacement's boot
+    sweep; a replay that can no longer run (the marker aged out) settles the chat's outcome."""
+    delay = session.pop("_refused_turn_delay", None)
+    if delay is None:
+        return
+
+    def fire() -> None:
+        from tui_gateway.update_pause import _detect_skew
+        if _detect_skew() is not None:
+            return
+        if _maybe_schedule_auto_continue(sid, session, marker_key) is None \
+                and read_turn_marker(_session_home(session), marker_key) is None:
+            from tui_gateway.turn_outcome import refresh_turn_outcome
+            refresh_turn_outcome(session, session.get("agent"))
+
+    timer = threading.Timer(delay, fire)
+    timer.daemon = True
+    timer.start()
 
 
 def _auto_continue_note(prompt: str) -> str:

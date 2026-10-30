@@ -4,7 +4,7 @@ import { TRANSLATIONS } from '@/i18n/catalog'
 import { type SessionDotState, sessionStatusStripe } from '@/store/session-dot-state'
 import type { SessionOutcome } from '@/types/session-outcome'
 
-import { outcomeEtaLabel, outcomeStripe, outcomeTooltip, outcomeWaitingLine } from './session-outcome'
+import { outcomeEtaLabel, outcomeHasCrons, outcomeStripe, outcomeTooltip, outcomeWaitingLine } from './session-outcome'
 
 const r = TRANSLATIONS.en.sidebar.row
 
@@ -189,5 +189,24 @@ describe('outcomeTooltip', () => {
 
     expect(outcomeEtaLabel(eta)).toBe('14:05')
     expect(outcomeWaitingLine({ kind: 'card', id: 't_1', state: 'scheduled', eta })).toBe('t_1 scheduled · 14:05')
+  })
+})
+
+describe('a finished chat that owns a cron', () => {
+  const outcome: SessionOutcome = {
+    kind: 'done',
+    summary: 'Sweep is live.',
+    crons: [{ kind: 'cron', id: 'j1', label: 'gmail-psfc-sweep' }, { kind: 'cron', id: 'j2' }]
+  }
+
+  it('stays green and names what keeps running', () => {
+    expect(outcomeStripe(outcome)).toBe('done')
+    expect(outcomeHasCrons(outcome)).toBe(true)
+    expect(outcomeTooltip(outcome, r)).toBe('Sweep is live.\nKeeps running: gmail-psfc-sweep, j2')
+  })
+
+  it('leaves a plain done alone', () => {
+    expect(outcomeHasCrons(OUTCOMES.done)).toBe(false)
+    expect(outcomeTooltip(OUTCOMES.done, r)).toBe('Shipped PR #12 and closed the card.')
   })
 })

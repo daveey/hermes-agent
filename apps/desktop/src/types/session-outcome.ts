@@ -35,5 +35,7 @@ export interface SessionOutcome {
   summary?: string
   items?: SessionOutcomeItem[]
   on?: SessionOutcomeWaitingOn[]
+  /** Recurring jobs a `done` chat owns: they never end, so they are named, not waited on. */
+  crons?: SessionOutcomeWaitingOn[]
   reason?: SessionOutcomeReason | string
 }

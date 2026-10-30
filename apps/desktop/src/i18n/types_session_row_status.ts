@@ -5,6 +5,7 @@ export interface SessionRowStatusCopy {
   kanbanAttention: (count: number) => string
   kanbanStalled: (count: number) => string
   outcomeDone: string
+  outcomeCrons: (names: string[]) => string
   outcomeDecision: string
   outcomeMuted: string
   outcomeRunning: string

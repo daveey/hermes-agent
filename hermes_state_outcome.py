@@ -43,6 +43,8 @@ _ERROR_FINISH_REASONS = frozenset({"error", "agent_error", "content_filter"})
 # The declaration tool's own result row follows the declaration; it does not supersede it.
 _OUTCOME_TOOL = "session_outcome"
 _NOTICE_KIND = "kanban_notice"
+# ``messages.display_kind`` of a row a person wrote: a plain message, or one steered into a running turn.
+_TYPED_KINDS = frozenset({None, "steer"})
 _PROGRESS_OPENERS = ("let me ", "i'll ", "i will ", "now i", "next, i", "next i ", "working on")
 
 ProviderFn = Callable[[str], Optional[dict]]
@@ -358,6 +360,27 @@ def _declaration_holds(declared: dict, tail: list[dict]) -> bool:
     return not (last["role"] == "tool" and (last.get("tool_name") or "") != _OUTCOME_TOOL)
 
 
+def _lost_request(tail: list[dict]) -> Optional[str]:
+    """Why a person's latest request got no answer, or None. It outranks live work: an open card says nothing about
+    the message that failed, and a chat painted "waiting" hides it from the only person who can resend it. Automated
+    rows after the failure (a process completion refused the same way) don't close it; only a real reply does."""
+    from agent.turn_failure_copy import AUTOMATION_INTERRUPTED_NOTICE, FAILED_TURN_DISPLAY_KIND
+
+    failed = False
+    for row in tail:
+        kind = row.get("display_kind")
+        if row["role"] == "assistant":
+            if kind == FAILED_TURN_DISPLAY_KIND:
+                if _text(row.get("content")).strip() == AUTOMATION_INTERRUPTED_NOTICE:
+                    return None
+                failed = True
+            elif _text(row.get("content")).strip() and not row.get("tool_calls"):
+                return None
+        elif row["role"] == "user" and kind in _TYPED_KINDS:
+            return "turn_failed" if failed else "interrupted"
+    return None
+
+
 def _tail_reason(tail: list[dict]) -> Optional[str]:
     last = tail[0]
     if last.get("display_kind") == _NOTICE_KIND:
@@ -417,11 +440,11 @@ def _outcome(kind: str, now: float, **fields: Any) -> dict[str, Any]:
 
 
 def _live_work(db: Any, sid: str, ids: list[str]) -> tuple[list[dict], list[dict]]:
-    """(open decision items, named waits) across every live-work source."""
+    """(open decision items, named waits) across every live-work source. A recurring cron is not one: it never
+    ends, so a chat that owns one would wait forever (see ``_derive``, which names it on the outcome instead)."""
     card_decisions, card_waits = _guarded("kanban cards", sid, lambda: _card_items(ids), ([], []))
     prov_decisions, prov_waits = _provider_items(sid)
     waits = (card_waits + _guarded("processes", sid, lambda: _process_items(sid, ids), [])
-             + _guarded("cron", sid, lambda: _cron_items(ids), [])
              + _guarded("subagents", sid, lambda: _subagent_items(db, ids), [])
              + _guarded("goal", sid, lambda: _goal_items(sid, ids), []) + prov_waits)
     return prov_decisions + card_decisions, waits
@@ -445,10 +468,15 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
     carry = {"declared": declared} if holds else {}
     if decisions:
         return _outcome("decision", now, items=decisions, **carry)
+    lost = None if holds else _lost_request(tail)  # a turn that declared its outcome answered the request
+    if lost:
+        return _outcome("unresolved", now, reason=lost, **carry)
     if waits:
         return _outcome("waiting", now, on=waits, **carry)
+    crons = _guarded("cron", sid, lambda: _cron_items(_lineage_ids(db, sid)), [])
+    named = {"crons": crons} if crons else {}
     if holds and declared.get("kind") in ("done", "waiting"):
-        return declared
+        return {**declared, **(named if declared.get("kind") == "done" else {})}
     if not tail:
         return _outcome("unresolved", now, reason="empty", **carry)
     reason = _tail_reason(tail)
@@ -463,7 +491,7 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
     if verdict is None:
         verdict = looks_like_summary(text)
     if verdict:
-        return _outcome("done", now, summary=text[:SUMMARY_CHARS], **judged, **carry)
+        return _outcome("done", now, summary=text[:SUMMARY_CHARS], **judged, **named, **carry)
     return _outcome("unresolved", now, reason="no_summary", **judged, **carry)
 
 

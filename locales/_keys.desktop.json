@@ -4829,6 +4829,7 @@
     "sidebar.row.openInNewTab",
     "sidebar.row.openInSplit",
     "sidebar.row.openInTerminal",
+    "sidebar.row.outcomeCrons",
     "sidebar.row.outcomeDecision",
     "sidebar.row.outcomeDone",
     "sidebar.row.outcomeMuted",

@@ -44,6 +44,10 @@ export const outcomeEtaLabel = (eta: number): string => {
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
 }
 
+/** A finished chat whose cron keeps running: it draws the loop glyph on the green stripe, not the grey wait. */
+export const outcomeHasCrons = (outcome: null | SessionOutcome | undefined): boolean =>
+  outcome?.kind === 'done' && Boolean(outcome.crons?.length)
+
 /** One `on[]` entry in words: a card reads `t_… scheduled · 14:00`, anything else `capacity: hub slot`. */
 export const outcomeWaitingLine = (item: SessionOutcomeWaitingOn): string => {
   const head = item.kind === 'card' ? item.id : `${item.kind}: ${item.label || item.id}`
@@ -55,14 +59,25 @@ export const outcomeWaitingLine = (item: SessionOutcomeWaitingOn): string => {
 
 type RowCopy = Pick<
   Translations['sidebar']['row'],
-  'outcomeDecision' | 'outcomeDone' | 'outcomeMuted' | 'outcomeRunning' | 'outcomeUnresolved' | 'outcomeWaiting'
+  | 'outcomeCrons'
+  | 'outcomeDecision'
+  | 'outcomeDone'
+  | 'outcomeMuted'
+  | 'outcomeRunning'
+  | 'outcomeUnresolved'
+  | 'outcomeWaiting'
 >
 
 /** The stripe's tooltip for an outcome, or null when the row has none (old backend, or an unknown kind). */
 export const outcomeTooltip = (outcome: null | SessionOutcome | undefined, r: RowCopy): null | string => {
   switch (outcome?.kind) {
-    case 'done':
-      return outcome.summary?.trim() || r.outcomeDone
+    case 'done': {
+      const names = (outcome.crons ?? []).map(job => job.label || job.id)
+      const summary = outcome.summary?.trim() || r.outcomeDone
+
+      return names.length ? `${summary}\n${r.outcomeCrons(names)}` : summary
+    }
+
     case 'decision': {
       const questions = (outcome.items ?? []).map(item => item.question?.trim()).filter(Boolean)
 

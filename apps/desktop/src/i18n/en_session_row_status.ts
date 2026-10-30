@@ -21,6 +21,7 @@ export const enSessionRowStatus = {
   kanbanStalled: count =>
     `${count} ${count === 1 ? 'card has' : 'cards have'} stalled: waiting over 2 h on something only an agent can do, with nothing producing it`,
   outcomeDone: 'Done',
+  outcomeCrons: names => `Keeps running: ${names.join(', ')}`,
   outcomeDecision: 'Waiting on your decision',
   outcomeMuted: 'Muted',
   outcomeRunning: 'Running',

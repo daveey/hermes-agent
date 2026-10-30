@@ -4,7 +4,7 @@ import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { outcomeStripe, outcomeTooltip } from '@/lib/session-outcome'
+import { outcomeHasCrons, outcomeStripe, outcomeTooltip } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useSessionParked } from '@/lib/use-session-parked'
 import { cn } from '@/lib/utils'
@@ -76,7 +76,8 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
 
   const outcomeKind = outcomePainted && outcomeStripe(session.outcome) ? session.outcome?.kind : undefined
   const tipText = outcomeKind ? outcomeTooltip(session.outcome, t.sidebar.row) : null
-  const glyph = GLYPH_STRIPES.has(statusStripe)
+  const doneCron = Boolean(outcomeKind) && outcomeHasCrons(session.outcome)
+  const glyph = GLYPH_STRIPES.has(statusStripe) || doneCron
 
   return (
     <Tip label={tipText ? <span className="whitespace-pre-line">{tipText}</span> : null}>
@@ -96,8 +97,8 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
         role={tipText ? 'img' : undefined}
       >
         {/* `periodic`: a live cron job, it recurs so it is never "done". `waiting`: open kanban cards hold it — the
-            card glyph (amber when `stalled`). */}
-        {glyph && <Codicon name={statusStripe === 'periodic' ? 'sync' : 'project'} size="0.5625rem" />}
+            card glyph (amber when `stalled`). A finished chat's cron keeps the loop glyph, in the green of `done`. */}
+        {glyph && <Codicon name={statusStripe === 'periodic' || doneCron ? 'sync' : 'project'} size="0.5625rem" />}
       </span>
     </Tip>
   )
