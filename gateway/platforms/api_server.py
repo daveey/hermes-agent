@@ -3605,8 +3605,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         usage = {"input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                  "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                  "total_tokens": getattr(agent, "session_total_tokens", 0) or 0}
-        # Effective session id lets callers track compression-triggered rotations.
-        # (#16938)
+        # Effective session id lets callers track compression-triggered rotations (#16938).
         _eff_sid = getattr(agent, "session_id", session_id)
         if isinstance(_eff_sid, str) and _eff_sid:
             result["session_id"] = _eff_sid
@@ -3615,12 +3614,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         _session_rotated = isinstance(_eff_sid, str) and isinstance(session_id, str) and _eff_sid != session_id
         if getattr(agent, "_last_compaction_in_place", False) or _session_rotated:
             result["_compressed"] = True
-        # Always record who actually served the turn (a class selector names no provider or model).
-        if isinstance(result, dict):
-            _p, _m = getattr(agent, "provider", ""), getattr(agent, "model", "")
-            result["served_runtime"] = {
-                "provider": self._clean_runtime_id(_p, max_len=80) if isinstance(_p, str) else "",
-                "model": self._clean_runtime_id(_m) if isinstance(_m, str) else ""}
+        result["served_runtime"] = {k: self._clean_runtime_id(getattr(agent, k, ""), max_len=80) for k in ("provider", "model")}  # who served; a class selector names neither
         if requested_runtime or route or confirmed_runtime_lock or (route_source and route_source != "global"):
             runtime = self._turn_runtime_metadata(
                 agent, route=route, requested_runtime=requested_runtime,

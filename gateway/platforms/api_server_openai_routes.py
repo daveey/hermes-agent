@@ -777,6 +777,16 @@ def _parse_conversation_history(raw_history: Any) -> tuple:
     return conversation_history, None
 
 
+def _apply_served_runtime(response_data: dict, result: dict) -> None:
+    """Name who served the turn: a class selector ("class:fast") is not a model, and clients (BB's
+    egress log) attribute the request from this. ``model`` keeps echoing the request when unknown."""
+    served = result.get("served_runtime") if isinstance(result.get("served_runtime"), dict) else {}
+    if served.get("provider"):
+        response_data["provider"] = served["provider"]
+    if served.get("model"):
+        response_data["model"] = served["model"]
+
+
 class OpenAICompatRoutesMixin:
     """/v1/chat/completions and /v1/responses handlers + SSE writers."""
 
@@ -1060,13 +1070,7 @@ class OpenAICompatRoutesMixin:
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "" if presentation_muted else final_response},
                          "finish_reason": finish_reason}],
             "usage": _chat_usage_payload(usage)}
-        # A class selector ("class:fast") is not a model: report who served it, so clients (BB's egress log)
-        # attribute the request. ``model`` keeps echoing the request when the runtime is unknown.
-        served = result.get("served_runtime") if isinstance(result.get("served_runtime"), dict) else {}
-        if served.get("provider"):
-            response_data["provider"] = served["provider"]
-        if served.get("model"):
-            response_data["model"] = served["model"]
+        _apply_served_runtime(response_data, result)
         # Non-streaming twin of ``delta.reasoning_content`` (#99552).
         reasoning_text = _turn_reasoning_text(history, user_message, result)
         if reasoning_text and not presentation_muted:
