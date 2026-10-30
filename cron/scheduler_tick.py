@@ -41,6 +41,8 @@ def tick(verbose=True, adapters=None, loop=None, sync=True, *, can_dispatch=None
             return 0
         with update_admission() as update_admitted:
             if not update_admitted:
+                from cron.planned_pause import begin
+                begin()
                 return 0  # due jobs stay due: nothing advanced, they fire on the first tick after the hold
             return _tick_admitted(verbose, adapters, loop, sync, can_dispatch=can_dispatch,
                                   headless=headless)
@@ -175,6 +177,8 @@ def _tick_admitted(
                 return 0
 
         if can_dispatch is not None and not can_dispatch():
+            from cron.planned_pause import begin
+            begin()
             _sched.logger.debug("Cron dispatch paused while gateway drains existing work")
             return 0
 

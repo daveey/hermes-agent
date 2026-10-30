@@ -3186,30 +3186,6 @@ def _fast_forward_missed_recurring(d: _DueJob, grace: int) -> bool:
     return False
 
 
-def _retire_expired_oneshot(d: _DueJob) -> bool:
-    """One-shot grace gate; True when the job must not fire this tick.
-
-    A one-shot beyond the grace window must never fire (create/update/resume reject such schedules
-    and recovery never revives them; only the due scan used to dispatch them hours late). With no
-    claim stamped, retire it with a diagnostic (never silently delete). A claim may mean a run is
-    still in flight elsewhere — skip but keep the record so its mark_job_run can land."""
-    if _elapsed_seconds(d.scan.now, d.next_run_dt) <= ONESHOT_GRACE_SECONDS:
-        return False
-    # Due during an outage of its store: it was skipped, not missed; fire it once on recovery.
-    if store_health.outage_covers(_current_cron_store().cron_dir, d.next_run_dt.timestamp(), ONESHOT_GRACE_SECONDS):
-        return False
-    claim = d.job.get("run_claim")
-    # An outage-covered claim that never reached its fire claim never started: it stays covered.
-    if isinstance(claim, dict) and claim.get("outage") and not d.job.get("fire_claim"):
-        return False
-    if not (claim or d.job.get("fire_claim")):
-        from cron.jobs_oneshot_diagnostics import write_missed
-        write_missed(d.job, d.next_run)
-        d.scan.retire(d.job["id"])
-        d.scan.on_saved.append(lambda job=d.job: record_cron_missed(job))
-    return True
-
-
 def _oneshot_dispatch_limit_reached(job: dict[str, Any], scan: _DueScan) -> bool:
     """One-shot dispatch-limit guard; True when the job must not fire this tick.
 
@@ -3331,14 +3307,15 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     if not manual_run and recurring and _fast_forward_missed_recurring(d, grace):
         return False
     if kind == "once":
-        if _retire_expired_oneshot(d) or _oneshot_dispatch_limit_reached(job, scan):
+        from cron.planned_pause import covers, retire_expired
+        if retire_expired(d) or _oneshot_dispatch_limit_reached(job, scan):
             return False
         # Durably claim the one-shot for the DURATION of its run: a second scheduler process on the
         # same HERMES_HOME must not re-dispatch it while in flight, and advancing next_run_at by a
         # fixed window is not enough for a run that outlives a tick. The other process sees the
         # fresh claim and skips; mark_job_run() clears it. The TTL only covers a tick that DIES.
         claim = {"at": now.isoformat(), "by": _machine_id()}
-        if _elapsed_seconds(now, d.next_run_dt) > ONESHOT_GRACE_SECONDS:  # only an outage lets it through
+        if not covers(job) and _elapsed_seconds(now, d.next_run_dt) > ONESHOT_GRACE_SECONDS:
             claim["outage"] = True
         job["run_claim"] = claim
         scan.persist(job["id"], run_claim=claim)
@@ -3371,6 +3348,11 @@ def _get_due_jobs_locked() -> list[dict[str, Any]]:
     raw_jobs = load_jobs()
     scan = _DueScan(raw_jobs, _hermes_now())
     scan.needs_save = _normalize_due_scan_records(raw_jobs)
+    from cron import planned_pause
+    recovered_pause = planned_pause.recover(raw_jobs, scan.now)
+    if recovered_pause is None:
+        return []  # the interval must be durable before any covered slot can be retired
+    scan.needs_save |= recovered_pause[0]
     jobs = [_apply_skill_fields(j) for j in copy.deepcopy(raw_jobs)]
     # One-shot run-claim TTL, resolved once per scan (see _oneshot_run_claim_ttl_seconds).
     run_claim_ttl = _oneshot_run_claim_ttl_seconds()
@@ -3408,6 +3390,7 @@ def _get_due_jobs_locked() -> list[dict[str, Any]]:
             return due
     # Only now is a skipped one-shot claimed or durably due on disk: normal grace applies again.
     store_health.end_recovery_window(_current_cron_store().cron_dir)
+    planned_pause.finish_recovery(recovered_pause[1])
     for emit in scan.on_saved:
         emit()
     return due
