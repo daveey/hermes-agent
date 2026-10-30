@@ -16,6 +16,11 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
 Ownership follows the unloaded sweeper's: a chat another live backend holds is that backend's (its own pass
 handles it); a chat with a live turn is skipped. The close-out prompt row is itself a notice, stamped as claimed,
 so a close-out never wakes another one.
+
+A notice about a card on another gateway (``gateway`` in its metadata, or only ``remote:`` event keys) is judged
+by the ``blocked_on_human`` flag its writer stored, never by a local board lookup: its ``board`` is the owner's.
+A candidate whose handling raises is stamped ``closeout.state = "error"`` once and left for the auditor, instead
+of being retried (and logged) on every pass.
 """
 
 from __future__ import annotations
@@ -93,20 +98,49 @@ def _stamp(db: Any, msg_id: int, verdict: str) -> None:
                        (json.dumps(meta, ensure_ascii=False), msg_id))
 
 
+def _this_gateway() -> str:
+    try:
+        from hermes_cli.kanban_origin import gateway_names
+        return gateway_names()[0]
+    except Exception:
+        logger.debug("notice guarantee: this gateway's name is unknown", exc_info=True)
+        return ""
+
+
+def _is_remote(meta: dict) -> bool:
+    """A notice about a card on another gateway: its ``board`` names the OWNER's board, not one here. [daveey]"""
+    gateway = str(meta.get("gateway") or "")
+    if gateway and gateway != _this_gateway():
+        return True
+    keys = [str(k) for k in meta.get("kanban_event_keys") or ()]
+    return bool(keys) and all(k.startswith("remote:") for k in keys)
+
+
 def blocked_on_human(cand: dict) -> bool:
-    """True when a card this notice is about is (still) parked on a validated human request."""
+    """True when a card this notice is about is (still) parked on a validated human request.
+
+    Remote notices (defect kanban-a9b5d2c7c1) read the ``blocked_on_human`` flag their writer stored and never open
+    a local board. A local notice whose board is gone or archived reads as not blocked, so its close-out runs."""
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_connect as _kbc
     from tui_gateway.kanban_unloaded import _blocked_on_human
     from tui_gateway.notice_fanout import _notice_tasks
     meta = cand["meta"]
+    flagged = bool(meta.get("blocked_on_human"))
+    if _is_remote(meta):
+        return flagged
     keys = [str(k) for k in meta.get("kanban_event_keys") or () if ":" in str(k) and not str(k).startswith("remote:")]
     board = meta.get("board") or (keys[0].rsplit(":", 1)[0] if keys else None)
     tasks = _notice_tasks(cand["content"], meta)
     if not tasks:
-        return False
-    with contextlib.closing(_kbc.connect(board=board) if board else _kbc.connect()) as conn:
-        return any(_blocked_on_human(_kb.get_task(conn, tid)) for tid in sorted(tasks))
+        return flagged
+    try:
+        conn = _kbc.connect(board=board) if board else _kbc.connect()
+    except ValueError:  # board deleted or archived since the notice: nothing here can be waiting on a human
+        logger.debug("notice guarantee: board %r of notice %s is gone", board, cand.get("msg_id"))
+        return flagged
+    with contextlib.closing(conn):
+        return flagged or any(_blocked_on_human(_kb.get_task(conn, tid)) for tid in sorted(tasks))
 
 
 def _wake(sid: str, msg_id: int) -> str:
@@ -180,6 +214,20 @@ def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn) -> 
     return "dispatched"
 
 
+def _give_up(db, cand: dict) -> str:
+    """A candidate whose handling raised: stamp it ``error`` (compare-and-swap, so a row another backend claimed
+    meanwhile is left alone) and refresh the outcome, which then reads ``unresolved{notice_tail}`` for the auditor.
+    Without the stamp the same row was retried and logged on every pass forever (349 warnings in one window). [daveey]"""
+    try:
+        meta = {**cand["meta"], "closeout": {"state": "error", "at": time.time(), "pid": os.getpid()}}
+        db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
+                           (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"]))
+        _refresh(db, cand["sid"])
+    except Exception:
+        logger.debug("notice guarantee: could not stamp %s as error", cand["sid"], exc_info=True)
+    return "error"
+
+
 @contextlib.contextmanager
 def _profile_store(profile: Optional[str]) -> Iterator[Any]:
     from tui_gateway import server
@@ -214,7 +262,7 @@ def guarantee_pass(*, now: Optional[float] = None, stores: Callable[[], Iterator
                     result = _handle(db, cand, now, holders=holders, session_db=session_db, wake=wake, spawn=spawn)
                 except Exception:
                     logger.warning("notice guarantee failed for %s", cand["sid"], exc_info=True)
-                    result = "error"
+                    result = _give_up(db, cand)
                 out.append({"session_id": cand["sid"], "msg_id": cand["msg_id"], "result": result})
     except Exception:
         logger.warning("notice guarantee pass failed", exc_info=True)

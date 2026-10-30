@@ -247,13 +247,28 @@ def _completion_text(gw: str, key: str, task: dict, me: str, profile: str, sid: 
     return server._format_kanban_event_text(sub, SimpleNamespace(**task), ev, task.get("board", "default"))
 
 
+def remote_blocked_on_human(task: dict) -> bool:
+    """Whether a remote card is parked on a validated human request, from its replicated task record. Stored in
+    the notice's metadata: the notice guarantee cannot look the card up on this gateway. [daveey]"""
+    try:
+        from types import SimpleNamespace
+
+        from tui_gateway.kanban_unloaded import _blocked_on_human
+        return bool(_blocked_on_human(SimpleNamespace(status=task.get("status"), block_kind=task.get("block_kind"),
+                                                      human_request=task.get("human_request"))))
+    except Exception:
+        logger.debug("remote blocked_on_human check failed", exc_info=True)
+        return False
+
+
 def _notice_item(card: dict, session_key: str, me: str, profile: str) -> dict:
     task = card["task"]
     at = _terminal_at(task)
     sid = card.get("sid") or session_key
     text = _completion_text(card["gw"], card["key"], task, me, profile, sid)
     item = {"text": text or format_notice(card["gw"], card["key"], task), "session": session_key,
-            "ref": f"{card['gw']}/{card['key']}", "state": f"{task['status']}@{int(at) if at else 0}"}
+            "ref": f"{card['gw']}/{card['key']}", "state": f"{task['status']}@{int(at) if at else 0}",
+            "blocked_on_human": remote_blocked_on_human(task)}
     if text:
         item["event_key"] = _event_key(card["gw"], card["key"], task["completion_notice"])
     elif task.get("status") == "blocked":
@@ -573,11 +588,13 @@ def _sweep_payload(owner: str, key: str, task: dict, me: str, profile: str, sid:
         event_key = _event_key(owner, key, notice)
         metadata = {"notice_id": f"remote:{owner}:{key}:{event_id}:{profile}:{sid}",
                     "board": task.get("board", "default"), "task_id": task["id"],
-                    "gateway": owner, "event_ids": [event_id], "kanban_event_keys": [event_key]}
+                    "gateway": owner, "event_ids": [event_id], "kanban_event_keys": [event_key],
+                    "blocked_on_human": False}
         return event_key, metadata, _completion_text(owner, key, task, me, profile, sid)
     event_key = _shared_key(owner, key, task, profile, sid)
     metadata = {"notice_id": event_key, "board": task.get("board", "default"),
-                "task_id": task["id"], "gateway": owner, "kanban_event_keys": [event_key]}
+                "task_id": task["id"], "gateway": owner, "kanban_event_keys": [event_key],
+                "blocked_on_human": remote_blocked_on_human(task)}
     return event_key, metadata, format_notice(owner, key, task)
 
 

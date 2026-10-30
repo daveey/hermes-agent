@@ -113,3 +113,63 @@ def test_a_blocked_on_human_notice_never_wakes_and_reads_decision(db):
     stored = so.get_outcome(CHAT, db=db)
     assert stored["kind"] == "decision"
     assert stored["items"][0]["card_id"] == tid and [c["value"] for c in stored["items"][0]["choices"]] == ["ship", "hold"]
+
+
+# Remote notices (defect kanban-a9b5d2c7c1): a notice about a card on ANOTHER gateway carries that owner's board
+# name, which does not exist here. The guarantee must not open a local board for it; it reads the
+# ``blocked_on_human`` flag the remote writer stored. [daveey]
+
+def _no_local_board(monkeypatch):
+    def refuse(*_a, **_k):
+        raise AssertionError("a remote notice must not open a local kanban board")
+    monkeypatch.setattr(kbc, "connect", refuse)
+
+
+@pytest.mark.parametrize("flag, expected", [(True, "refreshed:human"), (False, "dispatched")])
+def test_a_remote_notice_reads_its_flag_and_never_opens_a_local_board(db, monkeypatch, flag, expected):
+    _no_local_board(monkeypatch)
+    row = _notice(db, "⏸ Kanban t_remote1 on hub blocked — remote card", board="nosuchboard", task_id="t_remote1",
+                  gateway="hub", kanban_event_keys=["remote:hub:nosuchboard/default/t_remote1:blocked@1:default:x"],
+                  blocked_on_human=flag)
+
+    out, calls = _run(db)
+
+    assert [o["result"] for o in out] == [expected]
+    assert (calls == []) is flag
+    if not flag:
+        assert _closeout(db, row) == "started"
+
+
+def test_a_live_poller_row_of_only_remote_keys_is_remote_too(db, monkeypatch):
+    _no_local_board(monkeypatch)
+    _notice(db, "⏸ Kanban t_remote2 on hub blocked — remote card", blocked_on_human=True,
+            kanban_event_keys=["remote:hub:bb/default/t_remote2:blocked@1:default:x"])
+
+    out, calls = _run(db)
+
+    assert calls == [] and [o["result"] for o in out] == ["refreshed:human"]
+
+
+def test_a_local_notice_whose_board_is_gone_still_gets_a_closeout(db):
+    row = _notice(db, "✔ Kanban t_gone1 done — card on a deleted board", board="deletedboard", task_id="t_gone1")
+
+    out, calls = _run(db)
+
+    assert calls == [(CHAT, row)] and [o["result"] for o in out] == ["dispatched"]
+    assert _closeout(db, row) == "started"
+
+
+def test_a_notice_whose_handling_raises_is_stamped_error_once(db, monkeypatch):
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(ng, "started_last_hour", boom)
+
+    out, calls = _run(db)
+
+    assert calls == [] and [o["result"] for o in out] == ["error"]
+    assert _closeout(db, row) == "error"
+    assert ng.candidates(db, time.time()) == []  # handled once, not retried on every pass
+    stored = so.get_outcome(CHAT, db=db)
+    assert (stored["kind"], stored["reason"]) == ("unresolved", "notice_tail")
