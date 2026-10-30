@@ -62,9 +62,7 @@ jobs:
         timeout-minutes: 1
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         env:
-          HTTPS_PROXY: ${{ env.CACHE_PROBE_URL }}
           https_proxy: ${{ env.CACHE_PROBE_URL }}
-          NO_PROXY: ''
           no_proxy: ''
         with:
           path: ${{ runner.temp }}/cache-timeout-probe/payload
