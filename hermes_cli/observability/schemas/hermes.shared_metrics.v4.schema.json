@@ -1159,6 +1159,7 @@
               "enum": [
                 "daytona",
                 "docker",
+                "kubernetes",
                 "local",
                 "managed_modal",
                 "modal",
@@ -2186,6 +2187,7 @@
                 "docker",
                 "extension",
                 "firecrawl",
+                "kubernetes",
                 "lightpanda",
                 "local",
                 "managed_modal",
@@ -3240,6 +3242,7 @@
               "enum": [
                 "daytona",
                 "docker",
+                "kubernetes",
                 "local",
                 "managed_modal",
                 "modal",

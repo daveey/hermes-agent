@@ -340,17 +340,14 @@ DEFAULT_CONFIG = {
         # HERMES_HOME/home; "real" = force real HOME; "profile" = force HERMES_HOME/home when it
         # exists (strict per-profile isolation).
         "home_mode": "auto",
-        # Extra files sourced in the login shell when building the per-session env snapshot — for
-        # nvm/pyenv/asdf/PATH entries registered by files a bash login shell skips (~/.bashrc,
-        # ~/.zshrc, ~/.zprofile). Supports ~ and ${VAR}; missing files skipped. When empty and the
-        # shell is bash, ~/.profile, ~/.bash_profile, ~/.bashrc are auto-sourced in that order (see
-        # auto_source_bashrc).
+        # Extra files sourced in the login shell when building the per-session env snapshot — for nvm/pyenv/asdf/PATH
+        # entries registered by files a bash login shell skips (~/.bashrc, ~/.zshrc, ~/.zprofile). Supports ~ and
+        # ${VAR}; missing files skipped. When empty and the shell is bash, ~/.profile, ~/.bash_profile, ~/.bashrc are
+        # auto-sourced in that order (see auto_source_bashrc).
         "shell_init_files": [],
-        # Source ~/.profile, ~/.bash_profile, ~/.bashrc in the snapshot login shell to capture PATH
-        # additions, functions, and aliases that `bash -l -c` misses (bash skips bashrc when
-        # non-interactive; Debian/Ubuntu ~/.bashrc short-circuits). ~/.profile and ~/.bash_profile
-        # go first because n/nvm/asdf write PATH exports there without an interactivity guard. Turn
-        # off if an rc file misbehaves when sourced non-interactively (exits on TTY check).
+        # Source ~/.profile, ~/.bash_profile, ~/.bashrc in the snapshot login shell for PATH, functions and aliases
+        # `bash -l -c` misses (non-interactive bash skips bashrc; Debian ~/.bashrc short-circuits). The profiles go
+        # first (n/nvm/asdf write PATH there unguarded). Turn off if an rc file misbehaves non-interactively.
         "auto_source_bashrc": True,
         # The default sandbox for every container backend: the nikolaik/python-nodejs base
         # (Python 3.13 / Node 26) plus a display stack, so Bot Screen, computer_use and the
@@ -377,14 +374,12 @@ DEFAULT_CONFIG = {
         "docker_mount_cwd_to_workspace": False,  # mount host cwd at /workspace (weakens isolation)
         "docker_network": True,  # false = --network=none, no network access from commands
         "docker_extra_args": [],        # Extra flags passed verbatim to docker run
-        # /dev/shm size for the Docker sandbox. Docker's 64 MB default silently breaks
-        # Chromium/Playwright and PyTorch DataLoader workers; tmpfs is lazily allocated so the
-        # higher ceiling is free until used. "" or "0" = omit the flag (Docker default).
+        # /dev/shm size for the Docker sandbox. Docker's 64 MB default silently breaks Chromium/Playwright and
+        # PyTorch DataLoader workers; tmpfs is lazily allocated. "" or "0" = omit the flag (Docker default).
         "docker_shm_size": "1g",
-        # Run the container as the host uid:gid (`--user`) so files written to bind mounts
-        # (docker_volumes, persistent workspace, mounted cwd) are owned by you, not root. Off by
-        # default for images whose entrypoints must start as root (e.g. the bundled Hermes image,
-        # which drops to `hermes` via s6-setuidgid). When on, SETUID/SETGID caps are omitted.
+        # Run the container as the host uid:gid (`--user`) so bind-mount writes (docker_volumes, persistent
+        # workspace, mounted cwd) are yours, not root's. Off by default for images whose entrypoints must start
+        # as root (the bundled image drops to `hermes` via s6-setuidgid). On omits the SETUID/SETGID caps.
         "docker_run_as_host_user": False,
         # Snap-packaged Docker under AppArmor (Ubuntu cloud images; LP#1908448) refuses to exec
         # anything under `--init` or `--security-opt no-new-privileges` ("operation not
@@ -392,9 +387,14 @@ DEFAULT_CONFIG = {
         "docker_snap_compat": False,
         # Trusted profiles sharing one Docker container identity; empty = per-profile boundary.
         "docker_shared_container_key": "",
-        # SSH: carry exported env vars between commands (cwd always carries). false = every command
-        # starts from the login env, profile functions included. Local: TERMINAL_LOCAL_PERSISTENT.
+        # SSH: carry exported env vars between commands (cwd always carries). false = every command starts from the
+        # login env, profile functions included. Local: TERMINAL_LOCAL_PERSISTENT.
         "persistent_shell": True,
+        # kubernetes: pod per session; namespace+image required (namespace only from here); workspace_pvc: existing
+        "kubernetes": {"namespace": "", "image": "", "cpu": "1", "memory": "2Gi", "ephemeral_storage": "10Gi",
+                       "idle_timeout": 1800, "context": "", "kubeconfig": "", "labels": {}, "workspace_pvc": "",
+                       "workspace_subpath": "", "run_as_user": 1000, "run_as_group": 1000, "fs_group": 1000,
+                       "node_selector": {}, "tolerations": []},
     },
 
     "web": {

@@ -49,7 +49,7 @@ def terminal_backend_unavailable_reason() -> Optional[str]:
 
 _VERCEL_SANDBOX_DEFAULT_CWD = "/vercel/sandbox"
 _SUPPORTED_VERCEL_RUNTIMES = ("node24", "node22", "python3.13")
-_BUILTIN_BACKENDS = "local, docker, modal, daytona, vercel_sandbox, ssh"
+_BUILTIN_BACKENDS = "local, docker, modal, daytona, vercel_sandbox, ssh, kubernetes"
 
 # Config -> kwargs shapers, driven by (out_key, config_key, default) tables. The container table's
 # (key, default) literal is intentionally greppable; tools/terminal_tool.py keeps its own for the AST test.
@@ -210,6 +210,20 @@ def _build_ssh_env(*, cwd, timeout, ssh_config, probe_only=False, **_):
                            persistent=ssh_config.get("persistent", True))
 
 
+def _kubernetes_section() -> dict:
+    """The served profile's ``terminal.kubernetes`` section: namespace/image never come from the model."""
+    from hermes_cli.config import load_config_readonly
+    section = (load_config_readonly().get("terminal") or {}).get("kubernetes")
+    return section if isinstance(section, dict) else {}
+
+
+def _build_kubernetes_env(*, cwd, timeout, task_id, **_):
+    from hermes_cli.profiles import current_profile_name
+    from tools.environments.kubernetes import KubernetesEnvironment, settings_from_config
+    return KubernetesEnvironment(cwd=cwd, timeout=timeout, task_id=task_id, profile=current_profile_name("default"),
+                                 **settings_from_config(_kubernetes_section()))
+
+
 def _stamp_sandbox_home(env_obj, provider, cwd) -> None:
     """Record the provider's declared home on this environment: a declared absolute path whatever ``cwd`` the
     environment started in (``terminal.cwd`` may pick another directory), or, for ``~``, the path it resolved
@@ -268,7 +282,7 @@ def _build_plugin_env(*, env_type, image, cwd, timeout, cc, task_id, **_):
 # Built-in backend -> builder. Anything else is looked up in the plugin registry.
 _ENV_BUILDERS = {"local": _build_local_env, "docker": _build_docker_env, "modal": _build_modal_env,
                  "daytona": _build_daytona_env, "vercel_sandbox": _build_vercel_env,
-                 "ssh": _build_ssh_env}
+                 "ssh": _build_ssh_env, "kubernetes": _build_kubernetes_env}
 
 
 def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
@@ -341,6 +355,15 @@ def _ssh_pre(config: dict[str, Any]) -> bool:
                    "run `hermes setup terminal` to enter them or pick the 'local' backend")
 
 
+def _kubernetes_pre(config: dict[str, Any]) -> Optional[bool]:
+    from tools.environments.kubernetes import settings_from_config
+    settings = settings_from_config(_kubernetes_section())
+    if settings["namespace"] and settings["image"]:
+        return None
+    return _reject("the kubernetes backend needs terminal.kubernetes.namespace and terminal.kubernetes.image "
+                   "in this profile's config.yaml")
+
+
 def _daytona_post(config: dict[str, Any]) -> bool:
     from daytona import Daytona
     from agent.secret_scope import get_secret
@@ -356,6 +379,9 @@ _BACKEND_SPECS: dict[str, dict[str, Any]] = {
               "module": ("modal", "modal is required for direct modal terminal backend. Run hermes setup terminal and select Modal.")},
     "vercel_sandbox": {"pre": _check_vercel},
     "daytona": {"post": _daytona_post},
+    "kubernetes": {"pre": _kubernetes_pre,
+                   "module": ("kubernetes", "the kubernetes Python client is missing: install the optional "
+                              "'kubernetes' extra (run hermes setup terminal and select Kubernetes)")},
 }
 
 

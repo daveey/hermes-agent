@@ -201,6 +201,19 @@ def _setup_backend_daytona(config: dict) -> None:
     config["terminal"].setdefault("daytona_image", _SANDBOX_IMAGE)
 
 
+def _setup_backend_kubernetes(config: dict) -> None:
+    _setup.print_success("Terminal backend: Kubernetes")
+    _setup._info("One pod per session in a namespace you choose; /workspace can be an existing claim.",
+                 "Auth: in-cluster service account, else your kubeconfig (KUBECONFIG or ~/.kube/config).")
+    _ensure_sdk("kubernetes")
+    section = config["terminal"].setdefault("kubernetes", {})
+    for key, label in (("namespace", "  Namespace"), ("image", "  Container image"), ("kubeconfig", "  Kubeconfig path"),
+                       ("context", "  Kubeconfig context"), ("workspace_pvc", "  Existing workspace PVC (blank = none)")):
+        value = _setup.prompt(label, section.get(key) or "")
+        if value:
+            section[key] = value
+
+
 def _setup_backend_vercel(config: dict) -> None:
     _setup.print_success("Terminal backend: Vercel Sandbox")
     _setup._info("Cloud microVM sandboxes with snapshot-backed filesystem persistence.",
@@ -259,10 +272,12 @@ _BUILTIN_TERMINAL_BACKENDS = [
     ("docker", "Docker/Podman - isolated container with configurable resources"),
     ("modal", "Modal - serverless cloud sandbox"), ("ssh", "SSH - run on a remote machine"),
     ("daytona", "Daytona - persistent cloud development environment"),
-    ("vercel_sandbox", "Vercel Sandbox - cloud microVM with snapshot filesystem persistence")]
+    ("vercel_sandbox", "Vercel Sandbox - cloud microVM with snapshot filesystem persistence"),
+    ("kubernetes", "Kubernetes - per-session pod on a cluster")]
 _TERMINAL_BACKEND_SETUP = {
     "local": _setup_backend_local, "docker": _setup_backend_docker, "modal": _setup_backend_modal,
-    "daytona": _setup_backend_daytona, "vercel_sandbox": _setup_backend_vercel, "ssh": _setup_backend_ssh}
+    "daytona": _setup_backend_daytona, "vercel_sandbox": _setup_backend_vercel, "ssh": _setup_backend_ssh,
+    "kubernetes": _setup_backend_kubernetes}
 # Backend -> env var mirrored from config after setup (config.yaml is the source of truth, but
 # terminal_tool reads these from .env).
 _BACKEND_ENV_MIRROR = {"modal": ("TERMINAL_MODAL_MODE", "modal_mode", "auto"),

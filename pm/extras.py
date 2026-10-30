@@ -51,6 +51,7 @@ ANCHORS: dict[str, str | tuple[str, ...]] = {
     "teams": "microsoft_teams.apps",
     "modal": "modal",
     "daytona": "daytona",
+    "kubernetes": "kubernetes",
     "vercel": "vercel",
     "google": ("googleapiclient", "google.auth", "google_auth_oauthlib.flow", "google_auth_httplib2"),
     "google-chat": "google.cloud.pubsub_v1",

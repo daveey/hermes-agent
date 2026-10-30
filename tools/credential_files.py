@@ -345,7 +345,7 @@ def from_agent_visible_cache_path(container_path: str, container_base: str = "/r
 
 # Backends whose file-sync lands under the remote home: ``~/.hermes`` is
 # expanded by the remote shell, so it resolves regardless of the actual home.
-_HOME_RELATIVE_BACKENDS = frozenset({"ssh", "daytona", "vercel_sandbox"})
+_HOME_RELATIVE_BACKENDS = frozenset({"ssh", "daytona", "vercel_sandbox", "kubernetes"})
 
 
 def _terminal_backend() -> str:

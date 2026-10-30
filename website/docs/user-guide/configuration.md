@@ -222,11 +222,11 @@ Before that stash step, Hermes also restores tracked `package-lock.json` diffs l
 
 ## Terminal Backend Configuration
 
-Hermes ships six terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a remote server via SSH, a Modal cloud sandbox (direct or via the Nous-managed gateway), a Daytona workspace, or a Vercel Sandbox. Plugins add more, such as the official [Singularity/Apptainer](#singularityapptainer-backend) backend.
+Hermes ships seven terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a remote server via SSH, a Modal cloud sandbox (direct or via the Nous-managed gateway), a Daytona workspace, a Vercel Sandbox, or a pod on a Kubernetes cluster. Plugins add more, such as the official [Singularity/Apptainer](#singularityapptainer-backend) backend.
 
 ```yaml
 terminal:
-  backend: local    # local | docker | ssh | modal | daytona | vercel_sandbox | <plugin backend>
+  backend: local    # local | docker | ssh | modal | daytona | vercel_sandbox | kubernetes | <plugin backend>
   cwd: "."          # Gateway/cron working directory (CLI always uses launch dir)
   temp_dir: ""      # Session temp root; empty = TMPDIR, else ~/.hermes/cache/terminal
   font_family: ""   # Desktop terminal font; e.g. "MesloLGS NF"
@@ -301,6 +301,7 @@ For cloud sandboxes such as Modal, Daytona, and Vercel Sandbox, `container_persi
 | **daytona** | Daytona workspace | Full (cloud container) | Managed cloud dev environments |
 | **vercel_sandbox** | Vercel Sandbox | Full (cloud microVM) | Cloud execution with snapshot-backed filesystem persistence |
 | **singularity** (plugin) | Singularity/Apptainer container | Namespaces (--containall) | HPC clusters, shared machines |
+| **kubernetes** | One pod per session on your cluster | Full (pod, non-root, no capabilities) | Running agents on shared cluster capacity |
 
 ### Local Backend
 
@@ -560,6 +561,40 @@ terminal:
 **Persistence:** When enabled, sandboxes are stopped (not deleted) on cleanup and resumed on next session. Sandbox names follow the pattern `hermes-{task_id}`.
 
 **Disk limit:** Daytona enforces a 10 GiB maximum. Requests above this are capped with a warning.
+
+### Kubernetes Backend
+
+Runs each session's commands in its own pod, in a namespace you configure. The backend only creates, reads, deletes and execs into pods, so a ServiceAccount limited to `pods` (create/get/list/watch/delete), `pods/exec` and `pods/log` in that namespace is enough; it never creates or deletes a PersistentVolumeClaim.
+
+```yaml
+terminal:
+  backend: kubernetes
+  kubernetes:
+    namespace: agents              # required; read only from config, never from a command
+    image: ghcr.io/you/sandbox:1   # required; needs bash
+    kubeconfig: ""                 # explicit kubeconfig path; "" = in-cluster, else KUBECONFIG / ~/.kube/config
+    context: ""                    # kubeconfig context
+    cpu: "1"                       # requests = limits for cpu, memory and ephemeral storage
+    memory: 2Gi
+    ephemeral_storage: 10Gi
+    idle_timeout: 1800             # seconds idle before the pod is deleted
+    workspace_pvc: ""              # an EXISTING claim (e.g. RWX/EFS) to mount at /workspace; "" = emptyDir
+    workspace_subpath: ""          # subPath inside that claim
+    run_as_user: 1000              # match the uid that owns the workspace files (must be non-zero)
+    run_as_group: 1000
+    fs_group: 1000
+    node_selector: {}
+    tolerations: []
+    labels: {}                     # extra pod labels
+```
+
+**Install:** the `kubernetes` Python client is an optional extra; `hermes setup terminal` (Kubernetes) installs it.
+
+**Pods:** one per (profile, session), named `hermes-<profile>-<hash>` and labelled `app.kubernetes.io/managed-by=hermes` and `hermes/profile=<profile>`. A running pod is reused; a missing or failed one is created and Hermes waits up to 5 minutes for it to be Ready, failing fast on image-pull and container-config errors. Pods run with `runAsNonRoot` under the configured uid/gid, no privilege escalation, all capabilities dropped, the `RuntimeDefault` seccomp profile and no service-account token.
+
+**Workspace:** `/workspace` (the default cwd and `$HOME`) is the claim named by `workspace_pvc`, mounted at `workspace_subpath`, or an emptyDir that disappears with the pod when no claim is set.
+
+**Lifecycle:** a pod idle for `idle_timeout` seconds, or whose session is cleaned up (including the terminal tool's own `lifetime_seconds` reaper), is deleted and the next command recreates it. Each use stamps the pod annotation `hermes/last-used` (at most once a minute) so an external reaper can act on abandoned pods.
 
 ### Vercel Sandbox Backend
 

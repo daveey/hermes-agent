@@ -115,12 +115,21 @@ def _probe_daytona_backend(_cfg) -> tuple:
     return ("needs_setup", "Set DAYTONA_API_KEY to use the Daytona backend.")
 
 
+def _probe_kubernetes_backend(cfg) -> tuple:
+    section = cfg.get("kubernetes") if isinstance(cfg, dict) else None
+    section = section if isinstance(section, dict) else {}
+    if section.get("namespace") and section.get("image"):
+        return ("ready", f"{section['namespace']}: {section['image']}")
+    return ("needs_setup", "Set terminal.kubernetes.namespace and terminal.kubernetes.image to use the Kubernetes backend.")
+
+
 _BACKEND_PROBES = {
     "local": lambda _cfg: ("ready", ""),
     "docker": _probe_docker_backend,
     "ssh": _probe_ssh_backend,
     "modal": _probe_modal_backend,
     "daytona": _probe_daytona_backend,
+    "kubernetes": _probe_kubernetes_backend,
 }
 
 

@@ -542,6 +542,33 @@ terminal:
 #   daytona_image: "nousresearch/hermes-sandbox:desktop"
 #   container_disk: 10240          # Daytona max is 10GB per sandbox
 
+# -----------------------------------------------------------------------------
+# OPTION 7: Kubernetes pods
+# One pod per session in the namespace below. /workspace is an existing claim
+# (workspace_pvc, optional subPath) or an emptyDir; no PVC is ever created.
+# Requires: the optional 'kubernetes' extra (hermes setup terminal -> Kubernetes)
+# and in-cluster credentials or a kubeconfig.
+# -----------------------------------------------------------------------------
+# terminal:
+#   backend: "kubernetes"
+#   kubernetes:
+#     namespace: "agents"            # required
+#     image: "ghcr.io/you/sandbox:1" # required; needs bash
+#     kubeconfig: ""                 # "" = in-cluster, else KUBECONFIG / ~/.kube/config
+#     context: ""
+#     cpu: "1"
+#     memory: "2Gi"
+#     ephemeral_storage: "10Gi"
+#     idle_timeout: 1800             # seconds
+#     workspace_pvc: ""              # existing claim; "" = emptyDir
+#     workspace_subpath: ""
+#     run_as_user: 1000
+#     run_as_group: 1000
+#     fs_group: 1000
+#     node_selector: {}
+#     tolerations: []
+#     labels: {}
+
 #
 # --- Container resource limits (docker, modal, daytona, container plugin backends -- ignored for local/ssh) ---
 # These settings apply to all container backends. They control the resources

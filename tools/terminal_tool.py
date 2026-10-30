@@ -719,7 +719,7 @@ def _ensure_terminal_env_bridged() -> None:
 
 
 # Default cwd per backend; plugins may declare ``default_cwd``; anything else (container backends) is "/root".
-_DEFAULT_CWD_BY_BACKEND = {"ssh": "~", "vercel_sandbox": _VERCEL_SANDBOX_DEFAULT_CWD}
+_DEFAULT_CWD_BY_BACKEND = {"ssh": "~", "vercel_sandbox": _VERCEL_SANDBOX_DEFAULT_CWD, "kubernetes": "/workspace"}
 
 
 def _backend_default_cwd(env_type: str) -> str:

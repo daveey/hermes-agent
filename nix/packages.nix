@@ -65,6 +65,7 @@
           "fal"
           "feishu"
           "firecrawl"
+          "kubernetes"
           "messaging"
           "modal"
           "parallel-web"

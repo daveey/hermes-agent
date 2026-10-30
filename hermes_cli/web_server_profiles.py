@@ -340,6 +340,7 @@ _TERMINAL_BACKENDS: list[dict[str, str]] = [
          "Run commands in an isolated Docker or Podman container with a persistent workspace."),
         ("modal", "Modal", "Run commands in a Modal cloud sandbox."),
         ("daytona", "Daytona", "Run commands in a Daytona cloud sandbox."),
+        ("kubernetes", "Kubernetes", "Run commands in a per-session pod on a Kubernetes cluster."),
         ("ssh", "SSH", "Run commands on a remote host over SSH."))]
 
 

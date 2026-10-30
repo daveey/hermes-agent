@@ -184,7 +184,8 @@ def _check_git_and_rg(should_fix: bool, f: Finding) -> None:
         check_info(f"Install for faster search: {_system_package_install_cmd('ripgrep')}")
 
 
-_BUILTIN_TERMINAL_BACKENDS = {"local", "docker", "modal", "managed_modal", "daytona", "vercel_sandbox", "ssh"}
+_BUILTIN_TERMINAL_BACKENDS = {"local", "docker", "modal", "managed_modal", "daytona", "vercel_sandbox", "ssh",
+                              "kubernetes"}
 
 
 def _check_docker_backend(terminal_env: str, running_in_container: bool, issues: list[str]) -> None:
@@ -246,6 +247,19 @@ def _check_daytona_backend(issues: list[str]) -> None:
         _fail_and_issue("daytona SDK not installed", "(run hermes setup terminal)", "Run hermes setup terminal and select Daytona, then restart Hermes", issues)
 
 
+def _check_kubernetes_backend(issues: list[str]) -> None:
+    from hermes_cli.config import load_config_readonly
+    from tools.environments.kubernetes import settings_from_config
+    settings = settings_from_config((load_config_readonly().get("terminal") or {}).get("kubernetes"))
+    _require(settings["namespace"] and settings["image"],
+             ("Kubernetes namespace/image", f"({settings['namespace']}, {settings['image']})"),
+             ("Kubernetes namespace/image missing", "(terminal.kubernetes.namespace / .image)"),
+             "Set terminal.kubernetes.namespace and terminal.kubernetes.image in config.yaml", issues)
+    _require(importlib.util.find_spec("kubernetes") is not None, ("kubernetes client", "(installed)"),
+             ("kubernetes client not installed", "(optional 'kubernetes' extra)"),
+             "Run hermes setup terminal and select Kubernetes, then restart Hermes", issues)
+
+
 def _check_vercel_backend(issues: list[str]) -> None:
     from tools.terminal_tool_backends import _SUPPORTED_VERCEL_RUNTIMES
     runtime = os.getenv("TERMINAL_VERCEL_RUNTIME", "node24").strip() or "node24"
@@ -287,7 +301,8 @@ def _check_plugin_backend(terminal_env: str, issues: list[str]) -> None:
         _require(ok, (label, detail), (label, detail), detail.strip("()"), issues)
 
 
-_BACKEND_CHECKS = {"ssh": _check_ssh_backend, "daytona": _check_daytona_backend, "vercel_sandbox": _check_vercel_backend}
+_BACKEND_CHECKS = {"ssh": _check_ssh_backend, "daytona": _check_daytona_backend, "vercel_sandbox": _check_vercel_backend,
+                   "kubernetes": _check_kubernetes_backend}
 
 
 @doctor_check()
