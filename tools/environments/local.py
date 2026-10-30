@@ -530,8 +530,8 @@ def strip_launch_profile_env(env: dict, target_home: str | Path | None = None) -
         key.upper() for key in
         set(load_env_file(launch_home / ".env")) | set(launch_dotenv_keys())
         | set(TERMINAL_CONFIG_ENV_MAP.values()) | set(source_supplied_names())
-        # Derived by the config/gateway bridges, not represented in the config map.
-        | {"TERMINAL_DOCKER_IMAGE_PINNED", "TERMINAL_HOME_MODE"}
+        # Derived by the config bridge, not represented in the config map.
+        | {"TERMINAL_DOCKER_IMAGE_PINNED"}
         if not _is_global_env(key.upper()) or key.upper().startswith("TERMINAL_")} - managed_names
     for key in [k for k in env if k.upper() in residue_names]:
         del env[key]

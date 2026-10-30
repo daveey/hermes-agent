@@ -23,7 +23,7 @@ def test_secondary_worker_env_drops_launch_terminal_policy_and_env_settings(tmp_
     monkeypatch.setenv('HERMES_MODEL', 'launch-model')
     monkeypatch.setenv('TERMINAL_ENV', 'docker')
     monkeypatch.setenv('TERMINAL_CWD', str(root))
-    # These launch-bridge settings are derived outside TERMINAL_CONFIG_ENV_MAP.
+    # Include launch bridge policy, not only the fixture's backend and cwd.
     monkeypatch.setenv('TERMINAL_DOCKER_IMAGE_PINNED', '1')
     monkeypatch.setenv('TERMINAL_HOME_MODE', 'profile')
     set_multiplex_active(True)
@@ -53,6 +53,21 @@ def test_derived_terminal_policy_preserves_launch_and_managed_values(tmp_path, m
     assert strip_launch_profile_env({k.lower(): v for k, v in values.items()}, beta) == {}
     monkeypatch.setattr(env_loader, 'managed_dotenv_keys', lambda: set(values))
     assert strip_launch_profile_env(values.copy(), beta) == values
+
+
+def test_target_home_mode_is_rebuilt_by_both_terminal_bridges(tmp_path, monkeypatch):
+    from hermes_cli.config import apply_terminal_config_to_env
+    from tools.terminal_scope import build_profile_terminal_scope
+
+    target = tmp_path / 'target'
+    target.mkdir()
+    (target / 'config.yaml').write_text('terminal:\n  home_mode: profile\n')
+    monkeypatch.setenv('HERMES_HOME', str(target))
+    monkeypatch.setenv('TERMINAL_HOME_MODE', 'real')
+    scope = build_profile_terminal_scope(target)
+    assert scope['TERMINAL_HOME_MODE'] == 'profile'
+    child_env = apply_terminal_config_to_env(env={}, config={'terminal': {'home_mode': 'profile'}})
+    assert child_env['TERMINAL_HOME_MODE'] == 'profile'
 
 
 def test_launch_scrub_runs_before_the_turn_context_is_injected(tmp_path, monkeypatch):

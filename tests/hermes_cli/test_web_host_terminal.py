@@ -105,7 +105,7 @@ def test_host_terminal_resolver_applies_selected_profile_home_and_config(
     monkeypatch.setenv("HOME", str(current / "home"))
     monkeypatch.setenv("HERMES_HOME", str(current))
     monkeypatch.setenv("HERMES_REAL_HOME", str(real_home))
-    monkeypatch.setenv("TERMINAL_HOME_MODE", "profile")
+    monkeypatch.setenv("TERMINAL_HOME_MODE", "real")
     monkeypatch.setenv("OPENAI_API_KEY", "current-profile-secret")
 
     _argv, _cwd, env, _shell_name = web_host_terminal.resolve_argv(home=target)
