@@ -29,6 +29,13 @@ from tests.pm._fixtures import isolated_python
 pytestmark = pytest.mark.real_machine_home
 
 
+@pytest.fixture(autouse=True)
+def _in_process_currency(monkeypatch):
+    # These transaction tests substitute PM's tool/runtime providers in this process;
+    # the separate launch-probe suite covers the isolated deadline boundary.
+    monkeypatch.setattr(venv_sync, "_launch_currency", lambda root, command: pm.venv_is_current(project_root=root))
+
+
 @pytest.fixture
 def source_launch(tmp_path, monkeypatch, isolated_python):
     client = importlib.import_module("pm.client")
@@ -389,7 +396,13 @@ def test_real_bootstrap_reexecs_before_app_imports(source_launch, tmp_path, isol
         "import pm.client\n"
         "from pm import paths\n"
         f"paths.lockfile_path = lambda: Path({str(tmp_path / 'tool-lock.json')!r})\n"
-        f"pm.client.runtime_command = lambda *args, **kwargs: {worker_command!r}\n",
+        f"pm.client.runtime_command = lambda *args, **kwargs: {worker_command!r}\n"
+        # The bounded currency probe asks from a fresh interpreter: give it the same tools,
+        # and room for this cold real-uv fixture (the deadline itself is tested elsewhere).
+        "import hermes_cli.launch_probe as _probe\n"
+        "_probe.DEFAULT_TIMEOUT = 30.0\n"
+        "_probe._WORKER = _probe._WORKER.replace('try:\\n', "
+        f"{'sys.path.insert(0, ' + repr(str(root)) + '); import launch_test_tools' + chr(10) + 'try:' + chr(10)!r}, 1)\n",
         encoding="utf-8",
     )
     entry = root / "launch_probe.py"
@@ -480,7 +493,13 @@ def test_failed_launch_completion_degrades_to_a_warning(source_launch, tmp_path,
         "import pm.client\n"
         "from pm import paths\n"
         f"paths.lockfile_path = lambda: Path({str(tmp_path / 'tool-lock.json')!r})\n"
-        f"pm.client.runtime_command = lambda *args, **kwargs: {worker_command!r}\n",
+        f"pm.client.runtime_command = lambda *args, **kwargs: {worker_command!r}\n"
+        # The bounded currency probe asks from a fresh interpreter: give it the same tools,
+        # and room for this cold real-uv fixture (the deadline itself is tested elsewhere).
+        "import hermes_cli.launch_probe as _probe\n"
+        "_probe.DEFAULT_TIMEOUT = 30.0\n"
+        "_probe._WORKER = _probe._WORKER.replace('try:\\n', "
+        f"{'sys.path.insert(0, ' + repr(str(root)) + '); import launch_test_tools' + chr(10) + 'try:' + chr(10)!r}, 1)\n",
         encoding="utf-8",
     )
     entry = root / "launch_probe.py"

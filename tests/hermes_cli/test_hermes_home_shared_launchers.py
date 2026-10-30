@@ -85,7 +85,7 @@ def test_temp_home_prepare_launch_relaunches_without_rebinding(tmp_path, monkeyp
     before = _publish(repo)
 
     _isolate(tmp_path, monkeypatch, temp_home)
-    monkeypatch.setattr(pm, "venv_is_current", lambda **kwargs: True)
+    monkeypatch.setattr(venv_sync, "_launch_currency", lambda root, command: True)
     target = venv_sync.prepare_launch(repo, [])
     assert target is not None
     assert target.resolve() == temp_python.resolve()

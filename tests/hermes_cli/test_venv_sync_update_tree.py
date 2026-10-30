@@ -37,7 +37,7 @@ def test_launch_refuses_while_another_process_holds_the_checkout(tmp_path, monke
     (root / "install-stamp.json").write_text('{"updateMechanism": "self"}', encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("HERMES_DISABLE_LAZY_INSTALLS", raising=False)
-    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: False)  # an interrupted update's tree
+    monkeypatch.setattr(venv_sync, "_launch_currency", lambda root, command: False)  # an interrupted update's tree
     finished = []
     monkeypatch.setattr(venv_sync, "_finish_source_update", lambda *a, **k: finished.append(a))
 

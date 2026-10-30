@@ -19,6 +19,7 @@ def _no_tool_downloads(monkeypatch):
     import pm.client
 
     monkeypatch.setattr(pm.client, "ensure_tools_for_sync", lambda: None)
+    monkeypatch.setattr(venv_sync, "_launch_currency", lambda root, command: pm.venv_is_current(project_root=root))
 
 
 @pytest.fixture

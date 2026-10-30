@@ -45,6 +45,7 @@ def sync(*_args, **_kwargs):
 
 # "restore": PM's answer follows the sync; otherwise it never says current.
 pm.venv_is_current = lambda **_kw: sync_mode == "restore" and state.read_text() == "current"
+venv_sync._launch_currency = lambda root, command: pm.venv_is_current(project_root=root)
 pm.sync_venv = sync
 pm.client.ensure_tools_for_sync = lambda: None
 _launchers.resolve_store_python = lambda *_a, **_k: Path(sys.executable)

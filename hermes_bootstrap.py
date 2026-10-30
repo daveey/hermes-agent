@@ -600,7 +600,7 @@ from hermes_cli._parser import command_argv
 # Repair needs only stdlib. Do not activate the damaged tree to reach it.
 _pm_repair = command_argv(sys.argv[1:])[:2] == ["pm", "repair"]
 if not _pm_repair:
-    from hermes_cli.venv_sync import prepare_launch, relaunch_command
+    from hermes_cli.venv_sync import exec_launch, prepare_launch, relaunch_command
 
     try:
         _launch_python = prepare_launch(_root, sys.argv[1:])
@@ -614,7 +614,7 @@ if not _pm_repair:
                 import subprocess
 
                 raise RelaunchExit(subprocess.call(_command))
-            os.execv(str(_launch_python), _command)
+            exec_launch(_launch_python, _command)
     except Exception as exc:
         if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
             print(f"hermes: {message}", file=sys.stderr)

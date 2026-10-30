@@ -51,12 +51,45 @@ def _is_sealed(project_root: Path) -> bool:
 def check_runtime(project_root: Path) -> str | None:
     """One passive startup verdict; callers only choose stderr or logging."""
     import pm
-    from hermes_cli.steward import read_install_stamp, sealed_steward
+    from hermes_cli.steward import read_install_stamp
 
     if (Path(project_root) / ".git").exists() and read_install_stamp(project_root).get("updateMechanism") != "self":
         return None  # A developer's checkout does not owe managed products.
 
-    problems = pm.activate()
+    if os.environ.get("HERMES_DISABLE_LAZY_INSTALLS", "").lower() in ("1", "true", "yes"):
+        pm.activate(allow_incomplete=True)  # keep tool PATH without reading plugin-union inputs
+        return None
+    if Path(project_root).resolve() in _current_roots:
+        # prepare_launch just found the dependencies current in this process: only the
+        # store's tools remain to check, which reads no plugin-union inputs and starts no PM.
+        problems = pm.activate(allow_incomplete=True)
+        return _runtime_problem(project_root, problems)
+    if Path(project_root).resolve() in _unknown_roots:
+        # This launch's currency probe already ran out of time; the runtime diagnostic
+        # reads the same inputs, so defer it to a later launch rather than wait again.
+        pm.activate(allow_incomplete=True)
+        return None
+    from hermes_cli.launch_probe import probe
+
+    # The diagnostic computes plugin-union inputs (including YAML) and may start PM.
+    # It is advisory: never make command dispatch wait indefinitely for it.
+    if os.name == "nt":
+        problems = pm.activate()  # Windows retains its existing path until native containment is available.
+    else:
+        result = probe(project_root, "runtime")
+        if result is None or result["state"] == "error":
+            # Tool activation has no worker or plugin-union/YAML read; keep bundled
+            # executables available even when the advisory diagnostic times out.
+            pm.activate(allow_incomplete=True)
+            return None if result is None else f"runtime check deferred: {result['detail']}"
+        os.environ["PATH"] = result["path"]
+        problems = result["problems"]
+    return _runtime_problem(project_root, problems)
+
+
+def _runtime_problem(project_root: Path, problems: list[str]) -> str | None:
+    from hermes_cli.steward import sealed_steward
+
     if not problems:
         return None
     steward = sealed_steward(Path(project_root))
@@ -422,6 +455,138 @@ def _relaunch_target(root: Path, python: Path, *, same: bool) -> Path | None:
     return python
 
 
+def _launchers_intact(root: Path) -> bool:
+    """Would publication leave every checkout launcher as it is? A small file read that,
+    unlike publication, imports no app config.
+
+    Mirrors ensure_install_launchers: a launcher is kept when it execs this root's own
+    store Python, or (for a checkout this home only borrows) a live interpreter outside
+    this root's store. Missing, dead and stale same-store pins republish."""
+    from hermes_cli._launchers import (
+        WINDOWS_BIN_LAUNCHERS, _is_home_checkout, _launcher_python, resolve_store_python)
+    from pm.environments import store_root
+
+    own = resolve_store_python(root, publication=True)  # what stage_launcher writes
+    if own is None:
+        return False
+    own = os.path.normcase(os.path.abspath(own))
+    try:
+        store = store_root(root).resolve()
+        owner = _is_home_checkout(root, store)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    local = root / ".hermes" / "bin"
+    for name in WINDOWS_BIN_LAUNCHERS:
+        # cmd.exe resolves the .exe before the .cmd: judge the form that would run.
+        forms = [local / f"{name}.exe", local / f"{name}.cmd"] if os.name == "nt" else [local / name]
+        running = next((form for form in forms if form.exists()), None)
+        python = None if running is None else _launcher_python(running)
+        try:
+            if python is None or not python.is_file():
+                return False
+            if os.path.normcase(os.path.abspath(python)) == own:
+                continue
+            if owner or any(parent.resolve() == store for parent in python.parents):
+                return False
+        except OSError:
+            return False
+    return True
+
+
+#: Checkouts this process found current at launch; check_runtime reuses the verdict.
+_current_roots: set[Path] = set()
+#: Checkouts whose launch probe timed out in this process: check_runtime defers its own
+#: (equally slow) diagnostic instead of paying a second deadline.
+_unknown_roots: set[Path] = set()
+#: (verdict, checkout) a launch is handing off to the managed interpreter for.
+_handoff: tuple[str, Path] | None = None
+#: One-shot "<verdict>:<pid>:<checkout>" a launch hands its exec'd self (same pid), so the
+#: child neither repeats a fresh probe ("current") nor waits out a second timeout
+#: ("unknown"). Popped first thing: a later re-exec (an early-recovery restore re-runs
+#: sys.orig_argv) and every subprocess check currency for themselves.
+LAUNCH_HANDOFF_ENV = "HERMES_LAUNCH_CURRENT_HANDOFF"
+_HANDOFF_VERDICTS = {"current": True, "unknown": None}
+
+
+def launch_handoff_env() -> dict[str, str]:
+    """Environment for the exec into the managed interpreter (hermes_bootstrap)."""
+    if _handoff is None:
+        return {}
+    verdict, root = _handoff
+    return {LAUNCH_HANDOFF_ENV: f"{verdict}:{os.getpid()}:{root}"}
+
+
+def exec_launch(python: Path, command: list[str]) -> None:
+    """POSIX: exec into the managed interpreter, handing it this launch's verdict.
+
+    Only returns by raising. A failed exec keeps running in this process, so the verdict is
+    withdrawn first: it must not reach subprocesses or a later same-pid re-exec (which would
+    then skip its own currency check)."""
+    handoff = launch_handoff_env()
+    os.environ.update(handoff)
+    try:
+        os.execv(str(python), command)
+    except BaseException:
+        for name in handoff:
+            os.environ.pop(name, None)
+        raise
+
+
+def _take_handoff(root: Path) -> tuple[bool, bool | None]:
+    """(handed off, verdict) from the parent this process was exec'd from."""
+    verdict, _, rest = os.environ.pop(LAUNCH_HANDOFF_ENV, "").partition(":")
+    if verdict not in _HANDOFF_VERDICTS or rest != f"{os.getpid()}:{root}":
+        return False, None
+    return True, _HANDOFF_VERDICTS[verdict]
+
+
+def _launch_currency(root: Path, command: list[str]) -> bool | None:
+    """Unknown is not stale: a slow passive check must not start a repair.
+
+    `hermes update` (not its report-only forms) is the remedy every deferred launch names,
+    so it waits for the full answer; Windows has no native process-tree containment yet."""
+    import pm
+    from hermes_cli.launch_probe import probe
+
+    explicit_update = command[:1] == ["update"] and not _REPORT_ONLY_UPDATE_FLAGS & set(command)
+    if os.name == "nt" or explicit_update:
+        return pm.venv_is_current(project_root=root)
+    result = probe(root)
+    if result is None:
+        return None
+    if result["state"] == "error":
+        raise RuntimeError(result["detail"])
+    return result["state"] == "current"
+
+
+def _unknown_launch_target(root: Path) -> Path | None:
+    """Launch on an unknown currency verdict (the bounded probe gave no answer).
+
+    Unknown is not stale: no repair, no publication, completion debt untouched (a later
+    launch or explicit update retries). Interpreter isolation still holds: a venv or
+    foreign interpreter hands off once to the managed (signed) one, carrying the verdict
+    so the exec'd child does not wait out a second deadline."""
+    global _handoff
+    import sys
+
+    from hermes_cli._launchers import resolve_store_python, signed_python_app
+
+    _unknown_roots.add(root)
+    if completion_pending_path(root).is_file():
+        # Deferred, not dropped: the next launch retries; say so where an operator looks.
+        print("hermes: dependency check timed out; a source update is still unfinished "
+              "(retried on the next launch, or run `hermes update` to finish it now)",
+              file=sys.stderr, flush=True)
+    python = resolve_store_python(root)
+    if python is None:
+        return None
+    python = signed_python_app(python) or python
+    if os.path.normcase(os.path.abspath(python)) == os.path.normcase(os.path.abspath(sys.executable)):
+        return None
+    _handoff = ("unknown", root)
+    return python
+
+
 def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     """Finish a self-managed source update before importing app dependencies.
 
@@ -438,7 +603,10 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     import os
     import sys
 
+    global _handoff
     root = Path(project_root).resolve()
+    handed_off, handed_verdict = _take_handoff(root)
+    _handoff = None
     # sys.argv[0] is this process's script identity; *argv* carries only the command.
     if _is_tail_script(root, sys.argv[0]):
         return None
@@ -470,7 +638,10 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     from hermes_cli._launchers import resolve_store_python
     from hermes_cli.update_lock import UpdateLock, read_live_update
 
-    current = pm.venv_is_current(project_root=root)
+    # The parent this process was exec'd from (same pid) probed an instant ago.
+    current = handed_verdict if handed_off else _launch_currency(root, command)
+    if current is None:
+        return _unknown_launch_target(root)
     from pm.environments import owning_home_root
 
     owner = owning_home_root(root)
@@ -525,9 +696,13 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     # venv interpreter symlinked to the same binary is still a different
     # interpreter (its own sys.prefix) and must re-exec once.
     same = os.path.normcase(os.path.abspath(python)) == os.path.normcase(os.path.abspath(sys.executable))
-    if not current or not same:
+    if not current or not _launchers_intact(root):
         publish_launchers(root)
+    if not current or not same:
+        if current:
+            _handoff = ("current", root)
         return _relaunch_target(root, python, same=same)
+    _current_roots.add(root)
     if owed_to_cli:
         # Left owed, not dropped: say so (once, in the process that boots) where an
         # operator of the unit will read it.

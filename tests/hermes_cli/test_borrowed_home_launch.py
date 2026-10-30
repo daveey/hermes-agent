@@ -28,6 +28,7 @@ def _no_tool_downloads(monkeypatch):
     import pm.client
 
     monkeypatch.setattr(pm.client, "ensure_tools_for_sync", lambda: None)
+    monkeypatch.setattr(venv_sync, "_launch_currency", lambda root, command: pm.venv_is_current(project_root=root))
 
 
 @pytest.fixture
@@ -175,7 +176,7 @@ def test_a_borrowing_launch_syncs_its_own_dependencies_and_nothing_of_the_checko
     python = tmp_path / ".hermes" / "tools" / "python" / "bin" / "python3"
     monkeypatch.setattr(pm, "venv_is_current", lambda **kw: borrowed_facts.is_file())
     monkeypatch.setattr(pm, "sync_venv", sync)
-    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _: python)
+    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _, **__: python)
     monkeypatch.setattr(venv_sync, "publish_launchers", lambda *a, **kw: pytest.fail("published the owner's launchers"))
 
     assert venv_sync.prepare_launch(root, ["kanban", "init"]) == python  # relaunch into the synced env
@@ -202,7 +203,7 @@ def test_the_owner_still_owes_and_runs_its_tail(tmp_path, monkeypatch, completio
     facts.unlink()
     monkeypatch.setattr(pm, "venv_is_current", lambda **kw: facts.is_file())
     monkeypatch.setattr(pm, "sync_venv", lambda *a, **kw: facts.write_text("{}", encoding="utf-8"))
-    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _: Path(sys.executable))
+    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _, **__: Path(sys.executable))
     published = []
     monkeypatch.setattr(venv_sync, "publish_launchers", lambda r, **kw: published.append(r))
 
@@ -230,7 +231,7 @@ def test_borrowed_launch_already_on_the_store_interpreter_does_not_reexec(tmp_pa
     monkeypatch.setattr(pm, "sync_venv", lambda *a, **kw: (
         borrowed_facts.parent.mkdir(parents=True, exist_ok=True)
         or borrowed_facts.write_text("{}", encoding="utf-8")))
-    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _: python)
+    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _, **__: python)
 
     assert venv_sync.prepare_launch(root, ["kanban", "init"]) is None
     assert borrowed_facts.is_file()
