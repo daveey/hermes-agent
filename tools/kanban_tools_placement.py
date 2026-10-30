@@ -1,9 +1,38 @@
 """Placement refusals for ``kanban_create`` (split out of :mod:`tools.kanban_tools`). [daveey]"""
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from tools.registry import tool_error
+
+logger = logging.getLogger(__name__)
+
+
+def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
+    """Return a session id only when it is a real chat: present in this profile's state.db and not a
+    ``kanban.placement`` creator placeholder (a stray notice can give the placeholder a state.db row,
+    so presence alone does not prove a chat; defect kanban-69709bcf16). [daveey]"""
+    if not session_id:
+        return None
+    try:
+        from hermes_cli.kanban_placement import is_placeholder_session
+        if is_placeholder_session(session_id):
+            return None
+    except Exception:
+        logger.debug("Could not check Kanban placement placeholder", exc_info=True)
+    try:
+        from hermes_state import SessionDB
+        from hermes_constants import get_hermes_home
+
+        state = SessionDB(db_path=get_hermes_home() / "state.db", read_only=True)
+    except Exception:  # state.db may not exist for a CLI/dashboard invocation
+        logger.debug("Could not open state.db to verify Kanban provenance", exc_info=True)
+        return None
+    try:
+        return session_id if state.get_session(session_id) else None
+    finally:
+        state.close()
 
 
 def _placement_refused(pin: str, why: str) -> str:

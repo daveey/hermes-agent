@@ -21,7 +21,8 @@ from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
-from tools.kanban_tools_placement import _marker_placement_fields, _placement_refused, _runs_where
+from tools.kanban_tools_placement import (_marker_placement_fields, _persisted_session_id,
+                                          _placement_refused, _runs_where)
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg
 from hermes_cli.kanban_block_policy import ask_lint_check
@@ -1561,24 +1562,6 @@ def _handle_attachments(args: dict, **kw) -> str:
                 _fields(a, _ATTACHMENT_FIELDS) for a in kb.list_attachments(conn, tid)]})
 
 
-def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
-    """Return a session id only when it is present in this profile's state.db."""
-    if not session_id:
-        return None
-    try:
-        from hermes_state import SessionDB
-        from hermes_constants import get_hermes_home
-
-        state = SessionDB(db_path=get_hermes_home() / "state.db", read_only=True)
-    except Exception:  # state.db may not exist for a CLI/dashboard invocation
-        logger.debug("Could not open state.db to verify Kanban provenance", exc_info=True)
-        return None
-    try:
-        return session_id if state.get_session(session_id) else None
-    finally:
-        state.close()
-
-
 def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id, conn=None
                   ) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
@@ -1732,7 +1715,10 @@ def _handle_create(args: dict, **kw) -> str:
             session_id = args.get("session_id")
         else:
             session_id = (_persisted_session_id(args.get("session_id"))
-                          or (self_task.session_id if self_task else None)
+                          # The parent card's session too: a card placed from another gateway carries
+                          # a placeholder (or a chat that lives elsewhere), and handing that on as a
+                          # child's origin made the owner's bind fail (kanban-69709bcf16). [daveey]
+                          or _persisted_session_id(self_task.session_id if self_task else None)
                           or _persisted_session_id(_current_origin_session_id())
                           or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))
         if project_id is None and workspace_kind is None and workspace_path is None:
