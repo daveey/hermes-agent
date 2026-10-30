@@ -63,10 +63,31 @@ def test_closed_websocket_in_shielded_keepalive_is_not_forwarded(loop_with_captu
 
 
 def test_other_exception_in_shielded_future_still_forwarded(loop_with_capture):
+    # Synthetic context: CPython 3.14.9+ no longer logs shielded-future failures at all (the
+    # ``_log_on_exception`` callback was removed from ``asyncio.shield``), so replaying the
+    # keepalive sequence cannot produce this context on every supported interpreter.
     loop, forwarded = loop_with_capture
-    _shielded_failure(loop, RuntimeError("real bug behind a shield"))
-    assert len(forwarded) == 1
-    assert isinstance(forwarded[0]["exception"], RuntimeError)
+    ctx = {"message": "RuntimeError exception in shielded future", "exception": RuntimeError("real bug behind a shield")}
+    loop.call_exception_handler(ctx)
+    assert forwarded == [ctx]
+
+
+def test_filter_forwards_whatever_asyncio_reports_for_a_shielded_failure():
+    """Replay parity: with the filter installed, a non-websocket shield failure reaches the handler
+    exactly when it would without the filter (once on <=3.14.7, never on 3.14.9+)."""
+    counts = []
+    for install in (False, True):
+        loop = asyncio.new_event_loop()
+        seen: list[dict] = []
+        loop.set_exception_handler(lambda _loop, ctx, seen=seen: seen.append(ctx))
+        if install:
+            install_loop_noise_filter(loop)
+        try:
+            _shielded_failure(loop, RuntimeError("real bug behind a shield"))
+        finally:
+            loop.close()
+        counts.append(len(seen))
+    assert counts[0] == counts[1]
 
 
 def test_closed_websocket_outside_a_shield_still_forwarded(loop_with_capture):
