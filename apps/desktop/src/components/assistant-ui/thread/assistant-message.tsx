@@ -1245,8 +1245,12 @@ const ERROR_ACTION_RENDERERS: Record<ErrorActionId, (ctx: ErrorActionContext) =>
   compress: ({ className, copy }) => (
     <CompressConversationAction className={className} label={copy.errorCompressConversation} />
   ),
-  start_new_session: ({ className, copy, link }) =>
-    textButton(className, requestFreshSession, link ? copy.errorStartNewChatLink : copy.errorStartNewSession),
+  start_new_session: ({ className, copy, link, surface }) =>
+    textButton(
+      className,
+      requestFreshSession,
+      link && surface?.code !== 'SESSION_NOT_OWNED' ? copy.errorStartNewChatLink : copy.errorStartNewSession
+    ),
   edit_message: ({ className, copy }) => <EditPreviousMessageAction className={className} label={copy.editMessage} />,
   open_hermes_folder: ({ className, copy, ownerProfile }) =>
     window.hermesDesktop?.logsRoot
