@@ -61,7 +61,7 @@ if "/jobs" in endpoint:
     run = next(r for r in runs if f"/runs/{{r['id']}}/jobs" in endpoint)
     jobs = [{{"name": "Full suite / " + n, "status": "completed", "conclusion": run["conclusion"],
               "labels": ["self-hosted", "hermes-hub"], "runner_name": "hub-1"}}
-            for n in ("Run tests (1/2)", "Run tests (2/2)", "e2e")]
+            for n in [f"Run tests ({{i}}/8)" for i in range(1, 9)] + ["e2e"]]
     print(json.dumps([{{"jobs": jobs}}]))
 elif "/pulls?" in endpoint:
     branch = endpoint.split("head=", 1)[1].split("&", 1)[0].split(":", 1)[1]
