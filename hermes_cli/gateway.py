@@ -70,6 +70,9 @@ from hermes_cli.setup import (
 )
 from hermes_cli.colors import Colors, color
 from hermes_cli.gateway_profile_lifecycle import owned_gateway_pid as _owned_gateway_pid
+from hermes_cli.gateway_supervised_handback import (
+    _host_decision_exit_code, custom_job_serves, supervised_attach_exit_code,
+)
 logger = logging.getLogger(__name__)
 
 # Shared ``subprocess.run`` kwargs for text-mode probes (stdout/stderr captured, decode-tolerant).
@@ -1009,37 +1012,13 @@ def _prepare_profile_gateway_update_restart(profile: str, pid: int) -> str | Non
     disk. ``argv`` is already captured above, so the fallback costs nothing extra.
     """
     argv = _capture_gateway_argv(pid)
-    if argv_declares_external_supervisor(argv):
-        return "external-supervisor"
-    if _home_has_custom_launchd_supervisor(profile):
+    if argv_declares_external_supervisor(argv) or custom_job_serves(profile):
         return "external-supervisor"
     if launch_detached_profile_gateway_restart(profile, pid):
         return "detached"
     if argv and launch_detached_gateway_restart_by_cmdline(pid, list(argv)):
         return "detached-cmdline"
     return None
-
-
-def _home_has_custom_launchd_supervisor(profile: str) -> bool:
-    """[daveey] A KeepAlive LaunchAgent under any label serves this profile's home.
-
-    gateway-e2cd786685 (second occurrence): a client-spawned MANUAL gateway held the mini's
-    ``~/.bb-hermes`` when hermes-sync ran ``hermes update``; the updater armed a detached watcher that
-    relaunched it manual again, so ``com.daveey.babybear.hermes`` stayed locked out (exit 75 loop).
-    Stopping it and letting the KeepAlive job respawn hands the home back instead."""
-    import time
-    try:
-        from hermes_cli.gateway_runtime_service import custom_launchd_supervisor_for_home
-        from hermes_cli.profiles import get_profile_dir
-        service = custom_launchd_supervisor_for_home(get_profile_dir(profile), deadline=time.monotonic() + 10)
-    except Exception:  # health: allow BLE001 -- unknown supervisor state keeps the old relaunch path
-        logger.debug("custom launchd supervisor probe failed for %s", profile, exc_info=True)
-        return False
-    if service is None:
-        return False
-    print(f"  → {profile}: its home is served by a KeepAlive launchd job "
-          f"({service.start_argv[-1]}); stopping the manual gateway so that job takes the home back")
-    return True
 
 
 def launch_detached_gateway_restart_by_cmdline(old_pid: int, run_argv: list[str], home: str | None = None) -> bool:
@@ -4340,53 +4319,6 @@ def _guard_named_profile_under_multiplexer(force: bool = False) -> None:
     sys.exit(GATEWAY_FATAL_CONFIG_EXIT_CODE)
 
 
-def _host_decision_exit_code(decision) -> int:
-    """Exit code for a host-attach verdict a supervisor may be watching.
-
-    ``GATEWAY_FATAL_CONFIG_EXIT_CODE`` (78) is the PERMANENT refusal: systemd parks the unit on it
-    (``RestartPreventExitStatus``), the s6 finish script maps it to 125, launchd maps it to a
-    deliberate stop. That is right for a config-derived refusal and wrong for a runtime one — "some
-    other process serves me right now" ends the moment that process goes away, and parking the unit
-    on it strands the profile until a human notices. Transient verdicts therefore use
-    ``GATEWAY_SERVICE_RESTART_EXIT_CODE`` (75, EX_TEMPFAIL), which every supervisor we generate
-    already retries: systemd has ``RestartForceExitStatus=75`` with ``RestartSec=5``, the s6 finish
-    script passes it through, and launchd relaunches a non-78 failure. Exit 0 would NOT do: s6
-    parks a clean exit too.
-    """
-    if getattr(decision, "transient", False):
-        return GATEWAY_SERVICE_RESTART_EXIT_CODE
-    return GATEWAY_FATAL_CONFIG_EXIT_CODE
-
-
-def _supervised_attach_to_owner_of_this_home(decision) -> None:
-    """[daveey] A supervised start that ATTACHES to a live gateway launched from THIS home is a refusal.
-
-    gateway-e2cd786685: ``hermes update`` (run by hermes-sync) relaunched an unsupervised gateway for
-    the home that the mini's KeepAlive job supervises. Once that gateway published its host record,
-    every KeepAlive retry stopped here ("nothing to start", exit 75) before ``start_gateway`` ran, so
-    neither the duplicate guard's handback (``run_bootstrap._hand_home_back_to_supervisor``) nor any
-    exit-diag row ever happened, and the job looped for hours with no signal. Record the refusal in
-    ``gateway-exit-diag.log`` (the coach's wedge detector reads it) and ask a MANUAL owner to drain;
-    the exit code stays the caller's. A profile unit attaching to a host multiplexer launched from
-    another home is a real attach and is left alone.
-    """
-    owner = getattr(decision, "owner", None)
-    if owner is None:
-        return
-    try:
-        if Path(owner.home).expanduser().resolve() != Path(get_hermes_home()).expanduser().resolve():
-            return
-        from gateway.run_bootstrap import _hand_home_back_to_supervisor
-        from gateway.run_exit_reason import note_start_refused
-        from hermes_cli.gateway_exit_diag import make_exit_diag, nonzero_exit_record
-        note_start_refused("already_running", owner_pid=owner.pid, detail="host_attach")
-        _hand_home_back_to_supervisor(owner.pid)
-        tag, extra = nonzero_exit_record()
-        make_exit_diag()(tag, **extra)
-    except Exception:  # health: allow BLE001 -- recording/handback is best-effort; the attach exit stands
-        logger.debug("Supervised attach refusal record failed", exc_info=True)
-
-
 def _attach_to_host_gateway_or_guard(force: bool = False, replace: bool = False) -> None:
     """``gateway run`` against the ONE host gateway: attach, rescan-then-attach, replace, or refuse.
 
@@ -4417,8 +4349,7 @@ def _attach_to_host_gateway_or_guard(force: bool = False, replace: bool = False)
             logger.warning("gateway run refused (exit %d): %s", code, decision.message)
             sys.exit(code)
         if _running_under_gateway_supervisor():
-            _supervised_attach_to_owner_of_this_home(decision)
-            sys.exit(_host_decision_exit_code(decision))
+            sys.exit(supervised_attach_exit_code(decision))
         sys.exit(0)
     # No host record (older gateway, unwritable lock dir): the config-derived refusal still applies.
     _guard_named_profile_under_multiplexer(force=force)
