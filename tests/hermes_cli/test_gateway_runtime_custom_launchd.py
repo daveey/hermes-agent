@@ -162,3 +162,42 @@ def test_detached_replacement_without_any_service_still_spawns(account, monkeypa
     monkeypatch.setattr(start, "spawn_unmanaged_gateway", lambda target, **k: spawned.append(Path(target)))
     assert start.start_detached_replacement(link) == 0
     assert spawned == [link]
+
+
+# --- hermes update: who relaunches a manual gateway of a supervised home --------------------------------------
+# Second occurrence of gateway-e2cd786685: hermes-sync ran ``hermes update`` while the client-spawned manual
+# gateway held ~/.bb-hermes. The updater saw a manual gateway and armed a detached watcher that relaunched it
+# manual again (``--profile default gateway run --quiet``), so the KeepAlive job stayed locked out after the
+# update too. A home that a KeepAlive job serves is that job's to restart.
+
+_MANUAL_ARGV = ["/Applications/Hermes Python.app/Contents/MacOS/python3.14", "-m", "hermes_cli.main",
+                "--profile", "default", "gateway", "run", "--quiet"]
+
+
+def _update_fixture(account, monkeypatch, *, with_agent=True):
+    from hermes_cli import gateway, gateway_runtime_service as service
+    link, real = _mini_home(account)
+    if with_agent:
+        _agent(account, real)
+    _launchctl(monkeypatch, service)
+    monkeypatch.setenv("HERMES_HOME", str(link))
+    monkeypatch.setattr(service.sys, "platform", "darwin")  # os-marker: ok — launchctl and the plist dir are stubbed; the logic is host-independent
+    monkeypatch.setattr(gateway, "_capture_gateway_argv", lambda _pid: list(_MANUAL_ARGV))
+    return gateway
+
+
+def test_update_hands_a_manual_gateway_of_a_supervised_home_back_to_its_job(account, monkeypatch):
+    gateway = _update_fixture(account, monkeypatch)
+    monkeypatch.setattr(gateway, "launch_detached_profile_gateway_restart",
+                        lambda *_a: pytest.fail("update relaunched a manual gateway beside a KeepAlive job"))
+    monkeypatch.setattr(gateway, "launch_detached_gateway_restart_by_cmdline",
+                        lambda *_a: pytest.fail("update replayed a manual gateway beside a KeepAlive job"))
+
+    assert gateway._prepare_profile_gateway_update_restart("default", 4242) == "external-supervisor"
+
+
+def test_update_still_relaunches_a_manual_gateway_when_no_job_serves_the_home(account, monkeypatch):
+    gateway = _update_fixture(account, monkeypatch, with_agent=False)
+    monkeypatch.setattr(gateway, "launch_detached_profile_gateway_restart", lambda *_a: True)
+
+    assert gateway._prepare_profile_gateway_update_restart("default", 4242) == "detached"

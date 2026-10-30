@@ -1011,11 +1011,35 @@ def _prepare_profile_gateway_update_restart(profile: str, pid: int) -> str | Non
     argv = _capture_gateway_argv(pid)
     if argv_declares_external_supervisor(argv):
         return "external-supervisor"
+    if _home_has_custom_launchd_supervisor(profile):
+        return "external-supervisor"
     if launch_detached_profile_gateway_restart(profile, pid):
         return "detached"
     if argv and launch_detached_gateway_restart_by_cmdline(pid, list(argv)):
         return "detached-cmdline"
     return None
+
+
+def _home_has_custom_launchd_supervisor(profile: str) -> bool:
+    """[daveey] A KeepAlive LaunchAgent under any label serves this profile's home.
+
+    gateway-e2cd786685 (second occurrence): a client-spawned MANUAL gateway held the mini's
+    ``~/.bb-hermes`` when hermes-sync ran ``hermes update``; the updater armed a detached watcher that
+    relaunched it manual again, so ``com.daveey.babybear.hermes`` stayed locked out (exit 75 loop).
+    Stopping it and letting the KeepAlive job respawn hands the home back instead."""
+    import time
+    try:
+        from hermes_cli.gateway_runtime_service import custom_launchd_supervisor_for_home
+        from hermes_cli.profiles import get_profile_dir
+        service = custom_launchd_supervisor_for_home(get_profile_dir(profile), deadline=time.monotonic() + 10)
+    except Exception:  # health: allow BLE001 -- unknown supervisor state keeps the old relaunch path
+        logger.debug("custom launchd supervisor probe failed for %s", profile, exc_info=True)
+        return False
+    if service is None:
+        return False
+    print(f"  → {profile}: its home is served by a KeepAlive launchd job "
+          f"({service.start_argv[-1]}); stopping the manual gateway so that job takes the home back")
+    return True
 
 
 def launch_detached_gateway_restart_by_cmdline(old_pid: int, run_argv: list[str], home: str | None = None) -> bool:
