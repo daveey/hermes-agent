@@ -132,6 +132,11 @@ def _run_serve(tmp_path, *, update_running: bool, new: str = NEW, moved_before_g
     return result, incarnations, token_reads, proc.stderr
 
 
+def _gate_log(tmp_path) -> str:
+    path = tmp_path / "home" / "logs" / suw.GATE_LOG_NAME
+    return path.read_text() if path.exists() else ""
+
+
 @pytest.mark.skipif(os.name == "nt", reason="re-exec in place is POSIX only")
 def test_serve_that_waited_out_an_update_reports_the_commit_it_runs(tmp_path):
     result, incarnations, token_reads, stderr = _run_serve(tmp_path, update_running=True)
@@ -145,6 +150,14 @@ def test_serve_that_waited_out_an_update_reports_the_commit_it_runs(tmp_path):
     assert len(incarnations) == 2 and len(set(incarnations)) == 1 == len(set(token_reads))
     assert token_reads == incarnations[:1]
     assert "re-executing" in stderr
+    # Durable record in <HERMES_HOME>/logs (Desktop deletes the per-spawn stderr log): the wait,
+    # the re-exec and the re-executed image, all stamped with the one pid.
+    pid = incarnations[0]
+    lines = _gate_log(tmp_path).splitlines()
+    assert any(f"pid={pid} serve: a core update is in progress; waiting" in ln for ln in lines), lines
+    assert any(f"pid={pid} serve: the checkout moved from {OLD[:10]}" in ln and "re-executing so this backend runs" in ln
+               for ln in lines), lines
+    assert any(f"pid={pid} serve: re-executed image #1 gated on {NEW}" in ln for ln in lines), lines
 
 
 @pytest.mark.skipif(os.name == "nt", reason="re-exec in place is POSIX only")
@@ -153,6 +166,22 @@ def test_serve_with_no_update_does_not_reexec(tmp_path):
     assert result["health_commit"] == result["head"] == OLD
     assert len(incarnations) == 1 and len(token_reads) == 1
     assert "re-executing" not in stderr
+    assert _gate_log(tmp_path) == ""  # nothing waited, nothing re-executed: nothing recorded
+
+
+def test_gate_record_survives_an_unwritable_home_and_rotates(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+    path = suw.gate_log_path()
+    assert path is not None and path == tmp_path / "h" / "logs" / suw.GATE_LOG_NAME
+    suw._stderr("serve: one")
+    assert f"pid={os.getpid()} serve: one" in path.read_text()
+    monkeypatch.setattr(suw, "GATE_LOG_MAX_BYTES", 1)
+    suw._stderr("serve: two")
+    assert "serve: one" in path.with_name(path.name + ".1").read_text()
+    assert "serve: two" in path.read_text() and "serve: one" not in path.read_text()
+    monkeypatch.setattr(suw, "gate_log_path", lambda: tmp_path / "file" / "x.log")
+    (tmp_path / "file").write_text("not a dir")
+    suw._stderr("serve: three")  # must not raise
 
 
 @pytest.mark.skipif(os.name == "nt", reason="re-exec in place is POSIX only")

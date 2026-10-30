@@ -78,8 +78,42 @@ def admission_hold_present(root: Optional[Path] = None) -> bool:
         return False  # a hint, not a fence: an unreadable hold must not delay every start
 
 
+GATE_LOG_NAME = "serve-update-gate.log"
+GATE_LOG_MAX_BYTES = 2_000_000
+
+
+def gate_log_path() -> Optional[Path]:
+    """``<HERMES_HOME>/logs/serve-update-gate.log``: the durable, host-wide record of gate decisions.
+
+    stderr alone is not enough: Desktop SSH serves write it to a per-spawn
+    ``desktop-ssh/<id>/<nonce>.log`` that Desktop deletes when the backend is replaced, so a wait
+    or a re-exec left no trace once the next update retired that serve (t_01a1832a732d95e8)."""
+    from hermes_constants import get_hermes_home
+
+    return Path(get_hermes_home()) / "logs" / GATE_LOG_NAME
+
+
+def _record(msg: str) -> None:
+    path = gate_log_path()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.stat().st_size > GATE_LOG_MAX_BYTES:
+                os.replace(path, path.with_name(path.name + ".1"))
+        except FileNotFoundError:
+            pass
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S%z")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{stamp} pid={os.getpid()} {msg}\n")
+    except OSError as exc:  # a log write must never stop a backend from starting
+        print(f"serve: cannot record to {path}: {exc}", file=sys.stderr, flush=True)
+
+
 def _stderr(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
+    _record(msg)
 
 
 def wait_for_update_clear(*, update_probe: Optional[Callable[[], bool]] = None,
@@ -221,6 +255,10 @@ def reexec_if_checkout_moved(result: str, launch_fingerprint: Optional[str], *,
         count = int(os.environ.pop(REEXEC_ENV, "0") or 0)  # never leaks into the agent's children
     except ValueError:
         count = 0
+    if count and log is None:
+        # The durable after-half of a re-exec: same pid as the "re-executing" record before it.
+        fp = (current_fingerprint or checkout_fingerprint)()
+        _record(f"serve: re-executed image #{count} gated on {_sha(fp) or fp or 'no checkout'}")
     if result not in ("cleared", "clear"):
         return False
     if result == "clear":
