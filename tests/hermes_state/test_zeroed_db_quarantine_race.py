@@ -41,11 +41,23 @@ def test_preflight_cannot_observe_db_mid_quarantine(tmp_path, monkeypatch):
             late_reached.set()  # about to block on the lock worker 0 holds
         return real_lock(path, *args, **kwargs)
 
+    late_done = threading.Event()
+
     def worker(idx):
+        # Neither opener closes until BOTH have opened: a close() unlinks -wal/-shm (and retires the
+        # WAL generation), which would race the other opener's chmod/generation check. That close
+        # race is not what this test covers (the sidecar tolerance has its own test below).
+        db_obj = None
         try:
-            hs.SessionDB(db_path=db).close()
+            db_obj = hs.SessionDB(db_path=db)
         except Exception as exc:  # surfaced by the assertions below
             errors[idx] = exc
+        if idx == 1:
+            late_done.set()
+        else:
+            late_done.wait(20)
+        if db_obj is not None:
+            db_obj.close()
 
     late = threading.Thread(target=worker, args=(1,), name="late-opener")
 
