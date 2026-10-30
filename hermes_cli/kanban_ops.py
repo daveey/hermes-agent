@@ -334,7 +334,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         removed_ws = gc_task_worktrees(conn, older_than_days=wt_days)
     with kbc.connect_closing() as conn:
-        removed_ws += gc_task_scratch(conn)
+        removed_ws += gc_task_scratch(conn, older_than_days=wt_days)
 
     removed_events = 0
     if event_days:

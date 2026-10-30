@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -33,23 +34,32 @@ def retention_days() -> int:
         return 0
 
 
-def gc_task_scratch(conn: sqlite3.Connection) -> int:
+def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = None) -> int:
     """Retry terminal scratch cleanup, failing closed on any unreadable board.
 
     Only task records establish ownership; never infer it from directory names.
     Read every board before the first removal, even if an earlier board reports
     a live sharer. Keep the selected owner locked against concurrent resumption.
+
+    A tree that is kept only because it holds standalone git clones is archived
+    and then removed once its card finished more than *older_than_days* ago
+    (default ``kanban.worktree_retention_days``; 0 disables). [daveey]
     """
     import shutil
 
     from hermes_cli import kanban_db as kb
 
+    days = retention_days() if older_than_days is None else older_than_days
     removed = 0
+    aged: list[tuple[str, Path, int | None]] = []
     with kb.write_txn(conn):
         try:
             rows = conn.execute(
-                "SELECT id, workspace_path FROM tasks WHERE workspace_kind='scratch' "
-                f"AND status IN {ws._TERMINAL_STATUSES_SQL}"
+                "SELECT t.id, t.workspace_path, t.completed_at, t.created_at, "
+                "(SELECT MAX(created_at) FROM task_events e WHERE e.task_id=t.id "
+                " AND e.kind NOT LIKE 'workspace%') AS last_event "
+                "FROM tasks t WHERE t.workspace_kind='scratch' "
+                f"AND t.status IN {ws._TERMINAL_STATUSES_SQL}"
             ).fetchall()
             for board in ws._sibling_board_db_files(conn):
                 with _read_board(board) as other:
@@ -63,16 +73,79 @@ def gc_task_scratch(conn: sqlite3.Connection) -> int:
                 continue
             if ws._has_active_children(conn, row["id"]):
                 continue
-            if not ws._scratch_tree_removable(path):
+            removable = ws._scratch_tree_removable(path)
+            if not removable and not _finished_before(row, days):
                 continue
             if ws._defer_shared_workspace_cleanup(conn, row["id"], path):
+                continue
+            if not removable:
+                aged.append((row["id"], path, row["completed_at"]))
                 continue
             ws.release_lsp_clients(str(path))
             shutil.rmtree(path, ignore_errors=True)
             if not path.exists():
                 ws._log_scratch_removal(conn, row["id"], path, "scratch workspace (GC retry)")
                 removed += 1
+    # Archiving runs git for minutes on big clones: never hold the board's write lock for it.
+    for task_id, path, completed_at in aged:
+        removed += _archive_and_remove_scratch(conn, task_id, path, completed_at)
     return removed
+
+
+def _finished_before(row: sqlite3.Row, days: int) -> bool:
+    if days <= 0:
+        return False
+    since = row["completed_at"] or row["last_event"] or row["created_at"]
+    return bool(since and since <= time.time() - days * 86400)
+
+
+def _board_slug(conn: sqlite3.Connection) -> str:
+    from hermes_cli.kanban_db_connect import _main_db_file
+    from hermes_cli.kanban_db_sync import board_slug_for_path
+    db_file = _main_db_file(conn)
+    return board_slug_for_path(db_file) if db_file else "default"
+
+
+def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Path,
+                                completed_at: int | None) -> int:
+    """Archive every git repo in an aged scratch tree, then remove it; 1 when removed.
+
+    Any refusal or failure keeps the workspace and logs why. The owner is
+    re-checked under the write lock after archiving, and the tree is renamed
+    away inside that lock so a resumed card can never see it half-deleted.
+    """
+    import shutil
+    import subprocess
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_scratch_archive as sa
+
+    archive_dir = kb.kanban_home() / "archive" / "scratch" / _board_slug(conn) / task_id
+    try:
+        final = sa.archive_workspace(path, archive_dir, task_id=task_id, completed_at=completed_at)
+    except (sa.ArchiveRefused, OSError, subprocess.SubprocessError, ValueError) as exc:
+        log.info("Keeping aged scratch workspace for task %s: %s (%s)", task_id, path, exc)
+        return 0
+    ws.release_lsp_clients(str(path))
+    trash = path.with_name(f".{path.name}.gc-{os.getpid()}")
+    with kb.write_txn(conn):
+        if (not ws._is_terminal_task(conn, task_id) or ws._has_active_children(conn, task_id)
+                or ws._defer_shared_workspace_cleanup(conn, task_id, path)):
+            log.info("Keeping scratch workspace for task %s after archiving it to %s: "
+                     "the card is live again or shares the path: %s", task_id, final, path)
+            return 0
+        try:
+            path.rename(trash)
+        except OSError as exc:
+            log.info("Keeping aged scratch workspace for task %s: cannot move %s away (%s); "
+                     "archive at %s", task_id, path, exc, final)
+            return 0
+        kb._append_event(conn, task_id, "workspace_archived", {"path": str(path), "archive": str(final)})
+        ws._log_scratch_removal(conn, task_id, path, "scratch workspace (aged, git archived)")
+    shutil.rmtree(trash, ignore_errors=True)
+    if trash.exists():
+        log.warning("Archived scratch workspace for task %s was not fully removed: %s", task_id, trash)
+    return 1
 
 
 def gc_task_worktrees(conn: sqlite3.Connection, *, older_than_days: int = 7,
