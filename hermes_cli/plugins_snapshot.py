@@ -204,6 +204,12 @@ def record(stamp: Optional[str], home: Optional[Path] = None) -> None:
 # * hooks a manifest declares (``provides_hooks``) count even when the plugin did not register them;
 # * records with the same stamp are unioned, so processes that load the same inputs differently
 #   (another surface, a config-owned shell hook) can only grow the set.
+#
+# Contract for plugins: whether register() subscribes a hook must depend only on fingerprinted
+# inputs (plugin files, config.yaml, .env, the env flags above, installed packages); a hook gated on
+# anything else (another env var, argv, the surface, a data file) must be listed in the manifest's
+# ``provides_hooks``. A register() that raises (other than a timeout) is recorded as contributing
+# only its declared hooks: a plugin that always fails would otherwise prevent any record.
 
 HOOKS_VERSION = 1
 

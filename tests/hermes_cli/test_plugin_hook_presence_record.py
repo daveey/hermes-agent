@@ -180,9 +180,11 @@ def test_manifest_declared_hook_counts_even_when_not_registered(home):
     _plugin(home, "declarer", "def register(ctx):\n    pass\n",
             manifest_extra="provides_hooks: [on_kanban_task_updated]\n")
     _config(home, ["bystander", "declarer"])
-    _run(home, "setup")
+    tid = _run(home, "setup")["task_id"]
     _run(home, "discover")
     assert "on_kanban_task_updated" in _hooks_record(home)["hooks"]
+    out = _run(home, "assign", task_id=tid, profile="bob")
+    assert out["assigned"] is True and out["sweeps"] == 1  # served True: the invoke discovers
 
 
 def test_sweep_with_a_timed_out_plugin_does_not_vouch_for_the_hook_set(home):
