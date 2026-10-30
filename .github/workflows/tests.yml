@@ -438,15 +438,9 @@ jobs:
     # runs ~5-15 min. Sharded by suite directory (see e2e-upgrade-plan).
     name: e2e-upgrade (${{ matrix.shard }})
     needs: e2e-upgrade-plan
-    # [daveey] ci-bwrap: hub slots whose container can run bubblewrap (userns-remapped
-    # daemon, host AppArmor profile for /usr/bin/bwrap, Docker seccomp + namespace
-    # syscalls, unmasked /proc). A plain hermes-hub slot fails the bwrap probe below:
-    # Docker's default seccomp/AppArmor and masked /proc block bwrap, and the
-    # container cannot set the host's apparmor_restrict_unprivileged_userns.
-    # ci-bwrap slots live only on the on-demand box A (ec2-gwgen-1..3); never put the
-    # label on a spot box: EC2 ACPI-stops spot hosts and kills in-flight shards
-    # (pinned by test_long_job_labels_stay_off_spot_boxes in the hermes-sync repo).
-    # Runbook: hosts/hermes-ci-capacity/BWRAP.md in the hermes-sync repo.
+    # [daveey] ci-bwrap: one on-demand VM per job, from the runner AMI that lifts the
+    # userns restriction and proves bwrap at bake time (hosts/hermes-ci-runners/packer).
+    # Never route this to spot: EC2 stops spot hosts and kills in-flight shards.
     runs-on: [self-hosted, ci-bwrap]
     timeout-minutes: 60
     strategy:

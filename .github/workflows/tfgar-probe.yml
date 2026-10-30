@@ -1,0 +1,45 @@
+name: tfgar-probe
+
+# Probe lane assertions for the terraform-aws-github-runner pilot. Runs ONLY on the probe label.
+# Fails if IMDS or any private/RFC1918 range is reachable from a job.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolation-assertions:
+    runs-on: [self-hosted, linux, x64, tfgar-probe]
+    timeout-minutes: 10
+    steps:
+      - name: IMDS (169.254.169.254) must be unreachable
+        run: |
+          set -u
+          # A disabled IMDS answers 403, so only a 2xx (curl -f success) means it is reachable.
+          code=$(curl -sS -m 3 -o /dev/null -w '%{http_code}' -X PUT "http://169.254.169.254/latest/api/token" -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)
+          echo "IMDS token PUT http_code=${code:-none}"
+          case "$code" in 2*) echo "FAIL: IMDS issued a token"; exit 1;; esac
+          echo "ok: IMDS unreachable"
+      - name: No role credentials via env or files
+        run: |
+          set -u
+          if env | grep -E '^AWS_(ACCESS_KEY_ID|SESSION_TOKEN|CONTAINER_CREDENTIALS)'; then echo "FAIL: AWS creds in env"; exit 1; fi
+          if aws sts get-caller-identity >/dev/null 2>&1; then echo "FAIL: aws sts works"; exit 1; fi
+          echo "ok: no role credentials"
+      - name: RFC1918 and other private ranges must be unreachable
+        run: |
+          set -u
+          fail=0
+          # hub VPC host (this probe is valid while the hub VPC is 172.31.0.0/16), plus one address per range
+          for ip in 172.31.17.170 172.31.0.2 10.0.0.1 10.255.255.254 172.16.0.1 192.168.0.1 100.64.0.1; do
+            if timeout 4 bash -c "exec 3<>/dev/tcp/$ip/22" 2>/dev/null; then echo "FAIL: reached $ip:22"; fail=1; fi
+            if timeout 4 bash -c "exec 3<>/dev/tcp/$ip/443" 2>/dev/null; then echo "FAIL: reached $ip:443"; fail=1; fi
+          done
+          # control: public internet must work
+          curl -fsS -m 10 -o /dev/null https://api.github.com/zen || { echo "FAIL: no public egress (control)"; fail=1; }
+          [ $fail = 0 ] && echo "ok: private ranges unreachable, public egress works"
+          exit $fail
+      - name: Root, docker and baked toolchain present
+        run: |
+          sudo -n true && docker info >/dev/null && gh --version && uv --version && rustup --version && node --version && dpkg -s libatomic1 >/dev/null
