@@ -108,3 +108,120 @@ def test_refused_start_without_signal_writes_exit_nonzero(monkeypatch):
         gateway_cli.run_gateway()
     assert exc.value.code == 1
     assert _rows()[-1]["tag"] == "gateway.exit_nonzero"
+
+
+# --- [daveey] every False exit names its cause (defect gateway-3cf2256311 came back) -------------------------
+# The fix above named two causes (stop signal, refused start). Every other False return of
+# start_gateway() still wrote a bare ``gateway.exit_nonzero`` with no cause, so a new cause (mini,
+# 10-29 22:01 PT, after a reboot) was filed as a recurrence of the fixed one and nobody could read why.
+
+
+@pytest.fixture(autouse=True)
+def _reset_exit_cause():
+    from gateway import run_exit_reason
+    reset = getattr(run_exit_reason, "reset_exit_cause", None)
+    if reset is not None:
+        reset()
+    run_exit_reason.reset_start_refusal()
+    yield
+    if reset is not None:
+        reset()
+
+
+def test_failure_verdict_records_cause_and_exit_reason(monkeypatch):
+    runner = _runner(fail=True)
+    runner.exit_reason = "All messaging adapters disconnected"
+    gateway_cli = _prepare(monkeypatch, runner, None)
+    with pytest.raises(_HardExit) as exc:
+        gateway_cli.run_gateway()
+    assert exc.value.code == 1  # exit code unchanged: launchd/systemd behave the same
+    last = _rows()[-1]
+    assert last["tag"] == "gateway.exit_nonzero"
+    assert last["cause"] == "runner_failure"
+    assert last["exit_reason"] == "All messaging adapters disconnected"
+
+
+def test_false_exit_with_no_cause_note_says_unrecorded():
+    from hermes_cli.gateway_exit_diag import nonzero_exit_record
+    tag, extra = nonzero_exit_record()
+    assert tag == "gateway.exit_nonzero"
+    assert extra.get("cause") == "unrecorded"
+
+
+def test_early_start_gateway_false_records_its_cause(monkeypatch):
+    """A start_gateway() abort before the runner exists (profile reservation failed) names its cause."""
+    from gateway import run_bootstrap
+    from hermes_cli.gateway_exit_diag import nonzero_exit_record
+
+    def _disk_full(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(run_bootstrap, "_reserve_waiting_out_browse_reconcile", _disk_full)
+    assert run_bootstrap._start_gateway_reserve_profiles([]) is False
+    tag, extra = nonzero_exit_record()
+    assert tag == "gateway.exit_nonzero"
+    assert extra["cause"] == "profile_reservation_failed"
+    assert "disk full" in extra["exit_reason"]
+
+
+_NOTE_CALLS = {"note_exit_cause", "note_start_refused"}
+
+
+def _false_returns_without_note(func) -> list[int]:
+    """Line numbers of ``return False`` statements in ``func`` with no cause note earlier in their block."""
+    import ast
+
+    def _notes(stmt) -> bool:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else ""
+                if name in _NOTE_CALLS:
+                    return True
+        return False
+
+    bad: list[int] = []
+
+    def _scan(stmts):
+        for i, stmt in enumerate(stmts):
+            if (isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Constant)
+                    and stmt.value.value is False and not any(_notes(s) for s in stmts[:i])):
+                bad.append(stmt.lineno)
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue  # nested defs return to their own caller, not to start_gateway()
+            for field in ("body", "orelse", "finalbody"):
+                _scan(getattr(stmt, field, None) or [])
+            for handler in getattr(stmt, "handlers", None) or []:
+                _scan(handler.body)
+
+    _scan(func.body)
+    return bad
+
+
+@pytest.mark.parametrize("module, qualname", [
+    ("gateway.run_bootstrap", "start_gateway"),
+    ("gateway.run_bootstrap", "_start_gateway_run_runner"),
+    ("gateway.run_bootstrap", "_start_gateway_reserve_profiles"),
+    ("gateway.run_bootstrap", "_start_gateway_claim_pid_file"),
+    ("gateway.run_bootstrap", "_start_gateway_replace_existing_instance"),
+    ("gateway.run_bootstrap", "_launch_home_may_multiplex"),
+    ("gateway.run_shutdown", "_resolve_gateway_exit_verdict"),
+    ("gateway.run_startup", "GatewayStartupMixin.start"),
+    ("gateway.run_startup", "GatewayStartupMixin._start_impl"),
+    ("gateway.run", "_host_attach_or_none"),
+])
+def test_every_false_exit_path_notes_a_cause(module, qualname):
+    """Guard: a new ``return False`` on the gateway's exit path must say why (note_exit_cause)."""
+    import ast
+    import importlib
+    import inspect
+    import textwrap
+
+    obj = importlib.import_module(module)
+    for part in qualname.split("."):
+        obj = getattr(obj, part)
+    src = textwrap.dedent(inspect.getsource(obj))
+    func = ast.parse(src).body[0]
+    first = inspect.getsourcelines(obj)[1]
+    bad = [first + n - 1 for n in _false_returns_without_note(func)]
+    assert not bad, f"{module}.{qualname}: `return False` without note_exit_cause() at lines {bad}"

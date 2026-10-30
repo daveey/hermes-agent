@@ -39,3 +39,33 @@ def reset_start_refusal() -> None:
 def last_start_refusal() -> Optional[dict]:
     """``{"reason", "owner_pid", "owner_alive"[, "detail"]}`` for a refused start, else None."""
     return _last_start_refusal
+
+
+# [daveey] Every other False exit of ``start_gateway()`` names its cause too (defect
+# gateway-3cf2256311 came back): before this, only a stop signal and a refused start had one, so a
+# new cause wrote the same bare ``gateway.exit_nonzero`` as the fixed one and was filed as its
+# recurrence, with the reason only in gateway.log. ``cause`` is a short code, ``exit_reason`` the
+# human text (``runner.exit_reason`` or the exception). The FIRST note wins: the innermost site
+# knows most, and the generic note its caller adds on the way out must not overwrite it.
+# tests/hermes_cli/test_gateway_exit_signal.py scans the exit path for a bare ``return False``.
+_last_exit_cause: Optional[dict] = None
+
+
+def note_exit_cause(cause: str, reason: Optional[object] = None) -> None:
+    """Record why ``start_gateway()`` is about to return False (first note per process wins)."""
+    global _last_exit_cause
+    if _last_exit_cause is not None:
+        return
+    _last_exit_cause = {"cause": cause}
+    if reason:
+        _last_exit_cause["exit_reason"] = str(reason)[:500]
+
+
+def reset_exit_cause() -> None:
+    global _last_exit_cause
+    _last_exit_cause = None
+
+
+def last_exit_cause() -> Optional[dict]:
+    """``{"cause"[, "exit_reason"]}`` for a noted False exit, else None."""
+    return _last_exit_cause

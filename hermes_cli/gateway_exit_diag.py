@@ -33,7 +33,8 @@ def nonzero_exit_record() -> tuple[str, dict]:
     """Tag + fields for a False ``start_gateway()`` return. An unplanned stop signal (bootout,
     kickstart -k, systemctl stop) exits 1 on purpose so the service manager revives us, and a start
     refused because another gateway owns this home/host exits 1 too: neither is a crash, so each
-    names its cause. Only an unexplained False is a bare ``gateway.exit_nonzero``."""
+    names its cause. Any other False is ``gateway.exit_nonzero`` with the ``cause`` (and ``exit_reason``)
+    its exit site noted via ``note_exit_cause()``, or ``cause: "unrecorded"`` when it noted none."""
     from gateway.run_exit_reason import last_start_refusal
     from gateway.run_shutdown import last_signal_exit
     if (sig := last_signal_exit()) is not None:
@@ -44,7 +45,10 @@ def nonzero_exit_record() -> tuple[str, dict]:
         if "--external-supervisor" in sys.argv[1:]:
             refusal = {**refusal, "external_supervisor": True}
         return "gateway.start_refused", refusal
-    return "gateway.exit_nonzero", {}
+    # [daveey] Any other False exit carries the cause its exit site noted; a site that noted none
+    # says so ("unrecorded"), which the coach files as a missing note, not as an old crash.
+    from gateway.run_exit_reason import last_exit_cause
+    return "gateway.exit_nonzero", dict(last_exit_cause() or {"cause": "unrecorded"})
 
 
 def make_exit_diag():

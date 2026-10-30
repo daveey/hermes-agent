@@ -47,7 +47,7 @@ from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get, config_exists
 from gateway.run_common import _csv_or_list_to_set
 from hermes_cli.fallback_config import pre_agent_fallback_notice
 from gateway.turn_executor import _UnboundedThreadExecutor
-from gateway.run_exit_reason import note_start_refused
+from gateway.run_exit_reason import note_exit_cause, note_start_refused
 from gateway.run_signal_handlers import _start_gateway_make_restart_signal_handler, repeat_stop_signal
 from gateway import exit_deadline
 
@@ -4960,7 +4960,6 @@ async def _host_attach_or_none(replace: bool, force: bool = False) -> Optional[b
         return None
 
     from gateway.host_attach import ATTACH, REFUSE, REPLACE_HOST, decide
-
     decision = decide(get_hermes_home(), replace=replace)
     if decision.outcome == ATTACH:
         logger.info("Attaching to the host gateway instead of starting a second one: %s",
@@ -4976,6 +4975,7 @@ async def _host_attach_or_none(replace: bool, force: bool = False) -> Optional[b
     if decision.outcome == REPLACE_HOST and decision.owner is not None:
         # decide() only targets an owner that serves this profile or has not published its served set.
         if not await _start_gateway_replace_existing_instance(decision.owner.pid, True):
+            note_exit_cause("host_replace_failed", f"could not replace host gateway PID {decision.owner.pid}")
             return False
     return None
 

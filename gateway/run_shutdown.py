@@ -62,25 +62,24 @@ def last_signal_exit() -> Optional[dict]:
 def _resolve_gateway_exit_verdict(runner, signal_initiated_shutdown: bool) -> bool:
     """Resolve the process verdict after either startup abort or normal shutdown."""
     global _last_signal_exit
+    from gateway.run_exit_reason import note_exit_cause
     _last_signal_exit = None
     if _exit_with_failure_verdict(runner):
+        # [daveey] e.g. "All messaging adapters disconnected": name it in gateway-exit-diag.log too.
+        note_exit_cause("runner_failure", runner.exit_reason)
         return False
     if runner.exit_code is not None:
         raise SystemExit(runner.exit_code)
     if signal_initiated_shutdown and not runner._restart_requested:
-        logger.info(
-            "Exiting with code 1 (signal-initiated shutdown without restart "
-            "request) so the service manager can revive the gateway."
-        )
+        logger.info("Exiting with code 1 (signal-initiated shutdown without restart request) so the "
+                    "service manager can revive the gateway.")
         _last_signal_exit = dict(getattr(runner, "_unplanned_signal", None) or {"signal": "UNKNOWN"})
+        note_exit_cause("unplanned_signal", _last_signal_exit.get("signal"))
         return False
     # Older restart paths may not set ``runner.exit_code``; retain the service-restart fallback.
     if runner._restart_via_service:
-        logger.info(
-            "Exiting with code %d (service-restart requested) so the service "
-            "manager relaunches the gateway.",
-            GATEWAY_SERVICE_RESTART_EXIT_CODE,
-        )
+        logger.info("Exiting with code %d (service-restart requested) so the service manager relaunches "
+                    "the gateway.", GATEWAY_SERVICE_RESTART_EXIT_CODE)
         raise SystemExit(GATEWAY_SERVICE_RESTART_EXIT_CODE)
     return True
 

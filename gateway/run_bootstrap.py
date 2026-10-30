@@ -109,6 +109,8 @@ async def _start_gateway_replace_existing_instance(existing_pid: int, replace: b
             # Persistence must never abort the start; the traceback (DEBUG) keeps the
             # failure visible for the next bug report.
             logger.debug("Could not stamp runtime status after the ownership refusal", exc_info=True)
+        from gateway.run_exit_reason import note_exit_cause
+        note_exit_cause("replace_ownership_unproven", f"PID {existing_pid} is not provably this profile's gateway")
         return False
     existing_start_time = get_process_start_time(existing_pid)
     logger.info("Replacing existing gateway instance (PID %d) with --replace.", existing_pid)
@@ -131,6 +133,8 @@ async def _start_gateway_replace_existing_instance(existing_pid: int, replace: b
     except (PermissionError, OSError):
         logger.error("Permission denied killing PID %d. Cannot replace.", existing_pid)
         _clear_takeover_marker_quiet()
+        from gateway.run_exit_reason import note_exit_cause
+        note_exit_cause("replace_permission_denied", f"permission denied signalling PID {existing_pid}")
         return False
     # Up to 10s for SIGTERM, then SIGKILL.
     if not await _wait_for_pid_exit(existing_pid, 20, 0.5):
@@ -148,6 +152,8 @@ async def _start_gateway_replace_existing_instance(existing_pid: int, replace: b
                 "Old gateway (PID %d) still appears alive after SIGKILL; "
                 "aborting replacement to avoid a duplicate gateway.", existing_pid)
             _clear_takeover_marker_quiet()
+            from gateway.run_exit_reason import note_exit_cause
+            note_exit_cause("replace_target_alive", f"PID {existing_pid} survived SIGKILL")
             return False
     # Reap orphaned children (POSIX; mirrors Windows taskkill /T) so they stop holding scoped token locks.
     try:
@@ -669,9 +675,13 @@ def _start_gateway_reserve_profiles(profile_homes) -> bool:
                 "second gateway for the profile.")
             _write_runtime_status_quiet(gateway_state="startup_failed", exit_reason=str(exc))
             raise SystemExit(GATEWAY_FATAL_CONFIG_EXIT_CODE)
+        from gateway.run_exit_reason import note_exit_cause
+        note_exit_cause("profile_reservation_conflict", exc)
         return False
     except OSError as exc:
         logger.error("Cannot reserve gateway profiles: %s", exc)
+        from gateway.run_exit_reason import note_exit_cause
+        note_exit_cause("profile_reservation_failed", exc)
         return False
     return True
 
@@ -714,6 +724,8 @@ async def _start_gateway_run_runner(runner, _signal_initiated_shutdown: list) ->
         raise
     if not success:
         _shutdown_gateway_health_export(runner)
+        from gateway.run_exit_reason import note_exit_cause
+        note_exit_cause("runner_start_failed", getattr(runner, "exit_reason", None))
         return False
 
     if runner.should_exit_cleanly:
@@ -798,6 +810,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     profile_homes = (_multiplex_profile_homes(resolved_config)
                      if getattr(resolved_config, 'multiplex_profiles', False) else [])
     if profile_homes and not _launch_home_may_multiplex(resolved_config):
+        from gateway.run_exit_reason import note_exit_cause
+        note_exit_cause("multiplex_launch_refused")
         return False
     if profile_homes and not getattr(resolved_config, 'multiplex_profiles', False):
         profile_homes = []  # implicit default downgraded: this named launch serves only itself
@@ -806,17 +820,24 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # replace it (--replace) or refuse — before anything below binds a port or claims a PID file.
     _host_decision = await _host_attach_or_none(replace, force)
     if _host_decision is not None:
+        if _host_decision is False:
+            from gateway.run_exit_reason import note_exit_cause
+            note_exit_cause("host_decision_refused")
+            return False
         return _host_decision
 
     # Duplicate-instance guard scoped to HERMES_HOME (the host record is absent or unusable here).
     from gateway.status import get_running_pid
+    from gateway.run_exit_reason import note_exit_cause
     existing_pid = get_running_pid()
     if (existing_pid is not None and existing_pid != os.getpid()
             and not await _start_gateway_replace_existing_instance(existing_pid, replace)):
+        note_exit_cause("replace_existing_failed", f"existing gateway PID {existing_pid}")
         return False
 
     from gateway.status import remove_pid_file, release_gateway_runtime_lock
     if not _start_gateway_reserve_profiles(profile_homes):
+        note_exit_cause("profile_reservation_failed")
         return False
     # Freeze discovery: later profile additions must restart and reserve before opening stores.
     if profile_homes:
@@ -827,6 +848,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # owner over already freed the lock with that process.
     if not _start_gateway_claim_pid_file(force=force):
         release_gateway_runtime_lock()
+        note_exit_cause("pid_claim_failed")
         return False
 
     _control_server = None
