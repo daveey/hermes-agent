@@ -82,7 +82,12 @@ def _defines_memory_provider(path: Path) -> bool:
     heuristic, a docstring or comment naming the contract does not count."""
     for module in sorted(path.glob("*.py")):
         try:
-            tree = ast.parse(module.read_text(errors="replace", encoding="utf-8-sig"))
+            source = module.read_text(errors="replace", encoding="utf-8-sig")
+            # Both checks below need one of these names in the text (an `import MemoryProvider as X`
+            # alias and `mod.MemoryProvider` bases included), so skip the costly parse without them.
+            if "MemoryProvider" not in source and "register_memory_provider" not in source:
+                continue
+            tree = ast.parse(source)
         except (OSError, SyntaxError, ValueError):
             continue
         bases = {"MemoryProvider"} | {a.asname for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
