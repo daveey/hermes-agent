@@ -260,6 +260,55 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
     return hook
 
 
+# [daveey] t_01a18ac84e3491a9: a turn parked in a blocking clarify never reaches a step boundary, so the
+# drainer's pause budget runs out and the update cuts it (hub 2026-10-30 05:37: a clarify waited 41 min, the
+# turn crash-resumed). While a pause is requested and the turn's boundary hook would pause it, the clarify is
+# withdrawn unanswered; the hook then pauses at the boundary right after it and the continuation re-asks.
+CLARIFY_PAUSE_STATUS = "paused_for_update"
+CLARIFY_PAUSE_NOTICE = ("Hermes is pausing this turn at a step boundary for an update, so this question was "
+                        "withdrawn unanswered. The turn continues automatically after the update: ask it again then.")
+_clarify_provider_lock = threading.Lock()
+_clarify_provider_installed = False
+
+
+def _session_for(session_id: str) -> dict | None:
+    from tui_gateway import server
+    with server._sessions_lock:
+        sessions = list(server._sessions.values())
+    for session in sessions:
+        agent = session.get("agent")
+        if session.get("session_key") == session_id or getattr(agent, "session_id", None) == session_id:
+            return session
+    return None
+
+
+def clarify_pause_provider(session_id: str, tool_call_id: str):
+    """``tools.clarify_early`` provider: withdraw a blocked clarify when this turn will pause for an update."""
+    if not session_id:
+        return None
+    session = _session_for(session_id)
+    if session is None or getattr(session.get("agent"), "step_boundary_pause", None) is None:
+        return None
+    marker_key = str(session.get("session_key") or "")
+    if not marker_key or not pause_requested(session) or not_resumable_reason(session, marker_key):
+        return None
+    from tools.clarify_early import EarlyAnswer
+    logger.info("core-update pause: session %s withdrew a pending clarify to pause for a Hermes update", marker_key)
+    return EarlyAnswer({"status": CLARIFY_PAUSE_STATUS, "outcome": CLARIFY_PAUSE_STATUS,
+                        "notice": CLARIFY_PAUSE_NOTICE}, commit=lambda: None)
+
+
+def install_clarify_pause_provider() -> None:
+    """Idempotent; called when a turn installs its boundary hook."""
+    global _clarify_provider_installed
+    with _clarify_provider_lock:
+        if _clarify_provider_installed:
+            return
+        from tools import clarify_early
+        clarify_early.register_provider(clarify_pause_provider)
+        _clarify_provider_installed = True
+
+
 def pause_note(prompt: str, killed_jobs: list | None = None) -> str:
     from tui_gateway.session_history import _AUTO_CONTINUE_NOTE_PREFIX
     note = (f"{_AUTO_CONTINUE_NOTE_PREFIX} — it was paused at a step boundary for a Hermes update. Every "

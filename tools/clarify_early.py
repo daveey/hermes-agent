@@ -115,7 +115,7 @@ def ask(callback: Callable, normalized: list, session_id: str, tool_call_id: str
             continue
         cancelled = False
         try:
-            cancelled = bool(cancel(STATUS))
+            cancelled = bool(cancel(str(early.result.get("status") or STATUS)))
         except Exception:
             logger.debug("clarify cancel_early failed", exc_info=True)
         done.wait(5)

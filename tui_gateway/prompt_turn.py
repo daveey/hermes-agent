@@ -967,8 +967,10 @@ def _invoke_agent(
         "session.title", sid, {"session_id": _k, "title": t})
     _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
     # [daveey] Core-update pause: consulted by the agent loop at each step boundary of this turn only.
-    from tui_gateway.update_pause import boundary_pause_hook
+    from tui_gateway.update_pause import boundary_pause_hook, install_clarify_pause_provider
     agent.step_boundary_pause = boundary_pause_hook(session, st.marker_key) if st.marker_key else None
+    if st.marker_key:
+        install_clarify_pause_provider()  # a blocked clarify is withdrawn so the pause can land
     try:
         from agent.notification_presentation import notification_turn, event_presentation_muted
         with notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid):

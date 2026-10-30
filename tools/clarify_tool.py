@@ -123,7 +123,10 @@ def clarify_tool(questions, callback: Optional[Callable] = None, *, session_id: 
             from tools import clarify_early
             reply, early = clarify_early.ask(callback, normalized, session_id or "", tool_call_id or "")
             if early is not None:
-                human.outcome = clarify_early.STATUS
+                try:
+                    human.outcome = str(json.loads(early).get("status") or clarify_early.STATUS)
+                except (ValueError, AttributeError):
+                    human.outcome = clarify_early.STATUS
                 return early
             human.outcome = str(reply.get("outcome") or "")
             return _result(normalized, reply)

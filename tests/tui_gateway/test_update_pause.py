@@ -7,6 +7,7 @@ that does not use up a crash-resume attempt. Turns that cannot be auto-continued
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -176,6 +177,38 @@ def test_announce_pause_frame_satisfies_the_message_complete_contract(monkeypatc
     assert MessageCompletePayload.model_validate(payload).paused_for_update is True
     assert [e for e, _ in emitted] == ["status.update"]
     check_payload("status.update", emitted[0][1])
+
+
+def test_clarify_asked_during_a_pause_request_is_withdrawn_and_the_turn_pauses(turn_env, home, monkeypatch):
+    """[daveey] t_01a18ac84e3491a9: the whole turn path installs the clarify withdrawal, so a turn waiting on a
+    human no longer holds the update until the drainer's budget runs out and cuts it."""
+    from tools import clarify_early
+    from tools.clarify_tool import clarify_tool
+    monkeypatch.setattr(up, "_clarify_provider_installed", False, raising=False)
+    clarify_early.reset_for_tests()
+    asked: list = []
+    seen = {}
+
+    def _run(message, **kwargs):
+        _request_pause(home)
+        seen["clarify"] = json.loads(clarify_tool([{"question": "Which pool?"}], callback=lambda q: asked.append(q),
+                                                  session_id="session-key", tool_call_id="tc1"))
+        reason = agent.step_boundary_pause()
+        return {"final_response": "", "messages": [], "interrupted": True, "completed": False,
+                "paused_for_update": reason}
+
+    agent = types.SimpleNamespace(session_id="session-key", run_conversation=_run, clear_interrupt=lambda: None)
+    session = _session(agent=agent, running=True, profile_home=str(home))
+    monkeypatch.setitem(server._sessions, "ui-sid", session)
+    try:
+        server._run_prompt_submit("rid", "ui-sid", session, "the prompt")
+    finally:
+        clarify_early.reset_for_tests()
+
+    assert seen["clarify"]["status"] == "paused_for_update"
+    assert asked == []  # never shown: the pause was already requested
+    marker = read_turn_marker(home, "session-key")
+    assert marker is not None and marker["reason"] == "core_update_pause"
 
 
 def test_ordinary_stop_is_not_reported_as_a_pause(turn_env, home):
