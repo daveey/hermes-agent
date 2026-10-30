@@ -623,6 +623,7 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
                 sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
             result.repaired = repair_divergence(live, replica, gateway)
             repair_missing_children(live, replica, gateway)
+            retire_lost_placeholder_links(live, replica, gateway)
             if mode == "primary":
                 heal_clobbered_completions(live)
         finally:
@@ -1106,6 +1107,43 @@ def repair_missing_children(live: sqlite3.Connection, shadow: sqlite3.Connection
                     (sync.uuid7(), table, uid, json.dumps(_row_fields(live, table, row)), time.time_ns() // 1_000_000))
                 _log.warning("kanban sync: %s %s absent from the service with nothing in flight "
                              "(an uncaptured write); re-queued", table, uid)
+
+
+def retire_lost_placeholder_links(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> int:
+    """Delete from the Board this gateway's placement-attribution chat links (``kanban-placement*`` sessions) that the
+    live file no longer holds. Such a link is never a chat (``is_placeholder_session``), so its absence from live is
+    the intended state, and before chat-link deletes were captured a local delete left the Board's row behind for
+    good: a shadow-only ``task_chat_links`` mismatch at pending=0 (238 rows on the hub, 2026-10-30). Real chat links
+    missing from live are left alone, so the diff keeps reporting them. Returns the number of deletes queued."""
+    from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_placement import is_placeholder_session
+    lost = [(u, s) for u, s in shadow.execute(
+        "SELECT uid, chat_session FROM task_chat_links WHERE chat_gateway = ? AND uid IS NOT NULL", (gateway,))
+        if is_placeholder_session(s)]
+    if not lost:
+        return 0
+    queued = 0
+    with write_txn(live):
+        have = _live_uids(live, "task_chat_links")
+        held = {u for t, u in live.execute(
+            "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state IN ('pending', 'rejected')")
+            if t == "task_chat_links"}
+        held |= {u for t, u in live.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")
+                 if t == "task_chat_links"}
+        now_ms = time.time_ns() // 1_000_000
+        for uid, _session in lost:
+            if uid in have or uid in held:
+                continue
+            live.execute(
+                "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
+                "VALUES (?, 'task_chat_links', ?, 'delete', '{}', NULL, '', ?)", (sync.uuid7(), uid, now_ms))
+            live.execute("INSERT OR REPLACE INTO kanban_sync_tombstones (table_name, row_uid, deleted_at) "
+                         "VALUES ('task_chat_links', ?, ?)", (uid, now_ms))
+            queued += 1
+    if queued:
+        _log.warning("kanban sync: %d placement chat links absent from live but still on the service; "
+                     "delete queued", queued)
+    return queued
 
 
 def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> dict[str, list[str]]:

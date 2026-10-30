@@ -54,11 +54,11 @@ def test_reconcile_writes_created_and_shepherd_links_once_and_through_capture(li
     with kbc.write_txn(live):
         live.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, created_at) VALUES (?, 'tui', 's_watcher', 1)", (mine,))
         live.execute("DELETE FROM kanban_sync_outbox")
-    assert links.reconcile(live, "default", ME) == {"added": 2, "changed": 0, "released": 0}
+    assert links.reconcile(live, "default", ME) == {"added": 2, "changed": 0, "released": 0, "retired": 0}
     assert _links(live) == {(mine, "s_creator", "created", 0), (mine, "s_watcher", "shepherd", 0)}
     queued = [r[0] for r in live.execute("SELECT table_name FROM kanban_sync_outbox")]
     assert queued.count("task_chat_links") == 2  # pushed like any synced row
-    assert links.reconcile(live, "default", ME) == {"added": 0, "changed": 0, "released": 0}  # idempotent
+    assert links.reconcile(live, "default", ME) == {"added": 0, "changed": 0, "released": 0, "retired": 0}  # idempotent
     with kbc.write_txn(live):
         live.execute("DELETE FROM kanban_notify_subs")
     assert links.reconcile(live, "default", ME)["released"] == 1  # an unsubscribe releases, never deletes

@@ -95,10 +95,19 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     want = _local_links(conn, gateway)
     if ledger:
         want.update(_ledger_links(board, gateway))
-    have = {r[0]: r[1] for r in conn.execute(
-        "SELECT uid, released FROM task_chat_links WHERE chat_gateway = ?", (gateway,))}
-    added = changed = released = 0
+    from hermes_cli.kanban_placement import is_placeholder_session
+    rows = conn.execute("SELECT uid, released, chat_session FROM task_chat_links WHERE chat_gateway = ?",
+                        (gateway,)).fetchall()
+    have = {r[0]: r[1] for r in rows}
+    # A placement attribution id is not a chat: its link is deleted (captured, so the Board drops it too), never
+    # merely released; a released one still counted in every diff and replica read.
+    placeholders = {r[0] for r in rows if is_placeholder_session(r[2])}
+    added = changed = released = retired = 0
     with write_txn(conn):
+        for uid in placeholders - set(want):
+            conn.execute("DELETE FROM task_chat_links WHERE uid = ?", (uid,))
+            have.pop(uid)
+            retired += 1
         for uid, link in want.items():
             if uid not in have:
                 conn.execute(
@@ -113,7 +122,7 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
             if uid not in want and not was_released:
                 conn.execute("UPDATE task_chat_links SET released = 1 WHERE uid = ?", (uid,))
                 released += 1
-    return {"added": added, "changed": changed, "released": released}
+    return {"added": added, "changed": changed, "released": released, "retired": retired}
 
 
 TERMINAL_STATUSES = ("done", "archived")
