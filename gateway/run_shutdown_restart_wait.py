@@ -20,6 +20,7 @@ from gateway.session_runtime_workers import kanban_managed_count
 
 # Only the update's post-grace Kanban wait: human turns retain their normal budget.
 CORE_UPDATE_KANBAN_WAIT_S = 15.0
+CORE_UPDATE_KANBAN_STOP_LEASH_S = 40.0  # 15 wait + 40 stop + 5 poll allowance = 60s admission
 
 logger = logging.getLogger("gateway.run")
 
@@ -50,12 +51,31 @@ class GatewayRestartWaitMixin:
         since = now if since is None else since
         expired = now - since >= CORE_UPDATE_KANBAN_WAIT_S
         if expired:
+            # The after-turn grace is spent. Do not start another full graceful drain in stop().
+            self._core_update_kanban_cap_spent = True
             logger.warning(
                 "Core update Kanban-only wait capped at %.0fs with %d managed card(s); "
                 "proceeding to restart drain (interrupted attempts requeued uncounted)",
                 CORE_UPDATE_KANBAN_WAIT_S, kanban,
             )
         return since, expired
+
+    def _core_update_kanban_snapshot_stop_leash(self) -> None:
+        """Fix, once at stop() entry, the short stop-relative leash for a spent Kanban update grace.
+
+        A fixed number (callers already subtract their own stop elapsed), snapshotted so work or
+        intent changing mid-stop cannot flip the budget after the watchdog was armed. Human or
+        unknown work, a withdrawn intent or an ordinary restart keep the normal budgets.
+        """
+        self._stop_kanban_leash_s = None
+        intent = getattr(self, "_restart_update_intent", None)
+        if not getattr(self, "_core_update_kanban_cap_spent", False) or not self._restart_requested:
+            return
+        if intent is None or not intent.exists():
+            return
+        if self._awaitable_work_count() > kanban_managed_count(self):
+            return
+        self._stop_kanban_leash_s = CORE_UPDATE_KANBAN_STOP_LEASH_S
 
     def _restart_cap_state_text(self) -> str:
         """Log suffix naming whether this restart carries a core-update intent (the Kanban-only cap)."""
@@ -148,6 +168,8 @@ class GatewayRestartWaitMixin:
         self._restart_detached = False
         self._restart_via_service = False
         self._restart_update_intent = None
+        self._core_update_kanban_cap_spent = False
+        self._stop_kanban_leash_s = None
         self._draining = False
         self._restart_task_started = False
         self._scale_to_zero_status("running", "restart cancel: status mark failed")

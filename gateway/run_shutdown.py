@@ -2150,10 +2150,10 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, Gate
         # skipped under pytest (#66892). It covers stop() only; gateway.exit_deadline covers up to os._exit.
         _watchdog_done = threading.Event()
         self._shutdown_watchdog_done = _watchdog_done
+        getattr(self, "_core_update_kanban_snapshot_stop_leash", lambda: None)()  # fixed leash for this stop
         # Shutdown-path doubles may lack the deferred-worker counter.
-        ctx = GatewayShutdownMixin._StopContext(
-            deferred_count=getattr(self, "_active_deferred_agent_worker_count", lambda: 0)
-        )
+        _deferred = getattr(self, "_active_deferred_agent_worker_count", lambda: 0)
+        ctx = GatewayShutdownMixin._StopContext(deferred_count=_deferred)
         exit_deadline.arm_for_stop(
             self, _effective_watchdog_leash(self), lambda: GatewayRunner._shutdown_watchdog_snapshot(self, ctx))
         if not os.environ.get("PYTEST_CURRENT_TEST"):
@@ -2166,9 +2166,9 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, Gate
             timeout = effective_stop_drain_timeout(self)
             if timeout < self._restart_drain_timeout:
                 logger.warning(
-                    "Shutdown drain capped to %.0fs (configured %.0fs) to fit the live launchd exit "
-                    "timeout of %.0fs — launchd SIGKILLs past it",
-                    timeout, self._restart_drain_timeout, self._launchd_exit_timeout_s,
+                    "Shutdown drain capped to %.0fs (configured %.0fs) to fit the shutdown budget "
+                    "(launchd exit timeout %s; spent Kanban update grace)", timeout, self._restart_drain_timeout,
+                    getattr(self, "_launchd_exit_timeout_s", None),
                 )
             await GatewayRunner._stop_drain_active_work(self, timeout, ctx)
             if ctx.timed_out:
