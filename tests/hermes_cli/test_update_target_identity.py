@@ -198,8 +198,11 @@ def test_branch_update_uses_real_refs_and_completion_request(update_tree, monkey
                 assert 'Code did not move' not in output
                 assert 'Already up to date' not in output
                 origin_before = t.wanted if case.startswith('fork-late') else t.base
-                assert git(t.origin, 'rev-parse', 'HEAD') == (t.newer if case.endswith('push-ok') else origin_before)
-                assert pushes and all((rc == 0) is case.endswith('push-ok') for rc in pushes)
+                # Even with write access (push-ok) the updater never pushes the fork's main: an upstream
+                # sync reaches it only through scripts/ci/upstream_sync.py, which this fixture lacks.
+                assert git(t.origin, 'rev-parse', 'HEAD') == origin_before
+                assert pushes == []
+                assert 'no scripts/ci/upstream_sync.py gate' in output
                 if case.startswith('fork-late'):
                     assert local.read_bytes() == local_work
                     assert not git(t.clone, 'stash', 'list')
