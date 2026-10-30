@@ -38,6 +38,14 @@ logger = logging.getLogger("hermes_cli.plugin_host_child")
 _ENTRY_POINTS_GROUP = "hermes_agent.plugins"
 
 
+def _evict_modules(module_name: str) -> None:
+    """Drop ``module_name`` and its submodules from ``sys.modules``, iterating a copy: the host runs plugin
+    code on several threads, and walking the live dict while one of them imports raises RuntimeError."""
+    prefix = module_name + "."
+    for name in [m for m in sys.modules.copy() if m == module_name or m.startswith(prefix)]:
+        sys.modules.pop(name, None)
+
+
 class RemoteRegistration:
     """Child-side twin of ``PluginRegistration``: ``dispose()`` releases the Hermes-side entry."""
 
@@ -396,8 +404,7 @@ class HostRuntime:
                 self.owners.pop(ref, None)
         module_name = self.modules.pop(plugin_key, "")
         if module_name:
-            for name in [m for m in sys.modules if m == module_name or m.startswith(module_name + ".")]:
-                sys.modules.pop(name, None)
+            _evict_modules(module_name)
         return {"errors": errors}
 
     def op_shutdown(self, _params: dict[str, Any]) -> None:
@@ -484,8 +491,7 @@ def _import_plugin(params: dict[str, Any]) -> Any:
     try:
         spec.loader.exec_module(module)
     except BaseException:
-        for name in [m for m in sys.modules if m == module_name or m.startswith(module_name + ".")]:
-            sys.modules.pop(name, None)
+        _evict_modules(module_name)
         raise
     return module
 
