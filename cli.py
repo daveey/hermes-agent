@@ -51,6 +51,7 @@ from hermes_cli.cli_tui_runtime_mixin import CLITuiRuntimeMixin
 from hermes_cli.cli_shutdown import (
     _CLEANUP_STEPS,
     _arm_exit_watchdog,
+    _cancel_background_review_on_exit,
     _emit_interrupted_session_end,
     _exit_watchdog_timeout,
     _finalize_single_query,
@@ -482,6 +483,8 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
         # step raising must not skip the reset. No-op unless the TUI ran.
         # See #36823.
         _reset_terminal_input_modes_on_exit()
+        # The session's review fork ends before the resources it may still be using are torn down.
+        _cancel_background_review_on_exit()
 
         for step, swallow in _CLEANUP_STEPS:
             with suppress(swallow):

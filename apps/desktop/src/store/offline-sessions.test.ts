@@ -18,6 +18,8 @@ import {
   sessionOwnerIsFresh,
   syncedAgoLabel
 } from './offline-sessions'
+import { $ownerRowStamps, _resetOwnerRowStampsForTests, refreshOwnerRowStamps, type StampFetcher } from './owner-row-stamps'
+import { kanbanStripeCounts } from './session-dot-state'
 
 // [daveey] Cached (hermes-hub replica) sessions of an unreachable gateway feed
 // the NORMAL sidebar pipeline as fallback rows; nothing here is a second list.
@@ -407,6 +409,86 @@ describe('mergeOfflineFallback', () => {
       const merged = mergeOfflineFallback(hubList, asleep, undefined, [stamped])
 
       expect(merged.find(r => r.id === 'parked')).toMatchObject({ offline_cached: true })
+    })
+  })
+
+  // [daveey] The tree carries only a few previews per project, so most of this Mac's older chats have no tree copy
+  // (20261026_170127_f07c32: 5 cards, all parked, painted no stripe). Their owner's stamps come from
+  // /api/profiles/sessions/stamps (owner-row-stamps.ts) and are folded into the replica row.
+  describe('an awake owner whose session the projects tree does not carry', () => {
+    const hubList = [live('h1', { connection_id: 'hermes-hub' })]
+    const toLocal = (gateway: string) => (gateway === 'macbook' ? 'local' : undefined)
+
+    beforeEach(() => _resetOwnerRowStampsForTests())
+
+    it("gets its owner's kanban stamps and paints the grey waiting stripe; an asleep row is unchanged", async () => {
+      const replica = offlineSessionsFromReplica(
+        [
+          rec('f07c32', { gateway: 'macbook' }),
+          rec('asleep', { gateway: 'macbook', profile: 'work', synced_at: 1_000 })
+        ],
+        toLocal,
+        9_000
+      )
+
+      const asked: [string, string, string[]][] = []
+
+      const fetcher: StampFetcher = async (connectionId, profile, wanted) => {
+        asked.push([connectionId, profile, wanted])
+
+        return wanted.map(id => ({
+          cwd: '/Users/daveey/code/infra',
+          id,
+          kanban_active: 5,
+          kanban_blocked: 0,
+          kanban_observed_at: 9_000,
+          kanban_parked: 5,
+          profile
+        }))
+      }
+
+      const before = mergeOfflineFallback(hubList, replica, undefined, [])
+      expect(kanbanStripeCounts(before.find(r => r.id === 'f07c32')!).waiting).toBe(0)
+
+      await refreshOwnerRowStamps(before, fetcher, 50_000)
+      // Only the awake row is asked for; the asleep (offline_cached) row's owner is unreachable.
+      expect(asked).toEqual([['local', 'default', ['f07c32']]])
+
+      const merged = mergeOfflineFallback(hubList, replica, undefined, [], $ownerRowStamps.get())
+      const row = merged.find(r => r.id === 'f07c32')!
+
+      expect(row).toMatchObject({
+        connection_id: 'local',
+        cwd: '/Users/daveey/code/infra',
+        kanban_active: 5,
+        kanban_parked: 5,
+        offline_synced_at: 9_000,
+        title: 'Chat f07c32'
+      })
+      expect(row.offline_cached).toBe(false)
+      expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, stalled: 0, waiting: 5 })
+
+      // Control: the asleep owner's cached row is the very same row as before (no stamps, still cached).
+      const asleepRow = merged.find(r => r.id === 'asleep')!
+      expect(asleepRow).toBe(before.find(r => r.id === 'asleep'))
+      expect(asleepRow).toMatchObject({ offline_cached: true })
+      expect(asleepRow.kanban_parked).toBeUndefined()
+    })
+
+    it("a stamp keyed to an asleep row's identity is never applied to it", () => {
+      const asleep = offlineSessionsFromReplica([rec('x', { gateway: 'macbook', synced_at: 1_000 })], toLocal, 9_000)
+      const stamps = new Map([[`local\u0000default\u0000x`, { kanban_active: 2, kanban_parked: 2 }]])
+      const merged = mergeOfflineFallback(hubList, asleep, undefined, [], stamps)
+
+      expect(merged.find(r => r.id === 'x')).toBe(asleep[0])
+    })
+
+    it('a tree copy still wins over owner stamps', () => {
+      const replica = offlineSessionsFromReplica([rec('t', { gateway: 'macbook' })], toLocal, 9_000)
+      const tree = live('t', { connection_id: 'local', kanban_active: 1, kanban_parked: 1, profile: 'default' })
+      const stamps = new Map([[`local\u0000default\u0000t`, { kanban_active: 9 }]])
+
+      expect(mergeOfflineFallback(hubList, replica, undefined, [tree], stamps).find(r => r.id === 't')).toBe(tree)
     })
   })
 })

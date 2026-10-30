@@ -764,6 +764,9 @@ class CLIAgentSetupMixin:
                 provider_data_collection=self._provider_data_collection,
                 openrouter_min_coding_score=self._openrouter_min_coding_score,
                 session_id=self.session_id, platform="cli", session_db=self._session_db,
+                # A single-query process exits right after its turn, so a post-turn review fork
+                # could never finish; it would only cost a full-history request (cron precedent).
+                skip_background_review=single_query_mode,
                 clarify_callback=clarify_callback, connection_callback=connection_callback,
                 connection_update_callback=None if single_query_mode else self._connection_on_change,
                 # The gateway's model-guard refusal is asked like main's own guard; -q cannot answer it.

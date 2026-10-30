@@ -346,12 +346,15 @@ export function projectTreeSessionRows(nodes: readonly SidebarProjectTree[]): Se
  * [daveey] `treeRows`: rows the backends' projects trees reported. A replica row carries no activity stamps
  * (kanban_*, outcome, goal_active, ...), and the sidebar overlays fallback rows over the tree's own copies ("live
  * wins"), so an awake owner's replica row used to blank the waiting/stuck stripe its backend row paints. When the
- * owner's backend reported that session in its tree, that row is used instead of the replica copy. */
+ * owner's backend reported that session in its tree, that row is used instead of the replica copy; otherwise the
+ * owner's stamps for it (`stamps`, fetched by owner-row-stamps.ts) are merged into the replica copy. */
 export function mergeOfflineFallback(
   live: SessionInfo[],
   offline: readonly SessionInfo[],
   freshness = $sessionListFreshness.get(),
-  treeRows: readonly SessionInfo[] = []
+  treeRows: readonly SessionInfo[] = [],
+  // [daveey] Owner-reported stamps for awake replica rows, keyed like `ownedIdentity` (see owner-row-stamps.ts).
+  stamps: ReadonlyMap<string, Partial<SessionInfo>> = new Map()
 ): SessionInfo[] {
   // [daveey] Primary-backend rows carry no connection_id while replica rows name the primary: one identity for both.
   const primary = $connectionsRegistry.get()?.primary?.trim() || 'local'
@@ -411,8 +414,18 @@ export function mergeOfflineFallback(
         freshness[ownerKey(row.connection_id, row.profile)] !== true &&
         !seen.has(ownedIdentity(row, row.id))
     )
-    // An asleep owner's row keeps its cached (read-only) marking; an awake one's backend row wins.
-    .map(row => (row.offline_cached ? row : (reported.get(ownedIdentity(row, row.id)) ?? row)))
+    // An asleep owner's row keeps its cached (read-only) marking; an awake one's backend row wins. Outside the tree,
+    // the owner's own stamps (owner-row-stamps.ts) are folded into the replica row.
+    .map(row => {
+      if (row.offline_cached) {
+        return row
+      }
+
+      const key = ownedIdentity(row, row.id)
+      const own = stamps.get(key)
+
+      return reported.get(key) ?? (own ? { ...row, ...own } : row)
+    })
 
   const merged = added.length ? [...rows, ...added] : changed ? rows : live
 

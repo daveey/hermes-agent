@@ -124,6 +124,23 @@ def _shutdown_agent_memory_provider(agent) -> None:
         agent.shutdown_memory_provider()
 
 
+def _cancel_background_review_on_exit() -> None:
+    """The CLI session ends with the process, so its in-flight background review ends first.
+
+    The review fork runs on a daemon thread that nothing else on the CLI exit path owns. Left alone
+    it outlives teardown and dispatches tools into an exiting interpreter ("cannot schedule new
+    futures after interpreter shutdown"). Same cancel the TUI's session finalize uses (#102895):
+    bounded ack, then teardown proceeds. Never raises.
+    """
+    agent = _cli()._active_agent_ref
+    if agent is None:
+        return
+    with suppress(Exception):
+        from agent.background_review import cancel_background_review_for_live_turn
+        cancel_background_review_for_live_turn(
+            agent, message="session ended (cli exit)", tool_reason="session ended")
+
+
 def _stop_cli_wake_word() -> None:
     from tools.wake_word import stop_listening
     if _cli()._cli_wake_owner is not None:
@@ -356,8 +373,9 @@ def _finalize_single_query(cli) -> None:
     process's stale ``cli_close`` end-stamp, because phase 1 has already run it.
     """
     import cli as cli_module
-    from cli import _flush_one_shot_session_store, _notify_single_query_session_finalize, _run_cleanup, _shutdown_agent_memory_provider, _wait_for_oneshot_background_completions
+    from cli import _cancel_background_review_on_exit, _flush_one_shot_session_store, _notify_single_query_session_finalize, _run_cleanup, _shutdown_agent_memory_provider, _wait_for_oneshot_background_completions
     try:
+        _cancel_background_review_on_exit()  # before memory shutdown: the review writes memory
         try:
             _flush_one_shot_session_store(cli)
         except Exception:

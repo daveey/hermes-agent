@@ -618,6 +618,8 @@ def _run_agent(
             # HERMES_INTERACTIVE (never set), hook approval via HERMES_ACCEPT_HOOKS=1, dangerous
             # commands via HERMES_YOLO_MODE=1, skill secret capture degrades gracefully.
             clarify_callback=_oneshot_clarify_callback,
+            # The process exits right after this turn: a post-turn review fork could never finish.
+            skip_background_review=True,
         )
         # Belt-and-braces: no streaming display callbacks may bypass our stdout capture.
         agent.suppress_status_output = True
