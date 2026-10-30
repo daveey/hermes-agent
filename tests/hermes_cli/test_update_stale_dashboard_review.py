@@ -381,3 +381,31 @@ def test_a_backend_that_stays_unpreparable_after_its_review_is_stopped_as_before
     monkeypatch.setattr(dashboard_procs, "_retirement_request", scripted)
     dashboard_procs._await_background_reviews([4242])
     assert len(seen) == 6 and {"action": "commit", "token": "permit"} not in seen
+
+
+def test_unanswered_idle_probe_while_waiting_is_not_taken_for_the_review_ending(monkeypatch, fast_poll):
+    """A starved backend can miss the HTTP timeout; no answer must keep the wait, not stop unfenced."""
+    endpoint = ("127.0.0.1", 1, "tok")
+    answers = iter([
+        ({"action": "prepare"}, {"ok": False, "idle": False}),
+        (None, {"ok": True, "idle": False, "detail": "background_review:1"}),
+        ({"action": "prepare"}, {"ok": False, "idle": False}),
+        (None, None),                                             # probe timed out
+        ({"action": "prepare"}, None),                            # so did the prepare
+        (None, None),
+        ({"action": "prepare"}, {"ok": True, "idle": True, "token": "permit"}),
+        ({"action": "commit", "token": "permit"}, {"ok": True}),
+    ])
+    seen = []
+
+    def scripted(ep, body):
+        expected, reply = next(answers)
+        assert body == expected, (body, expected)
+        seen.append(body)
+        return reply
+
+    monkeypatch.setattr(dashboard_procs, "_retirement_endpoint", lambda pid: endpoint)
+    monkeypatch.setattr(dashboard_procs, "_retirement_request", scripted)
+    monkeypatch.setattr(dashboard_procs, "_pid_alive", lambda pid: True)
+    dashboard_procs._await_background_reviews([4242])
+    assert seen[-1] == {"action": "commit", "token": "permit"}, seen

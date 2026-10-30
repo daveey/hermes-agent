@@ -627,7 +627,7 @@ def _kill_pids_posix(pids: list[int], killed: list[int], failed: list[tuple[int,
 # (900 s), which is also this wait's own deadline. Every other answer (idle, another kind of busy,
 # an old backend with no fence, no token, no port) is stopped exactly as before.
 _REVIEW_RETIRE_POLL_S = 2.0
-_REVIEW_RETIRE_HTTP_TIMEOUT_S = 3.0
+_REVIEW_RETIRE_HTTP_TIMEOUT_S = 10.0
 
 
 def _review_retire_deadline_s() -> float:
@@ -690,6 +690,16 @@ def _retirement_request(endpoint: tuple[str, int, str], body: dict | None) -> di
     return payload if isinstance(payload, dict) else None
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def _await_background_reviews(pids: list[int]) -> None:
     """Hold the stop of each backend in *pids* while it runs a background review (see above)."""
     import time as _time
@@ -719,7 +729,12 @@ def _await_background_reviews(pids: list[int]) -> None:
                     print(f"    ✓ {msg}")
                     logger.warning("dashboard stop: %s", msg)
                 continue
-            detail = str(((_retirement_request(endpoint, None) or {}).get("detail")) or "")
+            idle = _retirement_request(endpoint, None)
+            if idle is None and pid in waited and _pid_alive(pid):
+                # No answer at all (a CPU-starved backend missed the HTTP timeout) is not "the
+                # review ended": keep waiting; the deadline still bounds this.
+                continue
+            detail = str((idle or {}).get("detail") or "")
             if not detail.startswith("background_review:"):
                 if pid in waited and pid not in retried:
                     retried.add(pid)
