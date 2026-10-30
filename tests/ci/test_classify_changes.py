@@ -287,9 +287,14 @@ CASES = {
         ["apps/desktop/eslint.config.mjs"],
         _lanes(frontend=True),
     ),
-    "shared eslint config → python": (
+    # Every workspace's eslint config imports it, so it must run the JS checks.
+    "shared eslint config → python + frontend": (
         ["eslint.config.shared.mjs"],
-        _lanes(python=True),
+        _lanes(python=True, frontend=True),
+    ),
+    "root .npmrc → python + frontend": (
+        [".npmrc"],
+        _lanes(python=True, frontend=True),
     ),
     "ui-tui eslint config → frontend": (
         ["ui-tui/eslint.config.mjs"],

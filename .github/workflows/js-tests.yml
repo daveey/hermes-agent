@@ -124,3 +124,38 @@ jobs:
         # every earlier step passed: a step that failed midway can leave its own temp files
         # (a half-extracted download, a worktree its later cleanup never removed).
         uses: ./.github/actions/check-clean-worktree
+
+  # The Prebuilt TUI job of termux-verify.yml installs ONLY ui-tui + tests-js
+  # (npm adds apps/shared and ui-tui/packages/hermes-ink), not the full
+  # workspace the job above installs. A tests-js or ui-tui change that assumes
+  # another workspace is installed passes `check` above and first fails there,
+  # on some unrelated scripts/termux or pm PR: termux-verify's path filter never
+  # runs it on the PR that made the break (7a33a706f5, then run 41097455062 on
+  # PR #339). This job runs the same install and the same three commands on
+  # every PR that runs this workflow (the frontend lane), so the break lands on
+  # its own PR. Its steps must stay identical to termux-verify's `tui` job
+  # (tests/ci/test_tui_install_shape.py). About 2 minutes. [daveey]
+  tui-install-shape:
+    name: Prebuilt TUI install-shape checks
+    runs-on: [self-hosted, hermes-hub]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          # tests-js generates real icons; the wrapper needs core Pillow/resvg.
+          extras: '[]'
+          cache-node: false
+      - name: Install the locked JS workspace
+        run: npm ci --workspace ui-tui --workspace tests-js --include-workspace-root --include=dev --no-fund --no-audit
+      - name: Check and bundle the TUI
+        run: |
+          npm run check --workspace tests-js
+          npm run check --workspace ui-tui
+          npm run build --workspace ui-tui
+      - name: Check the checkout is clean
+        uses: ./.github/actions/check-clean-worktree

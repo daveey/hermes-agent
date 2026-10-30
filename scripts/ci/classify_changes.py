@@ -94,7 +94,15 @@ import sys
 
 _FRONTEND = ("ui-tui/", "web/", "apps/")  # TS typecheck-matrix packages
 # Shipped page outside those packages, exercised by the desktop Electron suite.
-_FRONTEND_FILES = {"scripts/desktop-update/ui.html"}
+_FRONTEND_FILES = {
+    "scripts/desktop-update/ui.html",
+    # Root inputs of every workspace's checks: each package's eslint config
+    # imports the shared one, and .npmrc shapes every ``npm ci``. As
+    # unrecognized paths they ran only the Python lane, so a lint-breaking edit
+    # went green on its own PR. [daveey]
+    "eslint.config.shared.mjs",
+    ".npmrc",
+}
 # The WhatsApp bridge's ``node --test`` suites run in the JS & TS job, so a
 # change to the bridge or to the Python adapter that speaks its protocol
 # selects ``frontend``.
