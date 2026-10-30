@@ -631,3 +631,52 @@ def test_both_remote_writers_record_blocked_on_human(tmp_path, monkeypatch):
         assert verdict == "written"
         rows = [m for m in live.get_messages(CHAT) if m.get("display_kind") == "kanban_notice"]
     assert rows[-1]["display_metadata"].get("blocked_on_human") is True
+
+
+# [daveey] MacBook remote-notices.db row 842 (2026-10-28 22:51 PDT): t_01a18622e706e70a's blocked notice was claimed
+# by pid 35287, which died before the transcript write. The card was unblocked at 23:20, so neither collect nor the
+# sweep (both walk terminal cards only) looked at the row again: delivered=0 with a dead holder for over 24 h.
+ROW_842_TASK = "t_01a18622e706e70a"
+ROW_842_BLOCKED_AT = 1793253046
+
+
+def test_sweep_settles_a_dead_holder_claim_whose_card_left_that_state(tmp_path):
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = ROW_842_BLOCKED_AT + 30 * 3600.0
+    moved = _card(ROW_842_TASK, CHAT, status="ready", at=ROW_842_BLOCKED_AT)  # unblocked: no longer terminal
+    held = _card("t_still_blocked", CHAT, status="blocked", at=ROW_842_BLOCKED_AT)  # still in the claimed state
+    alive = _card("t_live_holder", CHAT, status="ready", at=ROW_842_BLOCKED_AT)  # moved on, but holder is alive
+    replica = _hub(tmp_path, [moved, held, alive])
+    ledger = tmp_path / "remote-notices.db"
+    state = f"blocked@{ROW_842_BLOCKED_AT}"
+    dead = _dead_pid()
+    me, start = kbn._my_holder()
+    krn._reset_for_tests()
+    conn = krn._ledger(ledger)
+    with conn:
+        for card, pid, pstart in ((moved, dead, None), (held, dead, None), (alive, me, start)):
+            ref = f"hub/{card['key']}"
+            conn.execute("INSERT INTO notices (session, ref, state, at, delivered, holder_pid, holder_start, "
+                         "notice_key, legacy_seen) VALUES (?,?,?,?,0,?,?,?,1)",
+                         (CHAT, ref, state, ROW_842_BLOCKED_AT + 5, pid, pstart,
+                          f"remote:hub:{card['key']}:{state}:default:{CHAT}"))
+    conn.close()
+
+    db, opener = _sweep_db(tmp_path, (CHAT,))
+    with db:
+        sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger, now=now)
+        assert not any(ROW_842_TASK in (m.get("content") or "") for m in db.get_messages(CHAT))  # no stale text
+
+    row = _ledger_row(ledger, CHAT, f"hub/{moved['key']}")
+    assert (row["delivered"], row["holder_pid"], row["holder_start"], row.get("settled")) == (1, None, None, "stale")
+    with sqlite3.connect(ledger) as c:
+        swept = c.execute("SELECT replica, profile, session, notice_id FROM swept").fetchall()
+    assert swept == [(str(replica), "default", CHAT, f"remote:hub:{moved['key']}:{state}:default:{CHAT}")]
+    for card, pid in ((held, dead), (alive, me)):
+        other = _ledger_row(ledger, CHAT, f"hub/{card['key']}")
+        assert (other["delivered"], other["holder_pid"], other.get("settled")) == (0, pid, None)
+
+    # Idempotent; the still-terminal row stays with collect's dead-holder re-offer path.
+    sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger, now=now)
+    assert _ledger_row(ledger, CHAT, f"hub/{held['key']}")["delivered"] == 0

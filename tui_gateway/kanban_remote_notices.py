@@ -159,7 +159,7 @@ def _ledger(path: Optional[Path] = None) -> sqlite3.Connection:
                  "at REAL NOT NULL, delivered INTEGER NOT NULL, PRIMARY KEY (session, ref, state))")
     cols = {row[1] for row in conn.execute("PRAGMA table_info(notices)")}
     for name, decl in (("holder_pid", "INTEGER"), ("holder_start", "INTEGER"), ("notice_key", "TEXT"),
-                       ("legacy_seen", "INTEGER NOT NULL DEFAULT 0")):
+                       ("legacy_seen", "INTEGER NOT NULL DEFAULT 0"), ("settled", "TEXT")):
         if name not in cols:
             conn.execute(f"ALTER TABLE notices ADD COLUMN {name} {decl}")
     return conn
@@ -580,6 +580,83 @@ def _ledger_settled(conn: Optional[sqlite3.Connection], sessions: tuple, ref: st
     return row is not None
 
 
+def _current_states(rows: list[tuple]) -> dict:
+    """``{ref: (state, task)}`` for every canonical replica card, terminal or not, keyed like the ledger."""
+    out: dict[str, tuple] = {}
+    for owner, key, _seq, raw in rows:
+        try:
+            task = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(task, dict) or not task.get("status"):
+            continue
+        at = _terminal_at(task) if task.get("status") in _TERMINAL else None
+        out[f"{owner}/{key}"] = (f"{task['status']}@{int(at) if at else 0}", task)
+    return out
+
+
+def _stale_notice_id(row, task: dict) -> tuple[str, str]:
+    """``(profile, notice_id)`` the sweep would have used for this ledger row, for the ``swept`` record."""
+    sid, key = str(row["session"]), str(row["notice_key"] or "")
+    profile = next((str(link.get("profile") or "default") for link in task.get("sessions") or []
+                    if isinstance(link, dict) and link.get("session") == sid), "")
+    if not profile and key.endswith(f":{sid}"):
+        profile = key[:-len(sid) - 1].rsplit(":", 1)[-1]
+    profile = profile or "default"
+    if str(row["state"]).startswith("done@") and key and not key.endswith(f":{profile}:{sid}"):
+        return profile, f"{key}:{profile}:{sid}"
+    return profile, key or f"remote:{row['ref']}:{row['state']}:{profile}:{sid}"
+
+
+def _settle_stale_claims(rows: list[tuple], path, ledger) -> int:
+    """Settle in-flight claims nobody can finish: the holder is dead AND the card left the notice's state. [daveey]
+
+    ``collect`` and the sweep only walk cards that are terminal NOW, so a claim whose holder died after the card
+    moved on (blocked, then unblocked or rescheduled) was never looked at again: it sat ``delivered=0`` with a dead
+    holder forever and showed up in every audit (MacBook row 842, t_01a18622e706e70a, held >24 h). Such a row is
+    acked as stale (``delivered=1``, holder cleared, ``settled='stale'``) and recorded in ``swept``. Its text is
+    never delivered: it describes a state the card is no longer in. A live holder, a card still in that state
+    (the re-offer path owns it) and a card missing from the replica (partial sync) are left alone. Never raises.
+    """
+    try:
+        states = _current_states(rows)
+        conn = _ledger(ledger)
+        try:
+            claims = conn.execute(
+                "SELECT session, ref, state, holder_pid, holder_start, notice_key FROM notices "
+                "WHERE delivered=0 AND holder_pid IS NOT NULL").fetchall()
+            keys, settled = [], 0
+            for row in claims:
+                current = states.get(str(row["ref"]))
+                if current is None or current[0] == row["state"]:
+                    continue
+                if _holder_is_me(row["holder_pid"]) or _holder_alive(row["holder_pid"], row["holder_start"]):
+                    continue
+                with conn:
+                    cur = conn.execute(
+                        "UPDATE notices SET delivered=1, holder_pid=NULL, holder_start=NULL, legacy_seen=1, "
+                        "settled='stale', notice_key=IFNULL(notice_key, ?) WHERE session=? AND ref=? AND state=? "
+                        "AND delivered=0 AND holder_pid IS ?",
+                        (f"stale:{row['ref']}:{row['state']}", row["session"], row["ref"], row["state"],
+                         row["holder_pid"]))
+                if cur.rowcount != 1:
+                    continue
+                settled += 1
+                profile, notice_id = _stale_notice_id(row, current[1])
+                keys.append((str(path), profile, str(row["session"]), notice_id))
+                logger.info("remote kanban: settled stale claim %s %s for chat %s (holder %s dead, card now %s)",
+                            row["ref"], row["state"], row["session"], row["holder_pid"], current[0])
+        finally:
+            conn.close()
+        _record_swept(keys, ledger)
+        for key in keys:
+            _remember_delivered(key)
+        return settled
+    except Exception:
+        logger.debug("remote kanban stale-claim settle failed", exc_info=True)
+        return 0
+
+
 def _sweep_payload(owner: str, key: str, task: dict, me: str, profile: str, sid: str) -> tuple:
     """``(event_key, metadata, text)`` of one swept notice, keyed like ``collect``'s."""
     notice = task.get("completion_notice")
@@ -766,6 +843,7 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
         logger.debug("remote kanban observation failed; defer notices", exc_info=True)
         return []
     _load_swept(ledger)
+    _settle_stale_claims(rows, path, ledger)
     delivered: list[dict] = []
     swept: list = []
     counts: dict = {}
