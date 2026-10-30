@@ -123,3 +123,24 @@ async def test_runs_http_class(adapter, routing_home, streaming_route, native_tr
     assert native_transport
     assert all(body["model"] == "anthropic-deep" and headers.get("authorization", "").startswith("Bearer sk-ant-oat")
                for _, headers, body in native_transport)
+
+
+@pytest.mark.asyncio
+async def test_completions_http_class_reply_names_served_provider_and_model(
+        adapter, routing_home, streaming_route, native_transport):
+    """A class selector is not a model: the non-streaming reply carries who served it (BB egress attribution)."""
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
+    with patch("gateway.run._resolve_runtime_agent_kwargs", side_effect=AssertionError("paid default")), \
+            patch("model_tools.get_tool_definitions", return_value=[]):
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post("/v1/chat/completions", json={
+                "model": "class:deep", "provider": "auto", "stream": False,
+                "messages": [{"role": "user", "content": "Say ok"}]})
+            body = await response.json()
+            assert response.status == 200, body
+    assert body["provider"] == "anthropic"
+    assert body["model"] == "anthropic-deep"
+
