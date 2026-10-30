@@ -247,9 +247,12 @@ def home(tmp_path: Path) -> Path:
 def _resume(home: Path, sid: str) -> tuple[subprocess.CompletedProcess, dict | None]:
     """Run ``hermes --tui --resume SID``; return the process result and what the TUI child received."""
     out = home.parent / f"handoff-{uuid.uuid4().hex}.json"
+    node = shutil.which("node")
+    assert node is not None, "the TUI hand-off requires installed Node"
     result = run_hermes(
         ["--tui", "--resume", sid], home, timeout=90,
-        extra_env={"HERMES_TUI_DIR": str(home.parent / "tui-probe"), "HERMES_SKIP_NODE_BOOTSTRAP": "1",
+        # This tests attachment, not PM acquisition; use the Node already required by pytestmark.
+        extra_env={"HERMES_TUI_DIR": str(home.parent / "tui-probe"), "HERMES_NODE": node,
                    "ATTACH_PROBE_OUT": str(out)})
     handoff = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
     return result, handoff
