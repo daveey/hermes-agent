@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from tui_gateway import server
+
+
+@pytest.fixture(autouse=True)
+def _no_digest_throttle(monkeypatch):
+    monkeypatch.setattr(server, "SESSION_DIGEST_MIN_S", 0.0)
 
 
 def _seed_store(path):
@@ -59,3 +66,34 @@ def test_sessions_signature_changes_for_session_metadata_updates(tmp_path, monke
     conn.close()
 
     assert server._sessions_sig() != before
+
+
+def test_busy_db_is_not_redigested_more_often_than_min_interval(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    _seed_store(db_path)
+    monkeypatch.setattr(server, "_watcher_home", lambda: tmp_path)
+    monkeypatch.setattr(server, "_served_profile_homes", [])
+    monkeypatch.setattr(server, "SESSION_DIGEST_MIN_S", 3.0)
+    server._sessions_db_sig_cache.clear()
+    server._sessions_digest_at.clear()
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    reads = []
+    import hermes_state
+    orig = hermes_state._connect_tracked_db
+    monkeypatch.setattr(hermes_state, "_connect_tracked_db",
+                        lambda *a, **k: (reads.append(1), orig(*a, **k))[1])
+
+    before = server._sessions_sig()
+    assert len(reads) == 1
+    for i in range(5):  # a busy db: the mtime moves on every pass
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE sessions SET title = ?", (f"T{i}",))
+        conn.commit()
+        conn.close()
+        clock[0] += 0.5
+        assert server._sessions_sig() == before
+    assert len(reads) == 1  # no re-digest inside the window
+    clock[0] += 3.0
+    assert server._sessions_sig() != before  # trailing edge still fires
+    assert len(reads) == 2
