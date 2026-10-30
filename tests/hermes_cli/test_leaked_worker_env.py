@@ -263,3 +263,100 @@ def test_parked_card_without_any_run_pid_is_still_a_leak(tmp_path):
     db = _board(tmp_path, [("t_45d5a361", "todo", None)])
     msg = tle.leaked_worker_env_diagnosis(_leak_env(db))
     assert msg and "is todo" in msg
+
+
+# ── a live managed worker: the shell descends from the worker_bound interpreter ───────────────
+# t_01a18b6ffd5e33c1 (hub, 2026-10-30): the worker's own shell (parent: ``agent.managed_worker``
+# pid 4081359, the run's ``worker_bound`` pid and HERMES_DELEGATED_CHILD_OWNER) was told
+# "leaked worker env ... Cmd-Q", because only task_runs.worker_pid (4081264, the
+# kanban_worker_client spawn pid, a sibling under the gateway) was checked for ancestry.
+
+def _managed_board(tmp_path, spawn_pid, bound_pid, status="running"):
+    db = _board(tmp_path, [("t_45d5a361", status, spawn_pid)])
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, worker_pid INTEGER)")
+    conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, run_id INTEGER, "
+                 "kind TEXT, payload TEXT, created_at INTEGER)")
+    conn.execute("INSERT INTO task_runs (task_id, worker_pid) VALUES ('t_45d5a361', ?)", (spawn_pid,))
+    run_id = conn.execute("SELECT max(id) FROM task_runs").fetchone()[0]
+    # An older run's bind must not vouch for the current run.
+    conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+                 "VALUES ('t_45d5a361', ?, 'worker_bound', ?, 0)", (run_id - 1, json.dumps({"pid": os.getpid()})))
+    if bound_pid is not None:
+        conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+                     "VALUES ('t_45d5a361', ?, 'worker_bound', ?, 1)", (run_id, json.dumps({"pid": bound_pid})))
+    conn.commit()
+    conn.close()
+    return db
+
+
+@pytest.fixture
+def sibling_spawn_pid():
+    """A live process this one does not descend from (the kanban_worker_client spawn pid)."""
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        yield p.pid
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_no_diagnosis_for_a_shell_of_the_bound_managed_worker(tmp_path, sibling_spawn_pid):
+    db = _managed_board(tmp_path, sibling_spawn_pid, os.getpid())
+    assert tle.leaked_worker_env_diagnosis(_leak_env(db)) is None
+
+
+def test_no_diagnosis_when_the_delegation_owner_is_a_live_ancestor(tmp_path, sibling_spawn_pid):
+    """No worker_bound row readable, but HERMES_DELEGATED_CHILD_OWNER names a live ancestor."""
+    db = _managed_board(tmp_path, sibling_spawn_pid, None)
+    env = {**_leak_env(db), "HERMES_DELEGATED_CHILD_OWNER": f"{os.getppid()}:123"}
+    assert tle.leaked_worker_env_diagnosis(env) is None
+
+
+def test_bound_pid_this_process_does_not_descend_from_is_still_a_leak(tmp_path, sibling_spawn_pid):
+    db = _managed_board(tmp_path, sibling_spawn_pid, sibling_spawn_pid)
+    env = {**_leak_env(db), "HERMES_DELEGATED_CHILD_OWNER": f"{sibling_spawn_pid}:123"}
+    msg = tle.leaked_worker_env_diagnosis(env)
+    assert msg and "does not descend from" in msg
+
+
+def test_older_runs_bind_does_not_vouch_for_the_current_run(tmp_path, sibling_spawn_pid):
+    db = _managed_board(tmp_path, sibling_spawn_pid, None)
+    msg = tle.leaked_worker_env_diagnosis(_leak_env(db))
+    assert msg and "does not descend from" in msg
+
+
+def test_live_managed_worker_shell_gets_the_plain_cli_fence(monkeypatch, tmp_path, capsys, sibling_spawn_pid):
+    """End to end on a real board: the fence still refuses, but without the Cmd-Q leak advice."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for k in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_RUN_ID"):
+        monkeypatch.delenv(k, raising=False)
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="live managed worker", assignee="default")
+        kb.claim_task(conn, tid)
+        other = kb.create_task(conn, title="the worker tries to unblock this", assignee="default")
+        run_id = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+        with conn:
+            conn.execute("UPDATE tasks SET worker_pid = ? WHERE id = ?", (sibling_spawn_pid, tid))
+            conn.execute("UPDATE task_runs SET worker_pid = ? WHERE id = ?", (sibling_spawn_pid, run_id))
+            conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+                         "VALUES (?, ?, 'worker_bound', ?, 0)", (tid, run_id, json.dumps({"pid": os.getpid()})))
+    finally:
+        conn.close()
+    monkeypatch.setenv(MARKER, str(home))
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(home / "kanban" / "workspaces" / tid))
+    import argparse
+    from hermes_cli import kanban as kcli
+    rc = kcli.kanban_command(argparse.Namespace(kanban_action="archive", task_ids=[other], board=None))
+    err = capsys.readouterr()
+    text = err.err + err.out
+    assert rc != 0
+    assert "cannot mutate Kanban tasks via the CLI" in text and "kanban_* tools" in text
+    assert "leaked worker env" not in text and "Cmd-Q" not in text

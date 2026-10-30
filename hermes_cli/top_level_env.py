@@ -102,8 +102,33 @@ def _board_db(env: Mapping[str, str]) -> Optional[Path]:
 _TERMINAL_STATUSES = frozenset({"done", "archived"})
 
 
-def _task_state(db: Path, task_id: str) -> Optional[tuple[str, Optional[int]]]:
-    """``(status, worker_pid)`` of ``task_id``; ``("", None)`` when absent; ``None`` when unreadable."""
+def _bound_pid(conn, task_id: str) -> Optional[int]:
+    """The interpreter the owner bound to the task's current run (``worker_bound`` event).
+
+    A managed worker runs in ``agent.managed_worker`` under the gateway, a sibling of the
+    ``kanban_worker_client`` spawn pid ``task_runs.worker_pid`` records, so its shells descend
+    from this pid and never from that one (t_01a18b6ffd5e33c1). [daveey]
+    """
+    import json
+    import sqlite3
+
+    try:
+        row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'worker_bound' AND run_id = "
+            "(SELECT max(id) FROM task_runs WHERE task_id = ?) ORDER BY id DESC LIMIT 1",
+            (task_id, task_id)).fetchone()
+    except sqlite3.Error:
+        return None
+    try:
+        pid = int((json.loads(row[0]) or {}).get("pid") or 0) if row and row[0] else 0
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return pid or None
+
+
+def _task_state(db: Path, task_id: str) -> Optional[tuple[str, Optional[int], Optional[int]]]:
+    """``(status, worker_pid, bound_pid)`` of ``task_id``; ``("", None, None)`` when absent; ``None``
+    when unreadable. ``bound_pid`` is the latest run's ``worker_bound`` interpreter, if any."""
     import sqlite3
 
     if not db.is_file():
@@ -127,13 +152,14 @@ def _task_state(db: Path, task_id: str) -> Optional[tuple[str, Optional[int]]]:
                     run = None
                 if run is not None and run[0]:
                     row = (row[0], run[0])
+            bound = _bound_pid(conn, task_id) if row is not None else None
         finally:
             conn.close()
     except sqlite3.Error:
         return None
     if row is None:
-        return ("", None)
-    return (str(row[0] or ""), int(row[1]) if row[1] else None)
+        return ("", None, None)
+    return (str(row[0] or ""), int(row[1]) if row[1] else None, bound)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -179,6 +205,17 @@ def _is_ancestor(pid: int, start: Optional[int] = None) -> bool:
     return False
 
 
+def _descends_from_live_agent(env: Mapping[str, str], bound_pid: Optional[int]) -> bool:
+    """Whether this process descends from a live agent of the lineage other than the spawn pid:
+    the run's ``worker_bound`` interpreter, or the ``HERMES_DELEGATED_CHILD_OWNER`` process that
+    fenced the lineage (that same managed worker, named even when no bind row is readable). [daveey]"""
+    from agent.delegation_context import DELEGATED_CHILD_OWNER_ENV
+
+    owner = (env.get(DELEGATED_CHILD_OWNER_ENV) or "").strip().partition(":")[0]
+    candidates = [bound_pid] + ([int(owner)] if owner.isdigit() else [])
+    return any(pid and pid > 1 and _pid_alive(pid) and _is_ancestor(pid) for pid in candidates)
+
+
 def leaked_worker_env_diagnosis(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
     """Why this process's ``HERMES_DELEGATED_CHILD_CONTEXT`` looks leaked, or ``None``.
 
@@ -197,11 +234,13 @@ def leaked_worker_env_diagnosis(environ: Optional[Mapping[str, str]] = None) -> 
     state = _task_state(db, tid) if db is not None else None
     if state is None:
         return None
-    status, worker_pid = state
+    status, worker_pid, bound_pid = state
     if not status:
         reason = f"its worker card {tid} is not on the board"
-    elif status != "running" and (status in _TERMINAL_STATUSES or not worker_pid):
+    elif status != "running" and (status in _TERMINAL_STATUSES or not (worker_pid or bound_pid)):
         reason = f"its worker card {tid} is {status}"
+    elif _descends_from_live_agent(env, bound_pid):
+        return None  # a live managed worker / delegation owner is this process's ancestor
     elif worker_pid and not _pid_alive(worker_pid):
         reason = f"{tid}'s worker pid {worker_pid} is gone"
     elif worker_pid and not _is_ancestor(worker_pid):
