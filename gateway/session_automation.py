@@ -618,16 +618,21 @@ async def _reset_and_retarget_local(authority, runner, session_key, old_session_
         old_targets = authority.db.get_compression_lineage(old_session_id) or [old_session_id]
         entry = runner.session_store.reset_session(session_key)
         if entry is None or entry.session_id in old_targets:
-            return entry, []
+            return entry, ([], [])
         return entry, retarget_local_automation(
             authority.db, epoch=authority.epoch, session_id=owner.session_id,
             principal_id='automation:' + session_key, old_targets=old_targets, new_target=entry.session_id)
 
+    def settle(result):
+        entry, (moved, cancelled) = result
+        for admission_id in cancelled:
+            authority._settle_cancelled(owner, admission_id)
+        if moved:
+            authority._publish_pending(owner)
+        return entry
+
     async with live.mutation_lock:
-        entry, moved = await tracked_write(authority, rotate_and_retarget, ordered=True)
-    if moved:
-        authority._publish_pending(owner)
-    return entry
+        return await tracked_write(authority, rotate_and_retarget, settle, ordered=True)
 
 
 async def reset_and_rehome_messages(runner, session_key, old_session_id):

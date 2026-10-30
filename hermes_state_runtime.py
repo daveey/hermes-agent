@@ -413,15 +413,33 @@ def rehome_queued_inputs(db, *, epoch: int, old_session_id: str, new_session_id:
     return db._execute_write(write)
 
 
+def _conversation_bound_automation(row, descriptor):
+    """Closed producer policy: a frozen decision follows compression, never a reset.
+
+    Match the durable producer identity, not model text or a request-id prefix. This also
+    protects decisions queued before the policy shipped, without rewriting their payload.
+    """
+    if descriptor.get('identity') != row['request_id']:
+        return False
+    try:
+        identity = json.loads(row['request_id'])
+    except (TypeError, ValueError):
+        return False
+    return (isinstance(identity, list) and len(identity) == 2 and identity[0] == 'user-steps'
+            and isinstance(identity[1], str) and bool(identity[1]))
+
+
 def retarget_local_automation(db, *, epoch: int, session_id: str, principal_id: str,
-                               old_targets, new_target: str) -> list[str]:
+                               old_targets, new_target: str) -> tuple[list[str], list[str]]:
     """Point a LOCAL owner's still-queued ``principal_id`` automation rows (a Bot Chat's queued
     ``hermes peer dm`` turns, plugin and completion notices) that name a pre-reset transcript in
     ``old_targets`` at ``new_target``, in one transaction (the compression-exhaustion auto-reset).
     A LOCAL FIFO's owner is its receipt id and survives the reset; only the descriptor's ``target``
-    goes stale, and the drain refuses a stale one (``admission_conflict``), pausing the FIFO for
-    good. Admission id, request id and seq are kept; the digest is re-keyed to the new payload.
-    Nothing moves behind an ``unknown`` head. Returns the retargeted admission ids in FIFO order."""
+    goes stale. Generic rows keep their admission id, request id and seq; the digest is re-keyed
+    to the new payload. Nothing moves behind an ``unknown`` head. Frozen user-steps decisions
+    are cancelled instead of retargeted: their approval belongs to the old conversation, not
+    its fresh reset. Their payload/digest stay immutable. Returns (retargeted ids, cancelled
+    ids), each in FIFO order; the caller settles the cancellations for observers."""
     for value in (session_id, principal_id, new_target, *old_targets):
         _text(value)
     old_targets = set(old_targets)
@@ -431,22 +449,26 @@ def retarget_local_automation(db, *, epoch: int, session_id: str, principal_id: 
         _session(conn, new_target)
         if conn.execute("SELECT 1 FROM session_admissions WHERE target_session_id=? AND status='unknown'",
                         (session_id,)).fetchone():
-            return []
-        moved = []
+            return [], []
+        moved, cancelled = [], []
         for row in conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' "
                                 "AND principal_id=? ORDER BY seq", (session_id, principal_id)).fetchall():
             payload = json.loads(row['payload_json'])
             descriptor = payload.get('local_automation_v1') if isinstance(payload, dict) else None
             if not isinstance(descriptor, dict) or descriptor.get('target') not in old_targets:
                 continue
+            if _conversation_bound_automation(row, descriptor):
+                conn.execute(_CANCEL_QUEUED, (row['admission_id'],))
+                cancelled.append(row['admission_id'])
+                continue
             descriptor['target'] = new_target
             digest = admission_fingerprint(canonical_target=session_id, payload={'input': payload, 'intent': row['intent']})
             conn.execute("UPDATE session_admissions SET payload_json=?,payload_digest=? WHERE admission_id=? AND status='queued'",
                          (_json(payload), digest, row['admission_id']))
             moved.append(row['admission_id'])
-        if moved:
+        if moved or cancelled:
             conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (session_id,))
-        return moved
+        return moved, cancelled
     return db._execute_write(write)
 
 
