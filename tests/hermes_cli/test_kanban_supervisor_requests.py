@@ -158,9 +158,11 @@ def test_foreign_archived_link_and_cycle_ops_are_refused(board):
     out = _tool({"ops": [{"op": "unlink", "parent_id": b["dev67"], "child_id": b["dev81"]}]})
     assert out["code"] == "refused" and "archived" in out["error"]
     out = _tool({"ops": [{"op": "link", "parent_id": b["qa116"], "child_id": b["dev67"]}]})
-    assert out["code"] == "own_card_op" and "kanban_link" in out["error"]
-    out = _tool({"ops": [{"op": "link", "parent_id": b["dev116"], "child_id": b["qa119"]}]})
-    assert out["code"] == "refused" and "cycle" in out["error"]
+    assert out["code"] == "link_not_requested" and "kanban_link" in out["error"]
+    out = _tool({"ops": [{"op": "link", "parent_id": b["dev116"], "child_id": b["qa119"]}], "dry_run": True})
+    assert out["ops"][0]["verdict"] == "refused" and "cycle" in out["ops"][0]["reason"]
+    out = _tool({"ops": [{"op": "unlink", "parent_id": b["requester"], "child_id": b["qa116"]}]})
+    assert out["code"] in ("own_card_op", "no_supervisor_needed"), out
     with kbc.connect() as conn:
         assert ksr.list_requests(conn) == []
 
@@ -460,3 +462,28 @@ def test_a_leaked_worker_env_in_the_dispatcher_is_logged(board, caplog, monkeypa
 def test_codex_runtime_workers_can_reach_the_tool():
     from agent.transports.hermes_tools_mcp_server import EXPOSED_TOOLS
     assert "kanban_supervisor_request" in EXPOSED_TOOLS
+
+
+def test_a_late_result_does_not_wake_an_unrelated_park(board, monkeypatch):
+    from tools import kanban_tools as kt
+    out = _tool({"ops": _reorder(board)})
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        ksr.drain(conn)
+    _as_worker(monkeypatch, board)
+    until = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))
+    assert json.loads(kt._handle_schedule({"reason": f"SCHEDULED_UNTIL={until} waiting on CI"}))["ok"]
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        ksr.drain(conn)
+        assert kb.get_task(conn, board["requester"]).status == "scheduled"
+        assert ksr.get_request(conn, out["request_id"])["requester_woken"] == 1  # settled, not retried
+
+
+def test_a_batch_with_any_link_op_is_refused_up_front(board):
+    b = board
+    out = _tool({"ops": [{"op": "link", "parent_id": b["qa119"], "child_id": b["dev116"]},  # already present
+                         {"op": "unlink", "parent_id": b["dev67"], "child_id": b["dev81"]}]})
+    assert out["code"] == "link_not_requested", out
+    with kbc.connect() as conn:
+        assert ksr.list_requests(conn) == []

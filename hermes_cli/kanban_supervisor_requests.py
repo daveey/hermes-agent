@@ -292,6 +292,12 @@ def submit(conn: sqlite3.Connection, *, env_task: Optional[str], env_run: Option
     existing = conn.execute(dup_sql, (key,)).fetchone() if _has_table(conn) else None
     if existing:
         return {"request_id": int(existing[0]), "status": existing[1], "duplicate": True, **summary}
+    links = [v for v in verdicts if v["op"] == "link"]
+    if links:
+        raise SupervisorRequestError(
+            "link_not_requested", "; ".join(f"link {v['parent_id']} -> {v['child_id']}" for v in links)
+            + ": link ops are preview-only (dry_run); add edges yourself with kanban_link and request "
+            "only unlinks")
     if refused:
         raise SupervisorRequestError(
             "refused", "; ".join(f"{v['op']} {v['parent_id']} -> {v['child_id']}: {v['reason']}" for v in refused))
@@ -299,8 +305,8 @@ def submit(conn: sqlite3.Connection, *, env_task: Optional[str], env_run: Option
     if own:
         raise SupervisorRequestError(
             "own_card_op", "; ".join(f"{v['op']} {v['parent_id']} -> {v['child_id']}" for v in own)
-            + ": no supervisor needed; apply link ops with kanban_link and unlinks of this worker's own "
-            "card with kanban_unlink, and request only the rest")
+            + ": no supervisor needed; unlink this worker's own card's edges with kanban_unlink and "
+            "request only the rest")
     if not any(v["verdict"] == "supervisor" for v in verdicts):
         raise SupervisorRequestError("no_supervisor_needed", "every op is already in the requested state")
     with kb.write_txn(conn):
@@ -385,7 +391,7 @@ def _accept_next(conn: sqlite3.Connection, executor: str, now: int,
             attempts = int(conn.execute("SELECT attempts FROM supervisor_requests WHERE id=?",
                                         (rid,)).fetchone()[0])
             if attempts >= MAX_ATTEMPTS:
-                abandoned.append(rid)
+                abandoned.append((rid, holder))
                 continue
             cur = conn.execute(
                 "UPDATE supervisor_requests SET status='accepted', executor=?, lease_expires=?, "
@@ -430,26 +436,40 @@ def _finish(conn: sqlite3.Connection, req: dict, executor: str, status: str, *,
     return True
 
 
-def _wake_requester(conn: sqlite3.Connection, rid: int, requester: str, status: str) -> None:
-    """Wake a parked requester once per result. A requester still running (it parks after the result
-    landed) is woken by a later drain via :func:`_rewake_late_parkers`."""
+def _park_names_request(conn: sqlite3.Connection, requester: str, rid: int, since: int) -> bool:
+    """Whether the requester's current park came after the result and its reason names ``#<rid>``."""
+    import re
+    from hermes_cli.kanban_continuation import SCHEDULED_ENTRY_EVENTS
+    marks = ",".join("?" for _ in SCHEDULED_ENTRY_EVENTS)
+    row = conn.execute(
+        f"SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
+        "ORDER BY id DESC LIMIT 1", (requester, *SCHEDULED_ENTRY_EVENTS)).fetchone()
+    return bool(row and int(row[1] or 0) >= since and re.search(rf"#{rid}\b", str(row[0] or "")))
+
+
+def _wake_requester(conn: sqlite3.Connection, rid: int, requester: str, status: str, *,
+                    late_since: Optional[int] = None) -> None:
+    """Wake a parked requester once per result. A requester still running when the result lands
+    is woken later (:func:`_rewake_late_parkers`) only by a park that names this request."""
     from hermes_cli import kanban_wake_check as kwc
     row = conn.execute("SELECT status FROM tasks WHERE id = ?", (requester,)).fetchone()
     state = row[0] if row else None
-    if state == "scheduled":
-        kwc._wake(conn, requester, "supervisor_request_wake", {"request_id": rid, "request_status": status})
-    elif state == "running":
+    if state == "running":
         return  # not parked yet: leave requester_woken=0 for the next drain
+    if state == "scheduled" and (late_since is None or _park_names_request(conn, requester, rid, late_since)):
+        kwc._wake(conn, requester, "supervisor_request_wake", {"request_id": rid, "request_status": status})
     conn.execute("UPDATE supervisor_requests SET requester_woken=1 WHERE id=?", (rid,))
 
 
 def _rewake_late_parkers(conn: sqlite3.Connection) -> None:
     from hermes_cli import kanban_db as kb
+    sql = ("SELECT id, requester_task_id, status, finished_at FROM supervisor_requests WHERE requester_woken=0 "
+           "AND status IN ('done','rejected','failed') ORDER BY id")
+    if not conn.execute(sql).fetchone():
+        return
     with kb.write_txn(conn):
-        for rid, requester, status in conn.execute(
-                "SELECT id, requester_task_id, status FROM supervisor_requests WHERE requester_woken=0 "
-                "AND status IN ('done','rejected','failed') ORDER BY id").fetchall():
-            _wake_requester(conn, int(rid), requester, status)
+        for rid, requester, status, finished in conn.execute(sql).fetchall():
+            _wake_requester(conn, int(rid), requester, status, late_since=int(finished or 0))
 
 
 def _execute(conn: sqlite3.Connection, req: dict, executor: str, board: Optional[str]) -> str:
@@ -504,16 +524,17 @@ def drain(conn: sqlite3.Connection, *, board: Optional[str] = None, role: str = 
         ensure_schema(conn)
         conn.execute(
             "INSERT INTO supervisor_executors (executor_id, role, last_seen) VALUES (?, ?, ?) "
-            "ON CONFLICT(executor_id) DO UPDATE SET last_seen=excluded.last_seen, role=excluded.role",
+            "ON CONFLICT(executor_id) DO UPDATE SET last_seen=excluded.last_seen, role=excluded.role "
+            "WHERE supervisor_executors.last_seen < excluded.last_seen - 60",
             (executor, role, now))
     processed = []
     _rewake_late_parkers(conn)
     for _ in range(max(0, int(limit))):
         abandoned: list = []
         req = _accept_next(conn, executor, now, abandoned)
-        for rid in abandoned:
-            _abandon(conn, rid, executor, now)
-            processed.append((rid, "failed"))
+        for rid, holder in abandoned:
+            if _abandon(conn, rid, holder, executor):
+                processed.append((rid, "failed"))
         if req is None:
             break
         (on_accept or _after_accept)(req)
@@ -527,18 +548,18 @@ def drain(conn: sqlite3.Connection, *, board: Optional[str] = None, role: str = 
     return {"executor": executor, "processed": processed}
 
 
-def _abandon(conn: sqlite3.Connection, rid: int, executor: str, now: int) -> None:
-    """Fail a request whose executors kept dying on it (``MAX_ATTEMPTS`` acceptances)."""
+def _abandon(conn: sqlite3.Connection, rid: int, holder: Optional[str], executor: str) -> bool:
+    """Fail a request whose executors kept dying on it (``MAX_ATTEMPTS`` acceptances). Takes it only
+    from the holder it was found expired with (compare-and-swap), so a holder that renewed keeps it."""
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
-        holder = conn.execute("SELECT executor FROM supervisor_requests WHERE id=? AND status IN "
-                              "('pending','accepted')", (rid,)).fetchone()
-        if holder is None:
-            return
-        conn.execute("UPDATE supervisor_requests SET status='accepted', executor=? WHERE id=?", (executor, rid))
-    req = get_request(conn, rid)
-    _finish(conn, req, executor, "failed", results=[],
-            error=f"abandoned after {MAX_ATTEMPTS} deliveries whose executor never finished")
+        cur = conn.execute(
+            "UPDATE supervisor_requests SET status='accepted', executor=? WHERE id=? AND "
+            "status IN ('pending','accepted') AND COALESCE(executor,'')=?", (executor, rid, holder or ""))
+        if cur.rowcount != 1:
+            return False
+    return _finish(conn, get_request(conn, rid), executor, "failed", results=[],
+                   error=f"abandoned after {MAX_ATTEMPTS} deliveries whose executor never finished")
 
 
 _skip_logged = False

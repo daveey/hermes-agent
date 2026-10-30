@@ -932,7 +932,7 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "pending until an executor accepts it, then the result (applied / "
         "failed / rejected, per op) lands on this card as a supervisor_request_* "
         "event and a comment, and a scheduled card is woken. It never completes or "
-        "unblocks this card. Cards another task created are refused (out_of_scope). "
+        "unblocks this card. Cards another task created are refused. "
         "Pass dry_run=true first to see, per op, whether you can do it yourself "
         "(self), need the supervisor (supervisor), it is already so (noop), or it "
         "is refused (cards another task created, cycles), and whether an executor is live. After a real request, park "
