@@ -330,9 +330,32 @@ def _mark_skip_upstream_prompt():
         (get_hermes_home() / SKIP_UPSTREAM_PROMPT_FILE).touch()
 
 
-def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
-    """Push updated main to origin (sync fork); True on success."""
-    return _git_ok(git_cmd, ["push", "origin", "main", "--force-with-lease"], cwd, network=True)
+def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path, head: str = "HEAD") -> bool:
+    """Hand an upstream sync to the fork's CI gate; True only when it is on the fork's main.
+
+    ``scripts/ci/upstream_sync.py`` (the checkout's own copy) stages ``head`` on
+    ``sync/upstream-<sha>`` and lands it on main only once the full suite went green on the fork's
+    runners at exactly that commit. Main is never pushed here directly: an untested sync that reached
+    main this way first ran upstream's new tests on runners that lacked upstream's image (10-29 tmux).
+    """
+    from hermes_cli.update_custody import run as custody_run
+    gate = Path(cwd) / "scripts" / "ci" / "upstream_sync.py"
+    if not gate.is_file():
+        print("  ✗ Upstream sync refused: this checkout has no scripts/ci/upstream_sync.py gate")
+        return False
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"}
+    if os.path.isabs(git_cmd[0]):  # the gate runs plain `git`: the updater's resolved one first
+        env["PATH"] = os.pathsep.join((os.path.dirname(git_cmd[0]), env.get("PATH", "")))
+    try:
+        proc = custody_run([sys.executable, str(gate), "--repo", str(cwd), "--head", head], cwd=cwd, env=env,
+                           stdin=subprocess.DEVNULL, timeout=900, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", creationflags=windows_hide_flags())
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  ✗ Upstream sync gate failed to run: {exc}")
+        return False
+    for line in (proc.stdout or proc.stderr or "").strip().splitlines()[-4:]:
+        print(f"    {line}")
+    return proc.returncode == 0
 
 
 def _offer_upstream_remote(git_cmd: list[str], cwd: Path, *, assume_yes: bool, input_fn) -> bool:
@@ -389,7 +412,8 @@ def _synthesize_upstream_merge(git_cmd: list[str], cwd: Path, upstream: str) -> 
                                    cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False).stdout.splitlines()[1:]
         print("  ✗ Upstream does not merge cleanly into your fork — nothing changed.\n"
               "    Conflicting paths: " + (", ".join(p for p in conflicts if p.strip())[:400] or "?") + "\n"
-              "    Resolve by hand: git merge upstream/main, fix, commit, git push origin main")
+              "    Resolve by hand: merge upstream/main on a branch, fix, commit, then land it with\n"
+              "    python3 scripts/ci/upstream_sync.py --head <merge sha>  (never a direct push to main)")
         return None
     msg = f"Merge upstream/main ({upstream[:10]}) into fork"
     commit = _git_stdout(git_cmd, ["commit-tree", tree, "-p", head, "-p", upstream, "-m", msg], cwd)
@@ -454,14 +478,20 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
                 "  (or set updates.fork_merge_upstream: true to merge on every update)"
             )
             return True
-        # updates.fork_merge_upstream: carry the fork's commits forward by merging upstream into HEAD.
-        # The merge is computed off-tree (merge-tree + commit-tree), so the live checkout only ever
-        # fast-forwards — the same custody path as a plain upstream pull — and a conflict moves nothing.
+        # updates.fork_merge_upstream: carry the fork's commits forward by merging upstream into the fork.
+        # The merge is built off-tree (merge-tree + commit-tree) and handed to the fork's CI gate; the
+        # live checkout does not move to it. It arrives through the normal origin pull once the full
+        # suite passed on the fork's runners and the gate landed it on main.
         merged = _synthesize_upstream_merge(git_cmd, cwd, upstream)
         if merged is None:
             return False
-        target = merged
-        print(f"\n→ Fork is {upstream_ahead} commit(s) behind upstream\n→ Merging upstream into the fork ({target[:10]})...")
+        print(f"\n→ Fork is {upstream_ahead} commit(s) behind upstream\n"
+              f"→ Handing the upstream merge ({merged[:10]}) to the fork's CI gate...")
+        if _sync_fork_with_upstream(git_cmd, cwd, merged):
+            print("  ✓ An upstream sync that passed the fork's full suite is on main; the next update pulls it")
+        else:
+            print("  ℹ Upstream sync not on main yet (staged, in CI, or refused above); main is unchanged")
+        return True
     elif upstream_ahead == 0:
         print("  ✓ Fork is up to date with upstream")
         return True
@@ -531,13 +561,13 @@ def _push_synced_fork(git_cmd: list[str], cwd: Path) -> None:
         return
     if origin and not _git_ok(git_cmd, ["merge-base", "--is-ancestor", origin, head], cwd):
         return
-    print("→ Syncing fork...")
+    print("→ Syncing fork through its CI gate...")
     if _sync_fork_with_upstream(git_cmd, cwd):
-        print("  ✓ Fork synced with upstream")
+        print("  ✓ Fork synced with upstream (full suite green on the fork's runners)")
     else:
         print(
-            "  ℹ Got updates from upstream but couldn't push to fork (no write access?)\n"
-            "    Your local repo is updated, but your fork on GitHub may be behind."
+            "  ℹ Your local repo has upstream's commits; the fork's main gets them once the gate lands\n"
+            "    them (full suite on the fork's runners). The next update checks again."
         )
 
 

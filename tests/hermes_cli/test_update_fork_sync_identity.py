@@ -69,7 +69,15 @@ def test_a_local_branch_named_upstream_main_never_changes_what_the_sync_counts_o
     assert _git(clone, "rev-parse", "HEAD") == commits[2]
     # The tree-move marker names the merged commit: a killed merge is repaired toward it.
     assert armed == [commits[2]]
-    # The deferred fork push checks HEAD against the same remote-tracking commit, not the shadow.
+    # The deferred fork sync checks HEAD against the same remote-tracking commit, not the shadow, and
+    # hands exactly that commit to the CI gate: staged first, on main once its full suite is green.
+    from tests.hermes_cli.upstream_gate_fake import FakeFork
+    gate = FakeFork(tmp_path, monkeypatch, origin)
+    gate.adopt(clone)
+    _push_synced_fork(["git"], clone)
+    assert gate.staged() == [commits[2]]
+    assert _git(origin, "rev-parse", "refs/heads/main") == commits[0]
+    gate.finish(commits[2], "success")
     _push_synced_fork(["git"], clone)
     assert _git(origin, "rev-parse", "refs/heads/main") == commits[2]
 

@@ -98,6 +98,7 @@ def _add_engine(repo: Path, checker: bool = True) -> list[str]:
     _write(repo, {"scripts/ci/prompt_surface.py": "import sys\n\nsys.exit(0)\n"})
     if checker:
         shutil.copy2(REPO / "scripts/check", repo / "scripts/check")
+        shutil.copy2(REPO / "scripts/ci/upstream_sync.py", repo / "scripts/ci/upstream_sync.py")
         shutil.copytree(REPO / "scripts/code_health", repo / "scripts/code_health",
                         ignore=shutil.ignore_patterns("__pycache__"), dirs_exist_ok=True)
     return ["agent", "scripts", "tests"]
@@ -259,6 +260,43 @@ def test_pre_push_judges_a_checker_branch_pushed_from_an_older_checkout(tmp_path
     assert _remote_ref(remote, "old") == old
     assert _sh(repo, "git", "push", "origin", "--delete", "clean").returncode == 0
     assert _remote_ref(remote, "clean") == ""
+
+
+def test_pre_push_refuses_an_untested_upstream_sync_on_any_branch(tmp_path):
+    """The 10-29 sync reached main by hand pushes; now only the CI gate pushes upstream commits."""
+    repo, remote = _pushable(tmp_path)
+    fork = _branch_with_checker(repo, "fork-main", {"pkg/d.py": "def d():\n    return 4\n"})
+    _git(repo, "push", "-q", "origin", "fork-main:main")
+    _git(repo, "fetch", "-q", "origin")
+    upstream = tmp_path / "upstream.git"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(upstream))
+    _git(repo, "push", "-q", str(upstream), "main:main")  # upstream: main predating the fork commit
+    up_work = tmp_path / "up-work"
+    _git(tmp_path, "clone", "-q", str(upstream), str(up_work))
+    _git(up_work, "config", "user.email", "u@example.invalid")
+    _git(up_work, "config", "user.name", "u")
+    _commit(up_work, {"pkg/up.py": "def up():\n    return 5\n"})
+    _git(up_work, "push", "-q", "origin", "HEAD:main")
+    _git(repo, "remote", "add", "upstream", str(upstream))
+    _git(repo, "fetch", "-q", "upstream")
+    assert _check(repo, "--install-hook", "pre-push").returncode == 0
+
+    _git(repo, "checkout", "-q", "-b", "sync", fork)
+    _git(repo, "merge", "-q", "--no-edit", "refs/remotes/upstream/main")
+    sync = _git(repo, "rev-parse", "HEAD")
+    for ref in ("main", "sync"):  # by hand, to main or to a branch that a PR would merge
+        push = _sh(repo, "git", "push", "origin", f"{sync}:refs/heads/{ref}")
+        assert push.returncode != 0 and "upstream sync guard" in push.stderr, push.stdout + push.stderr
+    assert _remote_ref(remote, "main") == fork and _remote_ref(remote, "sync") == ""
+
+    # The gate's own staging push passes; fork-only work passes.
+    env = {**_env(), "HERMES_UPSTREAM_SYNC_GATE": "stage"}
+    push = _sh(repo, "git", "push", "origin", f"{sync}:refs/heads/sync/upstream-{sync}", env=env)
+    assert push.returncode == 0, push.stdout + push.stderr
+    _git(repo, "checkout", "-q", "-b", "feature", fork)
+    work = _commit(repo, {"pkg/e.py": "def e():\n    return 6\n"})
+    push = _sh(repo, "git", "push", "origin", "feature")
+    assert push.returncode == 0 and _remote_ref(remote, "feature") == work, push.stdout + push.stderr
 
 
 # --- M5: interpreter choice and the version guard ---------------------------------------------

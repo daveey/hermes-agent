@@ -190,13 +190,20 @@ def test_update_and_upstream_network_calls_disable_terminal_prompts(monkeypatch,
     assert update_cmd_git._sync_with_upstream_if_needed(["git"], tmp_path, assume_yes=True)
     from hermes_cli.update_custody import git_subcommand
 
-    # The fork push runs only after the update is validated (_push_synced_fork), never inside the sync.
+    # The fork sync runs only after the update is validated (_push_synced_fork), never inside the sync,
+    # and only through the fork's CI gate (scripts/ci/upstream_sync.py), never a direct push to main.
+    (tmp_path / "scripts" / "ci").mkdir(parents=True)
+    (tmp_path / "scripts" / "ci" / "upstream_sync.py").write_text("")
     update_cmd_git._sync_fork_with_upstream(["git"], tmp_path)
     # The fork's fast-forward is local (`merge --ff-only` after the fetch): no credential helper ever
     # runs under the checkout lock fd a mutator inherits (R2).
     network = [(args, kwargs) for args, kwargs in calls if git_subcommand(args) in {"fetch", "pull", "push", "merge"}]
-    assert [git_subcommand(args) for args, _ in network] == ["fetch", "fetch", "merge", "push"]
+    assert [git_subcommand(args) for args, _ in network] == ["fetch", "fetch", "merge"]
     assert network[2][0][-1] == upstream  # the counted commit, not a name a local branch can shadow
+    [gate] = [(args, kwargs) for args, kwargs in calls if args and str(args[0]).endswith("upstream_sync.py")]
+    assert gate[0][1:] == ["--repo", str(tmp_path), "--head", "HEAD"]
+    assert not gate[1].get("pass_fds")  # the gate's fetch/push never hold the update's lock fd
+    network.append(gate)
     for args, kwargs in network:
         assert kwargs["stdin"] is subprocess.DEVNULL, args
         env = kwargs["env"]

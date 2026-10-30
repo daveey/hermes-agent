@@ -1,0 +1,30 @@
+name: Upstream sync full suite
+
+# The evidence scripts/ci/upstream_sync.py requires before an upstream sync may reach main:
+# the full suite (both Python slices + e2e) on the fork's own self-hosted runners, at exactly
+# the candidate's head. The gate stages each candidate on sync/upstream-<sha>; nothing else
+# should push these branches.
+on:
+  push:
+    branches: ['sync/upstream-*']
+
+permissions:
+  contents: read
+
+# Every candidate has its own immutable SHA branch. A main push, another sync,
+# or a rerun cannot supersede this evidence before publication (main's busy-branch
+# concurrency cancelled both push runs of the 10-29 sync).
+concurrency:
+  group: upstream-sync-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  full-suite:
+    name: Full suite
+    uses: ./.github/workflows/tests.yml
+    with:
+      commit: ${{ github.sha }}
+      python_changed: ''
+      python_slices: '[1, 2]'
+      e2e: true
+      e2e_upgrade: false

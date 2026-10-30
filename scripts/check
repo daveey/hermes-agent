@@ -276,6 +276,17 @@ def _selected(parser: argparse.ArgumentParser, only: str | None) -> list[str]:
     return [name for name in _CHECKS if name in wanted]
 
 
+def _upstream_sync_refused(rev: str) -> bool:
+    """Pre-push (``--commit``): an untested upstream sync goes through scripts/ci/upstream_sync.py.
+
+    The hook judges every pushed branch with that commit's own scripts/check, so this guard is live
+    in every installed hook without reinstalling it.
+    """
+    from scripts.ci.upstream_sync import guard_push
+
+    return guard_push(Path.cwd(), rev) != 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scripts/check", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -294,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
         return install_hook(args.install_hook)
     if args.uninstall_hook:
         return uninstall_hooks()
+    if args.commit and _upstream_sync_refused(args.commit):
+        return 1
     try:
         results = _run_all(args)
     except RuntimeError as exc:

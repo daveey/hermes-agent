@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""The only way an upstream sync reaches the fork's main: a full suite on the fork's runners first.
+
+    python3 scripts/ci/upstream_sync.py --head REV      # stage, or land once green, one candidate
+    python3 scripts/ci/upstream_sync.py                 # only land staged candidates that went green
+
+A candidate X (a commit that brings upstream/main commits into the fork) is pushed to its own
+branch ``sync/upstream-<X>``. ``.github/workflows/upstream-sync.yml`` runs the full suite there
+(both Python slices and e2e, self-hosted, never cancelled by main's concurrency). Only an X whose
+run completed green, with every required job succeeding on a self-hosted runner at exactly X, is
+landed: a fast-forward when main has not moved, else a non-forced merge commit (main, X). Nothing
+is ever force-pushed. Red, pending or unreadable evidence is a refusal.
+
+Each call also lands any earlier staged candidate that went green (hosts that merged upstream at
+different times converge on one tested sync), keeps at most one candidate in CI, and stops staging
+for RED_BACKOFF_S after a red run so a broken upstream does not loop full suites.
+
+Exit codes: 0 landed (or already on main), 1 refused (red, conflict, error), 2 not yet (staged,
+pending, throttled): run it again with the same head after CI finishes.
+
+The pre-push hook (``scripts/check --install-hook pre-push``, through ``scripts/check --commit``) runs
+``guard_push``: a push of any branch that brings upstream commits the fork's main lacks is refused
+unless this gate is the one pushing.
+"""
+from __future__ import annotations
+
+import argparse
+import calendar
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+WORKFLOW_FILE = "upstream-sync.yml"
+WORKFLOW_PATH = f".github/workflows/{WORKFLOW_FILE}"
+BRANCH_PREFIX = "sync/upstream-"
+# The job names tests.yml gives the full suite (called as job "Full suite"); all must succeed.
+REQUIRED_JOBS = ("Run tests (1/2)", "Run tests (2/2)", "e2e")
+RED_BACKOFF_S = 6 * 3600
+STALE_PENDING_S = 6 * 3600  # a run queued this long never got runners: it no longer holds the slot
+# Set on the gate's own pushes; the pre-push guard lets exactly those through.
+GATE_ENV = "HERMES_UPSTREAM_SYNC_GATE"
+UPSTREAM_REF = "refs/remotes/upstream/main"
+
+LANDED, REFUSED, NOT_YET = 0, 1, 2
+
+
+class GateError(Exception):
+    pass
+
+
+def _run(repo, *args, env=None):
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          env=env, timeout=600, check=False)
+
+
+def git(repo, *args, env=None) -> str:
+    proc = _run(repo, *args, env=env)
+    if proc.returncode:
+        raise GateError(f"git {' '.join(args[:2])} failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
+    return proc.stdout.strip()
+
+
+def _is_ancestor(repo, sha, of) -> bool:
+    return _run(repo, "merge-base", "--is-ancestor", sha, of).returncode == 0
+
+
+def _gate_env(stage: str) -> dict:
+    return {**os.environ, GATE_ENV: stage, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def github_pages(endpoint):
+    """Every page of a GitHub API GET: the logged-in gh, else the broker's ``user/github`` scope."""
+    argv = ["gh", "api", "--paginate", "--slurp", endpoint]
+    proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=120, check=False)
+    broker = shutil.which("token-broker") or str(Path.home() / ".local/bin/token-broker")
+    if proc.returncode and Path(broker).exists():
+        proc = subprocess.run([broker, "exec", "--scope", "user/github", "--reason",
+                               "upstream sync gate: read fork CI evidence", "--", *argv], encoding="utf-8",
+                              capture_output=True, text=True, timeout=180, check=False)
+    if proc.returncode:
+        raise GateError(f"GitHub API read failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
+    return json.loads(proc.stdout)
+
+
+@dataclass
+class Candidate:
+    head: str
+    status: str  # green | red | pending
+    url: str
+    updated_at: float
+
+
+def _ts(value) -> float:
+    return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")) if value else 0.0
+
+
+def _jobs_green(gh_repo, run_id, request) -> bool:
+    pages = request(f"repos/{gh_repo}/actions/runs/{run_id}/jobs?per_page=100&filter=latest")
+    jobs = {job["name"].rsplit(" / ", 1)[-1]: job for page in pages for job in page["jobs"]}
+    return all(name in jobs and jobs[name]["status"] == "completed"
+               and jobs[name]["conclusion"] == "success"
+               and "self-hosted" in (jobs[name].get("labels") or []) and jobs[name].get("runner_name")
+               for name in REQUIRED_JOBS)
+
+
+def candidates(gh_repo, request) -> dict[str, Candidate]:
+    """Each staged candidate's newest verdict, keyed by head sha."""
+    pages = request(f"repos/{gh_repo}/actions/workflows/{WORKFLOW_FILE}/runs?event=push&per_page=50")
+    runs = sorted((r for page in pages for r in page["workflow_runs"]), key=lambda r: (r.get("run_number", 0), r["id"]))
+    found: dict[str, Candidate] = {}
+    for run in runs:  # oldest first: a later run on the same head replaces the earlier verdict
+        head = run["head_sha"]
+        if run["head_branch"] != BRANCH_PREFIX + head or run["path"] != WORKFLOW_PATH or run["event"] != "push":
+            continue  # evidence counts only from the candidate's own branch and this workflow
+        if run["status"] != "completed":
+            status = "pending"
+        elif run["conclusion"] == "success":
+            status = "green" if _jobs_green(gh_repo, run["id"], request) else "red"
+        elif run["conclusion"] in ("cancelled", "skipped", "stale"):
+            continue  # never reached a verdict: neither evidence nor a failure
+        else:
+            status = "red"
+        found[head] = Candidate(head, status, run["html_url"], _ts(run.get("updated_at") or run.get("created_at")))
+    return found
+
+
+def _fetch_main(repo) -> str:
+    git(repo, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main")
+    return git(repo, "rev-parse", "refs/remotes/origin/main")
+
+
+def _adds_nothing(repo, head, main) -> bool:
+    """Merging ``head`` into ``main`` changes no file (a twin of a sync that already landed)."""
+    tree = _run(repo, "merge-tree", "--write-tree", "--no-messages", main, head)
+    return tree.returncode == 0 and tree.stdout.split("\n", 1)[0].strip() == git(repo, "rev-parse", f"{main}^{{tree}}")
+
+
+def land(repo, cand: Candidate) -> int:
+    """Put the tested head on main without force: a fast-forward, or a merge commit (main, head)."""
+    main = _fetch_main(repo)
+    if _is_ancestor(repo, cand.head, main):
+        return LANDED
+    target = cand.head
+    if not _is_ancestor(repo, main, cand.head):
+        if _adds_nothing(repo, cand.head, main):
+            return LANDED  # main already holds everything it brings (a newer sync landed first)
+        tree = _run(repo, "merge-tree", "--write-tree", "--no-messages", main, cand.head)
+        tree_sha = (tree.stdout or "").split("\n", 1)[0].strip()
+        if tree.returncode or not tree_sha:
+            print(f"REFUSED: tested sync {cand.head[:10]} conflicts with main {main[:10]}; stage a new candidate")
+            return REFUSED
+        target = git(repo, "commit-tree", tree_sha, "-p", main, "-p", cand.head, "-m",
+                     f"Merge tested upstream sync {cand.head[:10]} into main\n\nFull suite: {cand.url}")
+    push = _run(repo, "push", "-q", "origin", f"{target}:refs/heads/main", env=_gate_env("publish"))
+    if push.returncode:
+        print(f"NOT YET: main moved during publication; run again ({(push.stderr or '').strip()[-200:]})")
+        return NOT_YET
+    _run(repo, "update-ref", "refs/remotes/origin/main", target)
+    # The run (and its verdict) outlives the branch; best effort, a leftover branch is harmless.
+    _run(repo, "push", "-q", "origin", f":refs/heads/{BRANCH_PREFIX}{cand.head}", env=_gate_env("stage"))
+    print(f"LANDED {cand.head} on main as {target}; full suite: {cand.url}")
+    return LANDED
+
+
+def _land_other_greens(repo, found, head, main) -> bool:
+    landed = False
+    for cand in found.values():
+        if cand.status == "green" and cand.head != head and not _is_ancestor(repo, cand.head, main):
+            landed = land(repo, cand) == LANDED or landed
+    return landed
+
+
+def _upstream_point(repo, sha) -> str | None:
+    """The newest upstream/main commit ``sha`` contains; None when unknown (treated as a match)."""
+    if _run(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode:
+        _run(repo, "fetch", "-q", "origin", f"refs/heads/{BRANCH_PREFIX}{sha}")
+    point = _run(repo, "merge-base", sha, UPSTREAM_REF)
+    return point.stdout.strip() if point.returncode == 0 and point.stdout.strip() else None
+
+
+def _stage_or_wait(repo, head, found, now) -> int:
+    pending = [c for c in found.values() if c.status == "pending" and now - c.updated_at < STALE_PENDING_S]
+    if pending:
+        print(f"NOT YET: another sync candidate is in CI ({pending[0].url}); not staging {head[:10]}")
+        return NOT_YET
+    red = [c for c in found.values() if c.status == "red" and now - c.updated_at < RED_BACKOFF_S
+           and _upstream_point(repo, c.head) in (None, _upstream_point(repo, head))]
+    if red:
+        print(f"NOT YET: a sync candidate with the same upstream failed its full suite within "
+              f"{RED_BACKOFF_S // 3600} h ({red[0].url}); not staging {head[:10]} until upstream moves, "
+              "the backoff ends, or the red candidate is rerun green")
+        return NOT_YET
+    git(repo, "push", "-q", "origin", f"{head}:refs/heads/{BRANCH_PREFIX}{head}", env=_gate_env("stage"))
+    print(f"NOT YET: staged {head} as {BRANCH_PREFIX}{head}; it lands once its full suite is green")
+    return NOT_YET
+
+
+def advance(repo: Path, head: str | None, *, gh_repo: str, request=github_pages, now=None) -> int:
+    """Land green candidates, then report ``head``'s state or stage it (module doc, exit codes)."""
+    now = time.time() if now is None else now
+    try:
+        if head is not None:
+            head = git(repo, "rev-parse", "--verify", f"{head}^{{commit}}")
+        found = candidates(gh_repo, request)
+        landed_other = _land_other_greens(repo, found, head, _fetch_main(repo))
+        if head is None:
+            return LANDED if landed_other else NOT_YET
+        main = _fetch_main(repo)
+        if _is_ancestor(repo, head, main) or _adds_nothing(repo, head, main):
+            print(f"LANDED: main already has everything {head[:10]} brings")
+            return LANDED
+        cand = found.get(head)
+        if cand is None:
+            return _stage_or_wait(repo, head, found, now)
+        if cand.status == "green":
+            return land(repo, cand)
+        if cand.status == "red":
+            print(f"REFUSED: the full suite failed on {head[:10]}: {cand.url}")
+            return REFUSED
+        print(f"NOT YET: the full suite is still running on {head[:10]}: {cand.url}")
+        return NOT_YET
+    except (GateError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+        print(f"REFUSED: upstream sync evidence/publication failed: {exc}")
+        return REFUSED
+
+
+def brings_upstream(repo, sha, base) -> bool:
+    """``sha`` contains upstream/main commits that ``base`` (the fork's main) lacks."""
+    upstream = _run(repo, "rev-parse", "-q", "--verify", f"{UPSTREAM_REF}^{{commit}}").stdout.strip()
+    if not upstream:
+        return False
+    newest = _run(repo, "merge-base", sha, upstream).stdout.strip()
+    return bool(newest) and not (base and _is_ancestor(repo, newest, base))
+
+
+def guard_push(repo, sha) -> int:
+    """Pre-push: refuse a push that brings upstream/main commits the fork's main lacks.
+
+    Only this gate (stage/publish) may push such a commit; the pushed branch does not matter, as a
+    branch carrying an untested sync reaches main by a PR merge just the same.
+    """
+    if os.environ.get(GATE_ENV) in ("publish", "stage"):
+        return 0
+    base = _run(repo, "rev-parse", "-q", "--verify", "refs/remotes/origin/main").stdout.strip()
+    if not brings_upstream(repo, sha, base):
+        return 0
+    # A stale origin/main (a sync landed since the last fetch) must not refuse a branch built on it.
+    if _run(repo, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main").returncode == 0:
+        base = _run(repo, "rev-parse", "-q", "--verify", "refs/remotes/origin/main").stdout.strip()
+        if not brings_upstream(repo, sha, base):
+            return 0
+    print(f"upstream sync guard: {sha[:10]} brings upstream/main commits that the fork's main lacks.\n"
+          "  An upstream sync lands only after a full suite on the fork's own runners. Run instead:\n"
+          f"    python3 scripts/ci/upstream_sync.py --head {sha[:12]}", file=sys.stderr)
+    return 1
+
+
+def origin_slug(repo) -> str:
+    # The configured URL, not `remote get-url`'s insteadOf-rewritten one: it names the GitHub repo.
+    url = git(repo, "config", "--get", "remote.origin.url")
+    match = re.fullmatch(r"(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)([^/]+/[^/]+?)(?:\.git)?/?", url)
+    if not match:
+        raise GateError(f"the upstream sync gate needs a GitHub origin, not {url}")
+    return match[1]
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--repo", type=Path, default=Path.cwd())
+    parser.add_argument("--head", help="candidate commit; omitted: only land staged candidates that went green")
+    parser.add_argument("--guard-push", metavar="SHA", help="pre-push check (scripts/check --commit runs it)")
+    args = parser.parse_args(argv)
+    if args.guard_push:
+        return guard_push(args.repo, args.guard_push)
+    try:
+        slug = origin_slug(args.repo)
+    except GateError as exc:
+        print(f"REFUSED: {exc}")
+        return REFUSED
+    return advance(args.repo, args.head, gh_repo=slug)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
