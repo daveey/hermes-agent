@@ -97,6 +97,19 @@ def _stat_entry(path: Path, label: str) -> list:
     return [label, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns]
 
 
+_DIST_SUFFIXES = (".dist-info", ".egg-info", ".egg-link", ".pth", ".egg")
+
+
+def _site_entry(path: Path, label: str) -> list:
+    """A site dir's installed-distribution entries (not the dir's own mtime, which also moves
+    whenever any process first byte-compiles a top-level module into ``__pycache__``)."""
+    try:
+        names = sorted(n for n in os.listdir(path) if n.endswith(_DIST_SUFFIXES))
+    except OSError as exc:
+        return [label, "missing", exc.errno]
+    return [label, [_stat_entry(path / n, n) for n in names]]
+
+
 def _walk_root(root: Path, label: str, out: list) -> None:
     if not root.is_dir():
         out.append([label, "absent"])
@@ -112,8 +125,11 @@ def _walk_root(root: Path, label: str, out: list) -> None:
             continue
         seen.add((st.st_dev, st.st_ino))
         rel = os.path.relpath(dirpath, root)
-        # The directory's own entry changes when a file is added, removed or renamed.
-        out.append([f"{label}:{rel}/", st.st_dev, st.st_ino, st.st_mtime_ns])
+        # The directory's identity only: its mtime also moves when ANY process (a sibling test worker,
+        # a pytest run importing a bundled plugin) first creates a __pycache__ in it, which made a
+        # record stale between two cold processes. Added/removed/renamed plugin files and
+        # subdirectories already show up below as entries of their own.
+        out.append([f"{label}:{rel}/", st.st_dev, st.st_ino])
         dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
         for name in sorted(filenames):
             if name.endswith(_PLUGIN_SUFFIXES):
@@ -142,7 +158,7 @@ def fingerprint(home: Optional[Path] = None) -> Optional[str]:
         # uninstall changes the directory. Script and source dirs on sys.path differ per caller
         # and hold no distributions, so they are left out to keep the record shared.
         for entry in sorted({e for e in sys.path if e and os.path.basename(e) in ("site-packages", "dist-packages")}):
-            parts.append(_stat_entry(Path(entry), f"syspath:{entry}"))
+            parts.append(_site_entry(Path(entry), f"syspath:{entry}"))
         roots = [("bundled", Path(_plugins.get_bundled_plugins_dir())), ("user", home / "plugins")]
         if _plugins._env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
             roots.append(("project", Path.cwd() / ".hermes" / "plugins"))
