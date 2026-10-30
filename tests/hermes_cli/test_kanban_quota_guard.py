@@ -135,6 +135,7 @@ def test_hold_cap_requeues_quota_error_instead_of_blocking(kanban_home, monkeypa
     """The hold-cap path itself, reached for a quota-flavored error: re-queue, never a human kind."""
     monkeypatch.setenv("HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS", "600")
     now = 5_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="capped", assignee="a")
         conn.execute("UPDATE tasks SET last_failure_error=? WHERE id=?", (QUOTA_ERR, tid))
@@ -213,6 +214,7 @@ def test_hold_clock_survives_non_dispatcher_comments(kanban_home, monkeypatch):
     """A comment from an orchestrator/human must not restart the hold clock (t_d5d83916)."""
     monkeypatch.setenv("HERMES_KANBAN_GUARD_HOLD_CAP_LONG_SECONDS", "3600")
     now = 5_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="pr held", assignee="a")
         monkeypatch.setattr(kb.time, "time", lambda: now)

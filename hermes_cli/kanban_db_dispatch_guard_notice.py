@@ -23,32 +23,53 @@ logger = logging.getLogger(__name__)
 DEFAULT_GUARD_HOLD_NOTIFY_SECONDS = 30 * 60
 GUARD_HOLD_NOTE_MARKER = "[respawn-guard]"
 
+def _current_guard_hold(
+    conn: sqlite3.Connection, task_id: str, *, include_replies: bool = False,
+) -> list[tuple[int, int, str, str]]:
+    """Current hold in occurrence order; sync imports can give old events newer local IDs."""
+    from hermes_cli import kanban_db as _kb
+
+    comment_filter = (
+        "NOT (kind = 'commented' AND json_extract(payload, '$.author') = 'kanban-dispatcher')"
+        if include_replies else "kind != 'commented'"
+    )
+    events = sorted(
+        (stamp, row[0], row[1], row[2])
+        for row in conn.execute(
+            "SELECT id, kind, payload, created_at FROM task_events "
+            f"WHERE task_id = ? AND {comment_filter}", (task_id,),
+        )
+        if (stamp := _kb._to_epoch(row[3])) is not None
+    )
+    hold = []
+    # IDs only break ties within the same normalized second, never order older imports.
+    for event in events:
+        if event[2] == "respawn_guarded":
+            hold.append(event)
+        else:
+            hold.clear()
+    return hold
+
+
 def guard_hold_started_at(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
     """When the current unbroken run of ``respawn_guarded`` events began: the first one
     after the newest event of any other kind (a claim, a block, an unblock...). Comments of any
     author do not restart it: a note or reply fixes nothing, and resetting on them held
     t_d5d83916 in ``ready`` 374 min after its first guard event (09:24Z). [daveey]"""
-    row = conn.execute(
-        "SELECT MIN(created_at) FROM task_events WHERE task_id = ? AND kind = 'respawn_guarded' "
-        "AND id > COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ? "
-        "AND kind != 'respawn_guarded' AND kind != 'commented'), 0)", (task_id, task_id),
-    ).fetchone()
-    return int(row[0]) if row and row[0] is not None else None
+    hold = _current_guard_hold(conn, task_id)
+    return hold[0][0] if hold else None
 
 
 def guard_hold_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
-    """The reason of the hold in progress, or None: the newest event (ignoring the dispatcher's own
-    notice comments, as :func:`guard_hold_started_at` does) when it is a ``respawn_guarded`` one.
-    The dispatcher appends a new ``respawn_guarded`` event only when this differs, so an unbroken
-    hold logs one event per reason instead of one per tick."""
-    row = conn.execute(
-        "SELECT kind, payload FROM task_events WHERE task_id = ? AND NOT (kind = 'commented' AND "
-        "json_extract(payload, '$.author') = 'kanban-dispatcher') ORDER BY id DESC LIMIT 1", (task_id,),
-    ).fetchone()
-    if row is None or row[0] != "respawn_guarded":
+    """The reason of the latest guard, ignoring dispatcher notice comments.
+    Other authors' replies still cause a fresh guard event on the next held tick, but do not
+    reset the hold clock. One unbroken hold otherwise logs one event per reason, not per tick.
+    """
+    hold = _current_guard_hold(conn, task_id, include_replies=True)
+    if not hold:
         return None
     try:
-        data = json.loads(row[1] or "{}")
+        data = json.loads(hold[-1][3] or "{}")
     except ValueError:
         return None
     reason = data.get("reason") if isinstance(data, dict) else None
@@ -95,8 +116,14 @@ def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
     held = int(time.time()) - started
     if held < _kbd._env_seconds("HERMES_KANBAN_GUARD_HOLD_NOTIFY_SECONDS", DEFAULT_GUARD_HOLD_NOTIFY_SECONDS):
         return False
-    if conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND body LIKE ? AND created_at >= ? LIMIT 1",
-                    (task_id, f"{GUARD_HOLD_NOTE_MARKER}%", started)).fetchone():
+    if any(
+        stamp >= started
+        for row in conn.execute(
+            "SELECT created_at FROM task_comments WHERE task_id = ? AND body LIKE ?",
+            (task_id, f"{GUARD_HOLD_NOTE_MARKER}%"),
+        )
+        if (stamp := _kb._to_epoch(row[0])) is not None
+    ):
         return False
     detail = ""
     if reason == "active_pr":
