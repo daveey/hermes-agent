@@ -46,13 +46,29 @@ class Model(BaseHTTPRequestHandler):
             pass
 
 
-# Windows children need the system environment (Winsock, temp, PATHEXT); POSIX uses the first three.
-CHILD_ENV_KEYS = ('PATH', 'LANG', 'TZ', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PATHEXT',
+# Windows children need the system environment (Winsock, temp, PATHEXT); POSIX uses PATH/LANG/TZ and
+# TMPDIR, so a child's temp files (the control socket's hermes-gw-<hash> fallback dir included) land
+# in the test run's own prunable temp root instead of the shared /tmp.
+CHILD_ENV_KEYS = ('PATH', 'LANG', 'TZ', 'TMPDIR', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PATHEXT',
                   'LOCALAPPDATA', 'APPDATA', 'PROGRAMDATA', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE')
 
 
 def child_env():
     return {k: os.environ[k] for k in CHILD_ENV_KEYS if k in os.environ}
+
+
+def stop_child(proc, timeout=10):
+    """Teardown stop: SIGTERM so the gateway runs its shutdown (control socket + fallback dir
+    cleanup), then SIGKILL only if it has not exited within ``timeout``. A test that needs a
+    crash calls ``proc.kill()`` itself."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+            return
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    proc.wait(timeout=10)
 
 
 async def rpc(ws, method, **params):
@@ -104,9 +120,7 @@ def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
             assert desc.get('state') == 'ready', log.read()
             yield proc, desc
         finally:
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait(timeout=10)
+            stop_child(proc)
 
 
 def probe(tmp_path):

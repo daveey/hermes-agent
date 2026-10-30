@@ -456,7 +456,9 @@ def _run_task_turns(agent, frame, history, context):
         result = agent.run_conversation(prompt, conversation_history=agent._session_db.get_messages_as_conversation(agent.session_id),
                                         turn_author=KANBAN_TURN_AUTHOR)
         return result.get('final_response', '')
-    run_kanban_goal_loop(task_id=context['task_id'], goal_text=context['goal_text'], run_turn=turn,
+    from hermes_cli.goals import kanban_goal_loop_turn_result
+    loop = run_kanban_goal_loop(task_id=context['task_id'], goal_text=context['goal_text'], run_turn=turn,
         task_status_fn=status, block_fn=block, max_turns=context['goal_max_turns'] or DEFAULT_MAX_TURNS,
         first_response=result.get('final_response', ''))
-    return result
+    # A broken loop exits non-zero; a parked or dispatcher-owned stop keeps the settled result (rc 0).
+    return kanban_goal_loop_turn_result(result, loop)

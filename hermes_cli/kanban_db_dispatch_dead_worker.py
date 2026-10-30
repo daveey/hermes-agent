@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from hermes_cli.kanban_host_reboot import HOST_REBOOT_OUTCOME
+from hermes_cli.kanban_owner_unavailable import OWNER_UNAVAILABLE_OUTCOME
 
 
 @dataclass
@@ -24,12 +25,15 @@ class _DeadWorker:
     stdlib_shadow: bool = False  # traceback from a workspace ``<stdlib>.py``: blocked at once [daveey]
     host_reboot: bool = False  # the host rebooted under the worker: no failure counted [daveey]
     reboot_culprit: Optional[dict] = None  # this card's own sudo shutdown (journal line): blocked at once [daveey]
+    owner_unavailable: bool = False  # the profile owner never answered the claim: no failure counted [daveey]
     owner_restart: bool = False  # the profile owner restarted under the attempt: requeued uncounted [daveey]
 
     @property
     def run_outcome(self) -> str:
         if self.host_reboot:
             return HOST_REBOOT_OUTCOME
+        if self.owner_unavailable:
+            return OWNER_UNAVAILABLE_OUTCOME
         if self.owner_restart:
             return "reclaimed"
         if self.event_kind in {"oom_killed", "signaled"}:

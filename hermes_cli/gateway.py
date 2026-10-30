@@ -70,6 +70,9 @@ from hermes_cli.setup import (
 )
 from hermes_cli.colors import Colors, color
 from hermes_cli.gateway_profile_lifecycle import owned_gateway_pid as _owned_gateway_pid
+from hermes_cli.gateway_supervised_handback import (
+    _host_decision_exit_code, custom_job_serves, supervised_attach_exit_code,
+)
 logger = logging.getLogger(__name__)
 
 # Shared ``subprocess.run`` kwargs for text-mode probes (stdout/stderr captured, decode-tolerant).
@@ -1009,7 +1012,7 @@ def _prepare_profile_gateway_update_restart(profile: str, pid: int) -> str | Non
     disk. ``argv`` is already captured above, so the fallback costs nothing extra.
     """
     argv = _capture_gateway_argv(pid)
-    if argv_declares_external_supervisor(argv):
+    if argv_declares_external_supervisor(argv) or custom_job_serves(profile):
         return "external-supervisor"
     if launch_detached_profile_gateway_restart(profile, pid):
         return "detached"
@@ -4316,24 +4319,6 @@ def _guard_named_profile_under_multiplexer(force: bool = False) -> None:
     sys.exit(GATEWAY_FATAL_CONFIG_EXIT_CODE)
 
 
-def _host_decision_exit_code(decision) -> int:
-    """Exit code for a host-attach verdict a supervisor may be watching.
-
-    ``GATEWAY_FATAL_CONFIG_EXIT_CODE`` (78) is the PERMANENT refusal: systemd parks the unit on it
-    (``RestartPreventExitStatus``), the s6 finish script maps it to 125, launchd maps it to a
-    deliberate stop. That is right for a config-derived refusal and wrong for a runtime one — "some
-    other process serves me right now" ends the moment that process goes away, and parking the unit
-    on it strands the profile until a human notices. Transient verdicts therefore use
-    ``GATEWAY_SERVICE_RESTART_EXIT_CODE`` (75, EX_TEMPFAIL), which every supervisor we generate
-    already retries: systemd has ``RestartForceExitStatus=75`` with ``RestartSec=5``, the s6 finish
-    script passes it through, and launchd relaunches a non-78 failure. Exit 0 would NOT do: s6
-    parks a clean exit too.
-    """
-    if getattr(decision, "transient", False):
-        return GATEWAY_SERVICE_RESTART_EXIT_CODE
-    return GATEWAY_FATAL_CONFIG_EXIT_CODE
-
-
 def _attach_to_host_gateway_or_guard(force: bool = False, replace: bool = False) -> None:
     """``gateway run`` against the ONE host gateway: attach, rescan-then-attach, replace, or refuse.
 
@@ -4364,7 +4349,7 @@ def _attach_to_host_gateway_or_guard(force: bool = False, replace: bool = False)
             logger.warning("gateway run refused (exit %d): %s", code, decision.message)
             sys.exit(code)
         if _running_under_gateway_supervisor():
-            sys.exit(_host_decision_exit_code(decision))
+            sys.exit(supervised_attach_exit_code(decision))
         sys.exit(0)
     # No host record (older gateway, unwritable lock dir): the config-derived refusal still applies.
     _guard_named_profile_under_multiplexer(force=force)

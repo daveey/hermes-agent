@@ -1,0 +1,146 @@
+"""Stale-triage sweep: release triage cards nobody specifies, once per triage entry. [daveey]
+
+Nothing consumes ``triage`` on boards without a specifier, and a card no chat owns (cron, automation,
+CLI) has no other releaser. The sweep used to fire once per card ever, so the second time such a card
+landed in triage it stayed there. Now it fires once per triage entry, capped at ``TRIAGE_SWEEP_CAP``
+sweeps per card per day; past the cap the card stays in triage with one board-supervisor card as its
+producer.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+import time
+from typing import Optional
+
+from hermes_cli import kanban_db as _kb
+
+logger = logging.getLogger(__name__)
+
+TRIAGE_STALE_SECONDS = 3600
+TRIAGE_SWEEP_CAP = 3
+TRIAGE_SWEEP_CAP_WINDOW = 86400
+# Events that put a card into triage. A card in triage whose newest such event is newer than its last
+# ``triage_swept`` re-entered triage after that sweep.
+TRIAGE_ENTRY_EVENTS = ("gave_up", "block_loop_detected", "agent_block_escalated", "supervisor_escalated",
+                       "continuation_exhausted", "blocked", "status")
+_TRIAGE_BRIEF = (
+    "\n\n---\n[triage sweep] This card sat in triage with no specifier. Specify it "
+    "(clarify title/body, then do the work), or park it with kanban_schedule + a wake_check "
+    "probe if it waits on something external. Do not return it to triage."
+)
+_MARKS = ",".join("?" * len(TRIAGE_ENTRY_EVENTS))
+
+
+def _supervisor_profile() -> str:
+    """``kanban.orchestrator_profile``, else ``default``."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        name = ((load_config_readonly() or {}).get("kanban") or {}).get("orchestrator_profile")
+    except Exception:  # config unreadable: fall back to the default profile
+        logger.warning("kanban: triage sweep could not read kanban.orchestrator_profile", exc_info=True)
+        name = None
+    return (name.strip() if isinstance(name, str) else "") or "default"
+
+
+def triage_reasons(conn: sqlite3.Connection, task_id: str, limit: int = 3) -> list[str]:
+    """The card's last ``limit`` triage entries, oldest first, as ``kind at <epoch>: reason`` lines."""
+    rows = conn.execute(
+        f"SELECT kind, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({_MARKS}) "
+        "ORDER BY id DESC LIMIT ?", (task_id, *TRIAGE_ENTRY_EVENTS, limit),
+    ).fetchall()
+    out = []
+    for kind, payload, created_at in reversed(rows):
+        try:
+            data = json.loads(payload) if payload else {}
+        except ValueError:
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        why = data.get("reason") or data.get("error") or data.get("reason_code") or "(no reason recorded)"
+        out.append(f"{kind} at {created_at}: {' '.join(str(why).split())[:400]}")
+    return out
+
+
+def _cap(conn: sqlite3.Connection, row, now: int) -> str:
+    """Leave the card in triage and give it a producer: one board-supervisor card per card per day,
+    named by a ``triage_sweep_capped`` event and a comment. Returns the supervisor card id."""
+    tid = row["id"]
+    reasons = triage_reasons(conn, tid)
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    body = (
+        f"Card {tid} ({row['title']!r}) keeps landing in triage. The stale-triage sweep released it "
+        f"{TRIAGE_SWEEP_CAP} times in 24 h and it came back each time, so the sweep stopped and left it in "
+        "triage. No chat owns it, so nothing else will release it: this card is its producer.\n\n"
+        "Its last triage reasons:\n" + "\n".join(f"- {r}" for r in reasons) + "\n\n"
+        f"Find why {tid} keeps failing and fix that cause (or file the fix card). Then release it with "
+        f"`hermes kanban promote {tid} --reason '<what changed>'`, or archive it if the work is no longer "
+        f"wanted. Record what you did as a comment on {tid}."
+    )
+    sup_id = _kb.create_task(
+        conn, title=f"Triage loop: {row['title']}"[:200], body=body,
+        assignee=_supervisor_profile(), created_by="triage-sweep", workspace_kind="scratch",
+        idempotency_key=f"triage-sweep-cap:{tid}:{day}", tenant=row["tenant"],
+    )
+    with _kb.write_txn(conn):
+        _kb._append_event(conn, tid, "triage_sweep_capped", {
+            "supervisor_task_id": sup_id, "cap": TRIAGE_SWEEP_CAP, "window": TRIAGE_SWEEP_CAP_WINDOW,
+            "reasons": reasons,
+        })
+    try:
+        _kb.add_comment(conn, tid, "triage-sweep", f"Triage sweep capped ({TRIAGE_SWEEP_CAP} sweeps in 24 h). "
+                                                   f"Supervisor card {sup_id} owns releasing it.")
+    except Exception:
+        logger.warning("kanban: triage cap comment failed for %s", tid, exc_info=True)
+    return sup_id
+
+
+def sweep_stale_triage(
+    conn: sqlite3.Connection, *, default_assignee: Optional[str] = None,
+    older_than: int = TRIAGE_STALE_SECONDS, now: Optional[int] = None,
+) -> list[str]:
+    """Move triage cards idle for ``older_than`` seconds to ``ready`` on the default profile with a
+    "specify or park with a probe" brief. A card is eligible once per triage entry: never swept, or a
+    ``TRIAGE_ENTRY_EVENTS`` event newer than its last ``triage_swept``. Past ``TRIAGE_SWEEP_CAP`` sweeps
+    in ``TRIAGE_SWEEP_CAP_WINDOW`` it is capped instead (see :func:`_cap`). Cards with an open human
+    request are left alone. Returns swept task ids."""
+    now = int(now if now is not None else time.time())
+    cutoff = now - older_than
+    swept: list[str] = []
+    rows = conn.execute(
+        "SELECT t.id, t.title, t.body, t.assignee, t.human_request, t.tenant FROM tasks t "
+        "WHERE t.status = 'triage' "
+        "AND COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id), t.created_at) <= ? "
+        "AND COALESCE((SELECT MAX(n.id) FROM task_events n WHERE n.task_id = t.id "
+        f"AND n.kind IN ({_MARKS})), 0) > "
+        "COALESCE((SELECT MAX(s.id) FROM task_events s WHERE s.task_id = t.id AND s.kind = 'triage_swept'), -1) "
+        "AND NOT EXISTS (SELECT 1 FROM task_events c WHERE c.task_id = t.id AND c.kind = 'triage_sweep_capped' "
+        f"AND c.id > COALESCE((SELECT MAX(n.id) FROM task_events n WHERE n.task_id = t.id AND n.kind IN ({_MARKS})), 0))",
+        (cutoff, *TRIAGE_ENTRY_EVENTS, *TRIAGE_ENTRY_EVENTS),
+    ).fetchall()
+    for row in rows:
+        if row["human_request"]:
+            continue
+        recent = conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'triage_swept' AND created_at > ?",
+            (row["id"], now - TRIAGE_SWEEP_CAP_WINDOW),
+        ).fetchone()[0]
+        if recent >= TRIAGE_SWEEP_CAP:
+            try:
+                _cap(conn, row, now)
+            except Exception:
+                logger.exception("kanban: triage sweep cap failed for %s", row["id"])
+            continue
+        assignee = (row["assignee"] or "").strip() or default_assignee or "default"
+        body = row["body"] or ""
+        if _TRIAGE_BRIEF.strip() not in body:
+            body += _TRIAGE_BRIEF
+        with _kb.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'ready', assignee = ?, body = ? WHERE id = ? AND status = 'triage'",
+                (assignee, body, row["id"]),
+            )
+            if cur.rowcount:
+                _kb._append_event(conn, row["id"], "triage_swept", {"assignee": assignee, "older_than": older_than})
+                swept.append(row["id"])
+    return swept

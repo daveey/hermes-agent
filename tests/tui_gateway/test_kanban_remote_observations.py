@@ -54,3 +54,26 @@ def test_cached_first_seen_still_ages_out(tmp_path):
     assert len(first) == 1
     assert krn.release(first[0], ledger=ledger)
     assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + krn.FRESH_S + 1) == []
+
+
+def test_changed_snapshot_decodes_only_the_rows_whose_seq_moved(tmp_path, monkeypatch):
+    """A busy replica's signature moves whenever any card does. Re-decoding every task row per
+    change (~8k rows / 30 MB on David-MBP) kept idle Desktop backends busy; only moved rows decode."""
+    now = 1_800_000_000.0
+    cards = [_card(f"t_bulk_{i}", CHAT, status="done", at=now - i) for i in range(20)]
+    replica = _hub(tmp_path, cards)
+    ledger = tmp_path / "ledger.db"
+    krn._reset_for_tests()
+    first = obs.observe(replica, ledger, now)
+    assert len(first) == 20
+
+    decoded = []
+    real_loads = json.loads
+    monkeypatch.setattr(obs.json, "loads", lambda raw, *a, **k: decoded.append(raw) or real_loads(raw, *a, **k))
+    moved = _card("t_bulk_3", CHAT, status="blocked", at=now + 5)
+    with sqlite3.connect(replica) as conn:
+        conn.execute("UPDATE replica SET data=?, seq=seq+1000 WHERE key=?", (json.dumps(moved["task"]), moved["key"]))
+    second = obs.observe(replica, ledger, now + 10)
+    assert len(decoded) == 1
+    assert any(state.startswith("blocked@") for (_gw, key, state) in second if key == moved["key"])
+    assert len(second) == len(first)

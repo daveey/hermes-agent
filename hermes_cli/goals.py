@@ -1692,8 +1692,11 @@ def run_kanban_goal_loop(
         except Exception as exc:
             _log(f"kanban goal loop: block_fn failed ({exc})")
 
-    def _result(outcome: str, reason: str) -> dict[str, Any]:
-        return {"outcome": outcome, "turns_used": turns_used, "reason": reason}
+    def _result(outcome: str, reason: str, *, failed: bool = False) -> dict[str, Any]:
+        # [daveey] ``failed`` marks the stops a caller must exit non-zero for (the loop itself broke:
+        # status read, judge transport, a follow-up turn raised or failed). Every other stop, the
+        # dispatcher-owned statuses included, is clean: the worker exits 0.
+        return {"outcome": outcome, "turns_used": turns_used, "reason": reason, "failed": failed}
 
     max_turns = int(max_turns or DEFAULT_MAX_TURNS)
     if max_turns < 1:
@@ -1708,7 +1711,7 @@ def run_kanban_goal_loop(
             status = task_status_fn()
         except Exception as exc:
             _log(f"kanban goal loop: status check failed ({exc}); stopping")
-            return _result("stopped", "status check failed")
+            return _result("stopped", "status check failed", failed=True)
 
         terminal = _KANBAN_TERMINAL_STATUSES.get(status)
         if terminal is not None:
@@ -1716,7 +1719,9 @@ def run_kanban_goal_loop(
             _log("kanban goal loop: " + log_fmt.format(task_id=task_id, turns=turns_used))
             return _result(outcome, reason)
         if status not in ("running", "ready"):
-            # Reclaimed / archived / unexpected — let the dispatcher own it.
+            # A dispatcher-owned state (scheduled / superseded / continued / triage / archived /
+            # reclaimed): the worker parked or lost the run and the dispatcher owns it now. A clean
+            # stop, never a failure: the worker exits 0 and the run keeps the outcome already booked.
             _log(f"kanban goal loop: task {task_id} status={status!r}; stopping")
             return _result("stopped", f"status={status}")
 
@@ -1729,7 +1734,7 @@ def run_kanban_goal_loop(
                 reset_affinity_scope(affinity_token)
         if _transport_failed:
             _log(f"kanban goal loop: judge transport failed on turn {turns_used}; stopping")
-            return _result("stopped", "judge transport failure")
+            return _result("stopped", "judge transport failure", failed=True)
         if verdict == "wait":
             verdict = "continue"
         _log(f"kanban goal loop: turn {turns_used}/{max_turns} verdict={verdict} reason={_truncate(reason, 120)}")
@@ -1779,11 +1784,29 @@ def run_kanban_goal_loop(
                 failure_reason = None
         except Exception as exc:
             _log(f"kanban goal loop: run_turn failed ({exc}); stopping")
-            return _result("stopped", f"run_turn error: {type(exc).__name__}")
+            return _result("stopped", f"run_turn error: {type(exc).__name__}", failed=True)
         if failed:
             _log(f"kanban goal loop: worker failed on turn {turns_used} (reason={failure_reason}); stopping")
-            return _result("stopped", f"worker failed: {failure_reason}")
+            return _result("stopped", f"worker failed: {failure_reason}", failed=True)
         turns_used += 1
+
+
+def kanban_goal_loop_turn_result(result, loop):
+    """[daveey] The turn result a goal-mode worker's exit code is read from, after its goal loop.
+
+    A loop that broke (``failed``: a follow-up turn raised, the judge or the status read failed) must
+    not exit 0 on the last good turn's result, which books the run a clean-exit protocol violation;
+    a follow-up turn that failed on its own keeps its result, so its provider reason still maps to
+    the rate-limit / terminal-provider exits. Every other stop (a worker that parked itself as
+    scheduled, a superseded/triage/archived card, a terminal board call) keeps the settled result:
+    exit 0."""
+    if not (isinstance(loop, dict) and loop.get("failed")):
+        return result
+    if isinstance(result, dict) and (result.get("failed") or result.get("partial") or result.get("completed") is False):
+        return result
+    base = result if isinstance(result, dict) else {}
+    return {**base, "failed": True, "failure_reason": "goal_loop",
+            "error": f"kanban goal loop stopped: {loop.get('reason')}"}
 
 
 __all__ = [
@@ -1804,6 +1827,7 @@ __all__ = [
     "clear_goal",
     "draft_contract",
     "judge_goal",
+    "kanban_goal_loop_turn_result",
     "load_goal",
     "migrate_goal_to_session",
     "parse_contract",

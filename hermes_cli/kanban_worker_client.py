@@ -150,8 +150,17 @@ async def run(params, board_db):
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)
                 detail = exc if isinstance(exc, GatewayClientError) else type(exc).__name__ + (
                     f' (HTTP {status})' if status else '')
-                lost = OwnerRestartLost if claim.restarted else GatewayClientError
-                raise lost(f'Kanban owner silent for {claim.silent_for():.0f}s: {detail}') from exc
+                message = f'Kanban owner silent for {claim.silent_for():.0f}s: {detail}'
+                if claim.restarted:
+                    # An ADMITTED turn lost to the owner's restart: exit 76, requeued uncounted. [daveey]
+                    raise OwnerRestartLost(message) from exc
+                error = GatewayClientError(message)
+                # [daveey] No admission answer reached us: the host's condition, not the card's. The
+                # exit says so and the dispatcher requeues the run uncounted unless the board shows
+                # the owner did admit it (t_82f0fe15 runs 7630/7649: two restart_wait refusals
+                # spent its failure budget and sent it to triage).
+                error.owner_unavailable = claim.admission_id is None
+                raise error from exc
         else:
             if receipt['status'] == 'unknown' and claim.restarted:
                 raise OwnerRestartLost('Kanban execution unknown after an owner restart; retained by owner')
@@ -260,6 +269,9 @@ def _submit():
         return KANBAN_OWNER_RESTART_EXIT_CODE
     except (KeyError, ValueError, OSError) as exc:
         print(f'Kanban owner refused: {exc}', file=sys.stderr)
+        if getattr(exc, 'owner_unavailable', False):
+            from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
+            return KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
         return 1
 
 

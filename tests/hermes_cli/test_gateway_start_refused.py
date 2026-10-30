@@ -214,3 +214,90 @@ def test_supervised_start_refused_by_manual_owner_hands_the_home_back(
     else:
         assert marked == []
         assert "handback" not in row
+
+
+# [daveey] gateway-e2cd786685 (second pass): once the unsupervised owner has published its host record,
+# the supervisor's retries never reach start_gateway's duplicate guard. The CLI's host-attach guard
+# answers ATTACH ("nothing to start") and exits 75 first, so the handback above never ran and no
+# exit-diag row was written: the mini looped `- 75` for hours with no signal. A supervised start that
+# attaches to a live owner of ITS OWN home is the same refusal: it is recorded and handed back.
+def _attach_decision(monkeypatch, owner_pid: int, owner_home: Path):
+    from gateway import host_attach
+
+    owner = host_attach.HostGateway(owner_pid, owner_home, ("default",))
+    decision = host_attach.HostAttachDecision(host_attach.ATTACH, "nothing to start", owner, transient=True)
+    monkeypatch.setattr(host_attach, "decide", lambda home, replace=False: decision)
+
+
+def _prepare_attach_cli(monkeypatch, supervised_start):
+    import hermes_cli.gateway as gateway_cli_module
+
+    real_guard = gateway_cli_module._attach_to_host_gateway_or_guard  # _prepare_cli stubs it out
+    gateway_cli, _ = _prepare_cli(monkeypatch)
+    monkeypatch.setattr(gateway_cli, "_attach_to_host_gateway_or_guard", real_guard)
+    from gateway import control_socket, status
+    marked: list[int] = []
+    monkeypatch.setattr(status, "write_planned_stop_marker", lambda pid: marked.append(pid) or True)
+    monkeypatch.setattr(sys, "argv", ["hermes", "gateway", "run", *(["--external-supervisor"] if supervised_start else [])])
+    # What gateway_command() exports for --external-supervisor before run_gateway().
+    for var in ("INVOCATION_ID", "XPC_SERVICE_NAME", "HERMES_LAUNCHD_LABEL", "HERMES_S6_SUPERVISED_CHILD"):
+        monkeypatch.delenv(var, raising=False)
+    if supervised_start:
+        monkeypatch.setenv("HERMES_GATEWAY_EXTERNAL_SUPERVISOR", "1")
+    else:
+        monkeypatch.delenv("HERMES_GATEWAY_EXTERNAL_SUPERVISOR", raising=False)
+    return gateway_cli, control_socket, marked
+
+
+@pytest.mark.parametrize("owner_supervisor,expect_handback", [
+    ("manual", True),     # the live failure: a client-spawned gateway holds the job's home
+    ("launchd", False),   # a supervised copy still draining is waited for, never stopped
+    (None, False),        # owner did not answer identify
+])
+def test_supervised_attach_to_owner_of_this_home_is_a_recorded_refusal_with_handback(
+        monkeypatch, live_pid, owner_supervisor, expect_handback):
+    gateway_cli, control_socket, marked = _prepare_attach_cli(monkeypatch, True)
+    home = Path(os.environ["HERMES_HOME"])
+    _attach_decision(monkeypatch, live_pid, home)
+    identity = {} if owner_supervisor is None else {"pid": live_pid, "launch_supervisor": owner_supervisor}
+    monkeypatch.setattr(control_socket, "identify_gateway", lambda *a, **k: identity)
+
+    with pytest.raises(SystemExit) as exc:
+        gateway_cli.run_gateway()
+    assert exc.value.code == 75  # unchanged: launchd retries, and the retry takes the drained home
+    row = _assert_refused("already_running", live_pid, True)
+    assert row["external_supervisor"] is True
+    assert row["detail"] == "host_attach"
+    if expect_handback:
+        assert marked == [live_pid]
+        assert row["handback"] == "planned_stop_requested"
+    else:
+        assert marked == []
+        assert "handback" not in row
+
+
+def test_supervised_attach_to_a_host_gateway_of_another_home_is_not_a_refusal(monkeypatch, live_pid, tmp_path):
+    """A profile unit whose profile the host multiplexer (launched from another home) serves: a real attach."""
+    gateway_cli, control_socket, marked = _prepare_attach_cli(monkeypatch, True)
+    _attach_decision(monkeypatch, live_pid, tmp_path / "other-home")
+    monkeypatch.setattr(control_socket, "identify_gateway",
+                        lambda *a, **k: {"pid": live_pid, "launch_supervisor": "manual"})
+    with pytest.raises(SystemExit) as exc:
+        gateway_cli.run_gateway()
+    assert exc.value.code == 75
+    assert marked == []
+    log = Path(os.environ["HERMES_HOME"]) / "logs" / "gateway-exit-diag.log"
+    assert not log.exists() or "gateway.start_refused" not in log.read_text(encoding="utf-8")
+
+
+def test_unsupervised_attach_stays_a_clean_attach(monkeypatch, live_pid):
+    """A plain `hermes gateway run` beside the live owner still prints who serves it and exits 0."""
+    gateway_cli, control_socket, marked = _prepare_attach_cli(monkeypatch, False)
+    _attach_decision(monkeypatch, live_pid, Path(os.environ["HERMES_HOME"]))
+    monkeypatch.setattr(control_socket, "identify_gateway",
+                        lambda *a, **k: {"pid": live_pid, "launch_supervisor": "manual"})
+    monkeypatch.setattr(gateway_cli, "_running_under_gateway_supervisor", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        gateway_cli.run_gateway()
+    assert exc.value.code == 0
+    assert marked == []

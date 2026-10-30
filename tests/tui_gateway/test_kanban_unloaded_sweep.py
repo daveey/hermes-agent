@@ -134,6 +134,35 @@ def test_unknown_chat_keeps_its_cursor(db):
     assert _cursor(tid) == before
 
 
+def _subs(tid):
+    conn = kbc.connect()
+    try:
+        return kbn.list_notify_subs(conn, task_id=tid)
+    finally:
+        conn.close()
+
+
+def test_archived_card_sub_to_unknown_chat_is_removed(db):
+    """An archived card's sub whose chat no store holds can never drain: its poller never runs and the sweep
+    skipped it, so the chat kept an unseen count forever (chat s1, t_01a18c03307c8661). [daveey]"""
+    tid = _card(chat_id="s1")
+    conn = kbc.connect()
+    try:
+        assert kb.archive_task(conn, tid)
+    finally:
+        conn.close()
+    assert ku.sweep_once(set(), now=LATER, session_db=_session_db(db)) == []
+    assert _subs(tid) == []
+
+
+def test_live_card_sub_to_unknown_chat_is_kept(db):
+    """Control: a card still open keeps its sub, since the chat may appear later (a store not yet mounted)."""
+    tid = _card(chat_id="s1")
+    before = _cursor(tid)
+    assert ku.sweep_once(set(), now=LATER, session_db=_session_db(db)) == []
+    assert len(_subs(tid)) == 1 and _cursor(tid) == before
+
+
 def test_append_is_deduped_by_notice_id(db):
     meta = {"notice_id": "default:t_x:0-1"}
     first = db.append_kanban_notice(CHAT, "one", meta)

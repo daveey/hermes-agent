@@ -36,7 +36,7 @@ from hermes_cli import kanban_db_dispatch_quota as _kbq
 from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code_kind
 from hermes_cli.kanban_db_dispatch_allowlist import _dispatch_profile_allowlist, dispatch_profile_allowlist_summary
 from hermes_cli import kanban_worker_scope as _worker_scope
-from hermes_cli import kanban_host_reboot as _host_reboot
+from hermes_cli import kanban_host_reboot as _host_reboot, kanban_owner_unavailable as _ou  # [daveey]
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
 from hermes_cli.kanban_db_dispatch_queries import lane_rows, skip_reap
 
@@ -207,6 +207,8 @@ class DispatchResult:
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     agent_block_escalated: list[str] = field(default_factory=list)
     """Agent-owned blocks older than 2h re-spawned through triage."""
+    ask_rechecked: list[str] = field(default_factory=list)
+    """Standing human asks found void (relay lint, every named card closed) and moved to agent triage."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
     woken_continuations: list[str] = field(default_factory=list)
@@ -1278,7 +1280,7 @@ def _classify_dead_worker(
         dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
                            {"pid": pid, "claimer": claimer, **failure})
     else:
-        dead = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board)
+        dead = _ou.noted(_classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board), conn, task_id, run_id, log)
     if task_id and not dead.rate_limited:
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
@@ -1359,7 +1361,7 @@ def _classify_dead_worker_exit(
             {"pid": pid, "claimer": claimer, "exit_kind": kind, "exit_code": code, "terminal_provider": True},
             terminal_provider=True,
         )
-    if kind == "nonzero_exit":
+    if kind in ("nonzero_exit", "owner_unavailable"):  # owner_unavailable: kanban_owner_unavailable.note rebooks it
         error_text = f"pid {pid} exited with code {code}"
     elif kind == "signaled":
         error_text = f"pid {pid} killed by signal {code}"
@@ -1379,6 +1381,7 @@ class _CrashSweep:
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
     host_rebooted: list[str] = field(default_factory=list)  # reboot bystanders, requeued uncounted [daveey]
+    owner_unavailable: list[str] = field(default_factory=list)  # owner never answered, requeued uncounted [daveey]
     owner_restarted: list[str] = field(default_factory=list)  # lost to an owner restart, requeued uncounted [daveey]
     # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
     # ``_record_task_failure`` (needs its own write_txn).
@@ -1462,11 +1465,10 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
-            if dead.host_reboot and not dead.reboot_culprit:
-                # A bystander of a reboot: back to its source phase, no failure counted. [daveey]
-                conn.execute("UPDATE tasks SET last_failure_error = ? WHERE id = ?",
-                             (dead.error_text[:500], row["id"]))
-                sweep.host_rebooted.append(row["id"])
+            if (dead.host_reboot and not dead.reboot_culprit) or dead.owner_unavailable:
+                # A reboot bystander, or an owner that never answered (no turn ran): no failure counted. [daveey]
+                conn.execute("UPDATE tasks SET last_failure_error = ? WHERE id = ?", (dead.error_text[:500], row["id"]))
+                (sweep.owner_unavailable if dead.owner_unavailable else sweep.host_rebooted).append(row["id"])
             elif dead.owner_restart:  # lost to its owner's restart: requeued, no failure counted [daveey]
                 conn.execute("UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                              (dead.error_text[:500], row["id"]))
@@ -2600,45 +2602,15 @@ def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
 # critical section (#56066 sweeper finding / #64231 disposition): a slow subscriber must never extend the
 # lock hold and stall a sibling dispatcher's tick.
 TRIAGE_STALE_SECONDS = 3600
-_TRIAGE_BRIEF = (
-    "\n\n---\n[triage sweep] This card sat in triage with no specifier. Specify it "
-    "(clarify title/body, then do the work), or park it with kanban_schedule + a wake_check "
-    "probe if it waits on something external. Do not return it to triage."
-)
 
 
 def sweep_stale_triage(
     conn: sqlite3.Connection, *, default_assignee: Optional[str] = None,
     older_than: int = TRIAGE_STALE_SECONDS, now: Optional[int] = None,
 ) -> list[str]:
-    """Nothing consumes ``triage`` on boards without a specifier, so it becomes a
-    parking lot. Move triage cards idle for ``older_than`` seconds to ``ready`` on the
-    default profile with a "specify or park with a probe" brief. Once per card
-    (``triage_swept`` event) so a worker that re-triages cannot loop; cards with an
-    open human request are left alone. Returns swept task ids."""
-    import time as _time
-    now = int(now if now is not None else _time.time())
-    cutoff = now - older_than
-    swept: list[str] = []
-    rows = conn.execute(
-        "SELECT t.id, t.body, t.assignee, t.human_request FROM tasks t WHERE t.status = 'triage' "
-        "AND COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id), t.created_at) <= ? "
-        "AND NOT EXISTS (SELECT 1 FROM task_events s WHERE s.task_id = t.id AND s.kind = 'triage_swept')",
-        (cutoff,),
-    ).fetchall()
-    for row in rows:
-        if row["human_request"]:
-            continue
-        assignee = (row["assignee"] or "").strip() or default_assignee or "default"
-        with _kb.write_txn(conn):
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', assignee = ?, body = ? WHERE id = ? AND status = 'triage'",
-                (assignee, (row["body"] or "") + _TRIAGE_BRIEF, row["id"]),
-            )
-            if cur.rowcount:
-                _kb._append_event(conn, row["id"], "triage_swept", {"assignee": assignee, "older_than": older_than})
-                swept.append(row["id"])
-    return swept
+    """Release stale triage cards once per triage entry (``hermes_cli.kanban_triage_sweep``). [daveey]"""
+    from hermes_cli.kanban_triage_sweep import sweep_stale_triage as _sweep
+    return _sweep(conn, default_assignee=default_assignee, older_than=older_than, now=now)
 
 
 def _dispatch_once_locked(
@@ -2667,12 +2639,9 @@ def _dispatch_once_locked(
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board, dry_run=dry_run,
     )
     if not dry_run:
-        # Agent-owned blocks (no human ask / wake probe) get one triage respawn after 2h.
-        try:
-            from hermes_cli.kanban_block_policy import sweep_agent_owned_blocks
-            result.agent_block_escalated.extend(sweep_agent_owned_blocks(conn))
-        except sqlite3.Error:
-            _kb._log.exception("kanban: agent-owned block sweep failed")
+        # Agent-owned blocks get one triage respawn after 2h; standing human asks are re-checked every tick.
+        from hermes_cli.kanban_block_policy import sweep_blocked_cards
+        sweep_blocked_cards(conn, result)
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )

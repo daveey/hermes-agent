@@ -2367,8 +2367,8 @@ _RUN_OUTCOME_TERMINAL_STATUS = {
     "changes_requested": "changes_requested",
     "blocked": "blocked",
     "dependency_wait": "blocked",
-    # Checkpointed for a fresh run (kanban_continuation): this run's goal loop stops.
-    "continued": "continued",
+    # The run's own checkpoint (kanban_continuation) or timed park stops its loop; a park is no ownership loss.
+    "continued": "continued", "scheduled": "scheduled",  # [daveey]
 }
 
 

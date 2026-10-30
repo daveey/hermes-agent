@@ -103,7 +103,7 @@ async def test_a_worker_cut_by_a_restart_wait_waits_outside_it(monkeypatch, tmp_
 
     # The worker waits for the next owner without reading anything from the restarting one. An
     # owner refusing it from the wait is alive and still runs the turn, so the worker outlasts
-    # OWNER_WAIT_S and gives up only past the wait's own cap, as an owner restart (exit 69, requeued
+    # OWNER_WAIT_S and gives up only past the wait's own cap, as an owner restart (exit 76, requeued
     # uncounted) rather than a failure.
     monkeypatch.setenv("HERMES_RESTART_AFTER_TURN_TIMEOUT", "1800")
     with pytest.raises(kanban_worker_client.OwnerRestartLost, match="owner silent"):

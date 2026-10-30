@@ -191,6 +191,34 @@ describe('prefetch refresh on activity change', () => {
     expect(await h.prefetcher.tick()).toMatchObject({ failed: 1, fetched: 2 })
   })
 
+  // An empty session (a fresh cron/kanban tip: message_count > 0 in the replica, nothing displayable yet) or a
+  // 404 stores nothing, so the cache had no row and every 5 s tick fetched it again: ~1100 transcript GETs per
+  // 90 s across three gateways on David-MBP (t_01a18977df212d21).
+  it('does not refetch an empty or missing session until its activity or message_count moves', async () => {
+    const records = [record('mini', 'empty', 1), record('mini', 'gone', 2), record('mini', 'full', 3)]
+    const h = harness(records)
+
+    h.fetchLatest.mockImplementation(async key => {
+      if (key.sessionId === 'gone') {
+        throw Object.assign(new Error('not found'), { status: 404 })
+      }
+
+      return key.sessionId === 'empty' ? [] : [{ content: 'ok', id: 1 }]
+    })
+
+    await h.prefetcher.tick()
+    expect(h.fetchLatest).toHaveBeenCalledTimes(3)
+
+    h.fetchLatest.mockClear()
+    h.advance(MIN_REFETCH_MS)
+    expect(await h.prefetcher.tick()).toMatchObject({ fetched: 0, skipped: 3 })
+    expect(h.fetchLatest).not.toHaveBeenCalled()
+
+    records[0] = record('mini', 'empty', 9) // the session moved: try again
+    await h.prefetcher.tick()
+    expect(h.fetchLatest.mock.calls.map(([key]) => key.sessionId)).toEqual(['empty'])
+  })
+
   it('does nothing without a hub replica', async () => {
     const store = new TranscriptCacheStore(':memory:')
     const fetchLatest = vi.fn()

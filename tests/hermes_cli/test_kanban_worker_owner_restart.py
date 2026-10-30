@@ -253,3 +253,84 @@ def test_a_plain_nonzero_exit_is_still_a_crash(board, monkeypatch):
         _reaped(monkeypatch, {73001: 1})
         assert kbd.detect_crashed_workers(conn) == [tid]
         assert kb.get_task(conn, tid).consecutive_failures == 1
+
+
+def test_owner_restart_is_its_own_exit_not_the_never_admitted_one():
+    # 69 = never admitted (kanban_owner_unavailable, streak breaker); 76 = an admitted turn the
+    # restart took. One code for both would book an admitted loss as a crash.
+    from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind
+    from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
+    assert KANBAN_OWNER_RESTART_EXIT_CODE != KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
+    assert exit_code_kind(KANBAN_OWNER_RESTART_EXIT_CODE)[0] == "owner_restart"
+    assert exit_code_kind(KANBAN_OWNER_UNAVAILABLE_EXIT_CODE)[0] == "owner_unavailable"
+
+
+def test_restart_losses_in_a_row_on_one_card_never_block_it(board, monkeypatch):
+    # t_01a18bf8fc6d1564 (c): repeated drains each take one run of the same card.
+    monkeypatch.setenv("HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", "0")
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="card", assignee="default", max_retries=2)
+        host = kb._claimer_id().split(":", 1)[0]
+        for i, pid in enumerate((77001, 77002, 77003)):
+            kb.claim_task(conn, tid, claimer=f"{host}:w{pid}")
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET worker_pid=?, started_at=? WHERE id=?",
+                             (pid, int(time.time()) - 600, tid))
+            _reaped(monkeypatch, {pid: KANBAN_OWNER_RESTART_EXIT_CODE})
+            assert kbd.detect_crashed_workers(conn) == []
+            task = kb.get_task(conn, tid)
+            assert task is not None
+            assert (task.status, task.consecutive_failures, task.block_kind) == ("ready", 0, None), i
+        kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=?", (tid,))]
+        assert kinds.count("owner_restart_lost") == 3
+        assert "crashed" not in kinds and "gave_up" not in kinds
+
+
+_LEGACY = "Kanban owner refused: Kanban owner silent for 184s: Gateway draining: restart_wait"
+
+
+def _legacy_log(monkeypatch, text):
+    from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+    log = f"{text}\n{KANBAN_WORKER_EXIT_TRAILER}1\n"
+    monkeypatch.setattr(kb, "read_worker_log", lambda *a, **kw: log)
+    monkeypatch.setattr(kbd, "_recent_worker_exits", {})
+
+
+def test_a_pre_fix_worker_refused_by_the_drain_after_admission_is_an_owner_restart(board, monkeypatch):
+    # The transition drain: workers in flight when the update installing this fix restarts the
+    # gateway still run the old client, which exits 1 with this line (t_01a188eb959227ce 7643/7665).
+    _legacy_log(monkeypatch, _LEGACY)
+    with kbc.connect() as conn:
+        tid = _running(conn, "card", 78001)
+        run_id = kb.get_task(conn, tid).current_run_id
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "owner_admitted", {}, run_id=run_id)
+        from hermes_cli import kanban_owner_recovery
+        monkeypatch.setattr(kanban_owner_recovery, "owner_reclaim_blocked", lambda *a, **k: False)
+        assert kbd.detect_crashed_workers(conn) == []
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready" and task.consecutive_failures == 0
+        outcome = conn.execute("SELECT outcome FROM task_runs WHERE id=?", (run_id,)).fetchone()[0]
+        assert outcome == "reclaimed"
+        kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=?", (tid,))]
+        assert "owner_restart_lost" in kinds and "crashed" not in kinds and "gave_up" not in kinds
+
+
+def test_a_pre_fix_worker_refused_before_admission_is_owner_unavailable(board, monkeypatch):
+    _legacy_log(monkeypatch, _LEGACY)
+    with kbc.connect() as conn:
+        tid = _running(conn, "card", 78101)
+        assert kbd.detect_crashed_workers(conn) == []
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready" and task.consecutive_failures == 0
+        outcome = conn.execute("SELECT outcome FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+                               (tid,)).fetchone()[0]
+        assert outcome == "owner_unavailable"
+
+
+def test_an_exit_1_whose_last_line_is_not_the_drain_refusal_is_still_a_crash(board, monkeypatch):
+    _legacy_log(monkeypatch, _LEGACY + "\nTraceback (most recent call last): boom")
+    with kbc.connect() as conn:
+        tid = _running(conn, "card", 78201)
+        assert kbd.detect_crashed_workers(conn) == [tid]
+        assert kb.get_task(conn, tid).consecutive_failures == 1

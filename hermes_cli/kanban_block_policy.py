@@ -88,7 +88,11 @@ _RELAY = re.compile(
     r"|\b(?:ask|tell|have|get)\s+your\s+(?:own\s+)?(?:hermes\s+)?(?:desktop\s+|cli\s+)?"
     r"(?:chat|session|agent)\b"
     # "or from a Hermes chat there" (MacBook card t_01a18b13ee350599): the same relay through any chat. [daveey]
-    r"|\b(?:from|in|via|using)\s+(?:a|an|any|the)\s+hermes\s+(?:desktop\s+|cli\s+)?(?:chat|session)\b",
+    r"|\b(?:from|in|via|using)\s+(?:a|an|any|the)\s+hermes\s+(?:desktop\s+|cli\s+)?(?:chat|session)\b"
+    # "from an owner Hermes chat" (hub t_01a1848506cae619), "from any owner chat", "from an owner Hermes Desktop or
+    # CLI chat": an owner chat is an agent the ask makes David relay to. [daveey]
+    r"|\b(?:from|in|via|using)\s+(?:a|an|any|the)\s+owner\s+(?:hermes\s+)?(?:desktop\s+|cli\s+)?(?:or\s+cli\s+)?"
+    r"(?:chat|session)\b",
     re.IGNORECASE)
 
 ROUTE_GAP_CODE = "agent_route_gap"
@@ -236,3 +240,104 @@ def sweep_agent_owned_blocks(conn: sqlite3.Connection, *, now: Optional[int] = N
                     "reason": evidence, "kind": row["block_kind"], "blocked_at": started})
                 escalated.append(tid)
     return escalated
+
+
+RECHECK_EVENT = "ask_rechecked"
+NAMED_CLOSED_CODE = "named_cards_closed"
+# "macbook/t_..." is another board's card: this board cannot judge it, so it is not collected.
+_TASK_ID = re.compile(r"(?<![\w/])t_[0-9a-f]{8,16}\b")
+
+
+def _named_task_ids(title, request: dict, own_id: str) -> list[str]:
+    text = " ".join([str(title or "")] + [str(request.get(k) or "") for k in ("action", "why_human", "evidence")])
+    return sorted({m.group(0) for m in _TASK_ID.finditer(text)} - {own_id})
+
+
+def _action_line(request) -> str:
+    return " ".join(str((request or {}).get("action") or "").split())
+
+
+def standing_ask_error(conn: sqlite3.Connection, task_id: str, title, request) -> Optional[tuple[str, str, dict]]:
+    """``(code, reason, extra)`` when a standing ask no longer holds, else None.
+
+    (a) the relay / route-gap lint refuses it today (an ask filed before a rule landed is never re-linted);
+    (b) it names at least one card and every named card is done or archived on this board (its premise is gone).
+    An id this board does not hold counts as open: it cannot be verified here.
+    """
+    if not isinstance(request, dict):
+        return None
+    err = agent_relay_ask_error(_action_line(request)) or agent_route_gap_error(request)
+    if err:
+        return (RELAY_ASK_CODE if err.startswith(RELAY_ASK_CODE) else ROUTE_GAP_CODE), err, {}
+    named = _named_task_ids(title, request, task_id)
+    if not named:
+        return None
+    marks = ",".join("?" for _ in named)
+    rows = {r["id"]: r["status"] for r in conn.execute(
+        f"SELECT id, status FROM tasks WHERE id IN ({marks})", named).fetchall()}
+    if len(rows) != len(named) or any(s not in ("done", "archived") for s in rows.values()):
+        return None
+    closed = ", ".join(f"{t} ({rows[t]})" for t in named)
+    return (NAMED_CLOSED_CODE,
+            f"{NAMED_CLOSED_CODE}: every card this ask names is closed ({closed}), so its premise is likely gone.",
+            {"named": named})
+
+
+def sweep_standing_asks(conn: sqlite3.Connection) -> list[str]:
+    """Re-check blocked cards that carry a human_request; move void ones to agent triage.
+
+    ``sweep_agent_owned_blocks`` skips blocks with a human ask and the ask lint runs only when an agent files the
+    block, so a standing ask was never looked at again: on 10-30 11 of 25 hub asks were void (filed before a lint
+    rule, or every card they named long done). One ``ask_rechecked`` move per block event; a card with a live run
+    is left alone; an ask re-filed unchanged after a recheck stands (the agent that re-checked it kept it). The
+    card's ask is cleared so ``sweep_stale_triage`` hands it to an agent; the event keeps the old ask. [daveey]
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db import _json_dict
+    moved: list[str] = []
+    rows = conn.execute(
+        "SELECT id, title, human_request FROM tasks WHERE status = 'blocked' AND human_request IS NOT NULL "
+        "AND current_run_id IS NULL").fetchall()
+    for row in rows:
+        tid = row["id"]
+        request = _json_dict(row["human_request"])
+        if not request:
+            continue
+        ev = conn.execute(
+            "SELECT id FROM task_events WHERE task_id = ? AND kind IN ('blocked','block_loop_detected','created') "
+            "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+        ev_id = int(ev["id"]) if ev is not None else 0
+        prior = [(int(r["id"]), _json_dict(r["payload"])) for r in conn.execute(
+            "SELECT id, payload FROM task_events WHERE task_id = ? AND kind = ?", (tid, RECHECK_EVENT)).fetchall()]
+        if any(pid > ev_id for pid, _ in prior):
+            continue
+        found = standing_ask_error(conn, tid, row["title"], request)
+        if found is None:
+            continue
+        code, reason, extra = found
+        if any(p.get("code") == code and _action_line(p.get("human_request")) == _action_line(request)
+               for _, p in prior):
+            continue
+        with kb.write_txn(conn):
+            changed = conn.execute(
+                "UPDATE tasks SET status = 'triage', block_kind = 'transient', human_request = NULL "
+                "WHERE id = ? AND status = 'blocked' AND human_request IS NOT NULL AND current_run_id IS NULL",
+                (tid,)).rowcount
+            if changed:
+                kb._append_event(conn, tid, RECHECK_EVENT, {
+                    "code": code, "human_request": request, **extra,
+                    "reason": reason + " Re-check the ask: finish the card, route the work to an agent, or "
+                    "re-file a real human_request."})
+                moved.append(tid)
+    return moved
+
+
+def sweep_blocked_cards(conn: sqlite3.Connection, result) -> None:
+    """Dispatcher-tick entry for both blocked-card sweeps; each is isolated so one failing never skips the other."""
+    from hermes_cli import kanban_db as kb
+    for name, sweep, out in (("agent-owned block", sweep_agent_owned_blocks, result.agent_block_escalated),
+                             ("standing-ask recheck", sweep_standing_asks, result.ask_rechecked)):
+        try:
+            out.extend(sweep(conn))
+        except sqlite3.Error:
+            kb._log.exception("kanban: %s sweep failed", name)

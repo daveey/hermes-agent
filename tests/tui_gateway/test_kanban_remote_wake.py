@@ -12,6 +12,7 @@ state.db paths of the sandboxed home; only the agent turn (``wake_turn``) and th
 
 import contextlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -79,12 +80,23 @@ def _blocked_on_david(tid, at):
             "sessions": [{"gw": "macbook", "profile": "default", "session": CHAT, "rel": "shepherd"}]}
 
 
-def _one_pass(monkeypatch, wake_verdict="started"):
-    """One iteration of the production sweeper loop; returns the faked wakes it requested."""
+def _turn_writes_row(tip, text, metadata):
+    """What the real woken turn persists on its thread (``prompt_turn._invoke_agent``): its user row, typed
+    ``kanban_notice`` with the wake's display metadata."""
+    with SessionDB(get_hermes_home() / "state.db") as db:
+        db.append_message(tip, "user", text, display_kind="kanban_notice", display_metadata=metadata)
+
+
+def _one_pass(monkeypatch, wake_verdict="started", row_lands=True):
+    """One iteration of the production sweeper loop; returns the faked wakes it requested. ``row_lands`` makes
+    a started turn persist its notice row before the waker hears "started" (False: admitted, row not yet
+    written, as when the backend dies between admission and the turn thread's write)."""
     wakes = []
 
     def wake(tip, text, metadata):
         wakes.append((tip, text, metadata))
+        if wake_verdict == "started" and row_lands:
+            _turn_writes_row(tip, text, metadata)
         return wake_verdict
 
     monkeypatch.setattr(ku, "wake_turn", wake)
@@ -118,7 +130,7 @@ def test_remote_done_notice_wakes_an_idle_chat_once(home, monkeypatch):
     assert "t_01a1873edd84d3fc" in wakes[0][1] and "shipped the fix" in wakes[0][1]
     assert wakes[0][2]["kanban_event_keys"] == ["remote:hub:default/default/t_01a1873edd84d3fc:81053"]
     assert wakes[0][2]["woken"] is True
-    assert _notice_rows() == []  # the started turn records the notice; no passive duplicate row
+    assert len(_notice_rows()) == 1  # the started turn's own row records the notice; no passive duplicate
     assert _ledger("hub/default/default/t_01a1873edd84d3fc")["delivered"] == 1
     # Next pass (and a restarted backend): nothing is woken or written again.
     assert _one_pass(monkeypatch) == []
@@ -162,3 +174,103 @@ def test_card_blocked_on_david_writes_the_row_without_waking(home, monkeypatch):
     assert _one_pass(monkeypatch) == []
     rows = _notice_rows()
     assert len(rows) == 1 and "t_needs_david" in rows[0]["content"]
+
+
+# [daveey] "started" means the turn was ADMITTED (``_notif_submit``); its notice row is written later, on the
+# turn thread. The waker acked the ledger at admission, so a backend that died in between left delivered=1
+# (DELIVERED = "in the transcript") with no row: the failure class of ledger row 1245 (t_01a18bf35767bcd9).
+
+def _orphan(ref):
+    from tests.tui_gateway.test_kanban_remote_notices import _dead_pid
+    with sqlite3.connect(krn.ledger_path()) as conn:
+        conn.execute("UPDATE notices SET holder_pid=?, holder_start=NULL WHERE session=? AND ref=?",
+                     (_dead_pid(), CHAT, ref))
+
+
+def _swept_reason(notice_id):
+    with contextlib.closing(sqlite3.connect(krn.ledger_path())) as conn:
+        row = conn.execute("SELECT reason FROM swept WHERE session=? AND notice_id=?", (CHAT, notice_id)).fetchone()
+        return row[0] if row else None
+
+
+def test_started_turn_whose_row_is_not_written_is_not_acked(home, monkeypatch):
+    """RED before the fix: admission alone acked delivered=1 with no transcript row."""
+    now = time.time()
+    ref = "hub/default/default/t_admitted"
+    _publish(home, [_done("t_admitted", now - 90)])
+
+    wakes = _one_pass(monkeypatch, row_lands=False)
+
+    assert len(wakes) == 1 and _notice_rows() == []
+    row = _ledger(ref)
+    assert row["delivered"] == 0 and row["holder_pid"] == os.getpid()  # still in flight, held by this backend
+    assert _swept_reason(wakes[0][2]["notice_id"]) is None
+    # The claim's live holder is this process, so the next pass neither wakes the chat again nor writes a row.
+    assert _one_pass(monkeypatch, row_lands=False) == []
+    assert _notice_rows() == [] and _ledger(ref)["delivered"] == 0
+
+
+def test_started_turn_is_acked_by_the_next_pass_once_its_row_lands(home, monkeypatch):
+    """The turn thread writes the row after admission: the next sweep pass acks DELIVERED, with no second wake."""
+    now = time.time()
+    ref = "hub/default/default/t_late_row"
+    _publish(home, [_done("t_late_row", now - 90)])
+    wakes = _one_pass(monkeypatch, row_lands=False)
+    assert _ledger(ref)["delivered"] == 0
+
+    _turn_writes_row(*wakes[0])  # the turn thread's write
+
+    assert _one_pass(monkeypatch) == []
+    assert len(_notice_rows()) == 1
+    row = _ledger(ref)
+    assert row["delivered"] == krn.DELIVERED and row["holder_pid"] is None
+    assert _swept_reason(wakes[0][2]["notice_id"]) == "delivered"
+
+
+def test_live_poller_acks_a_started_claim_once_its_row_lands(home, monkeypatch):
+    """A woken chat is live in this backend, so the sweep skips it; its poller (``collect``) acks the claim this
+    process holds once the key is in the transcript, and offers nothing new."""
+    now = time.time()
+    ref = "hub/default/default/t_live_ack"
+    _publish(home, [_done("t_live_ack", now - 90)])
+    wakes = _one_pass(monkeypatch, row_lands=False)
+    _turn_writes_row(*wakes[0])
+
+    with SessionDB(get_hermes_home() / "state.db") as db:
+        got = krn.collect(CHAT, "default", now=time.time(),
+                          transcript_has=lambda key, tid: krn.notice_in_transcript(db, CHAT, key, tid))
+
+    assert got == []
+    assert _ledger(ref)["delivered"] == krn.DELIVERED
+    assert len(_notice_rows()) == 1
+
+
+def test_backend_dies_before_the_started_turns_row_is_redelivered(home, monkeypatch):
+    """At-least-once: the admitting backend dies before the turn writes its row. A successor finds the dead
+    holder, the key is not in the transcript, so it re-offers (wakes again) instead of acking."""
+    now = time.time()
+    ref = "hub/default/default/t_died"
+    _publish(home, [_done("t_died", now - 90)])
+    assert len(_one_pass(monkeypatch, row_lands=False)) == 1
+    _orphan(ref)
+    krn._reset_for_tests()  # the successor process
+    ku._reset_wake_budget_for_tests()
+
+    wakes = _one_pass(monkeypatch)
+
+    assert len(wakes) == 1
+    assert len(_notice_rows()) == 1
+    assert _ledger(ref)["delivered"] == krn.DELIVERED
+
+
+def test_started_turn_whose_row_landed_is_acked_in_the_same_pass(home, monkeypatch):
+    """Control: when the row is already durable as the waker hears "started", the ack is immediate."""
+    now = time.time()
+    ref = "hub/default/default/t_fast_row"
+    _publish(home, [_done("t_fast_row", now - 90)])
+
+    wakes = _one_pass(monkeypatch, row_lands=True)
+
+    assert len(wakes) == 1 and len(_notice_rows()) == 1
+    assert _ledger(ref)["delivered"] == krn.DELIVERED
+    assert _swept_reason(wakes[0][2]["notice_id"]) == "delivered"
