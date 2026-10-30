@@ -424,7 +424,7 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
             "assignees": assignees, "latest_event_id": int(latest_event_id), "now": int(time.time())}
 
 
-_read_board = coalesced_read(get_board, admission_key=lambda a: (a.get("board") or "").strip().lower(), max_concurrent=4)  # a cold board must not queue other boards
+_read_board = coalesced_read(get_board, admission_key=lambda a: (a.get("board") or "").strip().lower(), max_concurrent=2)  # one read per board, at most 2 boards: hub A/B, a cap of 4 made the default board's cold read time out
 
 
 # --- GET /session-labels ------------------------------------------------------
