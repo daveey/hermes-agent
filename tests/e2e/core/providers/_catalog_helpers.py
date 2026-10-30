@@ -217,6 +217,14 @@ def write_home(root: Path, model: dict[str, Any], extra_cfg: dict[str, Any] | No
            **(extra_cfg or {})}
     (home / ".hermes" / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     select_test_dependencies(home / ".hermes", REPO_ROOT)
+    # The fake model has public metadata too. Seed it so a cold cache cannot make an
+    # unrelated OpenRouter catalog refresh look like foreign inference routing.
+    cache = home / ".hermes" / "cache"
+    cache.mkdir(exist_ok=True)
+    (cache / "openrouter_model_metadata.json").write_text(json.dumps({
+        "catalog-model-a": {"context_length": 128000, "max_completion_tokens": 4096,
+                            "name": "catalog-model-a", "pricing": {}},
+    }), encoding="utf-8")
     return home
 
 
