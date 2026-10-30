@@ -691,13 +691,8 @@ def _retirement_request(endpoint: tuple[str, int, str], body: dict | None) -> di
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
+    import psutil
+    return psutil.pid_exists(pid)
 
 
 def _await_background_reviews(pids: list[int]) -> None:
