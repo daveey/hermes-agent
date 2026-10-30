@@ -1157,7 +1157,15 @@ def worker_archive_scope(conn, task_id: str) -> tuple[Optional[str], Optional[st
     ``refusal`` is None when allowed. ``via`` is set when the archive is allowed only
     as a stranded-``runs_on`` sweep of a foreign card; record it on the archived event.
     """
-    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    return archive_scope_for(conn, task_id, os.environ.get("HERMES_KANBAN_TASK"))
+
+
+def archive_scope_for(conn, task_id: str, env_tid: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """:func:`worker_archive_scope` for a worker scoped to ``env_tid`` (None: unscoped, any card).
+
+    The home gateway applies it to an archive a Board worker node forwarded for a relayed capability owner
+    card (:mod:`hermes_cli.kanban_owner_archive_relay`), where the scope comes from the request, not the env.
+    """
     if not env_tid:
         return None, None
     if env_tid == task_id:

@@ -31,9 +31,35 @@ def _alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     if Path(f"/proc/{pid}/stat").exists():  # Linux: a zombie is dead
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # The reaper can remove procfs state after the existence check.
+            return False
         return stat[stat.rfind(")") + 2:][:1] != "Z"
     return True
+
+
+@pytest.mark.platforms("linux")
+def test_alive_tolerates_a_process_reaped_before_its_stat_read(monkeypatch):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    stat_path = Path(f"/proc/{child.pid}/stat")
+    read_text = Path.read_text
+
+    def reap_before_read(path, *args, **kwargs):
+        if path == stat_path:
+            child.kill()
+            child.wait(timeout=60)
+        return read_text(path, *args, **kwargs)
+
+    try:
+        assert _alive(child.pid), "a live process must not count as gone"
+        monkeypatch.setattr(Path, "read_text", reap_before_read)
+        assert not _alive(child.pid)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=60)
 
 
 def _gone_within(pid: int, seconds: float) -> bool:

@@ -206,8 +206,12 @@ def test_root_container_teardown_hands_every_sandbox_mount_back_before_removal(
     (walk,) = [argv for argv, _ in calls if "/usr/bin/find" in argv and "-print0" in argv]
     ((chown, stdin),) = chowns
     # After stop (no writer left, shutdown writes included), before rm, from the stopped container's volumes.
-    stop, rm = subcommands.index("stop"), subcommands.index("rm")
-    assert stop < calls.index((walk, b"")) < calls.index((chown, stdin)) < calls.index((strip, b"")) < rm
+    # `calls` is process-wide: an env another test left to the GC may stop/rm "fake-cid" at any point, so
+    # anchor on this teardown's own walk: the nearest stop before it, the first rm after its strip.
+    at_walk, at_strip = calls.index((walk, b"")), calls.index((strip, b""))
+    stop = max(i for i, sub in enumerate(subcommands[:at_walk]) if sub == "stop")
+    rm = subcommands.index("rm", at_strip)
+    assert stop < at_walk < calls.index((chown, stdin)) < at_strip < rm
     for argv in (walk, chown):
         assert argv[argv.index("--volumes-from") + 1] == "fake-cid" and "--user" in argv and "sha256:img" in argv
     for argv in (walk, chown):  # a binary planted on the image PATH under /root or /workspace never runs

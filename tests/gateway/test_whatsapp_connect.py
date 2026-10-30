@@ -414,11 +414,16 @@ class TestKillPortProcess:
              patch("plugins.platforms.whatsapp.adapter._pid_looks_like_node_bridge",
                    return_value=True), \
              patch("plugins.platforms.whatsapp.adapter.os.kill",
-                   side_effect=lambda pid, sig: kills.append((pid, sig))):
+                   side_effect=lambda pid, sig: kills.append((pid, sig))), \
+             patch("plugins.platforms.whatsapp.adapter._wait_pids_exit",
+                   return_value=[]) as mock_wait:
+            # PID 55555 is fake; without pinning the exit wait, the result depends on whether
+            # a real process with that PID exists on the host (extra os.kill(pid, 0) probe).
             wa._kill_port_process(3000)
 
         mock_listeners.assert_called_once_with(3000)
         assert kills == [(55555, signal.SIGTERM)]
+        assert mock_wait.call_args_list[0].args == ([55555],)
 
     @pytest.mark.platforms("linux")
     def test_non_bridge_listener_is_never_killed(self):

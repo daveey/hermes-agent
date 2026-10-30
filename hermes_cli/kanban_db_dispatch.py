@@ -2422,6 +2422,12 @@ def _run_reclaim_phase(
         result.remote_archived = apply_stop_requests(conn)
     except Exception:
         _kb._log.warning("kanban: applying remote stop requests failed", exc_info=True)
+    # Archives of relayed capability owner cards forwarded by a Board worker node (kanban_owner_archive_relay).
+    from hermes_cli.kanban_owner_archive_relay import apply_requests as _apply_owner_archives
+    try:
+        result.remote_archived = [*result.remote_archived, *_apply_owner_archives(conn)]
+    except Exception:
+        _kb._log.warning("kanban: applying forwarded owner archives failed", exc_info=True)
     # [daveey] Before any stale check: a long gap since the last pass is a host suspend, which the
     # heartbeat backstop, the stale sweep and max_runtime must not count (``kanban_suspend_ledger``).
     _record_dispatch_pass(conn, dry_run=dry_run)
