@@ -61,6 +61,7 @@ export function ConfirmDialog({
   const { t } = useI18n()
   const confirmRef = useRef<HTMLButtonElement>(null)
   const closeTimerRef = useRef<null | number>(null)
+  const unmountedRef = useRef(false)
   const [status, setStatus] = useState<'done' | 'idle' | 'saving'>('idle')
   const [error, setError] = useState<null | string>(null)
   const busy = status === 'saving' || status === 'done'
@@ -86,7 +87,13 @@ export function ConfirmDialog({
   // It happens on unmount only, and it clears the handle this component owns.
   // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
+    unmountedRef.current = false
+
     return () => {
+      // run() may still be awaiting onConfirm; it must not arm a new timer
+      // (or set state) once the dialog is gone.
+      unmountedRef.current = true
+
       if (closeTimerRef.current !== null) {
         window.clearTimeout(closeTimerRef.current)
         closeTimerRef.current = null
@@ -116,6 +123,11 @@ export function ConfirmDialog({
 
     try {
       await onConfirm()
+
+      if (unmountedRef.current) {
+        return
+      }
+
       setStatus('done')
       closeTimerRef.current = window.setTimeout(() => {
         closeTimerRef.current = null

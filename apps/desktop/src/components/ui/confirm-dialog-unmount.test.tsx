@@ -55,3 +55,30 @@ test('the close timer does not fire after unmount', async () => {
   expect(onClose).not.toHaveBeenCalled()
   vi.useRealTimers()
 })
+
+// Second hole in the same timer: unmounting while onConfirm is still pending.
+// The unmount cleanup above finds no timer yet. run() then resumes after the
+// await and arms a fresh 600ms timer on the dead tree, which is the leak that
+// failed main CI from canonical-group-workspace.test.tsx (the disband resolves
+// and the workspace unmounts the dialog before run() continues).
+test('no close timer is armed when the dialog unmounts while onConfirm is pending', async () => {
+  vi.useFakeTimers()
+  const onClose = vi.fn()
+
+  let resolveConfirm: () => void = () => {}
+  const onConfirm = vi.fn(() => new Promise<void>(resolve => { resolveConfirm = resolve }))
+
+  render(<ConfirmDialog confirmLabel="Delete" onClose={onClose} onConfirm={onConfirm} open title="Delete session" />)
+  fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+  await Promise.resolve()
+  expect(onConfirm).toHaveBeenCalled()
+
+  cleanup()
+  resolveConfirm()
+  await Promise.resolve()
+  await Promise.resolve()
+
+  vi.advanceTimersByTime(1000)
+  expect(onClose).not.toHaveBeenCalled()
+  vi.useRealTimers()
+})
