@@ -164,6 +164,16 @@ def route_runtime(policy, frozen, model, key, *, fallback=True):
         from hermes_cli.route_identity import normalize_route_base_url
         if normalize_route_base_url(launch_url) != normalize_route_base_url((frozen.get('model') or {}).get('base_url')):
             launch_url = None
+    from agent.model_routing import ModelRoutingError, is_class_selector
+    if is_class_selector(model):
+        # [daveey] A class route is the agent's own sticky allocation: AIAgent's prepare_agent_route
+        # resolves it under the session id, as the CLI's ``-m class:<level> --provider auto`` does.
+        # Resolving it here would allocate with no session id, and the concrete credentials it returns
+        # would reach the agent as explicit overrides, which class routing refuses unless managed.
+        if key or launch_url:
+            raise ModelRoutingError('Class selectors cannot use explicit credentials or endpoint overrides')
+        return {'provider': 'auto', 'requested_provider': 'auto', 'api_key': None, 'base_url': None,
+                'api_mode': None}, None
     # Every rung reads the session's FROZEN config, never live config.yaml: a later
     # ``model.base_url`` edit must not carry this route's frozen credential to the new host
     # (R2-M2). The auth-store pool is not config, so refresh/rotation still applies.

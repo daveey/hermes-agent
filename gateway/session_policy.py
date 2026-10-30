@@ -513,8 +513,18 @@ def _profile_workspace_cwd(home):
 
 
 def _without_auto_pick(params):
-    """`provider: auto` is the thin client's "no pick" sentinel: the profile's route stands as configured."""
-    if isinstance(params.get('provider'), str) and params['provider'].strip().lower() == 'auto':
+    """`provider: auto` is the thin client's "no pick" sentinel: the profile's route stands as configured.
+
+    [daveey] Not under a class selector (``class:<level>``): there ``auto`` is the provider class routing
+    requires (``resolve_model_route``), and a class launched with no provider pick runs ``auto`` too. The
+    profile's concrete provider can never serve a class: freezing it under one refused every class-tier
+    kanban run at agent build ("Class selectors require provider auto")."""
+    from agent.model_routing import is_class_selector
+    picked = params.get('provider')
+    is_auto = isinstance(picked, str) and picked.strip().lower() == 'auto'
+    if is_class_selector(params.get('model')):
+        return {**params, 'provider': 'auto'} if picked is None or is_auto else params
+    if is_auto:
         return {k: v for k, v in params.items() if k != 'provider'}
     return params
 
@@ -579,7 +589,10 @@ def _apply_launch_overrides(params, config):
     from hermes_cli.config import resolve_turn_limit
     from hermes_constants import parse_reasoning_effort
     params = _with_entry_pick(_without_auto_pick(params), config)
-    picks_profile_entry = 'provider' in params and _keeps_profile_route(params['provider'], config)
+    from agent.model_routing import is_class_selector
+    # [daveey] A class route is a route change: the class allocator picks the endpoint and credential.
+    picks_profile_entry = ('provider' in params and not is_class_selector(params.get('model'))
+                           and _keeps_profile_route(params['provider'], config))
     if 'provider' in params and not picks_profile_entry:
         model = config.setdefault('model', {})
         # A provider pick is a route change: the profile's endpoint, wire protocol and
