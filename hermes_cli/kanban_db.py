@@ -4101,11 +4101,8 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
             conn, task_id, outcome="reclaimed", status="reclaimed",
             summary="task archived with run still active",
         )
-        payload = {"source_status": row["status"]}
-        if via:
-            payload["via"] = via  # archived outside the creator scope (stranded-runs_on sweep) [daveey]
-        if event_extra:
-            payload.update(event_extra)  # e.g. the forwarding worker's run (kanban_owner_archive_relay) [daveey]
+        # [daveey] via: archived outside the creator scope; event_extra: e.g. a forwarded run (kanban_owner_archive_relay)
+        payload = {"source_status": row["status"], **({"via": via} if via else {}), **(event_extra or {})}
         _append_event(conn, task_id, "archived", payload, run_id=run_id)
     if was_running:
         termination = _terminate_reclaimed_worker(prev_pid, prev_lock, signal_fn=signal_fn, started_at=prev_started)

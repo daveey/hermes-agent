@@ -2413,19 +2413,10 @@ def _run_reclaim_phase(
     reap_worker_zombies()
     result.reaped_terminal_workers = reap_terminal_workers(conn)
     result.stopped_run_scopes = _worker_scope.stopped_scope_units(conn, board=board)  # orphans of ended runs [daveey]
-    # Stop requests another gateway sent for cards this gateway runs under its own Board lease (kanban_archive of a
-    # card running on this machine). Before the reclaim sweeps, so they see the archived card. [daveey]
-    from hermes_cli.kanban_remote_stop import apply_stop_requests
-    try:
-        result.remote_archived = apply_stop_requests(conn)
-    except Exception:
-        _kb._log.warning("kanban: applying remote stop requests failed", exc_info=True)
-    # Archives of relayed capability owner cards forwarded by a Board worker node (kanban_owner_archive_relay).
-    from hermes_cli.kanban_owner_archive_relay import apply_requests as _apply_owner_archives
-    try:
-        result.remote_archived = [*result.remote_archived, *_apply_owner_archives(conn)]
-    except Exception:
-        _kb._log.warning("kanban: applying forwarded owner archives failed", exc_info=True)
+    # Stop requests and forwarded owner card archives other gateways sent (kanban_owner_archive_relay). Before the
+    # reclaim sweeps, so they see the archived cards. [daveey]
+    from hermes_cli.kanban_owner_archive_relay import apply_remote_archives
+    result.remote_archived = apply_remote_archives(conn)
     # [daveey] Before any stale check: a long gap since the last pass is a host suspend, which the
     # heartbeat backstop, the stale sweep and max_runtime must not count (``kanban_suspend_ledger``).
     _record_dispatch_pass(conn, dry_run=dry_run)

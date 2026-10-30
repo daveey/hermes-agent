@@ -1987,26 +1987,11 @@ def _handle_archive(args: dict, **kw) -> str:
     _check(tid, "task_id is required")
     tid = str(tid)
     with _board(args.get("board")) as (_kb, conn):
-        # [daveey] A relay=home capability owner card lives only on the waiting card's home gateway: from a Board
-        # worker node the local lookup misses, so forward the archive there (kanban_owner_archive_relay).
-        env_tid = os.environ.get("HERMES_KANBAN_TASK")
-        if env_tid and env_tid != tid and _kb.get_task(conn, tid) is None:
-            from hermes_cli import kanban_owner_archive_relay as _oar
-            route = _oar.relayed_owner_route(conn, env_tid, tid)
-            if route is not None:
-                out = _oar.forward(conn, route, tid, requester=env_tid, run_id=_worker_run_id(env_tid))
-                if not out.pop("ok", False):
-                    raise _Reject(str(out.get("error") or f"cannot archive {tid}"))
-                out.pop("task_id", None)
-                return _ok(task_id=tid, **out)
-        from hermes_cli.kanban import worker_archive_scope
-        refusal, via = worker_archive_scope(conn, tid)
+        # [daveey] Scope rule, stop request for a card leased elsewhere, relayed owner card forwarded home.
+        from hermes_cli.kanban_owner_archive_relay import worker_archive
+        refusal, out = worker_archive(conn, tid, run_id_fn=_worker_run_id)
         if refusal:
             raise _Reject(refusal)
-        # A card another machine runs under its live Board lease is not archived here: the Board would reject the
-        # status write (live_claim) and the remote worker would keep running. Send it a stop request instead. [daveey]
-        from hermes_cli.kanban_remote_stop import archive as _archive
-        out = _archive(conn, tid, via=via)
         _check(out, f"cannot archive {tid}")
         return _ok(task_id=tid, **out)
 

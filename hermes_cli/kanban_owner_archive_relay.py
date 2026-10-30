@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -203,3 +204,42 @@ def _apply_one(conn, kcli, kb, waiting: str, owner: str, requester: str, req: di
         return {"ok": False, "error": f"cannot archive {owner}"}
     _log.info("kanban: archived capability owner %s forwarded by %s run %s", owner, requester, req.get("run_id"))
     return {"ok": True, "status": "archived"}
+
+
+def worker_archive(conn: sqlite3.Connection, tid: str, *,
+                   run_id_fn: Callable[[str], Optional[int]]) -> tuple[Optional[str], Optional[dict]]:
+    """``kanban_archive`` from a worker or an orchestrator: ``(refusal, result)``.
+
+    A ``relay=home`` owner card this board lacks is forwarded home (:func:`forward`). Any other card gets the local
+    scope rule, then :func:`hermes_cli.kanban_remote_stop.archive`: a card another machine runs under its live
+    Board lease gets a stop request, since the Board would reject the status write (live_claim).
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban import worker_archive_scope
+    from hermes_cli.kanban_remote_stop import archive
+
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    if env_tid and env_tid != tid and kb.get_task(conn, tid) is None:
+        route = relayed_owner_route(conn, env_tid, tid)
+        if route is not None:
+            out = forward(conn, route, tid, requester=env_tid, run_id=run_id_fn(env_tid))
+            if not out.pop("ok", False):
+                return str(out.get("error") or f"cannot archive {tid}"), None
+            out.pop("task_id", None)
+            return None, out
+    refusal, via = worker_archive_scope(conn, tid)
+    return (refusal, None) if refusal else (None, archive(conn, tid, via=via))
+
+
+def apply_remote_archives(conn: sqlite3.Connection) -> list[str]:
+    """Dispatcher tick: apply stop requests (:mod:`hermes_cli.kanban_remote_stop`) and forwarded owner archives
+    (:func:`apply_requests`). Returns the ids archived; a failing source is logged and skipped."""
+    from hermes_cli.kanban_remote_stop import apply_stop_requests
+
+    done: list[str] = []
+    for label, apply in (("remote stop requests", apply_stop_requests), ("forwarded owner archives", apply_requests)):
+        try:
+            done += apply(conn)
+        except Exception:  # health: allow BLE001 -- one failing source must not stop the dispatcher tick
+            _log.warning("kanban: applying %s failed", label, exc_info=True)
+    return done
