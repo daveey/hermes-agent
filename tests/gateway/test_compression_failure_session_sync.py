@@ -153,7 +153,9 @@ def _run_compression_failure_turn(runner, source, *, run_generation=None):
                 session_key=SESSION_KEY,
                 run_generation=run_generation,
             ),
-            timeout=2,
+            # Hang guard only: wait_for returns the moment the turn finishes. A quiet run takes ~1.8 s
+            # (first-call imports), so a 2 s deadline failed on CPU-throttled CI runners.
+            timeout=120,
         )
     )
 
