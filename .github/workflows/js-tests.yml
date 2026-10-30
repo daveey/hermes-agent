@@ -117,7 +117,40 @@ jobs:
         # the sum stays inside that cgroup limit.
         env:
           NODE_OPTIONS: --max-old-space-size=4096
-        run: node .github/scripts/run-workspace-checks.mjs
+        shell: bash
+        run: |
+          # CI overlay /tmp measured 32-35s write+fsync stalls (#335).
+          # Disposable fixtures need executable storage, not durable EBS writes.
+          # The scheduler reserves this full 1 GiB inside the 8 GiB cgroup.
+          # The runner container may lack CAP_SYS_ADMIN (PR 335 run 41100984332: mount denied).
+          # Then fall back to an executable /dev/shm of at least 512 MiB, else the default disk.
+          mounted=""
+          if temp_root="$(mktemp -d /tmp/wc.XXXXXX)" &&
+            sudo mount -t tmpfs -o size=1G,mode=1777,exec,nosuid,nodev tmpfs "$temp_root"; then
+            mounted="$temp_root"
+          else
+            rmdir "$temp_root" 2>/dev/null || true
+            echo "::warning::tmpfs mount denied; probing /dev/shm"
+            grep -E ' /dev/shm ' /proc/mounts || true
+            shm_kib="$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2{print $2}')"
+            if [ "${shm_kib:-0}" -ge 524288 ] && ! grep -E ' /dev/shm .*[ ,(]noexec[ ,)]' /proc/mounts >/dev/null; then
+              temp_root="$(mktemp -d /dev/shm/wc.XXXXXX)"
+            else
+              echo "::warning::no executable tmpfs available; fixtures stay on the runner disk"
+              temp_root="$(mktemp -d /tmp/wc.XXXXXX)"
+            fi
+          fi
+          cleanup() {
+            df -h "$temp_root"
+            if [ -n "$mounted" ]; then
+              # Job-end process cleanup follows this step. Detach even if a test
+              # daemon still holds its cwd; don't leak a mount into the next job.
+              sudo umount "$temp_root" || sudo umount -l "$temp_root"
+            fi
+            rm -rf "$temp_root" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          TMPDIR="$temp_root" node .github/scripts/run-workspace-checks.mjs
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
         # leaves an untracked or modified file in the checkout is reported here. Runs only when

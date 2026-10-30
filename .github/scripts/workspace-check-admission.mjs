@@ -63,12 +63,12 @@ export function unitsOf(pkgs, readMemory) {
  * The memory the checks may use, in MiB: the cgroup limit when there is one
  * (a runner container's `--memory`), else physical memory, less the reserve.
  *
- * @param {{constrained?: number, total: number}} machine bytes
+ * @param {{constrained?: number, total: number, temporaryMiB?: number}} machine bytes and tmpfs reserve
  */
-export function memoryBudgetMiB({ constrained, total }) {
+export function memoryBudgetMiB({ constrained, total, temporaryMiB = 0 }) {
   // constrainedMemory() is 0 or 2^64-1 with no limit set.
   const limit = constrained && constrained > 0 && constrained < total ? constrained : total
-  return Math.max(1, Math.floor(limit / MIB) - RESERVED_MIB)
+  return Math.max(1, Math.floor(limit / MIB) - RESERVED_MIB - temporaryMiB)
 }
 
 /**

@@ -20,10 +20,12 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { availableParallelism, totalmem } from 'node:os'
+import { availableParallelism, tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 
 import { memoryBudgetMiB, oomKills, schedule, unitsOf } from './workspace-check-admission.mjs'
+import { readCounters, startStallProbe, summarize } from './workspace-check-stall-probe.mjs'
+import { temporaryMemoryMiB } from './workspace-check-temp-memory.mjs'
 
 const IS_CI = Boolean(process.env.GITHUB_ACTIONS)
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
@@ -43,8 +45,8 @@ function discoverUnits() {
   )
 }
 
-/** The job cgroup's memory files (Linux cgroup v2), or null. */
-function cgroupMemory() {
+/** Reads one file of the job's cgroup (Linux cgroup v2), or null without a cgroup. */
+function cgroupReader() {
   let rel
   try {
     rel = readFileSync('/proc/self/cgroup', 'utf-8').match(/^0::(.*)$/m)?.[1]
@@ -52,14 +54,35 @@ function cgroupMemory() {
     return null
   }
   if (rel === undefined) return null
-  const read = (/** @type {string} */ f) => {
+  return (/** @type {string} */ f) => {
     try {
       return readFileSync(join('/sys/fs/cgroup', rel, f), 'utf-8').trim()
     } catch {
       return null
     }
   }
+}
+
+/** The job cgroup's memory files, or null. */
+function cgroupMemory() {
+  const read = cgroupReader()
+  if (!read) return null
   return { max: read('memory.max'), peak: read('memory.peak'), oomKill: oomKills(read('memory.events')) }
+}
+
+/** The filesystem the tests' temp directory lives on, from /proc/self/mounts. */
+function tmpMount() {
+  const dir = tmpdir()
+  try {
+    const mount = readFileSync('/proc/self/mounts', 'utf-8')
+      .split('\n')
+      .map((l) => l.split(' '))
+      .filter((m) => m[1] && (m[1] === '/' || dir === m[1] || dir.startsWith(`${m[1]}/`)))
+      .sort((a, b) => b[1].length - a[1].length)[0]
+    return mount ? `${dir} on ${mount[1]} (${mount[2]}, ${mount[3]})` : dir
+  } catch {
+    return dir
+  }
 }
 
 /** @param {Unit} unit */
@@ -112,7 +135,7 @@ async function main() {
     1,
     flagIdx !== -1 ? Number(argv[flagIdx + 1]) : Math.min(units.length, availableParallelism()),
   )
-  const budgetMiB = memoryBudgetMiB({ constrained: process.constrainedMemory?.(), total: totalmem() })
+  const budgetMiB = memoryBudgetMiB({ constrained: process.constrainedMemory?.(), total: totalmem(), temporaryMiB: temporaryMemoryMiB(tmpdir()) })
   // A runner container can serve many jobs, so its counters start where the
   // last job left them; this run's OOM kills are the difference.
   const oomBefore = cgroupMemory()?.oomKill ?? null
@@ -132,7 +155,45 @@ async function main() {
     if (IS_CI) console.log('::endgroup::')
   }
 
-  const results = await schedule(units, { concurrency, budgetMiB, run: runUnit, onDone: report })
+  // Single operations freeze for 20-35 s on the CI runners and time tests
+  // out (run 41087044980). This records whether the disk, memory reclaim or
+  // the CPU did it: see workspace-check-stall-probe.mjs.
+  const read = cgroupReader() ?? (() => null)
+  const countersBefore = readCounters(read)
+  /** @type {Set<string>} */
+  const live = new Set()
+  const probe = startStallProbe({
+    dir: tmpdir(),
+    running: () => [...live],
+    onStall: (s) =>
+      console.log(
+        `::warning::stall probe: temp-dir write+fsync took ${Math.round(s.fsyncMs)} ms while ${s.running.join(', ') || 'nothing'} ran`,
+      ),
+  })
+  // Keep measuring the backing checkout disk after fixtures move to tmpfs.
+  // This distinguishes isolation from repair of the EBS/overlay layer.
+  const diskProbe = IS_CI ? startStallProbe({
+    dir: process.cwd(),
+    running: () => [...live],
+    onStall: (s) => console.log(`::warning::checkout disk write+fsync took ${Math.round(s.fsyncMs)} ms`),
+  }) : null
+  /** @param {Unit} unit */
+  const runTracked = async (unit) => {
+    const label = `${unit.pkg} :: ${unit.script}`
+    live.add(label)
+    try {
+      return await runUnit(unit)
+    } finally {
+      live.delete(label)
+    }
+  }
+
+  const results = await schedule(units, { concurrency, budgetMiB, run: runTracked, onDone: report })
+  const stall = summarize(await probe.stop(), countersBefore, readCounters(read))
+  if (diskProbe) {
+    const disk = summarize(await diskProbe.stop(), countersBefore, readCounters(read))
+    console.log(`  checkout disk probe: ${disk.samples} samples, max fsync ${disk.maxFsyncMs} ms, ${disk.severeStalls} >= 5 s`)
+  }
 
   const failed = results.filter((r) => r.code !== 0)
   console.log('\n=== summary ===')
@@ -155,6 +216,15 @@ async function main() {
       )
     }
   }
+
+  console.log(`  temp dir: ${tmpMount()}`)
+  console.log(
+    `  stall probe: ${stall.samples} samples, max fsync ${stall.maxFsyncMs} ms, ${stall.stalls} >= 1 s, ${stall.severeStalls} >= 5 s, max event-loop lag ${stall.maxLagMs} ms`,
+  )
+  for (const w of stall.worst) {
+    console.log(`    ${new Date(w.at).toISOString()} fsync ${Math.round(w.fsyncMs)} ms during ${w.running.join(', ') || 'nothing'}`)
+  }
+  console.log(`  stalled ms (cgroup PSI, this run): ${JSON.stringify(stall.stalledMs)} memory.events delta: ${JSON.stringify(stall.events)}`)
 
   if (failed.length > 0) {
     for (const r of failed) console.error(`::error::${r.unit.pkg} :: ${r.unit.script} failed`)
