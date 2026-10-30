@@ -257,6 +257,10 @@ async def execute_admission(authority, ref, row):
         if 'local_automation_v1' in row['payload']:
             from gateway.session_automation import restore_local_automation
             event = restore_local_automation(authority, ref, row)
+    # The claim's admission gate ran inside its commit, so no drain had begun when this row was
+    # claimed: it is in-flight work the restart drain waits for, not new work its gate refuses.
+    # Without this a drain that flips between the claim and the turn settles it 'completed' unrun.
+    event._admitted_before_drain = True
     if event.internal and 'gateway_session_id' in event.metadata:
         # Main's ownership proof (802fd5782f3): the session the pre-claim check just validated, so the
         # turn's resolver never re-reads (and on a transient failure drops) an admitted completion.
