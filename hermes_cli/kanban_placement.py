@@ -611,10 +611,21 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
                     "why": f"has parents: created here and forwarded to {target} once they finish"}
         dead = (live or (lambda t: target_live(t, now=now, live_seconds=c.live_seconds())))(target)
         if dead:
-            return {"where": "local", "why": f"{target} not live: {dead}"}
+            return {"where": "local", "why": _target_not_live_why(target, dead)}
         return {"where": target, "why": "no local-only need" if not explicit else "placement pinned by the caller"}
     except Exception as exc:  # placement must never break card creation
         return {"where": "local", "why": f"placement check failed: {exc}"}
+
+
+def _target_not_live_why(target: str, dead: str) -> str:
+    from hermes_cli.kanban_capability_routing import has_replica
+    if not has_replica():
+        # A Board worker node runs no hermes-hub sync, so it never sees any gateway as live. Say so, with the
+        # route that works from here (worker-1 run 10113 read "not live" as a dead MacBook). [daveey]
+        dead = (f"this gateway has no hermes-hub replica (a Board worker node), so it cannot place cards on other "
+                f"gateways. Use kanban_block(needs=[...]): a worker node relays the need to the card's home "
+                f"gateway, which opens the owner card on {target}")
+    return f"{target} not live: {dead}"
 
 
 def _default_runner(argv: list[str], timeout: float = HUB_TIMEOUT) -> tuple[int, str, str]:

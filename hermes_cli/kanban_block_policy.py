@@ -86,8 +86,45 @@ _RELAY = re.compile(
     r"\b(?:from|in|via|using)\s+your\s+own\s+(?:hermes\s+)?(?:desktop\s+|cli\s+)?(?:or\s+cli\s+)?"
     r"(?:chat|session|agent)\b"
     r"|\b(?:ask|tell|have|get)\s+your\s+(?:own\s+)?(?:hermes\s+)?(?:desktop\s+|cli\s+)?"
-    r"(?:chat|session|agent)\b",
+    r"(?:chat|session|agent)\b"
+    # "or from a Hermes chat there" (MacBook card t_01a18b13ee350599): the same relay through any chat. [daveey]
+    r"|\b(?:from|in|via|using)\s+(?:a|an|any|the)\s+hermes\s+(?:desktop\s+|cli\s+)?(?:chat|session)\b",
     re.IGNORECASE)
+
+ROUTE_GAP_CODE = "agent_route_gap"
+# The typed answers of the agent routes (capability routing, placement, supervisor routing). A human_request that
+# cites one of them as its reason asks David to do an agent's step because the route failed. [daveey]
+_ROUTE_GAP = re.compile(
+    r"\bno_capability_holder\b|\bcapability_registry_(?:unavailable|stale)\b|\bno_capable_supervisor\b"
+    r"|\bplacement_unavailable\b|\bnot live\b(?=[^.;\n]{0,40}\bplacement)|\bplacement\b[^.;\n]{0,60}\bnot live\b"
+    r"|\bno agent route\b|\bno gateway holds\b",
+    re.IGNORECASE)
+# ... and asks him to run the step and hand back its output: an agent's step, not a grant or a sign-in.
+_RUN_AND_REPORT = re.compile(
+    r"\b(?:paste|post|send|report|share|copy)\b[^.;\n]{0,40}\b(?:results?|output|logs?|pass/fail)\b",
+    re.IGNORECASE)
+
+
+def agent_route_gap_error(human_request) -> Optional[str]:
+    """Typed refusal for a human_request that asks David to run a step and report back because an agent route failed.
+
+    MacBook card t_01a18b13ee350599, run on worker-1, asked David to "run the 8 drain test files ... and paste the
+    results", with why_human "No agent route to the MacBook ... no gateway holds host:macbook" and evidence
+    "needs=['host:macbook'] -> no_capability_holder". A MacBook chat did the step in 9 minutes. A route failure is
+    a routing bug for an agent to fix, never David's task.
+    """
+    if not isinstance(human_request, dict):
+        return None
+    text = " ".join(str(human_request.get(k) or "") for k in ("why_human", "evidence", "action"))
+    m = _ROUTE_GAP.search(text)
+    if not m or not _RUN_AND_REPORT.search(str(human_request.get("action") or "")):
+        return None  # a grant only David can give (the documented no_capability_holder ask) stays allowed
+    return (f"{ROUTE_GAP_CODE}: this human_request asks David to do a step because an agent route failed "
+            f"({m.group(0)!r}). That is a routing gap, not his task. Instead: (1) retry kanban_block(needs=[...]) "
+            "(a briefly stale holder now parks and retries; a Board worker node relays the need to the card's home "
+            "gateway); (2) kanban_create the owner card on the holder's gateway or pin it with runs_on="
+            "['machine:<holder>'] and park on it; (3) if routing is broken, kanban_create a card to fix it and park "
+            "on that card. Keep human_request for what only David can do: approve, pay, sign in, a physical step.")
 
 
 def agent_relay_ask_error(action: str) -> Optional[str]:
@@ -122,7 +159,7 @@ def user_ask_lint_error(human_request) -> Optional[str]:
     if not isinstance(human_request, dict):
         return None
     action = " ".join(str(human_request.get("action") or "").split())
-    relay = agent_relay_ask_error(action)
+    relay = agent_relay_ask_error(action) or agent_route_gap_error(human_request)
     if relay:
         return relay
     missing = [label for label, rx in (("what unblocking the card does", _UNBLOCK),
@@ -140,7 +177,7 @@ def user_ask_lint_error(human_request) -> Optional[str]:
 def ask_lint_check(human_request) -> tuple:
     """``_check`` args for the tool entry points: ``(ok, message, rejection)``."""
     err = user_ask_lint_error(human_request)
-    code = RELAY_ASK_CODE if err and err.startswith(RELAY_ASK_CODE) else ASK_LINT_CODE
+    code = next((c for c in (RELAY_ASK_CODE, ROUTE_GAP_CODE) if err and err.startswith(c)), ASK_LINT_CODE)
     return err is None, err or "", code
 
 

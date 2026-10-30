@@ -133,3 +133,47 @@ def test_macbook_holding_broker_account_admin_gets_the_secrets_need(tmp_path):
                  self_gw="hub")
     assert exc.value.code == "no_capability_holder"
     assert "relay" in str(exc.value)  # the refusal must not invite a "go ask your chat" human ask
+
+
+# --- route-gap asks: MacBook card t_01a18b13ee350599 (worker-1 run 10113, 2026-10-29 21:35 PDT) ---------
+
+# Its exact human_request: every agent route failed, so it asked David to run the tests and paste results.
+ROUTE_GAP_10113 = {
+    "action": ("On the MacBook (or from a Hermes chat there), run the 8 drain test files at 8a00314ae7 (steps in "
+               "the card reason) and paste the results here. Unblock = I record the Mac results and send this for "
+               "review. Archive = drop the Mac check and ship on Linux + CI evidence alone."),
+    "why_human": ("No agent route to the MacBook from this worker: no gateway holds host:macbook, david-mbp is not "
+                  "live for card placement, and no supervisor profile is configured."),
+    "interaction": "reply",
+    "scope": "Read-only test run in a throwaway worktree plus a read-only log grep on the MacBook.",
+    "evidence": ("kanban_block needs=['host:macbook'] -> no_capability_holder; kanban_create placement=David-MBP -> "
+                 "'david-mbp not live'; kind=assignment -> no_capable_supervisor."),
+}
+
+
+def test_the_10113_route_gap_ask_is_refused():
+    from hermes_cli.kanban_block_policy import user_ask_lint_error
+    err = user_ask_lint_error(ROUTE_GAP_10113)
+    assert err and err.startswith("agent_relay_ask"), err  # "from a Hermes chat there" is a relay ask too
+    without_relay = {**ROUTE_GAP_10113, "action": ROUTE_GAP_10113["action"].replace(
+        " (or from a Hermes chat there)", "")}
+    err = user_ask_lint_error(without_relay)
+    assert err and err.startswith("agent_route_gap"), err
+    assert "needs=" in err and "runs_on" in err
+
+
+def test_a_grant_after_no_capability_holder_is_still_allowed():
+    """The documented path: no gateway holds it and only David can grant it."""
+    from hermes_cli.kanban_block_policy import user_ask_lint_error
+    grant = {**ROUTE_GAP_10113, "interaction": "user_terminal",
+             "action": ("Approve the one-time KMS grant: run_in_user_terminal will show `aws kms create-grant ...` "
+                        "on the MacBook. Unblock = the hub refreshes the secret; archive = keep the manual copy.")}
+    assert user_ask_lint_error(grant) is None
+
+
+def test_block_entry_refuses_the_10113_route_gap_ask(worker_env):
+    from tools import kanban_tools as kt
+    hr = {**ROUTE_GAP_10113, "action": ROUTE_GAP_10113["action"].replace(" (or from a Hermes chat there)", "")}
+    d = json.loads(kt._handle_block({"reason": "Mac step left", "kind": "needs_input", "human_request": hr}))
+    assert d.get("rejection") == "agent_route_gap", d
+    assert _status(worker_env) == "running"

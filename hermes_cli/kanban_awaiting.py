@@ -349,7 +349,7 @@ def _check_card(conn: sqlite3.Connection, task_id: str, awaiting: dict, text: st
         # A cross-gateway capability owner card, named by its hermes-hub request id until the holder
         # applies it (kanban_capability_routing). Live while the request is pending or the card runs.
         from hermes_cli.kanban_capability_routing import owner_status
-        rc, out = owner_status(ref)
+        rc, out = owner_status(ref, conn)  # this txn's conn: a relay's route event is not committed yet
         if rc == 2:
             raise AwaitingError(INVALID_AWAITING, f"capability owner request is not live: {out[-200:]}")
         awaiting["observed"] = out[-120:]

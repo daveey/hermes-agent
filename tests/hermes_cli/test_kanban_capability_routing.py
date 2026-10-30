@@ -214,6 +214,8 @@ def test_need_no_gateway_holds_gets_typed_refusal_pointing_at_human_request(env,
 
 
 def test_stale_registry_data_triggers_no_routing(env, monkeypatch):
+    """Hours-old data (the holder's probe is down) refuses; a record that lapsed minutes ago parks and
+    retries instead (test_kanban_capability_relay)."""
     from tools import kanban_tools as kt
     publish(env["hub"], "macbook", {f"aws:{ACCOUNT}:admin": time.time() - 2 * 3600})
     with kbc.connect_closing() as conn:

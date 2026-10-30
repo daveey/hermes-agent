@@ -18,13 +18,29 @@ Refusals are typed (:class:`CapabilityRouteError`), and nothing is written:
 
 * ``no_capability_holder`` -- no gateway holds it: if only David can grant it, block with
   kind='needs_input' and a ``human_request`` naming the exact command.
-* ``capability_registry_stale`` -- a holder exists but was not live-checked recently; stale
-  registry data never routes.
+* ``capability_registry_stale`` -- a holder exists but its record is more than ``RELAY_RETRY_S``
+  past the freshness window; stale registry data never routes. (A record that lapsed more recently
+  parks and retries, see Relay below.)
 * ``capability_held_locally`` -- this gateway holds it: the wall is the worker's profile
   (kind='assignment') or a real failure, not a missing capability.
 * ``capability_route_exhausted`` -- this card already routed that need once; the existing owner
   card must finish or report why. A REJECTED owner request may be re-routed once more (a new
   generation of the request id).
+
+Relay (gateways without a hermes-hub replica, and a holder that is briefly not live-checked):
+
+* A Board worker node runs no hermes-hub sync: it has no registry to look the holder up in and no
+  ``create-task``. When it runs a card copied from another gateway (``created_on``), routing parks the
+  card on the same ``capability-owner:<card>:<need>`` ids and records a ``relay`` route to that home
+  gateway. The idle copy is evicted, so the home's dispatcher runs the wake probe, and
+  :func:`owner_status` there routes the need with the home's own registry: ``create-task`` to a remote
+  holder under the same request id, or, when the home holds the need itself, a local owner card keyed
+  by that id (``idempotency_key``) and pinned to the home machine. A worker node's OWN card has no home
+  to relay to: ``capability_registry_unavailable``.
+* A holder whose record lapsed recently (a gateway restarting or asleep) is not a refusal: the card
+  parks the same way, relayed to this gateway itself, and the probe retries routing for
+  ``RELAY_RETRY_S``. A relay that still finds no holder after that window wakes the card with the
+  typed error in the probe output, and the next ``route()`` for that need raises it.
 
 Retries are safe: an id that was already sent is re-sent from its stored envelope (same gateway,
 title, body and overlap override), so ``hermes-hub`` sees an exact retry, never a conflicting one.
@@ -50,6 +66,11 @@ ROUTED_EVENT = "capability_routed"
 WAKE_EVERY = 120
 WAKE_HORIZON = 72 * 3600
 HUB_TIMEOUT = 60
+# How long a relayed route keeps retrying a holder that is missing or stale before it wakes the card
+# with the typed error (a gateway restart or a laptop asleep must not fail the route). [daveey]
+RELAY_RETRY_S = 1800
+RELAY_HOME = "home"      # relayed by a worker node to the card's home gateway
+RELAY_RETRY = "retry"    # parked on this gateway itself until a stale holder is live-checked again
 # Stable: a resend of a fresh envelope must byte-match, and the target records it on the new card.
 DISTINCT_REASON = (
     "capability owner card for the waiting card and the cards it awaits; "
@@ -278,6 +299,139 @@ def owner_body(task, need: str, *, self_gw: str, board: str, reason: str) -> str
     )
 
 
+def has_replica() -> bool:
+    """True when this gateway runs hermes-hub sync (its ``hub.db`` replica exists). Board worker nodes don't."""
+    try:
+        return reg.hub_db_path().exists()
+    except OSError:
+        return False
+
+
+def card_home(conn, task_id: str) -> Optional[str]:
+    """The Board gateway that created ``task_id`` when this file holds a COPY of it (a worker node runs another
+    gateway's card, :mod:`hermes_cli.kanban_worker_node`); None for this gateway's own cards or unsynced boards."""
+    try:
+        from hermes_cli import kanban_db_sync as sync
+        st = sync.sync_state(conn)
+        if not st or "created_on" not in sync.table_columns(conn, "tasks"):
+            return None
+        row = conn.execute("SELECT created_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    except Exception:  # health: allow BLE001 -- an unreadable sync state means "not a copy"
+        return None
+    home = row[0] if row else None
+    return str(home) if home and home != st.get("gateway_id") else None
+
+
+def _own_gateway(conn) -> Optional[str]:
+    """This board file's Board gateway id (the ``machine:<name>`` this gateway leases as), None if unsynced."""
+    try:
+        from hermes_cli import kanban_db_sync as sync
+        st = sync.sync_state(conn)
+        return str(st["gateway_id"]) if st and st.get("gateway_id") else None
+    except Exception:  # health: allow BLE001 -- an unreadable sync state means "unsynced board"
+        return None
+
+
+def _briefly_stale(exc: CapabilityRouteError, now: float) -> bool:
+    """True when the newest stale holder record lapsed within the last ``RELAY_RETRY_S`` (a restart or a
+    short sleep): worth a timed retry. Older data means the holder's probe is down; that still refuses."""
+    ats = [float(at) for _gw, at in (exc.details.get("stale") or []) if at]
+    return bool(ats) and now - max(ats) < reg.stale_after() + RELAY_RETRY_S
+
+
+def _park_relay(conn, task_id: str, needs: list[str], *, reason: str, gateway: str, mode: str,
+                generations: dict, now: float, expected_run_id: Optional[int], require_unclaimed: bool,
+                self_gw: Optional[str] = None, why: str = "") -> dict:
+    """Park ``task_id`` on owner request ids that ``gateway`` will route (:func:`owner_status` there).
+
+    ``mode`` RELAY_HOME: a worker node hands the routing to the card's home gateway. RELAY_RETRY: this
+    gateway retries a stale holder itself. Same ids, wake_check and event shape as a direct route, plus
+    ``relay`` and the reason the probe needs to write the owner card.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_timed_park as ktp
+
+    me = self_gw or reg.self_gateway() or _own_gateway(conn) or "this gateway"
+    routes = [{"need": n, "gateway": gateway, "checked_at": None, "request_id": request_id(task_id, n, generations.get(n, 1)),
+               "generation": generations.get(n, 1), "relay": mode, "relayed_at": int(now), "from_gateway": me}
+              for n in needs]
+    ids = ",".join(r["request_id"] for r in routes)
+    until = datetime.fromtimestamp(int(now) + WAKE_HORIZON, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if mode == RELAY_HOME:
+        summary = (f"relayed {', '.join(needs)} to {gateway}, this card's home gateway: {me} is a Board worker "
+                   f"node with no hermes-hub registry, so {gateway} opens the owner card(s) with its own")
+    else:
+        summary = (f"the holder of {', '.join(needs)} was not live-checked recently ({why[:300]}); this gateway "
+                   f"retries routing every {WAKE_EVERY // 60} min for {RELAY_RETRY_S // 60} min")
+    park_reason = (f"Waiting on capability owner card(s): {summary} (request {ids}). Wakes when they are done. "
+                   f"SCHEDULED_UNTIL={until}\n{(reason or '').strip()[:1500]}")
+    wake_check = f"hermes kanban wait-check capability-owner {ids}"
+    excerpt = redact_sensitive_text((reason or "").strip(), force=True)[:3000]
+    with kb.write_txn(conn):
+        cur = conn.execute("SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if require_unclaimed and (cur is None or cur[0] != "ready" or cur[1] is not None):
+            raise CapabilityRouteError("capability_route_invalid_state",
+                                       f"{task_id} was claimed meanwhile; not parked", details={"routes": routes})
+        source = kb._retry_status_for_run(conn, task_id) if cur and cur[0] == "running" else "ready"
+        # The event first: the park's producer check (kanban_awaiting) reads it through owner_status.
+        kb._append_event(conn, task_id, ROUTED_EVENT, {
+            "routes": routes, "local": [], "self_gateway": me, "relay": mode, "reason": excerpt,
+            "awaiting": [{"kind": "card", "ref": f"{gateway}/request/{r['request_id']}",
+                          "why": f"capability {r['need']} ({mode} relay)"} for r in routes],
+        })
+        ok = ktp.park(conn, task_id, reason=park_reason, requested_kind="capability", source_status=source,
+                      expected_run_id=expected_run_id, wake_check=wake_check, check_every=WAKE_EVERY,
+                      awaiting={"kind": "card", "ref": routes[0]["request_id"], "gateway": gateway,
+                                "why": f"capability owner for {', '.join(needs)}, routed by {gateway}"})
+        if not ok:
+            raise CapabilityRouteError("capability_route_invalid_state",
+                                       f"{task_id} could not be parked (claim lost?)", details={"routes": routes})
+    return {"status": "scheduled", "routes": routes, "wake_check": wake_check, "local": [], "relay": mode}
+
+
+def _route_generations(conn, task_id: str, needs: list[str]) -> dict[str, int]:
+    """Request-id generation per need; raises the typed refusal for a need already routed (or failed)."""
+    previous = _previous_routes(conn, task_id)
+    generations: dict[str, int] = {}
+    for need in needs:
+        p = previous.get(need)
+        if p is None:
+            continue
+        if p.get("failed_code"):
+            # A relayed route that found no holder within RELAY_RETRY_S: the typed answer, not a re-relay.
+            raise CapabilityRouteError(p["failed_code"], str(p.get("failed") or "")[:1500],
+                                       details={"need": need, "request_id": p.get("request_id")})
+        sent = _sent(p.get("request_id") or "")
+        gen = int(p.get("generation") or 1)
+        if sent is not None and sent["state"] in ("rejected", "expired") and gen < 2:
+            generations[need] = gen + 1  # the owner never got a card: one fresh attempt
+            continue
+        raise CapabilityRouteError(
+            "capability_route_exhausted",
+            f"{task_id} already routed {need} to {p.get('gateway')} (hermes-hub request "
+            f"{p.get('request_id')}, {sent['state'] if sent else 'state unknown'}). That owner card must "
+            f"finish or report why; check it with `hermes kanban wait-check capability-owner "
+            f"{p.get('request_id')}` and `hermes-hub requests`. If it is done and the grant was "
+            "insufficient, comment the exact gap on it and reopen it there.",
+            details={"need": need, **p})
+    return generations
+
+
+def _relay_home(conn, task_id: str, needs: list[str]) -> str:
+    """The home gateway a worker node relays ``task_id`` to; typed refusal for the worker's own card."""
+    home = card_home(conn, task_id)
+    if home is None:
+        raise CapabilityRouteError(
+            "capability_registry_unavailable",
+            f"this gateway has no hermes-hub replica (a Board worker node runs no hermes-hub sync), so it "
+            f"cannot see which gateway holds {', '.join(needs)} or open an owner card there, and {task_id} "
+            "was created here, so there is no home gateway to relay to. Create such work on a gateway "
+            "with hermes-hub (hub, macbook) or pin it to the holder with runs_on=['machine:<holder>']. "
+            "Never ask David to run the step: it is an agent route gap.",
+            details={"needs": needs})
+    return home
+
+
 def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[int] = None,
           board: Optional[str] = None, now: Optional[float] = None, require_unclaimed: bool = False,
           **lookup) -> dict:
@@ -301,25 +455,12 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
         raise CapabilityRouteError("capability_route_invalid_state",
                                    f"{task_id} is {task.status}; only a running or ready card can be routed")
     now = time.time() if now is None else now
-    previous = _previous_routes(conn, task_id)
-    generations: dict[str, int] = {}
-    for need in needs:
-        p = previous.get(need)
-        if p is None:
-            continue
-        sent = _sent(p.get("request_id") or "")
-        gen = int(p.get("generation") or 1)
-        if sent is not None and sent["state"] in ("rejected", "expired") and gen < 2:
-            generations[need] = gen + 1  # the owner never got a card: one fresh attempt
-            continue
-        raise CapabilityRouteError(
-            "capability_route_exhausted",
-            f"{task_id} already routed {need} to {p.get('gateway')} (hermes-hub request "
-            f"{p.get('request_id')}, {sent['state'] if sent else 'state unknown'}). That owner card must "
-            f"finish or report why; check it with `hermes kanban wait-check capability-owner "
-            f"{p.get('request_id')}` and `hermes-hub requests`. If it is done and the grant was "
-            "insufficient, comment the exact gap on it and reopen it there.",
-            details={"need": need, **p})
+    generations = _route_generations(conn, task_id, needs)
+    if not has_replica():
+        # A Board worker node (no hermes-hub sync): hand the routing to the card's home gateway.
+        return _park_relay(conn, task_id, needs, reason=reason, gateway=_relay_home(conn, task_id, needs),
+                           mode=RELAY_HOME, generations=generations, now=now, expected_run_id=expected_run_id,
+                           require_unclaimed=require_unclaimed, self_gw=lookup.get("self_gw"))
     self_gw = lookup.pop("self_gw", None) or reg.self_gateway()
     if not self_gw:
         raise CapabilityRouteError("capability_hub_unavailable",
@@ -339,6 +480,12 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
         try:
             decided = plan(fresh_needs, now=now, self_gw=self_gw, **lookup)
         except CapabilityRouteError as exc:
+            if exc.code == "capability_registry_stale" and not queued and _briefly_stale(exc, now):
+                # The holder's record lapsed just now (restart, sleep): wait and retry routing on this
+                # gateway's own probe instead of failing the worker. Hours-old data still refuses.
+                return _park_relay(conn, task_id, fresh_needs, reason=reason, gateway=self_gw, mode=RELAY_RETRY,
+                                   generations=generations, now=now, expected_run_id=expected_run_id,
+                                   require_unclaimed=require_unclaimed, self_gw=self_gw, why=str(exc))
             if not (queued and exc.code == "capability_held_locally"):
                 raise
             decided = {"routes": [], "local": exc.details.get("local", [])}
@@ -473,38 +620,209 @@ def owner_task_id(result: Any) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def owner_status(rid: str) -> tuple[int, str]:
-    """(rc, message) for one owner request: 0 done, 1 pending, 2 cannot tell / rejected."""
+def owner_status(rid: str, conn=None) -> tuple[int, str]:
+    """(rc, message) for one owner request: 0 done, 1 pending, 2 cannot tell / rejected.
+
+    The hermes-hub ``sent`` row decides when this gateway sent the request. Otherwise a relayed route for
+    ``rid`` (see the module doc) is applied or tracked here: the home gateway routes it on its first probe.
+    ``conn`` is the board holding the waiting card (default: the probe's ``HERMES_KANBAN_DB``). [daveey]
+    """
+    status, why = _sent_status(rid)
+    if status is not None:
+        return status
+    relayed = _relay_status(rid, conn)
+    return relayed if relayed is not None else (2, why)
+
+
+def _sent_status(rid: str) -> tuple[Optional[tuple[int, str]], str]:
+    """``((rc, message), "")`` from this gateway's hermes-hub ``sent`` row, or ``(None, why)`` without one."""
     try:
         db = reg._ro(reg.hub_db_path())
-    except Exception as exc:
-        return 2, f"error: hermes-hub replica unreadable: {exc}"
+    except Exception as exc:  # health: allow BLE001 -- unreadable replica: fall through to the relay check
+        return None, f"error: hermes-hub replica unreadable: {exc}"
     try:
         row = db.execute("SELECT body, state, result FROM sent WHERE id = ?", (rid,)).fetchone()
         if row is None:
-            return 2, f"error: no hermes-hub request {rid} on this gateway"
+            return None, f"error: no hermes-hub request {rid} on this gateway"
         body = json.loads(row[0] or "{}")
         state = row[1]
         if state in ("rejected", "expired", "failed"):
-            return 2, f"error: request {rid} {state}: {str(row[2])[:300]}"
+            return (2, f"error: request {rid} {state}: {str(row[2])[:300]}"), ""
         if state != "done":
-            return 1, f"{rid} request {state}"
+            return (1, f"{rid} request {state}"), ""
         result = json.loads(row[2] or "{}") or {}
         tid = owner_task_id(result)
         if not tid:
-            return 2, f"error: request {rid} done without a task id: {str(row[2])[:300]}"
+            return (2, f"error: request {rid} done without a task id: {str(row[2])[:300]}"), ""
         gw = body.get("to_gw")
         board = (body.get("key") or "default/default/new").split("/")[1] if body.get("key") else "default"
         rec = db.execute("SELECT data FROM replica WHERE gw = ? AND coll = 'tasks' AND key = ?",
                          (gw, f"default/{board}/{tid}")).fetchone()
         if rec is None:
-            return 1, f"{rid} -> {gw}/{tid} not replicated yet"
+            return (1, f"{rid} -> {gw}/{tid} not replicated yet"), ""
         status = json.loads(rec[0]).get("status")
-        return (0 if status in ("done", "archived") else 1), f"{rid} -> {gw}/{tid} {status}"
-    except Exception as exc:  # cannot tell, never "not yet"
-        return 2, f"error: {exc}"
+        return ((0 if status in ("done", "archived") else 1), f"{rid} -> {gw}/{tid} {status}"), ""
+    except Exception as exc:  # health: allow BLE001 -- cannot tell, never "not yet"; reported as rc 2
+        return (2, f"error: {exc}"), ""
     finally:
         db.close()
+
+
+def _task_of(rid: str) -> Optional[str]:
+    """The waiting card id inside ``capability-owner:<card>:<need>``."""
+    if not rid.startswith(OWNER_PREFIX):
+        return None
+    tid = rid[len(OWNER_PREFIX):].split(":", 1)[0]
+    return tid or None
+
+
+def _route_entry(conn, task_id: str, rid: str) -> tuple[Optional[dict], Optional[dict]]:
+    """The newest ``capability_routed`` route for ``rid`` and its event payload (None, None if never routed)."""
+    entry = payload = None
+    for (raw,) in conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id",
+                               (task_id, ROUTED_EVENT)):
+        try:
+            p = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        for r in p.get("routes") or []:
+            if isinstance(r, dict) and r.get("request_id") == rid:
+                entry, payload = r, p
+    return entry, payload
+
+
+def _relay_status(rid: str, conn=None) -> Optional[tuple[int, str]]:
+    """Track or apply a relayed route for ``rid``; None when ``rid`` was never relayed on this board."""
+    from hermes_cli import kanban_db as kb
+
+    tid = _task_of(rid)
+    if not tid:
+        return None
+    own = conn is None
+    if own:
+        try:
+            from hermes_cli import kanban_db_connect as kbc
+            conn = kbc.connect()
+        except Exception:  # health: allow BLE001 -- no board: not a relay we can see
+            return None
+    try:
+        local = conn.execute("SELECT id, status FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+                             "ORDER BY created_at DESC LIMIT 1", (rid,)).fetchone()
+        if local is not None:
+            return (0 if local[1] == "done" else 1), f"{rid} -> local owner {local[0]} {local[1]}"
+        entry, payload = _route_entry(conn, tid, rid)
+        if entry is None:
+            return None
+        if entry.get("failed_code"):
+            return 0, f"{rid} capability route failed: {entry.get('failed')}"
+        if entry.get("owner_task"):  # a local owner card that was since archived
+            return 2, f"error: {rid} local owner {entry['owner_task']} is gone"
+        if not entry.get("relay"):
+            return None
+        task = kb.get_task(conn, tid)
+        if task is None or card_home(conn, tid) is not None or not has_replica():
+            # Still the worker node's copy: the home gateway's probe routes it once the copy is handed back.
+            return 1, f"{rid} relayed to {entry.get('gateway')}; it routes there"
+        return _apply_relay(conn, task, entry, payload or {})
+    finally:
+        if own:
+            conn.close()
+
+
+def _relay_fail(conn, task_id: str, entry: dict, code: str, message: str) -> tuple[int, str]:
+    from hermes_cli import kanban_db as kb
+
+    with kb.write_txn(conn):
+        kb._append_event(conn, task_id, ROUTED_EVENT, {"routes": [{**entry, "failed_code": code,
+                                                                   "failed": message[:1500]}]})
+    return 0, f"{entry['request_id']} capability route failed: {code}: {message[:600]}"
+
+
+def _apply_relay(conn, task, entry: dict, payload: dict, *, now: Optional[float] = None) -> tuple[int, str]:
+    """On the gateway that holds the waiting card: route one relayed need with this gateway's registry."""
+    from hermes_cli import kanban_db as kb
+
+    now = time.time() if now is None else now
+    need, rid = entry["need"], entry["request_id"]
+    self_gw = reg.self_gateway() or _own_gateway(conn) or "this gateway"
+    from_gw = entry.get("from_gateway") or payload.get("self_gateway") or self_gw
+    reason = payload.get("reason") or ""
+    board = kb.get_current_board() or "default"
+    age = now - float(entry.get("relayed_at") or now)
+    try:
+        decided = plan([need], now=now, self_gw=self_gw)
+    except CapabilityRouteError as exc:
+        if exc.code == "capability_held_locally":
+            return _local_owner(conn, task, entry, need=need, rid=rid, self_gw=self_gw, from_gw=from_gw,
+                                reason=reason)
+        if exc.code in ("capability_registry_stale", "no_capability_holder") and age < RELAY_RETRY_S:
+            return 1, f"{rid}: {exc.code}, retrying for {int((RELAY_RETRY_S - age) // 60)} more min"
+        return _relay_fail(conn, task.id, entry, exc.code, str(exc))
+    gw = decided["routes"][0]["gateway"]
+    title = redact_sensitive_text(f"Capability owner: {need} for {self_gw}/{task.id} ({(task.title or '')[:80]})",
+                                  force=True)
+    body = owner_body(task, need, self_gw=self_gw, board=board, reason=reason)
+    argv = [_hub_cli(), "create-task", gw, title, "--body", body, "--assignee", _owner_assignee(),
+            "--origin-session", "", "--id", rid, *_overlap_option_argv(None, overlap_exclusions(conn, task.id))]
+    rc, out = _create_task(argv)
+    if rc not in (0, 3):
+        if age < RELAY_RETRY_S:
+            return 1, f"{rid}: hermes-hub create-task to {gw} failed (exit {rc}), retrying: {out[-200:]}"
+        return _relay_fail(conn, task.id, entry, "capability_hub_unavailable",
+                           f"hermes-hub create-task to {gw} failed (exit {rc}): {out[-400:]}")
+    with kb.write_txn(conn):
+        kb._append_event(conn, task.id, ROUTED_EVENT, {
+            "routes": [{"need": need, "gateway": gw, "request_id": rid, "generation": entry.get("generation", 1),
+                        "queued_only": rc == 3, "relayed_from": from_gw}],
+            "local": [], "self_gateway": self_gw,
+            "awaiting": [{"kind": "card", "ref": f"{gw}/request/{rid}", "why": f"capability {need}"}],
+        })
+    return 1, f"{rid} sent to {gw} (relayed from {from_gw})"
+
+
+def _local_owner(conn, task, entry: dict, *, need: str, rid: str, self_gw: str, from_gw: str,
+                 reason: str) -> tuple[int, str]:
+    """The waiting card's own gateway holds the need: the owner card is a local card pinned to this machine."""
+    from hermes_cli import kanban_db as kb
+
+    excerpt = redact_sensitive_text((reason or "").strip(), force=True)[:3000]
+    title = redact_sensitive_text(f"Capability owner: {need} for {task.id} ({(task.title or '')[:80]})", force=True)
+    body = (
+        f"Capability owner card for waiting card {task.id} (\"{redact_sensitive_text((task.title or '')[:160], force=True)}\") "
+        f"on this board. It was running on {from_gw}, which does not hold `{need}`; this gateway ({self_gw}) "
+        "holds it (live-checked).\n\n"
+        "## Action (from the waiting card, inside its approved plan)\n"
+        f"{excerpt or '(no reason given; read the waiting card first)'}\n\n"
+        "## Do\n"
+        f"1. Read the waiting card: kanban_show(task_id='{task.id}').\n"
+        f"2. Perform exactly the scoped action above on this machine with `{need}`. Keep it to the minimum the "
+        "waiting card needs.\n"
+        "3. If the action goes beyond the waiting card's approved plan or scope, do NOT do it: block THIS card "
+        "with kind='needs_input' and a human_request naming the exact command. The waiting worker does not ask "
+        "David; this card does.\n\n"
+        "## Readback\n"
+        f"Record the evidence in your completion summary AND kanban_comment(task_id='{task.id}', body=<result>) "
+        "so the waiting worker sees it.\n\n"
+        "## Wake\n"
+        f"{task.id} is parked on this card: completing it wakes {task.id} within about {WAKE_EVERY // 60} min, "
+        f"and it resumes on {from_gw}.\n"
+    )
+    own = _own_gateway(conn)
+    try:
+        owner = kb.create_task(conn, title=title, body=body, assignee=_owner_assignee(),
+                               created_by="capability-relay", idempotency_key=rid,
+                               runs_on=[f"machine:{own}"] if own else None)
+    except ValueError:  # an unsynced board has no runs_on: the card is local anyway
+        owner = kb.create_task(conn, title=title, body=body, assignee=_owner_assignee(),
+                               created_by="capability-relay", idempotency_key=rid)
+    with kb.write_txn(conn):
+        kb._append_event(conn, task.id, ROUTED_EVENT, {
+            "routes": [{"need": need, "gateway": self_gw, "request_id": rid, "generation": entry.get("generation", 1),
+                        "owner_task": owner, "relayed_from": from_gw}],
+            "local": [need], "self_gateway": self_gw,
+            "awaiting": [{"kind": "card", "ref": owner, "why": f"capability {need}"}],
+        })
+    return 1, f"{rid} -> local owner {owner} (this gateway holds {need})"
 
 
 def wait_check(target: str) -> tuple[int, str]:
