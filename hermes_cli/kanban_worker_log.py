@@ -88,4 +88,9 @@ def current_run_log(raw: str) -> str:
     body = raw.rstrip()
     if trailers and trailers[-1].end() == len(body):
         body, trailers = body[:trailers[-1].start()], trailers[:-1]
-    return body[trailers[-1].end():] if trailers else body
+    body = body[trailers[-1].end():] if trailers else body
+    # A managed client's run starts with its ``Session: <id>`` line. A client before the reply-flush
+    # fix wrote its reply after its own trailer (stdout flushed at exit), so text between the previous
+    # trailer and this run's Session line is the previous run's reply (t_01a188a461c0178c run 10258).
+    starts = list(re.finditer(r"^Session: \S+[ \t]*$", body, re.MULTILINE))
+    return body[starts[-1].start():] if starts else body

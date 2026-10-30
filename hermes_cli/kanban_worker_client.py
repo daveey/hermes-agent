@@ -159,7 +159,9 @@ def _exit_code(receipt, params, board_db):
     result = worker_result(board_db, params)
     # The attempt's reply ends the log, as a one-shot worker's did: crash diagnostics quote it.
     if result.get('last_output'):
-        print(result['last_output'])
+        # Flushed: stdout is block-buffered into the log file, and an unflushed reply landed after
+        # this run's (stderr) exit trailer, where the next run's crash record quoted it.
+        print(result['last_output'], flush=True)
     return result.get('exit_code', 1)
 
 
