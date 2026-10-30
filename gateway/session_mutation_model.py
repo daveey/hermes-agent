@@ -24,9 +24,11 @@ def _current_route(authority, live, old):
     the configured name: a named ``providers:`` entry resolves to the bare ``custom`` class, and a
     pick on the same entry must not read as a route change. Only the session's own route counts:
     a fallback is where a turn lands, not what the user switches from. A route that cannot
-    authenticate here must not block leaving it: like main's agent-less ``--provider`` path, the
-    pick then switches from the configured provider alone and resolves its own target.
+    authenticate here, or that the routing policy refuses, must not block leaving it: like main's
+    agent-less ``--provider`` path, the pick then switches from the configured provider alone and
+    resolves its own target.
     """
+    from agent.model_routing import ModelRoutingError
     from gateway.session_policy import profile_read_scope
     from hermes_cli.auth import AuthError
     with profile_read_scope(old, authority):
@@ -35,7 +37,7 @@ def _current_route(authority, live, old):
         try:
             model, runtime = authority.runner._resolve_session_agent_runtime(
                 source=live.source, session_key=live.route, fallback=False)
-        except AuthError:
+        except (AuthError, ModelRoutingError):
             return config, _Route(block.get('provider') or '', old.current_model(authority) or '',
                                   block.get('base_url') or '', '')
     return config, _Route(block.get('provider') or runtime.get('provider') or '', model or '',
