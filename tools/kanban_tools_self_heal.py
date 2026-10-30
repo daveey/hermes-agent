@@ -25,7 +25,7 @@ def check_unblock() -> bool:
         return False
     try:
         with _board(None) as (kb, conn):
-            from hermes_cli.kanban import has_requeue_grant
+            from hermes_cli.kanban_requeue import has_requeue_grant
             return has_requeue_grant(conn, env_tid, board=kb.get_current_board())
     except Exception:  # health: allow BLE001 -- tool-list gate fails closed; traceback is logged
         logger.exception("kanban_unblock grant check failed")
@@ -57,7 +57,7 @@ def handle_unblock(args: dict, **kw) -> str:
     env_tid = os.environ.get("HERMES_KANBAN_TASK")
     if env_tid and tid != env_tid:
         with kt._board(args.get("board")) as (kb, conn):
-            from hermes_cli.kanban import requeue_grant
+            from hermes_cli.kanban_requeue import requeue_grant
             via, source = requeue_grant(conn, env_tid, tid, board=args.get("board") or kb.get_current_board())
             if via:
                 ok = kb.unblock_task(conn, tid)

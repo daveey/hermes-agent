@@ -205,7 +205,7 @@ def test_requeue_grant_function(board):
     """The grant function the live proof calls: (via, source card) or (None, None)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
-    from hermes_cli.kanban import requeue_grant
+    from hermes_cli.kanban_requeue import requeue_grant
 
     conn = kbc.connect()
     try:
