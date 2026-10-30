@@ -925,9 +925,9 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
     (
         "Request unlinks between cards this task created. "
         "Asks the board's non-worker supervisor executor (the gateway dispatcher) to "
-        "remove dependency edges between cards THIS task created (or between them "
-        "and this card), which a dispatcher worker may not do itself: kanban_unlink "
-        "only removes this card's own edges. To re-order a graph of cards you "
+        "remove dependency edges between cards THIS task created, which a "
+        "dispatcher worker may not do itself: kanban_unlink only removes this "
+        "card's own edges (do those yourself; they are refused here). To re-order a graph of cards you "
         "created, add the new edges yourself with kanban_link and request the "
         "unlinks here; link ops are accepted only with dry_run, to preview. The request is durable and deduplicated; it stays "
         "pending until an executor accepts it, then the result (applied / "
