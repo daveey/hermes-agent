@@ -89,6 +89,28 @@ _KEEP_STORED_LABEL = frozenset({'tool', 'oneshot'})
 STORED_AS_LOCAL = frozenset(SURFACES) - _KEEP_STORED_LABEL
 # Routing labels and the accounting placeholder: never a creating surface.
 _NOT_A_SURFACE = frozenset({None, '', 'local', 'unknown'})
+# [daveey] A free ``--source`` tag (``bb-reviewer``, ``peer-mail``): a script's integration label. It runs as
+# ``tool`` and is stored under its own name, so ``sessions.sidebar_exclude_sources`` and ``--source`` filters can
+# still name it. A messaging platform name, a routing label or another surface's alias is never a free tag.
+FREE_LABEL_PATTERN = r'^[a-z0-9][a-z0-9._-]{0,63}$'
+_RESERVED_LABELS = frozenset({'local', 'unknown', 'desktop', 'cron', 'kanban', 'bot_room', 'a2a', 'subagent',
+                              'gateway', 'webui', 'dashboard'})
+
+
+def is_free_label(label):
+    """Whether *label* is a free integration tag: well formed, and not a surface or a reserved name."""
+    import re
+    if not isinstance(label, str) or label in SURFACES or not re.fullmatch(FREE_LABEL_PATTERN, label):
+        return False
+    from gateway.config import Platform
+    return label not in _RESERVED_LABELS and label not in {p.value for p in Platform}
+
+
+def surface_label(label):
+    """The ``SURFACES`` label *label* behaves as: itself, ``tool`` for a free tag, else None."""
+    if label in SURFACES:
+        return label
+    return 'tool' if is_free_label(label) else None
 
 
 def created_surface(label):
@@ -252,7 +274,7 @@ class LocalSessionPolicy:
     def current_toolsets(self, config):
         """The next turn's toolsets from its resolved *config*: a following session without an explicit
         toolset pick runs the profile's current selection (main #124211), else the frozen launch set."""
-        if (not self.follows_profile or self.source not in SURFACES or self.editor_mcp_json is not None
+        if (not self.follows_profile or surface_label(self.source) is None or self.editor_mcp_json is not None
                 or 'toolsets' in json.loads(self.request_json)):
             return self.toolsets
         # The workspace decision is the creation-time one: a project file the agent writes mid-session must
@@ -423,9 +445,10 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
         from gateway.session_a2a import build_forward_policy
         return build_forward_policy(params, config, private_secrets=private_secrets)
     unknown = sorted(set(params) - CREATE_FIELDS)
-    if unknown or not isinstance(source, str) or source not in SURFACES:
+    kind = surface_label(source)
+    if unknown or kind is None:
         _refuse(f'params.{unknown[0]}' if unknown else 'source',
-                'unknown create field' if unknown else f'not a surface: {source!r}')
+                'unknown create field' if unknown else f'not a surface or a free tag: {source!r}')
     bad_bypass = next((name for name in BYPASS_FIELDS if name in params and type(params[name]) is not bool), None)
     if bad_bypass:
         _refuse(bad_bypass, 'must be a boolean')
@@ -458,7 +481,7 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
     # The posture is opt-in (``session.create`` only) and needs a folder the client named: the daemon's own
     # directory (the fallback above) is no workspace, and ``tool`` is a third-party integration. An explicit
     # pick wins anyway; skipping it here also spares the probe.
-    named = workspace_posture and source != 'tool' and 'cwd' in params and 'toolsets' not in params
+    named = workspace_posture and kind != 'tool' and 'cwd' in params and 'toolsets' not in params
     coding_posture = named and _in_coding_workspace(config, source, cwd)
     enabled = _resolve_toolsets(params, config, source, safe_mode, coding_posture, bypass=ignore_user_config)
     terminal = build_profile_terminal_scope(get_hermes_home()) if profile_terminal else default_terminal_scope()
@@ -482,7 +505,7 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
     private_editor_request(request, private_secrets)
     _extract_config_secrets(config, private_secrets)
     _extract_config_secrets(terminal, private_secrets, (None,))
-    return LocalSessionPolicy(source, SURFACES[source], cwd, model, tuple(sorted(enabled)),
+    return LocalSessionPolicy(source, SURFACES[kind], cwd, model, tuple(sorted(enabled)),
                               json.dumps(config), json.dumps(request, sort_keys=True), json.dumps(terminal),
                               safe_mode=safe_mode, ignore_user_config=ignore_user_config,
                               coding_posture=coding_posture, client_env_json=client_env,
@@ -996,6 +1019,8 @@ def restore_policy(data):
         policy = LocalSessionPolicy(**data)
         from gateway.session_a2a import is_forward_policy
         surfaces = {**SURFACES, 'cron': 'cron', 'kanban': 'cli', 'bot_room': 'bot_room'}
+        if is_free_label(policy.source):
+            surfaces[policy.source] = SURFACES['tool']
         if ((not is_forward_policy(policy) and
              (policy.source not in surfaces or policy.platform != surfaces[policy.source]))
                 or not isinstance(policy.cwd, str) or not Path(policy.cwd).is_absolute()

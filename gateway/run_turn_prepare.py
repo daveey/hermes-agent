@@ -63,6 +63,8 @@ def _resolve_policy_agent_runtime(runner, policy, *, fallback=True) -> tuple[str
             runtime.get('provider') or fallback_entry.get('provider') or 'unknown',
             fallback_entry.get('model') or 'default')
         return fallback_entry['model'], _runtime_agent_kwargs(runtime)
+    if runtime.get('class_deferred'):
+        return runtime['model'], _runtime_agent_kwargs(runtime)
     return model, _runtime_agent_kwargs(runtime)
 
 

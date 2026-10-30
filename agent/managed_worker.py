@@ -345,7 +345,7 @@ def execute(frame, channel):
     from tools.process_registry import process_registry
     process_registry.recover_from_checkpoint()
     # Store construction binds the delegation ledger before tool discovery.
-    from gateway.session_policy import restore_policy, policy_scope, register_worker_hooks
+    from gateway.session_policy import restore_policy, policy_scope, register_worker_hooks, surface_label
     policy = restore_policy(frame['policy'])
     register_worker_hooks(policy)
     discover_profile_mcp(policy)
@@ -367,8 +367,9 @@ def execute(frame, channel):
                 # execution (agent/runtime_session_child.py) and retires with it.
                 enabled_toolsets=list(policy.toolsets), max_iterations=policy.max_turns,
                 reasoning_config=policy.reasoning_config,
-                # ``tool`` / ``oneshot`` are storage labels for a CLI-surface agent (session_policy.SURFACES).
-                platform=policy.platform if policy.source in ('tool', 'oneshot') else policy.source,
+                # ``tool`` / ``oneshot`` / a free ``--source`` tag are storage labels for a CLI-surface agent
+                # (session_policy.SURFACES, surface_label).
+                platform=policy.platform if surface_label(policy.source) in ('tool', 'oneshot') else policy.source,
                 gateway_session_key=frame['route'], user_id=frame['user_id'], chat_id=frame['chat_id'],
                 skip_context_files=policy.ignore_rules, load_soul_identity=not policy.ignore_rules,
                 skip_memory=policy.ignore_rules, skip_background_review=True, quiet_mode=True,

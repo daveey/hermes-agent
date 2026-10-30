@@ -147,6 +147,20 @@ def _dict_list(value):
     return value is None or (isinstance(value, list) and all(isinstance(e, dict) for e in value))
 
 
+def _deferred_class_runtime(frozen, model, provider, key, launch_url):
+    """[daveey] A ``class:`` route is not resolved here: allocation is sticky per session, and only ``AIAgent``
+    (``prepare_agent_route``) holds the session id, so resolving now failed every turn with "Class routing
+    requires a durable session/job identity". Same deferral as the messaging path
+    (``gateway.run_class_routing.class_session_runtime``). A launch key or URL is not deferred: the resolver
+    refuses explicit credentials for a class selector, and that refusal stays."""
+    from agent.model_routing import is_class_selector
+    target = model or (frozen.get('model') or {}).get('default')
+    if key or launch_url or not is_class_selector(target):
+        return None
+    requested = provider or 'auto'
+    return {'provider': requested, 'requested_provider': requested, 'model': target, 'class_deferred': True}
+
+
 def route_runtime(policy, frozen, model, key, *, fallback=True):
     """``(runtime, fallback_entry)`` for a launch-policy route: the session's FROZEN config and launch
     credential, walking its own fallback chain on an AuthError unless ``fallback=False`` (a session
@@ -158,6 +172,9 @@ def route_runtime(policy, frozen, model, key, *, fallback=True):
     from hermes_cli.runtime_provider_custom import _resolve_named_custom_runtime
     provider = (frozen.get('model') or {}).get('provider')
     launch_url = json.loads(policy.request_json).get('base_url')
+    deferred = _deferred_class_runtime(frozen, model, provider, key, launch_url)
+    if deferred is not None:
+        return deferred, None
     if launch_url:
         # The creation request is immutable identity, not the current selection: once a canonical
         # model mutation moved the route off the launch endpoint, the policy's selection wins.

@@ -25,7 +25,8 @@ def _refusal(params, cfg=None, **kwargs):
 
 @pytest.mark.parametrize('extra, field', [
     ({'bogus': 1}, 'params.bogus'),                    # an unknown create field
-    ({'source': 'nope'}, 'source'),                     # not a known surface
+    ({'source': 'Nope'}, 'source'),                     # not a surface or a well-formed free tag
+    ({'source': 'telegram'}, 'source'),                 # a platform name is never a free tag
     ({'source': 'cli', 'safe_mode': 'yes'}, 'safe_mode'),
     ({'source': 'cli', 'ignore_user_config': 1}, 'ignore_user_config'),
     ({'source': 'cli', 'api_key': '   '}, 'api_key'),

@@ -315,7 +315,7 @@ def _build_chat_parser(subparsers) -> argparse.ArgumentParser:
     inherited(chat_parser, "--safe-mode", action="store_true", default=SUPPRESS,
               help="Troubleshooting mode: disable ALL customizations — user config, AGENTS.md/memory injection, plugins, and MCP servers (implies --ignore-user-config and --ignore-rules). Use to isolate whether a problem comes from your setup or from Hermes itself.")
     add("--source", default=None,
-        help="Session source tag for filtering (default: cli). Use 'tool' for third-party integrations that should not appear in user session lists.")
+        help="Session source tag (default: cli). Use 'tool' for third-party integrations that should not appear in user session lists; any other lowercase tag (e.g. 'peer-mail') runs as 'tool' and is stored under its own name for --source filters and sessions.sidebar_exclude_sources. Messaging platform names are refused.")
     add("--origin-session", default=None,
         help="This session works for a chat on ANOTHER gateway (@session:<profile>@<gateway>/<id>): it gets the kanban tools and every card it creates shows in that chat's task list. Exits 2 with a typed error if the binding could never be read back there.")
     inherited(chat_parser, "--tui", action="store_true", default=SUPPRESS,

@@ -5063,7 +5063,7 @@ export type WorkerPersistResult = Record<string, unknown>
 export interface CanonicalCreateParams {
   profile?: string | null
   request_id?: string | null
-  source?: 'cli' | 'tui' | 'gui' | 'acp' | 'tool' | 'oneshot'
+  source?: string
   cwd?: string | null
   row_cwd?: string | null
   model?: string | null

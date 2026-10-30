@@ -4,7 +4,7 @@ Reuse upstream authority-only value shapes; these overrides do not widen METHODS
 """
 from typing import Literal
 
-from pydantic import RootModel
+from pydantic import Field, RootModel
 
 from .base import JsonValue, Params, Result
 from .common import ProfileParams, TranscriptMessage
@@ -20,7 +20,9 @@ class CanonicalSessionParams(ProfileParams):
 
 class CanonicalCreateParams(ProfileParams):
     request_id: str | None = None
-    source: Literal['cli', 'tui', 'gui', 'acp', 'tool', 'oneshot'] = 'cli'
+    # A surface (cli, tui, gui, acp, tool, oneshot) or a free integration tag (``bb-reviewer``, ``peer-mail``)
+    # that runs as ``tool`` under its own stored label [daveey]; gateway.session_policy.surface_label decides.
+    source: str = Field('cli', pattern=r'^[a-z0-9][a-z0-9._-]{0,63}$')
     cwd: str | None = None
     # The sessions-row ``cwd`` when it differs from the execution ``cwd`` (the classic CLI records
     # main's stamp: the launch dir, ``""`` = none); ``cwd`` stays where the tools run.
