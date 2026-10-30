@@ -64,3 +64,14 @@ def test_old_attempt_cannot_overwrite_result(tmp_path, monkeypatch, mismatch):
                 conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
         record_restart_interruption(SimpleNamespace(kanban_json=json.dumps(context)))
         assert worker_result(context['db'], context) == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_booking_write_does_not_raise(monkeypatch):
+    import gateway.session_kanban_restart as r
+    import gateway.session_runtime_workers as w
+
+    async def boom(authority, fn):
+        raise RuntimeError('database is locked')
+    monkeypatch.setattr(w, 'tracked_write', boom)
+    await r.book_restart_interruption(object(), SimpleNamespace(kanban_json='{}'))

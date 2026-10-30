@@ -634,9 +634,8 @@ async def admit_managed(authority, ref, row, policy):
             (_INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN)):
         # The child booked exit 130 (or never bootstrapped). Supersede it BEFORE the
         # receipt becomes terminal: a runtime Stop must not spend the card's retries.
-        from gateway.session_kanban_restart import record_restart_interruption
-        from gateway.session_runtime_workers import tracked_write
-        await tracked_write(authority, partial(record_restart_interruption, policy))
+        from gateway.session_kanban_restart import book_restart_interruption
+        await book_restart_interruption(authority, policy)
     return reply
 
 

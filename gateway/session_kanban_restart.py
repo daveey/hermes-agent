@@ -2,7 +2,10 @@
 import asyncio
 from functools import partial
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 async def close_and_book_restart_loss(authority, policy, worker):
@@ -16,9 +19,17 @@ async def close_and_book_restart_loss(authority, policy, worker):
             (_INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN)):
         return worker.close
     await asyncio.to_thread(worker.close)
-    from gateway.session_runtime_workers import tracked_write
-    await tracked_write(authority, partial(record_restart_interruption, policy))
+    await book_restart_interruption(authority, policy)
     return lambda: None
+
+
+async def book_restart_interruption(authority, policy):
+    """Best-effort booking: a failed board write must never skip settlement of the admission."""
+    from gateway.session_runtime_workers import tracked_write
+    try:
+        await tracked_write(authority, partial(record_restart_interruption, policy))
+    except Exception:
+        logger.warning('Kanban restart-loss booking failed; settling without it', exc_info=True)
 
 
 def record_restart_interruption(policy):
