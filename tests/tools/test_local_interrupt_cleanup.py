@@ -230,6 +230,12 @@ def test_exit_cleanup_kills_foreground_command_still_running(monkeypatch, caplog
         while (proc := _descendant_running("sleep 3517")) is None and time.monotonic() < deadline:
             time.sleep(0.05)
         assert proc is not None, "test setup: foreground sleep never started"
+        # The child is visible in /proc a moment before execute() publishes it in
+        # _live_foreground; cleaning up in that window (a starved runner) finds nothing to kill.
+        from tools.environments import base as env_base
+        while not env_base._live_foreground and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert env_base._live_foreground, "test setup: foreground command never registered"
         pgid = os.getpgid(proc.pid)
 
         terminal_tool_lifecycle.cleanup_all_environments()
