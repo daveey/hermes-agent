@@ -186,6 +186,16 @@ stack to `~/.hermes/logs/gateway_faulthandler.log` and the gateway keeps
 running — use it to see what a stalled or misbehaving gateway is doing without
 restarting it.
 
+The dump is GIL-safe: a Python-level handler runs on the main thread with the
+GIL held and walks the threads through `sys._current_frames()`, so a thread
+that returns mid-dump cannot crash the gateway (the earlier
+`faulthandler.register` hook walked frames from C signal context and could
+segfault). Each dump starts with `--- SIGUSR2 stack dump <UTC time> pid=…` and
+names every thread. A second `SIGUSR2` within 1 s of the last dump is ignored.
+The dump runs when the main thread next executes Python code, so a main thread
+wedged inside a long C call dumps only after that call returns; the event-loop
+watchdog below covers that case.
+
 ### Built-in event-loop liveness watchdog
 
 On every platform the gateway runs an out-of-loop watchdog thread that probes

@@ -27,6 +27,7 @@ from gateway.restart import (
     DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT, GATEWAY_FATAL_CONFIG_EXIT_CODE, is_global_startup_conflict
 )
 from gateway.run_shutdown import _log_suppressed, _send_error
+from gateway.sigusr2_stack_dump import ThreadStackDumper
 from gateway.shutdown_watchdog import (
     DEFAULT_HEARTBEAT_INTERVAL_S, DEFAULT_LOOP_WATCHDOG_INTERVAL_S,
     DEFAULT_LOOP_WATCHDOG_MAX_STRIKES, DEFAULT_LOOP_WATCHDOG_TIMEOUT_S, loop_heartbeat_forever,
@@ -912,7 +913,7 @@ class GatewayStartupMixin:
         return open(os.path.join(log_dir, "gateway_faulthandler.log"), "a", encoding="utf-8")  # windows-footgun: ok (append log writer, not a read)
 
     def _start_install_faulthandler(self) -> None:
-        """Enable faulthandler (stderr or a log file) plus the SIGUSR2 stack-dump hook."""
+        """Enable faulthandler for fatal errors (stderr or a log file) plus the GIL-safe SIGUSR2 stack dump."""
         # sys.stderr may be None (Windows VBS / pythonw / detached service): fall back to a log file.
         try:
             # Enable faulthandler for stack dumps on freezes/crashes (#70344). Falls back to a log file when
@@ -922,15 +923,18 @@ class GatewayStartupMixin:
         except (RuntimeError, ValueError, OSError):
             with _log_suppressed(logging.DEBUG, "faulthandler.enable() unavailable", exc_info=True):
                 faulthandler.enable(file=self._open_faulthandler_log(), all_threads=True)
-        # SIGUSR2 stack dump to file for service managers that drop stderr; POSIX-only.
-        # chain=False: SIGUSR2's default disposition is "terminate", so chaining to it
-        # dumps the stacks and then kills the gateway the operator was trying to inspect.
+        # SIGUSR2 = operator stack-dump request (POSIX-only), appended to gateway_faulthandler.log.
+        # A Python-level handler, NOT faulthandler.register(all_threads=True): that one walks other
+        # threads' frames from C signal context while they run and segfaulted the gateway it was
+        # inspecting. This one runs on the main thread with the GIL held (gateway/sigusr2_stack_dump.py),
+        # is rate-limited to one dump per second, and never terminates the process.
         _sigusr2 = getattr(signal, "SIGUSR2", None)
-        if _sigusr2 is not None and hasattr(faulthandler, "register"):
-            with _log_suppressed(logging.DEBUG, "Could not set up faulthandler file logging", exc_info=True):
-                faulthandler.register(
-                    _sigusr2, file=self._open_faulthandler_log(), all_threads=True, chain=False,
-                )
+        if _sigusr2 is not None:
+            with _log_suppressed(logging.DEBUG, "Could not install the SIGUSR2 stack-dump handler", exc_info=True):
+                if hasattr(faulthandler, "unregister"):
+                    faulthandler.unregister(_sigusr2)  # drop a registration an older in-process setup left
+                # signal.signal only works on the main thread; elsewhere this raises ValueError (logged).
+                signal.signal(_sigusr2, ThreadStackDumper(self._open_faulthandler_log()))
 
     async def _start_log_startup_environment(self) -> None:
         """Bind the gateway loop, disarm the startup watchdog, and log the startup environment."""
