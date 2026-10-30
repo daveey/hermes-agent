@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 from hermes_dir_acl import make_user_dir
 
+from gateway.status_command_line import argv_to_command_line
 from gateway.status_inline_source import (
     command_line_runs_inline_source,
     inline_bootstrap_argv,
@@ -457,8 +458,12 @@ START_TIME_DRIFT_TOLERANCE = 200
 def start_time_fingerprints_match(recorded: Any, current: Any, tolerance: int = START_TIME_DRIFT_TOLERANCE) -> bool:
     """Liveness-reconciliation comparator for :func:`get_process_start_time` fingerprints: the
     recorded owner and the current reading are the same incarnation when they agree within
-    ``tolerance``. Raises on junk; callers decide what an unreadable (``None``) side means."""
-    return abs(int(current) - int(recorded)) <= tolerance
+    ``tolerance``. Raises TypeError or ValueError on junk; callers decide what an unreadable
+    (``None``) side means."""
+    try:
+        return abs(int(current) - int(recorded)) <= tolerance
+    except OverflowError as exc:
+        raise ValueError("non-finite process start-time fingerprint") from exc
 
 
 def _scope_hash(identity: str) -> str:
@@ -507,22 +512,6 @@ def _get_process_start_time(pid: int) -> Optional[int]:
 def get_process_start_time(pid: int) -> Optional[int]:
     """Public wrapper for retrieving a process start time when available."""
     return _get_process_start_time(pid)
-
-
-def argv_to_command_line(parts) -> str:
-    """[daveey] One command-line string from an exact argv, for the identity matchers.
-
-    Whitespace-bearing args (``~/Applications/Hermes Python.app/...``, an inline ``-c`` source) are
-    double-quoted so the quote-aware tokenizer in ``_gateway_command_subcommand`` keeps each one a
-    single token. A space-joined argv (``ps -o command=``, a NUL->space ``/proc`` read) loses those
-    boundaries: the interpreter path splits in two, the ``-c`` walk stops at its second half, and a
-    Hermes runpy bootstrap (``python -I -c "import sys, runpy; …"``) stops matching as a gateway.
-    Args that already carry a double quote stay as-is. Empty parts (the trailing NUL) are dropped."""
-    return " ".join(
-        f'"{part}"' if any(c.isspace() for c in part) and '"' not in part else part
-        for part in parts
-        if part
-    ).strip()
 
 
 def _read_process_cmdline(pid: int) -> Optional[str]:
