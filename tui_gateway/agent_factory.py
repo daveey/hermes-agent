@@ -525,7 +525,9 @@ def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _Runti
                     primary_failure_wording(primary_exc)[0], primary_exc, fb_provider, fb_model)
                 return _RuntimeFallbackResolution(runtime, fb_model, True)
             except Exception as fb_exc:
-                logging.getLogger(__name__).warning(
+                # A logger bound by name: health's BLE001 recognises `<name>.warning(..., exc_info=True)`. [daveey]
+                logger = logging.getLogger(__name__)
+                logger.warning(
                     "Fallback %s model %s failed: %s: %s",
                     fb_provider, fb_model, type(fb_exc).__name__, fb_exc, exc_info=True)
                 failures.append((fb_provider, fb_model, fb_exc))

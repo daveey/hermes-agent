@@ -1208,6 +1208,16 @@ def _resolve_exec_route(env: dict, session: str, task_id: Optional[str], local: 
     return None, route_err
 
 
+def _set_exec_session(env: dict, session: str) -> Optional[str]:
+    """Validate and export an explicit harness session name. [daveey]"""
+    if session:
+        if not _SESSION_RE.match(session):
+            return (f"Invalid session name {session!r}: use 1-64 letters, digits, "
+                    "dashes, or underscores (e.g. 'r7k2').")
+        env["BU_NAME"] = session
+    return None
+
+
 def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT_S,
                  task_id: Optional[str] = None, local: bool = False):
     """Run Python code through the browser-use CLI, and return its output"""
@@ -1232,11 +1242,9 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
                           "Run `hermes update` to re-sync it.")
 
     env = _base_subprocess_env()
-    if session:
-        if not _SESSION_RE.match(session):
-            return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
-                              "dashes, or underscores (e.g. 'r7k2').")
-        env["BU_NAME"] = session
+    session_error = _set_exec_session(env, session)
+    if session_error:
+        return tool_error(session_error)
     from tools import browser_agent_lifecycle as managed_browser
     generation = _live_generation()
     managed, route_err = _resolve_exec_route(env, session, task_id, local, local_sidecar, route_key)

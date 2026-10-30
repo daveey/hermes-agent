@@ -578,24 +578,12 @@ def _kernel32():
     return ctypes.WinDLL("kernel32", use_last_error=True)
 
 
-def _windows_user_runnable_pe_machines() -> Optional[set]:
-    """PE machines this host runs in user mode via GetMachineTypeAttributes (the only API reporting
-    AMD64-on-ARM64 emulation); None when unavailable (pre-Win11 22000) so callers fall back."""
-    import ctypes
-    from ctypes import wintypes
-    kernel32 = _kernel32()
-    kernel32.GetMachineTypeAttributes.argtypes = [wintypes.USHORT, ctypes.POINTER(ctypes.c_int)]
-    kernel32.GetMachineTypeAttributes.restype = ctypes.c_long
-
-    runnable = set()
-    for machine in (_PE_MACHINE_ARM64, _PE_MACHINE_AMD64, _PE_MACHINE_I386):
-        attributes = ctypes.c_int(0)
-        # HRESULT: zero is success, any nonzero value is a failure.
-        if kernel32.GetMachineTypeAttributes(machine, ctypes.byref(attributes)):
-            continue
-        if attributes.value & _MACHINE_ATTRIBUTE_USER_ENABLED:
-            runnable.add(machine)
-    return runnable or None
+# Keep the facade's patchable entry points for executable verification. [daveey]
+from hermes_cli.main_desktop_pe import (
+    _windows_user_runnable_pe_machines,
+    _expected_windows_pe_machines,
+    _parse_pe_machine,
+)
 
 
 def _windows_native_machine() -> str:
@@ -605,66 +593,6 @@ def _windows_native_machine() -> str:
             facts.native_arch(), (platform.machine() or "").upper()
         )
     return (platform.machine() or "").upper()
-
-
-def _expected_windows_pe_machines() -> set:
-    """PE machines this Windows host can load: ``GetMachineTypeAttributes``, else by name (AMD64 → x64+x86,
-    ARM64 → ARM64+x64, x86 → x86). Unknown hosts get the full set so the gate can never brick launch."""
-    if sys.platform == "win32":
-        try:
-            runnable = _windows_user_runnable_pe_machines()
-        except (OSError, AttributeError, TypeError, ValueError):
-            runnable = None
-        if runnable:
-            return runnable
-    machine = _windows_native_machine().upper()
-    if machine in ("AMD64", "X86_64", "X64"):
-        return {_PE_MACHINE_AMD64, _PE_MACHINE_I386}
-    if machine in ("ARM64", "AARCH64"):
-        return {_PE_MACHINE_ARM64, _PE_MACHINE_AMD64}
-    if machine in ("X86", "I386", "I486", "I586", "I686"):
-        return {_PE_MACHINE_I386}
-    return {_PE_MACHINE_AMD64, _PE_MACHINE_ARM64, _PE_MACHINE_I386}
-
-
-def _parse_pe_machine(path: Path) -> int:
-    """COFF machine field of the PE at ``path``; ``ValueError`` with a readable reason when it is not a
-    structurally complete PE (bad magic, truncated header, section data past EOF). Header walk only."""
-    import struct
-    try:
-        file_size = path.stat().st_size
-    except OSError as exc:
-        raise ValueError(f"unreadable: {exc}")
-    if file_size < 512:
-        raise ValueError(f"file is only {file_size} bytes — far too small to be a Windows executable")
-    with path.open("rb") as fh:
-        head = fh.read(64)
-        if len(head) < 64 or head[:2] != b"MZ":
-            raise ValueError(
-                "missing MZ header — not a Windows executable (a truncated or non-binary file saved as .exe?)"
-            )
-        e_lfanew = struct.unpack_from("<I", head, 0x3C)[0]
-        if e_lfanew <= 0 or e_lfanew + 24 > file_size:
-            raise ValueError("corrupt DOS header: PE header offset points past end of file")
-        fh.seek(e_lfanew)
-        pe_head = fh.read(24)
-        if len(pe_head) < 24 or pe_head[:4] != b"PE\x00\x00":
-            raise ValueError("missing PE signature — corrupt executable header")
-        machine, n_sections = struct.unpack_from("<HH", pe_head, 4)
-        size_of_optional = struct.unpack_from("<H", pe_head, 20)[0]
-        fh.seek(e_lfanew + 24 + size_of_optional)
-        max_section_end = 0
-        for _ in range(n_sections):
-            section = fh.read(40)
-            if len(section) < 40:
-                raise ValueError("truncated PE section table")
-            size_of_raw, pointer_to_raw = struct.unpack_from("<II", section, 16)
-            max_section_end = max(max_section_end, pointer_to_raw + size_of_raw)
-        if file_size < max_section_end:
-            raise ValueError(
-                f"truncated executable: file is {file_size} bytes but its PE sections extend to {max_section_end} bytes"
-            )
-    return machine
 
 
 def _pe_machine_or_none(path: Path) -> Optional[int]:

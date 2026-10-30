@@ -22,12 +22,10 @@ import {
   SidebarMenuItem
 } from '@/components/ui/sidebar'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
-import { useContributions } from '@/contrib/react/use-contributions'
-import { type SessionInfo, type SessionSearchResult } from '@/hermes'
+import { type SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { comboTokens } from '@/lib/keybinds/combo'
 import { sessionCreatedAt } from '@/lib/session-branch-tree'
-import { sessionMatchesSearch } from '@/lib/session-search'
 import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
 import { cn } from '@/lib/utils'
 import { markSidebarFirstRows } from '@/store/boot-snapshot'
@@ -36,7 +34,7 @@ import { $activeConnectionId } from '@/store/connections'
 import { $cronJobs } from '@/store/cron'
 import { recordAction } from '@/store/desktop-metrics'
 import { $hiddenGatewayIds, sessionOnHiddenGateway } from '@/store/gateway-visibility'
-import { $interfaceMode, $showsAdvancedChrome, shownInMode } from '@/store/interface-mode'
+import { $showsAdvancedChrome } from '@/store/interface-mode'
 import { $bindings } from '@/store/keybinds'
 import {
   $dismissedAutoProjectIds,
@@ -140,18 +138,9 @@ import { ackAllSessionsRead } from '@/store/session-unread'
 import { markSessionUnread } from '@/store/session-unread-remote'
 import { $archivedSessions, loadArchivedSessions } from '@/store/sidebar-archive'
 import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
-import { applySidebarNavPrefs, SIDEBAR_NAV_PREFS_AREA } from '@/store/sidebar-nav'
 import { $sidebarSessionRank, $sidebarSessionRankIds } from '@/store/sidebar-sort'
 
-import {
-  type AppView,
-  ARTIFACTS_ROUTE,
-  CAPABILITIES_ROUTE,
-  CRON_ROUTE,
-  MESSAGING_ROUTE,
-  SIDEBAR_NAV_AREA,
-  type SidebarNavContribution
-} from '../../routes'
+import { type AppView } from '../../routes'
 import type { SidebarNavItem } from '../../types'
 import { type NewSessionSplitHandler, startNewSessionDrag } from '../new-session-drag'
 
@@ -161,6 +150,7 @@ import { SidebarCronJobsSection } from './cron-jobs-section'
 import { SidebarFilterMenu } from './filter-menu'
 import { buildGatewaySessionGroups, scopeGatewaySessionGroups, useGatewaySessionGroups } from './gateway-group-model'
 import { SidebarLoadMoreRow } from './load-more-row'
+import { useSidebarNavItems } from './nav-items'
 import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } from './order'
 import { filterSessionsByProfileScope } from './profile-scope'
 import { ProfileRail } from './profile-switcher'
@@ -188,6 +178,7 @@ import {
   withProvisionalHome
 } from './projects'
 import { WorktreeDialog } from './projects/worktree-dialog'
+import { mergeSearchResults } from './search-results'
 import {
   hasSessionArea,
   SidebarBlankState,
@@ -197,11 +188,14 @@ import {
   SidebarStorageCorruptNotice
 } from './section-states'
 import { GlobalSessionRenameDialog } from './session-actions-menu'
+import { sidebarFiltersNarrow } from './session-filters'
 import { buildSessionByAnyId, resolvePinnedSessions, useOfflineFallback } from './session-index'
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
 import { useEnteredProjectSessions } from './use-entered-project-sessions'
 import { useServerSessionSearch } from './use-server-session-search'
+
+export { mergeSearchResults, searchResultToSession, stripFtsMarkers } from './search-results'
 
 // Non-session groups (messaging platforms) stay compact: show a few rows up
 // front, reveal more in larger steps on demand. Keeps a busy platform from
@@ -213,50 +207,6 @@ const NON_SESSION_LOAD_STEP = 10
 // the grouped view. Long enough that the flat list — the thing actually on
 // screen — has the connection to itself first.
 const PROJECT_TREE_WARM_MS = 2_000
-
-// A row's `tier` is the one mode it belongs to (Simple keeps the setup rows,
-// Advanced adds the readouts); the list filters once, nothing is passed down.
-const SIDEBAR_NAV: SidebarNavItem[] = [
-  {
-    id: 'new-session',
-    label: '',
-    icon: props => <Codicon name="robot" {...props} />,
-    action: 'new-session',
-    keybindActionId: 'session.new'
-  },
-  {
-    id: 'capabilities',
-    label: '',
-    icon: props => <Codicon name="symbol-misc" {...props} />,
-    route: CAPABILITIES_ROUTE,
-    keybindActionId: 'nav.capabilities'
-  },
-  {
-    id: 'messaging',
-    label: '',
-    icon: props => <Codicon name="comment" {...props} />,
-    route: MESSAGING_ROUTE,
-    keybindActionId: 'nav.messaging'
-  },
-  // Artifacts and Scheduled jobs are outputs of running Hermes the developer
-  // way; Capabilities and Messaging are how anyone sets it up.
-  {
-    id: 'artifacts',
-    label: '',
-    icon: props => <Codicon name="files" {...props} />,
-    route: ARTIFACTS_ROUTE,
-    keybindActionId: 'nav.artifacts',
-    tier: 'advanced'
-  },
-  {
-    id: 'cron',
-    label: '',
-    icon: props => <Codicon name="watch" {...props} />,
-    route: CRON_ROUTE,
-    keybindActionId: 'nav.cron',
-    tier: 'advanced'
-  }
-]
 
 // Two modes via the `compact` height variant (styles.css):
 //   tall    → each section is shrink-0, capped, its own scroller; Sessions is flex-1.
@@ -288,98 +238,6 @@ const HEADER_ACTION_BTN =
 // a hover-revealed action.
 const HEADER_NAV_BTN =
   'text-(--ui-text-tertiary) opacity-70 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground hover:opacity-100 focus-visible:opacity-100'
-
-// FTS results cover sessions that aren't in the loaded page; synthesize a
-// minimal SessionInfo so they render in the same row component (resume works
-// by id; the snippet stands in for the preview).
-
-// The backend's FTS layer wraps matched terms in literal '>>>' / '<<<'
-// highlight markers (sqlite snippet() delimiters — see hermes_state_search.py).
-// The sidebar renders the snippet as plain text, so the markers must be
-// stripped or a search for "foo" paints rows titled ">>>foo<<<".
-// Exported for tests.
-export function stripFtsMarkers(snippet: string): string {
-  return snippet.replaceAll('>>>', '').replaceAll('<<<', '')
-}
-
-// The backend already ships the real session title on every search hit
-// (web_routers/sessions.py add_lineage_result enriches each result via
-// get_session_rich_row). Map it onto the synthesized row so the sidebar
-// paints the actual name; the snippet stays as the preview. Untitled
-// sessions keep today's snippet fallback via sessionTitle().
-// Exported for tests.
-export function searchResultToSession(result: SessionSearchResult): SessionInfo {
-  const ts = result.session_started ?? Date.now() / 1000
-
-  return {
-    archived: false,
-    cwd: null,
-    ended_at: null,
-    id: result.session_id,
-    _lineage_root_id: result.lineage_root ?? null,
-    input_tokens: 0,
-    is_active: false,
-    last_active: result.last_active ?? ts,
-    message_count: 0,
-    model: result.model ?? null,
-    output_tokens: 0,
-    preview: stripFtsMarkers(result.snippet ?? '').trim() || null,
-    source: result.source ?? null,
-    started_at: ts,
-    title: result.title?.trim() || null,
-    tool_call_count: 0
-  }
-}
-
-export function mergeSearchResults(
-  sortedSessions: readonly SessionInfo[],
-  query: string,
-  serverMatches: readonly SessionSearchResult[],
-  sessionByAnyId: ReadonlyMap<string, SessionInfo>,
-  searchPending: boolean
-): SessionInfo[] {
-  if (!query) {
-    return []
-  }
-
-  // While the request is in flight the client's own recency-ordered matches
-  // are all there is — instant feedback while typing, and no leftovers from
-  // whatever the previous query's request returned. Once the ranked server
-  // response lands, it decides the order: the backend runs direct id matches
-  // before FTS content hits, so pasting a session's exact id must keep that
-  // hit on top instead of letting newer quoting sessions bury it.
-  const out = new Map<string, SessionInfo>()
-
-  if (searchPending) {
-    for (const s of sortedSessions) {
-      if (sessionMatchesSearch(s, query)) {
-        out.set(s.id, s)
-      }
-    }
-
-    return [...out.values()]
-  }
-
-  for (const match of serverMatches) {
-    if (out.has(match.session_id)) {
-      continue
-    }
-
-    const loaded = sessionByAnyId.get(match.session_id)
-    out.set(match.session_id, loaded ?? searchResultToSession(match))
-  }
-
-  // Client-only matches that the server didn't return (e.g. cwd/git-branch
-  // fields the FTS index doesn't cover) still deserve a row — after the
-  // ranked hits, in recency order.
-  for (const s of sortedSessions) {
-    if (!out.has(s.id) && sessionMatchesSearch(s, query)) {
-      out.set(s.id, s)
-    }
-  }
-
-  return [...out.values()]
-}
 
 interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   currentView: AppView
@@ -421,47 +279,8 @@ export function ChatSidebar({
   const { t } = useI18n()
   const s = t.sidebar
   const { pathname } = useLocation()
-  // Contributed nav rows (plugins pairing a page with a sidebar entry) render
-  // below the built-ins with the same chrome; active = at their route.
-  const navContributions = useContributions(SIDEBAR_NAV_AREA)
-
-  const contributedNav = useMemo<SidebarNavItem[]>(
-    () =>
-      navContributions.flatMap(c => {
-        const data = c.data as Partial<SidebarNavContribution> | undefined
-
-        if (!data?.path?.startsWith('/') || !data.label) {
-          return []
-        }
-
-        const codicon = data.codicon || 'plug'
-
-        return [
-          {
-            id: c.id,
-            label: data.label,
-            icon: (props: { className?: string }) => <Codicon name={codicon} {...props} />,
-            route: data.path,
-            tier: data.tier
-          }
-        ]
-      }),
-    [navContributions]
-  )
-
-  const interfaceMode = useStore($interfaceMode)
+  const navItems = useSidebarNavItems()
   const showsAdvancedChrome = useStore($showsAdvancedChrome)
-
-  // Nav preferences (`sidebarNav.prefs` contributions): a plugin may hide rows
-  // or re-order them. Merged here, at render, from the registry — so the
-  // preference never mutates the default list, and a plugin's disable/reload
-  // disposes its contribution and the rows come straight back.
-  const navPrefs = useContributions(SIDEBAR_NAV_PREFS_AREA)
-
-  const navItems = useMemo(
-    () => applySidebarNavPrefs([...SIDEBAR_NAV, ...contributedNav].filter(shownInMode(interfaceMode)), navPrefs),
-    [contributedNav, interfaceMode, navPrefs]
-  )
 
   const panesFlipped = useStore($panesFlipped)
   const grouping = useStore($sidebarGrouping)
@@ -725,13 +544,15 @@ export function ChatSidebar({
     ]
   )
 
-  const filtersNarrow =
-    hiddenGatewayIds.length > 0 ||
-    !showAutomated ||
-    statusFilter.length > 0 ||
-    projectFilter.length > 0 ||
-    prFilter.length > 0 ||
-    (showAllProfiles && profileFilter.length > 0)
+  const filtersNarrow = sidebarFiltersNarrow({
+    hiddenGatewayIds,
+    showAutomated,
+    statusFilter,
+    projectFilter,
+    prFilter,
+    showAllProfiles,
+    profileFilter
+  })
 
   const visibleSessions = useMemo(
     () => (filtersNarrow ? scopedSessions.filter(sessionMatchesFilters) : scopedSessions),

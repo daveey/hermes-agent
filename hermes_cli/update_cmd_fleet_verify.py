@@ -301,6 +301,16 @@ def _owed_restart_reason(restart, stopped, *, gateway_owed: bool, stale_serves: 
     return "; ".join(parts) or (_GATEWAY_OWED_REASON + _GATEWAY_RECOVERY)
 
 
+def _defer_manual_serve_outcomes(plan, outcomes) -> None:
+    """Credit live manual serves whose restart obligation was deferred. [daveey]"""
+    from dataclasses import asdict
+    from hermes_cli.update_serve_obligations import defer_manual_serve
+
+    for runtime, outcome in zip(plan.runtimes, outcomes):
+        if outcome["outcome"] == "unaccounted" and defer_manual_serve(asdict(runtime), require_alive=True):
+            outcome["outcome"] = "deferred"
+
+
 def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_resume, update_complete):
     """Post-restart verification: legacy-unit warning, dashboard cleanup, stale serve
     probe, fleet version matrix, plan-vs-execution reconciliation, receipt finalize.
@@ -452,12 +462,7 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
                 external_gateway_pids={row.get("pid") for row in _fleet_snapshot if row_is_external(row)},
                 live_gateway_pids=_live_gateway_pids,
             )
-            from dataclasses import asdict
-            from hermes_cli.update_serve_obligations import defer_manual_serve
-
-            for runtime, outcome in zip(_pre_update_plan.runtimes, _runtime_outcomes):
-                if outcome["outcome"] == "unaccounted" and defer_manual_serve(asdict(runtime), require_alive=True):
-                    outcome["outcome"] = "deferred"
+            _defer_manual_serve_outcomes(_pre_update_plan, _runtime_outcomes)
             if report_unaccounted_runtimes(_runtime_outcomes):
                 restart.incomplete = True
                 _missed_gateway, _missed_serves = _split_unaccounted(_runtime_outcomes)

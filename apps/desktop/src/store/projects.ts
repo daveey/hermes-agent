@@ -70,6 +70,13 @@ import { $hiddenGatewayIds } from './gateway-visibility'
 import { hubGatewayForConnection, hubGatewayProjects, hubRequest, learnHubGatewayName } from './hub-sync'
 import { type OfflineReplicaRecord, offlineSessionsFromReplica } from './offline-sessions'
 import { fetchRemoteProjectTree, type ProjectTreePayload } from './project-tree-background'
+import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature } from './projects-repo-discovery'
+
+export {
+  type RepoDiscoveryPolicy,
+  repoDiscoveryPolicyFromConfig,
+  repoDiscoveryPolicySignature
+} from './projects-repo-discovery'
 
 // First-class, per-profile Projects (named, multi-folder workspaces). State is
 // served by the live gateway's `projects.*` JSON-RPC methods, which wrap the
@@ -1372,39 +1379,6 @@ export function moveToProjectTargets(
     node =>
       node.id !== currentProjectId && !node.isNoProject && (Boolean(projectRootCwd(node)) || isRemoteProjectId(node.id))
   )
-}
-
-export interface RepoDiscoveryPolicy {
-  enabled: boolean
-  roots: string[]
-  exclude_paths: string[]
-}
-
-export function repoDiscoveryPolicyFromConfig(config: unknown): RepoDiscoveryPolicy {
-  const desktopValue = config && typeof config === 'object' ? (config as { desktop?: unknown }).desktop : undefined
-
-  const desktop =
-    desktopValue && typeof desktopValue === 'object'
-      ? (desktopValue as {
-          repo_scan_enabled?: unknown
-          repo_scan_exclude_paths?: unknown
-          repo_scan_roots?: unknown
-        })
-      : {}
-
-  return {
-    enabled: desktop.repo_scan_enabled !== false,
-    roots: Array.isArray(desktop.repo_scan_roots)
-      ? desktop.repo_scan_roots.filter((value): value is string => typeof value === 'string')
-      : [],
-    exclude_paths: Array.isArray(desktop.repo_scan_exclude_paths)
-      ? desktop.repo_scan_exclude_paths.filter((value): value is string => typeof value === 'string')
-      : []
-  }
-}
-
-export function repoDiscoveryPolicySignature(policy: RepoDiscoveryPolicy): string {
-  return JSON.stringify(policy)
 }
 
 interface RepoScanState {
