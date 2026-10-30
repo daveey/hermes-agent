@@ -17,6 +17,17 @@ from typing import Optional
 
 from hermes_cli.gateway_client import GatewayClientError as _GatewayClientError
 
+# [daveey] The promise hermes-sync's ``kanban_workers_restart_safe`` asks of this core: a gateway restart
+# (the one in ``hermes update``) neither fails nor strands a running Kanban run. The run carries on, or
+# it is requeued without a failure counted. #266 keeps it: a draining owner's refusals refresh this
+# worker's silence budget up to the owner's own after-turn cap (``_Claim.note_refusal``); an admitted
+# turn the restart ends raises ``OwnerRestartLost`` and exits ``KANBAN_OWNER_RESTART_EXIT_CODE``; and the
+# dead-worker sweep requeues that exit as ``reclaimed`` with no failure counted. hermes-sync reads this
+# file's text with the regex ``^GATEWAY_RESTART_SAFE\s*(?::\s*bool\s*)?=\s*True\b``: without a match every
+# core-update drain holds new Kanban claims for up to 20 min. Pinned by
+# tests/hermes_cli/test_kanban_worker_owner_restart.py.
+GATEWAY_RESTART_SAFE = True
+
 # A worker that loses its owner (a dropped socket, a restart, `hermes update` draining it or a new
 # owner still starting) waits for it instead of exiting: the condition is the host's, not the card's,
 # and a failed exit here spends the card's failure budget and lets the owner end the turn. Asking

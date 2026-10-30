@@ -15,8 +15,10 @@ crashes as systemic: ``gave_up`` to triage on the first failure.
 """
 
 import asyncio
+import re
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -341,3 +343,66 @@ def test_an_exit_1_whose_last_line_is_not_the_drain_refusal_is_still_a_crash(boa
         tid = _running(conn, "card", 78201)
         assert kbd.detect_crashed_workers(conn) == [tid]
         assert kb.get_task(conn, tid).consecutive_failures == 1
+
+
+# --- end to end: the contract hermes-sync's ``GATEWAY_RESTART_SAFE`` declaration promises -------------
+
+@pytest.mark.parametrize("booked_by", ["reaped_exit", "log_trailer"])
+def test_a_worker_mid_turn_at_an_owner_restart_is_requeued_uncounted_end_to_end(
+        board, monkeypatch, clock, capsys, booked_by):
+    """The real worker entry point (``main`` -> ``_submit`` -> ``run``) mid-turn when its owner restarts:
+    the owner refuses every redial ``draining``/``restart_wait`` for longer than ``OWNER_WAIT_S``, then
+    a new owner reports the turn ``unknown``. The worker exits ``KANBAN_OWNER_RESTART_EXIT_CODE``, and
+    the dead-worker sweep, booking that exit from the reaped status or from the worker log's exit
+    trailer, puts the card back to ready with no failure counted. [daveey]"""
+    from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+    with kbc.connect() as conn:
+        tid = _running(conn, "card mid-turn at the restart", 79001)
+        claimed = kb.get_task(conn, tid)
+        assert claimed is not None
+        run_id = claimed.current_run_id
+        claim_lock = conn.execute("SELECT claim_lock FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+    for key, value in {"HERMES_KANBAN_BOARD": "default", "HERMES_KANBAN_TASK": tid,
+                       "HERMES_KANBAN_RUN_ID": str(run_id), "HERMES_KANBAN_CLAIM_LOCK": claim_lock,
+                       "HERMES_KANBAN_DB": str(board / "kanban.db")}.items():
+        monkeypatch.setenv(key, value)
+    owner = _Owner(clock, wait_ends=600.0, final="unknown")  # draining 10 min (> OWNER_WAIT_S), then unknown
+    monkeypatch.setattr(gateway_client, "connect_gateway", owner.connect())
+
+    rc = kanban_worker_client.main()
+
+    assert rc == KANBAN_OWNER_RESTART_EXIT_CODE
+    assert clock[0] >= 600.0 > kanban_worker_client.OWNER_WAIT_S  # the drain's refusals kept it alive
+    log = capsys.readouterr().err
+    assert log.rstrip().endswith(f"{KANBAN_WORKER_EXIT_TRAILER}{KANBAN_OWNER_RESTART_EXIT_CODE}")
+    # ``_submit`` strips HERMES_KANBAN_* from the worker's env; the sweep runs in the dispatcher's.
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    if booked_by == "reaped_exit":
+        _reaped(monkeypatch, {79001: rc})
+    else:
+        monkeypatch.setattr(kbd, "_recent_worker_exits", {})
+        monkeypatch.setattr(kb, "read_worker_log", lambda task_id, **kw: _marked(task_id, log))
+
+    with kbc.connect() as conn:
+        assert kbd.detect_crashed_workers(conn) == []
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert (task.status, task.consecutive_failures, task.block_kind) == ("ready", 0, None)
+        outcome = conn.execute("SELECT outcome FROM task_runs WHERE id=?", (run_id,)).fetchone()[0]
+        assert outcome == "reclaimed"
+        kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=?", (tid,))]
+        assert kinds.count("owner_restart_lost") == 1
+        assert "crashed" not in kinds and "gave_up" not in kinds
+        assert kbd._protocol_violation_streak(conn, tid) == 0
+
+
+# hermes-sync's ``_RESTART_SAFE_RE`` (kanban_workers_restart_safe), verbatim.
+_SYNC_RESTART_SAFE_RE = re.compile(r"^GATEWAY_RESTART_SAFE\s*(?::\s*bool\s*)?=\s*True\b", re.MULTILINE)
+
+
+def test_the_client_declares_gateway_restart_safe_as_hermes_sync_reads_it():
+    """hermes-sync reads this file's text with that regex; without a match every core-update drain holds
+    new Kanban claims for up to 20 min. [daveey]"""
+    source = Path(kanban_worker_client.__file__).read_text(encoding="utf-8")
+    assert _SYNC_RESTART_SAFE_RE.search(source)
+    assert kanban_worker_client.GATEWAY_RESTART_SAFE is True
