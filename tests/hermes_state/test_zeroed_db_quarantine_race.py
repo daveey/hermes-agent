@@ -71,3 +71,25 @@ def test_preflight_cannot_observe_db_mid_quarantine(tmp_path, monkeypatch):
     assert errors == [None, None], f"concurrent open raised: {errors}"
     baks = list(tmp_path.glob("state.db.zeroed-*.bak"))
     assert len(baks) == 1 and baks[0].read_bytes() == bytes(4096)
+
+
+def test_secure_files_tolerates_sidecar_unlinked_between_lstat_and_chmod(tmp_path, monkeypatch):
+    """A sibling's last ``close()`` unlinks -wal/-shm; the 0600 tightening must not raise ENOENT.
+
+    This was the cause of the flaky ``[None, FileNotFoundError]`` above: worker 0's ``close()``
+    raced worker 1's ``_secure_state_db_files`` (lstat succeeded, chmod hit ENOENT).
+    """
+    db = tmp_path / "state.db"
+    db.write_bytes(b"x")
+    wal = tmp_path / "state.db-wal"
+    wal.write_bytes(b"x")
+    real_chmod = os.chmod
+
+    def vanishing_chmod(path, mode, *args, **kwargs):
+        if Path(path) == wal:
+            wal.unlink()  # the sibling's close lands exactly here
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(hs.os, "chmod", vanishing_chmod)
+    hs._secure_state_db_files(db)  # must not raise
+    assert not wal.exists()
