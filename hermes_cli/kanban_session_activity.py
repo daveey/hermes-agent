@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_activity_identity as _identity
+from hermes_cli import kanban_annotation_disk as _annotation_copy
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
 from hermes_cli.kanban_scope_heartbeat import scope_heartbeats as _scope_heartbeats
 from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases, _moved_evidence, _retire_moved
@@ -1871,6 +1872,7 @@ def _refresh_annotation_locked(scope: tuple[str, ...]) -> tuple:
     parts = _read_annotation_parts()
     _last_annotation[scope] = parts
     _annotate_flight_result = parts
+    _annotation_copy.published(scope, parts)  # [daveey] a restart serves it while its first read runs
     return parts
 
 
@@ -1893,6 +1895,7 @@ def _annotation_snapshot() -> tuple:
         _annotate_waiters += 1
         try:
             stale = _last_annotation.get(scope)
+            stale = stale or _annotation_copy.seed(scope, _last_annotation, _identity.freeze_annotation)
             if stale is not None:
                 return stale
             _annotate_refresh_lock.acquire()
@@ -1934,15 +1937,7 @@ def one_annotation_snapshot() -> Iterator[None]:
         _annotation_scope.reads = _annotation_scope.attention = _annotation_scope.links = None
 
 
-def _mark_kanban_unknown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    for row in rows:
-        for key in ("kanban_active", "kanban_blocked", "kanban_unseen", "kanban_attention", "kanban_remote_stale",
-                    "kanban_parked", "kanban_held", "kanban_stalled"):
-            row.pop(key, None)
-        row.pop("kanban_observed_at", None)
-        row.pop("kanban_waiting_on", None)
-        row["kanban_unknown"] = True
-    return rows
+_mark_kanban_unknown = _identity.mark_unknown
 
 
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1959,9 +1954,11 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     attention = None
     try:
         if shared:
-            active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = shared[0]
+            *parts, copy_at = shared[0]
+            active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = parts
         else:
             parts = _annotation_snapshot()
+            copy_at = _annotation_copy.observed_at(parts)  # [daveey] a previous process's copy keeps its own date
             if parts is None:
                 # [daveey] Not a read error (those raise with their own traceback): one line, no synthetic
                 # traceback for self-heal to chase.
@@ -1971,7 +1968,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
              attention) = parts
             if shared is not None:
                 shared.append((active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys,
-                               extra))
+                               extra, copy_at))
                 _annotation_scope.attention = attention
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
@@ -1988,6 +1985,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             attention = {}
         if shared is not None:
             _annotation_scope.attention = attention
+    observed_at = observed_at if copy_at is None else min(observed_at, copy_at)
     for row in rows:
         row["kanban_observed_at"] = observed_at
         row.pop("kanban_unknown", None)
@@ -2041,6 +2039,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     _annotate_flight_result = None
     _annotate_waiters = 0
     _last_annotation.clear()
+    _annotation_copy.reset()
     with _pairs_lock:
         _board_memo.clear()
     with _links_lock:

@@ -58,3 +58,15 @@ def freeze_annotation(parts):
         {sid: frozenset(ids) for sid, ids in extra.items()},
         dict(attention),
     )
+
+
+def mark_unknown(rows):
+    """Drop the counts and stamp ``kanban_unknown`` (a failed read is unknown, never \"no work\")."""
+    for row in rows:
+        for key in ("kanban_active", "kanban_blocked", "kanban_unseen", "kanban_attention", "kanban_remote_stale",
+                    "kanban_parked", "kanban_held", "kanban_stalled"):
+            row.pop(key, None)
+        row.pop("kanban_observed_at", None)
+        row.pop("kanban_waiting_on", None)
+        row["kanban_unknown"] = True
+    return rows
