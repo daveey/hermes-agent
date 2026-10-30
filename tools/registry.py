@@ -946,6 +946,12 @@ class ToolRegistry:
         except Exception as e:
             # exc_info already renders the exception, so keep the message copy bounded.
             logger.exception("Tool %s dispatch error: %s", name, _bound_error_text(str(e)))
+            if isinstance(e, ImportError):
+                try:
+                    from gateway.code_skew import note_import_error
+                    note_import_error(e, f"tool {name}")
+                except Exception:
+                    pass  # a skew note must never change how the tool error is returned
             # Sanitize so framing tokens/CDATA/fences in exception text aren't structural noise.
             raw = f"Tool execution failed: {type(e).__name__}: {e}"
             try:

@@ -28,10 +28,39 @@ def _fingerprint() -> str | None:
 
 
 def record_boot_fingerprint() -> None:
-    """Snapshot the checkout revision at gateway startup (idempotent)."""
+    """Snapshot the checkout revision at gateway startup (idempotent).
+
+    Prefers the revision ``hermes_bootstrap`` read when the process started: by the time a gateway
+    or serve lifespan gets here, ``hermes_cli.main`` has already imported much of the tree, and an
+    update that landed meanwhile must not pass as the boot commit (agent-529f2244ac)."""
     global _boot_fingerprint
     if _boot_fingerprint is None:
-        _boot_fingerprint = _fingerprint()
+        _boot_fingerprint = _process_boot_fingerprint() or _fingerprint()
+        current = _fingerprint()
+        if _boot_fingerprint and current and current != _boot_fingerprint:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "code-skew at startup: checkout moved from %s to %s while this process was starting; "
+                "modules imported so far may mix both, later first-time imports load from %s",
+                _short(_boot_fingerprint), _short(current), _short(_boot_fingerprint))
+
+
+def _process_boot_fingerprint() -> str | None:
+    """The revision ``hermes_bootstrap`` read at process start. A pytest process honours it only
+    with ``HERMES_BOOT_PINNED_IMPORTS=1`` (as ``boot_pinned_imports.install`` does): tests stand in
+    their own revisions through ``_fingerprint`` and must not get the worktree's real HEAD."""
+    import os
+
+    if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get(
+            "HERMES_BOOT_PINNED_IMPORTS", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return None
+    try:
+        from hermes_cli.git_fingerprint import process_boot_fingerprint
+
+        return process_boot_fingerprint(_PROJECT_ROOT)
+    except Exception:
+        return None
 
 
 def install_boot_pinned_imports() -> None:
@@ -71,3 +100,33 @@ def detect_code_skew() -> tuple[str, str] | None:
     if current is None or current == _boot_fingerprint:
         return None
     return _short(_boot_fingerprint), _short(current)
+
+
+_import_mix_noted: set[tuple[str, str]] = set()
+
+
+def note_import_error(exc: BaseException, where: str) -> bool:
+    """Name an ImportError raised while the checkout differs from this process's boot revision.
+
+    One ``code-skew import mix`` WARNING per (boot, disk) pair, so the error signal shows the cause
+    (a process running two revisions; restart it) instead of a bare ``cannot import name``
+    (agent-529f2244ac). Returns True when the error happened under skew. Never raises."""
+    try:
+        if not isinstance(exc, ImportError):
+            return False
+        boot = _boot_fingerprint or _process_boot_fingerprint()
+        current = _fingerprint() if boot else None
+        if not current or current == boot:
+            return False
+        pair = (boot, current)
+        if pair not in _import_mix_noted:
+            _import_mix_noted.add(pair)
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "code-skew import mix: %s raised %s: %s; this process booted on %s but the checkout "
+                "is now %s, so it runs two revisions — restart it to load one",
+                where, type(exc).__name__, exc, _short(boot), _short(current))
+        return True
+    except Exception:
+        return False

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import os
 import subprocess
 import sys
 import uuid
@@ -192,3 +193,56 @@ def test_code_skew_wiring_installs_a_finder_bound_to_the_boot_commit(tree, monke
 
     _core_update(repo, pkg)
     assert importlib.import_module(f"{pkg}.assign").validate() == "old:ModelRoutingError"
+
+
+def test_an_update_between_process_start_and_gateway_bootstrap_still_pins_the_boot_revision(
+        tree, monkeypatch):
+    """Regression for agent-529f2244ac (mini, 2026-10-29): ``hermes_cli.main`` imported the old
+    ``process_identity`` at process start, ``hermes update`` moved the checkout before
+    ``start_gateway`` recorded the boot commit, so the finder took the NEW commit as "boot", saw no
+    skew, and the lazy ``code_kernel`` import loaded new code that wants ``spawn_owned``.
+
+    Real order: ``hermes_bootstrap`` reads the revision before any other in-tree import, eager
+    imports follow, the update lands, then ``start_gateway`` records + installs."""
+    from gateway import code_skew
+    from hermes_cli import git_fingerprint
+
+    pkg, repo, boot, finders = tree
+    monkeypatch.setenv("HERMES_BOOT_PINNED_IMPORTS", "1")
+    monkeypatch.setattr(boot_pinned_imports, "_installed", None)
+    monkeypatch.setattr(code_skew, "_PROJECT_ROOT", repo)
+    monkeypatch.setattr(code_skew, "_boot_fingerprint", None)
+    monkeypatch.setattr(git_fingerprint, "_process_boot", {})
+
+    git_fingerprint.record_process_boot_fingerprint(repo)  # hermes_bootstrap, first thing
+    importlib.import_module(f"{pkg}.routing")  # hermes_cli.main's eager imports (old code)
+    _core_update(repo, pkg)  # `hermes update` lands while the process is still starting
+    code_skew.record_boot_fingerprint()  # start_gateway / web_server_app lifespan
+    code_skew.install_boot_pinned_imports()
+    finder = boot_pinned_imports._installed
+    assert finder is not None
+    finders.append(finder)
+
+    assert finder.boot_sha == boot  # the commit the process actually started on
+    assert importlib.import_module(f"{pkg}.assign").validate() == "old:ModelRoutingError"
+    assert finder.pinned == [f"{pkg}.assign"]
+
+
+def test_hermes_bootstrap_records_the_boot_revision_before_hermes_cli_main_loads():
+    """Entry-point wiring: importing ``hermes_bootstrap`` (the first import of every entry point)
+    leaves the checkout's revision recorded, before ``hermes_cli.main`` and its eager imports run."""
+    root = Path(__file__).resolve().parents[2]
+    probe = ("import sys, hermes_bootstrap\n"
+             "import hermes_cli.git_fingerprint as g\n"
+             "print('main-loaded' if 'hermes_cli.main' in sys.modules else 'main-not-loaded')\n"
+             f"print(g.process_boot_fingerprint({str(root)!r}))\n"
+             # Read the reference in the child too: this worktree's .git lives in the real hermes
+             # home, which the in-process home-I/O guard refuses to touch.
+             f"from pathlib import Path\nprint(g.read_git_revision_fingerprint(Path({str(root)!r})))\n")
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"}
+    done = subprocess.run([sys.executable, "-c", probe], cwd=root, env=env, capture_output=True, check=False,
+                          text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    lines = done.stdout.strip().splitlines()
+    assert lines[-3] == "main-not-loaded"
+    assert lines[-2].startswith("git:") and lines[-2] == lines[-1]

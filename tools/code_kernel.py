@@ -859,6 +859,11 @@ def _run_cell(kernel: SessionKernel, key: tuple, code: str, *, task_id: str, chi
         except Exception as exc:  # pragma: no cover - defensive parity with per-call
             from tools.code_execution_tool import _error_result
             logger.error("session kernel failed: %s: %s", type(exc).__name__, exc, exc_info=True)
+            try:
+                from gateway.code_skew import note_import_error
+                note_import_error(exc, "execute_code session kernel")
+            except Exception:
+                pass  # the skew note must never mask the cell's own error
             _REGISTRY.discard(key, kernel)
             return _error_result(str(exc), tool_calls_made=kernel.tool_call_counter[0],
                                  duration=round(time.monotonic() - exec_start, 2))

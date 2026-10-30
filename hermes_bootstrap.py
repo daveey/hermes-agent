@@ -544,6 +544,24 @@ def _settle_interrupted_update() -> None:
 _settle_interrupted_update()
 
 
+def _record_boot_revision() -> None:
+    """Read the checkout revision before the rest of the tree is imported. The boot-pin guard
+    (``gateway.code_skew``) installs much later, in ``start_gateway``/the serve lifespan; a
+    ``hermes update`` landing in between used to pass as the boot commit, so the finder saw no skew
+    and lazy imports mixed revisions (agent-529f2244ac). Runs after ``_settle_interrupted_update``:
+    that repair may move the tree back (and drops ``hermes_cli.*`` modules in its moved-aside path),
+    so a revision read before it would not be the one this process loads. Stdlib-only, never fatal."""
+    try:
+        from hermes_cli.git_fingerprint import record_process_boot_fingerprint
+
+        record_process_boot_fingerprint(_root)
+    except Exception:
+        return  # older tree (mid-update) or unreadable .git: the guard records late, as before
+
+
+_record_boot_revision()
+
+
 def _pin_launcher_home() -> None:
     """A minted launcher (``hermes_cli._launchers``) pins ``HERMES_HOME`` to the install's default
     root. That needs ``hermes_constants`` from the checkout, so the launcher asks for it here, after
