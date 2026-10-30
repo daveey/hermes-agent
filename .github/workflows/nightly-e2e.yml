@@ -1,0 +1,49 @@
+name: Nightly e2e
+
+# Dispatch-only. A Hermes cron job on hermes-hub (scripts/ci/nightly_e2e.py dispatch, 02:00 PT) runs
+# this at origin/main every night and files a Kanban card when it goes red. There is deliberately no
+# `schedule:` here: GitHub cron is unattended and nothing would read its result (the e2e suite sat red
+# on main for days because no main workflow ran it and nobody was watching it).
+#
+# It runs the SAME e2e job the upstream-sync gate runs (tests.yml `e2e`, via workflow_call with
+# python: false), not a copy, so a green nightly means the gate's e2e evidence is green on that ref.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Full commit SHA or branch to test (the dispatcher resolves short SHAs). Default main.
+        type: string
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve ref
+    runs-on: [self-hosted, hermes-hub]
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Resolve ref to a full commit SHA
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${REF}" --jq .sha)
+          echo "Testing ${REF} = ${sha}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    name: e2e
+    needs: resolve
+    uses: ./.github/workflows/tests.yml
+    with:
+      commit: ${{ needs.resolve.outputs.sha }}
+      python: false
+      e2e: true
+      e2e_upgrade: false

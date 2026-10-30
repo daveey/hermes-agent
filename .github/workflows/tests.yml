@@ -19,6 +19,13 @@ on:
         type: string
         required: false
         default: '[1, 2, 3, 4, 5, 6, 7, 8]'
+      python:
+        description: >-
+          Run the Python slices and the Termux assembly lane. false runs only the e2e lanes below
+          (nightly-e2e.yml: the e2e job in isolation, same definition the upstream-sync gate runs).
+        type: boolean
+        required: false
+        default: true
       # The E2E jobs below are slow lanes (scripts/ci/classify_changes.py).
       # ci.yaml passes the classifier's answer; a caller that passes nothing
       # gets every job.
@@ -62,6 +69,7 @@ jobs:
     #
     # Pull requests usually run one slice of affected files (ci.yaml detect sizes the
     # matrix, scripts/ci/affected_tests.py); every other event runs all eight.
+    if: inputs.python
     name: Run tests (${{ inputs.python_changed != '' && 'affected, ' || '' }}${{ matrix.slice }}/${{ strategy.job-total }})
     runs-on: [self-hosted, tfgar-tests]
     # ~10 min expected; 30 leaves room for a cold cache or a dilated file.
@@ -217,6 +225,7 @@ jobs:
     # hermes-hub slices skip both parametrizations: no daemon, and the pinned
     # native image is not pre-pulled. A green Python shard is not evidence the
     # bind-mount ownership regression ran. This lane is that evidence.
+    if: inputs.python
     name: Termux assembly permissions
     runs-on: [self-hosted, docker-ci]
     timeout-minutes: 20
