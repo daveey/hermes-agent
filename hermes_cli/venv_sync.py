@@ -559,7 +559,7 @@ def _launch_currency(root: Path, command: list[str]) -> bool | None:
     return result["state"] == "current"
 
 
-def _unknown_launch_target(root: Path) -> Path | None:
+def _unknown_launch_target(root: Path, *, announce: bool = True) -> Path | None:
     """Launch on an unknown currency verdict (the bounded probe gave no answer).
 
     Unknown is not stale: no repair, no publication, completion debt untouched (a later
@@ -572,8 +572,9 @@ def _unknown_launch_target(root: Path) -> Path | None:
     from hermes_cli._launchers import resolve_store_python, signed_python_app
 
     _unknown_roots.add(root)
-    if completion_pending_path(root).is_file():
-        # Deferred, not dropped: the next launch retries; say so where an operator looks.
+    if announce and completion_pending_path(root).is_file():
+        # Deferred, not dropped: the next launch retries; say so where an operator looks
+        # (once: the exec'd child that inherits this verdict stays quiet).
         print("hermes: dependency check timed out; a source update is still unfinished "
               "(retried on the next launch, or run `hermes update` to finish it now)",
               file=sys.stderr, flush=True)
@@ -641,7 +642,7 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     # The parent this process was exec'd from (same pid) probed an instant ago.
     current = handed_verdict if handed_off else _launch_currency(root, command)
     if current is None:
-        return _unknown_launch_target(root)
+        return _unknown_launch_target(root, announce=not handed_off)
     from pm.environments import owning_home_root
 
     owner = owning_home_root(root)

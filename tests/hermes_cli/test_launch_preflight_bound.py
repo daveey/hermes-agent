@@ -199,6 +199,8 @@ def test_unknown_verdict_with_owed_update_says_so(tmp_path, monkeypatch, capsys)
     venv_sync._unknown_launch_target(root)
     assert "source update is still unfinished" in capsys.readouterr().err
     assert pending.is_file(), "an unknown verdict must not clear the debt"
+    venv_sync._unknown_launch_target(root, announce=False)  # the exec'd child of that launch
+    assert capsys.readouterr().err == "", "said once per launch, not again after the handoff"
 
 
 @pytest.mark.platforms("posix")
