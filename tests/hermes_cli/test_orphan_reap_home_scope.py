@@ -36,6 +36,8 @@ def test_reap_requires_positive_same_home_and_uid(tmp_path, monkeypatch, identit
     elif identity == "uid-unreadable":
         proc.uids.side_effect = psutil.AccessDenied(777)
     monkeypatch.setattr(psutil, "Process", lambda pid: proc)
+    # The real reader opens /proc/777/cmdline: on a fresh Linux VM pid 777 is a live process whose argv wins.
+    monkeypatch.setattr("hermes_cli.main_dashboard._dashboard_cmdline_for_pid", lambda pid: list(argv))
     monkeypatch.setattr("gateway.status.get_process_start_time", lambda pid: 1000)
     monkeypatch.setattr(procs, "_pid_environ", lambda pid: None if identity == "unreadable" else env)
     monkeypatch.setattr(procs, "_scan_dashboard_processes", lambda **kw: [(777, " ".join(argv))])
