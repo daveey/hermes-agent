@@ -137,6 +137,58 @@ def test_a_alive_sandbox_process_is_reattached_and_its_completion_delivered(
     assert registry.get("proc_qa").exit_code == 3
 
 
+def test_a_reattached_sandbox_completion_starts_a_turn_in_the_live_gateway_session(
+        checkpoint, registry, tmp_path, monkeypatch):
+    """The path the 10-30 live proof (a one-shot ``chat -q``) never ran: the re-attached job's exit goes
+    through the gateway's normal completion path (batch -> admission -> wake injection) into the live
+    Slack session's adapter as an internal message, which is what starts the agent's turn there."""
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+
+    class AdmittingHandler(AsyncMock):
+        """Fake transport whose insertion issues the production acceptance receipt."""
+
+        async def _execute_mock_call(self, event, *args, **kwargs):
+            result = await super()._execute_mock_call(event, *args, **kwargs)
+            event._gateway_accepted = True
+            return result
+
+    sandbox = LocalShellSandbox()
+    pid = _start_wrapped(tmp_path, "proc_live", "sleep 1; echo 'pytest rc=1'; exit 3")
+    checkpoint.write_text(json.dumps([_sandbox_entry("proc_live", pid, tmp_path)]))
+    monkeypatch.setattr("tools.environments.reattach.reattach_environment", lambda handle: sandbox)
+    assert registry.recover_from_checkpoint(owner="gateway") == 1
+
+    from gateway.config import GatewayConfig
+    from gateway.run import GatewayRunner
+    import gateway.run as gateway_run
+    (tmp_path / "config.yaml").write_text("display:\n  background_process_notifications: concise\n")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner = GatewayRunner(GatewayConfig())
+    adapter = SimpleNamespace(send=AsyncMock(), handle_message=AdmittingHandler(), _active_sessions={})
+    runner.adapters[Platform.SLACK] = adapter
+    # The live (not one-shot) session: the gateway's session store knows where the chat lives.
+    runner.session_store._entries[GW_KEY] = SimpleNamespace(origin=SessionSource(
+        platform=Platform.SLACK, chat_id="C123", chat_type="dm", thread_id="1761813563.000100",
+        user_id="U1", user_name="David"))
+
+    watchers, registry.pending_watchers = registry.pending_watchers, []
+
+    async def _go():
+        await asyncio.wait_for(asyncio.gather(*(runner._watch_process(w) for w in watchers)), 20)
+        for _ in range(100):  # the completion batch flushes on its own task
+            if adapter.handle_message.await_count:
+                break
+            await asyncio.sleep(0.1)
+
+    asyncio.run(_go())
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.internal is True
+    assert event.source.platform == Platform.SLACK and event.source.chat_id == "C123"
+    assert "proc_live" in event.text and "exit code 3" in event.text
+
+
 def test_a_tui_owned_sandbox_completion_goes_through_the_readopt_sink(checkpoint, registry, tmp_path, monkeypatch):
     sandbox = LocalShellSandbox()
     pid = _start_wrapped(tmp_path, "proc_tui", "echo hi; exit 0")

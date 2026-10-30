@@ -233,7 +233,7 @@ def test_explicit_kill_returns_output_before_consuming_notification(monkeypatch)
     session.process.pid = 4242
     registry._running[session.id] = session
     monkeypatch.setattr(registry, "_terminate_host_pid", lambda *_a, **_kw: None)
-    monkeypatch.setattr(registry, "_write_checkpoint", lambda: None)
+    monkeypatch.setattr(registry, "_write_checkpoint", lambda *_a, **_k: None)
     monkeypatch.setattr(pr_module, "process_registry", registry)
 
     result = registry.kill_process(session.id)

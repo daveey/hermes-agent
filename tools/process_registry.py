@@ -1542,7 +1542,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
 
     def _publish_finished(self, session: ProcessSession, was_running: bool) -> None:
         self._release_finished_handles(session)
-        self._write_checkpoint()
+        self._write_checkpoint(settled_id=session.id if was_running else None)
         if was_running and session.notify_on_complete:
             notification = {
                 "type": "completion",

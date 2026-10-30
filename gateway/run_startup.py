@@ -1200,6 +1200,12 @@ class GatewayStartupMixin:
         # served profile's file under its scope or those processes are never re-adopted.
         with _log_suppressed(logging.WARNING, "Process checkpoint recovery: %s"):
             from tools.process_registry import process_registry
+            if getattr(self.config, "multiplex_profiles", False):
+                # One registry serves every profile: each job lives in (and is recovered from) its own
+                # profile's checkpoint only. Settle finished copies and re-home the rest first. [daveey]
+                from tools.process_registry_profiles import consolidate_checkpoints
+                process_registry.profile_scoped_checkpoints = True
+                consolidate_checkpoints(multiplexed=True)
             # owner="gateway": leave Desktop/TUI chats' orphans to the Desktop backend, so this gateway's
             # shutdown kill_all can never kill a job it does not own. [daveey]
             recovered = process_registry.recover_from_checkpoint(owner="gateway")

@@ -18,19 +18,36 @@ _SANDBOX_ORPHAN_KEEP_SECONDS = 7 * 24 * 3600
 
 
 class ProcessCheckpointMixin:
+    # Set by the multiplexed gateway: one registry serves every profile, so an ``agent:main:`` key names
+    # the default profile rather than "whoever wrote it" (see tools.process_registry_profiles). [daveey]
+    profile_scoped_checkpoints: bool = False
+
+    def _owned_here(self, session_key, scope=None) -> bool:
+        from tools.process_registry_profiles import owned_here
+        return owned_here(session_key, multiplexed=self.profile_scoped_checkpoints, scope=scope)
+
     def _detached_host_fate(self, pid: Optional[int], expected_start: Optional[int]) -> str:
         """Subclass supplies the live PID decision. See ProcessRegistry."""
         raise NotImplementedError
 
     # ----- Checkpoint (crash recovery) -----
 
-    def _write_checkpoint(self, extra_entries: Optional[list[dict[str, Any]]] = None):
-        """Write running process metadata to the checkpoint file atomically."""
+    def _write_checkpoint(self, extra_entries: Optional[list[dict[str, Any]]] = None, *,
+                          settled_id: Optional[str] = None):
+        """Write running process metadata to the checkpoint file atomically. ``settled_id``: a job whose
+        result was just recorded, dropped from every other profile's checkpoint too (after this one's
+        lock is released), so no profile re-attaches it at a restart. [daveey]"""
         try:
             with self._checkpoint_file_lock():
                 self._write_checkpoint_locked(extra_entries)
         except Exception as e:
             logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
+        if settled_id:
+            from tools.process_registry_profiles import drop_from_every_checkpoint
+            try:
+                drop_from_every_checkpoint([settled_id])
+            except Exception:
+                logger.debug("Dropping %s from other checkpoints failed", settled_id, exc_info=True)
 
     @staticmethod
     def _checkpoint_file_lock():
@@ -132,12 +149,19 @@ class ProcessCheckpointMixin:
         that must leave the file even though no table of ours tracks them."""
         from tools.process_registry import _checkpoint_path, _CHECKPOINT_FIELDS
 
+        from tools.process_registry_profiles import scope_profile
+
         writer = self._writer_identity()
+        scope = scope_profile()
         with self._lock:
             own_ids = set(self._running) | set(self._finished) | set(drop_ids)
             entries = []
             for s in self._running.values():
                 if s.exited:
+                    continue
+                # One registry serves every profile of a multiplexed gateway: a job goes only in its own
+                # profile's checkpoint, or every other profile re-attaches it after it finished. [daveey]
+                if not self._owned_here(s.session_key, scope):
                     continue
                 # Backfill the start time so recovery can detect PID recycling
                 # even for sessions spawned before this field existed.
@@ -196,8 +220,11 @@ class ProcessCheckpointMixin:
         both lose them, so the chat paints green and never wakes. [daveey]"""
         from tools.process_registry import _checkpoint_path
 
+        from tools.process_registry_profiles import scope_profile
+
+        scope = scope_profile()
         with self._lock:
-            own = {s.id for s in self._running.values() if not s.exited}
+            own = {s.id for s in self._running.values() if not s.exited and self._owned_here(s.session_key, scope)}
         if not own:
             return False
         try:
@@ -229,32 +256,44 @@ class ProcessCheckpointMixin:
         so two backends starting together adopt an orphan once. [daveey]"""
         try:
             with self._checkpoint_file_lock():
-                return self._recover_from_checkpoint_locked(owner)
+                recovered, foreign, settled, source = self._recover_from_checkpoint_locked(owner)
         except Exception as e:
             logger.warning("Process checkpoint recovery failed: %s", e, exc_info=True)
             return 0
+        # Outside the lock: these take other profiles' checkpoint locks, one at a time. [daveey]
+        from tools.process_registry_profiles import drop_from_every_checkpoint, hand_to_owners
+        try:
+            hand_to_owners(foreign, source, multiplexed=self.profile_scoped_checkpoints)
+            drop_from_every_checkpoint(settled)
+        except Exception:
+            logger.warning("Settling other profiles' process checkpoints failed", exc_info=True)
+        return recovered
 
-    def _recover_from_checkpoint_locked(self, owner: Optional[str]) -> int:
+    def _recover_from_checkpoint_locked(self, owner: Optional[str]):
+        """Returns (recovered count, entries another profile owns, settled ids, this checkpoint's path)."""
         from tools.process_registry import (
             ProcessSession, _CHECKPOINT_FIELDS, _checkpoint_path,
             _CHECKPOINT_DEFAULTS, _stop_systemd_unit,
         )
         from tools.process_registry_readopt import OWNER_TUI, UNKNOWN_EXIT_REASON, owner_accepts
         from tools.process_registry_output_log import adoptable_log
+        from tools.process_registry_profiles import result_recorded, scope_profile
 
         # This host adopts what a crashed predecessor left running, so the jobs it starts must
         # survive its own crash for the next one: they stay out of the owner-death supervisor.
         self._jobs_outlive_host = True
         checkpoint_path = _checkpoint_path()
         if not checkpoint_path.exists():
-            return 0
+            return 0, [], set(), checkpoint_path
         try:
             entries = json.loads(checkpoint_path.read_text(encoding="utf-8-sig"))
         except Exception:
-            return 0
+            return 0, [], set(), checkpoint_path
         recovered = 0
         unresolved_scope_entries: list[dict[str, Any]] = []
         settled_ids: set = set()  # sandbox entries answered with a lost-watcher notice: leave the file
+        foreign: list[dict[str, Any]] = []  # another profile's jobs: handed to its checkpoint after the lock
+        scope = scope_profile()
         for entry in entries:
             pid, pid_scope = entry.get("pid"), entry.get("pid_scope", "host")
             if not pid:
@@ -264,6 +303,17 @@ class ProcessCheckpointMixin:
             with self._lock:
                 already_tracked = entry.get("session_id") in self._running
             if already_tracked:
+                continue
+            # Its exit was already observed and delivered (a result receipt exists in some profile):
+            # re-attaching would start a watcher on a finished job's (maybe reused) PID. [daveey]
+            if result_recorded(entry.get("session_id")):
+                logger.info("Not re-attaching finished process %s of session %s: its exit is already recorded",
+                            entry.get("session_id"), entry.get("session_key") or "-")
+                settled_ids.add(entry.get("session_id"))
+                continue
+            # Only the profile that owns the job recovers it; this copy goes to the owner's file. [daveey]
+            if not self._owned_here(entry.get("session_key"), scope):
+                foreign.append(entry)
                 continue
             # Another live Hermes process (Desktop backend, kanban worker, CLI) still
             # supervises it: adopting would double-own the child and let OUR shutdown
@@ -334,8 +384,10 @@ class ProcessCheckpointMixin:
             # Re-enqueue watcher so gateway can resume notifications
             if session.watcher_interval > 0:
                 self.pending_watchers.append(self._recovered_watcher(session))
-        self._write_checkpoint_locked(extra_entries=unresolved_scope_entries, drop_ids=frozenset(settled_ids))
-        return recovered
+        # Another profile's jobs stay in this file until hand_to_owners has put them in the owner's. [daveey]
+        self._write_checkpoint_locked(extra_entries=unresolved_scope_entries + foreign,
+                                      drop_ids=frozenset(settled_ids))
+        return recovered, foreign, settled_ids, checkpoint_path
 
     def _recover_sandbox_entry(self, entry: dict[str, Any], owner: Optional[str]) -> bool:
         """Re-attach a sandbox job's watcher (True), or deliver a "watcher lost" notice to its owning
