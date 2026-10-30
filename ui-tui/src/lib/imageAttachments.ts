@@ -11,6 +11,7 @@ import { sessionCwd } from '../app/uiStore.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import { t } from '../i18n/runtime.js'
 
+import { flushFileHandle } from './durableFlush.js'
 import { pythonHelperPath } from './pythonHelpers.js'
 
 export interface ImageAttachment { path: string; mime: string }
@@ -126,7 +127,7 @@ export async function stageImagePath(raw: string, gw: GatewayClient, destination
   const path = join(directory, `${randomUUID()}${ext}`)
   const file = await open(path, 'wx', 0o600)
 
-  try { await file.writeFile(bytes); await file.sync() } finally { await file.close() }
+  try { await file.writeFile(bytes); await flushFileHandle(file) } finally { await file.close() }
 
   return { path, mime, name, remainder: source.remainder }
 }

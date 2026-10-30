@@ -1,7 +1,6 @@
 import {
   closeSync,
   existsSync,
-  fsyncSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -16,6 +15,8 @@ import { join } from 'node:path'
 import type { SubmissionDestination } from '../app/submissionDestination.js'
 import type { QueueItem } from '../hooks/useQueue.js'
 import { t } from '../i18n/runtime.js'
+
+import { flushDirectorySync, flushFileSync } from './durableFlush.js'
 
 const directory = (home?: string) =>
   join(home ?? process.env.HERMES_HOME ?? join(homedir(), '.hermes'), 'tui-pending-inputs')
@@ -70,20 +71,6 @@ export function migratePendingInputs(previous: SubmissionDestination, successorS
   pendingInputRevision++
 }
 
-function syncDirectory(dir: string) {
-  if (process.platform === 'win32') {
-    return
-  }
-
-  const fd = openSync(dir, 'r')
-
-  try {
-    fsyncSync(fd)
-  } finally {
-    closeSync(fd)
-  }
-}
-
 // Separate files avoid read/modify/write loss between two native clients.
 export function savePendingInput(item: QueueItem): void {
   if (!item.submissionId || !item.destination?.sid) {
@@ -97,9 +84,10 @@ export function savePendingInput(item: QueueItem): void {
   const ownerDestination = pendingInputOwner(item.ownerDestination ?? item.destination)
   const { submissionId, display, text, preparedText, attachments, controlMethod, executionGeneration, inFlight, failed, createdAt, queued, legacyAttempted } = item
   const destination = inFlight || failed ? item.destination : ownerDestination
-  writeFileSync(
-    temporary,
-    JSON.stringify({
+  const fd = openSync(temporary, 'w', 0o600)
+
+  try {
+    writeFileSync(fd, JSON.stringify({
       submissionId,
       destination,
       ownerDestination,
@@ -113,11 +101,14 @@ export function savePendingInput(item: QueueItem): void {
       createdAt,
       queued,
       attempted: inFlight || failed
-    }),
-    { mode: 0o600, flush: true }
-  )
+    }))
+    flushFileSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+
   renameSync(temporary, path)
-  syncDirectory(dir)
+  flushDirectorySync(dir)
 }
 
 export function removePendingInput(item: QueueItem): void {
@@ -132,7 +123,7 @@ export function removePendingInput(item: QueueItem): void {
   }
 
   rmSync(join(dir, `${item.submissionId}.json`), { force: true })
-  syncDirectory(dir)
+  flushDirectorySync(dir)
 }
 
 export function loadPendingInputs(destination: SubmissionDestination, durableResume = false): QueueItem[] {

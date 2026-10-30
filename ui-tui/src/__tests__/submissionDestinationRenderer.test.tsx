@@ -5,14 +5,26 @@ import { PassThrough } from 'node:stream'
 
 import { renderSync, Text } from '@hermes/ink'
 import React from 'react'
-import { expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 
 import { patchUiState, resetUiState } from '../app/uiStore.js'
 import { useSubmission } from '../app/useSubmission.js'
 import { useQueue } from '../hooks/useQueue.js'
 
+// Runner-owned: a timed-out body keeps running, and its late teardown would reset the
+// next case's store and HERMES_HOME mid-assertion.
+const cleanups: Array<() => void> = []
+afterEach(() => {
+  for (const cleanup of cleanups.splice(0).reverse()) { cleanup() }
+})
+
 it('submits interpolated queued input only to its captured owner and removes it only after the matching receipt', async () => {
   const home = mkdtempSync(join(tmpdir(), 'ink-submit-'))
+  cleanups.push(() => {
+    resetUiState()
+    vi.unstubAllEnvs()
+    rmSync(home, { recursive: true, force: true })
+  })
   vi.stubEnv('HERMES_HOME', home)
   resetUiState()
   const info = { model: 'test', profile_name: 'alpha', stored_session_id: 'stored-owner', skills: {}, tools: {} }
@@ -66,40 +78,40 @@ it('submits interpolated queued input only to its captured owner and removes it 
     patchConsole: false
   })
 
-  try {
-    queue.enqueue('private {!printf data}')
-    const item = queue.dequeue()!
-    submission.sendQueued(item)
-    patchUiState({ sid: 'other', busy: false })
-    resolveShell({ stdout: 'data', code: 0 })
-    await expect.poll(() => request.mock.calls.filter(call => call[0] === 'prompt.submit').length).toBe(1)
-    expect(request).toHaveBeenCalledWith('prompt.submit', {
-      session_id: 'owner',
-      text: 'private data',
-      submission_id: item.submissionId,
-      queued: true
-    })
-    expect(appended).not.toHaveBeenCalled()
-    expect(queue.queueRef.current).toEqual([])
-    patchUiState({ sid: 'owner' })
-    expect(queue.queueRef.current).toContain(item)
-    resolveSubmit({
-      admission_id: item.submissionId,
-      target_session_id: 'stored-owner',
-      target_profile_home: home,
-      status: 'queued'
-    })
-    await expect.poll(() => queue.queueRef.current.length).toBe(0)
-  } finally {
-    instance.unmount()
-    resetUiState()
-    vi.unstubAllEnvs()
-    rmSync(home, { recursive: true, force: true })
-  }
+  cleanups.push(() => instance.unmount())
+
+  queue.enqueue('private {!printf data}')
+  const item = queue.dequeue()!
+  submission.sendQueued(item)
+  patchUiState({ sid: 'other', busy: false })
+  resolveShell({ stdout: 'data', code: 0 })
+  await expect.poll(() => request.mock.calls.filter(call => call[0] === 'prompt.submit').length).toBe(1)
+  expect(request).toHaveBeenCalledWith('prompt.submit', {
+    session_id: 'owner',
+    text: 'private data',
+    submission_id: item.submissionId,
+    queued: true
+  })
+  expect(appended).not.toHaveBeenCalled()
+  expect(queue.queueRef.current).toEqual([])
+  patchUiState({ sid: 'owner' })
+  expect(queue.queueRef.current).toContain(item)
+  resolveSubmit({
+    admission_id: item.submissionId,
+    target_session_id: 'stored-owner',
+    target_profile_home: home,
+    status: 'queued'
+  })
+  await expect.poll(() => queue.queueRef.current.length).toBe(0)
 })
 
 it('refuses the whole submit when a {!cmd} cannot run instead of sending a placeholder to the model', async () => {
   const home = mkdtempSync(join(tmpdir(), 'ink-submit-'))
+  cleanups.push(() => {
+    resetUiState()
+    vi.unstubAllEnvs()
+    rmSync(home, { recursive: true, force: true })
+  })
   vi.stubEnv('HERMES_HOME', home)
   resetUiState()
   patchUiState({ sid: 'owner', info: { model: 'test', stored_session_id: 'stored-owner', skills: {}, tools: {} } as any })
@@ -139,20 +151,15 @@ it('refuses the whole submit when a {!cmd} cannot run instead of sending a place
     patchConsole: false
   })
 
-  try {
-    queue.enqueue('summarize {!rm -rf /}')
-    const item = queue.dequeue()!
-    submission.sendQueued(item)
-    await expect.poll(() => sys.mock.calls.length).toBe(1)
-    expect(request.mock.calls.map(([method]) => method)).not.toContain('prompt.submit')
-    expect(String(sys.mock.calls[0]![0])).toContain('dangerous_command')
-    // Retained for Alt+K / an edit, never silently dropped.
-    expect(item.failed).toBe(true)
-    expect(queue.queueRef.current).toContain(item)
-  } finally {
-    instance.unmount()
-    resetUiState()
-    vi.unstubAllEnvs()
-    rmSync(home, { recursive: true, force: true })
-  }
+  cleanups.push(() => instance.unmount())
+
+  queue.enqueue('summarize {!rm -rf /}')
+  const item = queue.dequeue()!
+  submission.sendQueued(item)
+  await expect.poll(() => sys.mock.calls.length).toBe(1)
+  expect(request.mock.calls.map(([method]) => method)).not.toContain('prompt.submit')
+  expect(String(sys.mock.calls[0]![0])).toContain('dangerous_command')
+  // Retained for Alt+K / an edit, never silently dropped.
+  expect(item.failed).toBe(true)
+  expect(queue.queueRef.current).toContain(item)
 })

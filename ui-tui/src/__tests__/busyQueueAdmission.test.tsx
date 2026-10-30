@@ -6,7 +6,7 @@ import { PassThrough } from 'node:stream'
 import { renderSync, Text } from '@hermes/ink'
 import { useStore } from '@nanostores/react'
 import React from 'react'
-import { expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 
 import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
 import { captureDestination } from '../app/submissionDestination.js'
@@ -22,6 +22,11 @@ import { loadPendingInputs } from '../lib/pendingInputs.js'
 const row = (admission_id: string, input_id: string, text: string, status = 'queued') => ({
   admission_id, input_id, text, status, sequence: 1, outcome: null, authority_epoch: 1, execution_generation: null,
   ref: { profile_id: '/tmp/profile', session_id: 'stored-owner' }
+})
+
+const cleanups: Array<() => void> = []
+afterEach(() => {
+  for (const cleanup of cleanups.splice(0)) { cleanup() }
 })
 
 function mount(busyInputMode: 'queue' | 'interrupt' | 'steer' = 'queue', cancel: () => Promise<unknown> = () => Promise.resolve({ status: 'terminal', outcome: 'cancelled' })) {
@@ -93,10 +98,22 @@ function mount(busyInputMode: 'queue' | 'interrupt' | 'steer' = 'queue', cancel:
     stderr: new PassThrough() as any, patchConsole: false
   })
 
+  let mounted = true
+
+  // Idempotent: the runner tears down first, so a timed-out body's late finally is a no-op
+  // instead of resetting the next case's store and HERMES_HOME.
+  const cleanup = () => {
+    if (!mounted) { return }
+    mounted = false
+    instance.unmount(); turnController.fullReset(); resetUiState(); vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true })
+  }
+
+  cleanups.push(cleanup)
+
   return {
     calls, request, fanout,
     get queue() { return queue }, get submission() { return submission },
-    cleanup() { instance.unmount(); turnController.fullReset(); resetUiState(); vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }) }
+    cleanup
   }
 }
 
