@@ -192,3 +192,34 @@ jobs:
           npm run build --workspace ui-tui
       - name: Check the checkout is clean
         uses: ./.github/actions/check-clean-worktree
+
+  # The E2E drivers (desktop-bundle-smoke, install-e2e-run/-macos-run/
+  # -windows-run) install ONLY the runtime deps of tests-js and run
+  # tests/install/e2e-assets drivers. They run on release or dispatch on hosted
+  # macOS/Windows runners, so a driver that imports a devDependency (vitest,
+  # jsdom, node-pty, ...) first fails at release time. This job installs that
+  # exact shape and resolves every import of every driver entry point. Its
+  # install command must stay identical to theirs
+  # (tests/ci/test_runtime_install_shape.py). [daveey]
+  runtime-install-shape:
+    name: E2E driver runtime-install checks
+    runs-on: [self-hosted, hermes-hub]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          extras: '[]'
+          cache-node: false
+      - name: Install locked chat driver dependencies
+        run: npm ci --workspace tests-js --include-workspace-root --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Resolve every driver import
+        run: |
+          node .github/scripts/check-runtime-driver-imports.mjs
+          node --test tests/install/e2e-assets/windows-bundled-helpers.test.mjs
+      - name: Check the checkout is clean
+        uses: ./.github/actions/check-clean-worktree

@@ -107,6 +107,10 @@ _FRONTEND_FILES = {
 # change to the bridge or to the Python adapter that speaks its protocol
 # selects ``frontend``.
 _WHATSAPP_BRIDGE = ("scripts/whatsapp-bridge/", "plugins/platforms/whatsapp/")
+# Code that tests-js imports or spawns (install drivers, the e2e matrix
+# generator, scripts/generate-icons.mjs): a change there must run the tests that
+# exercise it and the runtime-only install-shape job. [daveey]
+_TESTS_JS_INPUTS = ("tests/install/", "scripts/sandbox/")
 _ROOT_NPM = {"package.json", "package-lock.json"}  # shifts every package's tree
 _DOCKER_META = ("docker/", ".hadolint.yaml", "Dockerfile", ".dockerignore") # docker setup
 _NIX_PATHS = ("nix/",) # nix files
@@ -644,7 +648,8 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
     python_prod = any(not _py_irrelevant(f) and not _py_test_only(f) for f in code)
     frontend = any(
         f.startswith(_FRONTEND) or f in _ROOT_NPM or f in _FRONTEND_FILES
-        or f.startswith(("tests-js/",) + _WHATSAPP_BRIDGE)
+        or f.startswith(("tests-js/",) + _WHATSAPP_BRIDGE + _TESTS_JS_INPUTS)
+        or f == "scripts/generate-icons.mjs"
         or (f.startswith("scripts/build/") and f.endswith((".mjs", ".js", ".ts")))
         for f in files
     )
