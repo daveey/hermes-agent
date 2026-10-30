@@ -416,7 +416,11 @@ export class CanonicalDesktopProtocol {
 
       if (typeof generation !== 'number') { throw new Error('Session execution identity unavailable; reconnect before controlling this turn') }
 
-      return { ...params, session_id: params.session_id, execution_generation: generation }
+      // The Stop gesture (`origin`, lib/stop-origin.ts) is a legacy-gateway log field; the canonical control
+      // contract forbids unknown keys, so it never rides this wire.
+      const { origin: _origin, ...control } = params
+
+      return { ...control, session_id: params.session_id, execution_generation: generation }
     }
 
     if (method === 'prompt.resolve_unknown') {

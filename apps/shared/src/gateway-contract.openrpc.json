@@ -38177,6 +38177,18 @@
             ],
             "default": null,
             "title": "Expected Hosted Task Id"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Origin"
           }
         },
         "required": [

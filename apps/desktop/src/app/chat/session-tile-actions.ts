@@ -18,6 +18,7 @@ import { useI18n } from '@/i18n'
 import { type ChatMessage, textPart } from '@/lib/chat-messages'
 import { isSlashCommandText } from '@/lib/chat-runtime'
 import { triggerHaptic } from '@/lib/haptics'
+import { asStopOrigin, interruptParams, type StopOrigin } from '@/lib/stop-origin'
 import { clearClarifyRequest } from '@/store/clarify'
 import type { ComposerAttachment } from '@/store/composer'
 import { resetSessionBackground } from '@/store/composer-status'
@@ -356,8 +357,10 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
     [listTileSession, scope.attachments.$attachments, submitPromptText]
   )
 
-  const cancelRun = useCallback(async () => {
+  // A tile's Stop names the tile; its composer's Esc keeps the gesture too (`tile:esc`).
+  const cancelRun = useCallback(async (gesture?: StopOrigin) => {
     const sessionId = runtimeIdRef.current
+    const origin: StopOrigin = asStopOrigin(gesture) === 'esc' ? 'tile:esc' : 'tile'
 
     // Frontend busy clears immediately; gateway wind-down can lag (#83855).
     markSessionRecentlyInterrupted(sessionId)
@@ -384,7 +387,7 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
       await withSessionNotFoundResume(
         sessionId,
         storedIdRef.current,
-        liveId => requestSessionGateway('session.interrupt', { session_id: liveId }),
+        liveId => requestSessionGateway('session.interrupt', interruptParams(liveId, origin)),
         {
           requestGateway: requestSessionGateway,
           onRecovered: bindRecoveredRuntime

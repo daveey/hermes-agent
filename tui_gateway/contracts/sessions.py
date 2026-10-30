@@ -665,6 +665,9 @@ method("session.compress", params=SessionCompressParams, result=SessionCompressR
 
 class SessionInterruptParams(SessionParams):
     expected_hosted_task_id: str | None = None  # only interrupt if this hosted task is the running one
+    # [daveey] the client gesture that sent the Stop (stop_button, esc, tile, slash, delete, plugin:<id>); logged
+    # and kept in the turn_stopped notice. Free-form: an unknown value is accepted.
+    origin: str | None = None
 
 
 class InterruptStatus(WireEnum):

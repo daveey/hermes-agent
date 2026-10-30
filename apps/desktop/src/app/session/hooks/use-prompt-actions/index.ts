@@ -12,6 +12,7 @@ import { isSlashCommandText, pathLabel } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { triggerHaptic } from '@/lib/haptics'
 import { setMutableRef } from '@/lib/mutable-ref'
+import { interruptParams, type StopOrigin } from '@/lib/stop-origin'
 import { normalize } from '@/lib/text'
 import { transcribeAudioClientDirect } from '@/lib/voice-client-direct'
 import { clearClarifyRequest } from '@/store/clarify'
@@ -750,7 +751,7 @@ export function usePromptActions({
     [copy.sttDisabled, sttEnabled]
   )
 
-  const cancelRun = useCallback(async () => {
+  const cancelRun = useCallback(async (origin?: StopOrigin) => {
     // Read from the ref, not the closure-captured `activeSessionId`. The
     // actions bag is a stable ref mutated in place (Object.assign on each
     // ContribWiring render), and ChatRoutesSurface is memoized on that stable
@@ -825,7 +826,7 @@ export function usePromptActions({
       await withSessionNotFoundResume(
         sessionId,
         selectedStoredSessionIdRef.current,
-        liveId => requestGateway('session.interrupt', { session_id: liveId }),
+        liveId => requestGateway('session.interrupt', interruptParams(liveId, origin)),
         {
           requestGateway,
           onRecovered: recoveredId => {

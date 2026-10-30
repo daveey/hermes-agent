@@ -505,6 +505,8 @@ describe('useComposerSubmit busy-turn routing', () => {
     })
 
     expect(onCancel).toHaveBeenCalledTimes(1)
+    // The gesture is named so agent.log can tell the Stop button from Esc.
+    expect(onCancel).toHaveBeenCalledWith('stop_button')
     expect(onSteer).not.toHaveBeenCalled()
     expect(onSubmit).not.toHaveBeenCalled()
     expect(queueCurrentDraft).not.toHaveBeenCalled()

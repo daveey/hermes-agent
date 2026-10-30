@@ -122,6 +122,23 @@ describe('useSessionTileActions sleep/wake session recovery', () => {
     vi.restoreAllMocks()
   })
 
+  // A tile's Stop names the tile in agent.log; its composer's Esc keeps the gesture (`tile:esc`).
+  it.each([
+    [undefined, 'tile'],
+    ['stop_button', 'tile'],
+    ['esc', 'tile:esc']
+  ] as const)('a tile Stop (gesture %o) sends origin %s', async (gesture, origin) => {
+    requestGatewayMock.mockImplementation(async () => ({}))
+
+    const { result } = renderTileActions()
+
+    await act(async () => {
+      await result.current.cancelRun(gesture)
+    })
+
+    expect(requestGatewayMock).toHaveBeenCalledWith('session.interrupt', { origin, session_id: RUNTIME_SESSION_ID })
+  })
+
   it('resumes the stored session and retries once when session.interrupt reports "session not found"', async () => {
     const calls: { method: string; params?: Record<string, unknown> }[] = []
     let interruptAttempts = 0
@@ -154,9 +171,9 @@ describe('useSessionTileActions sleep/wake session recovery', () => {
 
     // First interrupt (stale id) → session.resume (stored id) → retry interrupt (fresh id).
     expect(calls.map(c => c.method)).toEqual(['session.interrupt', 'session.resume', 'session.interrupt'])
-    expect(calls[0]?.params).toEqual({ session_id: RUNTIME_SESSION_ID })
+    expect(calls[0]?.params).toEqual({ origin: 'tile', session_id: RUNTIME_SESSION_ID })
     expect(calls[1]?.params).toMatchObject({ session_id: STORED_SESSION_ID, source: 'desktop', omit_messages: true })
-    expect(calls[2]?.params).toEqual({ session_id: RECOVERED_SESSION_ID })
+    expect(calls[2]?.params).toEqual({ origin: 'tile', session_id: RECOVERED_SESSION_ID })
     expect($sessionTiles.get()[0]?.runtimeId).toBe(RECOVERED_SESSION_ID)
   })
 

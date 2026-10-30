@@ -782,7 +782,7 @@ describe('useSessionTileDelegate interruptSession', () => {
     renderTile(requestGateway)
     await sessionTileDelegate()!.interruptSession('runtime-tile-1')
 
-    expect(requestGateway).toHaveBeenCalledWith('session.interrupt', { session_id: 'runtime-tile-1' })
+    expect(requestGateway).toHaveBeenCalledWith('session.interrupt', { origin: 'tile', session_id: 'runtime-tile-1' })
     // Same 3s cooldown the primary chat's Stop sets: busy reads false while the
     // gateway winds down, so the rewind path must still interrupt-first.
     expect(isSessionRecentlyInterrupted('runtime-tile-1')).toBe(true)

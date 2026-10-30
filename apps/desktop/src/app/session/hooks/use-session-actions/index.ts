@@ -32,6 +32,7 @@ import { markReasoningEffortPending } from '@/lib/chat-runtime'
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { purgeInFlightTurnJournals, recoverInFlightTurnJournal } from '@/lib/inflight-turn-journal'
 import { markOpenPaint, markOpenReconciled, markOpenStage, markOpenStart } from '@/lib/open-timing'
+import { interruptParams } from '@/lib/stop-origin'
 import { latestSessionTodoSnapshot } from '@/lib/todos'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { asleepOpenFor, clearAsleepOpen } from '@/store/asleep-session'
@@ -3320,9 +3321,8 @@ export function useSessionActions({
           })
 
           try {
-            await requestForSessionProfile(removedOwner, requestGateway, 'session.interrupt', {
-              session_id: closingRuntimeId
-            })
+            const stop = interruptParams(closingRuntimeId, 'delete')
+            await requestForSessionProfile(removedOwner, requestGateway, 'session.interrupt', stop)
           } catch (error) {
             // A missing runtime has no turn left to stop. Any other failure means
             // deletion cannot safely continue: restore the live state and let the

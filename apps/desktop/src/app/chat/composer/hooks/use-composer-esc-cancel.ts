@@ -2,13 +2,15 @@ import { useEffect, useRef } from 'react'
 
 import { triggerHaptic } from '@/lib/haptics'
 import { composerFocusBlockedBySurface } from '@/lib/keybinds/composer-focus-keys'
+import { type StopOrigin } from '@/lib/stop-origin'
 
 import { type ComposerTarget, getActiveComposer } from '../focus'
 
 interface UseComposerEscCancelOptions {
   awaitingInput: boolean
   busy: boolean
-  onCancel: () => unknown
+  /** Called with `'esc'` so the gateway log names the gesture (lib/stop-origin.ts). */
+  onCancel: (origin?: StopOrigin) => unknown
   /** This composer's focus-bus key. With N composers mounted (main + tiles),
    *  only the active one's Esc cancels — otherwise every busy tile stops. */
   target: ComposerTarget
@@ -57,7 +59,7 @@ export function useComposerEscCancel({ awaitingInput, busy, onCancel, target }: 
 
     event.preventDefault()
     triggerHaptic('cancel')
-    void Promise.resolve(onCancel())
+    void Promise.resolve(onCancel('esc'))
   }
 
   useEffect(() => {

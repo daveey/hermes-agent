@@ -23,6 +23,7 @@ import {
   hasUnresolvedToolCall,
   textPart
 } from '@/lib/chat-messages'
+import { interruptParams } from '@/lib/stop-origin'
 import type { ConfirmRequest } from '@/store/confirm'
 
 import {
@@ -338,7 +339,7 @@ export async function runRewindSubmit(
 
   const interrupt = async () => {
     try {
-      await requestGateway('session.interrupt', { session_id: liveSessionId })
+      await requestGateway('session.interrupt', interruptParams(liveSessionId, 'rewind'))
     } catch {
       // Best-effort. The submit path still gates on the gateway state.
     }

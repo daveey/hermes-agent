@@ -24,6 +24,7 @@ import { chatMessageText } from '@/lib/chat-messages'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { DATA_IMAGE_URL_RE } from '@/lib/embedded-images'
 import { triggerHaptic } from '@/lib/haptics'
+import { type StopOrigin } from '@/lib/stop-origin'
 import { $touchPointer } from '@/lib/touch-interaction'
 import { useStoreSelector, useStoresSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
@@ -398,10 +399,10 @@ export function ChatBar({
   // only trace). Interrupts that exist to advance the queue (send-now-while-
   // busy) call the raw onCancel and keep draining on settle. Parked entries
   // stay in the panel until resumed, sent, edited, or deleted.
-  const haltRun = useCallback(() => {
+  const haltRun = useCallback((origin?: StopOrigin) => {
     parkQueuedPrompts(activeQueueSessionKeyRef.current)
 
-    return onCancel()
+    return onCancel(origin)
   }, [activeQueueSessionKeyRef, onCancel])
 
   const { compactPill, foldVoice, minimal, stacked, singleColumn } = useComposerMetrics({

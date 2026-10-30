@@ -22,6 +22,8 @@ describe('useComposerEscCancel', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
 
     expect(onCancel).toHaveBeenCalledTimes(1)
+    // The gesture is named so agent.log can tell Esc from the Stop button.
+    expect(onCancel).toHaveBeenCalledWith('esc')
   })
 
   it('does not cancel on Esc when the turn is not busy', () => {

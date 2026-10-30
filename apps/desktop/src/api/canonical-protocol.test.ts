@@ -120,6 +120,8 @@ test('canonical receipts preserve admission identity and replay restores fenced 
   expect(resumed.pending_approval).toMatchObject({ request_id: 'p', execution_generation: 3 })
   expect(protocol.prepare('approval.respond', { session_id: 's', request_id: 'p', choice: 'once' })).toEqual({ session_id: 's', execution_generation: 3, prompt_id: 'p', choice: 'once' })
   expect(protocol.prepare('session.interrupt', { session_id: 's' })).toEqual({ session_id: 's', execution_generation: 3 })
+  // The legacy gateway's Stop gesture never rides the canonical control wire (its contract forbids unknown keys).
+  expect(protocol.prepare('session.interrupt', { session_id: 's', origin: 'esc' })).toEqual({ session_id: 's', execution_generation: 3 })
   protocol.event({ type: 'message.start', session_id: 's', payload: { execution_generation: 4 } })
   expect(() => protocol.prepare('approval.respond', { session_id: 's', request_id: 'p', choice: 'once' })).toThrow('stale')
 })

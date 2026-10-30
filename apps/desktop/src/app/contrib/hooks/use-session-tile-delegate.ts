@@ -16,6 +16,7 @@ import { translateNow } from '@/i18n/runtime'
 import { type ChatMessage, chatMessageText, toChatMessages } from '@/lib/chat-messages'
 import { markReasoningEffortPending } from '@/lib/chat-runtime'
 import { type GuardedModelSwitchResult, surfaceModelSwitchConfirm } from '@/lib/guarded-model-switch'
+import { interruptParams } from '@/lib/stop-origin'
 import { noteMessageSent } from '@/store/desktop-metrics'
 import { notify } from '@/store/notifications'
 import {
@@ -357,7 +358,7 @@ export function useSessionTileDelegate({
 
         return true
       },
-      interruptSession: async runtimeId => {
+      interruptSession: async (runtimeId, origin = 'tile') => {
         // Read-only stored-transcript tiles have no live turn to interrupt.
         if (isReadOnlyRuntimeId(runtimeId)) {
           return
@@ -380,7 +381,7 @@ export function useSessionTileDelegate({
         await withSessionNotFoundResume(
           runtimeId,
           storedSessionId,
-          liveId => routedRequest('session.interrupt', { session_id: liveId }),
+          liveId => routedRequest('session.interrupt', interruptParams(liveId, origin)),
           {
             requestGateway: routedRequest,
             onRecovered: recoveredId => {

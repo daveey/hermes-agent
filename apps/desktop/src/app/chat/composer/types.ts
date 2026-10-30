@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
 import type { HermesGateway, ResolvedOwner } from '@/hermes'
+import { type StopOrigin } from '@/lib/stop-origin'
 
 import type { DroppedFile } from '../hooks/use-composer-actions'
 
@@ -50,7 +51,8 @@ export interface ChatBarProps {
   /** The tile's routed profile: scopes the slash palette while a draft has no session yet. */
   profile?: string | null
   cwd?: string | null
-  onCancel: () => Promise<void> | void
+  /** `origin` names the Stop gesture for the gateway log (lib/stop-origin.ts). */
+  onCancel: (origin?: StopOrigin) => Promise<void> | void
   onAddContextRef?: (refText: string, label?: string, detail?: string) => void
   onAddUrl?: (url: string) => void
   onAttachImageBlob?: (blob: Blob, isCurrent?: () => boolean) => Promise<boolean | void> | boolean | void

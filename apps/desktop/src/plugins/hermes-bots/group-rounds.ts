@@ -603,7 +603,9 @@ export async function stopGroupThread(group: string, thread: null | string, memb
 
   if (onTurn && sessionId) {
     try {
+      // `origin` names this Stop in the gateway log (desktop lib/stop-origin.ts).
       await requestForBot(onTurn, 'session.interrupt', {
+        origin: 'plugin:hermes-bots',
         session_id: sessionId
       })
     } catch {

@@ -6,6 +6,8 @@ bodies close over server.py globals through ``method_ctx.bind_module`` exactly a
 from the parent's ``register()`` via ``HandlerRegistry``.
 """
 
+import re
+
 from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
@@ -46,18 +48,42 @@ def _stop_issuer_label(transport) -> str:
     identity = getattr(transport, "auth_identity", None)
     if not is_authenticated_identity(identity):
         return "Desktop"
+    # An SSH-attached Desktop logs in with its per-connection ownership id (a 32-hex ``desktop-ssh`` subject,
+    # one per ``~/.hermes/desktop-ssh/<id>``): that is a credential, not a person, so name the client.
+    if str((identity or {}).get("provider") or "").strip() == _SSH_DESKTOP_PROVIDER:
+        return "Desktop"
     return str((identity or {}).get("user_id")).strip()
 
 
-def _note_stop_issuer(sid: str, session: dict, transport) -> None:
-    """Remember who stopped the running turn and log it; an idle session queues nothing."""
+# The client gesture that sent a Stop (``stop_button``, ``esc``, ``tile``, ``slash``, ``delete``,
+# ``plugin:<id>``). Optional and open-ended: an unknown value is kept (made log-safe), a missing one logs ``-``.
+_SSH_DESKTOP_PROVIDER = "desktop-ssh"
+_STOP_ORIGIN_MAX = 64
+_STOP_ORIGIN_UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]")
+
+
+def _stop_origin(params: dict) -> str | None:
+    raw = params.get("origin")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return _STOP_ORIGIN_UNSAFE.sub("_", raw.strip())[:_STOP_ORIGIN_MAX] or None
+
+
+def _note_stop_issuer(sid: str, session: dict, transport, origin: str | None = None) -> None:
+    """Remember who stopped the running turn (and with which gesture) and log it; an idle session queues
+    nothing. A Stop without an origin clears an earlier one, so a gesture never labels a later Stop."""
     label = _stop_issuer_label(transport)
     with session["history_lock"]:
         running = bool(session.get("running"))
         if running:
             session["_stop_issuer"] = label
-    logger.info("session.interrupt: ui_session=%s session_key=%s by=%s peer=%s running=%s", sid,
-                session.get("session_key") or "", label, getattr(transport, "_peer", "-"), running)
+            if origin:
+                session["_stop_origin"] = origin
+            else:
+                session.pop("_stop_origin", None)
+    logger.info("session.interrupt: ui_session=%s session_key=%s by=%s peer=%s running=%s origin=%s", sid,
+                session.get("session_key") or "", label, getattr(transport, "_peer", "-"), running,
+                origin or "-")
 
 
 def _record_stop_notice(session: dict, status: str) -> dict | None:
@@ -65,11 +91,14 @@ def _record_stop_notice(session: dict, status: str) -> dict | None:
     consumes the recorded issuer so a Stop that raced a finishing turn never labels a later one."""
     with session["history_lock"]:
         label = session.pop("_stop_issuer", None)
+        origin = session.pop("_stop_origin", None)
     if not label or status != "interrupted":
         return None
     text = f"Stopped by {label}"
     content = f"[Turn stopped by {label} before it finished.]"
     metadata = {"display_text": text, "stopped_by": label}
+    if origin:
+        metadata["stop_origin"] = origin
     entry: dict = {"role": "user", "content": content, "display_kind": _STOP_NOTICE_KIND,
                    "display_metadata": metadata}
     with session["history_lock"]:
@@ -148,7 +177,7 @@ def _(rid, params: dict) -> dict:
                     return _ok(rid, {"status": "not_interrupted", "interrupted": False})
         sid = str(params.get("session_id") or "")
         _note_user_input(session)
-        _note_stop_issuer(sid, session, current_transport())
+        _note_stop_issuer(sid, session, current_transport(), _stop_origin(params))
         if _session_uses_compute_host(session):
             with session["history_lock"]:
                 inflight_at_interrupt = session.get("inflight_turn")

@@ -23,6 +23,7 @@ import { useI18n } from '@/i18n'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { NEW_SESSION_TITLE, sessionTitle } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
+import { type StopOrigin } from '@/lib/stop-origin'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { migrateSessionDraft } from '@/store/composer'
@@ -100,7 +101,7 @@ interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
   requestModelOptionsForOwner?: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   onToggleSelectedPin: () => void
   onDeleteSelectedSession: () => void
-  onCancel: () => Promise<void> | void
+  onCancel: (origin?: StopOrigin) => Promise<void> | void
   onAddContextRef: (refText: string, label?: string, detail?: string) => void
   onAddUrl: (url: string) => void
   onBranchInNewChat?: (messageId: string) => void
@@ -202,7 +203,7 @@ function ChatHeader({
 interface ChatRuntimeBoundaryProps {
   busy: boolean
   children: React.ReactNode
-  onCancel: () => Promise<void> | void
+  onCancel: (origin?: StopOrigin) => Promise<void> | void
   onEdit: (message: AppendMessage) => Promise<void>
   onReload: (parentId: string | null) => Promise<void>
   onThreadMessagesChange: (messages: readonly ThreadMessage[]) => void
@@ -453,7 +454,7 @@ export function ChatRuntimeBoundary({
     // (use-prompt-actions), never the display page, so the edit is correct;
     // sending one rewinds the live transcript and drops the page.
     onEdit,
-    onCancel: isHistorical ? undefined : async () => onCancel(),
+    onCancel: isHistorical ? undefined : async () => onCancel('transcript'),
     onReload: isHistorical ? undefined : onReload
   })
 
@@ -615,7 +616,7 @@ const ChatViewContent = memo(function ChatViewContent({
   const haltRun = useCallback(() => {
     parkQueuedPrompts(queueSessionKey || activeSessionId)
 
-    return onCancel()
+    return onCancel('transcript')
   }, [activeSessionId, onCancel, queueSessionKey])
 
   // A tile IS its session — no route involved, never "mismatched".

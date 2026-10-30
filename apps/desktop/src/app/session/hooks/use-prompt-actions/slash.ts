@@ -23,6 +23,7 @@ import {
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { type GuardedModelSwitchResult, surfaceModelSwitchConfirm } from '@/lib/guarded-model-switch'
 import { applyReasoningSlashResult, reasoningSlashParams } from '@/lib/reasoning-slash'
+import { interruptParams } from '@/lib/stop-origin'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { openCommandPalettePage } from '@/store/command-palette'
 import { markCompressDeferred } from '@/store/compaction'
@@ -674,7 +675,7 @@ export function useSlashCommand(deps: SlashCommandDeps) {
             ;({ sessionId: stopSessionId } = await withSessionNotFoundResume(
               initialSessionId,
               storedSessionId,
-              liveId => requestGateway('session.interrupt', { session_id: liveId }),
+              liveId => requestGateway('session.interrupt', interruptParams(liveId, 'slash')),
               {
                 requestGateway,
                 onRecovered: recoveredId => {

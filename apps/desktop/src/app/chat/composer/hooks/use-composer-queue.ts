@@ -581,7 +581,7 @@ export function useComposerQueue({
         promoteQueuedPrompt(activeQueueSessionKey, id)
         unparkQueuedPrompts(activeQueueSessionKey)
         triggerHaptic('selection')
-        void Promise.resolve(onCancel())
+        void Promise.resolve(onCancel('send_now'))
 
         return true
       }

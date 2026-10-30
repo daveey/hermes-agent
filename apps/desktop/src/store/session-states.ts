@@ -37,6 +37,7 @@ import { dropBrowserProfilePrefs, migrateBrowserProfilePrefs } from '@/lib/brows
 import { finalizeInterruptedMessages, sealOpenToolParts } from '@/lib/chat-messages'
 import { tileFocusStampOnFocusChange } from '@/lib/session-timer-since'
 import { stableArray } from '@/lib/stable-array'
+import { type StopOrigin } from '@/lib/stop-origin'
 import { readJson, writeJson } from '@/lib/storage'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -2237,8 +2238,7 @@ export interface SessionTileDelegate {
   deleteSession(storedSessionId: string): Promise<void>
   /** Run a slash command against a tile's session (app-level effects, e.g. branch/handoff, act on the main surface). */
   executeSlash(rawCommand: string, sessionId: string, options?: { typed?: boolean }): Promise<void>
-  /** Interrupt a tile's running turn. */
-  interruptSession(runtimeId: string): Promise<void>
+  interruptSession(runtimeId: string, origin?: StopOrigin): Promise<void> // origin: the Stop gesture (default `tile`)
   switchSessionModel?(runtimeId: string, model: string, provider: string): Promise<boolean>
   /** Drop the wiring cache's stored→runtime bindings. Called on gateway
    *  reconnect: a respawned backend re-mints runtime ids, so every binding

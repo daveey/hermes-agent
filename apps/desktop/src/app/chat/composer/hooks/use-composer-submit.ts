@@ -367,7 +367,7 @@ export function useComposerSubmit({
       // Stop button (the only way to reach here while busy with an empty
       // composer — empty Enter is short-circuited in the keydown handler).
       triggerHaptic('cancel')
-      void Promise.resolve(onCancel())
+      void Promise.resolve(onCancel('stop_button'))
     }
 
     return true

@@ -1531,6 +1531,7 @@ describe('stopGroupThread (#91868/#94569)', () => {
     // Exactly one — the serial loop has one member in flight.
     expect(interrupts).toHaveLength(1)
     expect(interrupts[0].params.session_id).toBe('live-alpha-sid')
+    expect(interrupts[0].params.origin).toBe('plugin:hermes-bots')
   })
 
   it('stops a room with nobody on turn without any interrupt RPC', async () => {

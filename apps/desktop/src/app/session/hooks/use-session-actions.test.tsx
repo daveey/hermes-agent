@@ -568,10 +568,10 @@ describe('connection-qualified session deletion', () => {
       await actions?.removeSession('background-session')
     })
 
-    expect(requestGateway).toHaveBeenCalledWith('session.interrupt', { session_id: 'runtime-bg' })
+    expect(requestGateway).toHaveBeenCalledWith('session.interrupt', { origin: 'delete', session_id: 'runtime-bg' })
     expect(requestGateway).toHaveBeenCalledWith('session.close', { session_id: 'runtime-bg' })
     // The selected session's runtime must not be touched by another row's delete.
-    expect(requestGateway).not.toHaveBeenCalledWith('session.interrupt', { session_id: 'runtime-foreground' })
+    expect(requestGateway).not.toHaveBeenCalledWith('session.interrupt', expect.objectContaining({ session_id: 'runtime-foreground' }))
     expect(requestGateway).not.toHaveBeenCalledWith('session.close', { session_id: 'runtime-foreground' })
     // Marked interrupted BEFORE the RPCs so a queued blocking-input frame is
     // declined instead of parked.

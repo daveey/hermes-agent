@@ -202,3 +202,121 @@ def test_turn_that_completes_adds_no_notice(sid, emitted):
 
     assert not [h for h in session["history"] if h.get("display_kind") == "turn_stopped"]
     assert fake.rows == []
+
+
+# ── SSH-attached Desktop identity + the stop gesture (origin) ─────────────────────────────────────
+# A Desktop attached over SSH logs in with a per-connection ownership id (provider ``desktop-ssh``), so
+# the notice read "Stopped by 5caca28140205b2b8f1f5cabb2aaf8ba". And every Stop gesture sent the same
+# RPC, so "why did this stop?" had no answer in agent.log.
+
+SSH_DESKTOP = {"user_id": "5caca28140205b2b8f1f5cabb2aaf8ba", "provider": "desktop-ssh"}
+
+
+def interrupt_with(sid: str, transport, **extra) -> dict:
+    token = bind_transport(transport)
+    try:
+        return server._methods["session.interrupt"](1, {"session_id": sid, **extra})
+    finally:
+        reset_transport(token)
+
+
+def test_stop_from_an_ssh_attached_desktop_reads_desktop(sid, db, caplog):
+    fake, agent = db
+    session = record(sid, running=True, agent=agent)
+    caplog.set_level("INFO")
+
+    interrupt_as(sid, _transport(SSH_DESKTOP))
+    entry = server._record_stop_notice(session, "interrupted")
+
+    assert entry["display_metadata"]["display_text"] == "Stopped by Desktop"
+    assert fake.rows[0]["display_metadata"]["display_text"] == "Stopped by Desktop"
+    assert SSH_DESKTOP["user_id"] not in entry["content"]
+    assert any("by=Desktop" in r.getMessage() and sid in r.getMessage() for r in caplog.records)
+
+
+def test_ssh_desktop_turn_end_to_end_reads_desktop(sid, emitted):
+    session, _fake = _run_turn(sid, SSH_DESKTOP, stop=True)
+
+    notices = [h for h in session["history"] if h.get("display_kind") == "turn_stopped"]
+    assert [n["display_metadata"]["display_text"] for n in notices] == ["Stopped by Desktop"]
+
+
+@pytest.mark.parametrize("origin", ["stop_button", "esc", "tile", "slash", "delete", "plugin:hermes-bots"])
+def test_each_stop_origin_is_logged_and_kept_in_the_notice(sid, db, caplog, origin):
+    fake, agent = db
+    session = record(sid, running=True, agent=agent)
+    caplog.set_level("INFO")
+
+    response = interrupt_with(sid, _transport(SSH_DESKTOP), origin=origin)
+    entry = server._record_stop_notice(session, "interrupted")
+
+    assert response.get("result", {}).get("status") == "interrupted", response
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("session.interrupt: ")]
+    assert any(sid in line and "by=Desktop" in line and line.endswith(f"origin={origin}") for line in lines), lines
+    assert entry["display_metadata"] == {"display_text": "Stopped by Desktop", "stopped_by": "Desktop",
+                                         "stop_origin": origin}
+    assert fake.rows[0]["display_metadata"]["stop_origin"] == origin
+    assert "_stop_origin" not in session
+
+
+def test_absent_origin_logs_a_dash_and_adds_no_metadata_key(sid, db, caplog):
+    _fake, agent = db
+    session = record(sid, running=True, agent=agent)
+    caplog.set_level("INFO")
+
+    interrupt_as(sid, _transport({"user_id": "redde", "provider": "basic"}))
+    entry = server._record_stop_notice(session, "interrupted")
+
+    assert any(sid in r.getMessage() and r.getMessage().endswith("origin=-") for r in caplog.records)
+    assert "stop_origin" not in entry["display_metadata"]
+
+
+@pytest.mark.parametrize("raw, kept", [("some new gesture!\n", "some_new_gesture_"), (42, None), ("", None),
+                                       ("x" * 200, "x" * 64)])
+def test_unknown_or_odd_origin_is_accepted_and_made_log_safe(sid, db, caplog, raw, kept):
+    _fake, agent = db
+    session = record(sid, running=True, agent=agent)
+    caplog.set_level("INFO")
+
+    response = interrupt_with(sid, _transport(None), origin=raw)
+    entry = server._record_stop_notice(session, "interrupted")
+
+    assert response.get("result", {}).get("status") == "interrupted", response
+    assert entry["display_metadata"].get("stop_origin") == kept
+    assert any(r.getMessage().endswith(f"origin={kept or '-'}") for r in caplog.records)
+
+
+def test_origin_of_an_earlier_stop_never_labels_a_later_one(sid, db):
+    """A later turn's Stop without an origin must not inherit the earlier turn's gesture."""
+    _fake, agent = db
+    session = record(sid, running=True, agent=agent)
+
+    interrupt_with(sid, _transport(None), origin="esc")
+    first = server._record_stop_notice(session, "interrupted")
+    session["running"] = True  # the next turn
+    interrupt_as(sid, _transport(None))
+    second = server._record_stop_notice(session, "interrupted")
+
+    assert first["display_metadata"]["stop_origin"] == "esc"
+    assert "stop_origin" not in second["display_metadata"]
+
+
+def test_a_repeat_stop_on_an_already_stopped_turn_keeps_the_gesture_that_stopped_it(sid, db):
+    """Interrupt clears ``running``; a second Stop on the same turn changes neither who nor how."""
+    _fake, agent = db
+    session = record(sid, running=True, agent=agent)
+
+    interrupt_with(sid, _transport(SSH_DESKTOP), origin="esc")
+    interrupt_with(sid, _transport({"user_id": "redde", "provider": "basic"}), origin="stop_button")
+    entry = server._record_stop_notice(session, "interrupted")
+
+    assert entry["display_metadata"] == {"display_text": "Stopped by Desktop", "stopped_by": "Desktop",
+                                         "stop_origin": "esc"}
+
+
+def test_contract_accepts_origin_on_session_interrupt():
+    """The wire contract refuses unknown keys (4000); ``origin`` must be a declared one."""
+    from tui_gateway.contracts.registry import METHODS, validate_params
+
+    params, problem = validate_params(METHODS["session.interrupt"], {"session_id": "s", "origin": "esc"})
+    assert problem is None and params is not None
