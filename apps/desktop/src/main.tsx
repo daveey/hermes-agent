@@ -35,6 +35,7 @@ import { HapticsProvider } from './components/haptics-provider'
 import { RootTooltipProvider } from './components/ui/tooltip'
 import { ProfileI18nProvider as I18nProvider } from './i18n/profile-provider'
 import { installClipboardShim } from './lib/clipboard'
+import { installPowerSettlingRejectionGuard } from './lib/power-settling-rejections'
 import { queryClient } from './lib/query-client'
 import { installRendererAnimationPauseState } from './lib/renderer-loop-pause'
 import { installSelectionCopyColorGuard } from './lib/selection-copy-colors'
@@ -46,6 +47,8 @@ import { isMainWindow } from './store/windows'
 import { ThemeProvider } from './themes/context'
 
 installClipboardShim()
+// Skipped background reads around sleep/wake are expected; keep them out of the console (power-settling-rejections.ts).
+installPowerSettlingRejectionGuard()
 // Chromium serializes selection copies (Cmd+C, right-click Copy) with the
 // theme's computed colors inlined; without this guard a dark-theme selection
 // pastes as near-white text into light-background targets.
