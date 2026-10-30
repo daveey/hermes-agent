@@ -78,7 +78,7 @@ def test_all_named_cards_closed_moves_card_to_triage(conn):
     a = kb.create_task(conn, title="named a")
     b = kb.create_task(conn, title="named b")
     tid = _blocked(conn, _ask(f"Approve the deploy once {a} lands. Unblock = deploy; archive = drop.",
-                              evidence=f"waiting on {b}"))
+                              why=f"David decides once {b} is out"))
     assert _sweep(conn) == []  # both named cards open: the ask stands
     _set_status(conn, a, "done")
     assert _sweep(conn) == []  # one still open
@@ -88,6 +88,19 @@ def test_all_named_cards_closed_moves_card_to_triage(conn):
     (ev,) = _events(conn, tid)
     assert ev["code"] == "named_cards_closed" and sorted(ev["named"]) == sorted([a, b])
     assert a in ev["reason"] and b in ev["reason"]
+
+
+def test_card_cited_only_in_evidence_is_not_the_premise(conn):
+    # t_01a18c0215a4efe9: "Unlock the MacBook screen" cited a done probe card as proof in evidence; the sweep
+    # voided the ask while the screen was still locked. Evidence is proof, not the ask's premise.
+    from hermes_cli import kanban_db as kb
+    probe = kb.create_task(conn, title="probe")
+    _set_status(conn, probe, "done")
+    tid = _blocked(conn, _ask("Unlock the MacBook screen, then reply unlocked. Unblock = continue; archive = drop.",
+                              why="Screen is locked at loginwindow; no stored login",
+                              evidence=f"probe {probe} frontmost=com.apple.loginwindow"))
+    assert _sweep(conn) == []
+    assert kb.get_task(conn, tid).status == "blocked" and _events(conn, tid) == []
 
 
 def test_named_id_not_on_this_board_is_untouched(conn):

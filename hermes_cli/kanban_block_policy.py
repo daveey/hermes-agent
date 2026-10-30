@@ -249,7 +249,8 @@ _TASK_ID = re.compile(r"(?<![\w/])t_[0-9a-f]{8,16}\b")
 
 
 def _named_task_ids(title, request: dict, own_id: str) -> list[str]:
-    text = " ".join([str(title or "")] + [str(request.get(k) or "") for k in ("action", "why_human", "evidence")])
+    # Premise only: a card cited as proof in ``evidence`` (a done probe) is not what the ask waits on.
+    text = " ".join([str(title or "")] + [str(request.get(k) or "") for k in ("action", "why_human")])
     return sorted({m.group(0) for m in _TASK_ID.finditer(text)} - {own_id})
 
 
