@@ -9,6 +9,7 @@ its wait. The deferred restart used to run anyway once the last work unit ended,
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -44,9 +45,15 @@ class GatewayRestartWaitMixin:
 
         Unknown claims/mutations/managed human turns keep their original wait. Reset if other
         work appears. Withdrawing the intent is checked by the caller before this cap.
+
+        An intent marked ``"cron_cut": true`` (hermes-sync applied past its cron bound,
+        t_01a18dbde9f8b2f0) also puts awaitable cron runs under the cap: the update was decided over
+        them, and waiting up to restart_after_turn_timeout for them would land it past the drain's target.
+        Each cut run is logged with its job id and start time; its next tick reruns it.
         """
         kanban = kanban_managed_count(self) if intent is not None else 0
-        if kanban <= 0 or self._awaitable_work_count() != kanban:
+        cron = self._restart_wait_cron_counts()["awaitable"] if self._intent_cuts_cron(intent) else 0
+        if kanban + cron <= 0 or self._awaitable_work_count() != kanban + cron:
             return None, False
         since = now if since is None else since
         expired = now - since >= CORE_UPDATE_KANBAN_WAIT_S
@@ -54,10 +61,12 @@ class GatewayRestartWaitMixin:
             # The after-turn grace is spent. Do not start another full graceful drain in stop().
             self._core_update_kanban_cap_spent = True
             logger.warning(
-                "Core update Kanban-only wait capped at %.0fs with %d managed card(s); "
+                "Core update %s wait capped at %.0fs with %d managed card(s) and %d cron run(s); "
                 "proceeding to restart drain (interrupted attempts requeued uncounted)",
-                CORE_UPDATE_KANBAN_WAIT_S, kanban,
+                "Kanban/cron-only" if cron else "Kanban-only", CORE_UPDATE_KANBAN_WAIT_S, kanban, cron,
             )
+            if cron:
+                self._log_cut_cron_runs()
         return since, expired
 
     def _core_update_kanban_snapshot_stop_leash(self) -> None:
@@ -73,9 +82,36 @@ class GatewayRestartWaitMixin:
             return
         if intent is None or not intent.exists():
             return
-        if self._awaitable_work_count() > kanban_managed_count(self):
+        # Under a "cron_cut" intent the cron runs were cut with the cards (t_01a18dbde9f8b2f0).
+        cron = self._restart_wait_cron_counts()["awaitable"] if self._intent_cuts_cron(intent) else 0
+        if self._awaitable_work_count() > kanban_managed_count(self) + cron:
             return
         self._stop_kanban_leash_s = CORE_UPDATE_KANBAN_STOP_LEASH_S
+
+    def _intent_cuts_cron(self, intent: Optional[Path]) -> bool:
+        """The update intent says cron runs in flight are cut, not awaited (``"cron_cut": true``). Read per
+        intent (re-read each poll: tiny file); a missing or unreadable intent never cuts."""
+        if intent is None:
+            return False
+        with suppress(Exception):
+            data = json.loads(Path(intent).read_text(encoding="utf-8-sig"))
+            return isinstance(data, dict) and data.get("cron_cut") is True
+        return False
+
+    def _log_cut_cron_runs(self) -> None:
+        """One line per cron run the update's restart cuts: job id and start time."""
+        with suppress(Exception):
+            from cron.scheduler import get_running_job_details
+            now = time.time()
+            for job in get_running_job_details():
+                if job.get("restart_safe"):
+                    continue  # a scoped worker outlives the restart; it is not cut
+                elapsed = job.get("elapsed_s")
+                started = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - elapsed))
+                           if isinstance(elapsed, (int, float)) else "unknown")
+                logger.warning("Core update restart cutting cron run %s (started %s, %ss ago); its next tick "
+                               "reruns it", job.get("job_id"), started,
+                               round(elapsed) if isinstance(elapsed, (int, float)) else "?")
 
     def _restart_cap_state_text(self) -> str:
         """Log suffix naming whether this restart carries a core-update intent (the Kanban-only cap)."""
