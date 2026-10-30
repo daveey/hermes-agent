@@ -77,6 +77,23 @@ def test_local_review_reviews_the_stored_conversation_once_the_cached_agent_is_g
         return {'provider': request.get('provider'), 'prefill': 'PREFILL_EXAMPLE' in text,
                 'saw_conversation': 'OPENED_PR_42' in text}
 
+    async def moa_once_idle(ws, sid):
+        # settled() reads the admission rows; the daemon drops the finished completion turn's
+        # running-agent entry just after, and /moa refuses mid-run ("Agent is running"). Under load
+        # that gap is long enough to hit (run 41009740205), so retry the refusal until the session
+        # is idle, waiting on the socket between tries.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 45
+        while True:
+            result = (await rpc(ws, 'slash.exec', session_id=sid, command='moa compare the options'))['result']
+            if result.get('type') == 'send':
+                return result
+            assert 'Agent is running' in result.get('output', ''), result
+            assert loop.time() < deadline, ('the session never went idle for /moa', result)
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(0.5):
+                    await ws.recv()
+
     async def probe(desc):
         async with websocket(home, desc) as ws:
             # A local session takes the profile's config as of its creation, not the daemon's startup copy.
@@ -88,7 +105,7 @@ def test_local_review_reviews_the_stored_conversation_once_the_cached_agent_is_g
             await rpc(ws, 'prompt.submit', session_id=sid, input_id='warm', text='OPENED_PR_42')
             await async_wait_until(settled, timeout=45, what='the warm turn settling')
             out['warm'] = await review(ws, sid, 'resident pass')
-            moa = (await rpc(ws, 'slash.exec', session_id=sid, command='moa compare the options'))['result']
+            moa = await moa_once_idle(ws, sid)
             await rpc(ws, 'prompt.submit', session_id=sid, input_id='moa', text=moa['message'])
             await async_wait_until(settled, timeout=45, what='the /moa turn settling')
             out['cold'] = await review(ws, sid, 'cold pass')
