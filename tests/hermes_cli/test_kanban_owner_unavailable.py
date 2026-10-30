@@ -75,10 +75,30 @@ def test_owner_that_never_admits_exits_owner_unavailable(monkeypatch, tmp_path, 
     assert "Kanban owner refused: Kanban owner silent for" in capsys.readouterr().err
 
 
-def test_owner_that_admitted_then_went_silent_still_exits_1(monkeypatch, tmp_path):
+def test_owner_that_admitted_then_drained_past_its_cap_exits_owner_restart(monkeypatch, tmp_path):
+    # An admitted turn the restart took (the drain outlasted restart_after_turn_timeout): 76, not
+    # 69 (never admitted) and not 1 (a crash). [daveey]
+    from hermes_cli.kanban_db_dispatch_exit_code import KANBAN_OWNER_RESTART_EXIT_CODE
     _fake_clock(monkeypatch)
     _submit_env(monkeypatch, tmp_path)
     monkeypatch.setattr(gateway_client, "connect_gateway", _owner(admit_first=True))
+    assert kanban_worker_client._submit() == KANBAN_OWNER_RESTART_EXIT_CODE == 76
+
+
+def test_owner_that_admitted_then_went_silent_still_exits_1(monkeypatch, tmp_path):
+    _fake_clock(monkeypatch)
+    _submit_env(monkeypatch, tmp_path)
+    admit = _owner(admit_first=True)
+    dials = [0]
+
+    @asynccontextmanager
+    async def _connect(*a, **kw):
+        dials[0] += 1
+        if dials[0] > 1:
+            raise ConnectionRefusedError("no owner")  # silence, not a draining answer
+        async with admit(*a, **kw) as client:
+            yield client
+    monkeypatch.setattr(gateway_client, "connect_gateway", _connect)
     assert kanban_worker_client._submit() == 1
 
 

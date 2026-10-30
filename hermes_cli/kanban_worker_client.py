@@ -15,6 +15,8 @@ import sys
 import time
 from typing import Optional
 
+from hermes_cli.gateway_client import GatewayClientError as _GatewayClientError
+
 # A worker that loses its owner (a dropped socket, a restart, `hermes update` draining it or a new
 # owner still starting) waits for it instead of exiting: the condition is the host's, not the card's,
 # and a failed exit here spends the card's failure budget and lets the owner end the turn. Asking
@@ -45,15 +47,67 @@ def admission_answer_budget():
     return lock_wait + ADMISSION_ANSWER_MARGIN_S
 
 
+def restart_wait_budget():
+    """Seconds a drain's ``draining``/``starting`` answers keep refreshing the worker's silence budget.
+
+    That owner is alive and holds this attempt's turn until the turn ends or its own cap
+    (``agent.restart_after_turn_timeout``) force-drains it, then stops; the ``OWNER_WAIT_S`` of
+    silence the worker still allows after this covers the stop and the next owner's start, so a
+    continuous drain ends the worker at cap + ``OWNER_WAIT_S``. Counting the refusal as silence ended every Kanban turn a restart
+    waited on ``OWNER_WAIT_S`` into the wait (2026-10-30 hub: 11 runs, all booked crashed). [daveey]"""
+    from gateway.restart import parse_restart_after_turn_timeout
+    raw = os.environ.get('HERMES_RESTART_AFTER_TURN_TIMEOUT', '').strip() or None
+    if raw is None:
+        try:
+            from hermes_cli.config import load_config
+            raw = (load_config().get('agent') or {}).get('restart_after_turn_timeout')
+        except Exception:  # health: allow BLE001 -- an unreadable config falls back to the default cap
+            raw = None
+    return parse_restart_after_turn_timeout(raw)
+
+
+class OwnerRestartLost(_GatewayClientError):
+    """The owner's restart ended this attempt: its restart wait outlasted ``restart_wait_budget`` or
+    the next owner reports the turn ``unknown``. Exits ``KANBAN_OWNER_RESTART_EXIT_CODE``, which the
+    dead-worker sweep requeues without counting a failure. [daveey]"""
+
+
 @dataclass
 class _Claim:
     """What the owner has said about this attempt, carried across connections."""
     answered: float  # monotonic time of the owner's last answer
     session_id: Optional[str] = None
     admission_id: Optional[str] = None
+    waiting: Optional[float] = None  # monotonic time the owner's current restart wait was first seen
+    alive: float = float('-inf')  # monotonic time the owner last refused us from inside that wait
+    restarted: bool = False  # the owner restarted (or began to) during this attempt
 
     def silent_for(self):
-        return time.monotonic() - self.answered
+        return time.monotonic() - max(self.answered, self.alive)
+
+    def note_refusal(self, exc):
+        """An owner refusing us because it is draining (a restart's after-turn wait, ``hermes update``
+        pausing it) answered over its live control socket or session: it is alive and still runs the
+        turn, so it refreshes the silence budget until the drain outlasts the owner's own cap
+        (``restart_wait_budget``). ``starting`` and a lost transport only mark the restart."""
+        from hermes_cli.gateway_client import GatewayRPCError, GatewayUnavailableError
+        if isinstance(exc, GatewayRPCError):
+            draining = str(exc) in _TRANSIENT_RPC_REASONS
+        elif isinstance(exc, GatewayUnavailableError) and exc.state in _TRANSIENT_OWNER_STATES:
+            # draining comes only from a live control-socket identify (restart_wait) or a live update
+            # fence (update_paused); starting only from a strictly held gateway.lock. An idle exit
+            # is an owner leaving with no work, so not one running this turn.
+            draining = exc.reason_code != 'idle_exit'
+        else:
+            return
+        self.restarted = self.admission_id is not None
+        if not draining:
+            return
+        now = time.monotonic()
+        if self.waiting is None or self.waiting < self.answered:
+            self.waiting = now  # a new drain (the owner answered since the last one)
+        if now - self.waiting < restart_wait_budget():
+            self.alive = now
 
 
 async def run(params, board_db):
@@ -65,7 +119,8 @@ async def run(params, board_db):
     # A lost socket is not a lost attempt, and exiting here would let ``_watch_submitter`` end the
     # owner's in-flight turn, so the next connection resumes whatever the last one reached. The
     # wait is bounded from the owner's last answer: an owner that keeps answering keeps the
-    # worker, and one that stays silent for ``OWNER_WAIT_S`` fails the worker honestly.
+    # worker, and one that stays silent for ``OWNER_WAIT_S`` fails the worker honestly. An owner
+    # refusing us from its restart wait counts as answering, up to that wait's own cap.
     claim = _Claim(answered=time.monotonic())
     failures = 0
     while True:
@@ -89,12 +144,16 @@ async def run(params, board_db):
         except (GatewayClientError, WebSocketException, OSError, TimeoutError) as exc:
             if not _restartable(exc):
                 raise
+            claim.note_refusal(exc)
             if claim.silent_for() >= OWNER_WAIT_S:
                 # WebSocket errors can embed remote bodies; only our own messages are quoted.
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)
                 detail = exc if isinstance(exc, GatewayClientError) else type(exc).__name__ + (
                     f' (HTTP {status})' if status else '')
                 message = f'Kanban owner silent for {claim.silent_for():.0f}s: {detail}'
+                if claim.restarted:
+                    # An ADMITTED turn lost to the owner's restart: exit 76, requeued uncounted. [daveey]
+                    raise OwnerRestartLost(message) from exc
                 error = GatewayClientError(message)
                 # [daveey] No admission answer reached us: the host's condition, not the card's. The
                 # exit says so and the dispatcher requeues the run uncounted unless the board shows
@@ -103,6 +162,8 @@ async def run(params, board_db):
                 error.owner_unavailable = claim.admission_id is None
                 raise error from exc
         else:
+            if receipt['status'] == 'unknown' and claim.restarted:
+                raise OwnerRestartLost('Kanban execution unknown after an owner restart; retained by owner')
             return _exit_code(receipt, params, board_db)
         failures = 1 if claim.answered != seen else failures + 1
         # Jittered (1-2 s first, up to 16 s): workers of one dead owner do not all redial, and so
@@ -201,6 +262,11 @@ def _submit():
         for key in ('HERMES_SESSION_SOURCE', 'HERMES_TENANT', 'TERMINAL_CWD'):
             os.environ.pop(key, None)
         return asyncio.run(run(params, board_db))
+    except OwnerRestartLost as exc:
+        # The owner's restart, not the card: the sweep requeues this exit without a failure. [daveey]
+        from hermes_cli.kanban_db_dispatch_exit_code import KANBAN_OWNER_RESTART_EXIT_CODE
+        print(f'Kanban owner restarted: {exc}', file=sys.stderr)
+        return KANBAN_OWNER_RESTART_EXIT_CODE
     except (KeyError, ValueError, OSError) as exc:
         print(f'Kanban owner refused: {exc}', file=sys.stderr)
         if getattr(exc, 'owner_unavailable', False):
