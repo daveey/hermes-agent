@@ -38,7 +38,7 @@ import {
   withoutBackgroundProcess,
   withRowActivity
 } from './session-dot-state'
-import { clearAllSessionStates, publishSessionState } from './session-states'
+import { $sessionStates, clearAllSessionStates, publishSessionState } from './session-states'
 import { $unreadWriteGuard } from './session-unread-remote'
 import { $subagentsBySession, type SubagentProgress } from './subagents'
 
@@ -247,6 +247,22 @@ describe('persisted unread (backend watermark)', () => {
     publishSessionState('rt1', createClientSessionState('s1'))
 
     expect($sessionDotStateById.get()['s1']).toBe('unread')
+  })
+
+  // [daveey] A settled session nothing references releases its transcript (messages: []). When its row is not in
+  // `$sessions` (a project-tree row past the recents page) that cold state must not read as "nothing sent yet".
+  it('a released transcript is not a draft, even with no listed row', () => {
+    // No busy→idle transition here: that would claim `unread` and mask the draft question.
+    const loaded = { ...createClientSessionState('s1'), messages: [{ id: 'm1', parts: [], role: 'user' }] as never }
+    publishSessionState('rt1', loaded)
+    expect($sessionDotStateById.get()['s1']).not.toBe('draft')
+    publishSessionState('rt1', { ...loaded })
+    expect($sessionStates.get().rt1?.messages).toEqual([])
+    expect($sessionDotStateById.get()['s1']).not.toBe('draft')
+
+    // Control: an open tab nothing was ever sent to, with no listed row, is still a draft.
+    publishSessionState('rt2', createClientSessionState('s2'))
+    expect($sessionDotStateById.get()['s2']).toBe('draft')
   })
 
   it('lets working outrank persisted unread', () => {
@@ -630,6 +646,21 @@ describe('withRowActivity', () => {
 
     // An offline cached copy proves nothing about now.
     expect(withRowActivity('idle', { offline_cached: true, turn_live: true })).toBe('idle')
+  })
+
+  // [daveey] The row is authoritative about its own history: a project-tree row older than the recents page is not in
+  // `$sessions`, so a cold (transcript-released) client state for it read as a draft and the row lost its green.
+  it('a draft claim yields to a row that has messages', () => {
+    const fresh = { kanban_observed_at: Date.now() / 1000 }
+
+    expect(withRowActivity('draft', { ...fresh, message_count: 207 })).toBe('idle')
+    expect(sessionStatusStripe(withRowActivity('draft', { ...fresh, message_count: 207 }), true)).toBe('done')
+    // Still background when the row carries work.
+    expect(withRowActivity('draft', { ...fresh, goal_active: true, message_count: 3 })).toBe('background')
+
+    // Controls: a genuinely unsent row (or one whose count is unknown) stays a draft.
+    expect(withRowActivity('draft', { ...fresh, message_count: 0 })).toBe('draft')
+    expect(withRowActivity('draft', fresh)).toBe('draft')
   })
 
   it('a decision outcome yields to a running close-out turn and paints red again once it ends', () => {

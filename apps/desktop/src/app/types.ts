@@ -153,6 +153,9 @@ export interface ClientSessionState {
   transcriptAuthorityEpoch?: number
   transcriptProvenance?: PersistedDisplayTranscriptProvenance
   messages: ChatMessage[]
+  /** [daveey] `messages` was emptied by `releaseSessionTranscript` (a settled session nothing shows), so the empty
+   *  list means "not loaded", never "nothing sent yet". */
+  transcriptReleased?: boolean
   branch: string
   cwd: string
   model: string

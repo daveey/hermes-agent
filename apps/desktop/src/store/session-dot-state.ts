@@ -390,7 +390,7 @@ export const kanbanStripeCounts = (row: KanbanCounts): { blocked: number; stalle
 type RowActivity = Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active' | 'kanban_blocked'> &
   Partial<Pick<SessionInfo, 'kanban_held' | 'kanban_parked'>> &
   Partial<Pick<SessionInfo, 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen' | 'offline_cached'>> &
-  Partial<Pick<SessionInfo, 'turn_live'>>
+  Partial<Pick<SessionInfo, 'message_count' | 'turn_live'>>
 
 /** [daveey] Work the row's own stamps say is still in flight outside a turn: a goal, cards, a background job. */
 const rowHasBackgroundWork = (row: RowActivity): boolean =>
@@ -415,11 +415,16 @@ export const withRowActivity = (state: SessionDotState, row: RowActivity): Sessi
     return 'working'
   }
 
-  if ((state === 'idle' || state === 'unread' || state === 'draft') && rowHasBackgroundWork(row)) {
+  // [daveey] The row knows its own history: a store-side `draft` claim (a client state with no messages, matched
+  // against `$sessions` only) is wrong for a row that has messages. A project-tree row older than the recents page is
+  // not in `$sessions`, so a cold state for it (transcript released) painted "nothing sent yet" and no stripe.
+  const settled = state === 'draft' && (row.message_count ?? 0) > 0 ? 'idle' : state
+
+  if ((settled === 'idle' || settled === 'unread' || settled === 'draft') && rowHasBackgroundWork(row)) {
     return 'background'
   }
 
-  return (state === 'idle' || state === 'draft') && (row.kanban_unseen ?? 0) > 0 ? 'unread' : state
+  return (settled === 'idle' || settled === 'draft') && (row.kanban_unseen ?? 0) > 0 ? 'unread' : settled
 }
 
 /** Whether this turn is the session's own, live: brighter title, and the row's

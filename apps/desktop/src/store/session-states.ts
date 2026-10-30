@@ -952,8 +952,7 @@ export function releaseSessionTranscript(runtimeId: string, state?: ClientSessio
     return
   }
 
-  const lightweight =
-    Array.isArray(retained.messages) && retained.messages.length === 0 ? retained : { ...retained, messages: [] }
+  const lightweight = retained.messages?.length === 0 ? retained : { ...retained, messages: [], transcriptReleased: true }
 
   $sessionStates.set({ ...current, [runtimeId]: lightweight })
 }
@@ -1175,7 +1174,7 @@ export const $attentionSessionIds = computed(
 let draftIds: readonly string[] = []
 export const $draftSessionIds = computed([$sessionStates, $sessions], (states, sessions) => {
   const unsent = (state: ClientSessionState) => {
-    if (state.busy || state.messages.length > 0) {
+    if (state.busy || state.messages.length > 0 || state.transcriptReleased) {
       return false
     }
 

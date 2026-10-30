@@ -71,7 +71,8 @@ describe('session tab underline', () => {
     ['draft', 'neutral', 'zinc-400']
   ] as const)('uses the sidebar palette for %s', (state, stripe, color) => {
     states.set({ session: state })
-    const { container } = render(tab())
+    // [daveey] A draft has sent nothing: a row with messages overrides a stale `draft` claim (withRowActivity).
+    const { container } = render(tab(state === 'draft' ? { ...row, message_count: 0 } : row))
     const accent = container.querySelector('[data-session-tab-accent]')!
 
     expect(accent.getAttribute('data-session-tab-accent')).toBe(stripe)

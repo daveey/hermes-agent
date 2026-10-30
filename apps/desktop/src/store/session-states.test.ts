@@ -1064,7 +1064,7 @@ describe('releaseSessionTranscript', () => {
     $sessionStates.set({ runtime: legacy })
 
     expect(() => releaseSessionTranscript('runtime')).not.toThrow()
-    expect($sessionStates.get().runtime).toEqual({ ...legacy, messages: [] })
+    expect($sessionStates.get().runtime).toEqual({ ...legacy, messages: [], transcriptReleased: true })
   })
 })
 
