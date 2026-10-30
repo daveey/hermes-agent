@@ -42,10 +42,8 @@ def _dead_worker_with_log(conn, tid: str, pid: int, rc: int) -> None:
         (pid, int(time.time()) - 120, tid),
     )
     conn.commit()
-    log = kb.worker_log_path(tid)
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "a", encoding="utf-8") as f:
-        f.write(f"the model said something\n\nResume this session with:\n  hermes --resume x\n\n{KANBAN_WORKER_EXIT_TRAILER}{rc}\n")
+    with kbd._open_worker_log(kb.get_task(conn, tid), None) as f:
+        f.write(f"the model said something\n\nResume this session with:\n  hermes --resume x\n\n{KANBAN_WORKER_EXIT_TRAILER}{rc}\n".encode())
 
 
 @pytest.mark.parametrize(

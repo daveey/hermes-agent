@@ -178,11 +178,11 @@ def test_a_lost_worker_that_exited_cleanly_still_charges_the_breaker(board):
     run_id = board.running("t_clean", claim_expires_in=900, heartbeat_age=30,
                            worker_lost="managed_worker_failed")
     # The worker's own exit trailer says rc=0 (the CLI's epilogue after a lost turn).
-    log = kb.worker_log_path("t_clean")
-    log.parent.mkdir(parents=True, exist_ok=True)
     from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
-    log.write_text(f"I fixed the protocol violation from the last run.\n{KANBAN_WORKER_EXIT_TRAILER}0\n",
-                   encoding="utf-8")
+    task = kb.get_task(board.conn, 't_clean')
+    assert task is not None
+    with kbd._open_worker_log(task, None) as log:
+        log.write(f"I fixed the protocol violation from the last run.\n{KANBAN_WORKER_EXIT_TRAILER}0\n".encode())
     board.tick(failure_limit=2)
     run = board.run(run_id)
     assert run["outcome"] == "crashed"
@@ -203,11 +203,11 @@ def test_a_lost_worker_that_exited_cleanly_still_charges_the_breaker(board):
 def test_a_crash_whose_output_quotes_protocol_violation_is_not_one(board):
     """The streak's text match reads our own error head, never the worker's quoted output."""
     run_id = board.running("t_quote", claim_expires_in=900, heartbeat_age=30, owner=False)
-    log = kb.worker_log_path("t_quote")
-    log.parent.mkdir(parents=True, exist_ok=True)
     from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
-    log.write_text(f"Retrying after the earlier protocol violation.\n{KANBAN_WORKER_EXIT_TRAILER}1\n",
-                   encoding="utf-8")
+    task = kb.get_task(board.conn, 't_quote')
+    assert task is not None
+    with kbd._open_worker_log(task, None) as log:
+        log.write(f"Retrying after the earlier protocol violation.\n{KANBAN_WORKER_EXIT_TRAILER}1\n".encode())
     board.tick(failure_limit=5)
     run = board.run(run_id)
     assert run["outcome"] == "crashed" and "protocol violation" in run["error"]

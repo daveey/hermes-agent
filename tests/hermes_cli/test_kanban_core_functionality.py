@@ -1211,7 +1211,7 @@ def test_reclaim_task_resets_running_to_ready(kanban_home, monkeypatch):
 
 
 
-def _drive_worker_exit(conn, tid, fake_pid, raw_status):
+def _drive_worker_exit(conn, tid, fake_pid, raw_status, worker_output=None):
     """Claim ``tid``, record ``raw_status`` for its dead worker pid, and run
     one reaper pass.
 
@@ -1227,6 +1227,9 @@ def _drive_worker_exit(conn, tid, fake_pid, raw_status):
     host_prefix = _kb._claimer_id().split(":", 1)[0]
     claimed = _kb.claim_task(conn, tid, claimer=f"{host_prefix}:mock")
     assert claimed is not None, "task was not claimable for the next attempt"
+    if worker_output is not None:
+        with _kbd._open_worker_log(claimed, None) as log:
+            log.write(worker_output.encode())
     _kbd._set_worker_pid(conn, tid, fake_pid)
     _kbd._record_worker_exit(fake_pid, raw_status)
     original_alive = _kb._pid_alive
@@ -1237,20 +1240,20 @@ def _drive_worker_exit(conn, tid, fake_pid, raw_status):
         _kb._pid_alive = original_alive
 
 
-def _drive_protocol_violation(conn, tid, fake_pid):
+def _drive_protocol_violation(conn, tid, fake_pid, worker_output=None):
     """One clean-exit protocol violation reaper pass for ``tid``.
 
     os.W_EXITCODE(status=0, signal=0) == 0 on POSIX.
     """
-    return _drive_worker_exit(conn, tid, fake_pid, 0)
+    return _drive_worker_exit(conn, tid, fake_pid, 0, worker_output)
 
 
-def _drive_nonzero_crash(conn, tid, fake_pid):
+def _drive_nonzero_crash(conn, tid, fake_pid, worker_output=None):
     """One plain non-zero-exit crash reaper pass for ``tid``.
 
     W_EXITCODE(1, 0) == 256 — WIFEXITED True, WEXITSTATUS == 1.
     """
-    return _drive_worker_exit(conn, tid, fake_pid, 256)
+    return _drive_worker_exit(conn, tid, fake_pid, 256, worker_output)
 
 
 @pytest.mark.platforms("linux")
@@ -1363,11 +1366,7 @@ def test_dead_worker_reap_surfaces_the_workers_own_last_output(kanban_home, driv
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="handoff", assignee="worker")
-        log_path = kb.worker_log_path(tid)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(_WORKER_LOG_TAIL)
-
-        drive(conn, tid, 991100)
+        drive(conn, tid, 991100, worker_output=_WORKER_LOG_TAIL)
 
         task = kb.get_task(conn, tid)
         assert "no reassignment operation" in (task.last_failure_error or "")
@@ -1394,11 +1393,11 @@ def test_dead_worker_reap_reads_the_log_of_the_dispatching_board(kanban_home):
     conn = kbc.connect(board=board)
     try:
         tid = kb.create_task(conn, title="handoff", assignee="worker")
-        log_path = kb.worker_log_path(tid, board=board)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(_WORKER_LOG_TAIL)
         host_prefix = kb._claimer_id().split(":", 1)[0]
-        assert kb.claim_task(conn, tid, claimer=f"{host_prefix}:mock") is not None
+        claimed = kb.claim_task(conn, tid, claimer=f"{host_prefix}:mock")
+        assert claimed is not None
+        with kbd._open_worker_log(claimed, board) as log:
+            log.write(_WORKER_LOG_TAIL.encode())
         kbd._set_worker_pid(conn, tid, 991101)
         kbd._record_worker_exit(991101, 0)
         original_alive = kb._pid_alive

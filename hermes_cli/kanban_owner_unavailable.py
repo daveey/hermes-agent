@@ -61,7 +61,8 @@ _LEGACY_REFUSAL_RE = re.compile(
 def legacy_refusal_in_log(log: str) -> bool:
     """True when the dead run's own part of the log ends with the old client's drain refusal."""
     from hermes_cli.kanban_worker_log import current_run_log
-    lines = [ln.strip() for ln in current_run_log(log or "").splitlines() if ln.strip()]
+    from hermes_cli.kanban_db_dispatch import _EXIT_TRAILER_RE
+    lines = [ln.strip() for ln in _EXIT_TRAILER_RE.sub("", current_run_log(log or "")).splitlines() if ln.strip()]
     return bool(lines) and bool(_LEGACY_REFUSAL_RE.match(lines[-1]))
 
 

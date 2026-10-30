@@ -163,9 +163,10 @@ def test_unknown_skill_exit_blocks_as_assignment_without_retry(board, monkeypatc
         pid = 72000
         conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid))
         conn.commit()
-        log = _kb.worker_log_path(tid)
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text("Error: Unknown skill(s): x\n", encoding="utf-8")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        with kbd._open_worker_log(task, None) as log:
+            log.write(b'Error: Unknown skill(s): x\n')
         kbd._record_worker_exit(pid, 1 << 8)
 
         assert tid in kbd.detect_crashed_workers(conn)

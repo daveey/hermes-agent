@@ -75,7 +75,7 @@ def log_noise_prefixes() -> tuple[str, ...]:
     return ("session_id:", "Query:", t("cli.chat.initializing_agent"))
 
 
-def current_run_log(raw: str) -> str:
+def current_run_log(raw: str, run_id=None) -> str:
     """[daveey] Only the dead run's own part of the append-only per-task log.
 
     Every run ends with an exit trailer (``[kanban-worker-exit] rc=N``). The dead run's own trailer
@@ -84,6 +84,15 @@ def current_run_log(raw: str) -> str:
     so its crash notice read as the worker re-asking the earlier question."""
     import re
     from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+    starts = list(re.finditer(r'^\[kanban-worker-start\] run_id=(\d+)[ \t]*$', raw, re.MULTILINE))
+    if starts:
+        start = starts[-1]
+        if run_id is not None and start.group(1) != str(run_id):
+            return ''
+        return raw[start.end():]
+    # No marker anywhere: the log predates the marker (a worker spawned before this version was
+    # deployed), so fall back to the trailer / Session cut below. Readers with a run_id read the whole
+    # file, so "no marker" is never a truncated tail.
     trailers = list(re.finditer(r"^" + re.escape(KANBAN_WORKER_EXIT_TRAILER) + r"\d+\s*$", raw.rstrip(), re.MULTILINE))
     body = raw.rstrip()
     if trailers and trailers[-1].end() == len(body):
@@ -94,3 +103,40 @@ def current_run_log(raw: str) -> str:
     # trailer and this run's Session line is the previous run's reply (t_01a188a461c0178c run 10258).
     starts = list(re.finditer(r"^Session: \S+[ \t]*$", body, re.MULTILINE))
     return body[starts[-1].start():] if starts else body
+
+
+def _worker_final_output(task_id: str, board: Optional[str] = None, *, run_id=None) -> str:
+    """Best-effort read of a dead worker's last printed text, for the board diagnostic.
+
+    A ``chat -q`` worker's stdout/stderr are redirected to its per-task log
+    (``_default_spawn``), so when it exits without a terminal board call the
+    reason is usually sitting there: the model's own explanation of why it could
+    not comply (#88603), or the rendered provider error (#46593). The reap used to
+    discard it in favour of a canned message on every retry. Trims the CLI exit
+    summary, rule lines and the ``session_id:`` trailer; returns "" (never raises)
+    on a missing/empty log.
+
+    ``board`` must come from the dispatching tick: ambient current-board resolution
+    is wrong for every board but the one the dispatcher thread happens to call
+    "current", so the log would silently not be found.
+    """
+    from hermes_cli import kanban_db as _kb
+    from hermes_cli.kanban_db_dispatch import _EXIT_TRAILER_RE, _LOG_CHROME, _worker_scope
+    _exit_summary_marker, _log_noise_prefixes = exit_summary_marker, log_noise_prefixes
+    try:
+        raw = _kb.read_worker_log(task_id, tail_bytes=None if run_id is not None else 4000, board=board)
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    raw = _EXIT_TRAILER_RE.sub("", current_run_log(raw, run_id=run_id))
+    cut = raw.rfind(_exit_summary_marker())
+    if cut != -1:
+        raw = raw[:cut]
+    lines = []
+    for ln in raw.splitlines():
+        ln = _LOG_CHROME.sub("", ln).strip()
+        if ln and not ln.startswith((*_log_noise_prefixes(), _worker_scope.SNAPSHOT_PREFIX)):
+            lines.append(ln)
+    return " ".join(lines)[-400:]
+

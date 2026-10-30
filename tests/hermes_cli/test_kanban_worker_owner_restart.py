@@ -181,6 +181,13 @@ def _running(conn, title, pid):
     return tid
 
 
+def _marked(tid, text):
+    """Prefix the task's current run start marker, as the dispatcher writes before spawning."""
+    with kbc.connect() as c:
+        rid = c.execute("SELECT current_run_id FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+    return f"[kanban-worker-start] run_id={rid}\n{text}"
+
+
 def _reaped(monkeypatch, codes):
     exits = {pid: ((code & 0xFF) << 8, time.time()) for pid, code in codes.items()}
     monkeypatch.setattr(kbd, "_recent_worker_exits", exits)
@@ -235,7 +242,7 @@ def test_a_restart_lost_exit_booked_by_the_next_gateway_is_requeued_too(board, m
     from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
     monkeypatch.setattr(kbd, "_recent_worker_exits", {})
     trailer = f"Kanban owner restarted: ...\n{KANBAN_WORKER_EXIT_TRAILER}{KANBAN_OWNER_RESTART_EXIT_CODE}\n"
-    monkeypatch.setattr(kb, "read_worker_log", lambda *a, **kw: trailer)
+    monkeypatch.setattr(kb, "read_worker_log", lambda tid, **kw: _marked(tid, trailer))
     with kbc.connect() as conn:
         tids = [_running(conn, f"card {pid}", pid) for pid in (76001, 76002, 76003)]
         assert kbd.detect_crashed_workers(conn) == []
@@ -292,7 +299,7 @@ _LEGACY = "Kanban owner refused: Kanban owner silent for 184s: Gateway draining:
 def _legacy_log(monkeypatch, text):
     from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
     log = f"{text}\n{KANBAN_WORKER_EXIT_TRAILER}1\n"
-    monkeypatch.setattr(kb, "read_worker_log", lambda *a, **kw: log)
+    monkeypatch.setattr(kb, "read_worker_log", lambda tid, **kw: _marked(tid, log))
     monkeypatch.setattr(kbd, "_recent_worker_exits", {})
 
 

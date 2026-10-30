@@ -1,0 +1,24 @@
+"""Hold new Kanban claims while the owning gateway drains for a restart."""
+from pathlib import Path
+
+
+def claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds):
+    """Recheck the assignee's owner immediately before either ready/review claim."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.profiles import resolve_profile_env
+    try:
+        owner_home = resolve_profile_env(assignee)
+    except FileNotFoundError:
+        owner_home = None
+    if dispatch_paused(owner_home):
+        return None
+    claim = kb.claim_review_task if lane == 'review' else kb.claim_task
+    return claim(conn, task_id, ttl_seconds=ttl_seconds)
+
+
+def dispatch_paused(home=None):
+    """Read the owning gateway's lifecycle snapshot; dead snapshots must not park work forever."""
+    from gateway.status import read_runtime_status, runtime_status_pid_is_live
+    record = read_runtime_status(Path(home) / 'gateway_state.json' if home else None)
+    return bool(record and (record.get('gateway_state') == 'draining' or record.get('restart_requested'))
+                and runtime_status_pid_is_live(record))

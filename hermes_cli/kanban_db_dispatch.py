@@ -381,7 +381,7 @@ _EXIT_TRAILER_RE = re.compile(
 )
 
 
-def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional[int]:
+def _worker_log_exit_code(task_id: str, board: Optional[str] = None, *, run_id=None) -> Optional[int]:
     """Exit code from the trailer the worker CLI wrote to its own log; None when absent.
 
     The durable twin of ``_recent_worker_exits``: written by the worker itself
@@ -390,10 +390,12 @@ def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional
     wins — the log is append-mode across re-runs.
     """
     try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
+        raw = _kb.read_worker_log(task_id, tail_bytes=None if run_id is not None else 4000, board=board)
     except Exception:
         return None
-    matches = _EXIT_TRAILER_RE.findall(raw or "")
+    # A log with no run marker predates it (worker spawned before the deploy): last trailer wins, as before.
+    scoped = current_run_log(raw or '', run_id=run_id) if run_id is not None and '[kanban-worker-start]' in (raw or '') else raw or ''
+    matches = _EXIT_TRAILER_RE.findall(scoped)
     return int(matches[-1]) if matches else None
 
 
@@ -1226,37 +1228,7 @@ from hermes_cli.kanban_worker_log import (
     current_run_log, exit_summary_marker as _exit_summary_marker, log_noise_prefixes as _log_noise_prefixes)
 
 
-def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
-    """Best-effort read of a dead worker's last printed text, for the board diagnostic.
-
-    A ``chat -q`` worker's stdout/stderr are redirected to its per-task log
-    (``_default_spawn``), so when it exits without a terminal board call the
-    reason is usually sitting there: the model's own explanation of why it could
-    not comply (#88603), or the rendered provider error (#46593). The reap used to
-    discard it in favour of a canned message on every retry. Trims the CLI exit
-    summary, rule lines and the ``session_id:`` trailer; returns "" (never raises)
-    on a missing/empty log.
-
-    ``board`` must come from the dispatching tick: ambient current-board resolution
-    is wrong for every board but the one the dispatcher thread happens to call
-    "current", so the log would silently not be found.
-    """
-    try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
-    except Exception:
-        return ""
-    if not raw:
-        return ""
-    raw = _EXIT_TRAILER_RE.sub("", current_run_log(raw))
-    cut = raw.rfind(_exit_summary_marker())
-    if cut != -1:
-        raw = raw[:cut]
-    lines = []
-    for ln in raw.splitlines():
-        ln = _LOG_CHROME.sub("", ln).strip()
-        if ln and not ln.startswith((*_log_noise_prefixes(), _worker_scope.SNAPSHOT_PREFIX)):
-            lines.append(ln)
-    return " ".join(lines)[-400:]
+from hermes_cli.kanban_worker_log import _worker_final_output
 
 
 def _classify_dead_worker(
@@ -1269,7 +1241,7 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    log = _kb.read_worker_log(task_id, tail_bytes=4000, board=board) if task_id and run_id else ""
+    log = _kb.read_worker_log(task_id, tail_bytes=None, board=board) if task_id and run_id else ""
     failure = _worker_scope.read_failure(task_id, run_id, log or "") if task_id else None
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
@@ -1280,9 +1252,9 @@ def _classify_dead_worker(
         dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
                            {"pid": pid, "claimer": claimer, **failure})
     else:
-        dead = _ou.noted(_classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board), conn, task_id, run_id, log)
+        dead = _ou.noted(_classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id), conn, task_id, run_id, log)
     if task_id and not dead.rate_limited:
-        worker_output = _worker_final_output(task_id, board=board)
+        worker_output = _worker_final_output(task_id, board=board, run_id=run_id)
         if worker_output:
             dead.error_text += f"{WORKER_OUTPUT_SEP}{worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
@@ -1300,6 +1272,7 @@ def _classify_dead_worker_exit(
     *,
     task_id: Optional[str] = None,
     board: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
 
@@ -1314,7 +1287,7 @@ def _classify_dead_worker_exit(
     if exit_code is not None:
         kind, code = _exit_code_kind(int(exit_code))
     elif kind == "unknown" and task_id:
-        logged = _worker_log_exit_code(task_id, board=board)
+        logged = _worker_log_exit_code(task_id, board=board, run_id=run_id)
         if logged is not None:
             kind, code = _exit_code_kind(logged)
     if kind == "clean_exit":
@@ -2329,9 +2302,9 @@ def _dispatch_lane_task(
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
-    claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
+    from hermes_cli.kanban_gateway_drain import claim_if_admitting
     _kb._sync.pop_claim_deferral(task_id)
-    claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
+    claimed = claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds)
     if claimed is None:
         deferral = _kb._sync.pop_claim_deferral(task_id)
         if deferral is not None:  # the Board said no this tick: the caller moves on to the next candidate
@@ -2642,6 +2615,10 @@ def _dispatch_once_locked(
         # Agent-owned blocks get one triage respawn after 2h; standing human asks are re-checked every tick.
         from hermes_cli.kanban_block_policy import sweep_blocked_cards
         sweep_blocked_cards(conn, result)
+    from hermes_cli.kanban_gateway_drain import dispatch_paused
+    if dispatch_paused():
+        _kb._log.info('kanban dispatcher: scheduling paused — gateway draining or restart requested')
+        return result
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
@@ -3038,7 +3015,10 @@ def _open_worker_log(task: Task, board: Optional[str]):
     log_path = log_dir / f"{task.id}.log"
     from hermes_cli.kanban_worker_log import rotate_worker_log, worker_log_rotation_config
     rotate_worker_log(log_path, *worker_log_rotation_config())
-    return open(log_path, "ab")
+    log = open(log_path, "ab")
+    log.write(f'\n[kanban-worker-start] run_id={task.current_run_id}\n'.encode())
+    log.flush()  # must reach disk before a child can fail (even before importing its client)
+    return log
 
 
 def _restart_safe_worker_argv(task: Task, command: list[str], board: Optional[str] = None) -> list[str]:
