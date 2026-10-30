@@ -214,8 +214,15 @@ def _policies(home, *session_ids):
 
 
 def _peers_running(pid):
-    return [child for child in psutil.Process(pid).children(recursive=True)
-            if any('peer.py' in part for part in child.cmdline())]
+    peers = []
+    for child in psutil.Process(pid).children(recursive=True):
+        try:
+            if any('peer.py' in part for part in child.cmdline()):
+                peers.append(child)
+        except psutil.NoSuchProcess:
+            # Closing a peer can exit (ZombieProcess) or reap it after enumeration.
+            continue
+    return peers
 
 
 @pytest.mark.platforms("linux")
