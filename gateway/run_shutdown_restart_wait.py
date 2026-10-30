@@ -89,6 +89,17 @@ class GatewayRestartWaitMixin:
             "update that did not apply", intent, self._awaitable_work_count())
         return True
 
+    async def _restart_wait_cancelled(self) -> bool:
+        """Run the after-turn wait; True when the restart must be cancelled instead of run.
+
+        Re-checks the intent on every exit path, not only inside the wait loop: it can vanish during
+        the poll sleep while the last unit ends (loop exits on count == 0) or at the deadline, and a
+        restart then would relaunch old code for an update that gave up. [daveey]
+        """
+        if await self._await_active_work_before_restart() is RESTART_CANCELLED:
+            return True
+        return self._update_intent_withdrawn(getattr(self, "_restart_update_intent", None))
+
     def _cancel_restart(self) -> None:
         """Undo ``request_restart`` before ``stop()``: accept new turns again, report ``running``, and
         let the next update's SIGUSR1 request a fresh restart. API runs keep their informational

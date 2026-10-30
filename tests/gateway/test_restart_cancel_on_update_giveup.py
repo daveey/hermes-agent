@@ -57,6 +57,51 @@ async def test_update_restart_is_cancelled_when_the_intent_goes_away(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_restart_is_cancelled_when_the_intent_goes_as_the_last_unit_ends(tmp_path, monkeypatch):
+    """Intent removed during the poll sleep in the same step the last unit finishes: the loop exits
+    on count == 0, and must still see the give-up instead of restarting on old code."""
+    intent = _intent(tmp_path, monkeypatch)
+    runner, _adapter = make_restart_runner()
+    runner.stop = AsyncMock()
+    runner._restart_after_turn_timeout = 30.0
+    session_key = "agent:main:telegram:dm:1"
+    runner._running_agents[session_key] = MagicMock()
+
+    assert runner.request_restart(detached=False, via_service=True) is True
+    await _let_the_wait_loop_run()
+    intent.unlink()
+    del runner._running_agents[session_key]
+    await asyncio.wait_for(runner._restart_task, 5)
+
+    runner.stop.assert_not_awaited()
+    assert runner._draining is False
+    assert runner._restart_requested is False
+
+
+@pytest.mark.asyncio
+async def test_restart_is_cancelled_when_the_wait_times_out_after_the_intent_went(tmp_path, monkeypatch):
+    intent = _intent(tmp_path, monkeypatch)
+    runner, _adapter = make_restart_runner()
+    runner.stop = AsyncMock()
+    runner._restart_after_turn_timeout = 1e-6  # deadline already passed on the first iteration
+    runner._running_agents["agent:main:telegram:dm:1"] = MagicMock()
+    # The withdrawn check inside the loop runs before the deadline check; make it miss once so the
+    # deadline branch is the one that sees the removed intent.
+    real = runner._update_intent_withdrawn
+    calls = []
+
+    def withdrawn(path):
+        calls.append(path)
+        return False if len(calls) == 1 else real(path)
+
+    runner._update_intent_withdrawn = withdrawn
+    assert runner.request_restart(detached=False, via_service=True) is True
+    intent.unlink()
+    await asyncio.wait_for(runner._restart_task, 5)
+    runner.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_update_restart_proceeds_when_work_drains_while_the_intent_stands(tmp_path, monkeypatch):
     _intent(tmp_path, monkeypatch)
     runner, _adapter = make_restart_runner()

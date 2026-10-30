@@ -801,6 +801,9 @@ def _record_external_cron_worker(job_id: str, pid: Any, *, scope_isolated: bool)
             _running_worker_pids[key] = int(pid)
         if scope_isolated:
             _scope_isolated_job_ids.add(key)
+            # A scoped worker outlives a gateway restart, so the restart wait excludes it; the
+            # update drain must too, or a long scoped run holds every drain window open. [daveey]
+            _drop_run_reservation(key)
 
 
 def try_register_running_job(job_id: str, *, owner=None, future=_FUTURE_PENDING) -> bool:

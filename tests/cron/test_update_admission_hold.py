@@ -89,3 +89,24 @@ def test_a_running_job_holds_an_admission_reservation_until_it_ends(tmp_path, mo
         assert admission_fence.state(root)["reservations"] == 0
     finally:
         admission_fence.clear_hold(root)
+
+
+def test_a_scope_isolated_run_drops_its_reservation_an_in_process_run_keeps_it(tmp_path, monkeypatch):
+    """A scoped external worker survives the gateway restart, which excludes it from its wait; the
+    update drain must not wait on it either (hub: 4 restart-safe scoped crons at once)."""
+    from cron import scheduler
+    from hermes_cli import admission_fence
+
+    root = _root()
+    assert scheduler.try_register_running_job("scoped-job")
+    assert scheduler.try_register_running_job("inproc-job")
+    try:
+        assert admission_fence.state(root)["reservations"] == 2
+        scheduler._record_external_cron_worker("scoped-job", 4242, scope_isolated=True)
+        scheduler._record_external_cron_worker("inproc-job", 4243, scope_isolated=False)
+        assert admission_fence.state(root)["reservations"] == 1
+        assert "scoped-job" in scheduler.get_running_job_ids()  # still in flight for dedupe
+    finally:
+        scheduler.release_running_job("scoped-job")
+        scheduler.release_running_job("inproc-job")
+    assert admission_fence.state(root)["reservations"] == 0

@@ -1683,7 +1683,7 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin):
         self._mark_api_runs_shutdown_requested()
 
         async def _run_restart() -> None:
-            if await self._await_active_work_before_restart() is RESTART_CANCELLED:
+            if await self._restart_wait_cancelled():
                 self._cancel_restart()
                 return
             # Detached helper only AFTER the after-turn wait, or its drain_timeout+5 deadline fires mid-turn.
