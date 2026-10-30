@@ -34,7 +34,8 @@ const LOAD_WRITERS = [
 
 const dirs: string[] = []
 const stops: (() => void)[] = []
-const tick = (ms = 400) => new Promise(resolve => setTimeout(resolve, ms))
+// Deliberately longer than the old 400–800ms assertion sleeps.
+const slowRead = () => new Promise(resolve => setTimeout(resolve, 2000))
 
 function storeFile(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ui-handoff-'))
@@ -47,7 +48,7 @@ function bridgeFor(file: string, { offline = false, slow = false } = {}): UiPref
   const down = () => Promise.reject(new Error('fetch failed'))
 
   return {
-    read: async () => (offline ? down() : (slow && (await tick(300)), readUiPreferences(file))),
+    read: async () => (offline ? down() : (slow && (await slowRead()), readUiPreferences(file))),
     write: async payload => (offline ? down() : writeUiPreferences(file, parseUiPreferencesWrite(payload))),
     onChanged: () => () => undefined
   }
@@ -71,8 +72,26 @@ async function pageLoad(file: string, { late = false, offline = false, stores = 
     await load()
   }
 
-  stops.push(sync.startUiPreferencesSync(bridgeFor(file, { offline, slow: late })))
-  await tick(late ? 700 : 400)
+  const bridge = bridgeFor(file, { offline, slow: late })
+  const read = vi.spyOn(bridge, 'read')
+  const write = vi.spyOn(bridge, 'write')
+  stops.push(sync.startUiPreferencesSync(bridge))
+
+  // connect() registers join() before we await this read, so any seed write
+  // has started by the time it resolves. Wait for that I/O too, not a guess
+  // at how long imports or the native file writer will take on a busy runner.
+  if (offline) {
+    await expect(read.mock.results[0].value).rejects.toThrow('fetch failed')
+  } else {
+    await read.mock.results[0].value
+    await Promise.all(write.mock.results.map(result => result.value))
+
+    if (fs.existsSync(file)) {
+      await vi.waitFor(() => {
+        expect(window.localStorage.getItem('hermes:ui-preferences:generation')).toBe(readUiPreferences(file).generation)
+      })
+    }
+  }
 }
 
 function closeTabs() {
@@ -128,6 +147,7 @@ it('a browser upgraded from a build that stored every default at load never seed
     'true'
   ])
   expect(readUiPreferences(file).values).toEqual({ [HAPTICS]: 'true', [KEYBINDS]: CUSTOM_KEYBINDS })
+  expect(outboxes()).toEqual([])
 })
 
 it('a tab closed with an edit still unsent hands it to the next tab, which writes it and removes the outbox', async () => {
@@ -151,8 +171,10 @@ it('a tab closed with an edit still unsent hands it to the next tab, which write
   // module (and its sync) is gone.
   await pageLoad(file, { stores: [] })
 
-  expect([window.localStorage.getItem(MODE), readUiPreferences(file).values[MODE]]).toEqual(['dark', 'dark'])
-  expect(outboxes()).toEqual([])
+  await vi.waitFor(() => {
+    expect([window.localStorage.getItem(MODE), readUiPreferences(file).values[MODE]]).toEqual(['dark', 'dark'])
+    expect(outboxes()).toEqual([])
+  })
 })
 
 it('a crashed tab’s outbox is adopted by the next load once its heartbeat is stale; a live sibling’s is left alone', async () => {
@@ -161,12 +183,16 @@ it('a crashed tab’s outbox is adopted by the next load once its heartbeat is s
   await pageLoad(file, { offline: true, stores: [] })
   const { writeKey } = await import('@/lib/storage')
   writeKey(MODE, 'dark')
+  const liveOutboxes = outboxes()
   window.sessionStorage.clear()
 
   // A sibling opening right away: the first tab is alive, its edit is its own.
   await pageLoad(file, { stores: [] })
   expect(readUiPreferences(file).values[MODE]).toBe('light')
   expect(outboxes()).toHaveLength(1)
+  // The owner must be unchanged too: adoption can leave one NEW outbox
+  // whose incorrect write is still waiting for the debounce.
+  expect(outboxes()).toEqual(liveOutboxes)
 
   // The first tab died without a pagehide (a crash: no teardown, no more
   // heartbeats): its stamp ages out.
@@ -174,8 +200,10 @@ it('a crashed tab’s outbox is adopted by the next load once its heartbeat is s
   window.sessionStorage.clear()
   await pageLoad(file, { stores: [] })
 
-  expect(readUiPreferences(file).values[MODE]).toBe('dark')
-  expect(outboxes()).toEqual([])
+  await vi.waitFor(() => {
+    expect(readUiPreferences(file).values[MODE]).toBe('dark')
+    expect(outboxes()).toEqual([])
+  })
 })
 
 it('a first snapshot that lands after the app read its cache never drops the store’s favorites on the next star', async () => {
@@ -187,9 +215,9 @@ it('a first snapshot that lands after the app read its cache never drops the sto
   const { toggleFavoriteModel } = await import('@/store/favorite-models')
   toggleFavoriteModel('mine', 'new')
   toggleFavoriteModel('mine', 'old')
-  await tick()
-
-  expect(JSON.parse(readUiPreferences(file).values[FAVORITES] ?? '[]')).toEqual(['mine::new', 'host::kept'])
+  await vi.waitFor(() => {
+    expect(JSON.parse(readUiPreferences(file).values[FAVORITES] ?? '[]')).toEqual(['mine::new', 'host::kept'])
+  })
 })
 
 it('a star made before the late snapshot lands joins the store’s favorites instead of replacing them', async () => {
@@ -206,11 +234,14 @@ it('a star made before the late snapshot lands joins the store’s favorites ins
   const { toggleFavoriteModel } = await import('@/store/favorite-models')
   stops.push(sync.startUiPreferencesSync(bridgeFor(file, { slow: true })))
   toggleFavoriteModel('mine', 'new')
-  await tick(800)
-
-  expect(JSON.parse(readUiPreferences(file).values[FAVORITES] ?? '[]')).toEqual([
-    'host::kept',
-    'mine::new',
-    'host::added'
-  ])
+  await vi.waitFor(
+    () => {
+      expect(JSON.parse(readUiPreferences(file).values[FAVORITES] ?? '[]')).toEqual([
+        'host::kept',
+        'mine::new',
+        'host::added'
+      ])
+    },
+    { timeout: 5000 }
+  )
 })

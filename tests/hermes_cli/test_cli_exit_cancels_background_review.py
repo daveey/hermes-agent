@@ -26,8 +26,12 @@ REPO = Path(__file__).resolve().parents[2]
 # way the real CLI's MCP and terminal teardown did (4.4 s on the MacBook).
 _SCRIPT = textwrap.dedent(
     """
-    import atexit, concurrent.futures, sys, threading, time
+    import atexit, sys, threading, time
     sys.path.insert(0, {repo!r})
+    # Warm the real tool executor before exit, matching a session that already ran tools.
+    # Its inherited submit then reproduces "cannot schedule new futures", rather than a
+    # lazy concurrent.futures import failing with "can't register atexit after shutdown".
+    from tools.daemon_pool import DaemonThreadPoolExecutor
     import cli
     from agent.background_review import finish_background_review_run, prepare_background_review_run
 
@@ -57,7 +61,7 @@ _SCRIPT = textwrap.dedent(
                 print("REVIEW_STOPPED_BEFORE_TOOLS", flush=True)
                 return
             try:
-                with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                with DaemonThreadPoolExecutor(1) as pool:
                     pool.submit(lambda: None).result()
                 print("TOOL_DISPATCHED", flush=True)
             except RuntimeError as exc:

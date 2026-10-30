@@ -669,10 +669,13 @@ def test_sweep_settles_a_dead_holder_claim_whose_card_left_that_state(tmp_path):
         assert not any(ROW_842_TASK in (m.get("content") or "") for m in db.get_messages(CHAT))  # no stale text
 
     row = _ledger_row(ledger, CHAT, f"hub/{moved['key']}")
-    assert (row["delivered"], row["holder_pid"], row["holder_start"], row.get("settled")) == (1, None, None, "stale")
+    # [daveey] SETTLED, not DELIVERED: no transcript row was written (MacBook row 842 was re-settled as delivered=1
+    # with swept reason=delivered at 23:34 PDT 2026-10-29, after 9eb41135c6 made delivered=1 mean "in the transcript").
+    assert (row["delivered"], row["holder_pid"], row["holder_start"], row.get("settled")) == (
+        krn.SETTLED, None, None, "stale")
     with sqlite3.connect(ledger) as c:
-        swept = c.execute("SELECT replica, profile, session, notice_id FROM swept").fetchall()
-    assert swept == [(str(replica), "default", CHAT, f"remote:hub:{moved['key']}:{state}:default:{CHAT}")]
+        swept = c.execute("SELECT replica, profile, session, notice_id, reason FROM swept").fetchall()
+    assert swept == [(str(replica), "default", CHAT, f"remote:hub:{moved['key']}:{state}:default:{CHAT}", "stale")]
     for card, pid in ((held, dead), (alive, me)):
         other = _ledger_row(ledger, CHAT, f"hub/{card['key']}")
         assert (other["delivered"], other["holder_pid"], other.get("settled")) == (0, pid, None)
@@ -680,3 +683,37 @@ def test_sweep_settles_a_dead_holder_claim_whose_card_left_that_state(tmp_path):
     # Idempotent; the still-terminal row stays with collect's dead-holder re-offer path.
     sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger, now=now)
     assert _ledger_row(ledger, CHAT, f"hub/{held['key']}")["delivered"] == 0
+
+
+def test_every_delivered_ack_has_a_transcript_row_after_a_stale_settle(tmp_path):
+    """[daveey] The ledger invariant the readback checks: a ``delivered=1`` row is a notice in the chat. A stale
+    settle writes no row, so it must leave no DELIVERED row and no ``swept`` row claiming a delivery."""
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = ROW_842_BLOCKED_AT + 30 * 3600.0
+    moved = _card(ROW_842_TASK, CHAT, status="ready", at=ROW_842_BLOCKED_AT)
+    replica = _hub(tmp_path, [moved])
+    ledger = tmp_path / "remote-notices.db"
+    state = f"blocked@{ROW_842_BLOCKED_AT}"
+    krn._reset_for_tests()
+    conn = krn._ledger(ledger)
+    with conn:
+        conn.execute("INSERT INTO notices (session, ref, state, at, delivered, holder_pid, holder_start, notice_key, "
+                     "legacy_seen) VALUES (?,?,?,?,0,?,NULL,?,1)",
+                     (CHAT, f"hub/{moved['key']}", state, ROW_842_BLOCKED_AT + 5, _dead_pid(),
+                      f"remote:hub:{moved['key']}:{state}:default:{CHAT}"))
+    conn.close()
+
+    db, opener = _sweep_db(tmp_path, (CHAT,))
+    with db:
+        sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger, now=now)
+        transcript = [m for m in db.get_messages(CHAT) if m.get("display_kind") == "kanban_notice"]
+    with sqlite3.connect(ledger) as c:
+        acks = c.execute("SELECT count(*) FROM notices WHERE delivered=?", (krn.DELIVERED,)).fetchone()[0]
+        reasons = [r for (r,) in c.execute("SELECT reason FROM swept")]
+    assert transcript == []
+    assert acks == len(transcript) == 0
+    assert reasons == ["stale"]
+    # Settled for every reader: the ledger skip used by the sweep and collect treats it as done.
+    with contextlib.closing(krn._ledger(ledger)) as c:
+        assert krn._ledger_settled(c, (CHAT,), f"hub/{moved['key']}", state)

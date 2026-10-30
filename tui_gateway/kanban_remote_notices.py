@@ -564,7 +564,9 @@ def _load_swept(ledger: Optional[Path]) -> None:
         logger.debug("remote notice ledger unreadable; delivered notices kept in memory only", exc_info=True)
 
 
-def _record_swept(keys: list[tuple], ledger: Optional[Path], reason: str = "delivered") -> None:
+def _record_swept(keys: list[tuple], ledger: Optional[Path], *, reason: str) -> None:
+    """[daveey] ``reason`` has no default: a settle that wrote no notice must say so (stale/placeholder), never
+    inherit ``delivered``."""
     if not keys:
         return
     try:
@@ -660,9 +662,11 @@ def _settle_stale_claims(rows: list[tuple], path, ledger) -> int:
     ``collect`` and the sweep only walk cards that are terminal NOW, so a claim whose holder died after the card
     moved on (blocked, then unblocked or rescheduled) was never looked at again: it sat ``delivered=0`` with a dead
     holder forever and showed up in every audit (MacBook row 842, t_01a18622e706e70a, held >24 h). Such a row is
-    acked as stale (``delivered=1``, holder cleared, ``settled='stale'``) and recorded in ``swept``. Its text is
-    never delivered: it describes a state the card is no longer in. A live holder, a card still in that state
-    (the re-offer path owns it) and a card missing from the replica (partial sync) are left alone. Never raises.
+    settled as stale (``delivered=SETTLED``, holder cleared, ``settled='stale'``) with a ``swept`` row of reason
+    ``stale`` in the same transaction. Its text is never delivered: it describes a state the card is no longer in,
+    so it never counts as DELIVERED (that means "in the transcript"; row 842 was re-settled as delivered=1 with
+    swept reason=delivered after 9eb41135c6). A live holder, a card still in that state (the re-offer path owns
+    it) and a card missing from the replica (partial sync) are left alone. Never raises.
     """
     try:
         states = _current_states(rows)
@@ -671,32 +675,31 @@ def _settle_stale_claims(rows: list[tuple], path, ledger) -> int:
             claims = conn.execute(
                 "SELECT session, ref, state, holder_pid, holder_start, notice_key FROM notices "
                 "WHERE delivered=0 AND holder_pid IS NOT NULL").fetchall()
-            keys, settled = [], 0
+            settled = 0
             for row in claims:
                 current = states.get(str(row["ref"]))
                 if current is None or current[0] == row["state"]:
                     continue
                 if _holder_is_me(row["holder_pid"]) or _holder_alive(row["holder_pid"], row["holder_start"]):
                     continue
+                profile, notice_id = _stale_notice_id(row, current[1])
+                swept_key = (str(path), profile, str(row["session"]), notice_id)
                 with conn:
                     cur = conn.execute(
-                        "UPDATE notices SET delivered=1, holder_pid=NULL, holder_start=NULL, legacy_seen=1, "
+                        "UPDATE notices SET delivered=?, holder_pid=NULL, holder_start=NULL, legacy_seen=1, "
                         "settled='stale', notice_key=IFNULL(notice_key, ?) WHERE session=? AND ref=? AND state=? "
                         "AND delivered=0 AND holder_pid IS ?",
-                        (f"stale:{row['ref']}:{row['state']}", row["session"], row["ref"], row["state"],
+                        (SETTLED, f"stale:{row['ref']}:{row['state']}", row["session"], row["ref"], row["state"],
                          row["holder_pid"]))
+                    if cur.rowcount == 1:
+                        _swept_row(conn, swept_key, "stale")
                 if cur.rowcount != 1:
                     continue
                 settled += 1
-                profile, notice_id = _stale_notice_id(row, current[1])
-                keys.append((str(path), profile, str(row["session"]), notice_id))
                 logger.info("remote kanban: settled stale claim %s %s for chat %s (holder %s dead, card now %s)",
                             row["ref"], row["state"], row["session"], row["holder_pid"], current[0])
         finally:
             conn.close()
-        _record_swept(keys, ledger)
-        for key in keys:
-            _remember_delivered(key)
         return settled
     except Exception:
         logger.debug("remote kanban stale-claim settle failed", exc_info=True)
@@ -742,7 +745,7 @@ def _sweep_cards(rows: list[tuple], me: str):
 def _settle_claim(claim: dict, memo_key: tuple, ledger) -> None:
     """The notice reached the chat (a started turn or a written row): ledger delivered, memo and ``swept`` set."""
     ack(claim, ledger=ledger)
-    _record_swept([memo_key], ledger)
+    _record_swept([memo_key], ledger, reason="delivered")
     _remember_delivered(memo_key)
 
 
@@ -914,5 +917,5 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
             logger.info("remote kanban sweep: %d linked terminal card(s) older than %.0fh not announced",
                         stale, FRESH_S / 3600)
     finally:
-        _record_swept(swept, ledger)
+        _record_swept(swept, ledger, reason="delivered")
     return delivered

@@ -39,7 +39,10 @@ jobs:
       - name: Install zsh and a virtual display for Electron
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -qq
+          # tfgar AMIs are baked in us-west-2; cloud-init rewrites apt sources to
+          # the regional mirror on boot, so baked lists are stale (#259). Fail on
+          # any partial index fetch instead of installing against stale lists.
+          sudo apt-get update --error-on=any
           sudo apt-get install -y zsh xvfb \
             libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
             xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64

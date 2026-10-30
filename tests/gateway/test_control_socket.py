@@ -228,7 +228,89 @@ def test_stale_socket_file_is_replaced_on_bind(home: Path):
         finally:
             await server.stop()
 
-    assert _run(scenario()) == {"pid": 7}
+    try:
+        assert _run(scenario()) == {"pid": 7}
+    finally:
+        if bind.parent != home:  # the test made this fallback dir, so the server must leave it
+            bind.parent.rmdir()
+
+
+def _long_home(tmp_path: Path) -> Path:
+    deep = tmp_path / ("x" * 120) / ".hermes"
+    deep.mkdir(parents=True)
+    return deep
+
+
+def _start_stop(home: Path) -> Path:
+    async def scenario():
+        server = GatewayControlServer(home, verb_handlers={"identify": lambda: {"pid": 1}})
+        assert await server.start()
+        bind = server._bind_path
+        assert bind is not None and bind.exists()
+        await server.stop()
+        return bind
+
+    return _run(scenario())
+
+
+def test_stop_removes_the_fallback_dir_it_created(tmp_path: Path):
+    home = _long_home(tmp_path)
+    bind, pointer = resolve_server_socket_path(home)
+    assert pointer is not None and not bind.parent.exists()
+    try:
+        assert _start_stop(home) == bind
+        assert not bind.parent.exists()  # no hermes-gw-<hash> dir left behind
+        assert not pointer.exists()
+    finally:
+        if bind.parent.exists():
+            bind.parent.rmdir()
+
+
+def test_stop_keeps_a_fallback_dir_it_did_not_create(tmp_path: Path):
+    home = _long_home(tmp_path)
+    bind, _ = resolve_server_socket_path(home)
+    bind.parent.mkdir(mode=0o700)  # pre-existing (e.g. another process made it)
+    try:
+        assert _start_stop(home) == bind
+        assert bind.parent.is_dir() and not bind.exists()
+    finally:
+        bind.parent.rmdir()
+
+
+def test_stop_keeps_a_fallback_dir_replaced_or_refilled_after_start(tmp_path: Path):
+    home = _long_home(tmp_path)
+    bind, _ = resolve_server_socket_path(home)
+
+    async def scenario(mutate):
+        server = GatewayControlServer(home, verb_handlers={"identify": lambda: {"pid": 1}})
+        assert await server.start()
+        assert server._bind_path is not None
+        mutate(server._bind_path.parent)
+        await server.stop()
+
+    # A file someone else dropped into the dir keeps it (only an empty dir is removed).
+    try:
+        _run(scenario(lambda d: (d / "other").touch()))
+        assert (bind.parent / "other").exists()
+    finally:
+        (bind.parent / "other").unlink()
+        bind.parent.rmdir()
+
+    # A dir swapped for a different inode at the same name is not ours to remove.
+    def swap(d: Path):
+        d.rename(d.with_name(d.name + "-moved"))
+        d.mkdir(mode=0o700)
+
+    moved = bind.parent.with_name(bind.parent.name + "-moved")
+    try:
+        _run(scenario(swap))
+        assert bind.parent.is_dir()
+    finally:
+        for d in (bind.parent, moved):
+            for child in d.iterdir() if d.exists() else ():
+                child.unlink()
+            if d.exists():
+                d.rmdir()
 
 
 @pytest.fixture()

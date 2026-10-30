@@ -52,7 +52,9 @@ class _Child:
             if self.outcome == "slow":
                 assert self.interrupted.wait(5), "child never received stop"
                 self.unwinding.set()
-                assert self.allow_finish.wait(5), "child teardown was not released"
+                # Keep teardown bounded, but outlast a throttled parent's observation.
+                # The fixture also releases this gate on assertion failure.
+                assert self.allow_finish.wait(60), "child teardown was not released"
                 return {"final_response": "partial", "completed": False,
                         "interrupted": True, "api_calls": 1, "messages": []}
             if self.outcome == "error":

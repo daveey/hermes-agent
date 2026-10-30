@@ -100,6 +100,15 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            # Every derivation builds in Nix's namespace sandbox, and Nix
+            # refuses to build at all when the runner cannot provide one.
+            # Nix's default fallback builds unsandboxed instead, and then the
+            # host /lib64 loader is visible to the builder, so pm-packages-exec
+            # (which must prove the binaries run without it) fails or proves
+            # nothing. The docker-ci runners provide the namespaces
+            # (daveey/hermes@state hosts/hermes-ci-capacity/NIX-SANDBOX.md).
+            sandbox = true
+            sandbox-fallback = false
             # A store path that does not substitute is a cache miss and not a
             # build failure. Build it here instead.
             fallback = true
