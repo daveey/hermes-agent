@@ -4065,7 +4065,8 @@ def specify_triage_task(
     return True
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None) -> bool:
+def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None,
+                 event_extra: Optional[dict] = None) -> bool:
     """Archive a task; a *running* task's host-local worker is terminated.
 
     Clearing ``worker_pid`` in the DB alone left the OS process running past its
@@ -4103,6 +4104,8 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
         payload = {"source_status": row["status"]}
         if via:
             payload["via"] = via  # archived outside the creator scope (stranded-runs_on sweep) [daveey]
+        if event_extra:
+            payload.update(event_extra)  # e.g. the forwarding worker's run (kanban_owner_archive_relay) [daveey]
         _append_event(conn, task_id, "archived", payload, run_id=run_id)
     if was_running:
         termination = _terminate_reclaimed_worker(prev_pid, prev_lock, signal_fn=signal_fn, started_at=prev_started)
