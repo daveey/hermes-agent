@@ -278,5 +278,12 @@ async def http_lifespan(app: FastAPI):
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     lifespan = http_lifespan if getattr(app.state, "gateway_runner", None) is not None else standalone_lifespan
-    async with lifespan(app):
-        yield
+    # A dashboard serves many requests/s: a slow gateway ``identify`` must not be re-paid on each
+    # (stale-while-revalidate for the host-gateway memo; CLI processes keep the synchronous TTL).
+    from gateway import host_attach
+    host_attach.enable_stale_while_revalidate()
+    try:
+        async with lifespan(app):
+            yield
+    finally:
+        host_attach.enable_stale_while_revalidate(False)

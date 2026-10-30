@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,6 +219,46 @@ def _probe_host_gateway(wait_for_channel: float) -> Optional[HostGateway]:
     return HostGateway(record.pid, home, (), served_known=False)
 
 
+#: A dashboard process answers many requests per second and must not pay a slow ``identify`` (the
+#: control-socket client timeout, ~2 s) on each one. ``enable_stale_while_revalidate`` opts a
+#: long-lived process in: an expired memo younger than ``HOST_GATEWAY_MAX_STALE_S`` is served as-is
+#: while ONE background thread re-probes. CLI/lifecycle processes never opt in and keep the
+#: synchronous TTL semantics; record writes still invalidate eagerly in every process.
+HOST_GATEWAY_MAX_STALE_S = 30.0
+_stale_while_revalidate = False
+_refresh_lock = threading.Lock()
+_refresh_running = False
+
+
+def enable_stale_while_revalidate(enabled: bool = True) -> None:
+    global _stale_while_revalidate
+    _stale_while_revalidate = enabled
+
+
+def _refresh_probe_in_background() -> None:
+    global _refresh_running
+    with _refresh_lock:
+        if _refresh_running:
+            return
+        _refresh_running = True
+
+    def _run() -> None:
+        global _cached_probe, _refresh_running
+        try:
+            stamp = _cached_probe
+            result = _probe_host_gateway(0.0)
+            # A record write during the probe invalidated the memo; do not resurrect a stale answer.
+            if _cached_probe is stamp:
+                _cached_probe = (time.monotonic(), result)
+        except Exception:
+            logger.debug("host gateway background re-probe failed", exc_info=True)
+        finally:
+            with _refresh_lock:
+                _refresh_running = False
+
+    threading.Thread(target=_run, name="host-gateway-reprobe", daemon=True).start()
+
+
 def host_gateway(*, wait_for_channel: float = 0.0) -> Optional[HostGateway]:
     """The one live host gateway, or ``None``.
 
@@ -226,8 +267,14 @@ def host_gateway(*, wait_for_channel: float = 0.0) -> Optional[HostGateway]:
     """
     global _cached_probe
     now = time.monotonic()
-    if wait_for_channel <= 0 and _cached_probe is not None and now - _cached_probe[0] < HOST_GATEWAY_CACHE_TTL_S:
-        return _cached_probe[1]
+    cached = _cached_probe
+    if wait_for_channel <= 0 and cached is not None:
+        age = now - cached[0]
+        if age < HOST_GATEWAY_CACHE_TTL_S:
+            return cached[1]
+        if _stale_while_revalidate and age < HOST_GATEWAY_MAX_STALE_S:
+            _refresh_probe_in_background()
+            return cached[1]
     result = _probe_host_gateway(wait_for_channel)
     _cached_probe = (time.monotonic(), result)
     return result

@@ -36,6 +36,19 @@ _MAX_UNIX_PATH = 100  # sun_path limit is 104 on macOS/BSD, 108 on Linux; margin
 _MAX_REQUEST_BYTES = 64 * 1024
 _MAX_RESPONSE_BYTES = 512 * 1024
 _DEFAULT_CLIENT_TIMEOUT = 2.0
+# Control verbs run on their own small pool, never the loop's default executor: that pool is shared
+# with every other ``run_in_executor(None, ...)`` in the gateway, and an ``identify`` queued behind a
+# burst of them blows the 2 s client budget while the gateway is perfectly healthy.
+_CONTROL_EXECUTOR = None
+
+
+def _control_executor():
+    global _CONTROL_EXECUTOR
+    if _CONTROL_EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _CONTROL_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="control-socket")
+    return _CONTROL_EXECUTOR
 # What a filesystem that cannot host an AF_UNIX node answers: a Docker Desktop (virtiofs) bind mount
 # refuses the socket, and an inode a previous container left there can be neither stat'ed nor
 # removed from inside (#123761). Not EADDRINUSE: a live sibling must keep failing loudly.
@@ -509,7 +522,7 @@ class GatewayControlServer:
             # Handlers read disk; keep that off the loop that drives every platform
             # adapter so a fast-polling consumer can't stall heartbeats.
             response = await asyncio.get_running_loop().run_in_executor(
-                None, self.handle_request_line, raw.rstrip(b"\n"), self._posix_peer_subject(writer))
+                _control_executor(), self.handle_request_line, raw.rstrip(b"\n"), self._posix_peer_subject(writer))
             writer.write(response)
             await asyncio.wait_for(writer.drain(), timeout=_DEFAULT_CLIENT_TIMEOUT)
         except (TimeoutError, ConnectionError, OSError):
