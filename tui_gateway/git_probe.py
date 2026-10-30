@@ -16,7 +16,11 @@ from hermes_cli._subprocess_compat import bounded_git_probe
 
 _GIT_TIMEOUT = 1.5
 _WARM_WORKERS = 8
-_NEG_TTL = 30.0  # "not a git repo" TTL: a fresh `git init` shows within seconds
+# "not a git repo" TTL. A negative is also dropped as soon as the cwd's own mtime moves (``git init``
+# creates ``.git`` there), so the TTL only bounds rarer cases such as a parent dir becoming a repo.
+# At 30 s, every sidebar/project poll re-spawned ``git`` for each of hundreds of non-repo session
+# cwds (kanban scratch dirs) twice a minute, a top idle cost of Desktop backends.
+_NEG_TTL = 300.0
 
 
 def run_git(cwd: str, *args: str) -> str:
@@ -45,7 +49,7 @@ class _RootCache:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._roots: dict[str, str] = {}
-        self._neg: dict[str, float] = {}  # key -> monotonic expiry
+        self._neg: dict[str, tuple[float, object]] = {}  # key -> (monotonic expiry, dir stamp)
         self._inflight: dict[str, threading.Event] = {}
 
     def invalidate(self) -> None:
@@ -54,16 +58,21 @@ class _RootCache:
             self._neg.clear()
             self._inflight.clear()
 
-    def resolve(self, key: str, probe) -> str:
+    def resolve(self, key: str, probe, cwd: str = "") -> str:
         while True:
             with self._lock:
                 if hit := self._roots.get(key):
                     return hit
-                expiry = self._neg.get(key)
-                if expiry is not None:
-                    if expiry > time.monotonic():
-                        return ""  # recent "not a repo": trust it briefly
-                    del self._neg[key]  # TTL elapsed: re-probe (may be a repo now)
+                neg = self._neg.get(key)
+            if neg is not None:
+                stamp = _dir_stamp(cwd)
+                with self._lock:
+                    if neg[0] > time.monotonic() and neg[1] == stamp:
+                        return ""  # recent "not a repo" and the dir has not changed: trust it
+                    self._neg.pop(key, None)  # TTL elapsed or dir moved: re-probe (may be a repo now)
+            with self._lock:
+                if hit := self._roots.get(key):
+                    return hit
                 gate = self._inflight.get(key)
                 leader = gate is None
                 if leader:
@@ -72,6 +81,7 @@ class _RootCache:
                 gate.wait(timeout=_GIT_TIMEOUT + 0.5)
                 continue
             value = ""
+            stamp = _dir_stamp(cwd)
             try:
                 value = probe()
             finally:
@@ -79,10 +89,20 @@ class _RootCache:
                     if value:
                         self._roots[key] = value
                     else:
-                        self._neg[key] = time.monotonic() + _NEG_TTL
+                        self._neg[key] = (time.monotonic() + _NEG_TTL, stamp)
                     self._inflight.pop(key, None)
                 gate.set()
             return value
+
+
+def _dir_stamp(cwd: str) -> object:
+    """``cwd``'s mtime (``None`` when missing): ``git init`` there moves it."""
+    if not cwd:
+        return None
+    try:
+        return os.stat(cwd).st_mtime_ns
+    except OSError:
+        return None
 
 
 _cache = _RootCache()
@@ -95,7 +115,7 @@ def invalidate() -> None:
 
 def repo_root(cwd: str) -> str:
     """Top-level git repo root for ``cwd`` (``""`` when not a repo)."""
-    return _cache.resolve(cwd, lambda: run_git(cwd, "rev-parse", "--show-toplevel")) if cwd else ""
+    return _cache.resolve(cwd, lambda: run_git(cwd, "rev-parse", "--show-toplevel"), cwd) if cwd else ""
 
 
 def common_repo_root(cwd: str) -> str:
@@ -116,7 +136,7 @@ def common_repo_root(cwd: str) -> str:
                 return os.path.dirname(gitdir).replace(os.sep, "/")
         return repo_root(cwd)
 
-    return _cache.resolve(f"common:{cwd}", _probe)
+    return _cache.resolve(f"common:{cwd}", _probe, cwd)
 
 
 def resolve(cwd: str) -> dict | None:

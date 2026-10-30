@@ -586,10 +586,11 @@ def _record_swept(keys: list[tuple], ledger: Optional[Path], *, reason: str) -> 
 
 def _reset_for_tests() -> None:
     """Forget this process's memos, as a restarted backend would (the ledger file stays)."""
-    from tui_gateway.kanban_remote_observations import _memo
+    from tui_gateway.kanban_remote_observations import _decoded, _memo
 
     global _index_memo
     _memo.clear()
+    _decoded.clear()
     _index_memo = None
     _delivered.clear()
     _swept_loaded.clear()
