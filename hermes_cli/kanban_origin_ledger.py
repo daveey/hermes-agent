@@ -189,7 +189,7 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
             # The event preview hides FINAL SEND blocks (public_summary), so accept that form of the first line too.
             from hermes_cli.kanban_final_send import public_summary
             evidence_ok = isinstance(judged, str) and (judged == recorded or (
-                recorded in (_first_line(judged, 400), _first_line(public_summary(judged), 400) or '')
+                recorded in (_first_line(judged, 400).strip(), (_first_line(public_summary(judged), 400) or '').strip())
                 and run is not None and run[0] == event[1]
                 and judged == (run[4] or '').strip()))
             goal_verified = bool(isinstance(subject, dict) and proof.get('snapshot') == digest(subject)

@@ -95,7 +95,13 @@ def test_receipt_verified_card_keeps_the_lifecycle_basis(board):
     assert 'basis' not in evidence  # unchanged observations publish identical records
 
 
-@pytest.mark.parametrize('summary', ['x' * 750, 'Delivered.\n\nDetails line two', '  padded summary  '])
+@pytest.mark.parametrize('summary', ['x' * 750, 'Delivered.\n\nDetails line two', '  padded summary  ',
+    # The 400-char cut lands right after a space: the event preview ends in 'a', the cut line ends in ' '.
+    'a' * 399 + ' ' + 'b' * 300,
+    # Same cut through the FINAL SEND-hiding public preview.
+    'a' * 399 + ' ' + 'b' * 300 + '\nFINAL SEND for @session:default/20261026_abc: hello',
+    # Cut after a space on the first line of a multi-line handoff.
+    'a' * 399 + ' c\nsecond line'])
 def test_receipt_binds_the_full_handoff_not_the_events_first_line(board, summary):
     """The completed event keeps only the summary's first line (400 chars); the receipt binds the whole handoff."""
     with kbc.connect_closing() as conn:
