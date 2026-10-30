@@ -231,6 +231,47 @@ def _holder_alive(pid, start) -> bool:
     return pid is not None and _holder_alive({"inflight_pid": pid, "inflight_start": start})
 
 
+# [daveey] Claims this process holds for a woken turn whose row was not yet durable at admission
+# (``_settle_started``): ``{(session, ref, state): live session dict}``. The dict is the woken turn's own record,
+# held by reference (a compaction may re-key the chat mid-turn); its ``running`` flag is set at admission
+# (``_notif_claim_turn``) and cleared when the turn ends, row or not. In-process only: a dead holder is the
+# successor's dead-holder path. Without it the claim waited for this process to exit when the turn ended with no
+# row (t_01a18c287684accd). No wall-clock timeout: a slow turn that writes the row late is never duplicated.
+_woken: dict[tuple, dict] = {}
+_woken_lock = threading.Lock()
+
+
+def _track_woken(claim_id: tuple, session: dict) -> None:
+    with _woken_lock:
+        _woken[claim_id] = session
+
+
+def _woken_turn_ended(claim_id: tuple) -> bool:
+    """True when this process woke a turn for ``claim_id`` and that chat has no running turn now."""
+    with _woken_lock:
+        session = _woken.get(claim_id)
+    return session is not None and not session.get("running")
+
+
+def _forget_woken(claim_id: tuple) -> bool:
+    """Drop the tracked wake; True for the one caller that removed it (so a claim is re-offered once)."""
+    with _woken_lock:
+        return _woken.pop(claim_id, None) is not None
+
+
+def _live_woken_session(*keys: str) -> Optional[dict]:
+    """The live session dict this process holds for the woken chat (any of ``keys``), else None."""
+    try:
+        from tui_gateway import server
+        for key in keys:
+            live = server._find_live_session_by_key(key) if key else None
+            if live is not None:
+                return live[1]
+    except Exception:
+        logger.debug("remote kanban: live session lookup for a woken chat failed", exc_info=True)
+    return None
+
+
 def notice_in_transcript(db, session_id: str, notice_key: str, task_id: str) -> bool:
     """True when this chat's compression lineage already has the notice (keyed row, or a legacy
     ``Kanban <id>`` line). Reuses ``kanban_notice_keys_delivered`` — the local at-least-once dedup."""
@@ -372,7 +413,11 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
         # [daveey] This process's own claim: a woken turn was admitted and its row is written later, on the
         # turn thread (``_settle_started`` leaves the claim in flight until then). Ack it once its own key is
         # in the transcript; until then it stays in flight, and a death re-offers it below in the successor.
+        # A woken turn that already ENDED without the row (context refused, an error before the persist) is
+        # re-offered here, once: its running flag is read BEFORE the transcript check, so a row the turn wrote
+        # before it ended is always seen and acked instead.
         key = notice_key or row["notice_key"] or ""
+        ended = _woken_turn_ended((session, ref, state))
         if key and transcript_has is not None and transcript_has(key, ""):
             with conn:
                 cur = conn.execute(
@@ -382,9 +427,14 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
                 if cur.rowcount == 1:
                     _swept_row(conn, swept_key, "delivered")
             if cur.rowcount == 1:
+                _forget_woken((session, ref, state))
                 logger.info("remote kanban: started turn's notice %s %s for chat %s is in the transcript; acked",
                             ref, state, session)
                 return "acked"
+        if ended and key and transcript_has is not None and _forget_woken((session, ref, state)):
+            logger.info("remote kanban: woken turn for notice %s %s in chat %s ended without its row; "
+                        "re-offering", ref, state, session)
+            return "offer"
         return "skip"
     if _holder_alive(holder, row["holder_start"]):
         return "skip"
@@ -481,6 +531,7 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
 
 def ack(claim: dict, *, ledger: Optional[Path] = None) -> bool:
     """The notice is in the transcript: the in-flight row is delivered. Idempotent."""
+    _forget_woken((claim.get("session"), claim.get("ref"), claim.get("state")))
     try:
         conn = _ledger(ledger)
         try:
@@ -613,6 +664,8 @@ def _reset_for_tests() -> None:
     _delivered.clear()
     _swept_loaded.clear()
     _last_stale.clear()
+    with _woken_lock:
+        _woken.clear()
 
 
 logger = logging.getLogger(__name__)
@@ -779,7 +832,13 @@ def _settle_started(session_db, profile: str, sid: str, event_key: str, claim: d
     backend that died in between lost the notice for good (the failure class of ledger row 1245). A claim left
     in flight is acked by this process's next pass once the key lands (``_claim_notice``, holder-is-me branch:
     the sweep, or ``collect`` once the woken chat is live here); if this process dies first, the successor's
-    dead-holder check finds no key in the transcript and re-offers it. Never raises."""
+    dead-holder check finds no key in the transcript and re-offers it. Never raises.
+
+    [daveey] The claim also follows the woken turn (``_track_woken``): the live session is looked up BEFORE the
+    transcript check, so a turn that ends with no row (context refused, an error before the persist) is
+    re-offered by this process's next pass instead of waiting for the backend to exit."""
+    tip = None
+    session = _live_woken_session(sid)
     try:
         with session_db(profile, sid) as (db, tip):
             durable = db is not None and notice_in_transcript(db, tip, event_key, "")
@@ -789,6 +848,12 @@ def _settle_started(session_db, profile: str, sid: str, event_key: str, claim: d
     if durable:
         _settle_claim(claim, memo_key, ledger)
         return True
+    session = session or (_live_woken_session(tip) if tip and tip != sid else None)
+    if session is not None:
+        _track_woken((claim["session"], claim["ref"], claim["state"]), session)
+    else:
+        logger.info("remote kanban notice %s %s: woken chat %s is not live here; claim waits for its row or this "
+                    "backend's exit", claim["ref"], claim["state"], sid)
     logger.info("remote kanban notice %s %s for chat %s: turn admitted, row not yet written; claim stays in "
                 "flight until it is", claim["ref"], claim["state"], sid)
     return False

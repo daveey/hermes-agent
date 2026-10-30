@@ -274,3 +274,113 @@ def test_started_turn_whose_row_landed_is_acked_in_the_same_pass(home, monkeypat
     assert len(wakes) == 1 and len(_notice_rows()) == 1
     assert _ledger(ref)["delivered"] == krn.DELIVERED
     assert _swept_reason(wakes[0][2]["notice_id"]) == "delivered"
+
+
+# [daveey] A woken turn can END without ever writing its notice row while this backend stays up
+# (``_prepare_turn_input`` refusing the context, an exception before the persist). The claim's holder is this
+# live process, so neither the holder-is-me ack nor the dead-holder re-offer ever fired: delivered=0 until the
+# backend exited, hours later (t_01a18c287684accd). The claim now follows the woken turn: once that chat has no
+# running turn and the key is still not in the transcript, this process re-offers it. A turn that is still
+# running is left alone (no wall-clock timeout: a slow turn's late row must not be duplicated).
+
+@pytest.fixture
+def live_chat(monkeypatch):
+    """The woken chat as ``_wake_session_turn`` leaves it: live in this process, its turn admitted (running)."""
+    from tui_gateway import server
+    sessions = {}
+
+    def admit(tip):
+        session = sessions.setdefault(tip, {"session_key": tip, "history_lock": threading.Lock()})
+        session["running"] = True
+        with server._sessions_lock:
+            server._sessions[f"live-{tip}"] = session
+        return session
+
+    yield admit, sessions
+    with server._sessions_lock:
+        for tip in sessions:
+            server._sessions.pop(f"live-{tip}", None)
+
+
+def _one_pass_live(monkeypatch, admit, row_lands=False):
+    """A sweep pass whose wake admits a live turn (running) in this process, like the real ``_wake_session_turn``."""
+    wakes = []
+
+    def wake(tip, text, metadata):
+        wakes.append((tip, text, metadata))
+        admit(tip)
+        if row_lands:
+            _turn_writes_row(tip, text, metadata)
+        return "started"
+
+    monkeypatch.setattr(ku, "wake_turn", wake)
+    monkeypatch.setattr(ku, "_spawn_thread", lambda job: (job(), "dispatched")[1])
+    stop = threading.Event()
+    monkeypatch.setattr(ku, "sweep_once", lambda *a, **k: stop.set() or [])
+    ku._loop(stop)
+    return wakes
+
+
+def _poll(now=None):
+    with SessionDB(get_hermes_home() / "state.db") as db:
+        return krn.collect(CHAT, "default", now=now or time.time(),
+                           transcript_has=lambda key, tid: krn.notice_in_transcript(db, CHAT, key, tid))
+
+
+def test_woken_turn_that_ended_without_its_row_is_reoffered_to_the_live_poller(home, monkeypatch, live_chat):
+    """RED before: the turn ended with no row, the chat stays live here, and the claim sat in flight."""
+    admit, sessions = live_chat
+    ref = "hub/default/default/t_refused_ctx"
+    _publish(home, [_done("t_refused_ctx", time.time() - 90)])
+    assert len(_one_pass_live(monkeypatch, admit)) == 1
+    assert _ledger(ref)["delivered"] == 0
+
+    sessions[CHAT]["running"] = False  # the turn ended ("Context injection refused") without persisting the row
+
+    got = _poll()
+    assert [item["ref"] for item in got] == [ref]
+    assert got[0]["event_key"] == "remote:hub:default/default/t_refused_ctx:81053"
+    assert _ledger(ref)["delivered"] == 0 and _ledger(ref)["holder_pid"] == os.getpid()
+    # One re-offer: the next poll (the redelivery now in flight) does not offer it again.
+    assert _poll() == []
+
+
+def test_woken_turn_that_ended_without_its_row_is_rewoken_by_the_next_sweep(home, monkeypatch, live_chat):
+    """Same gap when the chat is no longer live here: the next sweep pass in the same process wakes it again, and
+    the second turn's row is acked: one row, DELIVERED."""
+    admit, sessions = live_chat
+    ref = "hub/default/default/t_ended_unloaded"
+    _publish(home, [_done("t_ended_unloaded", time.time() - 90)])
+    assert len(_one_pass_live(monkeypatch, admit)) == 1
+    sessions[CHAT]["running"] = False
+    from tui_gateway import server
+    with server._sessions_lock:
+        server._sessions.pop(f"live-{CHAT}")  # the chat was unloaded after its turn
+
+    wakes = _one_pass_live(monkeypatch, admit, row_lands=True)
+
+    assert [w[0] for w in wakes] == [CHAT]
+    assert len(_notice_rows()) == 1
+    assert _ledger(ref)["delivered"] == krn.DELIVERED
+
+
+def test_woken_turn_still_running_without_its_row_is_not_reoffered(home, monkeypatch, live_chat):
+    """Control: the admitted turn is still running and has not written its row yet: no re-offer, no second wake,
+    claim still in flight; once its row lands it is acked with exactly one row."""
+    admit, sessions = live_chat
+    ref = "hub/default/default/t_slow_turn"
+    _publish(home, [_done("t_slow_turn", time.time() - 90)])
+    wakes = _one_pass_live(monkeypatch, admit)
+    assert len(wakes) == 1
+
+    assert _poll() == []
+    from tui_gateway import server
+    with server._sessions_lock:
+        server._sessions.pop(f"live-{CHAT}")  # even with the sweep looking, a running turn is not re-woken
+    assert _one_pass_live(monkeypatch, admit) == []
+    assert _ledger(ref)["delivered"] == 0 and _notice_rows() == []
+
+    _turn_writes_row(*wakes[0])  # the slow turn's late write
+    sessions[CHAT]["running"] = False
+    assert _poll() == []
+    assert len(_notice_rows()) == 1 and _ledger(ref)["delivered"] == krn.DELIVERED
