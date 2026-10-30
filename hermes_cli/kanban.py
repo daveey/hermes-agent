@@ -262,7 +262,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review", "reopen",
-    "gc", "origin-bind", "origin-create", "origin-adopt", "sync",
+    "gc", "origin-bind", "origin-create", "origin-adopt", "sync", "supervisor-requests",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
@@ -989,10 +989,18 @@ def _cmd_link(args: argparse.Namespace) -> int:
 
 
 def _cmd_unlink(args: argparse.Namespace) -> int:
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")  # [daveey] same own-card rule as the kanban_unlink tool
+    if env_tid and env_tid not in (args.parent_id, args.child_id):
+        return _err(f"unlink refused: worker {env_tid} may only unlink its own card's edges; use kanban_supervisor_request")
     with kbc.connect_closing() as conn:
         ok = kb.unlink_tasks(conn, args.parent_id, args.child_id)
     return _ok_or_err(ok, f"No such link: {args.parent_id} -> {args.child_id}",
                       f"Unlinked {args.parent_id} -> {args.child_id}")
+
+
+def _cmd_supervisor_requests(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_supervisor_requests import cli_command  # [daveey]
+    return cli_command(args)
 
 
 def _cmd_claim(args: argparse.Namespace) -> int:
@@ -1875,6 +1883,7 @@ _HANDLERS = {
     "reclaim": _cmd_reclaim, "move": _cmd_move, "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,
+    "supervisor-requests": _cmd_supervisor_requests,
     "comment": _cmd_comment, "attach": _cmd_attach,
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
     "complete": _cmd_complete, "edit": _cmd_edit, "reopen": _cmd_reopen, "block": _cmd_block,

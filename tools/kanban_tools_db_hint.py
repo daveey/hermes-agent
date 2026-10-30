@@ -25,6 +25,7 @@ _CLI_ARGS = {
     "kanban_list": "list",
     "kanban_link": "link {parent_id} {child_id}",
     "kanban_unlink": "unlink {parent_id} {child_id}",
+    "kanban_supervisor_request": "supervisor-requests --task {task_id}",
     "kanban_heartbeat": "heartbeat {task_id}",
     "kanban_request_review": 'request-review {task_id} --summary "<summary>"',
 }

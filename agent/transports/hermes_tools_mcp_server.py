@@ -62,6 +62,8 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "kanban_complete", "kanban_block", "kanban_schedule", "kanban_continue", "kanban_move", "kanban_request_review",
     "kanban_request_changes", "kanban_comment",
     "kanban_heartbeat", "kanban_show", "kanban_list",
+    # A worker's graph-edit request to the non-worker supervisor executor. [daveey]
+    "kanban_supervisor_request",
     # Orchestrator-only (the kanban tool gates them on HERMES_KANBAN_TASK unset).
     "kanban_create", "kanban_unblock", "kanban_link", "kanban_unlink",
 )

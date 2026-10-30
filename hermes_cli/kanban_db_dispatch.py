@@ -174,15 +174,13 @@ class DispatchResult:
     reaped_terminal_workers: list[str] = field(default_factory=list)
     """Task ids whose worker outlived its closed run and was terminated by :func:`reap_terminal_workers`."""
     stopped_run_scopes: list[str] = field(default_factory=list)  # ended runs' scopes stopped (kanban_worker_scope) [daveey]
+    supervisor_requests: list = field(default_factory=list)  # (request id, status) executed this tick [daveey]
     spawned: list[tuple[str, str, str]] = field(default_factory=list)
     """``(task_id, assignee, workspace_path)`` triples."""
     skipped_unassigned: list[str] = field(default_factory=list)
-    """Ready task ids with no assignee at all — operator-actionable (usually a
-    misfiled task waiting for routing)."""
+    """Ready task ids with no assignee at all — operator-actionable (usually a misfiled task waiting for routing)."""
     auto_assigned_default: list[str] = field(default_factory=list)
-    """Unassigned task ids that had ``kanban.default_assignee`` applied this
-    tick before spawning, so telemetry/CLI/dashboard can show the dispatcher
-    acting on the fallback rule rather than explicit assignments."""
+    """Unassigned task ids given ``kanban.default_assignee`` this tick (the fallback rule, not an explicit assignment)."""
     skipped_nonspawnable: list[str] = field(default_factory=list)
     """Ready task ids whose assignee names a control-plane lane (e.g. a Claude
     Code terminal like ``orion-cc``), not a Hermes profile. Expected steady-state
@@ -2443,6 +2441,8 @@ def _run_reclaim_phase(
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.reclaimed += len(getattr(detect_crashed_workers, "_last_owner_restarted", []))  # [daveey]
     result.timed_out = enforce_max_runtime(conn)
+    from hermes_cli.kanban_supervisor_requests import dispatcher_drain  # [daveey] non-worker executor
+    result.supervisor_requests = [] if dry_run else dispatcher_drain(conn, board=board)
     from hermes_cli.kanban_continuation import wake_due_continuations
     result.woken_continuations = wake_due_continuations(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)

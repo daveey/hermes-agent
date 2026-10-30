@@ -919,3 +919,42 @@ KANBAN_ARCHIVE_SCHEMA = _schema(
     },
     ["task_id"],
 )
+
+KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
+    "kanban_supervisor_request",
+    (
+        "Ask the board's non-worker supervisor executor (the gateway dispatcher) to "
+        "remove dependency edges between cards THIS task created (or between them "
+        "and this card), which a dispatcher worker may not do itself: kanban_unlink "
+        "only removes this card's own edges. To re-order a graph of cards you "
+        "created, add the new edges yourself with kanban_link and request the "
+        "unlinks here; link ops are accepted only with dry_run, to preview. The request is durable and deduplicated; it stays "
+        "pending until an executor accepts it, then the result (applied / "
+        "failed / rejected, per op) lands on this card as a supervisor_request_* "
+        "event and a comment, and a scheduled card is woken. It never completes or "
+        "unblocks this card. Cards another task created are refused (out_of_scope). "
+        "Pass dry_run=true first to see, per op, whether you can do it yourself "
+        "(self), need the supervisor (supervisor), it is already so (noop), or it "
+        "is refused (cards another task created, cycles), and whether an executor is live. After a real request, park "
+        "with kanban_schedule (or kanban_block kind='time') naming the request id; "
+        "it wakes you on the result."
+    ),
+    {
+        "ops": {
+            "type": "array",
+            "description": "Edge edits, applied in order (max 20).",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["link", "unlink"]},
+                    "parent_id": {"type": "string"},
+                    "child_id": {"type": "string"},
+                },
+                "required": ["op", "parent_id", "child_id"],
+            },
+        },
+        "reason": _prop("string", "Why the graph must change (recorded on the request)."),
+        "dry_run": _prop("boolean", "Only preflight: report per-op verdicts, file nothing."),
+    },
+    ["ops"],
+)

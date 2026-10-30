@@ -33,7 +33,7 @@ from tools.kanban_tools_schemas import (
     KANBAN_COMPLETE_SCHEMA, KANBAN_CONTINUE_SCHEMA, KANBAN_MOVE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_ORIGIN_ADOPT_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_ARCHIVE_SCHEMA,
-    KANBAN_UNLINK_SCHEMA)
+    KANBAN_SUPERVISOR_REQUEST_SCHEMA, KANBAN_UNLINK_SCHEMA)
 
 logger = logging.getLogger(__name__)
 
@@ -914,6 +914,7 @@ def _handle_show(args: dict, **kw) -> str:
             # Capped; full log via CLI.
             "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
             "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
+            "supervisor_requests": _graph.supervisor_requests(conn, tid),  # kanban_supervisor_request
             # Same string build_worker_context hands the dispatcher at spawn time.
             "worker_context": kb.build_worker_context(conn, tid)})
 
@@ -2010,42 +2011,6 @@ def _handle_archive(args: dict, **kw) -> str:
         return _ok(task_id=tid, **out)
 
 
-@_kanban_handler("kanban_link")
-def _handle_link(args: dict, **kw) -> str:
-    """Add a parent→child dependency edge after the fact (cycles/self-links/running
-    children → ValueError). A worker linking its OWN running card proves ownership
-    with its run id so the dependency-block handoff still works."""
-    _reject_delegated_child_mutation("kanban_link")
-    parent_id = args.get("parent_id")
-    child_id = args.get("child_id")
-    _check(parent_id and child_id, "both parent_id and child_id are required")
-    with _board(args.get("board")) as (kb, conn):
-        gated = kb.link_tasks(
-            conn, parent_id=parent_id, child_id=child_id,
-            expected_child_run_id=_worker_run_id(str(child_id)))
-        _maybe_subscribe_on_touch(conn, str(child_id))
-        return _ok(parent_id=parent_id, child_id=child_id, gated=gated,
-                   **({"gated_by": parent_id} if gated else {}))
-
-
-@_kanban_handler("kanban_unlink")
-def _handle_unlink(args: dict, **kw) -> str:
-    """Remove a dependency edge. Same ownership rule as kanban_link: a dispatcher worker
-    edits only its OWN card's edges (it is the child or the parent); orchestrators any."""
-    _reject_delegated_child_mutation("kanban_unlink")
-    parent_id = args.get("parent_id")
-    child_id = args.get("child_id")
-    _check(parent_id and child_id, "both parent_id and child_id are required")
-    parent_id, child_id = str(parent_id), str(child_id)
-    env_tid = os.environ.get("HERMES_KANBAN_TASK")
-    if env_tid and env_tid not in (parent_id, child_id):
-        raise _Reject(f"kanban_unlink refused: this worker owns {env_tid}, not the edge "
-                      f"{parent_id} -> {child_id}; it may only unlink edges of its own card")
-    with _board(args.get("board")) as (kb, conn):
-        _check(kb.unlink_tasks(conn, parent_id, child_id), f"no such link: {parent_id} -> {child_id}")
-        return _ok(parent_id=parent_id, child_id=child_id, unlinked=True)
-
-
 @_kanban_handler("kanban_origin_adopt")
 def _handle_origin_adopt(args: dict, **kw) -> str:
     _reject_delegated_child_mutation("kanban_origin_adopt")
@@ -2083,6 +2048,10 @@ def _handle_origin_adopt(args: dict, **kw) -> str:
 # kanban_list routes the board and is hidden from task workers. kanban_unblock's
 # gate lives in kanban_tools_self_heal (orchestrators, plus a self-heal requeue grant).
 _ORCHESTRATOR_TOOLS = frozenset({"kanban_list"})
+from tools import kanban_tools_graph as _graph
+_handle_link = _kanban_handler("kanban_link")(_graph.handle_link)
+_handle_unlink = _kanban_handler("kanban_unlink")(_graph.handle_unlink)
+_handle_supervisor_request = _kanban_handler("kanban_supervisor_request")(_graph.handle_supervisor_request)
 from tools.kanban_tools_self_heal import check_unblock as _check_kanban_unblock_fn
 from tools.kanban_tools_self_heal import handle_unblock as _handle_unblock_fn
 _check_kanban_unblock = no_cache_check_fn(_check_kanban_unblock_fn)
@@ -2107,6 +2076,7 @@ _TOOLS = (
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"),
     ("kanban_unlink", KANBAN_UNLINK_SCHEMA, _handle_unlink, "✂"),
+    ("kanban_supervisor_request", KANBAN_SUPERVISOR_REQUEST_SCHEMA, _handle_supervisor_request, "🛂"),
     ("kanban_archive", KANBAN_ARCHIVE_SCHEMA, _handle_archive, "🗄"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:

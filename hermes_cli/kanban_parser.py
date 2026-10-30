@@ -382,6 +382,13 @@ _SPECS = [
     ], aliases=["diag"], help="List active diagnostics on the current board"),
     _cmd("link", [_arg("parent_id"), _arg("child_id")], help="Add a parent->child dependency"),
     _cmd("unlink", [_arg("parent_id"), _arg("child_id")], help="Remove a parent->child dependency"),
+    _cmd("supervisor-requests", [
+        _arg("--drain", action="store_true",
+             help="Execute queued requests as this board's non-worker supervisor executor"),
+        _arg("--task", help="Only requests filed by this task id"),
+        _arg("--status", choices=["pending", "accepted", "done", "rejected", "failed"]),
+        _json_flag(help="Emit JSON"),
+    ], help="List (or --drain) graph-edit requests workers filed with kanban_supervisor_request"),
     _cmd("claim", [
         _TASK_ID,
         _arg("--ttl", type=int, default=kb.DEFAULT_CLAIM_TTL_SECONDS, help="Claim TTL in seconds (default: 900)"),
