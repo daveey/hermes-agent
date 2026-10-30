@@ -423,11 +423,10 @@ def _run_task_turns(agent, frame, history, context):
     skills, _loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
     # Pins were validated when the card was created; a later removal must reach the worker,
     # not crash it before it can report or recover the stale prerequisite.
-    warning = ''
-    if missing:
-        from agent.skill_commands import format_missing_skills
+    from hermes_cli.kanban_skill_check import unavailable_pin_note
+    warning = unavailable_pin_note(missing)
+    if warning:
         import logging
-        warning = f'Pinned skills unavailable: {format_missing_skills(missing)}. Do not assume their instructions were loaded.'
         logging.getLogger(__name__).warning('%s', warning)
     prompt = '\n\n'.join(p for p in (skills, warning, context['context'], frame['text']) if p)
     result = agent.run_conversation(prompt, conversation_history=history, turn_author=KANBAN_TURN_AUTHOR)

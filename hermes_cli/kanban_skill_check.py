@@ -56,6 +56,13 @@ def missing_pin_note(missing: list[str]) -> str:
     from agent.delegation_context import is_dispatcher_owned_worker_context
     if not missing or not os.environ.get("HERMES_KANBAN_TASK") or not is_dispatcher_owned_worker_context():
         return ""
+    return unavailable_pin_note(missing)
+
+
+def unavailable_pin_note(missing: list[str]) -> str:
+    """Recovery guidance for a proven dispatcher worker; no ambient owner-process state."""
+    if not missing:
+        return ""
     from agent.skill_commands import format_missing_skills
     return (f"[Kanban: this card pins skills this profile could not load ({format_missing_skills(missing)}). "
             "Work without them if the task allows it; if it cannot be done without them, call kanban_block "

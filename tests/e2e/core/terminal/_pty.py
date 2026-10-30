@@ -58,6 +58,26 @@ def poll(fn: Callable[[], object], *, timeout: float, what: str, interval: float
         time.sleep(interval)
 
 
+def _gateway_runtime_members(pids: set[int]) -> set[int]:
+    """Only live gateways and their exact, still-parented owner-death supervisor may survive /exit."""
+    import shlex
+    import psutil
+    from gateway.status import looks_like_gateway_command_line
+    from hermes_cli.process_identity import _POSIX_SH, _SUPERVISOR_SCRIPT
+
+    gateways = {pid for pid in pids if looks_like_gateway_command_line(cmdline(pid))}
+    allowed = set(gateways)
+    for pid in pids - gateways:
+        try:
+            parent = psutil.Process(pid).ppid()
+            if parent in gateways and shlex.split(cmdline(pid)) == [
+                    _POSIX_SH, str(_SUPERVISOR_SCRIPT), str(os.getpgid(parent))]:
+                allowed.add(pid)
+        except (psutil.NoSuchProcess, ProcessLookupError):
+            pass
+    return allowed
+
+
 def _operator_home() -> Path:
     import pwd
     return Path(pwd.getpwuid(os.getuid()).pw_dir)
@@ -299,12 +319,14 @@ class PtyHermes:
                 except ProcessLookupError:
                     pass
 
-    def leftover_processes(self, timeout: float = 15.0) -> list[str]:
-        """All tracked processes still alive after the viewer and sandbox runtime are stopped."""
+    def leftover_processes(self, timeout: float = 15.0, *, runtime_alive: bool = False) -> list[str]:
+        """After /exit only the shared runtime may remain; after its shutdown nothing may remain."""
         def alive() -> list[int]:
             pids = set(session_members(self.sid))
             # Same pid AND same start time: a recycled pid is not our leftover.
             pids |= {pid for pid, started in self.seen_members if _start_time(pid) == started}
+            if runtime_alive:
+                pids -= _gateway_runtime_members(pids)
             return sorted(pids)
         try:
             poll(lambda: not alive(), timeout=timeout, what="the PTY session to empty")

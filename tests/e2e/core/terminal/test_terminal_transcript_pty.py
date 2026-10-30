@@ -187,6 +187,8 @@ def test_terminal_transcript_integrity(surface: str, scenario: str, tmp_path: Pa
 
             code = term.exit()
             assert code == 0, f"[{surface}/{scenario}] /exit returned {code}\n{term.dump()}"
+            viewer_leftovers = term.leftover_processes(runtime_alive=True)
+            assert not viewer_leftovers, f"[{surface}/{scenario}] viewer processes left after /exit: {viewer_leftovers}"
             # The viewer does not own the shared runtime's lifetime. End our sandbox's gateway
             # gracefully, then require its entire tree (including its supervisor) to be gone.
             term.stop_gateway()
