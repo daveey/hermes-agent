@@ -19,15 +19,25 @@ def _freeze(value):
     return (type(value), value)
 
 
-def coalesced_read(func, *, thread_runner=run_sync):
+def coalesced_read(func, *, thread_runner=run_sync, admission_key=None, max_concurrent=1):
     """Return an async, in-flight-only wrapper around a synchronous read.
 
-    One worker per decorated function/event loop; identical home + bound
-    arguments share its result. Arguments must be hashable or built-in
-    containers of hashable values and must not be mutated during the read.
-    A custom async thread_runner must await the supplied zero-argument callable
-    through a context-preserving threadpool, not abandon running work.
+    Identical home + bound arguments share one in-flight result. Arguments must
+    be hashable or built-in containers of hashable values and must not be
+    mutated during the read. A custom async thread_runner must await the
+    supplied zero-argument callable through a context-preserving threadpool,
+    not abandon running work.
+
+    Admission: by default one worker per decorated function/event loop.
+    ``admission_key(bound_arguments)`` splits admission into groups (e.g. one
+    per kanban board): one read per group at a time, at most ``max_concurrent``
+    groups at once, so a slow read of one resource does not queue reads of
+    another while a burst still holds a bounded number of workers. [daveey]
     """
+    if max_concurrent < 1:
+        raise ValueError("max_concurrent must be >= 1")
+    if admission_key is None and max_concurrent != 1:
+        raise ValueError("max_concurrent needs an admission_key")
     signature = inspect.signature(func)
     hints = get_type_hints(func, include_extras=True)
     signature = signature.replace(
@@ -42,13 +52,22 @@ def coalesced_read(func, *, thread_runner=run_sync):
         loop = asyncio.get_running_loop()
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        key = (str(get_hermes_home()), _freeze(bound.arguments))
-        pending, admission = states.setdefault(loop, ({}, asyncio.Semaphore(1)))
+        home = str(get_hermes_home())
+        key = (home, _freeze(bound.arguments))
+        # Group before the read so a bad key fails this caller, not a shared task.
+        group = None if admission_key is None else (home, _freeze(admission_key(bound.arguments)))
+        pending, admission, groups = states.setdefault(loop, ({}, asyncio.Semaphore(max_concurrent), {}))
         task = pending.get(key)
         if task is None:
+            group_slot = None if group is None else groups.setdefault(group, asyncio.Semaphore(1))
+
             async def execute():
                 try:
-                    async with admission:
+                    # Group first: a read queued behind its own group holds no shared slot.
+                    if group_slot is None:
+                        async with admission:
+                            return await thread_runner(partial(func, *args, **kwargs))
+                    async with group_slot, admission:
                         return await thread_runner(partial(func, *args, **kwargs))
                 finally:
                     pending.pop(key, None)

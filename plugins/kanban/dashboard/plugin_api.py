@@ -424,7 +424,7 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
             "assignees": assignees, "latest_event_id": int(latest_event_id), "now": int(time.time())}
 
 
-_read_board = coalesced_read(get_board)
+_read_board = coalesced_read(get_board, admission_key=lambda a: (a.get("board") or "").strip().lower(), max_concurrent=4)  # a cold board must not queue other boards
 
 
 # --- GET /session-labels ------------------------------------------------------

@@ -85,3 +85,52 @@ async def test_board_burst_preserves_http_worker_capacity(tmp_path, monkeypatch)
         if requests:
             await asyncio.gather(*requests, return_exceptions=True)
         limiter.total_tokens = old_tokens
+
+@pytest.mark.anyio
+async def test_cold_board_read_does_not_queue_other_boards(tmp_path, monkeypatch):
+    """Mac 16:30 cold start: a slow read of one board held the only board slot,
+    so reads of every other board waited behind it (6-20 s, Desktop timeout 6 s)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    kb.create_board("other")
+    plugin_path = Path(__file__).resolve().parents[2] / "plugins/kanban/dashboard/plugin_api.py"
+    spec = importlib.util.spec_from_file_location("kanban_admission_multi_test", plugin_path)
+    plugin = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, plugin)
+    spec.loader.exec_module(plugin)
+    app = FastAPI()
+    app.include_router(plugin.router, prefix="/api/plugins/kanban")
+
+    entered = threading.Event()
+    release = threading.Event()
+    first = threading.Lock()
+    original = kb.list_tasks
+
+    def first_read_blocks(*args, **kwargs):
+        if first.acquire(blocking=False):  # only the first (default board) read stalls
+            entered.set()
+            assert release.wait(10), "test did not release board read"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "list_tasks", first_read_blocks)
+    slow = None
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            slow = asyncio.create_task(client.get(BOARD_PATH, params={"board": "default"}))
+            for _ in range(300):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set()
+            other = await asyncio.wait_for(client.get(BOARD_PATH, params={"board": "other"}), timeout=3)
+            assert other.status_code == OK
+            assert not slow.done()
+            release.set()
+            assert (await slow).status_code == OK
+    finally:
+        release.set()
+        if slow is not None:
+            await asyncio.gather(slow, return_exceptions=True)
