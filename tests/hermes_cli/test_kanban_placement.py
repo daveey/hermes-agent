@@ -892,7 +892,65 @@ def test_local_marker_decision_is_in_the_create_result(mac):
     hub = json.loads(kt._handle_create({"title": "Fix the flaky lint", "body": "Push it."}))
     assert hub.get("placed", {}).get("gateway") == "hub" and "placement" not in hub, hub
     structural = json.loads(kt._handle_create({"title": "Keep this one here", "goal_mode": True}))
-    assert structural["ok"] and "placed" not in structural and "placement" not in structural, structural
+    assert structural["ok"] and "placed" not in structural and "remedy" not in structural, structural
+
+
+# --- every local decision carries its reason (41 of 148 MacBook cards had none) [daveey] ---------
+
+_NO_NEED_NOTE = ("placement='local' was pinned, but nothing in the card names a machine-only need; without the "
+                 "pin it would run on hub. If the work doesn't need this machine, archive this card and create "
+                 "it again without the pin.")
+
+
+def test_local_pin_returns_its_why_and_the_no_need_note(mac, caplog):
+    """A placement='local' pin on a card with no local need: created here, says why, names the target."""
+    from tools import kanban_tools as kt
+    with caplog.at_level("INFO", logger="tools.kanban_tools_placement"):
+        out = json.loads(kt._handle_create({"title": "Verify green main CI", "body": "Check the run.",
+                                            "placement": "local"}))
+    assert out["ok"] and out.get("task_id") and _local_count() == 1 and not mac["calls"], out
+    assert out["placement"] == {"where": "local", "why": "placement pinned local by the caller"}, out
+    assert out["note"] == _NO_NEED_NOTE, out
+    assert "remedy" not in out
+    assert "kanban placement: local (placement pinned local by the caller)" in caplog.text
+
+
+def test_local_pin_with_a_local_marker_gets_no_note(mac):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "Reload the launchd agent", "body": "kickstart it.",
+                                        "placement": "local"}))
+    assert out["ok"] and _local_count() == 1, out
+    assert out["placement"] == {"where": "local", "why": "placement pinned local by the caller"}, out
+    assert "note" not in out and "remedy" not in out, out
+
+
+def test_local_pin_with_a_structural_local_need_gets_no_note(mac):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "Fix the flaky lint", "goal_mode": True,
+                                        "placement": "local"}))
+    assert out["ok"], out
+    assert out["placement"]["why"] == "placement pinned local by the caller" and "note" not in out, out
+
+
+def test_plain_local_decision_returns_its_why(mac, caplog):
+    """No pin, kept local for a structural reason (not a marker): the result still says why."""
+    from tools import kanban_tools as kt
+    with caplog.at_level("INFO", logger="tools.kanban_tools_placement"):
+        out = json.loads(kt._handle_create({"title": "Keep this one here", "goal_mode": True}))
+    assert out["ok"] and "placed" not in out, out
+    assert out["placement"]["where"] == "local" and out["placement"]["why"], out
+    assert set(out["placement"]) == {"where", "why"} and "note" not in out, out
+    assert f"kanban placement: local ({out['placement']['why']})" in caplog.text
+
+
+def test_needs_reason_is_returned(mac, monkeypatch):
+    """A gateway need the target does not hold keeps the card here; the result names it."""
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(reg, "locate", lambda need, now=None: {"holders": []})
+    monkeypatch.setattr("hermes_cli.kanban_capability_routing.preflight", lambda *a, **k: None)
+    out = json.loads(kt._handle_create({"title": "Reboot the box", "requires": ["ssh:nowhere"]}))
+    assert out["ok"], out
+    assert out["placement"]["where"] == "local" and out["placement"]["why"].startswith("needs ssh:nowhere"), out
 
 
 

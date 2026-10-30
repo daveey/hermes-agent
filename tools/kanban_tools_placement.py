@@ -44,6 +44,33 @@ def _placement_refused(pin: str, why: str) -> str:
         code="placement_unavailable", placement=pin, created=False)
 
 
+def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_pin: bool) -> dict:
+    """``placement`` for a card ``kp.decide`` kept on this gateway; every local decision says why. [daveey]
+
+    Pins, "needs ..." and plain local reasons used to return nothing, which left 41 of 148 MacBook cards
+    unattributable in the placement re-measure. A ``placement='local'`` pin on a card that would run
+    elsewhere without the pin also gets a ``note`` naming that target (the card is still created here).
+    """
+    why = decision.get("why") or ""
+    if decision.get("defer"):
+        # Parents are local links: created here, forwarded to the target once they finish.
+        return {"where": "local", "defer": decision["defer"], "why": why}
+    if decision.get("runs_on"):
+        logger.info("kanban placement: local, runs_on %s (%s)", decision["runs_on"], why)
+        return {"where": "local", "runs_on": decision["runs_on"], "why": why}
+    logger.info("kanban placement: local (%s)", why)
+    if why.startswith("local marker"):
+        return {"where": "local", "why": why, "remedy": kp.LOCAL_MARKER_REMEDY}
+    placement = {"where": "local", "why": why}
+    if note_local_pin and why == kp.PINNED_LOCAL_WHY:
+        unpinned = kp.decide({**view, "placement": "auto"}, machine_ok=machine_ok)
+        where = unpinned.get("where")
+        elsewhere = (unpinned.get("defer") or ", ".join(unpinned.get("runs_on") or ())) if where == "local" else where
+        if elsewhere and where != "refuse":
+            placement["note"] = kp.local_pin_note(elsewhere)
+    return placement
+
+
 def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict], session_id: Optional[str]) -> dict:
     """Result fields for a card a placement marker kept here; a deferred card records its forward. [daveey]"""
     if not marker_placement:
@@ -60,8 +87,12 @@ def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict
                          f"forwards it there and this card completes when that one does.")}
     if marker_placement.get("runs_on"):
         return {"placement": dict(marker_placement)}
-    return {"placement": {"where": marker_placement["where"], "why": marker_placement["why"]},
-            "remedy": marker_placement["remedy"]}
+    out: dict = {"placement": {"where": marker_placement["where"], "why": marker_placement["why"]}}
+    if marker_placement.get("remedy"):
+        out["remedy"] = marker_placement["remedy"]
+    if marker_placement.get("note"):
+        out["note"] = marker_placement["note"]  # a local pin on a card with no local need
+    return out
 
 
 def _runs_where(runs_on, pinned_machine, marker_placement) -> str:

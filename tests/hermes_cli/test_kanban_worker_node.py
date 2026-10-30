@@ -175,7 +175,9 @@ def test_tool_create_runs_on_and_placement_to_an_enrolled_machine(gws, monkeypat
     assert out["placement"] == {"where": "local", "runs_on": ["machine:worker-1"], "machine": WORKER}
     assert "runs on " + WORKER + " via the board lease" in out["note"] and tid in out["note"]
     out = _tool_create({"title": "explicit", "assignee": "default", "runs_on": ["linux"]})
-    assert out["runs_on"] == ["linux"] and "placement" not in out
+    # No machine pin: no machine placement block, only the plain local reason every local card carries.
+    assert out["runs_on"] == ["linux"] and "machine" not in out.get("placement", {})
+    assert out["placement"] == {"where": "local", "why": "no placement route for this gateway"}
     assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?",
                                        (out["task_id"],)).fetchone()[0]) == ["linux"]
 

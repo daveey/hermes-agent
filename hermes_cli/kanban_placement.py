@@ -118,6 +118,15 @@ APPLE_CONTEXT_MARKERS = (
 )
 LOCAL_MARKER_REMEDY = (
     "if the work doesn't need this machine, archive and re-create with placement='hub'")
+PINNED_LOCAL_WHY = "placement pinned local by the caller"
+
+
+def local_pin_note(target: str) -> str:
+    """Result note for a placement='local' pin whose card would run on ``target`` without it. [daveey]"""
+    return ("placement='local' was pinned, but nothing in the card names a machine-only need; without the pin "
+            f"it would run on {target}. If the work doesn't need this machine, archive this card and create it "
+            "again without the pin.")
+
 DEFAULT_LOCAL_SKILL_MARKERS = (
     r"^apple", r"^imessage$", r"^findmy$", r"^macos-", r"^mac-", r"^invisible-chrome-agent$",
     r"^local-chrome-remote-debugging$", r"^computer-use$", r"^babybear", r"^bb-", r"^ios-",
@@ -518,7 +527,7 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
         self_gw = reg.self_gateway() if self_gw is None else self_gw
         pin = canonical_pin(args.get("placement") or "auto", self_gw, c.raw)
         if pin in ("local", "here", (self_gw or "").lower()):
-            return {"where": "local", "why": "placement pinned local by the caller"}
+            return {"where": "local", "why": PINNED_LOCAL_WHY}
         explicit = pin not in ("", "auto")
         target = c.target(self_gw)
         if explicit and (not target or pin != target.lower()):
