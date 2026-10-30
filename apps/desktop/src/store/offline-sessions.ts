@@ -15,6 +15,7 @@
  */
 import { atom } from 'nanostores'
 
+import type { SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
 import type { SessionInfo } from '@/hermes'
 import { normalizeSessionSource, SIDEBAR_EXCLUDED_SOURCES } from '@/lib/session-source'
 import { syncedAgoLabel } from '@/lib/synced-ago'
@@ -330,13 +331,27 @@ function rowFromRecord(record: OfflineReplicaRecord, connectionId: string, linea
   }
 }
 
+/** [daveey] Every session row a projects tree carries (overview previews and hydrated lanes). */
+export function projectTreeSessionRows(nodes: readonly SidebarProjectTree[]): SessionInfo[] {
+  return nodes.flatMap(node => [
+    ...(node.previewSessions ?? []),
+    ...(node.repos ?? []).flatMap(repo => (repo.groups ?? []).flatMap(group => group.sessions ?? []))
+  ])
+}
+
 /** Fresh owner lists win; retained rows from a failed list are cached, not live. A retained row with no replica
  * copy is stamped `offline_stale_list`: its owner failed one list, which does not prove it is unreachable. Nor does
- * a replica copy of this Mac's own backend (the boot snapshot's, judged asleep at boot): its row is stamped too. */
+ * a replica copy of this Mac's own backend (the boot snapshot's, judged asleep at boot): its row is stamped too.
+ *
+ * [daveey] `treeRows`: rows the backends' projects trees reported. A replica row carries no activity stamps
+ * (kanban_*, outcome, goal_active, ...), and the sidebar overlays fallback rows over the tree's own copies ("live
+ * wins"), so an awake owner's replica row used to blank the waiting/stuck stripe its backend row paints. When the
+ * owner's backend reported that session in its tree, that row is used instead of the replica copy. */
 export function mergeOfflineFallback(
   live: SessionInfo[],
   offline: readonly SessionInfo[],
-  freshness = $sessionListFreshness.get()
+  freshness = $sessionListFreshness.get(),
+  treeRows: readonly SessionInfo[] = []
 ): SessionInfo[] {
   // [daveey] Primary-backend rows carry no connection_id while replica rows name the primary: one identity for both.
   const primary = $connectionsRegistry.get()?.primary?.trim() || 'local'
@@ -379,13 +394,25 @@ export function mergeOfflineFallback(
     row => !row.offline_cached && (row.connection_id?.trim() || primary) === primary
   )
 
-  const added = offline.filter(
-    row =>
-      !(ownBackendAnswered && (row.connection_id?.trim() || primary) === primary) &&
-      !freshOwners.has(ownerKey(row.connection_id, row.profile)) &&
-      freshness[ownerKey(row.connection_id, row.profile)] !== true &&
-      !seen.has(ownedIdentity(row, row.id))
-  )
+  // [daveey] Backend tree rows by owner identity; replica-derived tree rows (offline_synced_at) are no better.
+  const reported = new Map<string, SessionInfo>()
+
+  for (const row of treeRows) {
+    if (row?.id && row.offline_synced_at === undefined && !row.offline_cached) {
+      reported.set(ownedIdentity(row, row.id), row)
+    }
+  }
+
+  const added = offline
+    .filter(
+      row =>
+        !(ownBackendAnswered && (row.connection_id?.trim() || primary) === primary) &&
+        !freshOwners.has(ownerKey(row.connection_id, row.profile)) &&
+        freshness[ownerKey(row.connection_id, row.profile)] !== true &&
+        !seen.has(ownedIdentity(row, row.id))
+    )
+    // An asleep owner's row keeps its cached (read-only) marking; an awake one's backend row wins.
+    .map(row => (row.offline_cached ? row : (reported.get(ownedIdentity(row, row.id)) ?? row)))
 
   const merged = added.length ? [...rows, ...added] : changed ? rows : live
 

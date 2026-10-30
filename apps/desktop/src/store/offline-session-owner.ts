@@ -1,14 +1,21 @@
 import type { SessionInfo } from '@/hermes'
 
 import { $sidebarFallbackSessions } from './boot-snapshot'
-import { mergeOfflineFallback, offlineIdentity } from './offline-sessions'
+import { mergeOfflineFallback, offlineIdentity, projectTreeSessionRows } from './offline-sessions'
+import { $projectTree } from './project-tree'
 import { $sessions, sessionMatchesStoredId } from './session'
 
 /** Resolve the clicked owner, never the first cached row sharing a bare id.
  * Use the sidebar's effective rows so reconnect wins even before the cache poll.
  */
 export function sessionActionRow(storedSessionId: string, selectedRow?: SessionInfo): SessionInfo | undefined {
-  const effective = mergeOfflineFallback($sessions.get(), $sidebarFallbackSessions.get())
+  const effective = mergeOfflineFallback(
+    $sessions.get(),
+    $sidebarFallbackSessions.get(),
+    undefined,
+    projectTreeSessionRows($projectTree.get())
+  )
+
   const matches = effective.filter(row => sessionMatchesStoredId(row, storedSessionId))
 
   if (selectedRow) {

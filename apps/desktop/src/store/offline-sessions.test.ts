@@ -349,6 +349,66 @@ describe('mergeOfflineFallback', () => {
 
     expect(mergeOfflineFallback(rows, [])).toBe(rows)
   })
+
+  // [daveey] Active gateway = the hub, so its list holds no row of this Mac: this Mac's older chats come in as awake
+  // replica rows (no activity stamps) while the projects tree carries the backend's stamped copy. The overlay lets
+  // the merged row beat the tree's, so the replica copy blanked the grey waiting stripe of parked work.
+  describe('an awake owner whose backend reported the session in its projects tree', () => {
+    const awake = () =>
+      offlineSessionsFromReplica(
+        [rec('parked', { gateway: 'macbook' }), rec('untreed', { gateway: 'macbook' })],
+        gateway => (gateway === 'macbook' ? 'local' : undefined),
+        9_000
+      )
+
+    const stamped = live('parked', {
+      connection_id: 'local',
+      kanban_active: 1,
+      kanban_observed_at: 9_000,
+      kanban_parked: 1,
+      profile: 'default'
+    })
+
+    const hubList = [live('h1', { connection_id: 'hermes-hub' })]
+
+    it('uses the stamped tree row instead of the replica copy', () => {
+      const merged = mergeOfflineFallback(hubList, awake(), undefined, [stamped])
+
+      expect(ids(merged)).toEqual(['h1', 'parked', 'untreed'])
+      expect(merged.find(r => r.id === 'parked')).toBe(stamped)
+      // Control: a session the tree did not report keeps its replica row.
+      expect(merged.find(r => r.id === 'untreed')?.offline_synced_at).toBe(9_000)
+    })
+
+    it('without tree rows the replica copy is used, unchanged (the old behaviour)', () => {
+      const merged = mergeOfflineFallback(hubList, awake())
+
+      expect(merged.find(r => r.id === 'parked')).toMatchObject({ offline_synced_at: 9_000 })
+      expect(merged.find(r => r.id === 'parked')?.kanban_parked).toBeUndefined()
+    })
+
+    it('a tree row of another gateway or profile, or a replica-derived tree row, does not replace it', () => {
+      const merged = mergeOfflineFallback(hubList, awake(), undefined, [
+        { ...stamped, connection_id: 'hermes-hub' },
+        { ...stamped, profile: 'work' },
+        { ...stamped, offline_synced_at: 8_000 }
+      ])
+
+      expect(merged.find(r => r.id === 'parked')?.kanban_parked).toBeUndefined()
+    })
+
+    it("an asleep owner's cached row stays cached (opens read-only), even with a tree copy", () => {
+      const asleep = offlineSessionsFromReplica(
+        [rec('parked', { gateway: 'macbook', synced_at: 1_000 })],
+        gateway => (gateway === 'macbook' ? 'local' : undefined),
+        9_000
+      )
+
+      const merged = mergeOfflineFallback(hubList, asleep, undefined, [stamped])
+
+      expect(merged.find(r => r.id === 'parked')).toMatchObject({ offline_cached: true })
+    })
+  })
 })
 
 describe('syncedAgoLabel', () => {
