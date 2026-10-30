@@ -196,3 +196,44 @@ def test_cli_refresh_loads_plugin_providers(homes, probe_plugin, capsys):
 def test_web_refresh_loads_plugin_providers(client, homes, probe_plugin):
     seed(homes["default"])
     assert client.get("/api/sessions/chat/outcome?refresh=1").json()["outcome"]["kind"] == "decision"
+
+
+# ── tree rows match list rows ────────────────────────────────────────────
+
+# Every row field the Desktop's sessionStatusStripe reads (via session-row-stripe.tsx).
+_STRIPE_FIELDS = ("outcome", "muted", "message_count", "kanban_active", "kanban_blocked", "kanban_held", "kanban_parked",
+                  "kanban_stalled", "kanban_waiting_on", "kanban_attention", "goal_active", "cron_active", "background_active",
+                  "turn_live", "review_wait")
+
+
+def _tree_rows(node):
+    """Every session row anywhere in a projects-tree payload (rows are the dicts with a ``message_count``)."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _tree_rows(item)
+    elif isinstance(node, dict):
+        if "message_count" in node and "id" in node:
+            yield node
+        for value in node.values():
+            yield from _tree_rows(value)
+
+
+def test_project_tree_rows_carry_the_list_rows_outcome_and_mute(client, homes):
+    """[daveey] A tree preview and a list row of one chat paint the same stripe: the tree used to drop
+    ``outcome``/``muted``, so an ``unresolved`` chat flapped green (tree) <-> amber (list) on every refresh."""
+    seed(homes["default"], "open-chat", reply="Should I also bump the version?")
+    seed(homes["default"], "done-chat")
+    seed(homes["default"], "muted-chat")
+    for sid in ("open-chat", "done-chat"):
+        client.get(f"/api/sessions/{sid}/outcome?refresh=1")
+    client.post("/api/sessions/muted-chat/mute", json={"muted": True})
+
+    listed = {r["id"]: r for r in client.get("/api/profiles/sessions?profile=all&limit=50").json()["sessions"]}
+    tree = client.get("/api/profiles/projects/tree", params={"preview_limit": 50}).json()
+    treed = {r["id"]: r for r in _tree_rows(tree)}
+    assert {"open-chat", "done-chat", "muted-chat"} <= set(treed) & set(listed)
+    assert listed["open-chat"]["outcome"]["kind"] == "unresolved"
+    assert (listed["done-chat"]["outcome"]["kind"], listed["muted-chat"]["muted"]) == ("done", True)
+    for sid in ("open-chat", "done-chat", "muted-chat"):
+        for field in _STRIPE_FIELDS:
+            assert treed[sid].get(field) == listed[sid].get(field), (sid, field)
