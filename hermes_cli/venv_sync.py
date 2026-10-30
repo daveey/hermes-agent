@@ -56,19 +56,17 @@ def check_runtime(project_root: Path) -> str | None:
     if (Path(project_root) / ".git").exists() and read_install_stamp(project_root).get("updateMechanism") != "self":
         return None  # A developer's checkout does not owe managed products.
 
+    # Each shortcut below still activates and reports the store's tools: that check
+    # reads no plugin-union inputs and starts no PM, so only the venv verdict is skipped.
     if os.environ.get("HERMES_DISABLE_LAZY_INSTALLS", "").lower() in ("1", "true", "yes"):
-        pm.activate(allow_incomplete=True)  # keep tool PATH without reading plugin-union inputs
-        return None
+        return _runtime_problem(project_root, pm.activate(allow_incomplete=True))
     if Path(project_root).resolve() in _current_roots:
-        # prepare_launch just found the dependencies current in this process: only the
-        # store's tools remain to check, which reads no plugin-union inputs and starts no PM.
-        problems = pm.activate(allow_incomplete=True)
-        return _runtime_problem(project_root, problems)
+        # prepare_launch just found the dependencies current in this process.
+        return _runtime_problem(project_root, pm.activate(allow_incomplete=True))
     if Path(project_root).resolve() in _unknown_roots:
-        # This launch's currency probe already ran out of time; the runtime diagnostic
-        # reads the same inputs, so defer it to a later launch rather than wait again.
-        pm.activate(allow_incomplete=True)
-        return None
+        # This launch's currency probe already ran out of time; the venv verdict reads
+        # the same inputs, so defer it to a later launch rather than wait again.
+        return _runtime_problem(project_root, pm.activate(allow_incomplete=True))
     from hermes_cli.launch_probe import probe
 
     # The diagnostic computes plugin-union inputs (including YAML) and may start PM.
@@ -80,8 +78,10 @@ def check_runtime(project_root: Path) -> str | None:
         if result is None or result["state"] == "error":
             # Tool activation has no worker or plugin-union/YAML read; keep bundled
             # executables available even when the advisory diagnostic times out.
-            pm.activate(allow_incomplete=True)
-            return None if result is None else f"runtime check deferred: {result['detail']}"
+            problem = _runtime_problem(project_root, pm.activate(allow_incomplete=True))
+            if problem or result is None:
+                return problem
+            return f"runtime check deferred: {result['detail']}"
         os.environ["PATH"] = result["path"]
         problems = result["problems"]
     return _runtime_problem(project_root, problems)

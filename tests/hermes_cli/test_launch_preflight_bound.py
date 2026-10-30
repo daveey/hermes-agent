@@ -99,16 +99,21 @@ print(json.dumps({{'prepare': prepared - started, 'runtime': time.monotonic() - 
                    timeout=3, what="blocked PM descendant terminated")
 
 
-def test_runtime_opt_out_does_not_probe(tmp_path, monkeypatch):
+def test_runtime_opt_out_does_not_probe_but_reports_tools(tmp_path, monkeypatch):
     import pm
+    from hermes_cli import launch_probe
     root = tmp_path / "checkout"
     (root / ".git").mkdir(parents=True)
     (root / "install-stamp.json").write_text(json.dumps({"updateMechanism": "self"}))
     monkeypatch.setenv("HERMES_DISABLE_LAZY_INSTALLS", "1")
+    monkeypatch.setattr(launch_probe, "probe", lambda *a, **k: pytest.fail("probed under the opt-out"))
     activated = []
-    monkeypatch.setattr(pm, "activate", lambda **kw: activated.append(kw))
+    monkeypatch.setattr(pm, "activate", lambda **kw: activated.append(kw) or [])
     assert venv_sync.check_runtime(root) is None
-    assert activated == [{"allow_incomplete": True}]
+    monkeypatch.setattr(pm, "activate", lambda **kw: activated.append(kw) or ["git: missing"])
+    problem = venv_sync.check_runtime(root)
+    assert problem is not None and "git: missing" in problem, "a damaged store tool is still reported"
+    assert activated == [{"allow_incomplete": True}] * 2
 
 
 def test_runtime_check_reuses_this_launchs_current_verdict(tmp_path, monkeypatch):
@@ -140,8 +145,9 @@ def test_runtime_check_defers_after_this_launchs_probe_timed_out(tmp_path, monke
     activated = []
     monkeypatch.setattr(pm, "activate", lambda **kw: activated.append(kw) or ["git: missing"])
     monkeypatch.setattr(venv_sync, "_unknown_roots", {root.resolve()})
-    assert venv_sync.check_runtime(root) is None
+    problem = venv_sync.check_runtime(root)
     assert activated == [{"allow_incomplete": True}], "bundled tools must stay on PATH"
+    assert problem is not None and "git: missing" in problem, "a damaged store tool is still reported"
 
 
 @pytest.mark.platforms("posix")
