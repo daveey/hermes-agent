@@ -113,7 +113,10 @@ def main():
                 result = str(result)
             response = {"result": result}
         except BaseException as exc:
-            error = {"type": type(exc).__name__, "message": str(exc)}
+            error: dict = {"type": type(exc).__name__, "message": str(exc)}
+            if isinstance(exc, OSError) and exc.filename is not None:
+                # Launch permission diagnostics classify the denied path, not its rendered text.
+                error.update(errno=exc.errno, strerror=exc.strerror, filename=str(exc.filename))
             if isinstance(exc, InstallError):
                 error.update(package=exc.package, cause=exc.cause, remedy=exc.remedy)
             response = {"error": error}

@@ -9,6 +9,8 @@ Contract (stdlib only, so a bootstrap interpreter can import it):
 * ``{"schema": 1, "state": "current" | "stale"}`` for ``currency``.
 * ``{"schema": 1, "state": "runtime", "problems": [str], "path": str}`` for ``runtime``.
 * ``{"schema": 1, "state": "error", "detail": str}`` when the worker ran and failed.
+  Permission failures with a denied path also carry ``permission_error`` with
+  ``errno``, ``strerror`` and ``filename`` so launchers retain actionable diagnostics.
 * ``None`` when the probe is unavailable, times out or answers malformed data.
 
 The worker imports PM from the *implementation* checkout that contains this
@@ -62,6 +64,8 @@ try:
                  "path": os.environ.get("PATH", "")}
 except BaseException as exc:
     reply = {"schema": 1, "state": "error", "detail": f"{type(exc).__name__}: {exc}"}
+    if isinstance(exc, PermissionError) and exc.filename is not None:
+        reply["permission_error"] = {"errno": exc.errno, "strerror": exc.strerror, "filename": str(exc.filename)}
 out.write(json.dumps(reply) + "\n")
 out.flush()
 """
@@ -72,7 +76,16 @@ def _valid(operation: str, reply: Any) -> bool:
         return False
     state = reply.get("state")
     if state == "error":
-        return isinstance(reply.get("detail"), str) and set(reply) == {"schema", "state", "detail"}
+        if not isinstance(reply.get("detail"), str):
+            return False
+        if set(reply) == {"schema", "state", "detail"}:
+            return True
+        error = reply.get("permission_error")
+        return (set(reply) == {"schema", "state", "detail", "permission_error"}
+                and isinstance(error, dict) and set(error) == {"errno", "strerror", "filename"}
+                and (error["errno"] is None or type(error["errno"]) is int)
+                and (error["strerror"] is None or isinstance(error["strerror"], str))
+                and isinstance(error["filename"], str))
     if operation == "currency":
         return state in ("current", "stale") and set(reply) == {"schema", "state"}
     problems = reply.get("problems")

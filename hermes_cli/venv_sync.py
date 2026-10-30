@@ -555,6 +555,8 @@ def _launch_currency(root: Path, command: list[str]) -> bool | None:
     if result is None:
         return None
     if result["state"] == "error":
+        if error := result.get("permission_error"):
+            raise PermissionError(error["errno"], error["strerror"], error["filename"])
         raise RuntimeError(result["detail"])
     return result["state"] == "current"
 
