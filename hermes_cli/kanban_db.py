@@ -1763,42 +1763,6 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
         return cid
 
 
-def own_comment_ids(conn: sqlite3.Connection, task_id: str, run_id: int) -> set[int]:
-    """Ids of the comments on ``task_id`` written from inside run ``run_id`` (any process)."""
-    rows = conn.execute(
-        "SELECT json_extract(payload, '$.comment_id') FROM task_events "
-        "WHERE task_id = ? AND kind = 'commented' "
-        "AND json_extract(payload, '$.writer_run_id') = ?", (task_id, int(run_id)),
-    ).fetchall()
-    return {int(r[0]) for r in rows if r[0] is not None}
-
-
-def delivered_comment_ids(conn: sqlite3.Connection, task_id: str, run_id: int) -> set[int]:
-    """Ids the live bridge already steered into run ``run_id`` (``comment_delivered`` events)."""
-    out: set[int] = set()
-    for (raw,) in conn.execute(
-            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'comment_delivered' "
-            "AND run_id = ?", (task_id, int(run_id))).fetchall():
-        try:
-            out.update(int(i) for i in (json.loads(raw or "{}").get("comment_ids") or []))
-        except (ValueError, TypeError, AttributeError):
-            continue
-    return out
-
-
-def comment_id_before_run_start(conn: sqlite3.Connection, task_id: str, run_id: int) -> Optional[int]:
-    """Highest comment id on ``task_id`` created before run ``run_id`` started (0 when none);
-    None when the run or its ``started_at`` can't be resolved. Those earlier comments are in
-    the worker's prompt, so the live comment bridge seeds its watermark here."""
-    row = conn.execute("SELECT started_at FROM task_runs WHERE id = ? AND task_id = ?",
-                       (int(run_id), task_id)).fetchone()
-    if not row or row[0] is None:
-        return None
-    got = conn.execute("SELECT MAX(id) FROM task_comments WHERE task_id = ? AND created_at < ?",
-                       (task_id, int(row[0]))).fetchone()
-    return int(got[0]) if got and got[0] is not None else 0
-
-
 def record_comment_delivery(conn: sqlite3.Connection, task_id: str, run_id: int,
                             comment_ids: list[int]) -> None:
     """Receipt that the live bridge steered ``comment_ids`` into the running worker of ``run_id``."""
@@ -4650,6 +4614,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 
 
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
+from hermes_cli.kanban_db_comment_ids import comment_id_before_run_start, delivered_comment_ids, own_comment_ids
 from hermes_cli.kanban_db_schedule import schedule_task
 from hermes_cli.kanban_reason_comment import _awaiting_human_answer
 from hermes_cli.kanban_db_notify import _inherit_notify_subs, _owning_sub_clause

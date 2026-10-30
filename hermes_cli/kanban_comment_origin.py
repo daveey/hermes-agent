@@ -19,9 +19,12 @@ comments ``WHERE author = 'macbook'`` therefore never sees the relay's ``hub:gw:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 AUTHOR_PROBE = "author_probe"
 WAKE_PROBE_STALE_EVENT = "wake_probe_stale"
@@ -42,7 +45,8 @@ def _local_gateway() -> Optional[str]:
     try:
         from hermes_cli.kanban_origin import gateway_names
         me = gateway_names()[0]
-    except Exception:
+    except (ImportError, OSError, sqlite3.Error, ValueError):
+        logger.debug("origin_gateway: this gateway's name is unknown", exc_info=True)
         return None
     return me if me and _GATEWAY_NAME.match(me) else None
 
@@ -55,6 +59,17 @@ def resolve_origin(author: Optional[str], explicit: Optional[str] = None) -> Opt
             raise ValueError(f"origin gateway {name!r} is not a gateway name")
         return name
     return gateway_from_author(author) or _local_gateway()
+
+
+def ensure_origin_column(conn: sqlite3.Connection) -> None:
+    """Migration: add ``task_comments.origin_gateway`` to an older board and back-fill it once."""
+    from hermes_cli.sqlite_util import add_column_if_missing
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_comments'").fetchone() is None:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(task_comments)")}
+    if "origin_gateway" not in cols and add_column_if_missing(conn, "task_comments", "origin_gateway",
+                                                              "origin_gateway TEXT"):
+        backfill(conn)
 
 
 def backfill(conn: sqlite3.Connection) -> int:
@@ -134,7 +149,8 @@ def _author_probe_guard_enabled() -> bool:
         from hermes_cli.config import load_config_readonly
         cfg = (load_config_readonly() or {}).get("kanban", {}) or {}
         return cfg.get("author_probe_guard", True) is not False
-    except Exception:
+    except Exception:  # an unreadable config keeps the guard on
+        logger.debug("kanban.author_probe_guard: config unreadable, guard stays on", exc_info=True)
         return True
 
 
@@ -210,7 +226,8 @@ def answered_request(conn: sqlite3.Connection, task_id: str, cmd: str) -> Option
                                             sorted(tokens))]
         finally:
             db.close()
-    except Exception:
+    except (ImportError, OSError, sqlite3.Error):
+        logger.debug("wake_probe_stale: hermes-hub replica unreadable", exc_info=True)
         return None
     if not ids:
         return None
@@ -224,10 +241,7 @@ def answered_request(conn: sqlite3.Connection, task_id: str, cmd: str) -> Option
     for rid in sorted(ids):
         if rid in seen:
             continue
-        try:
-            rc, msg = owner_status(rid)
-        except Exception:
-            continue
+        rc, msg = owner_status(rid)  # never raises: "cannot tell" is rc 2
         if rc == 0:
             return {"request": rid, "owner": msg}
     return None
