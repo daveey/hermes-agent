@@ -159,6 +159,37 @@ def _retryable(exc):
     return any(predicate(exc) for predicate, _ in aux._FALLBACK_REASONS)
 
 
+def _recover_class_pool(runtime, exc, attempted):
+    """An account quota is not a failed route. Rotate only the fenced pool. [daveey]
+
+    Re-resolution still enforces the original class/pin and OAuth-only boundary.
+    A (provider, model, account) is recovered at most once per logical call,
+    including when concurrent writers or a broken pool reselect that account.
+    """
+    from agent import auxiliary_client as aux
+    if aux._is_overloaded_error(exc):
+        return False
+    if aux._is_payment_error(exc):
+        status, reason = 402, "billing"
+    elif aux._is_rate_limit_error(exc):
+        status, reason = 429, "rate_limit"
+    else:
+        return False
+    pool = runtime.get("credential_pool")
+    entry = pool.current() if pool else None
+    if entry is None:
+        return False
+    identity = runtime["provider"], runtime["model"], entry.id
+    if identity in attempted:
+        return False
+    attempted.add(identity)
+    return pool.mark_exhausted_and_rotate(
+        status_code=getattr(exc, "status_code", None) or status,
+        credential_id=entry.id, model=runtime["model"], failure_reason=reason,
+        error_context={"message": str(exc)},
+    ) is not None
+
+
 def _complete(task, runtime, client, kwargs):
     from agent import auxiliary_client as aux
     return aux._validate_llm_response(aux._relay_sync_completion(
@@ -194,6 +225,7 @@ def _stream_with_recovery(task, options, request):
     # Lazy allocation: an unconsumed generator must not leak a client or consume
     # an allocation. Once any chunk escapes, replay would duplicate output.
     failed = []
+    attempted = set()
     while True:
         runtime, client, kwargs = _prepare(task, options, request, failed)
         delivered = False
@@ -206,7 +238,8 @@ def _stream_with_recovery(task, options, request):
         except Exception as exc:
             if delivered or not _retryable(exc):
                 raise
-            failed.append((runtime["provider"], runtime["model"]))
+            if not _recover_class_pool(runtime, exc, attempted):
+                failed.append((runtime["provider"], runtime["model"]))
         finally:
             stream.close()
 
@@ -221,6 +254,7 @@ def class_routed_sync(callback):
         if options.get("stream"):
             return _stream_with_recovery(task, options, request)
         failed = []
+        attempted = set()
         while True:
             runtime, client, kwargs = _prepare(task, options, request, failed)
             try:
@@ -228,7 +262,8 @@ def class_routed_sync(callback):
             except Exception as exc:
                 if not _retryable(exc):
                     raise
-                failed.append((runtime["provider"], runtime["model"]))
+                if not _recover_class_pool(runtime, exc, attempted):
+                    failed.append((runtime["provider"], runtime["model"]))
             finally:
                 aux._close_cached_client(client, close_async=True)
     return wrapped
@@ -242,6 +277,7 @@ def class_routed_async(callback):
         if request is None:
             return await callback(task, **options)
         failed = []
+        attempted = set()
         while True:
             runtime, sync_client, kwargs = _prepare(task, options, request, failed)
             client, _ = aux._to_async_client(sync_client, runtime["model"])
@@ -256,7 +292,8 @@ def class_routed_async(callback):
             except Exception as exc:
                 if not _retryable(exc):
                     raise
-                failed.append((runtime["provider"], runtime["model"]))
+                if not _recover_class_pool(runtime, exc, attempted):
+                    failed.append((runtime["provider"], runtime["model"]))
             finally:
                 aux._close_cached_client(client, close_async=True)
                 aux._close_cached_client(sync_client, close_async=True)
