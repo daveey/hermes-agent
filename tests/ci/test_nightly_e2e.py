@@ -293,7 +293,7 @@ def test_state_round_trip(tmp_path):
 
 
 def _wf(name):
-    return YAML(typ="safe").load((ROOT / ".github" / "workflows" / name).read_text())
+    return YAML(typ="safe").load((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8-sig"))
 
 
 def test_nightly_workflow_is_dispatch_only_and_calls_the_gates_e2e_job():

@@ -175,7 +175,7 @@ class NightlyBoard(CliBoard):
 
 def load_state(path: Path) -> dict[str, Any]:
     try:
-        state = json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         state = {}
     state.setdefault("pending", [])  # dispatched runs not yet reported
