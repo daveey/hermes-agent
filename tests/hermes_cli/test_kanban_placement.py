@@ -1420,6 +1420,90 @@ def _forwarded_card(mac, monkeypatch, conn):
     return child
 
 
+@pytest.mark.parametrize("rc", [0, 3])
+def test_manual_completion_archives_forwarded_copy_online_or_queued(mac, monkeypatch, rc):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    with kbc.connect_closing() as conn:
+        child = _forwarded_card(mac, monkeypatch, conn)
+        kb.unblock_task(conn, child)
+        mac["result"]["rc"] = rc
+        assert kb.complete_task(conn, child, summary="Finished manually", force=True)
+        assert kb.get_task(conn, child).status == "done"
+        assert len(mac["calls"]) == 1
+        argv = mac["calls"][0]
+        assert argv[1:6] == ["request", "hub", "tasks", f"default/default/{HUB_TID}", "archive"]
+        assert kpf.archive_forward_view(conn, child)["status"] == "pending"
+        rid = argv[argv.index("--id") + 1]
+        assert mac["hub"].execute("SELECT state FROM sent WHERE id=?", (rid,)).fetchone()[0] == "sent"
+        mac["hub"].execute("UPDATE sent SET state='done' WHERE id=?", (rid,))
+        mac["hub"].commit()
+        assert kpf.archive_forward_view(conn, child)["status"] == "archived"
+        assert not kb.complete_task(conn, child, summary="Again", force=True)
+        assert len(mac["calls"]) == 1
+
+
+@pytest.mark.parametrize("status", ["done", "archived"])
+def test_manual_completion_preserves_terminal_remote_copy(mac, monkeypatch, status):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_wait_replica as replica
+    with kbc.connect_closing() as conn:
+        child = _forwarded_card(mac, monkeypatch, conn)
+        kb.unblock_task(conn, child)
+        monkeypatch.setattr(replica, "check", lambda *a, **kw: (0, f"{HUB_TID} {status}"))
+        assert kb.complete_task(conn, child, summary="Finished manually", force=True)
+        assert mac["calls"] == []
+
+
+@pytest.mark.parametrize("observation", ["offline", "stale", "exception", "wrong-id"])
+def test_completion_queues_archive_when_observation_is_unknown(mac, monkeypatch, observation):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_wait_replica as replica
+    from hermes_cli import kanban_wait_check as kwait
+    with kbc.connect_closing() as conn:
+        child = _forwarded_card(mac, monkeypatch, conn)
+        kb.unblock_task(conn, child)
+        def observe(*a, **kw):
+            if observation == "exception":
+                raise OSError("unavailable")
+            return {"offline": (2, "unavailable"), "stale": (3, f"{HUB_TID} done (stale)"),
+                    "wrong-id": (0, "t_other done")}[observation]
+        monkeypatch.setattr(replica, "check", observe)
+        monkeypatch.setattr(kwait, "check_remote", lambda *a, **kw: pytest.fail("must not SSH on completion"))
+        mac["result"]["rc"] = 3
+        assert kb.complete_task(conn, child, summary="Manual override", force=True)
+        assert len(mac["calls"]) == 1
+
+
+def test_settle_completion_never_forwards_archive(mac, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    with kbc.connect_closing() as conn:
+        child = _forwarded_card(mac, monkeypatch, conn)
+        kb.unblock_task(conn, child)
+        f = _forwarder(conn, child, mac, monkeypatch, check=(0, f"{HUB_TID} done"))
+        assert f.run() == "completed"
+        assert kb.get_task(conn, child).status == "done"
+        assert mac["calls"] == []
+        assert kpf.archive_forward_view(conn, child) is None
+
+
+def test_refused_and_plain_completion_do_not_forward(mac, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect_closing() as conn:
+        child = _forwarded_card(mac, monkeypatch, conn)
+        assert not kb.complete_task(conn, child, summary="Still scheduled", force=True)
+        plain = kb.create_task(conn, title="plain", assignee="default")
+        kb.recompute_ready(conn)
+        assert kb.complete_task(conn, plain, summary="Local only", force=True)
+        assert mac["calls"] == []
+
+
 def test_archiving_a_forwarded_card_archives_the_remote_copy(mac, monkeypatch):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc

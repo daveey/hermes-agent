@@ -2735,11 +2735,15 @@ def complete_task(
     summary: Optional[str] = None, metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
     fire_lifecycle_hook: bool = True, force: bool = False, goal_verification=None,
+    placement_settled: bool = False,
 ) -> bool:
     """``running|ready|blocked|review -> done``; records ``result``.
 
     ``ready`` is accepted for manual CLI completion, ``review`` for human
-    approval. A ``running`` task under a live claim is only completed with
+    approval. ``placement_settled`` is internal to the placement forwarder: it
+    suppresses remote cancellation when mirroring a successful remote result.
+    Other successful completions archive outstanding placed work.
+    A ``running`` task under a live claim is only completed with
     proof of ownership (``expected_run_id``) or ``force=True`` (explicit
     operator override) — otherwise :class:`LiveClaimError`, the same fence
     :func:`request_review` applies. With no active run the handoff fields survive via
@@ -2845,6 +2849,9 @@ def complete_task(
             run_id=run_id,
         )
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
+    if not placement_settled:
+        from hermes_cli.kanban_placement_forward import forward_completion
+        forward_completion(conn, task_id)
     # Success wipes the breaker counter (history stays on the event log).
     _clear_failure_counter(conn, task_id)
     recompute_ready(conn)  # separate txn so children see ``done``

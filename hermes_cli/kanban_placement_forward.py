@@ -248,6 +248,34 @@ def sweep_unresolved_archives(conn: sqlite3.Connection, *, now: Optional[float] 
     return sent
 
 
+def forward_completion(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """Manual origin completion cancels outstanding placed work, never completes it as successful.
+
+    Reuse archive's durable queue and audit event. Unknown/offline observations still send;
+    only a confirmed terminal copy is left untouched. Called after local completion commits.
+    """
+    try:
+        st = state(conn, task_id)
+        if not st or not (st.get("request_id") or st.get("remote_task_id")):
+            return None
+        from hermes_cli import kanban_placement as kp
+        from hermes_cli import kanban_wait_replica as replica
+        rtid = st.get("remote_task_id") or kp.remote_task_id(st["request_id"])
+        if rtid:
+            try:
+                # Local fresh snapshot only: do not hold completion/child release on sleeping-host SSH.
+                rc, out = replica.check(st["target"], rtid, until=UNTIL)
+                words = (out or "").split()
+                if rc == 0 and len(words) >= 2 and words[0] == rtid and words[1] in UNTIL:
+                    return None
+            except Exception:  # health: allow BLE001 -- unavailable observation must not prevent durable cancellation
+                pass
+        return forward_archive(conn, task_id)
+    except Exception as exc:  # health: allow BLE001 -- courtesy forwarding must not undo a committed completion
+        print(f"placement completion forward failed: {exc!r}", file=sys.stderr)
+        return None
+
+
 # --- the forwarder -----------------------------------------------------------------------------
 
 def _iso(ts: float) -> str:
@@ -361,7 +389,7 @@ class Forwarder:
         status = words[1] if rc == 0 and len(words) >= 2 and words[0] == rtid else ""
         if status == "done":
             ok = kb.complete_task(
-                self.conn, self.task_id, expected_run_id=self.run_id,
+                self.conn, self.task_id, expected_run_id=self.run_id, placement_settled=True,
                 summary=(f"Ran on {target} as {rtid} (deferred placement), which is done. Its handoff is on "
                          f"that card: cross_task @task:default@{target}/{rtid}."),
                 metadata={"placement": {"gateway": target, "remote_task_id": rtid}})
