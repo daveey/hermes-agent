@@ -52,7 +52,7 @@ FULL_FRACTION = 0.4
 GENERIC = {"__init__.py", "README.md", "index.ts", "index.js", "main.py", "utils.py", "config.py", "cli.py",
            "package.json", "SKILL.md", "types.ts", "constants.py"}
 SLICE_SECONDS = 16 * 300  # one slice: 16 workers x ~5 min of per-file wall time
-MAX_SLICES = 2  # tests.yml's full-suite matrix ([1, 2] on the shared hermes-hub pool)
+MAX_SLICES = 8  # tests.yml's full-suite matrix (one tfgar-tests VM per slice)
 DEFAULT_FILE_SECONDS = 3.0
 
 

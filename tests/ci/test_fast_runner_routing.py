@@ -208,14 +208,15 @@ def test_python_slices_match_their_matrix():
     job = wf["jobs"]["test"]
     assert job["strategy"]["matrix"]["slice"] == "${{ fromJSON(inputs.python_slices) }}"
     default = wf["on"]["workflow_call"]["inputs"]["python_slices"]["default"]
-    assert default == "[1, 2]"
+    assert default == "[1, 2, 3, 4, 5, 6, 7, 8]"
     # The planner's full-suite slice count is the same matrix (scripts/ci/affected_tests.py).
     planner = (ROOT / "scripts" / "ci" / "affected_tests.py").read_text(encoding="utf-8")
-    assert "MAX_SLICES = 2 " in planner
+    assert "MAX_SLICES = 8 " in planner
     run = next(step for step in job["steps"] if step.get("name") == "Run tests")
     assert run["env"]["HERMES_TEST_SLICE"] == "${{ matrix.slice }}/${{ strategy.job-total }}"
     assert "${{ matrix.slice }}/${{ strategy.job-total }}" in job["name"]
-    assert job["runs-on"] == ["self-hosted", "hermes-hub"]
+    # tfgar-tests is one VM per job: a slice never shares a CPU budget with other jobs.
+    assert job["runs-on"] == ["self-hosted", "tfgar-tests"]
 
 
 def test_pull_requests_pass_their_affected_plan_to_the_slices():
