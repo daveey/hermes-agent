@@ -60,3 +60,14 @@ def test_the_e2e_job_requires_tmux():
     assert run_step["env"]["HERMES_E2E_REQUIRE_TUI"] == "1"
     assert any("tmux" in s.get("run", "") and "tmux -V" in s.get("run", "") for s in job["steps"]), \
         "the e2e job must install/verify tmux before the tmux suites run"
+
+
+def test_the_python_test_job_installs_tmux_before_running_tests():
+    """The full-suite job runs platforms("linux") tests that drive the real CLI in tmux
+    (tests/hermes_cli/test_gateway_chat_native.py); a runner image without tmux failed them (run 41009740205)."""
+    yaml = pytest.importorskip("hermes_yaml")
+    steps = yaml.safe_load((_REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"))["jobs"]["test"]["steps"]
+    names = [s.get("name") for s in steps]
+    tmux = [i for i, s in enumerate(steps) if "tmux -V" in s.get("run", "")]
+    assert tmux, "the test job must install/verify tmux"
+    assert tmux[0] < names.index("Run tests"), names
