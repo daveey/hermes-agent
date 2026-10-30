@@ -851,9 +851,11 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
         "Unblock a Kanban task: blocked, scheduled, or a block-loop triage card. "
         "It moves to ready when all parents are done, "
         "or todo while any parent remains open. Orchestrator-only, except "
-        "one case: a self-heal fix card may unblock the single card named in "
-        "its defect (`kanban card t_...`). A card that finished fix card "
-        "created may do the same. Any other worker call is refused, and the "
+        "two grants: a self-heal fix card may unblock the single card named in "
+        "its defect (`kanban card t_...`), and a card that finished fix card "
+        "created may do the same; an owner-wake supervisor card (\"Owner wake: "
+        "supervise ...\") may unblock the cards its body lists while they are "
+        "in triage or blocked. Any other worker call is refused, and the "
         "worker shell stays fenced."
     ),
     {

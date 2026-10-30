@@ -1200,6 +1200,71 @@ def self_heal_requeue_grant(conn, worker_task_id: str) -> tuple[Optional[str], O
     return (target, fix.id) if target else (None, None)
 
 
+_OWNER_WAKE_TITLE = "Owner wake: supervise"
+# One chat-closeout ``owner_wake.card_line`` of a local card: ``- <board>/<id> "<title>": ...`` or ``- <board>/<id>:``.
+# A remote card's line names its gateway (`` on <gw>``) or a longer key, so it never matches.
+_OWNER_WAKE_CARD_LINE = re.compile(r"^- ([a-z0-9][a-z0-9_-]*)/(t_[0-9a-f]+)(?: \"|:)")
+OWNER_WAKE_REQUEUE_STATUSES = ("triage", "blocked")
+
+
+def _is_owner_wake_supervisor(task) -> bool:
+    """A board-supervisor card the chat-closeout owner wake created for an orphaned owner's cards."""
+    return (task is not None and (task.created_by or "") == "owner-wake"
+            and (task.title or "").startswith(_OWNER_WAKE_TITLE))
+
+
+def owner_wake_listed_cards(task, board: str) -> list[str]:
+    """The card ids an owner-wake supervisor card's body lists on ``board``, in order.
+
+    Only the card-line block (the lines before the first blank line) counts, so
+    ids cited later in the instructions are not grants. [daveey]
+    """
+    if not _is_owner_wake_supervisor(task):
+        return []
+    head = (task.body or "").split("\n\n", 1)[0]
+    found = []
+    for line in head.splitlines():
+        m = _OWNER_WAKE_CARD_LINE.match(line)
+        if m and m.group(1) == board:
+            found.append(m.group(2))
+    return list(dict.fromkeys(found))
+
+
+def requeue_grant(conn, worker_task_id: str, target_id: str, *,
+                  board: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    """``(via, source_card)`` when this worker may unblock ``target_id``, else ``(None, None)``.
+
+    - ``self-heal-requeue``: the self-heal grant (``self_heal_requeue_grant``), unchanged.
+    - ``owner-wake-requeue``: an owner-wake supervisor card (``created_by='owner-wake'``, title
+      ``Owner wake: supervise ...``) may unblock exactly the cards its body lists on this board,
+      and only while the target is in triage or blocked.
+
+    Every other worker and target stays refused. ``board`` is the board ``conn`` is on (default:
+    the active board). [daveey]
+    """
+    target, fix_id = self_heal_requeue_grant(conn, worker_task_id)
+    if target is not None and target == target_id:
+        return "self-heal-requeue", fix_id
+    worker = kb.get_task(conn, worker_task_id)
+    if not _is_owner_wake_supervisor(worker):
+        return None, None
+    slug = board or kb.get_current_board()
+    if target_id not in owner_wake_listed_cards(worker, slug):
+        return None, None
+    task = kb.get_task(conn, target_id)
+    if task is None or task.status not in OWNER_WAKE_REQUEUE_STATUSES:
+        return None, None
+    return "owner-wake-requeue", worker.id
+
+
+def has_requeue_grant(conn, worker_task_id: str, *, board: Optional[str] = None) -> bool:
+    """Whether this worker holds any requeue grant (it then gets the ``kanban_unblock`` tool). [daveey]"""
+    if self_heal_requeue_grant(conn, worker_task_id)[0] is not None:
+        return True
+    worker = kb.get_task(conn, worker_task_id)
+    return bool(owner_wake_listed_cards(worker, board or kb.get_current_board()))
+
+
 def worker_archive_scope(conn, task_id: str) -> tuple[Optional[str], Optional[str]]:
     """``(refusal, via)`` for archiving ``task_id`` from this process.
 
