@@ -35,6 +35,10 @@ OWNER_GATEWAY = "gateway"
 OWNER_TUI = "tui"
 UNKNOWN_EXIT_REASON = "unknown"
 UNKNOWN_EXIT_STATUS = "exited (status unknown — re-adopted after restart)"
+# A sandbox job whose watcher could not be re-attached after a restart (sandbox gone, no handle). [daveey]
+WATCHER_LOST_REASON = "watcher_lost"
+WATCHER_LOST_STATUS = ("watcher lost at restart — status unknown (the sandbox could not be re-attached); "
+                       "check the process yourself")
 DETACHED_SWEEP_SECONDS = 30.0
 _MAX_PARKED_EVENTS = 256
 
@@ -63,6 +67,8 @@ class ProcessReadoptMixin:
     # Supplied by ProcessRegistry.
     _lock: Any
     _running: dict
+    _finished: dict
+    pending_watchers: list
     completion_queue: Any
     _refresh_detached_session: Callable[[Any], Any]
 
@@ -75,6 +81,7 @@ class ProcessReadoptMixin:
     # ----- unknown-exit completion -----
 
     def _unknown_exit_event(self, session) -> dict[str, Any]:
+        lost = getattr(session, "completion_reason", "") == WATCHER_LOST_REASON
         return {
             "type": "completion",
             "session_id": session.id,
@@ -83,29 +90,114 @@ class ProcessReadoptMixin:
             "owner_task_id": session.owner_task_id,
             "command": session.command,
             "exit_code": None,
-            "completion_reason": UNKNOWN_EXIT_REASON,
-            "termination_source": "readopted_after_restart",
+            "completion_reason": WATCHER_LOST_REASON if lost else UNKNOWN_EXIT_REASON,
+            "termination_source": session.termination_source if lost else "readopted_after_restart",
             "output": "",
             "started_at": session.started_at,
             # The chat may not be open in this backend yet: park instead of dropping.
             "park_if_unowned": True,
         }
 
+    def _deliver_readopted_event(self, event: dict[str, Any]) -> None:
+        """Hand an event for a re-adopted job to the host's sink (Desktop: park + wake the chat), else the queue."""
+        sink = self.on_unknown_exit
+        if sink is None:
+            self.completion_queue.put(event)
+            return
+        try:
+            sink(event)
+        except Exception:
+            logger.warning("unknown-exit delivery hook failed; queueing %s instead", event.get("session_id"),
+                           exc_info=True)
+            self.completion_queue.put(event)
+
+    def _prune_uncollected_detached(self, session):
+        """Drop a recovered entry whose PID is gone, without inventing an exit.
+
+        An owned systemd scope stays reachable so kill can still reap it. A
+        scope-less entry is removed: poll/list must not report a collected exit.
+        A gateway re-adoption with a completion watcher keeps the session as an
+        ``unknown`` exit instead, so that watcher wakes the owning session. [daveey]
+        """
+        keep_for_watcher = session._lost_exit_via_watcher and session.notify_on_complete
+        with session._lock:
+            session.exited = True
+            if keep_for_watcher:
+                session.exit_code = None
+                session.completion_reason = UNKNOWN_EXIT_REASON
+                session.termination_source = "readopted_after_restart"
+        with self._lock:
+            was_running = self._running.pop(session.id, None) is not None
+            if session.systemd_unit or keep_for_watcher:
+                if keep_for_watcher and was_running:
+                    session.exited_at = time.time()
+                self._finished[session.id] = session
+            else:
+                self._finished.pop(session.id, None)
+        self._write_checkpoint()
+        if was_running and session._report_lost_exit and session.notify_on_complete:
+            self._queue_unknown_exit(session)
+        elif was_running and keep_for_watcher:
+            logger.info("Re-adopted process %s (pid=%s) exited; status unknown — the gateway watcher wakes %s",
+                        session.id, session.pid, session.session_key or "-")
+        session._completion_event.set()
+        return session if (session.systemd_unit or keep_for_watcher) else None
+
+    def _put_completion(self, session, notification: dict[str, Any]) -> None:
+        """Queue a completion; a re-attached job owned by a Desktop/TUI chat goes through the re-adopt
+        sink instead (that chat may not be open in this backend). [daveey]"""
+        if session._completion_via_readopt_sink:
+            notification["park_if_unowned"] = True
+            self._deliver_readopted_event(notification)
+            return
+        self.completion_queue.put(notification)
+
     def _queue_unknown_exit(self, session) -> None:
         from tools.process_registry import _redact_process_result
         event = self._unknown_exit_event(session)
         _redact_process_result(event)
-        sink = self.on_unknown_exit
-        if sink is None:
-            self.completion_queue.put(event)
-        else:
-            try:
-                sink(event)
-            except Exception:
-                logger.warning("unknown-exit delivery hook failed; queueing %s instead", session.id, exc_info=True)
-                self.completion_queue.put(event)
-        logger.info("Re-adopted process %s (pid=%s) exited; status unknown — notifying %s",
-                    session.id, session.pid, session.session_key)
+        self._deliver_readopted_event(event)
+        logger.info("Re-adopted process %s (pid=%s) %s — notifying %s", session.id, session.pid,
+                    "watcher lost" if event["completion_reason"] == WATCHER_LOST_REASON
+                    else "exited; status unknown", session.session_key)
+
+    def _deliver_unwatched_exit(self, session, owner: Optional[str], reason: str, source: str) -> str:
+        """Tell the owning session that a job's outcome was never observed (it exited while no host
+        watched it, or its sandbox watcher could not be re-attached). Every owner type gets a wake:
+        a Desktop/TUI chat through the re-adopt sink, a messaging-gateway session through a recovered
+        process watcher (which reads this exited session), a CLI/managed worker through the queue.
+        Returns how it was delivered (``sink`` | ``watcher`` | ``queue``), or ``""`` when the job asked
+        for no notification. [daveey]"""
+        with session._lock:
+            session.exited = True
+            session.exit_code = None
+            session.completion_reason = reason
+            session.termination_source = source
+        session.exited_at = time.time()
+        if not session.notify_on_complete:
+            return ""
+        if owner != OWNER_TUI and session.watcher_interval > 0:
+            with self._lock:
+                self._finished[session.id] = session
+            session._completion_event.set()
+            self.pending_watchers.append(self._recovered_watcher(session))
+            return "watcher"
+        if owner == OWNER_GATEWAY:
+            return ""  # no watcher route recorded: the gateway has no consumer for a bare queue event
+        self._queue_unknown_exit(session)
+        return "sink" if owner == OWNER_TUI and self.on_unknown_exit is not None else "queue"
+
+    @staticmethod
+    def _recovered_watcher(session) -> dict[str, Any]:
+        from tools.process_registry import _WATCHER_ROUTE_KEYS
+        return {
+            "session_id": session.id,
+            "check_interval": session.watcher_interval,
+            "session_key": session.session_key,
+            **{key: getattr(session, f"watcher_{key}") for key in _WATCHER_ROUTE_KEYS},
+            "notify_on_complete": session.notify_on_complete,
+            "parent_session_id": session.parent_session_id,
+        }
 
     # ----- parked events (owner chat not open in this backend) -----
 

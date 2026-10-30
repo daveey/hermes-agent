@@ -1183,6 +1183,13 @@ class DockerEnvironment(BaseEnvironment):
         self._mark_recreated()
         return True
 
+    def reattach_handle(self) -> dict | None:
+        """What a later process needs to watch a background job in this container after a restart
+        (``tools.environments.reattach``). [daveey]"""
+        if not self._container_id:
+            return None
+        return {"backend": "docker", "docker_exe": self._docker_exe, "container_id": self._container_id}
+
     def execute(self, command: str, cwd: str = "", **kwargs) -> dict:
         """Execute a command; if the container was removed out-of-band (idle reaper,
         docker prune, OOM, daemon restart) recreate it and retry once."""

@@ -13,6 +13,8 @@ logger = logging.getLogger("tools.process_registry")
 
 # This thread's nesting depth inside the processes.json flock (see _checkpoint_file_lock).
 _CHECKPOINT_LOCK_HELD = threading.local()
+# How long another writer keeps an orphaned sandbox entry (its writer died) for the owner's recovery.
+_SANDBOX_ORPHAN_KEEP_SECONDS = 7 * 24 * 3600
 
 
 class ProcessCheckpointMixin:
@@ -103,8 +105,19 @@ class ProcessCheckpointMixin:
         if not isinstance(existing, list):
             return []
         kept = []
+        now = time.time()
         for item in existing:
             if not isinstance(item, dict) or item.get("session_id") in own_ids:
+                continue
+            if item.get("pid_scope", "host") != "host" and item.get("pid"):
+                # A sandbox PID cannot be probed from here. Keep the entry while its writer still
+                # supervises it, and as an orphan awaiting its owner's restart recovery for up to
+                # _SANDBOX_ORPHAN_KEEP_SECONDS: dropping it erased the only trace a restarted gateway
+                # could re-attach (or report as lost). [daveey]
+                started = item.get("started_at")
+                fresh = isinstance(started, (int, float)) and now - started < _SANDBOX_ORPHAN_KEEP_SECONDS
+                if self._writer_alive(item) or fresh:
+                    kept.append(item)
                 continue
             if item.get("pid_scope", "host") != "host" or not item.get("pid"):
                 continue
@@ -113,12 +126,15 @@ class ProcessCheckpointMixin:
             kept.append(item)
         return kept
 
-    def _write_checkpoint_locked(self, extra_entries: Optional[list[dict[str, Any]]] = None):
+    def _write_checkpoint_locked(self, extra_entries: Optional[list[dict[str, Any]]] = None,
+                                 drop_ids: frozenset = frozenset()):
+        """``drop_ids``: entries this writer just settled (e.g. a lost-watcher notice sent at recovery)
+        that must leave the file even though no table of ours tracks them."""
         from tools.process_registry import _checkpoint_path, _CHECKPOINT_FIELDS
 
         writer = self._writer_identity()
         with self._lock:
-            own_ids = set(self._running) | set(self._finished)
+            own_ids = set(self._running) | set(self._finished) | set(drop_ids)
             entries = []
             for s in self._running.values():
                 if s.exited:
@@ -127,6 +143,10 @@ class ProcessCheckpointMixin:
                 # even for sessions spawned before this field existed.
                 if s.host_start_time is None and s.pid_scope == "host" and s.pid:
                     s.host_start_time = self._safe_host_start_time(s.pid)
+                # A recreated container has a new id: persist the handle that reaches the live one. [daveey]
+                if s.env_ref is not None and s.pid_scope != "host":
+                    from tools.environments.reattach import env_reattach_handle
+                    s.sandbox_handle = env_reattach_handle(s.env_ref) or s.sandbox_handle
                 entry = {"session_id": s.id, **{f: getattr(s, f) for f in _CHECKPOINT_FIELDS}}
                 # Redact inline credentials before persisting (~/.hermes/processes.json).
                 # Recovery uses command only for display (adoption re-validates the
@@ -217,9 +237,9 @@ class ProcessCheckpointMixin:
     def _recover_from_checkpoint_locked(self, owner: Optional[str]) -> int:
         from tools.process_registry import (
             ProcessSession, _CHECKPOINT_FIELDS, _checkpoint_path,
-            _CHECKPOINT_DEFAULTS, _WATCHER_ROUTE_KEYS, _stop_systemd_unit,
+            _CHECKPOINT_DEFAULTS, _stop_systemd_unit,
         )
-        from tools.process_registry_readopt import OWNER_TUI, owner_accepts
+        from tools.process_registry_readopt import OWNER_TUI, UNKNOWN_EXIT_REASON, owner_accepts
         from tools.process_registry_output_log import adoptable_log
 
         # This host adopts what a crashed predecessor left running, so the jobs it starts must
@@ -234,6 +254,7 @@ class ProcessCheckpointMixin:
             return 0
         recovered = 0
         unresolved_scope_entries: list[dict[str, Any]] = []
+        settled_ids: set = set()  # sandbox entries answered with a lost-watcher notice: leave the file
         for entry in entries:
             pid, pid_scope = entry.get("pid"), entry.get("pid_scope", "host")
             if not pid:
@@ -251,10 +272,13 @@ class ProcessCheckpointMixin:
                 continue
             if not owner_accepts(owner, entry):
                 continue
-            if pid_scope != "host":  # in-sandbox PIDs mean nothing once the env handle is gone
-                logger.info(
-                    "Skipping recovery for non-host process: %s (pid=%s, scope=%s)",
-                    entry.get("command", "unknown")[:60], pid, pid_scope)
+            if pid_scope != "host":
+                # In-sandbox PIDs are only reachable through the sandbox: re-attach to it when it is still
+                # up, else tell the owning session its watcher is gone. Never drop it silently. [daveey]
+                if self._recover_sandbox_entry(entry, owner):
+                    recovered += 1
+                else:
+                    settled_ids.add(entry.get("session_id"))
                 continue
             # Alive and still ours: re-attach. A start-time probe that cannot
             # be read is not proof the PID was reused — dropping it would leave
@@ -275,9 +299,15 @@ class ProcessCheckpointMixin:
                     entry.get("session_id", "?"), pid)
                 continue
             if fate != "running":
-                if owner == OWNER_TUI and entry.get("notify_on_complete"):
-                    # Exited while no backend watched it: the chat still gets its wake.
-                    self._queue_unknown_exit(self._session_from_entry(entry))
+                if entry.get("notify_on_complete"):
+                    # Exited while no host watched it: the owning session still gets its wake, whatever
+                    # kind of host owns it (Desktop chat, messaging gateway, CLI). [daveey]
+                    lost = self._session_from_entry(entry)
+                    how = self._deliver_unwatched_exit(
+                        lost, owner, UNKNOWN_EXIT_REASON, "readopted_after_restart")
+                    logger.info("Process %s (pid=%s) of session %s exited while unwatched; %s",
+                                lost.id, pid, lost.session_key or "-",
+                                f"waking it via {how}" if how else "no wake route recorded")
                 systemd_unit = entry.get("systemd_unit", "")
                 if systemd_unit and not _stop_systemd_unit(systemd_unit):
                     logger.warning(
@@ -290,8 +320,10 @@ class ProcessCheckpointMixin:
             # (and recorded exit) outlives its spawner, so tail it from the start.
             session = self._session_from_entry(entry)
             session.output_log = log
-            # A TUI backend reports the eventual exit (status unknown) to the owning chat. [daveey]
+            # A TUI backend reports the eventual exit (status unknown) to the owning chat; a gateway keeps the
+            # exited session for its recovered watcher to deliver. [daveey]
             session._report_lost_exit = owner == OWNER_TUI
+            session._lost_exit_via_watcher = owner != OWNER_TUI and session.watcher_interval > 0
             if session.output_log:
                 self._track_started(session, self._log_reader_loop, f"proc-log-reader-{session.id}")
             else:
@@ -301,22 +333,73 @@ class ProcessCheckpointMixin:
             logger.info("Recovered detached process: %s (pid=%d)", session.command[:60], pid)
             # Re-enqueue watcher so gateway can resume notifications
             if session.watcher_interval > 0:
-                self.pending_watchers.append({
-                    "session_id": session.id,
-                    "check_interval": session.watcher_interval,
-                    "session_key": session.session_key,
-                    **{key: getattr(session, f"watcher_{key}") for key in _WATCHER_ROUTE_KEYS},
-                    "notify_on_complete": session.notify_on_complete,
-                    "parent_session_id": session.parent_session_id,
-                })
-        self._write_checkpoint_locked(extra_entries=unresolved_scope_entries)
+                self.pending_watchers.append(self._recovered_watcher(session))
+        self._write_checkpoint_locked(extra_entries=unresolved_scope_entries, drop_ids=frozenset(settled_ids))
         return recovered
+
+    def _recover_sandbox_entry(self, entry: dict[str, Any], owner: Optional[str]) -> bool:
+        """Re-attach a sandbox job's watcher (True), or deliver a "watcher lost" notice to its owning
+        session (False). Logs one line either way, naming the session. [daveey]"""
+        import shlex
+        from tools.process_registry_readopt import OWNER_TUI, WATCHER_LOST_REASON
+
+        session = self._session_from_entry(entry)
+        session.sandbox_handle = dict(entry.get("sandbox_handle") or {})
+        key = session.session_key or "-"
+        temp_dir = str(entry.get("sandbox_temp_dir") or "").rstrip("/")
+        log_path, pid_path, exit_path = (f"{temp_dir}/hermes_bg_{session.id}.{ext}" for ext in ("log", "pid", "exit"))
+        env, why = None, ""
+        if not session.sandbox_handle or not temp_dir:
+            why = "no re-attach handle recorded (spawned before handles were persisted, or backend has none)"
+        else:
+            from tools.environments import reattach as _reattach
+            try:
+                env = _reattach.reattach_environment(session.sandbox_handle)
+            except Exception as exc:
+                logger.debug("Sandbox re-attach of %s failed", session.id, exc_info=True)
+                env, why = None, f"re-attach failed: {exc}"
+            if env is None:
+                why = why or f"sandbox is gone ({session.sandbox_handle.get('backend', '?')})"
+            elif (isinstance(getattr(env, "started_at", None), (int, float))
+                  and isinstance(session.started_at, (int, float))
+                  and env.started_at > session.started_at + 5):
+                # The container restarted after the job started: the job died with it, and its old PID
+                # may now belong to something else. [daveey]
+                why = "the sandbox restarted after the job started"
+            else:
+                try:
+                    probe = env.execute(f"test -e {shlex.quote(pid_path)} && echo hermes-bg-present", timeout=10)
+                    present = "hermes-bg-present" in str(probe.get("output", ""))
+                except Exception as exc:  # health: allow BLE001 -- any probe failure means "cannot re-attach"; logged with traceback
+                    logger.debug("Sandbox probe of %s failed", session.id, exc_info=True)
+                    present, why = False, f"probe failed: {exc}"
+                if not present:
+                    why = why or "the job's wrapper files are gone from the sandbox"
+        if why:
+            how = self._deliver_unwatched_exit(session, owner, WATCHER_LOST_REASON, "restart_watcher_lost")
+            logger.warning(
+                "Sandbox process %s (pid=%s) of session %s: watcher lost at restart (%s); %s",
+                session.id, session.pid, key, why,
+                f"notified the session via {how}" if how else "it asked for no notification")
+            return False
+        session.env_ref = env
+        session.detached = False  # the poller collects the real exit code from the wrapper's exit file
+        session._completion_via_readopt_sink = owner == OWNER_TUI
+        self._track_started(session, self._env_poller_loop, f"proc-poller-{session.id}",
+                            (env, log_path, pid_path, exit_path))
+        if session.watcher_interval > 0:
+            self.pending_watchers.append(self._recovered_watcher(session))
+        logger.info("Re-attached sandbox process %s (pid=%s) of session %s: %s",
+                    session.id, session.pid, key, session.command[:60])
+        return True
 
     @staticmethod
     def _session_from_entry(entry: dict[str, Any]):
         from tools.process_registry import ProcessSession, _CHECKPOINT_DEFAULTS, _CHECKPOINT_FIELDS
 
         fields = {f: entry.get(f, _CHECKPOINT_DEFAULTS[f]) for f in _CHECKPOINT_FIELDS}
+        # Never share a mutable default (or the parsed entry's own container) between sessions.
+        fields = {f: (type(v)(v) if isinstance(v, (list, dict)) else v) for f, v in fields.items()}
         fields.update(
             command=entry.get("command", "unknown"),
             owner_task_id=entry.get("owner_task_id", "") or entry.get("task_id", ""),

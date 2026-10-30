@@ -27,7 +27,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 _IS_LINUX = platform.system() == "Linux"
 from tools.environments.local import _append_dropped_path_entries, _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env, _terminal_env, process_cwd
 from hermes_cli._subprocess_compat import windows_hide_flags
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
 
 from hermes_cli.config import get_hermes_home
@@ -573,6 +573,10 @@ class ProcessSession:
                                                 # sweeps), per terminal(background=true, persist_on_release=true) (#41225)
     output_log: str = ""                        # file the process writes to (worker spawns; no pipe to lose)
     pty_fallback: str = ""                      # why a pty=true local spawn runs in pipe mode instead
+    # Sandbox spawns: how a later process re-opens the sandbox (``env.reattach_handle()``) and where the
+    # wrapper's hermes_bg_<id>.{log,pid,exit} files live, so a restart can re-attach the watcher. [daveey]
+    sandbox_handle: dict = field(default_factory=dict)
+    sandbox_temp_dir: str = ""
     # Watcher/notification routing (persisted for crash recovery)
     watcher_platform: str = ""
     watcher_chat_id: str = ""
@@ -613,6 +617,12 @@ class ProcessSession:
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (use_pty=True)
     # Re-adopted by a Desktop/TUI backend: queue a status-unknown completion when the PID goes. [daveey]
     _report_lost_exit: bool = field(default=False, repr=False)
+    # Re-adopted by a messaging gateway: when the PID goes, keep the session as an "unknown" exit so the
+    # recovered gateway watcher delivers it, instead of pruning it and ending that watcher silently. [daveey]
+    _lost_exit_via_watcher: bool = field(default=False, repr=False)
+    # A re-attached sandbox job owned by a Desktop/TUI chat: its completion goes through the re-adopt
+    # sink (park + wake the chat), since the chat may not be open in this backend. [daveey]
+    _completion_via_readopt_sink: bool = field(default=False, repr=False)
     _owned_pgid: Optional[int] = field(default=None, repr=False)  # see ProcessOwnershipMixin
 
     def __post_init__(self):
@@ -662,9 +672,10 @@ _CHECKPOINT_FIELDS = (
     "started_at", "task_id", "owner_task_id", "session_key",
     *(f"watcher_{k}" for k in _WATCHER_ROUTE_KEYS), "watcher_interval",
     "parent_session_id", "notify_on_complete", "completion_output_chars", "watch_patterns",
-    "heartbeat_seconds", "persist_on_release", "output_log")
+    "heartbeat_seconds", "persist_on_release", "output_log", "sandbox_handle", "sandbox_temp_dir")
 _CHECKPOINT_DEFAULTS = {
-    f.name: ([] if f.name == "watch_patterns" else f.default)
+    f.name: (f.default if f.default is not MISSING
+             else f.default_factory() if f.default_factory is not MISSING else MISSING)  # type: ignore[misc]
     for f in ProcessSession.__dataclass_fields__.values()
     if f.name in _CHECKPOINT_FIELDS
 }
@@ -1047,26 +1058,6 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         self._write_checkpoint()
         session._completion_event.set()
 
-    def _prune_uncollected_detached(self, session: ProcessSession) -> Optional[ProcessSession]:
-        """Drop a recovered entry whose PID is gone, without inventing an exit.
-
-        An owned systemd scope stays reachable so kill can still reap it. A
-        scope-less entry is removed: poll/list must not report a collected exit.
-        """
-        with session._lock:
-            session.exited = True
-        with self._lock:
-            was_running = self._running.pop(session.id, None) is not None
-            if session.systemd_unit:
-                self._finished[session.id] = session
-            else:
-                self._finished.pop(session.id, None)
-        self._write_checkpoint()
-        if was_running and session._report_lost_exit and session.notify_on_complete:
-            self._queue_unknown_exit(session)
-        session._completion_event.set()
-        return session if session.systemd_unit else None
-
     def _uncollected_gone(self, session: Optional[ProcessSession]) -> bool:
         """True when a detached entry was closed without a collected exit status
         and the PID is no longer alive. List/poll must not report that as exited."""
@@ -1298,6 +1289,10 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         session = self._new_session(command, task_id, owner_task_id, session_key, cwd, env_ref=env, pid_scope="sandbox",
                                     persist_on_release=persist_on_release)
         temp_dir = self._env_temp_dir(env)
+        # Recorded in the checkpoint so a restarted host can re-attach this job's watcher. [daveey]
+        from tools.environments.reattach import env_reattach_handle
+        session.sandbox_handle = env_reattach_handle(env)
+        session.sandbox_temp_dir = temp_dir
         log_path, pid_path, exit_path = (f"{temp_dir}/hermes_bg_{session.id}.{ext}" for ext in ("log", "pid", "exit"))
         q = shlex.quote
         bg_command = (
@@ -1621,7 +1616,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
                 "started_at": session.started_at,
             }
             _redact_process_result(notification)
-            self.completion_queue.put(notification)
+            self._put_completion(session, notification)
 
     @staticmethod
     def _exit_fields(session: ProcessSession) -> dict:

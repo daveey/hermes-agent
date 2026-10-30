@@ -10,8 +10,12 @@ from contextlib import suppress
 _DONE = ("completed", "success")
 _REASON_STATUS = {"lost": "marked lost because the process backend disappeared", "failed_start": "failed to start",
                   # A re-adopted orphan (no pipe after a restart) exited; its status was never collected. [daveey]
-                  "unknown": "exited (status unknown — re-adopted after restart)"}
-_REASON_OUTCOME = {"lost": "Lost", "failed_start": "Failed to Start", "unknown": "Exited (status unknown)"}
+                  "unknown": "exited (status unknown — re-adopted after restart)",
+                  # A sandbox job whose watcher a restart could not re-attach. [daveey]
+                  "watcher_lost": ("watcher lost at restart — status unknown (the sandbox could not be "
+                                   "re-attached); check the process yourself")}
+_REASON_OUTCOME = {"lost": "Lost", "failed_start": "Failed to Start", "unknown": "Exited (status unknown)",
+                   "watcher_lost": "Watcher Lost (status unknown)"}
 
 
 @dataclass(frozen=True, slots=True)
