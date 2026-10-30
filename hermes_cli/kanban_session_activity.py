@@ -19,6 +19,8 @@ from hermes_cli import kanban_activity_identity as _identity
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
 from hermes_cli.kanban_scope_heartbeat import scope_heartbeats as _scope_heartbeats
 from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases, _moved_evidence, _retire_moved
+from hermes_cli.kanban_session_activity_attention import AttentionCache as _AttentionCache
+from hermes_cli.kanban_session_activity_attention import run_checks as _run_done_checks
 import contextlib
 import json
 import logging
@@ -1765,23 +1767,21 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
 ATTENTION_WINDOW_S = 24 * 3600
 _ATTENTION_TTL_S = 30.0
 _done_checks: dict[str, Callable[[dict[str, Any]], bool]] = {}
-_attention_cache: tuple[float, dict[str, int]] | None = None
-_attention_scope: tuple[str, ...] | None = None
+# [daveey] Per origin scope, with done-check verdicts shared across scopes (see the module).
+_attention = _AttentionCache(_ATTENTION_TTL_S)
 
 
 def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool]) -> Callable[[], None]:
     """Register ``fn(card) -> bool`` (True = this completed card needs attention). ``card`` has ``id``, ``title``,
     ``summary`` (latest run summary, else ``result``), ``completed_at``, ``board`` and ``board_path``. Re-registering a
     name replaces it; the returned callable unregisters."""
-    global _attention_cache
     _done_checks[name] = fn
-    _attention_cache = None
+    _attention.clear()
 
     def _dispose() -> None:
-        global _attention_cache
         if _done_checks.get(name) is fn:
             _done_checks.pop(name, None)
-            _attention_cache = None
+            _attention.clear()
 
     return _dispose
 
@@ -1821,44 +1821,32 @@ def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any
 def attention_task_counts(now: float | None = None) -> dict[str, int]:
     """``{session_id: completed cards a registered check flags}`` over the last ``ATTENTION_WINDOW_S``. Cached;
     a check that raises counts as False."""
-    global _attention_cache, _attention_scope
     if not _done_checks:
         return {}
     scope = _origin_scope()
     mono = time.monotonic()
-    with _cache_lock:
-        if _attention_cache is not None and _attention_scope == scope and mono < _attention_cache[0]:
-            return _attention_cache[1]
+    hit = _attention.get(scope, mono)
+    if hit is not None:
+        return hit
     since = (time.time() if now is None else now) - ATTENTION_WINDOW_S
     checks = list(_done_checks.values())
-    verdicts: dict[tuple[str, str], bool] = {}
+    paths = list(_board_db_paths())
+    boards = tuple(str(p) for p in paths)
     pairs: set[tuple[str, str]] = set()
-    for path in _board_db_paths():
+    for path in paths:
         try:
             recent = _read_recent_done(path, since)
         except sqlite3.Error as exc:
             _log.debug("kanban attention read failed for %s: %s", path, exc)
             continue
         for sid, card in recent:
-            key = (str(path), str(card["id"]))
-            if key not in verdicts:
-                flagged = False
-                for check in checks:
-                    try:
-                        if check(card):
-                            flagged = True
-                            break
-                    except Exception:
-                        _log.debug("kanban done check failed on %s", card.get("id"), exc_info=True)
-                verdicts[key] = flagged
-            if verdicts[key]:
-                pairs.add((sid, key[1]))
+            key = (boards, str(path), str(card["id"]), card.get("completed_at"), card.get("title"), card.get("summary"))
+            if _attention.verdict(key, mono, lambda card=card: _run_done_checks(checks, card)):
+                pairs.add((sid, key[2]))
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
-    with _cache_lock:
-        _attention_scope = scope
-        _attention_cache = (mono + _ATTENTION_TTL_S, counts)
+    _attention.put(scope, mono, counts)
     return counts
 
 
@@ -2045,7 +2033,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:
-    global _cache, _attention_cache, _remote_last, _links_cache, _snapshot_saved, _remote_read_memo
+    global _cache, _remote_last, _links_cache, _snapshot_saved, _remote_read_memo
     global _hub_signature_memo, _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
     _remote_read_memo = None
     _hub_signature_memo = None
@@ -2059,7 +2047,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
         _links_cache = None
     with _cache_lock:
         _cache = None
-        _attention_cache = None
+        _attention.clear()
         if not keep_remote:
             _remote_last = None
             _snapshot_saved = None
