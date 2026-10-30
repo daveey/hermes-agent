@@ -1,4 +1,4 @@
-"""Tests for scripts/termux/stage_apt_repo.py — stdlib + pytest, no network.
+"""Tests for scripts/termux/stage_apt_repo.py — stdlib + pytest (+ cryptography for one key fixture), no network.
 
 GPG tests generate a throwaway key inside a temp GNUPGHOME and never touch
 the invoking user's keyring; passphrase material never appears in test
@@ -6,6 +6,7 @@ output (no secret logging).
 """
 
 import gzip
+import hashlib
 import os
 import shutil
 import subprocess
@@ -367,3 +368,87 @@ def test_multi_key_import_is_rejected_not_first_key_used(tmp_path, monkeypatch, 
     if dists.exists():
         assert not (dists / "InRelease").exists()
         assert not (dists / "Release.gpg").exists()
+
+
+def _s2k_key(passphrase: bytes, salt: bytes, coded_count: int) -> bytes:
+    """OpenPGP iterated+salted S2K (RFC 4880 3.7.1.3), SHA-1 -> AES-128 key."""
+    count = (16 + (coded_count & 15)) << ((coded_count >> 4) + 6)
+    blob = salt + passphrase
+    h = hashlib.sha1()
+    chunk = blob * max(1, 65536 // len(blob))
+    while count >= len(chunk):
+        h.update(chunk)
+        count -= len(chunk)
+    reps, rem = divmod(count, len(blob))
+    h.update(blob * reps + blob[:rem])
+    return h.digest()[:16]
+
+
+def _with_s2k_salt(export: bytes, passphrase: str, new_salt: bytes) -> bytes:
+    """Re-protect every secret (sub)key packet of a binary gpg ed25519 export
+    under NEW_SALT: same key, same passphrase, only the S2K salt differs.
+
+    gpg picks a random salt per export, so this pins the one input that
+    decides whether gpg-agent's unattended import stores a corrupted key."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+    from cryptography.hazmat.decrepit.ciphers.modes import CFB
+
+    pw = passphrase.encode()
+    out, i = bytearray(), 0
+    while i < len(export):
+        tag_byte = export[i]
+        assert tag_byte & 0xC0 == 0x80, "gpg exports old-format packet headers"
+        tag, nlen = (tag_byte >> 2) & 0xF, (1, 2, 4)[tag_byte & 3]
+        length = int.from_bytes(export[i + 1:i + 1 + nlen], "big")
+        body = export[i + 1 + nlen:i + 1 + nlen + length]
+        i += 1 + nlen + length
+        if tag in (5, 7):  # secret key / secret subkey
+            p = 7 + body[6]  # version, created, algo, OID
+            p += 2 + (int.from_bytes(body[p:p + 2], "big") + 7) // 8  # public point
+            usage, cipher, s2k_mode, s2k_hash = body[p:p + 4]
+            assert (usage, cipher, s2k_mode, s2k_hash) == (254, 7, 3, 2)
+            salt, coded, iv = body[p + 4:p + 12], body[p + 12], body[p + 13:p + 29]
+            old = Cipher(algorithms.AES(_s2k_key(pw, salt, coded)), CFB(iv)).decryptor()
+            plain = old.update(body[p + 29:]) + old.finalize()
+            assert hashlib.sha1(plain[:-20]).digest() == plain[-20:], "wrong passphrase"
+            new = Cipher(algorithms.AES(_s2k_key(pw, new_salt, coded)), CFB(iv)).encryptor()
+            body = (body[:p + 4] + new_salt + body[p + 12:p + 29]
+                    + new.update(plain) + new.finalize())
+            tag_byte, nlen = 0x80 | (tag << 2) | 2, 4
+        out += bytes([tag_byte]) + len(body).to_bytes(nlen, "big") + body
+    return bytes(out)
+
+
+@pytest.mark.skipif(not GPG_PRESENT, reason="gpg binary not available")
+def test_protected_key_whose_s2k_salt_has_spaces_still_signs(tmp_path, monkeypatch, short_home):
+    """A passphrase-protected key file signs whatever random S2K salt gpg
+    chose when it was exported. gpg-agent's unattended (--batch) import
+    stores the key unconverted, and GnuPG 2.4's key-file writer drops a
+    space that follows "(", ")" or a space even inside the salt's quoted
+    string, so a salt like "AA  AAAA" came back wrong -> "Bad passphrase"."""
+    passphrase = "correct-horse-battery-staple"
+    monkeypatch.setenv("TERMUX_APT_GPG_PASSPHRASE", passphrase)
+    kh = short_home()
+    fpr = _generate_test_key(kh, passphrase=passphrase)
+    stage_apt_repo._gpg_run(
+        kh, ["--quick-add-key", fpr, "ed25519", "sign", "never"], passphrase=passphrase,
+    )
+    export = stage_apt_repo._gpg_run(
+        kh, ["--export-secret-keys", fpr], passphrase=passphrase
+    ).stdout
+    keyfile = tmp_path / "signing.gpg"
+    keyfile.write_bytes(_with_s2k_salt(export, passphrase, b"AA  AAAA"))
+
+    pool = tmp_path / "pool-in"
+    pool.mkdir()
+    make_deb(pool / "h.deb", "hermes-agent", "1.2.3-1")
+    out = tmp_path / "repo"
+    assert stage_apt_repo.main(
+        ["--pool", str(pool), "--out", str(out),
+         "--suite", "hermes-nightly", "--gpg-key-file", str(keyfile)]
+    ) == 0
+    dists = out / "dists" / "hermes-nightly"
+    vr = short_home(prefix="apt-test-verify-")
+    stage_apt_repo._gpg_run(vr, ["--import"], stdin=(out / "key.asc").read_bytes())
+    r = _independent_gpgv_verify(vr, dists / "InRelease")
+    assert r.returncode == 0, r.stderr.decode()
