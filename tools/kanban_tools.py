@@ -1211,7 +1211,7 @@ def _handle_block(args: dict, **kw) -> str:
         awaiting, wake = _awaiting_arg(args, wake)
         from hermes_cli.kanban_block_policy import ERROR_CODE, block_policy_error
         _policy = block_policy_error(kind, human_request=args.get("human_request"), wake_check=wake[0],
-                                     clock_only=wake[2], blocker_id=blocker_id, reason=reason)
+                                     clock_only=wake[2], blocker_id=blocker_id, reason=reason, task=(conn, tid))
         _check(_policy is None, _policy or "", ERROR_CODE)
         _standing_wait_guard(kb, conn, tid, kind, args.get("human_request"), reason)
         _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id,

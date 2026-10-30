@@ -317,7 +317,8 @@ def build_recovery_nudge(result: Any, *, attempt: int, max_attempts: int,
         "whatever it was writing before continuing (the action may not have executed).\n"
         "2. Continue the task from where it stopped and finish any remaining deliverable.\n"
         "3. End with a terminal `kanban_complete(summary=..., artifacts=[...])` if the work "
-        "is done, or `kanban_block(reason=...)` if you are blocked.]"
+        "is done, or `kanban_block(kind=..., reason=..., human_request=...)` if only the user can unblock it "
+        "(an agent wait is `kind='time'` with a wake_check, or `kind='assignment'`).]"
     )
 
 

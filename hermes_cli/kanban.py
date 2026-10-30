@@ -1486,8 +1486,11 @@ def _cmd_block(args: argparse.Namespace) -> int:
         except ValueError as exc:
             return _err(f"kanban block: {exc}", 2)
         from hermes_cli.kanban_block_policy import block_policy_error
+        from hermes_cli.kanban_continuation_recovery import is_exhausted_budget_block
         policy = block_policy_error(kind, human_request=request, wake_check=wake[0],
-                                    clock_only=wake[2], reason=reason)
+                                    clock_only=wake[2], reason=reason,
+                                    exhausted_budget=all(is_exhausted_budget_block(conn, t, kind, reason)
+                                                         for t in ids))
         if policy:
             return _err(f"kanban block: {policy}", 2)
         refused: dict = {}

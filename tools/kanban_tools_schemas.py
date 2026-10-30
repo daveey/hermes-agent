@@ -299,9 +299,10 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "Stop work on this task and route it according to WHY you're stuck. "
         "Set ``kind`` to say which: 'dependency' (waiting on another task — "
         "goes to todo and auto-resumes when that task finishes, no human "
-        "needed), 'needs_input' (you need a human decision/answer), "
-        "'capability' (a hard wall: no access, missing credentials, an action "
-        "no agent can do), 'assignment' (this worker has the wrong tools/backend; "
+        "needed), 'needs_input' (a decision/answer only David can give; needs "
+        "``human_request``), 'capability' (a hard wall no agent can clear: needs "
+        "``human_request`` for David's step, or ``needs`` when another gateway "
+        "holds the access), 'assignment' (this worker has the wrong tools/backend; "
         "route to a capable supervisor, not a human), 'transient' (a flaky failure that may clear), or "
         "'time' (waiting on a clock, a cron, a soak or a release, not a person: "
         "parks the card 'scheduled' with a wake time, never as a human block). "
@@ -328,8 +329,9 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "reason": _prop("string", (
                 "The human's unblock instructions. Lead with the ask, not "
-                "with what you finished. For needs_input/capability write "
-                "numbered steps the human must perform (\"1) ... 2) ...\"), "
+                "with what you finished. The ask itself goes in human_request "
+                "(a needs_input/capability reason without one is refused); here "
+                "write the numbered steps the human must perform (\"1) ... 2) ...\"), "
                 "naming the exact device, app, setting, page or command, then "
                 "what to do when done (e.g. \"then unblock this card\" or "
                 "\"reply with the value\"). For a decision, state the question "
@@ -345,7 +347,11 @@ KANBAN_BLOCK_SCHEMA = _schema(
                 "resumes automatically when an incomplete parent finishes; "
                 "if no parent is open it is a timed wait (scheduled). 'time' "
                 "parks scheduled until SCHEDULED_UNTIL=<ISO8601> in the reason "
-                "(default 24h). The others surface to a human. Omit only if none apply."
+                "(default 24h). 'assignment' routes to a capable supervisor. "
+                "'needs_input', 'capability', 'transient' or an omitted kind with no "
+                "human_request, wake_check, clock_only or blocker_id is refused "
+                "(agent_owned_block): a step for David needs human_request; agent "
+                "work is 'assignment', ``needs`` or an owner card; a wait is 'time'."
             ),
         },
         "blocker_id": _prop("string", _BLOCKER_ID_DESC + (
@@ -767,8 +773,10 @@ KANBAN_CREATE_SCHEMA = _schema(
             "type": "string",
             "enum": ["running", "blocked"],
             "description": (
-                "Initial card status. 'blocked' is only for human action needed now, "
-                "not a future approval or 'after X, then Y' hold. For task dependencies, "
+                "Initial card status. 'blocked' is only for human action needed now "
+                "and requires human_request (action, why_human, interaction, scope, "
+                "evidence): an ask written only in body is refused. Not for a future "
+                "approval or 'after X, then Y' hold. For task dependencies, "
                 "set parents and omit initial_status: the card waits in todo until parents "
                 "finish. The worker must still obtain any required approval when due. "
                 "For external conditions use kanban_schedule with wake_check (clock_only "

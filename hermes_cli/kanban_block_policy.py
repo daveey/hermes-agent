@@ -19,14 +19,33 @@ AGENT_OWNED_KINDS = (None, "capability", "transient", "needs_input")
 AGENT_BLOCK_GRACE_SECONDS = 2 * 3600
 ERROR_CODE = "agent_owned_block"
 _DECISION_TITLE = re.compile(r"^\s*(for you\s*:|choose\b|decide\b|approve\b)", re.IGNORECASE)
+# Copyable shape for the ask, appended to every refusal: agents that hit the guard retried by guessing
+# (reason="placeholder" probes, a tool_describe round trip) or moved the ask into reason/body again. [daveey]
+HUMAN_REQUEST_SKELETON = (
+    "human_request={'action': '<the exact step for David and where>. Unblock = <what happens next>; "
+    "archive = <what is dropped>', 'why_human': '<why no agent can do it>', 'interaction': "
+    "'approval|reply|user_terminal|physical|external', 'scope': '<what it covers>', 'evidence': "
+    "'<what you checked>'}"
+)
+_SKELETON_NOTE = (" A real ask for David goes in human_request, not in reason or body; copy and fill: "
+                  + HUMAN_REQUEST_SKELETON + ".")
 
 
 def block_policy_error(kind, *, human_request=None, wake_check=None, clock_only=False,
-                       blocker_id=None, reason=None) -> Optional[str]:
-    """Typed refusal text for an ownerless block, else None."""
+                       blocker_id=None, reason=None, exhausted_budget=False, task=None) -> Optional[str]:
+    """Typed refusal text for an ownerless block, else None.
+
+    ``exhausted_budget`` (or ``task=(conn, task_id)`` to compute it) is the DB-verified
+    :func:`hermes_cli.kanban_continuation_recovery.is_exhausted_budget_block`: that block is the one
+    ``kanban_continue`` prescribes after its refusal, and ``block_task`` routes it to agent triage (an
+    owner), so it is not ownerless. Before this the guard refused the prescribed call (8 sessions). [daveey]
+    """
     if kind not in AGENT_OWNED_KINDS:
         return None
-    if human_request or wake_check or clock_only or blocker_id:
+    if task is not None and not exhausted_budget:
+        from hermes_cli.kanban_continuation_recovery import is_exhausted_budget_block
+        exhausted_budget = is_exhausted_budget_block(task[0], task[1], kind, reason)
+    if human_request or wake_check or clock_only or blocker_id or exhausted_budget:
         return None
     if reason and "SCHEDULED_UNTIL=" in reason:
         return None
@@ -40,7 +59,7 @@ def block_policy_error(kind, *, human_request=None, wake_check=None, clock_only=
             "is opened on that gateway, or kanban_create the owner card there and park on it "
             "(kind='time', awaiting={kind:'card', ref, gateway}); (3) a timed wait -> kind='time' "
             "with awaiting plus wake_check (or clock_only=true)."
-        )
+        ) + _SKELETON_NOTE
     return (
         f"{ERROR_CODE}: kind={kind!r} with no human_request, wake_check or clock_only leaves the "
         "card with no owner and nothing to wake it. Pick one: (1) a decision/action only David can "
@@ -52,7 +71,7 @@ def block_policy_error(kind, *, human_request=None, wake_check=None, clock_only=
         "CI run, a vendor ticket, a real clock window) plus wake_check (or clock_only=true). "
         "If the work is actually done, call kanban_complete; if it needs another card, "
         "kanban_create it and link it as a parent."
-    )
+    ) + _SKELETON_NOTE
 
 
 ASK_LINT_CODE = "user_ask_incomplete"
@@ -130,8 +149,10 @@ def creation_lint_error(title, initial_status, human_request, *, triage=False) -
     if human_request:
         return None
     if initial_status == "blocked" and not triage:
-        return (f"{ERROR_CODE}: initial_status='blocked' requires human_request (the ask for David); "
-                "otherwise create the card ready/todo or use parents for a dependency.")
+        return (f"{ERROR_CODE}: initial_status='blocked' requires human_request (the ask for David). "
+                "If no human step is needed, omit initial_status: an agent wait on another card is "
+                "parents=[...], a wait on time or an external fact is kanban_schedule with wake_check "
+                "(clock_only for a pure clock)." + _SKELETON_NOTE)
     if title and _DECISION_TITLE.match(title) and initial_status == "blocked":
         return f"{ERROR_CODE}: decision-style card needs human_request."
     return None

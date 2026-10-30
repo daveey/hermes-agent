@@ -133,8 +133,10 @@ def continue_task(
                 f"continuation limit reached ({streak} consecutive continued runs, limit {limit}). "
                 "Finish with kanban_complete, or kanban_block(kind='transient', "
                 "reason='continuation_exhausted: split the work or reset the continuation budget') "
-                "for agent triage. Budget resets and task splitting are agent work, not needs_input. "
-                "Use needs_input only for an actual user decision, recorded in the reason.")}
+                "for agent triage. Pass that reason verbatim: put the handoff state in a kanban_comment "
+                "first, because any other text in the reason is read as a human ask and refused "
+                "without human_request. Budget resets and task splitting are agent work, not "
+                "needs_input. Use needs_input only for an actual user decision, with human_request.")}
         source_status = kb._retry_status_for_run(conn, task_id)
         new_status = "scheduled" if resume_after > 0 else source_status
         wake_at = now + resume_after if resume_after > 0 else None
