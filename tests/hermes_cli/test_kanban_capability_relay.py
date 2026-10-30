@@ -153,6 +153,12 @@ def test_worker_node_needs_relays_home_and_opens_the_owner_card_on_the_holder(pa
     assert kb.get_task(worker.conn, tid) is None  # evicted: the home now runs the wake probe
     home.enter()
     assert kb.get_task(home.conn, tid).status == "scheduled"
+    # [daveey] The park names the home as its probe host; the home's sweep registers the probe from the event.
+    from hermes_cli import kanban_wake_check as kwc
+    parks = [e for e in kb.list_events(home.conn, tid) if e.kind == "scheduled"]
+    assert parks[-1].payload["probe_host"] == HOME
+    assert kwc.restore_missing_checks(home.conn)["restored"] == [tid]
+    assert kwc.get_state(home.conn, tid)["cmd"] == f"hermes kanban wait-check capability-owner {rid}"
 
     # The home's wake probe routes it. The home holds host:macbook itself: the owner card is a local card
     # pinned to this machine, keyed by the same request id. No hermes-hub request is needed for that.

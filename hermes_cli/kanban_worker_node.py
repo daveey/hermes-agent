@@ -248,9 +248,15 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     """Drop copied foreign cards this gateway is not running (no claim, not ``running``) and has nothing left to
     push. Deleted with capture suppressed, so the Board never sees a delete."""
     own = _own(conn)
+    probes = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_wake_checks'").fetchone()
+    # [daveey] A scheduled copy whose wake_check this gateway runs stays until it wakes: the probe row is
+    # machine-local, and evicting the copy let the stale sweep delete it, so the card slept until its clock
+    # (t_01a18c12ba6895b8). Its wake is a status write the Board carries to the home board.
+    keep = (" AND NOT (status = 'scheduled' AND EXISTS (SELECT 1 FROM task_wake_checks w WHERE w.task_id = tasks.id))"
+            if probes else "")
     rows = conn.execute(
         "SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ? AND claim_lock IS NULL "
-        "AND status != 'running'", (own,)).fetchall()
+        "AND status != 'running'" + keep, (own,)).fetchall()
     gone: list[str] = []
     if not rows:
         return gone

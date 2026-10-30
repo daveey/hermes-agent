@@ -137,7 +137,7 @@ def park(
     source_status: str = "ready", expected_run_id: Optional[int] = None, from_untyped_block: bool = False,
     wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
     awaiting=None, blocker_id: Optional[str] = None, run_metadata: Optional[dict] = None,
-    blocker_wake: bool = False,
+    blocker_wake: bool = False, probe_host: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``scheduled`` with a wake time. Caller holds the write txn.
     ``from_untyped_block``: an untyped ``blocked`` card with no live run (classify-in-place) instead.
@@ -189,10 +189,11 @@ def park(
     kb._append_event(conn, task_id, "scheduled", {
         "reason": reason, "timed_park": True, "requested_kind": requested_kind,
         "wake_at": wake_at, "resume_status": source_status,
-        **kwc.park_fields(wake_check, check_every, clock_only), "awaiting": record,
+        **kwc.park_fields(wake_check, check_every, clock_only, conn=conn, probe_host=probe_host), "awaiting": record,
         **({"blocker_id": blocker_id} if blocker_id else {}),
         **({"blocker_wake": True} if blocker_wake else {}),
         **({"clear_blocker": True} if meta.get("clear_blocker") else {}),
     }, run_id=run_id)
-    kwc.set_check(conn, task_id, wake_check, check_every, now=now)
+    # [daveey] ``probe_host``: another gateway runs this probe (a relay to the home); it registers it there.
+    kwc.set_check(conn, task_id, wake_check if kwc.probe_here(conn, probe_host) else None, check_every, now=now)
     return True

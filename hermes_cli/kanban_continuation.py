@@ -202,7 +202,7 @@ def continue_task(
         from hermes_cli import kanban_wake_check as kwc  # condition wake [daveey]
         if wake_at is not None:
             payload["wake_at"] = wake_at
-            payload.update(kwc.park_fields(wake_check, check_every, clock_only))
+            payload.update(kwc.park_fields(wake_check, check_every, clock_only, conn=conn))
             payload["awaiting"] = record
         kb._append_event(conn, task_id, CONTINUED_OUTCOME, payload, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check if wake_at is not None else None, check_every, now=now)
@@ -257,8 +257,12 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
     maybe_refresh_async()  # live-check this gateway's capabilities off-thread, throttled [daveey]
     now = int(time.time()) if now is None else int(now)
     woken: list[str] = []
+    from hermes_cli.kanban_wake_check import foreign_ids
+    copies = foreign_ids(conn)  # [daveey] a worker node's copy: its home board owns the clock wake
     for row in conn.execute("SELECT id, block_kind FROM tasks WHERE status = 'scheduled'").fetchall():
         tid = row[0]
+        if tid in copies:
+            continue
         payload = pending_wake(conn, tid)
         if payload is None:
             # Invariant: every scheduled card has a wake or becomes blocked. [daveey]

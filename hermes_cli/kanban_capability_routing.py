@@ -32,7 +32,8 @@ Relay (gateways without a hermes-hub replica, and a holder that is briefly not l
 * A Board worker node runs no hermes-hub sync: it has no registry to look the holder up in and no
   ``create-task``. When it runs a card copied from another gateway (``created_on``), routing parks the
   card on the same ``capability-owner:<card>:<need>`` ids and records a ``relay`` route to that home
-  gateway. The idle copy is evicted, so the home's dispatcher runs the wake probe, and
+  gateway. The park names the home as ``probe_host``, so the worker registers no probe and evicts its idle
+  copy; the home's dispatcher registers the probe from the park event (``restore_missing_checks``), and
   :func:`owner_status` there routes the need with the home's own registry: ``create-task`` to a remote
   holder under the same request id, or, when the home holds the need itself, a local owner card keyed
   by that id (``idempotency_key``) and pinned to the home machine. A worker node's OWN card has no home
@@ -382,7 +383,9 @@ def _park_relay(conn, task_id: str, needs: list[str], *, reason: str, gateway: s
         ok = ktp.park(conn, task_id, reason=park_reason, requested_kind="capability", source_status=source,
                       expected_run_id=expected_run_id, wake_check=wake_check, check_every=WAKE_EVERY,
                       awaiting={"kind": "card", "ref": routes[0]["request_id"], "gateway": gateway,
-                                "why": f"capability owner for {', '.join(needs)}, routed by {gateway}"})
+                                "why": f"capability owner for {', '.join(needs)}, routed by {gateway}"},
+                      # [daveey] A home relay is routed by the home's registry: the home runs the probe.
+                      probe_host=gateway if mode == RELAY_HOME else None)
         if not ok:
             raise CapabilityRouteError("capability_route_invalid_state",
                                        f"{task_id} could not be parked (claim lost?)", details={"routes": routes})

@@ -63,6 +63,20 @@ OUTPUT_TAIL_CHARS = 500
 MAX_CMD_CHARS = 2000
 CONDITION_MET_EVENT = "condition_met"
 BROKEN_EVENT = "wake_check_broken"
+# [daveey] Probe placement on synced boards (``task_wake_checks`` is machine-local and never syncs). The probe runs
+# on the gateway that parked the card (``probe_host`` on the park event): that is where the park's dry run passed
+# and where host-only state lives (a ``wait-check capability-owner`` request id exists only in the store of the
+# gateway that opened it). A worker node keeps its scheduled copy of another gateway's card while the probe is live
+# (``kanban_worker_node.evict``); a wake there is a status write the Board carries home. The home board re-registers
+# a probe it lost (``RESTORED_EVENT``, once), and wakes the card with a comment when a probe is lost again or a
+# relayed park's probe host has gone silent (``LOST_EVENT``), so a lost probe never sleeps silently until the clock.
+RESTORED_EVENT = "wake_check_restored"
+LOST_EVENT = "wake_check_lost"
+ALIVE_EVENT = "wake_check_alive"
+# A worker node's probe on another gateway's card says it is alive at most this often (one synced event).
+ALIVE_EVERY = 3 * 3600
+SILENT_GRACE = 900
+_RESTORE_SEEN: dict[tuple[str, str], int] = {}
 # Output that shows a probe crashed even though it exited 1 ("not yet"): a traceback, a
 # shell syntax/lookup error, a sqlite failure, or a script's own ``error:`` line. Such a
 # probe can never succeed, so it counts toward BROKEN_AFTER instead of looking like waiting.
@@ -208,14 +222,172 @@ def planned_wake(conn: sqlite3.Connection, task_id: str, *, op: str, reason: Opt
     raise ValueError(f"unknown park op {op!r}")
 
 
-def park_fields(wake_check: Optional[str], check_every: Optional[int], clock_only: bool) -> dict:
-    """Keys added to the parking event payload (only the ones that are set)."""
+def park_fields(wake_check: Optional[str], check_every: Optional[int], clock_only: bool,
+                *, conn: Optional[sqlite3.Connection] = None, probe_host: Optional[str] = None) -> dict:
+    """Keys added to the parking event payload (only the ones that are set). With ``conn`` on a synced board,
+    ``probe_host`` names the gateway that runs the probe: this one, unless the caller hands it to another
+    (``probe_host``, e.g. a capability relay to the card's home). [daveey]"""
     out: dict = {}
     if wake_check:
         out["wake_check"] = wake_check
         out["check_every"] = normalize_every(check_every)
+        host = probe_host or own_gateway(conn)
+        if host:
+            out["probe_host"] = host
     if clock_only:
         out["clock_only"] = True
+    return out
+
+
+# --- probe placement (synced boards) --------------------------------------------------------
+
+def own_gateway(conn: Optional[sqlite3.Connection]) -> Optional[str]:
+    """This gateway's id on a board that syncs to the Board service, else None."""
+    if conn is None:
+        return None
+    try:
+        row = conn.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return str(row[0]) if row and row[0] else None
+
+
+def probe_here(conn: sqlite3.Connection, probe_host: Optional[str]) -> bool:
+    """Whether this gateway registers a park's probe (False only when ``probe_host`` names another gateway)."""
+    if not probe_host:
+        return True
+    own = own_gateway(conn)
+    return not own or own == probe_host
+
+
+def foreign_ids(conn: sqlite3.Connection, own: Optional[str] = None) -> set[str]:
+    """Ids of cards in this live file that another gateway created (worker-node copies)."""
+    own = own or own_gateway(conn)
+    if not own:
+        return set()
+    try:
+        rows = conn.execute("SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ?", (own,))
+        return {r[0] for r in rows.fetchall()}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def foreign_copy(conn: sqlite3.Connection, task_id: str) -> bool:
+    own = own_gateway(conn)
+    if not own:
+        return False
+    try:
+        row = conn.execute("SELECT created_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return bool(row and row[0] and row[0] != own)
+
+
+def _note_alive(conn: sqlite3.Connection, task_id: str, cmd: str, now: int) -> None:
+    """On a worker node's copy, say (at most every ``ALIVE_EVERY``) that the relayed probe still runs, so the
+    home board can tell a live remote probe from a lost one. In the caller's txn."""
+    from hermes_cli import kanban_continuation as kc
+    from hermes_cli import kanban_db as kb
+
+    if not foreign_copy(conn, task_id):
+        return
+    kinds = (ALIVE_EVENT, *kc.SCHEDULED_ENTRY_EVENTS)
+    marks = ",".join("?" for _ in kinds)
+    last = conn.execute(f"SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind IN ({marks})",
+                        (task_id, *kinds)).fetchone()[0] or 0
+    if now - int(last) >= ALIVE_EVERY:
+        kb._append_event(conn, task_id, ALIVE_EVENT, {"wake_check": cmd, "host": own_gateway(conn)})
+
+
+def _lost_wake(conn: sqlite3.Connection, task_id: str, payload: dict, note: str) -> Optional[str]:
+    from hermes_cli import kanban_db as kb
+
+    woke = _wake(conn, task_id, LOST_EVENT, {**payload, "note": note})
+    if woke:
+        kb.add_comment(conn, task_id, "kanban-dispatcher", note)
+    return woke
+
+
+def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
+    """Lint every ``scheduled`` card whose latest park carries a wake_check but has no probe on this board.
+
+    * The park ran here (``probe_host`` is this gateway, or unset on a card this gateway owns): re-register the
+      probe once (``RESTORED_EVENT``); a second loss of the same park wakes the card with a comment.
+    * The park was relayed from another gateway (a worker node ran the card): that host runs the probe and says
+      so with ``ALIVE_EVENT``; when it has been silent past ``ALIVE_EVERY`` + two intervals, wake the card with a
+      comment instead of letting it sleep until its clock.
+    A worker node's copy of another gateway's card is left to its home board. Returns ids restored and woken."""
+    from hermes_cli import kanban_continuation as kc
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    out: dict = {"restored": [], "woken": []}
+    now = int(time.time()) if now is None else int(now)
+    try:
+        missing = [r[0] for r in conn.execute(
+            "SELECT t.id FROM tasks t LEFT JOIN task_wake_checks w ON w.task_id = t.id "
+            "WHERE t.status = 'scheduled' AND w.task_id IS NULL").fetchall()]
+    except sqlite3.OperationalError:
+        return out
+    if not missing:
+        return out
+    db_key = str(kbc._main_db_file(conn) or id(conn))
+    own = own_gateway(conn)
+    foreign = foreign_ids(conn, own)
+    marks = ",".join("?" for _ in kc.SCHEDULED_ENTRY_EVENTS)
+    for tid in missing:
+        park = conn.execute(
+            f"SELECT id, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
+            "ORDER BY id DESC LIMIT 1", (tid, *kc.SCHEDULED_ENTRY_EVENTS)).fetchone()
+        if park is None:
+            continue
+        park_id, payload, parked_at = int(park[0]), kb._json_dict(park[1]), int(park[2] or 0)
+        key = (db_key, tid)
+        if _RESTORE_SEEN.get(key) == park_id:
+            continue
+        cmd = payload.get("wake_check")
+        if not cmd or not isinstance(payload.get("wake_at"), (int, float)):
+            _RESTORE_SEEN[key] = park_id  # a clock-only park: nothing to restore until it parks again
+            continue
+        if conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND id > ? AND kind IN ('claimed', 'spawned') "
+                        "LIMIT 1", (tid, park_id)).fetchone():
+            continue  # a later run's park has not reached this board yet
+        every = normalize_every(payload.get("check_every"))
+        host = payload.get("probe_host")
+        copy = tid in foreign
+        base = {"wake_check": cmd, "check_every": every, "probe_host": host}
+        if host and own and host != own:
+            if copy:
+                continue  # another gateway's probe on a card another gateway owns
+            last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND id > ? AND kind = ?",
+                                (tid, park_id, ALIVE_EVENT)).fetchone()[0]
+            silent = now - max(parked_at, int(last or 0))
+            if silent <= ALIVE_EVERY + 2 * every + SILENT_GRACE:
+                continue
+            with kb.write_txn(conn):
+                if _lost_wake(conn, tid, {**base, "reason": "remote_probe_silent", "silent_seconds": silent},
+                              f"Woken: this card's wake_check runs on {host}, the gateway that parked it, and "
+                              f"{host} has not reported that probe for {silent // 60} min, so nothing is watching "
+                              f"the condition. Probe: `{cmd}`. Check the condition yourself, then park again."):
+                    out["woken"].append(tid)
+            continue
+        if copy and not host:
+            continue  # a legacy park on a worker node's copy: its home board restores it
+        with kb.write_txn(conn):
+            st = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
+            if st is None or st[0] != "scheduled" or get_state(conn, tid) is not None:
+                continue
+            restored = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? AND id > ? AND kind = ?",
+                                    (tid, park_id, RESTORED_EVENT)).fetchone()[0]
+            if not restored:
+                set_check(conn, tid, cmd, every, now=now)
+                kb._append_event(conn, tid, RESTORED_EVENT, {**base, "park_event_id": park_id})
+                out["restored"].append(tid)
+            elif _lost_wake(conn, tid, {**base, "reason": "lost_again"},
+                            f"Woken: this card's wake_check probe went missing twice while it was parked, so "
+                            f"nothing was watching the condition. Probe: `{cmd}`. Check the condition yourself, "
+                            "then park again."):
+                out["woken"].append(tid)
     return out
 
 
@@ -459,6 +631,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
                 "next_at = ? WHERE task_id = ?", (now, tail, now + int(state["every"]), task_id))
+            _note_alive(conn, task_id, cmd, now)
             return None
         age = stale_age(rc, out)
         if age is not None:
@@ -476,6 +649,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, "
                 "next_at = ? WHERE task_id = ?", (now, rc, tail, now + int(state["every"]), task_id))
+            _note_alive(conn, task_id, cmd, now)
             return None
         fails = int(state["fails"] or 0) + 1
         if rc == 1:  # exit 1 with error output: a crashed probe posing as "not yet"
@@ -487,6 +661,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
         conn.execute(
             "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, fails = ?, "
             "next_at = ? WHERE task_id = ?", (now, rc_col, tail, fails, now + int(state["every"]), task_id))
+        _note_alive(conn, task_id, cmd, now)
         return None
 
 
@@ -534,6 +709,7 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                 for row in stale:
                     conn.execute("DELETE FROM task_wake_checks WHERE task_id = ? AND task_id NOT IN "
                                  "(SELECT id FROM tasks WHERE status = 'scheduled')", (row[0],))
+        restore_missing_checks(conn, now=ts)  # [daveey] a park whose probe never reached this board
         due = conn.execute(
             "SELECT w.task_id, w.cmd, w.every, w.generation FROM task_wake_checks w JOIN tasks t ON t.id = w.task_id "
             "WHERE t.status = 'scheduled' AND w.next_at <= ? ORDER BY w.next_at", (ts,)).fetchall()

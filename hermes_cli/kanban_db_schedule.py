@@ -70,7 +70,7 @@ def schedule_task(
             metadata=meta or None, synthesize=bool(reason or meta),
         )
         _kb._append_event(conn, task_id, "scheduled", {
-            **payload, **kwc.park_fields(wake_check, check_every, clock_only), "awaiting": record, **meta,
+            **payload, **kwc.park_fields(wake_check, check_every, clock_only, conn=conn), "awaiting": record, **meta,
         }, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check, check_every)
         return noted.keep(True)
