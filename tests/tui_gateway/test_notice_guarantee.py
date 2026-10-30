@@ -173,3 +173,53 @@ def test_a_notice_whose_handling_raises_is_stamped_error_once(db, monkeypatch):
     assert ng.candidates(db, time.time()) == []  # handled once, not retried on every pass
     stored = so.get_outcome(CHAT, db=db)
     assert (stored["kind"], stored["reason"]) == ("unresolved", "notice_tail")
+
+
+# Superseded decision notices (coach pattern closeout-notice-stale-decision): a "blocked" notice whose card has
+# since moved on (the user answered and it was unblocked, it rescheduled itself, finished, or was archived) asks a
+# question nobody needs to answer any more. It must not wake a close-out turn that re-asks it; it is stamped
+# ``superseded`` and the chat's outcome is refreshed. [daveey]
+
+def _decision_card():
+    with contextlib.closing(kbc.connect()) as conn:
+        return kb.create_task(conn, title="prod deploy", assignee="worker", session_id=CHAT,
+                              initial_status="blocked", human_request=HUMAN, lint_blocked=False)
+
+
+@pytest.mark.parametrize("move", ["unblock", "archive"])
+def test_a_blocked_notice_whose_card_moved_on_is_superseded_not_woken(db, move):
+    tid = _decision_card()
+    row = _notice(db, f"⏸ [default] @default Kanban {tid} blocked: Decision needed — prod deploy", task_id=tid,
+                  board="default")
+    with contextlib.closing(kbc.connect()) as conn:
+        assert (kb.unblock_task(conn, tid) if move == "unblock" else kb.archive_task(conn, tid))
+    ksa._reset_cache_for_tests()
+
+    out, calls = _run(db)
+
+    assert calls == [] and [o["result"] for o in out] == ["superseded"]
+    assert _closeout(db, row) == "superseded"
+    assert _run(db) == ([], [])  # handled once
+
+
+def test_a_remote_blocked_notice_marked_stale_is_superseded(db, monkeypatch):
+    _no_local_board(monkeypatch)
+    row = _notice(db, "⏸ Kanban t_remote3 on hub blocked — remote card", board="nosuchboard", task_id="t_remote3",
+                  gateway="hub", kanban_event_keys=["remote:hub:nosuchboard/default/t_remote3:blocked@1:default:x"],
+                  blocked_on_human=True, stale=True, stale_tasks=["t_remote3"])
+
+    out, calls = _run(db)
+
+    assert calls == [] and [o["result"] for o in out] == ["superseded"]
+    assert _closeout(db, row) == "superseded"
+
+
+def test_a_blocked_notice_whose_card_is_still_blocked_by_an_agent_still_gets_a_closeout(db):
+    with contextlib.closing(kbc.connect()) as conn:
+        tid = kb.create_task(conn, title="flaky", assignee="worker", session_id=CHAT)
+        kb.block_task(conn, tid, reason="transient CI outage", kind="transient")
+    row = _notice(db, f"⏸ Kanban {tid} blocked: transient CI outage", task_id=tid, board="default")
+
+    out, calls = _run(db)
+
+    assert calls == [(CHAT, row)] and [o["result"] for o in out] == ["dispatched"]
