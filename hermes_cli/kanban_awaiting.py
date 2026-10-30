@@ -53,7 +53,9 @@ AGENT_ACTION_WAIT = "agent_action_wait"
 HUMAN_WAIT = "human_wait"
 INVALID_AWAITING = "invalid_awaiting"
 OPAQUE_PROBE_WAIT = "opaque_probe_wait"
-CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT)
+# The declared producer card is already done: what the park waits for has been produced (it would wake at once).
+PRODUCER_DONE = "producer_done"
+CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT, PRODUCER_DONE)
 # Parks in a row on one premise before the next one escalates instead (the 3rd park = 2nd re-park).
 REPARK_LIMIT = 2
 ESCALATION_PREFIX = "repark-escalation:"
@@ -320,6 +322,22 @@ def card_orphan_reason(conn: sqlite3.Connection, task_id: str, *, _depth: int = 
     return None
 
 
+def producer_done_error(ref: str, completed: str) -> AwaitingError:
+    return AwaitingError(PRODUCER_DONE, (
+        f"the producer card {ref} is already done (completed {completed}): what you wait for has been produced. "
+        f"Read its result (kanban_show {ref}) and act on it now, or name what you are still waiting on."))
+
+
+def _completed_at(conn: sqlite3.Connection, ref: str) -> Optional[str]:
+    """``completed_at`` (UTC ISO) when ``ref`` is a done card on this board, else None."""
+    row = conn.execute("SELECT status, completed_at FROM tasks WHERE id = ?", (ref,)).fetchone()
+    if not row or row[0] != "done":
+        return None
+    if not row[1]:
+        return "at an unrecorded time"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(row[1])))
+
+
 def confirm_remote(awaiting: Optional[dict]) -> None:
     """Confirm a cross-gateway producer card exists, BEFORE any write txn (ssh can take 40 s).
     ``resolve`` then accepts the card from the process-local confirmation."""
@@ -340,6 +358,10 @@ def confirm_remote(awaiting: Optional[dict]) -> None:
     if status in ("archived", "triage") or "orphan producer" in out or "agent-owned park:" in out:
         raise AwaitingError(AGENT_ACTION_WAIT, f"the producer card is not live: {ref} on {awaiting['gateway']} "
                                                f"is {status}, so nobody is producing it. {_REMEDY}")
+    if status == "done":
+        # Its auto probe (``wait-check task``) would exit 0 on the first run: the park wakes at once. Other rc-0
+        # statuses (review, blocked on David) stay parkable: a tracker's re-park probe reads them as handled.
+        raise producer_done_error(ref, f"per {awaiting['gateway']}'s board")
     _REMOTE_CONFIRMED[(awaiting["gateway"], ref)] = (time.monotonic(), out[-240:] if rc == 3 else out[-120:])
 
 
@@ -374,6 +396,9 @@ def _check_card(conn: sqlite3.Connection, task_id: str, awaiting: dict, text: st
     why = card_orphan_reason(conn, ref)
     if why:
         raise AwaitingError(AGENT_ACTION_WAIT, f"the producer card is not live: {why}. {_REMEDY}")
+    done = _completed_at(conn, ref)
+    if done:
+        raise producer_done_error(ref, done)
 
 
 def _check_run(conn, task_id, awaiting, text) -> None:
@@ -490,6 +515,8 @@ def _live_card_ref(conn: sqlite3.Connection, task_id: str, text: str) -> Optiona
     for ref in dict.fromkeys(_TASK_ID.findall(text or "")):
         if ref == task_id or dependency_cycle_reason(conn, task_id, ref):
             continue  # self, own child/descendant, or a card that already waits back
+        if _completed_at(conn, ref):
+            continue  # a finished card produces nothing later; named as background, it would wake the park at once
         if card_orphan_reason(conn, ref) is None:
             return ref
     return None

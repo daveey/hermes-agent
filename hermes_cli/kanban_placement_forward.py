@@ -245,7 +245,14 @@ class Forwarder:
         from hermes_cli import kanban_awaiting as kaw
         from hermes_cli import kanban_db as kb
         awaiting = {"kind": "card", "ref": rtid, "gateway": target}
-        kaw.confirm_remote(awaiting)  # ssh, before the write txn
+        try:
+            kaw.confirm_remote(awaiting)  # ssh, before the write txn
+        except kaw.AwaitingError as exc:
+            # It finished between the settle read and this confirm: settle it (completes this card), once.
+            if exc.code != kaw.PRODUCER_DONE or getattr(self, "_resettled", False):
+                raise
+            self._resettled = True
+            return self._settle(kb.get_task(self.conn, self.task_id), target, rtid)
         ok = kb.schedule_task(
             self.conn, self.task_id, expected_run_id=self.run_id, awaiting=awaiting,
             wake_check=wake_probe(target, rtid), check_every=CHECK_EVERY,

@@ -100,18 +100,49 @@ def output_error(out: str) -> Optional[str]:
     return m.group(0).strip() or "error" if m else None
 
 
-def dry_run_error(cmd: Optional[str], *, cwd: Optional[str] = None, env: Optional[dict] = None) -> Optional[str]:
-    """Run ``cmd`` once at park time; refusal text when it can never succeed (rc >= 2, could
-    not start, or exit 0/1 with error output), else None. A timeout is accepted: slow is not
-    broken. ``HERMES_KANBAN_WAKE_DRYRUN=0`` skips it (tests)."""
+WAKE_CHECK_ALREADY_TRUE = "wake_check_already_true"
+
+
+def refusal_code(message: str) -> Optional[str]:
+    """The stable rejection code of a park-time probe refusal (``WAKE_CHECK_ALREADY_TRUE``), else None."""
+    return WAKE_CHECK_ALREADY_TRUE if (message or "").startswith(WAKE_CHECK_ALREADY_TRUE) else None
+
+
+def already_true_message(out: str, *, blocker_id: Any = None) -> str:
+    """Refusal for a park whose wake_check already exits 0: it would wake at once. [daveey]"""
+    msg = (f"{WAKE_CHECK_ALREADY_TRUE}: this wake_check already passes, so the park would wake at once: the "
+           "condition is already true. Act on it now, or give a probe that tests what you are still waiting for.")
+    if isinstance(blocker_id, str) and blocker_id.strip():
+        msg += (f" It tests shared blocker {blocker_id.strip()!r}, so that wall is gone: carry on with the work, "
+                "or park for your other reason with clear_blocker=true (that clears the blocker and wakes every "
+                "card behind it).")
+    return msg + f" Probe output: {_tail(out)!r}"
+
+
+def dry_run_error(cmd: Optional[str], *, cwd: Optional[str] = None, env: Optional[dict] = None,
+                  blocker_id: Any = None) -> Optional[str]:
+    """Run ``cmd`` once at park time, before the write txn, with the dispatcher's runner and
+    ``PROBE_TIMEOUT_SECONDS`` on this host (the one that registers and runs the park's probe, ``probe_host``).
+    Refusal text when it can never succeed (rc >= 2, could not start, or exit 0/1 with error output), or
+    when it already passes (exit 0: the park would wake at once, ``WAKE_CHECK_ALREADY_TRUE``), else None.
+    A timeout is accepted: slow is not broken. ``HERMES_KANBAN_WAKE_DRYRUN=0`` skips it (tests).
+
+    A worker's dry run carries the probe marker (``HERMES_KANBAN_WAKE_PROBE``) like the dispatcher's runs,
+    so ``wait-check task`` applies the same implicit ``--from`` (a status this card already woke for reads
+    "not yet") and the dry run agrees with the first real probe. [daveey]"""
     if cmd and re.search(r"\bhermes-hub\s+tasks\b", cmd) and re.search(r"\bt_[0-9a-f]{8,16}\b", cmd):
         return ("refused: hand-rolled replica task probes hide missing or stale cards. Use "
                 "`hermes kanban wait-check task <id> --gateway <name> --until done,blocked` instead.")
     if not cmd or os.environ.get("HERMES_KANBAN_WAKE_DRYRUN") == "0":
         return None
-    rc, out = _run_probe(("dry-run", cmd), cmd, cwd or str(Path.home()), env if env is not None else dict(os.environ))
+    env = dict(env if env is not None else os.environ)
+    if env.get("HERMES_KANBAN_TASK"):
+        env["HERMES_KANBAN_WAKE_PROBE"] = "1"
+    rc, out = _run_probe(("dry-run", cmd), cmd, cwd or str(Path.home()), env)
     if rc == "timeout":
         return None
+    if rc == 0 and not output_error(out):
+        return already_true_message(out, blocker_id=blocker_id)
     bad = None
     if stale_age(rc, out) is not None:
         return None  # unknown, not yet: the producer's gateway is offline right now

@@ -371,7 +371,8 @@ def test_diagnostics_flag_clock_parks_and_failing_probes(kanban_home) -> None:
 # --- silent forever-waits (t_1132a78a) -----------------------------------------------------
 
 def test_dry_run_rejects_probes_that_can_never_succeed():
-    assert kwc.dry_run_error("exit 0") is None
+    # exit 0 = the condition already holds: the park would wake at once (wake_check_already_true)
+    assert kwc.dry_run_error("exit 0").startswith(kwc.WAKE_CHECK_ALREADY_TRUE)
     assert kwc.dry_run_error("exit 1") is None
     assert "exited 2" in kwc.dry_run_error("exit 2")
     assert "exited 127" in kwc.dry_run_error("no_such_command_xyz")

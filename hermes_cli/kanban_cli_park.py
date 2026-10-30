@@ -48,7 +48,7 @@ def _cli_wake_check(args: argparse.Namespace):
 
     cmd = kwc.normalize_cmd(getattr(args, "wake_check", None))
     every = kwc.normalize_every(getattr(args, "check_every", None)) if cmd else None
-    err = kwc.dry_run_error(cmd)
+    err = kwc.dry_run_error(cmd, blocker_id=getattr(args, "blocker_id", None) or None)
     if err:
         raise ValueError(err)
     return cmd, every, bool(getattr(args, "clock_only", False))

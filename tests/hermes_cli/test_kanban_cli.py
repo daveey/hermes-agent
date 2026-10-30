@@ -306,15 +306,16 @@ def test_cli_block_agent_owned_is_rejected_with_typed_error(kanban_home):
 
 
 def test_cli_block_agent_owned_allowed_with_wake_check(kanban_home):
+    probe = f"test -f {kanban_home}/never-written"  # not /tmp/x: a park whose probe already passes is refused
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="waiting", assignee="alice")
-    out = kc.run_slash(f"block {tid} disk full --kind transient --wake-check 'test -f /tmp/x'")
+    out = kc.run_slash(f"block {tid} disk full --kind transient --wake-check '{probe}'")
     assert "agent_owned_block" not in out
     with kbc.connect_closing() as conn:
         # The probe is honored (a scheduled park with its wake row), never silently dropped.
         assert kb.get_task(conn, tid).status == "scheduled"
         row = conn.execute("SELECT cmd FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone()
-        assert row is not None and row["cmd"] == "test -f /tmp/x"
+        assert row is not None and row["cmd"] == probe
 
 
 # ---------------------------------------------------------------------------

@@ -1085,6 +1085,28 @@ def test_forwarder_sends_the_card_with_parent_handoffs_and_parks_until_the_hub_c
         assert len(mac["calls"]) == 1
 
 
+def test_forwarder_completes_when_the_hub_card_finishes_between_settle_and_park(mac, monkeypatch):
+    """confirm_remote refuses a done producer (producer_done); the forwarder settles it instead of crashing."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_wait_check as kwait
+    from tools import kanban_tools as kt
+    with kbc.connect_closing() as conn:
+        parent = _done_parent(kb, conn)
+    child = json.loads(kt._handle_create({"title": "Fix the flaky lint", "parents": [parent]}))["task_id"]
+    with kbc.connect_closing() as conn:
+        kb.recompute_ready(conn)
+        assert _forwarder(conn, child, mac, monkeypatch).run() == "parked"
+        kb.unblock_task(conn, child)
+        kb.recompute_ready(conn)
+        reads = iter([(1, HUB_TID + " running"), (0, HUB_TID + " done")])
+        f = _forwarder(conn, child, mac, monkeypatch, check=None)
+        f.check = lambda gw, rtid: next(reads)
+        monkeypatch.setattr(kwait, "check_remote", lambda gw, kind, tid_, **kw: (0, f"{tid_} done"))
+        assert f.run() == "completed"
+        assert kb.get_task(conn, child).status == "done"
+
+
 def test_forwarder_falls_back_to_a_local_worker_when_the_hub_refuses(mac, monkeypatch):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
