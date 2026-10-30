@@ -34,8 +34,13 @@ def test_partial_config_import_cannot_invert_config_and_module_locks(tmp_path):
         original_resolve = wal.resolve_journal_mode
 
         def controlled_list_providers():
+            # Fork: provider discovery runs on the first OPTIONAL_ENV_VARS touch, inside
+            # config_env_registry's lock, not during the module import (upstream ran it while
+            # the module was _initializing). Same hazard: discovery calls load_config() while
+            # holding a lock another thread's journal-mode resolution may need. [daveey]
             module = sys.modules["hermes_cli.config"]
-            assert module.__spec__._initializing
+            from hermes_cli import config_env_registry
+            assert config_env_registry._state == 1
             assert hasattr(module, "_CONFIG_LOCK") and hasattr(module, "load_config")
             partial_ready.set()
             assert opener_inside_resolve.wait(5)
@@ -60,6 +65,7 @@ def test_partial_config_import_cannot_invert_config_and_module_locks(tmp_path):
 
         def importer():
             import hermes_cli.config
+            len(hermes_cli.config.OPTIONAL_ENV_VARS)  # Fork: runs the lazy discovery stages.
             outcomes.append("import-returned")
 
         def opener():
