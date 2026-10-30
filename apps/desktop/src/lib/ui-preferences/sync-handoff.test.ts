@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { afterEach, beforeAll, expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 
 import { parseUiPreferencesWrite, readUiPreferences, writeUiPreferences } from '../../../electron/ui-preferences'
 
@@ -31,6 +31,23 @@ const LOAD_WRITERS = [
   () => import('@/store/tool-view'),
   () => import('@/store/translucency')
 ]
+
+// Transform the whole store graph while the file is collected, outside every
+// test and hook timeout. vi.resetModules() keeps the transformed code, so each
+// pageLoad only re-evaluates it. Left to the first test, the cold transform
+// alone took 14–22s on a CPU-starved runner (15s testTimeout); a beforeAll
+// only moves it under the 30s hookTimeout, which a slower runner exceeds too.
+await Promise.all([
+  import('./sync'),
+  import('@/lib/storage'),
+  import('@/store/favorite-models'),
+  ...LOAD_WRITERS.map(load => load())
+])
+// Drop the warm-up's evaluated stores and the defaults they wrote at load, so
+// the first test starts from the same empty page as every later one.
+vi.resetModules()
+window.localStorage.clear()
+window.sessionStorage.clear()
 
 const dirs: string[] = []
 const stops: (() => void)[] = []
@@ -110,23 +127,6 @@ const outboxes = () =>
   Array.from({ length: window.localStorage.length }, (_, index) => window.localStorage.key(index) ?? '').filter(key =>
     key.startsWith(OUTBOX_PREFIX)
   )
-
-// Transform the store graph once, under hookTimeout: each pageLoad re-evaluates it after
-// vi.resetModules(), and the first test paying the cold transform inside its own 15s budget
-// timed out when CI ran every workspace check at once (1.2s alone, >15s there).
-beforeAll(async () => {
-  await import('./sync')
-  await import('@/lib/storage')
-  await import('@/store/favorite-models')
-
-  for (const load of LOAD_WRITERS) {
-    await load()
-  }
-
-  vi.resetModules()
-  window.localStorage.clear()
-  window.sessionStorage.clear()
-})
 
 afterEach(() => {
   closeTabs()

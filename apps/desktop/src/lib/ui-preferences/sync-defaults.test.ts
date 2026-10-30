@@ -36,6 +36,22 @@ const LOAD_WRITERS = [
   () => import('@/store/tool-view')
 ]
 
+// Transform every store this file loads while it is collected, outside any
+// test's timeout: vi.resetModules() keeps the transformed code, so a load only
+// re-evaluates it. Left to the first boot(), the cold transform timed that
+// test out at 15s on a CPU-starved runner.
+await Promise.all([
+  import('./sync'),
+  import('@/store/translucency'),
+  import('@/store/voice-prefs'),
+  ...LOAD_WRITERS.map(load => load())
+])
+// Drop the warm-up's evaluated stores and the defaults they wrote at load, so
+// the first test starts from the same empty page as every later one.
+vi.resetModules()
+window.localStorage.clear()
+window.sessionStorage.clear()
+
 const dirs: string[] = []
 const tick = (ms = 400) => new Promise(resolve => setTimeout(resolve, ms))
 

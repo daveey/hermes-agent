@@ -6,6 +6,17 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import { parseUiPreferencesWrite, readUiPreferences, writeUiPreferences } from '../../../electron/ui-preferences'
 
+// Transform the stores this file loads while it is collected, outside the
+// test's timeout: vi.resetModules() keeps the transformed code, so a load only
+// re-evaluates it. Left to the first load(), the cold transform timed the test
+// out at 15s on a CPU-starved runner.
+await Promise.all([import('./sync'), import('@/store/onboarding'), import('@/store/tips')])
+// Drop the warm-up's evaluated stores and the values they wrote at load, so
+// the first test starts from the same empty page as every later one.
+vi.resetModules()
+window.localStorage.clear()
+window.sessionStorage.clear()
+
 const dirs: string[] = []
 const tick = (ms = 400) => new Promise(resolve => setTimeout(resolve, ms))
 
