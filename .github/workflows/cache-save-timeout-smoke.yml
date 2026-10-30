@@ -1,0 +1,95 @@
+name: Cache save timeout smoke
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/cache-save-timeout-smoke.yml
+      - .github/workflows/lint.yml
+      - .github/actions/setup-pm/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/cache-save-timeout-smoke.yml
+      - .github/workflows/lint.yml
+      - .github/actions/setup-pm/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stalled-save:
+    runs-on: [self-hosted, ci-fast]
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - name: Start a cache endpoint that accepts requests but never responds
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/cache-timeout-probe"
+          python3 -u - "$RUNNER_TEMP/cache-timeout-probe" <<'PY' &
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          from pathlib import Path
+          import sys
+          import threading
+          root = Path(sys.argv[1])
+          class Blackhole(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  (root / 'request').touch()
+                  threading.Event().wait()
+              def log_message(self, *args):
+                  pass
+          server = ThreadingHTTPServer(('127.0.0.1', 0), Blackhole)
+          (root / 'url').write_text(f'http://127.0.0.1:{server.server_port}/', encoding='utf-8')
+          server.serve_forever()
+          PY
+          echo "CACHE_PROBE_PID=$!" >> "$GITHUB_ENV"
+          deadline=$((SECONDS + 10))
+          until test -s "$RUNNER_TEMP/cache-timeout-probe/url"; do
+            test "$SECONDS" -lt "$deadline" || exit 1
+            sleep 0.1
+          done
+          echo "CACHE_PROBE_URL=$(cat "$RUNNER_TEMP/cache-timeout-probe/url")" >> "$GITHUB_ENV"
+          printf 'test cache payload\n' > "$RUNNER_TEMP/cache-timeout-probe/payload"
+          python3 -c 'import time, pathlib, os; pathlib.Path(os.environ["RUNNER_TEMP"], "cache-timeout-probe", "started").write_text(str(time.monotonic()), encoding="utf-8")'
+
+      # This is the same pinned save action and timeout policy used by lint.yml.
+      # Use a fake token: no real credential is sent to the test endpoint.
+      - name: Save to the unresponsive cache endpoint
+        id: save
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          ACTIONS_CACHE_SERVICE_V2: 'true'
+          ACTIONS_RESULTS_URL: ${{ env.CACHE_PROBE_URL }}
+          ACTIONS_CACHE_URL: ${{ env.CACHE_PROBE_URL }}
+          ACTIONS_RUNTIME_TOKEN: cache-timeout-probe-not-a-credential
+        with:
+          path: ${{ runner.temp }}/cache-timeout-probe/payload
+          key: timeout-probe-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Verify a stalled save times out and the consumer still runs
+        env:
+          SAVE_OUTCOME: ${{ steps.save.outcome }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import time
+          root = Path(os.environ['RUNNER_TEMP']) / 'cache-timeout-probe'
+          assert (root / 'request').exists(), 'save never reached the blackhole endpoint'
+          assert os.environ['SAVE_OUTCOME'] == 'failure', 'stalled save did not time out'
+          elapsed = time.monotonic() - float((root / 'started').read_text(encoding='utf-8'))
+          assert 55 <= elapsed < 120, f'recovery outside the step timeout budget: {elapsed:.1f}s'
+          print(f'Consumer ran after stalled cache save: {elapsed:.1f}s; outcome=failure')
+          PY
+
+      - name: Stop the test endpoint
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${CACHE_PROBE_PID:-}" ]; then kill "$CACHE_PROBE_PID" || true; fi
+      - name: Check the checkout is clean
+        uses: ./.github/actions/check-clean-worktree

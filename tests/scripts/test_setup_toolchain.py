@@ -129,12 +129,17 @@ def test_bootstrap_leaves_cache_key_inputs_unchanged(tmp_path):
     shutil.copytree(root / "pm", checkout / "pm", ignore=ignore)
     shutil.copytree(root / "scripts" / "ci", checkout / "scripts" / "ci", ignore=ignore)
     (checkout / "scripts" / "__init__.py").touch()
+    shutil.copytree(root / ".github/actions/setup-pm", checkout / ".github/actions/setup-pm")
 
     def snapshot():
-        return sorted(
-            str(path.relative_to(checkout)) for tree in ("pm", "scripts")
-            for path in (checkout / tree).rglob("*") if path.is_file()
-        )
+        import hashlib
+
+        return {
+            str(path.relative_to(checkout)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for tree in ("pm", ".github/actions/setup-pm", "scripts/ci/setup_toolchain.py")
+            for path in ([checkout / tree] if (checkout / tree).is_file() else (checkout / tree).rglob("*"))
+            if path.is_file()
+        }
 
     before = snapshot()
     env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}

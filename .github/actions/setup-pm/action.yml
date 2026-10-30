@@ -73,6 +73,12 @@ outputs:
   tools-cache-hit:
     description: Exact PM store cache hit.
     value: ${{ steps.tools-cache.outputs.cache-hit || steps.tools-cache-restore.outputs.cache-hit }}
+  tools-cache-key:
+    description: Exact tools key for an explicit bounded save after restore-only setup.
+    value: ${{ steps.tools-cache-restore.outputs.cache-primary-key }}
+  tools-cache-path:
+    description: Verified PM tools store for an explicit save.
+    value: ${{ steps.prepare.outputs.store }}
   python-cache-hit:
     description: Exact uv dependency cache hit.
     value: ${{ steps.python-cache.outputs.cache-hit || steps.python-cache-restore.outputs.cache-hit }}

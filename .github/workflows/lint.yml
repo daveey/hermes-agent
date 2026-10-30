@@ -43,10 +43,21 @@ jobs:
         with:
           fetch-depth: 0 # need full history for merge-base + worktree
 
+      # No automatic post-save: an optional cache upload must not consume the job timeout.
       - uses: ./.github/actions/setup-pm
+        id: pm
         with:
-          cache-python: true
-          prune-python-cache: true
+          save-tools-cache: false
+          cache-python: false
+
+      - name: Save verified PM tools (best effort, bounded)
+        if: steps.pm.outputs.tools-cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pm.outputs.tools-cache-path }}
+          key: ${{ steps.pm.outputs.tools-cache-key }}
 
       - name: Install ruff + ty
         uses: ./.github/actions/retry
@@ -147,10 +158,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
+      # No automatic post-save: an optional cache upload must not consume the job timeout.
       - uses: ./.github/actions/setup-pm
+        id: pm
         with:
-          cache-python: true
-          prune-python-cache: true
+          save-tools-cache: false
+          cache-python: false
+
+      - name: Save verified PM tools (best effort, bounded)
+        if: steps.pm.outputs.tools-cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pm.outputs.tools-cache-path }}
+          key: ${{ steps.pm.outputs.tools-cache-key }}
 
       - name: Install ruff
         uses: ./.github/actions/retry
@@ -185,10 +207,21 @@ jobs:
         with:
           fetch-depth: 2 # the merge commit and its first parent (the base branch tip)
 
+      # No automatic post-save: an optional cache upload must not consume the job timeout.
       - uses: ./.github/actions/setup-pm
+        id: pm
         with:
-          cache-python: true
-          prune-python-cache: true
+          save-tools-cache: false
+          cache-python: false
+
+      - name: Save verified PM tools (best effort, bounded)
+        if: steps.pm.outputs.tools-cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pm.outputs.tools-cache-path }}
+          key: ${{ steps.pm.outputs.tools-cache-key }}
 
       - name: Install pinned ruff
         uses: ./.github/actions/retry
@@ -218,10 +251,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
+      # No automatic post-save: an optional cache upload must not consume the job timeout.
       - uses: ./.github/actions/setup-pm
+        id: pm
         with:
-          cache-python: true
-          prune-python-cache: true
+          save-tools-cache: false
+          cache-python: false
+
+      - name: Save verified PM tools (best effort, bounded)
+        if: steps.pm.outputs.tools-cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pm.outputs.tools-cache-path }}
+          key: ${{ steps.pm.outputs.tools-cache-key }}
 
       - name: Run footgun checker
         run: python scripts/check-windows-footguns.py --all
