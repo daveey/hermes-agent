@@ -313,6 +313,106 @@ def test_stop_keeps_a_fallback_dir_replaced_or_refilled_after_start(tmp_path: Pa
                 d.rmdir()
 
 
+# ---------------------------------------------------------------------------
+# Stale fallback dirs left by SIGKILLed gateways are reaped on the next fallback bind
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def shared_tmp(monkeypatch):
+    """A private stand-in for the shared temp dir the fallback lands in (short enough for sun_path)."""
+    import shutil
+    import tempfile
+
+    try:
+        root = Path(tempfile.mkdtemp(prefix="hgw-", dir="/tmp")).resolve()  # no-tmp: ok — sun_path needs a short root
+    except OSError:
+        pytest.skip("/tmp not writable on this host")
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _gw_dir(parent: Path, name: str, *, sock: str | None = "dead", extra: bool = False,
+            mode: int = 0o700, age: float = 3600.0):
+    """Plant ``parent/<name>`` as a gateway fallback dir. ``sock``: "dead" (a socket file nobody
+    listens on, as a SIGKILLed gateway leaves it), "live" (a listener, returned), or None."""
+    import os
+    import time
+
+    d = parent / name
+    d.mkdir(mode=0o700)
+    live = None
+    if sock is not None:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(d / "control.sock"))
+        if sock == "live":
+            s.listen(1)
+            live = s
+        else:
+            s.close()  # the inode stays: connect now fails with ECONNREFUSED
+    if extra:
+        (d / "other").write_text("x")
+    d.chmod(mode)
+    stamp = time.time() - age
+    os.utime(d, (stamp, stamp))
+    return d, live
+
+
+def test_reaper_removes_only_dead_aged_private_dirs(shared_tmp: Path):
+    from gateway.control_socket import _reap_stale_fallback_dirs
+
+    dead, _ = _gw_dir(shared_tmp, "hermes-gw-dead")
+    empty, _ = _gw_dir(shared_tmp, "hermes-gw-empty", sock=None)
+    live, listener = _gw_dir(shared_tmp, "hermes-gw-live", sock="live")
+    young, _ = _gw_dir(shared_tmp, "hermes-gw-young", age=30)
+    extra, _ = _gw_dir(shared_tmp, "hermes-gw-extra", extra=True)
+    loose, _ = _gw_dir(shared_tmp, "hermes-gw-loose", mode=0o755)
+    own, _ = _gw_dir(shared_tmp, "hermes-gw-own")
+    other, _ = _gw_dir(shared_tmp, "not-a-gw-dir")
+    target, _ = _gw_dir(shared_tmp, "symlink-target")
+    (shared_tmp / "hermes-gw-link").symlink_to(target)
+    try:
+        assert _reap_stale_fallback_dirs(shared_tmp, keep="hermes-gw-own") == 2
+    finally:
+        listener.close()
+    assert not dead.exists() and not empty.exists()
+    for kept in (live, young, extra, loose, own, other, target):
+        assert kept.is_dir(), kept
+    assert (live / "control.sock").exists() and (target / "control.sock").exists()
+    assert (shared_tmp / "hermes-gw-link").is_symlink()
+
+
+def test_reaper_scan_is_bounded(shared_tmp: Path, monkeypatch):
+    import gateway.control_socket as cs
+
+    for i in range(3):
+        _gw_dir(shared_tmp, f"hermes-gw-{i}")
+    monkeypatch.setattr(cs, "_MAX_FALLBACK_REAP_SCAN", 2)
+    assert cs._reap_stale_fallback_dirs(shared_tmp, keep="none") == 2
+    assert len(list(shared_tmp.glob("hermes-gw-*"))) == 1
+    assert cs._reap_stale_fallback_dirs(shared_tmp, keep="none") == 1
+
+
+def test_fallback_bind_reaps_a_sigkilled_siblings_dir(tmp_path: Path, shared_tmp: Path):
+    """A gateway SIGKILLed mid-run (no cleanup_files) leaves hermes-gw-<hash>/control.sock behind;
+    the next gateway binding a fallback in the same temp dir removes it, and leaves a live one."""
+    home = _long_home(tmp_path)
+    bind, pointer = resolve_server_socket_path(home)
+    assert pointer is not None and bind.parent.parent == shared_tmp
+    dead, _ = _gw_dir(shared_tmp, "hermes-gw-00000000deadbeef")
+    live, listener = _gw_dir(shared_tmp, "hermes-gw-00000000aliveeee", sock="live")
+    try:
+        assert _start_stop(home) == bind
+    finally:
+        listener.close()
+    assert not dead.exists()
+    assert (live / "control.sock").exists()
+    assert not bind.parent.exists()
+
+
 @pytest.fixture()
 def short_home():
     """A home short enough that the server binds IN-HOME (no pointer fallback).
