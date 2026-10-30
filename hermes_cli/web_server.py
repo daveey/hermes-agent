@@ -498,7 +498,12 @@ def _require_token(request: Request) -> None:
             or getattr(request.state, "hosted_http_authenticated", None) is True):
         return
     if getattr(request.app.state, "auth_required", False):
-        ok = getattr(request.state, "session", None) is not None
+        from hermes_cli.dashboard_auth.token_auth import SESSION_TOKEN_PROVIDER
+        principal = getattr(request.state, "token_principal", None)
+        # A core service caller on a registered session-token route (the token seam verified
+        # the session header) or a verified cookie session.
+        ok = (getattr(request.state, "session", None) is not None
+              or getattr(principal, "provider", None) == SESSION_TOKEN_PROVIDER)
     else:
         ok = _has_valid_session_token(request)
     if not ok:
@@ -633,6 +638,28 @@ async def auth_middleware(request: Request, call_next):
         if session is not None:
             request.state.session = session
     return await call_next(request)
+
+
+# Core service callers that authenticate with the session header (``X-Hermes-Session-Token``) and
+# no cookie: ``hermes plugins install/enable`` (``plugins_activation.notify_serve_backend``) and
+# the review-retire path (``dashboard_procs._retirement_request``). On a gated dashboard the
+# cookie gate refused them as ``no_cookie`` before the handler ran, so they are session-token
+# routes on the token seam. Exact paths only; every other route keeps its gate.
+# tests/hermes_cli/test_dashboard_session_token_routes.py fails on a new caller missing here.
+SESSION_TOKEN_SERVICE_ROUTES: tuple[str, ...] = (
+    "/api/dashboard/agent-plugins/activate",
+    "/api/health/idle",
+    "/api/health/retirement",
+)
+
+
+def _register_session_token_service_routes() -> None:
+    from hermes_cli.dashboard_auth.token_auth import register_token_route
+    for _path in SESSION_TOKEN_SERVICE_ROUTES:
+        register_token_route(_path, session_token_check=_has_valid_session_token)
+
+
+_register_session_token_service_routes()
 
 
 @app.middleware("http")

@@ -132,8 +132,13 @@ def activate_plugin_now(name: str, *, in_process: bool = True) -> dict[str, Any]
     generation an enable just installed, so only restarting that process loads them."""
     from hermes_constants import get_hermes_home
     activation: Optional[dict[str, Any]] = load_and_go_live(name) if in_process else None
+    backend: Optional[dict[str, Any]] = None  # out of process: what the Desktop backend did
     if not in_process:
-        activation = (notify_serve_backend(name, Path(get_hermes_home())) or {}).get("activation")
+        answer = notify_serve_backend(name, Path(get_hermes_home()))
+        if answer is not None:
+            activation = answer.get("activation")
+            backend = ({"error": answer["backend_error"]} if answer.get("backend_error")
+                       else {"activation": activation})
     answer = reload_running_gateway()
     reloaded = bool(answer and answer.get("reloaded"))
     gateway_activation = find_activation((answer or {}).get("activations"), name) if reloaded else None
@@ -145,8 +150,11 @@ def activate_plugin_now(name: str, *, in_process: bool = True) -> dict[str, Any]
     if missing:
         activation = {**(activation or {"name": name, "key": name}), "missing_dependencies": missing,
                       "missing_in": [process for process, deps in gaps.items() if deps]}
-    return {"gateway_reloaded": reloaded, "activation": activation,
-            "restart_required": not reloaded or bool(missing)}
+    result = {"gateway_reloaded": reloaded, "activation": activation,
+              "restart_required": not reloaded or bool(missing)}
+    if backend is not None:
+        result["backend"] = backend
+    return result
 
 
 def reload_running_gateway() -> Optional[dict[str, Any]]:
@@ -242,17 +250,33 @@ def _serve_backend_record():
     return None
 
 
+def _backend_failure_reason(exc: BaseException) -> str:
+    """``<status> <reason>`` for an HTTP refusal, else the transport error; never a header value."""
+    import urllib.error
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"{exc.code} {exc.reason}".strip()
+    if isinstance(exc, urllib.error.URLError):
+        return f"unreachable: {exc.reason}"
+    return type(exc).__name__
+
+
 def notify_serve_backend(name: str, home: Path) -> Optional[dict[str, Any]]:
     """Ask the running dashboard / Desktop backend (``hermes serve``, found through its host record) to
-    run :func:`load_and_go_live` for ``name`` in ``home``. None when no backend answers. Never raises."""
+    run :func:`load_and_go_live` for ``name`` in ``home``. Returns the backend's answer; None when no
+    backend record exists; ``{"backend_error": "<status> <reason>"}`` (logged at warning) when a
+    record exists but the backend did not answer. Never raises."""
+    try:
+        record = _serve_backend_record()
+    except Exception:
+        logger.debug("serve backend record lookup failed", exc_info=True)
+        return None
+    if record is None:
+        return None
     try:
         import json
         import urllib.request
         from gateway import host_rendezvous as hr
         from hermes_cli.url_utils import format_url_host
-        record = _serve_backend_record()
-        if record is None:
-            return None
         token = hr.read_token(record.role)
         request = urllib.request.Request(
             f"http://{format_url_host(hr.dial_host(record))}:{record.port}"
@@ -260,10 +284,19 @@ def notify_serve_backend(name: str, home: Path) -> Optional[dict[str, Any]]:
             data=json.dumps({"name": name, "home": str(home)}).encode("utf-8"), method="POST",
             headers={"Content-Type": "application/json", "X-Hermes-Session-Token": token})
         with urllib.request.urlopen(request, timeout=60) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except Exception:
-        logger.debug("serve backend activation for %r failed", name, exc_info=True)
-        return None
+            answer = json.loads(response.read().decode("utf-8"))
+        if not isinstance(answer, dict):
+            raise ValueError("backend answer is not an object")
+        return answer
+    except (OSError, ValueError) as exc:  # HTTPError/URLError/timeouts are OSError; bad JSON ValueError
+        reason = _backend_failure_reason(exc)
+        logger.warning("the %s backend on port %s did not activate plugin %r: %s",
+                       getattr(record, "role", "serve"), getattr(record, "port", "?"), name, reason)
+        return {"backend_error": reason}
+    except Exception as exc:  # health: allow BLE001 -- documented never-raises CLI boundary; traceback logged
+        logger.warning("the %s backend activation of plugin %r failed",
+                       getattr(record, "role", "serve"), name, exc_info=True)
+        return {"backend_error": type(exc).__name__}
 
 
 def _gateway_present() -> bool:
@@ -303,7 +336,32 @@ def report_activation(console, name: str) -> None:
 
 def activation_hint(result: dict[str, Any]) -> str:
     """One honest sentence for CLI surfaces from an :func:`activate_plugin_now` result; empty when
-    there is nothing to say."""
+    there is nothing to say. When a Desktop / dashboard backend was asked (``result["backend"]``), a
+    first line says whether it loaded the plugin."""
+    body = _activation_body(result)
+    line = _backend_line(result.get("backend"))
+    return "\n".join(x for x in (line, body) if x)
+
+
+def _backend_line(backend: Optional[dict[str, Any]]) -> str:
+    if not backend:
+        return ""
+    if error := backend.get("error"):
+        return (f"The Desktop backend did not load it ({error}); open Desktop chats get it after that "
+                "backend restarts.")
+    act = backend.get("activation")
+    if act and act.get("missing_dependencies"):
+        return ""  # the dependency restart hint below names the backend
+    if not act:
+        return ("The Desktop backend did not load it (it answered without loading the plugin); open "
+                "Desktop chats get it after that backend restarts.")
+    now = act.get("activated_now") or {}
+    if now:
+        return "Desktop backend loaded it — active in open Desktop chats now: " + ", ".join(sorted(now)) + "."
+    return "Desktop backend loaded it."
+
+
+def _activation_body(result: dict[str, Any]) -> str:
     act = result.get("activation") or {}
     live = act.get("live_now") or {}
     connected = [s for s in live.get("mcp_servers") or () if s.get("connected")]
