@@ -30,6 +30,7 @@ from gateway.kanban_watchers_common import (
 from gateway.kanban_watchers_notifier import _KanbanNotification, _notifier_collect
 from gateway.kanban_watchers_dispatcher import (
     _KanbanDispatcher,
+    _external_drain_hold,
     _log_spawn_results,
     _resolve_dispatcher_settings,
 )
@@ -310,6 +311,7 @@ class GatewayKanbanWatchersMixin:
             # broken PATH, missing venv, or credential loss.
             bad_ticks = 0
             last_warn_at = 0
+            external_hold: Optional[tuple[str, str]] = None  # (principal, since) while an external drain holds
             results: Optional[list] = None
             dispatcher = _KanbanDispatcher(_kb, settings)
 
@@ -338,6 +340,22 @@ class GatewayKanbanWatchersMixin:
                         # claim hold (core declares GATEWAY_RESTART_SAFE) a claim made now only adds a
                         # run the restart must carry. A cancelled restart clears the flag. [daveey]
                         gate = "drain"
+                    # An external drain (``.drain_request.json``, gateway/drain_control.py) refuses new
+                    # turns the same way, so it holds claims the same way; without this the MacBook's
+                    # stale-plugin restarts claimed into the drain for 48 ticks and the stuck warning
+                    # blamed profile health. [daveey]
+                    external = bool(getattr(self, "_external_drain_active", False))
+                    if gate is None and external:
+                        gate = "drain"
+                    if external and external_hold is None:
+                        principal, since = external_hold = await asyncio.to_thread(_external_drain_hold, time.time())
+                        logger.info("kanban dispatch held: external drain (%s, since %s); "
+                                    "running workers continue", principal, since)
+                    elif not external and external_hold is not None:
+                        principal, since = external_hold
+                        logger.info("kanban dispatch released: external drain (%s, since %s) ended; "
+                                    "claims resume", principal, since)
+                        external_hold = None
                     if gate == "estop":
                         bad_ticks = 0
                     elif gate == "drain":
@@ -360,7 +378,8 @@ class GatewayKanbanWatchersMixin:
                         capped = _kbd.all_at_capacity(res for _slug, res in (results or []))
                         bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned and not capped else 0
                     now = int(time.time())
-                    if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
+                    # Only an ungated tick can be "stuck": an estop or drain hold spawns 0 on purpose.
+                    if gate is None and bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
                         # Names deferred Board claims / unleasable cards when those explain the zero.
                         logger.warning("%s", _kbd.stuck_warning(bad_ticks, (res for _slug, res in (results or []))))
                         last_warn_at = now

@@ -436,3 +436,21 @@ def _log_spawn_results(results: Optional[list]) -> bool:
                 len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
             )
     return any_spawned
+
+
+def _external_drain_hold(observed_at: float) -> tuple[str, str]:
+    """``(principal, since HH:MM:SS)`` of the external drain (``.drain_request.json``) holding dispatch.
+
+    Read through ``gateway.drain_control`` only to name the hold in the log; the gate itself is the runner's
+    ``_external_drain_active`` flag, so an unreadable marker degrades the line, never the hold. ``since`` is
+    the marker's ``requested_at`` in local time, else *observed_at* (when the dispatcher first saw it). [daveey]"""
+    from datetime import datetime
+
+    from gateway.drain_control import read_drain_request
+    from gateway.memory_status import _parse_iso
+
+    body = read_drain_request() or {}  # never raises: absent -> None, garbled -> {}
+    principal = str(body.get("principal") or "unknown principal")
+    since = _parse_iso(body.get("requested_at"))  # None when missing or unparseable
+    when = since.astimezone() if since is not None else datetime.fromtimestamp(observed_at)
+    return principal, when.strftime("%H:%M:%S")
