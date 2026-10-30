@@ -219,6 +219,9 @@ class GatewayControlServer:
         self._bind_path: Optional[Path] = None
         self._pointer_file: Optional[Path] = None
         self._fallback_root: Optional[Path] = None  # mkdtemp root created for a squatted fallback
+        # The shared-temp ``hermes-gw-<hash>`` dir this server mkdir'ed, with its (st_dev, st_ino):
+        # removed on stop only while it is still that inode and empty, never one it found existing.
+        self._created_dir: Optional[tuple[Path, tuple[int, int]]] = None
         self._file_identities = {}
         self._handlers: dict[str, Callable[..., dict[str, Any]]] = {
             "identify": build_identify_payload, "status": build_status_payload, **(verb_handlers or {})}
@@ -263,6 +266,8 @@ class GatewayControlServer:
         if pointer_file is not None:
             with contextlib.suppress(FileExistsError):
                 bind_path.parent.mkdir(mode=0o700)
+                info = bind_path.parent.lstat()
+                self._created_dir = (bind_path.parent, (info.st_dev, info.st_ino))
             if not _private_directory(bind_path.parent):
                 # Another local user pre-created the predictable shared-temp name; bootstrap treats
                 # a missing listener as fatal, so move to an unpredictable private root instead.
@@ -314,6 +319,13 @@ class GatewayControlServer:
                 if self._file_identities.get(path) == (info.st_dev, info.st_ino):
                     path.unlink()
         self._file_identities.clear()
+        if self._created_dir is not None:
+            directory, identity = self._created_dir
+            self._created_dir = None
+            with contextlib.suppress(OSError):  # non-empty (ENOTEMPTY) or already gone: leave it
+                info = directory.lstat()
+                if stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == identity:
+                    directory.rmdir()
         if self._fallback_root is not None:
             with contextlib.suppress(OSError):
                 (self._fallback_root / f"hermes-gw-{_home_hash(self._home)}").rmdir()

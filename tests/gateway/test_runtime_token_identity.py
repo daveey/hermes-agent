@@ -162,6 +162,8 @@ def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
                 process.send_signal(signal.SIGINT)
                 assert process.wait(timeout=20) == 0
                 assert not control_path.exists()
+                if control_path.parent != home:  # the fallback dir the gateway made goes with it
+                    assert not control_path.parent.exists()
                 assert not (home / 'gateway.sock.path').exists()
                 if port:
                     with socket.socket() as peer:
@@ -177,5 +179,5 @@ def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=5)
-                if control_path is not None and control_path.parent != home:
+                if control_path is not None and control_path.parent != home and control_path.parent.exists():
                     control_path.parent.rmdir()
