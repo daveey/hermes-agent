@@ -282,19 +282,30 @@ class PtyHermes:
             raise AssertionError(f"hermes did not exit within {timeout:.0f}s of {command}\n{self.dump()}")
         return self.proc.returncode
 
-    def leftover_processes(self, timeout: float = 15.0) -> list[str]:
-        """Processes still alive in the child's session, or seen as its descendants, after exit.
+    def stop_gateway(self) -> None:
+        """End this sandbox's shared runtime after its viewer exits.
 
-        The profile's ``gateway run`` is not a leftover: ``hermes chat`` attaches to it and it
-        keeps serving (cron, messaging, the next client) after the client exits; ``close()`` still
-        tears it down with the rest of this harness's tree."""
+        /exit closes a viewer, not the gateway or its owner-death supervisor. End the actual
+        owner before asserting that its whole tree exited; never exempt the supervisor or
+        kill it directly, since it must remain alive to reap registered groups.
+        """
         from gateway.status import looks_like_gateway_command_line
 
+        assert self.proc.poll() is not None, "stop the viewer before its sandbox gateway"
+        for pid, started in self.seen_members:
+            if _start_time(pid) == started and looks_like_gateway_command_line(cmdline(pid)):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+
+    def leftover_processes(self, timeout: float = 15.0) -> list[str]:
+        """All tracked processes still alive after the viewer and sandbox runtime are stopped."""
         def alive() -> list[int]:
             pids = set(session_members(self.sid))
             # Same pid AND same start time: a recycled pid is not our leftover.
             pids |= {pid for pid, started in self.seen_members if _start_time(pid) == started}
-            return sorted(pid for pid in pids if not looks_like_gateway_command_line(cmdline(pid)))
+            return sorted(pids)
         try:
             poll(lambda: not alive(), timeout=timeout, what="the PTY session to empty")
         except AssertionError:

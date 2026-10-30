@@ -220,6 +220,34 @@ def write_home(root: Path, model: dict[str, Any], extra_cfg: dict[str, Any] | No
     return home
 
 
+def stop_auto_started_gateway(hermes_home: Path, timeout: float = 30.0) -> None:
+    """Stop the daemon a ``hermes -z`` client auto-started for this hermetic home.
+
+    The oneshot client spawns the home's gateway (``ensure_gateway_runtime``), which outlives the
+    client for ``gateway.unmanaged_idle_exit_seconds`` (600 s). A matrix shard drives dozens of
+    homes, so un-reaped daemons (each a full gateway: cron, kanban dispatcher, housekeeping) pile up
+    across the whole E2E run and starve later children of CPU/RAM until they miss ``TURN_TIMEOUT``
+    with no request ever sent. Only the live process the gateway's own identity check proves is
+    this home's gateway is signalled (a recycled PID in a stale record is left alone).
+    """
+    import psutil
+    from gateway.status import live_gateway_pid_for_home
+
+    pid = live_gateway_pid_for_home(hermes_home)
+    if pid is None:
+        return
+    try:
+        gateway = psutil.Process(pid)  # binds the create time: terminate() refuses a reused PID
+        gateway.terminate()
+        try:
+            gateway.wait(timeout=timeout)
+        except psutil.TimeoutExpired:
+            gateway.kill()
+            gateway.wait(timeout=timeout)
+    except psutil.NoSuchProcess:
+        return
+
+
 def run_hermes(home: Path, cwd: Path, env_extra: dict[str, str], *args: str,
                timeout: float = TURN_TIMEOUT) -> subprocess.CompletedProcess:
     """Run the real CLI; a child that outlives ``timeout`` is killed (rc -9, reason in stderr)."""
@@ -233,6 +261,8 @@ def run_hermes(home: Path, cwd: Path, env_extra: dict[str, str], *args: str,
             proc.kill()
             proc.wait()
             rc, why = -9, f"\nTIMEOUT after {timeout}s"
+        finally:
+            stop_auto_started_gateway(home / ".hermes")
         out.seek(0)
         err.seek(0)
         return subprocess.CompletedProcess(proc.args, rc, out.read(), err.read() + why)

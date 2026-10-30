@@ -159,9 +159,7 @@ class Model:
         for job in self.active():
             if job.trigger:
                 job.trigger = False
-                job.fired += 1
-                self.fires.append((job.name, None, t))
-                job.advance_from(t)
+                self.manual(job.name, t)
                 continue
             if job.pending is None or job.pending > t:
                 continue
@@ -174,12 +172,32 @@ class Model:
 
     def manual(self, name: str, t: float) -> None:
         job = self.jobs[name]
-        job.fired += 1
         self.fires.append((name, None, t))
-        if job.kind == "interval":
-            job.pending = t + job.interval
-        if job.times is not None and job.fired >= job.times:
-            job.done, job.pending = True, None
+        # Explicit run-now before the pending occurrence is an extra fire (f656543e030):
+        # it preserves both the slot and its repeat budget, for intervals as well as cron.
+        if job.pending is not None and job.pending > t:
+            return
+        job.fired += 1
+        job.advance_from(t)
+
+
+@pytest.mark.parametrize("trigger", [False, True], ids=["direct", "trigger"])
+def test_model_manual_interval_preserves_the_scheduled_occurrence(trigger):
+    """Run-now is extra: one manual fire plus the full finite scheduled budget, at the old slot."""
+    model = Model()
+    job = ModelJob("interval", "interval", 7200.0, interval=7200.0, times=1)
+    model.jobs[job.name] = job
+    if trigger:
+        job.trigger = True
+        model.tick(600.0)
+    else:
+        model.manual(job.name, 600.0)
+    assert model.fires == [(job.name, None, 600.0)]
+    assert (job.pending, job.fired, job.done) == (7200.0, 0, False)
+    model.fires.clear()
+    model.tick(7200.0)
+    assert model.fires == [(job.name, _iso(7200.0), 7200.0)]
+    assert (job.pending, job.fired, job.done) == (None, 1, True)
 
 
 # --- the soak driver -------------------------------------------------------------------------
@@ -308,6 +326,10 @@ class Soak:
         by_id = {j["id"]: j for j in H.store_jobs(self.home)}
         for name, mj in self.model.jobs.items():
             stored = by_id.get(self.ids.get(name))
+            if stored is not None and mj.kind != "once" and mj.times is not None:
+                assert stored["repeat"]["completed"] == mj.fired, (
+                    f"{where} {name}: scheduled repeat budget {stored['repeat']} != "
+                    f"expected {mj.fired}; manual fires must not spend it")
             if mj.done or stored is None:
                 continue
             nra = stored.get("next_run_at")

@@ -14,7 +14,8 @@ Invariants, checked on the settled final frame of every scenario:
   * a tool call's command is rendered once; reasoning is never rendered twice;
   * rendered == persisted: every user/assistant row in state.db is on screen exactly once, and the
     persisted assistant text equals the scripted stream;
-  * ``/exit`` exits 0 within a bounded time and leaves no process behind in the PTY session.
+  * ``/exit`` exits 0 within a bounded time; after the sandbox's shared gateway is stopped
+    gracefully, no process remains in the tracked tree (including owner-death supervisors).
 
 The ``resize`` scenarios change the terminal width while a long reply is streaming (SIGWINCH via
 the PTY), the recurring "history re-appended on resize" shape. ``resize_scrollback`` replays it on
@@ -186,8 +187,11 @@ def test_terminal_transcript_integrity(surface: str, scenario: str, tmp_path: Pa
 
             code = term.exit()
             assert code == 0, f"[{surface}/{scenario}] /exit returned {code}\n{term.dump()}"
+            # The viewer does not own the shared runtime's lifetime. End our sandbox's gateway
+            # gracefully, then require its entire tree (including its supervisor) to be gone.
+            term.stop_gateway()
             leftovers = term.leftover_processes()
-            assert not leftovers, f"[{surface}/{scenario}] processes left after /exit: {leftovers}"
+            assert not leftovers, f"[{surface}/{scenario}] processes left after /exit and runtime shutdown: {leftovers}"
 
             persisted = term.persisted_messages()
             sessions = {s for s, _r, _c in persisted}
