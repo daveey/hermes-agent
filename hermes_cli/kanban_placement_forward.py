@@ -34,6 +34,7 @@ DEFERRED = "placement_deferred"
 FORWARDED = "placement_forwarded"
 CANCELLED = "placement_deferred_cancelled"
 NOT_LIVE = "placement_forward_not_live"
+ARCHIVE_FORWARDED = "placement_archive_forwarded"
 MAX_NOT_LIVE = 3
 REQUEUE_SECONDS = 600          # retry a not-live target / a still-queued request after this long
 SETTLE_PARK_SECONDS = 14 * 86400  # timer backstop of the settle park; the wake probe ends it first
@@ -98,6 +99,86 @@ def forward_argv(task, board: Optional[str], worker_cmd: list) -> Optional[list]
         from cron.scheduler_worker_env import hermes_module_argv
         return [*hermes_module_argv(sys.executable, MODULE), "--", *[str(x) for x in worker_cmd]]
     except Exception:
+        return None
+
+
+# --- lifecycle: archive the placed copy ---------------------------------------------------------
+
+def _archive_request_id(self_gw: str, task_id: str) -> str:
+    return f"placement-archive:{self_gw}:{task_id}"
+
+
+def _archive_events(conn: sqlite3.Connection, task_id: str) -> list:
+    out = []
+    for (raw,) in conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id",
+                               (task_id, ARCHIVE_FORWARDED)).fetchall():
+        try:
+            out.append(json.loads(raw or "{}"))
+        except ValueError:
+            continue
+    return out
+
+
+def archive_forward_view(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """What ``kanban_archive`` reports about the placed copy of ``task_id``: ``{gateway, task_id, status}`` with
+    status ``archived`` (the target applied the request), ``pending`` (queued or sent, not applied yet) or
+    ``unresolved`` (the target had not made the card when this one was archived), else None (never forwarded)."""
+    events = _archive_events(conn, task_id)
+    if not events:
+        return None
+    last = events[-1]
+    status = last.get("status") or "pending"
+    rid = last.get("request_id")
+    if status == "pending" and rid:
+        from hermes_cli import kanban_placement as kp
+        if kp.remote_state(rid) == "done":
+            status = "archived"
+    view = {"gateway": last.get("gateway"), "task_id": last.get("remote_task_id"), "status": status}
+    if last.get("error"):
+        view["error"] = last["error"]
+    if last.get("note"):
+        view["note"] = last["note"]
+    return view
+
+
+def forward_archive(conn: sqlite3.Connection, task_id: str, *, runner: Optional[Callable] = None) -> Optional[dict]:
+    """Archive the copy of ``task_id`` that placement forwarded to another gateway. Never raises.
+
+    Sends ``hermes-hub request <gw> tasks default/<remote id> archive``: the hub client queues it durably
+    (rc 3 = target or hub unreachable, applied when it reconnects). Records ``placement_archive_forwarded``
+    on the local card and returns :func:`archive_forward_view`. None when the card was never forwarded."""
+    try:
+        st = state(conn, task_id)
+        if not st or not (st.get("request_id") or st.get("remote_task_id")):
+            return None
+        prior = _archive_events(conn, task_id)
+        if prior and prior[-1].get("status") in ("pending", "archived"):
+            return archive_forward_view(conn, task_id)  # one request per card
+        from hermes_cli import kanban_capability_registry as reg
+        from hermes_cli import kanban_placement as kp
+        target = st["target"]
+        rtid = st.get("remote_task_id") or (kp.remote_task_id(st["request_id"]) if st.get("request_id") else None)
+        payload: dict = {"gateway": target, "request_id": None, "remote_task_id": rtid, "status": "pending"}
+        if not rtid:
+            payload.update(status="unresolved", note=(
+                f"{target} had not made the card for request {st.get('request_id')} yet, so there is nothing to "
+                f"archive there by id; check `hermes-hub tasks --gw {target}` for the copy."))
+        else:
+            cfg = kp.config()
+            self_gw = reg.self_gateway() or "local"
+            rid = _archive_request_id(self_gw, task_id)
+            argv = [reg.hub_cli_path(cfg.get("hub_cli")), "request", target, "tasks", f"default/default/{rtid}",
+                    "archive", "--id", rid]
+            rc, out, err = (runner or kp.hub_runner)(argv)
+            payload["request_id"] = rid
+            if rc not in (0, 3):  # 3: queued, sent on the next sync
+                payload.update(status="failed", error=(err or out or f"rc {rc}")[-300:])
+        from hermes_cli import kanban_db as kb
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, ARCHIVE_FORWARDED, payload)
+        return archive_forward_view(conn, task_id)
+    except Exception as exc:  # health: allow BLE001 -- an archive must never fail on the courtesy forward
+        print(f"placement archive forward failed: {exc!r}", file=sys.stderr)
         return None
 
 

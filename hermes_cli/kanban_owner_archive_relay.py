@@ -228,7 +228,15 @@ def worker_archive(conn: sqlite3.Connection, tid: str, *,
             out.pop("task_id", None)
             return None, out
     refusal, via = worker_archive_scope(conn, tid)
-    return (refusal, None) if refusal else (None, archive(conn, tid, via=via))
+    if refusal:
+        return refusal, None
+    out = archive(conn, tid, via=via)
+    if out and out.get("status") == "archived":
+        from hermes_cli.kanban_placement_forward import archive_forward_view
+        placed = archive_forward_view(conn, tid)  # [daveey] the placed copy on another gateway, if any
+        if placed:
+            out = {**out, "placed_copy": placed}
+    return None, out
 
 
 def apply_remote_archives(conn: sqlite3.Connection) -> list[str]:

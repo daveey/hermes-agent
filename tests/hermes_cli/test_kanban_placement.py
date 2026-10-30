@@ -1404,3 +1404,80 @@ def test_foreign_pin_with_parents_is_deferred_to_the_pinned_gateway():
 def test_foreign_pin_for_an_origin_bound_card_is_not_forwarded():
     d = decide({"title": "x", "placement": "macbook"}, cfg=HUB_CFG, self_gw="hub", origin_intent="chat")
     assert d["where"] == "local", d
+
+
+def _forwarded_card(mac, monkeypatch, conn):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+    parent = kb.create_task(conn, title="Orchestrate", assignee="default")
+    created = json.loads(kt._handle_create({"title": "Fix the flaky lint", "body": "Push it.", "parents": [parent],
+                                            "session_id": "20261027_183000_abc123"}))
+    kb.complete_task(conn, parent, summary="fanned out", force=True)
+    kb.recompute_ready(conn)
+    child = created["task_id"]
+    assert _forwarder(conn, child, mac, monkeypatch).run() == "parked"
+    mac["calls"].clear()
+    return child
+
+
+def test_archiving_a_forwarded_card_archives_the_remote_copy(mac, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    from tools import kanban_tools as kt
+    with kbc.connect_closing() as conn:
+        child = _forwarded_card(mac, monkeypatch, conn)
+    out = json.loads(kt._handle_archive({"task_id": child}))
+    assert out["ok"] and out["status"] == "archived", out
+    argv = mac["calls"][0]
+    assert argv[1:6] == ["request", "hub", "tasks", f"default/default/{HUB_TID}", "archive"], argv
+    assert out["placed_copy"] == {"gateway": "hub", "task_id": HUB_TID, "status": "pending"}, out
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, child).status == "archived"
+        assert [e["status"] for e in kpf._archive_events(conn, child)] == ["pending"]
+    # The hub client applied it: the view now says archived, and a second archive sends nothing new.
+    rid = argv[argv.index("--id") + 1]
+    mac["hub"].execute("UPDATE sent SET state='done' WHERE id=?", (rid,))
+    mac["hub"].commit()
+    with kbc.connect_closing() as conn:
+        assert kpf.archive_forward_view(conn, child)["status"] == "archived"
+        assert kpf.forward_archive(conn, child)["status"] == "archived"
+    assert len(mac["calls"]) == 1
+
+
+def test_archive_forward_is_queued_when_the_target_is_offline(mac, monkeypatch):
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    from tools import kanban_tools as kt
+    with kbc.connect_closing() as conn:
+        child = _forwarded_card(mac, monkeypatch, conn)
+    mac["result"]["rc"] = 3  # hub unreachable: the client queues the request durably
+    out = json.loads(kt._handle_archive({"task_id": child}))
+    assert out["ok"] and out["placed_copy"]["status"] == "pending", out
+    rid = mac["calls"][0][mac["calls"][0].index("--id") + 1]
+    assert mac["hub"].execute("SELECT state FROM sent WHERE id=?", (rid,)).fetchone()[0] == "sent"
+    with kbc.connect_closing() as conn:
+        assert kpf.archive_forward_view(conn, child)["status"] == "pending"
+    mac["hub"].execute("UPDATE sent SET state='done' WHERE id=?", (rid,))  # reconnected, target applied it
+    mac["hub"].commit()
+    with kbc.connect_closing() as conn:
+        assert kpf.archive_forward_view(conn, child)["status"] == "archived"
+
+
+def test_archive_forward_failure_is_reported_and_retried_and_plain_cards_are_untouched(mac, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    from tools import kanban_tools as kt
+    with kbc.connect_closing() as conn:
+        child = _forwarded_card(mac, monkeypatch, conn)
+        plain = kb.create_task(conn, title="plain", assignee="default")
+    mac["result"]["rc"] = 1
+    out = json.loads(kt._handle_archive({"task_id": child}))
+    assert out["ok"] and out["placed_copy"]["status"] == "failed" and out["placed_copy"]["error"], out
+    mac["result"]["rc"] = 0
+    with kbc.connect_closing() as conn:
+        assert kpf.forward_archive(conn, child)["status"] == "pending"  # a failed forward is sent again
+    mac["calls"].clear()
+    assert "placed_copy" not in json.loads(kt._handle_archive({"task_id": plain}))
+    assert mac["calls"] == []
