@@ -795,6 +795,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     from hermes_cli.resource_limits import apply_nofile_soft_limit
     apply_nofile_soft_limit()
 
+    # GIL handoffs to the API loop wait out the switch interval behind CPU-bound threads (gil_budget.py).
+    from gateway.gil_budget import apply_gateway_switch_interval
+    apply_gateway_switch_interval()
+
     # Snapshot the revision while sys.modules matches disk so a later `git pull` is detected safely.
     from gateway.code_skew import install_boot_pinned_imports, record_boot_fingerprint
     record_boot_fingerprint()
