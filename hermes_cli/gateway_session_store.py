@@ -162,11 +162,18 @@ class GatewaySessionStore:
         """``session.create`` with the launch policy (and ``title``: the owner's resolve -> create ->
         title step); adopts and returns the new session id. ``record_cwd=False`` (``/new``,
         ``--create-if-missing``) leaves the row's cwd empty, as main's explicit creates did."""
-        from agent.session_source import CLI_FAMILY_SOURCES, create_surface, session_source_for
+        from agent.session_source import CLI_FAMILY_SOURCES, ONESHOT_SOURCE, create_surface, session_source_for
+        from gateway.session_context import get_session_env
         params = _creation_policy(launch or {})
         params["cwd"] = _launch_cwd()
         # Main's row label: ``cli``, ``oneshot`` for a finite -q/-Q run, or an explicit --source.
-        params["source"] = create_surface(session_source_for("cli"))
+        source = session_source_for("cli")
+        if source == "kanban" and get_session_env("HERMES_SESSION_SOURCE_EXPLICIT", "") != "1":
+            # [daveey] Only the gateway's dispatcher admission mints ``kanban`` sessions; build_policy
+            # refuses it from a client (invalid_params). An inherited worker label (a worker shell from
+            # older code, a job it started) made every descendant ``hermes chat`` fail before sending.
+            source = ONESHOT_SOURCE if get_session_env("HERMES_SINGLE_QUERY_SESSION", "") == "1" else "cli"
+        params["source"] = create_surface(source)
         # Main's row stamp (run_agent._launch_cwd_for_session): this process's cwd (``-w`` never
         # chdirs, so the repo root), only for a CLI-family label on a local terminal backend.
         local = (os.getenv("TERMINAL_ENV") or "local").strip().lower() in ("", "local")

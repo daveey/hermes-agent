@@ -889,3 +889,30 @@ def test_clear_banner_shows_the_new_gateway_sessions_tools_and_short_label(store
     assert banner["session_id"] == "ab12cd34"
     assert sorted(t["function"]["name"] for t in banner["tools"]) == ["mcp__zeta__ro_probe", "read_file"]
     assert banner["get_toolset_for_tool"]("mcp__zeta__ro_probe") == "mcp-zeta"
+
+
+def test_an_inherited_kanban_label_is_never_sent_as_the_create_source(store, monkeypatch):
+    """[daveey] ``kanban`` is minted only by the gateway's dispatcher admission; ``build_policy`` refuses it
+    from a client (``invalid_params (source)``). A process that inherited a worker's
+    ``HERMES_SESSION_SOURCE=kanban`` (a worker shell from older code, a nohup job it started) made every
+    ``hermes chat -q`` it ran fail "couldn't start the model connection: invalid_params" before sending
+    (hermes-hub, 2026-10-30 05:44, card t_01a18b3d519d00c1). That descendant chat is a CLI run."""
+    monkeypatch.delenv("HERMES_SESSION_SOURCE_EXPLICIT", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "kanban")
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_TASK", "t_0123456789ab")
+    monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
+    db, client = store
+    db.open_session(cli(), {})
+    assert client.calls[-1][1]["source"] == "oneshot"
+    monkeypatch.delenv("HERMES_SINGLE_QUERY_SESSION")
+    GatewaySessionStore(db.connection).open_session(cli(), {})
+    assert client.calls[-1][1]["source"] == "cli"
+
+
+def test_an_explicit_kanban_source_is_still_sent_for_the_gateway_to_refuse(store, monkeypatch):
+    """Control: ``--source kanban`` the user typed is not rewritten; the gateway names the refused field."""
+    monkeypatch.setenv("HERMES_SESSION_SOURCE_EXPLICIT", "1")
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "kanban")
+    db, client = store
+    db.open_session(cli(), {})
+    assert client.calls[-1][1]["source"] == "kanban"
