@@ -7,7 +7,11 @@ is the executable scheduling configuration, not Python source under inspection.
 from __future__ import annotations
 
 import pathlib
+import re
+import shutil
+import subprocess
 
+import pytest
 from ruamel.yaml import YAML
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -23,7 +27,25 @@ FAST = {
     ("blob-size-check.yml", "check-blob-size"),
     ("profile-artifact-check.yml", "check-profile-artifacts"),
     ("lazy-deps-guard.yml", "lazy-deps-guard"),
+    # Second admission (October 30, 2026): PR-path summaries, ancestry/attribution
+    # checks, lockfile checks and completion aggregates. Each needs only git,
+    # python3/jq or setup-pm, and ran 7-62 s median on hub runners while it
+    # queued 7-26 min behind full suites (.github/FAST-LANE.md).
+    ("ci.yaml", "all-checks-pass"),
+    ("ci.yaml", "ci-timings"),
+    ("history-check.yml", "check-common-ancestor"),
+    ("contributor-check.yml", "check-attribution"),
+    ("uv-lockfile-check.yml", "check"),
+    ("icons-freshness-check.yml", "check"),
+    ("lockfile-diff.yml", "diff"),
+    ("prompt-surface-diff.yml", "diff"),
+    ("supply-chain-audit.yml", "scan"),
+    ("supply-chain-audit.yml", "dep-bounds"),
+    ("supply-chain-audit.yml", "aggregate"),
 }
+# Completion jobs in the orchestrator itself: the gate, and the advisory report
+# that runs after it. Neither can be one of the gate's own needs.
+COMPLETION = {("ci.yaml", "all-checks-pass"), ("ci.yaml", "ci-timings")}
 
 
 def _workflows():
@@ -65,6 +87,14 @@ def test_observers_and_long_work_do_not_compete_for_fast_slots():
         for job in workflows[wf]["jobs"].values():
             assert "ci-fast" not in job.get("runs-on", [])
     assert workflows["lint.yml"]["jobs"]["lint-diff"]["runs-on"] == ["self-hosted", "hermes-hub"]
+    # Test suites and E2E stay on the heavy lane even when one run is short.
+    for wf, name in [
+        ("catalog-tests.yml", "catalog-tests"),
+        ("bootstrap-installer.yml", "posix"),
+        ("tests.yml", "e2e-upgrade-plan"),
+        ("termux-verify.yml", "contracts"),
+    ]:
+        assert workflows[wf]["jobs"][name]["runs-on"] == ["self-hosted", "hermes-hub"]
 
 
 def test_fast_label_is_known_and_checks_cannot_bypass_the_gate():
@@ -80,12 +110,44 @@ def test_fast_label_is_known_and_checks_cannot_bypass_the_gate():
         if wf == "actionlint.yml":
             # Its independent trigger must still catch an invalid orchestrator.
             assert "pull_request" in workflows[wf]["on"]
+        elif (wf, name) in COMPLETION:
+            assert name == "all-checks-pass" or "all-checks-pass" in job["needs"]
+            assert job["if"] == "${{ !cancelled() }}"
         elif wf == "ci.yaml":
             assert name in gate["needs"]
         else:
             callers = {key for key, value in workflows["ci.yaml"]["jobs"].items()
                        if value.get("uses") == f"./.github/workflows/{wf}"}
             assert callers and callers <= set(gate["needs"])
+
+
+@pytest.mark.parametrize("upstream_label", ["ubuntu-latest", "[self-hosted, hermes-hub]"])
+def test_fork_rewriter_keeps_every_fast_job_on_the_fast_lane(tmp_path, upstream_label):
+    # An upstream merge brings back ubuntu-latest (or an older fork commit's
+    # hermes-hub) on these lines; the reapply script must pin them back.
+    shutil.copytree(ROOT / ".github", tmp_path / ".github")
+    for relative in ("scripts/fork-ci-runner.sh", "scripts/ci/required_results.py", "tests/ci/conftest.py"):
+        dest = tmp_path / relative
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, dest)
+    for wf in {wf for wf, _ in FAST}:
+        path = tmp_path / ".github/workflows" / wf
+        text = path.read_text(encoding="utf-8")
+        for name in [n for w, n in FAST if w == wf]:
+            match = re.search(r"(?m)^  " + re.escape(name) + r":\n(?:(?!  \S).*\n)*", text)
+            assert match, (wf, name)
+            block = match.group(0)
+            text = text.replace(block, re.sub(r"(?m)^    runs-on: .*$", f"    runs-on: {upstream_label}", block))
+        path.write_text(text, encoding="utf-8")
+    yaml = YAML(typ="safe")
+    for _ in range(2):
+        subprocess.run(["bash", "scripts/fork-ci-runner.sh"], cwd=tmp_path, check=True, capture_output=True)
+        for wf, name in FAST:
+            job = yaml.load((tmp_path / ".github/workflows" / wf).read_text(encoding="utf-8"))["jobs"][name]
+            assert _labels(job) == ["self-hosted", "ci-fast"], (wf, name)
+    # Heavy work the script routes is untouched by the fast-lane pin.
+    lint = yaml.load((tmp_path / ".github/workflows/lint.yml").read_text(encoding="utf-8"))
+    assert lint["jobs"]["lint-diff"]["runs-on"] == ["self-hosted", "hermes-hub"]
 
 
 def test_e2e_upgrade_runs_only_on_bwrap_capable_slots():

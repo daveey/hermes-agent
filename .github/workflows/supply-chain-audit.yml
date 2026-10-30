@@ -55,8 +55,8 @@ jobs:
   scan:
     name: Scan PR for critical supply chain risks
     if: inputs.scan
-    runs-on: [self-hosted, hermes-hub]
-    timeout-minutes: 15
+    runs-on: [self-hosted, ci-fast]
+    timeout-minutes: 10  # fork: ci-fast lane cap; runs take 6-69 s
     outputs:
       review_status: ${{ steps.emit-status.outputs.review_status }}
     steps:
@@ -159,8 +159,8 @@ jobs:
   dep-bounds:
     name: Check PyPI dependency upper bounds
     if: inputs.deps
-    runs-on: [self-hosted, hermes-hub]
-    timeout-minutes: 15
+    runs-on: [self-hosted, ci-fast]
+    timeout-minutes: 10  # fork: ci-fast lane cap; runs take 6-69 s
     outputs:
       review_status: ${{ steps.emit-status.outputs.review_status }}
     steps:
@@ -239,8 +239,8 @@ jobs:
     name: Aggregate review statuses
     needs: [scan, dep-bounds]
     if: ${{ !cancelled() }}
-    runs-on: [self-hosted, hermes-hub]
-    timeout-minutes: 15
+    runs-on: [self-hosted, ci-fast]
+    timeout-minutes: 10  # fork: ci-fast lane cap; runs take 6-69 s
     outputs:
       review_status: ${{ steps.merge.outputs.review_status }}
     steps:

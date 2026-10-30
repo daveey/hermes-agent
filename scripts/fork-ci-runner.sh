@@ -23,26 +23,50 @@ rm -f ./*.bak
 sed -i.bak -E 's/^([[:space:]]*runs-on:[[:space:]]*)(\[self-hosted, hermes-hub\]|ubuntu-latest|ubuntu-24\.04)[[:space:]]*$/\1[self-hosted, hermes-hub-poll]/' ci-review-comment.yml
 rm -f ./*.bak
 
-# Aggregator/report jobs use general capacity, never the observer-only pool:
-# live-comment pollers can await these jobs and fill every poll slot (PR #221).
-# Keep cancellation skipping: a CANCELLED run's always() gate used to hold
-# its concurrency group while queued (PR #53, PR #50).
+# Aggregator/report jobs run on the bounded ci-fast lane, never the
+# observer-only pool (live-comment pollers can await these jobs and fill every
+# poll slot, PR #221) nor the heavy pool (PR #266: a 7 s aggregate queued 23 min
+# behind full suites). Keep cancellation skipping: a CANCELLED run's always()
+# gate used to hold its concurrency group while queued (PR #53, PR #50).
+# Every other admitted light job (.github/FAST-LANE.md) is pinned back to
+# ci-fast too, so re-running this after an upstream merge cannot send it to the
+# heavy pool.
 # Detect gets 5 min: a 1-min cap was cancelling whole runs on a loaded hub
 # (checkout 52s + compare-API retry), which skipped every lane.
 python3 - <<'PY'
 import re
-JOBS = {
+COMPLETION = {
     'ci.yaml': ('all-checks-pass', 'ci-timings'),
     'supply-chain-audit.yml': ('aggregate',),
 }
-for f, names in JOBS.items():
+FAST = {
+    'ci.yaml': ('detect', 'all-checks-pass', 'ci-timings'),
+    'actionlint.yml': ('actionlint',),
+    'lint.yml': ('ruff-blocking', 'code-health', 'windows-footguns'),
+    'case-collision-check.yml': ('check-case-collisions',),
+    'infographic-check.yml': ('check-no-committed-infographics',),
+    'blob-size-check.yml': ('check-blob-size',),
+    'profile-artifact-check.yml': ('check-profile-artifacts',),
+    'lazy-deps-guard.yml': ('lazy-deps-guard',),
+    'history-check.yml': ('check-common-ancestor',),
+    'contributor-check.yml': ('check-attribution',),
+    'uv-lockfile-check.yml': ('check',),
+    'icons-freshness-check.yml': ('check',),
+    'lockfile-diff.yml': ('diff',),
+    'prompt-surface-diff.yml': ('diff',),
+    'supply-chain-audit.yml': ('scan', 'dep-bounds', 'aggregate'),
+}
+for f in sorted(set(COMPLETION) | set(FAST)):
     t = open(f).read()
-    for name in names:
+    for name in sorted(set(COMPLETION.get(f, ())) | set(FAST.get(f, ()))):
         m = re.search(r'(?m)^  ' + re.escape(name) + r':\n(?:(?!  \S).*\n)*', t)
         assert m, (f, name)
         block = m.group(0)
-        new = re.sub(r'(?m)^(    if: )always\(\)$', r"\1${{ !cancelled() }}", block)
-        new = re.sub(r'(?m)^(    runs-on: )\[self-hosted, hermes-hub(?:-poll)?\]$', r'\1[self-hosted, hermes-hub]', new)
+        new = block
+        if name in COMPLETION.get(f, ()):
+            new = re.sub(r'(?m)^(    if: )always\(\)$', r"\1${{ !cancelled() }}", new)
+        new = re.sub(r'(?m)^(    runs-on: )(?:\[self-hosted, (?:hermes-hub(?:-poll)?|ci-fast)\]|ubuntu-latest|ubuntu-24\.04)$',
+                     r'\1[self-hosted, ci-fast]', new)
         t = t.replace(block, new)
     if f == 'ci.yaml':
         t = re.sub(r"(  detect:\n    name: Detect affected areas\n    runs-on: [^\n]*\n    timeout-minutes: )1\n",

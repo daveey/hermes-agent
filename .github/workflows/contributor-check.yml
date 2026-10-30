@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   check-attribution:
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: [self-hosted, ci-fast]
     timeout-minutes: 10
     outputs:
       review_status: ${{ steps.check-emails.outputs.review_status }}

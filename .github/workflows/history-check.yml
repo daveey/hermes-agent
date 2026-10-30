@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   check-common-ancestor:
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: [self-hosted, ci-fast]
     timeout-minutes: 10
     outputs:
       review_status: ${{ steps.merge-base-check.outputs.review_status }}

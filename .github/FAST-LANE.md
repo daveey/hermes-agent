@@ -6,9 +6,42 @@
 Jobs keep their existing names, conditions, dependencies, steps, permissions,
 timeouts and required-result semantics. In particular, neither heavy tests nor
 the advisory full-tree `ruff + ty diff` moves here. Completion aggregates and the
-CI timing report use the general `hermes-hub` lane, never the observer-only pool:
-long-running live-comment pollers can await those very jobs and occupy every slot.
+CI timing report also run here, never on the observer-only pool: long-running
+live-comment pollers can await those very jobs and occupy every slot, and on the
+heavy `hermes-hub` pool they queued behind full suites (PR #266: 23 min for a
+7 s aggregate). `scripts/fork-ci-runner.sh` pins every admitted job back to
+`ci-fast` when it is re-run after an upstream merge.
 The `!cancelled()` condition still keeps superseded runs from latching their group.
+
+## Second admission (October 30, 2026)
+
+At 02:31 PDT all 16 online `hermes-hub` runners were busy with full suites
+while 9 of 11 `ci-fast` runners sat idle, and these light PR jobs queued up to
+50 min. Sample: the latest 40 PR `ci.yaml` runs (successful jobs only, read at
+10:15 UTC). Every job below needs only git, python3/jq or `setup-pm`; none uses
+Docker, bubblewrap, hub-local paths or repository secrets. The `ci-fast`
+slots run the same `gh-runner` image as the hub runners.
+
+| Job | Samples | Median s | Max s | Queue median s (hub) | Queue max s (hub) |
+|---|---:|---:|---:|---:|---:|
+| All required checks pass (v2) | 12 | 18 | 20 | 54 | 1242 |
+| CI timing report | 17 | 35 | 50 | 44 | 2074 |
+| check-attribution | 30 | 54 | 67 | 235 | 1981 |
+| check-common-ancestor | 33 | 51 | 58 | 208 | 2345 |
+| Check uv.lock | 12 | 25 | 30 | 297 | 1696 |
+| Icon assets freshness | 34 | 60 | 66 | 168 | 3072 |
+| package-lock.json semantic diff | 12 | 54 | 83 | 248 | 1989 |
+| Prompt surface summary | 29 | 54 | 68 | 223 | 1946 |
+| Supply-chain scan | 26 | 52 | 69 | 424 | 2168 |
+| PyPI dependency upper bounds | 11 | 54 | 56 | 387 | 2002 |
+| Aggregate review statuses | 22 | 6 | 9 | 188 | 3150 |
+
+Jobs already on `ci-fast` had a 2 s median queue (max 199 s) in the same
+sample. The supply-chain jobs' timeouts drop from 15 to the lane's 10-minute
+cap. Still on `hermes-hub`: test suites and E2E (Python slices, JS/TS, docs,
+bootstrap, catalog, Rust, termux contracts), the advisory `ruff + ty diff`,
+`label-rerun` (a 15-minute `gh` poll loop), release/archive jobs that use
+secrets or environments, and the cache-timeout smoke.
 
 ## Evidence behind admission
 
