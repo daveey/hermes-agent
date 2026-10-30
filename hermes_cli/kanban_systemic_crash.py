@@ -65,7 +65,7 @@ def ensure_fix_card(conn: sqlite3.Connection, fingerprint: str, task_ids: list[s
             return kb.create_task(
                 conn, title=f"Systemic Kanban crash: {len(task_ids)} cards died with `{fingerprint[:60]}`",
                 body=body, assignee=assignee, created_by=AUTHOR, idempotency_key=key)
-    except Exception:
+    except (sqlite3.Error, ValueError):
         _log.warning("kanban: opening the systemic-crash fix card failed", exc_info=True)
     return None
 
@@ -75,13 +75,13 @@ def attach(conn: sqlite3.Connection, fix_id: str, task_id: str) -> bool:
     from hermes_cli import kanban_db as kb
     try:
         kb.link_tasks(conn, fix_id, task_id)
-    except Exception:
+    except (sqlite3.Error, ValueError):
         _log.warning("kanban: linking %s under systemic fix card %s failed", task_id, fix_id, exc_info=True)
         return False
     try:
         kb.add_comment(conn, task_id, AUTHOR,
                        f"Tripped by a systemic crash shared with other cards. Fix card {fix_id} owns it; this "
                        "card resumes when that card is done.")
-    except Exception:
+    except (sqlite3.Error, ValueError):
         _log.debug("kanban: systemic-trip comment failed", exc_info=True)
     return True
