@@ -33,6 +33,7 @@ PROBE = textwrap.dedent("""
         out = {"missing": exc.missing}
     out["discoveries"] = len(calls)
     out["providers_discovered"] = bool(providers._discovered)
+    out["auth_imported"] = "hermes_cli.auth" in sys.modules
     print("RESULT " + json.dumps(out))
 """)
 
@@ -102,6 +103,26 @@ def test_second_cold_process_serves_the_record_without_discovery(home):
     assert second["discoveries"] == 0
     # The config-module import no longer discovers providers either (it ran via plugins before).
     assert second["providers_discovered"] is False
+
+
+def test_served_default_composite_does_not_import_auth_or_providers(home):
+    """A profile with no saved cli toolset list resolves through the default composite, which probes
+    xAI credentials (importing hermes_cli.auth, ~3.7 s cold on the mini). A served record needs
+    only terminal/file membership, so it must not pay that; a stale record falls back to the full
+    discovery (and its credential probe)."""
+    _tool_plugin(home, "extra", "extra_ping", "extra")
+    _config(home, ENABLED % "extra")
+    first = _run(home)
+    assert first["discoveries"] == 1 and first["granted"] == ["terminal", "file"]
+    second = _run(home)
+    assert _verdict(second) == _verdict(first)
+    assert second["discoveries"] == 0
+    assert second["auth_imported"] is False and second["providers_discovered"] is False
+    # Editing a plugin makes the record stale: full discovery again, same verdict.
+    (home / "plugins" / "extra" / "__init__.py").write_text(
+        (home / "plugins" / "extra" / "__init__.py").read_text() + "\n# edited\n")
+    third = _run(home)
+    assert third["discoveries"] == 1 and _verdict(third) == _verdict(first)
 
 
 @pytest.mark.parametrize("cli", [

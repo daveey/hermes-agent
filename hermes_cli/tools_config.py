@@ -512,7 +512,11 @@ def _composite_toolsets(toolset_names: list[str], platform: str, explicitly_conf
     all_tool_names = {t for ts_name in toolset_names for t in resolve_toolset(ts_name)}
     enabled = _configurable_subset_of(all_tool_names, platform)
     default_off = _default_off_toolsets(platform, explicitly_configured)
-    if _toolset_allowed_for_platform("x_search", platform) and _xai_credentials_present():
+    # [daveey] A served plugin record (kanban admission) reads only terminal/file/kanban membership; x_search
+    # cannot change that, and the credential probe imports hermes_cli.auth (~3.7 s cold on the mini).
+    from hermes_cli import plugins_snapshot
+    if (plugins_snapshot.active() is None and _toolset_allowed_for_platform("x_search", platform)
+            and _xai_credentials_present()):
         enabled.add("x_search")
         default_off.discard("x_search")
     return enabled - default_off
