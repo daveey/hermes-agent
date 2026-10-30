@@ -211,13 +211,13 @@ def forward_archive(conn: sqlite3.Connection, task_id: str, *, runner: Optional[
 
 def sweep_unresolved_archives(conn: sqlite3.Connection, *, now: Optional[float] = None,
                               runner: Optional[Callable] = None) -> list[str]:
-    """Dispatcher tick: send the archive for each archived card whose last ``placement_archive_forwarded`` is
+    """Dispatcher tick: send the archive for each archived/done card whose last ``placement_archive_forwarded`` is
     ``unresolved`` once the target's card id reached this gateway's hub replica (no waiting here: the tick reads
     the replica only). A card still unresolved after :data:`ARCHIVE_SWEEP_GIVE_UP` gets an ``expired`` event and
     a comment, and is not swept again. Returns the ids whose archive request was sent."""
     now = time.time() if now is None else now
     rows = conn.execute(
-        "SELECT t.id FROM tasks t WHERE t.status = 'archived' AND EXISTS "
+        "SELECT t.id FROM tasks t WHERE t.status IN ('archived', 'done') AND EXISTS "
         "(SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = ?)", (ARCHIVE_FORWARDED,)).fetchall()
     sent: list[str] = []
     for (task_id,) in rows:
@@ -270,7 +270,7 @@ def forward_completion(conn: sqlite3.Connection, task_id: str) -> Optional[dict]
                     return None
             except Exception as exc:  # health: allow BLE001 -- unavailable observation must not prevent durable cancellation
                 print(f"placement completion observation failed; forwarding archive: {exc!r}", file=sys.stderr)
-        return forward_archive(conn, task_id)
+        return forward_archive(conn, task_id, await_budget=0)
     except Exception as exc:  # health: allow BLE001 -- courtesy forwarding must not undo a committed completion
         print(f"placement completion forward failed: {exc!r}", file=sys.stderr)
         return None

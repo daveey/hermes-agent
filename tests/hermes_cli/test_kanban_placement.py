@@ -1634,6 +1634,28 @@ def test_unresolved_archive_is_sent_by_the_dispatcher_sweep_once_the_target_make
     assert len(_archive_requests(mac)) == 1
 
 
+def test_request_only_completion_never_waits_and_sweep_cancels_late_copy(mac, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement as kp
+    from hermes_cli import kanban_placement_forward as kpf
+    with kbc.connect_closing() as conn:
+        child, rid = _unresolved_forwarded_card(mac, monkeypatch, conn)
+        assert kb.unblock_task(conn, child)
+        monkeypatch.setattr(kp, "await_task_id", lambda *a, **kw: pytest.fail("completion must not wait"))
+        assert kb.complete_task(conn, child, summary="Manual override", force=True)
+        assert kb.get_task(conn, child).status == "done"
+        assert kpf.archive_forward_view(conn, child)["status"] == "unresolved"
+        assert kpf.sweep_unresolved_archives(conn) == []
+        mac["hub"].execute("UPDATE sent SET state='done', result=? WHERE id=?",
+                           (json.dumps({"ok": True, "task_id": "t_hub0001", "status": "ready"}), rid))
+        mac["hub"].commit()
+        assert kpf.sweep_unresolved_archives(conn) == [child]
+        assert kpf.archive_forward_view(conn, child)["status"] == "pending"
+        assert kpf.sweep_unresolved_archives(conn) == []
+    assert len(_archive_requests(mac)) == 1
+
+
 def test_unresolved_archive_sweep_gives_up_after_seven_days_with_a_comment(mac, monkeypatch):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
