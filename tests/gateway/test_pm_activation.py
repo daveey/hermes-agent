@@ -13,7 +13,7 @@ def test_gateway_main_survives_pm_failure(monkeypatch, tmp_path):
     import gateway.run as gateway
 
     failed = []
-    def broken():
+    def broken(**_options):
         failed.append("activate")
         raise RuntimeError("PM unavailable")
 
