@@ -291,6 +291,7 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
                 **{k: entry[k] for k in ("writer_pid", "writer_start_time") if entry.get(k) is not None},
                 **({"reason": str(entry["reason"])} if entry.get("reason") else {}),
                 **({"parked_at": float(entry["parked_at"])} if entry.get("parked_at") else {}),
+                **({"paused_at": float(entry["paused_at"])} if entry.get("paused_at") else {}),
                 **({"until_tool": True} if entry.get("until_tool") else {}),
                 **({"notification_category": "diagnostic"}
                    if entry.get("notification_category") == "diagnostic" else {}),

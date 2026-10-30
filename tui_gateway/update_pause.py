@@ -13,7 +13,9 @@ The threshold bounds no-progress continuations, never the checkpoint needed to l
 
 A turn the next backend would not auto-continue is never paused. A paused turn whose window ends without
 an update (expired, apply refused) continues in place (``start_in_place_watcher``), unless its pause
-budget is spent and the drainer still runs. Drainer exit/cancellation releases that wait automatically.
+budget is spent and the drainer still runs. Drainer exit/cancellation releases that wait automatically, and
+so does ``PARK_MAX_S`` since the pause: a paused turn never waits on a drainer that cannot apply. A turn
+paused ``STUCK_WARN_S`` logs a WARNING naming what it waits on.
 When the update did move the checkout, the turn is left for a successor only while one is coming: this
 process's skew watchdog runs and its idle proof holds (or a retirement is already under way). A backend
 kept busy by other work for ``NO_REPLACEMENT_S``, one no watchdog retires, or one that has not begun
@@ -69,6 +71,13 @@ KICKOFF_HOLD_S = 120.0 + DUE_HOLD_S
 HOLD_MAX_S = LEAVE_GRACE_S + WATCH_POLL_S
 # A capped pause parked between drain windows restamps its freshness clock this often (``_keep_parked``).
 PARK_STAMP_S = 30.0
+# [daveey] t_01a18b11cabcd2c2: a capped pause used to stay parked for its drainer's whole life (David-MBP
+# 2026-10-29: two chats paused 20:24, continued 21:25 because the drainer lived 66 min waiting on a peer app
+# build). A paused turn may wait on the apply itself, never on anything else: once its pause is this old and
+# the window is over, it continues in place even while the drainer still runs.
+PARK_MAX_S = 600.0
+# A turn still paused this long logs a WARNING naming what it waits on (once per pause).
+STUCK_WARN_S = 900.0
 
 
 def _now() -> float:
@@ -309,6 +318,12 @@ def drain_retry_pending(session: dict, marker: dict) -> bool:
     if (marker.get("reason") != PAUSE_REASON or marker.get("pauses", 0) < MAX_PAUSES
             or marker.get("writer_pid") != os.getpid() or _detect_skew() is not None):
         return False
+    try:
+        paused_for = _now() - float(marker.get("paused_at") or marker.get("started_at") or 0.0)
+    except (TypeError, ValueError):
+        paused_for = PARK_MAX_S
+    if paused_for >= PARK_MAX_S:
+        return False  # bounded: a parked turn never waits out a drainer that cannot apply
     if os.name != "posix":
         return False  # hermes-sync's POSIX drain protocol is not present
     import fcntl
@@ -333,13 +348,19 @@ def in_place_resume_action(session: dict, marker_key: str, *, skew: Callable[[],
     another path already moved on)."""
     from hermes_cli.admission_fence import is_held
     from tui_gateway.turn_marker import read_turn_marker
+
+    def why(text: str) -> None:
+        session["_update_pause_why"] = text  # read by the watcher's stuck-pause WARNING
+
     if pause_requested(session):
+        why("the drain window is still up (pause requested, admission held)")
         return "wait"
     try:
         held = is_held(_root(session) / "core-update")
     except OSError:
         held = True
     if held:
+        why("update admission is held (drain window or update in progress)")
         return "wait"
     # Settled first: a turn the user (or another path) already moved on is never handed off or resumed.
     with session["history_lock"]:
@@ -350,16 +371,22 @@ def in_place_resume_action(session: dict, marker_key: str, *, skew: Callable[[],
         # user moving on: wait for it, then continue the paused turn.
         with session["history_lock"]:
             carried = session.get("_paused_marker_carried") == marker_key and session.get("running")
+        if carried:
+            why("a synthesized turn runs over the paused marker")
         return "carried" if carried else "done"
     marker = read_turn_marker(_home(session), marker_key)
     if not marker or marker.get("reason") != PAUSE_REASON:
         return "done"
     if (skew or _detect_skew)() is not None:
         _keep_parked(session, marker_key, last=True)
+        why("the checkout moved; waiting for a replacement backend")
         return "leave"
     if drain_retry_pending(session, marker):
         _keep_parked(session, marker_key)
+        why(f"pause budget spent ({marker.get('pauses')} pauses); parked until the drainer applies or "
+            f"{PARK_MAX_S:.0f}s pass")
         return "wait"
+    why("continuation not yet admitted")
     _keep_parked(session, marker_key, last=True)
     return "resume"
 
@@ -494,6 +521,16 @@ def _leave_decision(waited: float, outlook: str) -> str | None:
     return None
 
 
+def warn_if_stuck(session: dict, marker_key: str, paused_for: float, warned: bool) -> bool:
+    """[daveey] One WARNING per pause once a turn has been paused ``STUCK_WARN_S``, naming the session and
+    what it waits on (the last ``in_place_resume_action`` reason). Returns the new ``warned`` flag."""
+    if warned or paused_for < STUCK_WARN_S:
+        return warned
+    logger.warning("core-update pause: session %s has been paused for %.0fs (over %.0fs); blocked by: %s",
+                   marker_key, paused_for, STUCK_WARN_S, session.get("_update_pause_why") or "unknown")
+    return True
+
+
 def start_in_place_watcher(sid: str, session: dict, marker_key: str) -> threading.Thread:
     """Bounded daemon: continue the paused turn here when its window ends without an update, or when
     the checkout moved but no successor backend is coming to continue it."""
@@ -502,9 +539,11 @@ def start_in_place_watcher(sid: str, session: dict, marker_key: str) -> threadin
         from tui_gateway import server
         from hermes_cli.backend_retirement import retirement
         started, left_at, last_outlook, scheduled, over_at = time.monotonic(), None, None, False, None
+        warned = False
         try:
             while time.monotonic() - started < WATCH_MAX_S:
                 time.sleep(WATCH_POLL_S)
+                warned = warn_if_stuck(session, marker_key, time.monotonic() - started, warned)
                 # Automatic turns wait for the paused turn at most HOLD_MAX_S past the window's end: a
                 # continuation that keeps failing to schedule must not starve the chat's notices for hours.
                 holding = over_at is None or time.monotonic() - over_at < HOLD_MAX_S

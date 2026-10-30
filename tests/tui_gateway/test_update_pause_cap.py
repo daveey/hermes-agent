@@ -156,7 +156,6 @@ def test_capped_retry_keeps_notice_hold_bounded(home, drainer, monkeypatch):
 
 DEFAULT_FRESHNESS_CFG = {"desktop": {"auto_continue": {"enabled": True, "resume_on_startup": True,
                                                        "freshness_minutes": 15, "max_attempts": 2}}}
-_LONG_PARK_S = 25 * 60.0  # one failed window + gap + most of the next: longer than the freshness window
 
 
 @pytest.fixture()
@@ -191,26 +190,16 @@ def _capped_pause_under_drainer(home, monkeypatch):
 
 
 @pytest.mark.platforms("posix")
-def test_long_park_then_drainer_exit_continues_in_place(schedule_env, home, drainer, wall, monkeypatch):
-    """(a) Parked past the freshness window, then the drainer exits: the watcher continues the turn."""
-    import fcntl
+def test_park_is_bounded_while_the_drainer_still_runs(schedule_env, home, drainer, wall, monkeypatch):
+    """(a) A capped pause parks only up to PARK_MAX_S, then continues in place although the drainer still
+    runs (t_01a18b11cabcd2c2: parking for the drainer's life held two chats 60 min)."""
     from tests.tui_gateway.test_update_pause import _InlineThread
     session = _capped_pause_under_drainer(home, monkeypatch)
     monkeypatch.setattr(up.threading, "Thread", _InlineThread)
     parked_from = wall.now()
-    sleep = up.time.sleep
-
-    def tick(seconds):
-        sleep(seconds)
-        if wall.now() - parked_from >= _LONG_PARK_S and not drainer.closed:
-            assert read_turn_marker(home, "session-key")["reason"] == up.PAUSE_REASON
-            assert schedule_env == []  # parked the whole time, never restarted
-            fcntl.flock(drainer, fcntl.LOCK_UN)  # drainer gave up / hit its hard max
-            drainer.close()
-
-    up.time.sleep = tick
     up.start_in_place_watcher("sid", session, "session-key")
-    assert drainer.closed, "watcher returned before the drainer exited"
+    assert not drainer.closed, "the drainer still holds its lock"
+    assert up.PARK_MAX_S <= wall.now() - parked_from <= up.PARK_MAX_S + 2 * up.WATCH_POLL_S
     (text, kwargs), = schedule_env
     assert text == up.pause_note("original work")
     assert kwargs["display_kind"] == "auto_continue"
@@ -220,11 +209,11 @@ def test_long_park_then_drainer_exit_continues_in_place(schedule_env, home, drai
 
 @pytest.mark.platforms("posix")
 def test_long_park_then_update_applies_startup_sweep_resumes(home, drainer, wall, monkeypatch):
-    """(b) Parked past the freshness window, then the update applies: the next backend resumes it."""
+    """(b) Parked (within PARK_MAX_S), then the update applies: the next backend resumes it."""
     import json
     from tui_gateway import startup_resume as sr
     session = _capped_pause_under_drainer(home, monkeypatch)
-    for _ in range(int(_LONG_PARK_S // up.WATCH_POLL_S)):  # the watcher's polls while parked
+    for _ in range(int(up.PARK_MAX_S // up.WATCH_POLL_S) - 1):  # the watcher's polls while parked
         wall.advance(up.WATCH_POLL_S)
         assert up.in_place_resume_action(session, "session-key") == "wait"
     monkeypatch.setattr(up, "_detect_skew", lambda: ("old", "new"))  # the second window applied
@@ -257,3 +246,83 @@ def test_wall_clock_jump_while_parked_still_continues(schedule_env, home, draine
     assert server._maybe_schedule_auto_continue("sid", session, "session-key") is not None
     (text, _), = schedule_env
     assert text == up.pause_note("original work")
+
+
+# ── t_01a18b11cabcd2c2: a paused turn waits on the apply itself, nothing else ─────────────────────────
+
+
+@pytest.mark.platforms("posix")
+def test_first_window_miss_capped_pause_continues_before_15_minutes(schedule_env, home, drainer, wall, monkeypatch):
+    """David-MBP 2026-10-29: two capped chats paused at 20:24 in a window that expired at 20:36:15; an apply
+    attempt followed at once (20:36:16) and the drainer then lived until 21:22 waiting on a peer app build.
+    They parked for the drainer's whole life and continued only at 21:25. Replay that sequence: window held
+    until the pause is ~10 min old, a 10 s apply attempt retakes the hold right after expiry, then the gap
+    with the drainer still alive. The turn must continue in place less than 15 min after its pause."""
+    from tests.tui_gateway.test_update_pause import _InlineThread
+    monkeypatch.setattr(server, "_load_cfg", lambda: DEFAULT_FRESHNESS_CFG)
+    monkeypatch.setattr(up, "_detect_skew", lambda: None)
+    monkeypatch.setattr(up.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(up, "WATCH_MAX_S", 40 * 60.0)
+    session = _session(profile_home=str(home))
+    record_turn_start(home, "session-key", "original work", pauses=up.MAX_PAUSES)
+    af.set_hold(home)
+    af.request_pause(home, expires_at=time.time() + 3600)
+    assert up.boundary_pause_hook(session, "session-key")() == up.PAUSE_REASON
+    paused_at = wall.now()
+    window_end, attempt_end = paused_at + 600.0, paused_at + 610.0
+    sleep, phase = up.time.sleep, ["window"]
+
+    def tick(seconds):
+        sleep(seconds)
+        now = wall.now()
+        if phase[0] == "window" and now >= window_end:  # expired: request cleared, then hold released
+            af.clear_pause_request(home)
+            phase[0] = "attempt"  # ...and the drainer's next apply attempt takes the hold at once
+        elif phase[0] == "attempt" and now >= attempt_end:
+            af.clear_hold(home)  # refused (no app build): the gap; the drainer lives on
+            phase[0] = "gap"
+
+    up.time.sleep = tick
+    up.start_in_place_watcher("sid", session, "session-key")
+    continued_after = wall.now() - paused_at
+    assert schedule_env, "the paused turn was never continued"
+    assert not drainer.closed, "continued while the drainer still runs"
+    assert continued_after < 15 * 60.0, f"paused {continued_after:.0f}s"
+    (text, _), = schedule_env
+    assert text == up.pause_note("original work")
+
+
+def test_stuck_pause_logs_a_warning_naming_session_and_blocker(home, caplog):
+    """A turn paused past STUCK_WARN_S logs one WARNING with the session and what it waits on."""
+    session = _session(profile_home=str(home))
+    session["_update_pause_why"] = "update admission is held (drain window or update in progress)"
+    with caplog.at_level("WARNING", logger=up.logger.name):
+        assert up.warn_if_stuck(session, "session-key", up.STUCK_WARN_S - 1, False) is False
+        assert not caplog.records
+        assert up.warn_if_stuck(session, "session-key", up.STUCK_WARN_S + 1, False) is True
+        assert up.warn_if_stuck(session, "session-key", up.STUCK_WARN_S + 60, True) is True
+    (rec,) = caplog.records
+    assert rec.levelname == "WARNING"
+    assert "session-key" in rec.getMessage() and "update admission is held" in rec.getMessage()
+
+
+@pytest.mark.platforms("posix")
+def test_watcher_warns_when_a_hold_keeps_the_turn_paused(home, wall, monkeypatch, caplog):
+    """End to end through the watcher: a hold that never ends keeps the turn paused; after STUCK_WARN_S the
+    watcher logs the WARNING with the session and the hold as the blocker."""
+    from tests.tui_gateway.test_update_pause import _InlineThread
+    monkeypatch.setattr(server, "_load_cfg", lambda: DEFAULT_FRESHNESS_CFG)
+    monkeypatch.setattr(up, "_detect_skew", lambda: None)
+    monkeypatch.setattr(up.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(up, "WATCH_MAX_S", up.STUCK_WARN_S + 30)
+    session = _session(profile_home=str(home))
+    record_turn_start(home, "session-key", "original work")
+    af.set_hold(home)
+    af.request_pause(home, expires_at=time.time() + 3600)
+    assert up.boundary_pause_hook(session, "session-key")() == up.PAUSE_REASON
+    af.clear_pause_request(home)  # the hold stays (an update that never finishes)
+    with caplog.at_level("WARNING", logger=up.logger.name):
+        up.start_in_place_watcher("sid", session, "session-key")
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1, warnings
+    assert "session-key" in warnings[0] and "admission is held" in warnings[0]
