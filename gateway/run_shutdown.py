@@ -1585,7 +1585,7 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, Gate
         logger.info(
             "Restart requested with %d active work unit(s); "
             "deferring stop() until they finish (cap=%.0fs) so in-flight "
-            "turns are not amputated (#77184)", active, timeout,
+            "turns are not amputated (#77184); %s", active, timeout, self._restart_cap_state_text(),
         )
         self._scale_to_zero_status("draining", "restart wait: status mark failed")
         loop = asyncio.get_running_loop()

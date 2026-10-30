@@ -1,5 +1,7 @@
 """Only confirmed Kanban work gets a short core-update restart wait."""
 import asyncio
+import json
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -127,3 +129,42 @@ async def test_cooperative_stop_booking_before_admission_settlement(monkeypatch,
     monkeypatch.setattr(booking, 'record_restart_interruption', recorded)
     assert await managed.admit_managed(authority, None, row, policy) == 'reply'
     assert recorded.call_count == int(expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('has_intent', [True, False])
+async def test_restart_line_states_whether_the_kanban_cap_is_armed(monkeypatch, tmp_path, caplog, has_intent):
+    """The hub's missing cap (14:38Z) could not be read from the log: the line showed only cap=1800s."""
+    runner, _ = make_restart_runner()
+    intent = tmp_path / 'intent'
+    intent.write_text('{"pid": 1, "kind": "unfenced"}\n')  # exactly what hermes-sync's unfenced path writes
+    runner._restart_update_intent = intent if has_intent else None
+    runner._restart_after_turn_timeout = 30
+    runner._active_work_count = runner._awaitable_work_count = lambda: 1
+    runner._describe_active_work = list
+    monkeypatch.setattr(wait, 'kanban_managed_count', lambda _: 1, raising=False)
+    clock = [0.0]
+    monkeypatch.setattr(asyncio, 'get_running_loop', lambda: SimpleNamespace(time=lambda: clock[0]))
+    async def advance(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(asyncio, 'sleep', advance)
+    with caplog.at_level('INFO', logger='gateway.run'):
+        await runner._await_active_work_before_restart()
+    line = next(r.getMessage() for r in caplog.records if 'Restart requested with' in r.getMessage())
+    if has_intent:
+        assert 'core-update intent present: Kanban-only cap 15s armed' in line
+    else:
+        assert 'no core-update intent: ordinary restart' in line
+
+
+def test_unfenced_intent_is_not_a_launcher_fence(tmp_path):
+    """hermes-sync's unfenced intent (hub) arms the gateway cap but parks no launcher, so `hermes update`
+    must keep its own gateway-restart verification."""
+    from hermes_cli.update_gateway_fence import ancestor_fence_owner
+    home = tmp_path / 'h'
+    (home / 'core-update').mkdir(parents=True)
+    path = home / 'core-update' / 'intent'
+    path.write_text(json.dumps({'pid': os.getppid(), 'created_at': 0, 'kind': 'unfenced'}) + '\n')
+    assert ancestor_fence_owner([home]) is None
+    path.write_text(json.dumps({'pid': os.getppid(), 'created_at': 0}) + '\n')
+    assert ancestor_fence_owner([home]) == os.getppid()

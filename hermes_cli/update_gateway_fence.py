@@ -53,6 +53,11 @@ def _intent_pid(home: Path) -> Optional[int]:
         pid = int(data["pid"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
+    # An "unfenced" intent (hermes-sync on a host with no launcher gate, e.g. the hub) only tells the gateway
+    # that its restart belongs to a core update. No launcher parks on it, so the update must still verify
+    # its own gateway restart.
+    if isinstance(data, dict) and data.get("kind") == "unfenced":
+        return None
     return pid if pid > 1 else None
 
 

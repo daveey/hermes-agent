@@ -57,6 +57,12 @@ class GatewayRestartWaitMixin:
             )
         return since, expired
 
+    def _restart_cap_state_text(self) -> str:
+        """Log suffix naming whether this restart carries a core-update intent (the Kanban-only cap)."""
+        if getattr(self, "_restart_update_intent", None) is not None:
+            return f"core-update intent present: Kanban-only cap {CORE_UPDATE_KANBAN_WAIT_S:.0f}s armed"
+        return "no core-update intent: ordinary restart, Kanban-only cap not armed"
+
     def _describe_active_work(self) -> list:
         """One dict per in-flight work unit the restart wait is holding for, so an observer
         (``hermes update``, ``hermes gateway status``) can name it instead of printing a bare count.
