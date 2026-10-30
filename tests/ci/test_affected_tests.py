@@ -90,6 +90,46 @@ def test_setup_wide_changes_run_the_full_suite(repo, wide):
     assert result["mode"] == "full" and wide in result["reason"] and result["slices"] == at.MAX_SLICES
 
 
+@pytest.mark.parametrize("wide", [
+    "pm/lock.json", "pm/environments.py", "pm/testenv.py",
+    "scripts/_activation.sh", "scripts/ci/setup_toolchain.py",
+])
+def test_shared_toolchain_changes_run_the_full_suite(repo, wide):
+    result = at.plan(repo, [wide])
+    assert result["mode"] == "full" and wide in result["reason"]
+    assert result["files"] == [] and result["slices"] == at.MAX_SLICES
+
+
+def test_all_activation_inputs_require_full_suite(repo):
+    from pm.environments import ACTIVATION_INPUTS
+
+    for path in ACTIVATION_INPUTS:
+        assert at.plan(repo, [path])["mode"] == "full", path
+
+
+def test_lock_only_interpreter_bump_emits_full_cli_plan(repo, tmp_path):
+    lock = repo / "pm" / "lock.json"
+    lock.parent.mkdir()
+    lock.write_text(json.dumps({"python": {"version": "3.14.7"}}))
+    git = ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    lock.write_text(json.dumps({"python": {"version": "3.14.9"}}))
+    subprocess.run([*git, "commit", "-qam", "bump interpreter"], check=True)
+    assert at.changed_files(repo, "HEAD^", "HEAD") == ["pm/lock.json"]
+    gh_out, files_out = tmp_path / "lock-gh.txt", tmp_path / "lock-files.txt"
+    assert at.main(["--repo", str(repo), "--github-output", str(gh_out),
+                    "--files-out", str(files_out)]) == 0
+    outputs = dict(line.split("=", 1) for line in gh_out.read_text().splitlines())
+    assert outputs["mode"] == "full" and "pm/lock.json" in outputs["reason"]
+    assert json.loads(outputs["slices"]) == list(range(1, at.MAX_SLICES + 1))
+    assert files_out.read_text() == ""
+
+
+def test_unrelated_pm_data_keeps_narrow_selection(repo):
+    assert _files(repo, ["pm/artifact-mirror.json"]) == SMOKE
+
+
 def test_large_selection_runs_the_full_suite(repo, monkeypatch):
     monkeypatch.setattr(at, "FULL_FRACTION", 0.1)
     assert at.plan(repo, ["pkg/core.py"])["mode"] == "full"
