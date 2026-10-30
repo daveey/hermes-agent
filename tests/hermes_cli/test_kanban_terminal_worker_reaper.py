@@ -84,8 +84,14 @@ def test_recycled_pid_and_legacy_row_are_never_signalled(conn):
     legacy = _sleeper()
     try:
         _tid, run_id = _completed_card_with_worker(conn, stranger)
-        # PID reuse: the recorded fingerprint belongs to a process that no longer exists.
-        conn.execute("UPDATE task_runs SET worker_started_at = worker_started_at - 1000000 WHERE id=?", (run_id,))
+        # PID reuse: the recorded fingerprint belongs to a process that no longer exists. Shift the
+        # start time inside the "<epoch>|<start>[@<boot>]" string; SQL arithmetic on the TEXT value
+        # coerces the boot_id's numeric prefix instead (a "123e4567-..." boot_id reads as +inf).
+        fp = conn.execute("SELECT worker_started_at FROM task_runs WHERE id=?", (run_id,)).fetchone()[0]
+        epoch, _, start = fp.rpartition("|")
+        abs_start, at, boot = start.partition("@")
+        stale = f"{epoch}|{int(abs_start) - 1000000}{at}{boot}"
+        conn.execute("UPDATE task_runs SET worker_started_at = ? WHERE id=?", (stale, run_id))
         _, legacy_run = _completed_card_with_worker(conn, legacy)
         conn.execute("UPDATE task_runs SET worker_started_at = NULL WHERE id=?", (legacy_run,))
 
@@ -99,6 +105,34 @@ def test_recycled_pid_and_legacy_row_are_never_signalled(conn):
         for p in (stranger, legacy):
             p.kill()
             p.wait()
+
+
+@pytest.mark.parametrize("coerced_sql", [
+    # A TEXT fingerprint coerced by SQLite arithmetic: the "123e4567" boot_id prefix overflows to +inf.
+    "'123e4567-89ab-cdef-0123-456789abcdef:22|5' - 1000000",
+    "9e999",
+])
+def test_unrepresentable_numeric_fingerprint_is_foreign_not_a_crash(conn, coerced_sql):
+    """A fingerprint that int() cannot hold (inf) is a stranger: never signalled, evidence cleared."""
+    proc = _sleeper()
+    signals = []
+
+    def signal_fn(pid, sig):
+        signals.append(pid)
+
+    try:
+        _tid, run_id = _completed_card_with_worker(conn, proc)
+        conn.execute(f"UPDATE task_runs SET worker_started_at = {coerced_sql} WHERE id=?", (run_id,))
+        assert conn.execute("SELECT worker_started_at FROM task_runs WHERE id=?", (run_id,)).fetchone()[0] == float("inf")
+
+        assert kbd._pid_recycled(proc.pid, float("inf")) is True
+        assert kbd.reap_terminal_workers(conn, signal_fn=signal_fn) == []
+
+        assert signals == [] and proc.poll() is None
+        assert conn.execute("SELECT worker_pid FROM task_runs WHERE id=?", (run_id,)).fetchone()["worker_pid"] is None
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 def test_fresh_terminal_run_is_left_alone_until_grace_passes(conn):

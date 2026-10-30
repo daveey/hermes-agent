@@ -579,7 +579,7 @@ def _pid_recycled(pid: Optional[int], started_at) -> bool:
         return True
     try:
         return not start_time_fingerprints_match(started_at, current)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # Overflow: inf, e.g. a TEXT fingerprint SQLite coerced
         return True
 
 
