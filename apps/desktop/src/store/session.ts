@@ -18,6 +18,7 @@ import type { TileSessionFocusStamp } from '@/lib/session-timer-since'
 import { persistBoolean, persistString, readJson, storedBoolean, storedString, writeJson } from '@/lib/storage'
 import type { SessionInfo, UsageStats } from '@/types/hermes'
 
+import { $projectTree } from './project-tree'
 import { $removedSessionIds, isSessionRemovalPending, tombstoneRowIds } from './session-removal'
 import type { SessionOwnerRoute, SessionOwnerScope } from './session-request-router'
 import { clearUnreadOnOpen } from './session-unread-remote'
@@ -1089,23 +1090,65 @@ function withUnlistedOwnerStubs(rows: SessionInfo[], stubs: readonly SessionInfo
  * install failed closed with SessionOwnerResolutionError even though the row
  * naming its owner was already in memory, one atom over. Concatenation order
  * mirrors lookup priority: recents first (they can carry fresher optimistic
- * connection tags), then the cron and messaging slices. Unlisted-draft stubs
- * ($unlistedSessionOwnerRows) ride last: a real row for the same id always
- * shadows its stub, so a listed session never resolves off a stale stamp.
+ * connection tags), then the cron and messaging slices, then the sidebar
+ * project tree. Unlisted-draft stubs ($unlistedSessionOwnerRows) ride last: a
+ * real row for the same id always shadows its stub, so a listed session never
+ * resolves off a stale stamp.
+ *
+ * The project tree is the only loaded copy of a chat older than the capped
+ * recents page (#76535), and its rows carry the same owner stamps (bare for
+ * the local primary, connection-tagged otherwise; store/projects.ts). Without
+ * it, a resumed day-old chat whose resume found its owner in the tree still
+ * failed every session-scoped RPC closed ("Session controls unavailable",
+ * t_01a18f128c7f815c).
  */
 export function ownerLookupSessionRows(): SessionInfo[] {
+  const sessions = $sessions.get()
   const cron = $cronSessions.get()
   const messaging = $messagingSessions.get()
+  const tree = $projectTree.get()
   const stubs = $unlistedSessionOwnerRows.get()
 
   // Recents-only stays the common case; keep its array identity (no copy) so
   // per-list memo caches (lineageAliases) keyed on the reference still hit.
-  if (!cron.length && !messaging.length) {
-    return withUnlistedOwnerStubs($sessions.get(), stubs)
+  if (!cron.length && !messaging.length && !tree.length) {
+    return withUnlistedOwnerStubs(sessions, stubs)
   }
 
-  return withUnlistedOwnerStubs([...$sessions.get(), ...cron, ...messaging], stubs)
+  const last = ownerLookupMemo
+
+  if (
+    last &&
+    last.sessions === sessions &&
+    last.cron === cron &&
+    last.messaging === messaging &&
+    last.tree === tree &&
+    last.stubs === stubs
+  ) {
+    return last.rows
+  }
+
+  const treeRows = tree.flatMap(project => [
+    ...(project.previewSessions ?? []),
+    ...project.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))
+  ])
+
+  const rows = withUnlistedOwnerStubs([...sessions, ...cron, ...messaging, ...treeRows], stubs)
+  ownerLookupMemo = { cron, messaging, rows, sessions, stubs, tree }
+
+  return rows
 }
+
+// Same inputs → same array, so identity-keyed memo caches keep hitting when
+// the merged (non-recents-only) path is taken.
+let ownerLookupMemo: {
+  cron: ReturnType<typeof $cronSessions.get>
+  messaging: ReturnType<typeof $messagingSessions.get>
+  rows: SessionInfo[]
+  sessions: ReturnType<typeof $sessions.get>
+  stubs: ReturnType<typeof $unlistedSessionOwnerRows.get>
+  tree: ReturnType<typeof $projectTree.get>
+} | null = null
 
 // Whether a profile's last session page was CAPPED by the request limit, keyed
 // by profile name — i.e. more rows exist on disk than were loaded. Replaces the

@@ -1,11 +1,33 @@
 import { JsonRpcGatewayError } from '@hermes/shared'
 import { atom } from 'nanostores'
 
+import { $connectionsRegistry } from './connection-registry-state'
 import { $gateway } from './gateway'
 import { refreshSessionGoal } from './goals'
+import { $profiles } from './profile'
+import { $projectTree } from './project-tree'
 import { isSessionGone, isSessionGoneForBackgroundPolling, markSessionGone } from './runtime-gone'
+import {
+  $activeSessionId,
+  $cronSessions,
+  $messagingSessions,
+  $selectedStoredSessionId,
+  $sessions,
+  $unlistedSessionOwnerRows
+} from './session'
 import { ambientRequestFor } from './session-gone-latch'
-import { requestForOwnedSession } from './session-states'
+import {
+  ambientGatewayOwnsEverySession,
+  isSessionOwnerResolutionError,
+  sessionOwnerIsKnown
+} from './session-owner-resolution'
+import {
+  $sessionStates,
+  $sessionTiles,
+  knownOwnerForSession,
+  requestForOwnedSession,
+  storedSessionIdForRuntimeId
+} from './session-states'
 
 export type SessionControlGoalStatus = 'active' | 'done' | 'paused'
 export type SessionControlLoopMode = 'interval' | 'self_paced'
@@ -142,6 +164,13 @@ const ERROR_LIMIT = 240
 
 const versions = new Map<string, number>()
 const eventVersions = new Map<string, number>()
+
+// An owner miss re-reads once the owner becomes resolvable (t_01a18f128c7f815c).
+// Owner-bearing atoms give the immediate signal; the poll is a local-only
+// backstop for rungs with no atom (owner hints, event-proven runtime owners).
+const OWNER_RETRY_POLL_MS = 2_000
+const OWNER_RETRY_MAX_MS = 15 * 60_000
+const ownerRetries = new Map<string, () => void>()
 
 export const $sessionControlBySession = atom<Record<string, SessionControlEntry>>({})
 
@@ -607,6 +636,7 @@ export function clearSessionControl(sessionId: string): void {
   }
 
   advanceVersion(sessionId)
+  disarmOwnerRetry(sessionId)
   const entries = $sessionControlBySession.get()
 
   if (!(sessionId in entries)) {
@@ -626,6 +656,10 @@ export function clearSessionControl(sessionId: string): void {
 export function clearAllSessionControl(): void {
   for (const sessionId of new Set([...versions.keys(), ...Object.keys($sessionControlBySession.get())])) {
     advanceVersion(sessionId)
+  }
+
+  for (const sessionId of [...ownerRetries.keys()]) {
+    disarmOwnerRetry(sessionId)
   }
 
   $sessionControlBySession.set({})
@@ -700,6 +734,105 @@ function publishFailure(sessionId: string, token: number, error: unknown, clearP
     loading: false,
     pendingAction: clearPendingAction ? null : current.pendingAction
   })
+}
+
+function logLine(line: string): void {
+  try {
+    console.warn(line)
+    window.hermesDesktop?.logLine?.(line)
+  } catch {
+    // logging must never break a control read
+  }
+}
+
+/** desktop.log trace for an owner miss: the screenshot-only banner of
+ *  t_01a18f128c7f815c left nothing to diagnose from. */
+function logOwnerMiss(sessionId: string, method: string): void {
+  const stored = storedSessionIdForRuntimeId(sessionId)
+
+  logLine(
+    `[session-control] owner unresolved session=${sessionId} stored=${stored ?? '-'} method=${method} ` +
+      `registry=${$connectionsRegistry.get() ? 'yes' : 'pending'} profiles=${$profiles.get().length} ` +
+      `rows=${$sessions.get().length} tree=${$projectTree.get().length}`
+  )
+}
+
+/** Same gate as assertSessionOwnerResolved, without throwing. */
+function ownerResolvable(sessionId: string): boolean {
+  return sessionOwnerIsKnown(knownOwnerForSession(sessionId)) || ambientGatewayOwnsEverySession()
+}
+
+function disarmOwnerRetry(sessionId: string): void {
+  const disarm = ownerRetries.get(sessionId)
+
+  if (disarm) {
+    ownerRetries.delete(sessionId)
+    disarm()
+  }
+}
+
+/**
+ * After a read failed closed on an unresolved owner, re-read as soon as the
+ * owner becomes resolvable, so the banner cannot outlive the miss. Nothing is
+ * sent until then — the gate stays fail-closed; this only re-runs the same
+ * owner ladder. Any newer read/action/event (version bump) or a clear
+ * supersedes the retry.
+ */
+function armOwnerRetry(sessionId: string, token: number): void {
+  disarmOwnerRetry(sessionId)
+
+  const atoms = [
+    $sessions,
+    $cronSessions,
+    $messagingSessions,
+    $unlistedSessionOwnerRows,
+    $projectTree,
+    $sessionTiles,
+    $sessionStates,
+    $selectedStoredSessionId,
+    $activeSessionId,
+    $connectionsRegistry,
+    $profiles
+  ] as const
+
+  const unsubscribers: Array<() => void> = []
+  let timer: ReturnType<typeof setInterval> | undefined
+  let deadline: ReturnType<typeof setTimeout> | undefined
+
+  const stop = () => {
+    unsubscribers.splice(0).forEach(unsubscribe => unsubscribe())
+    clearInterval(timer)
+    clearTimeout(deadline)
+  }
+
+  const check = () => {
+    if (ownerRetries.get(sessionId) !== stop) {
+      return
+    }
+
+    if (!isCurrent(sessionId, token) || isSessionGone(sessionId)) {
+      disarmOwnerRetry(sessionId)
+
+      return
+    }
+
+    if (!ownerResolvable(sessionId)) {
+      return
+    }
+
+    disarmOwnerRetry(sessionId)
+    logLine(`[session-control] owner resolved after miss session=${sessionId}; re-reading`)
+    void refreshSessionControl(sessionId, { background: true })
+  }
+
+  ownerRetries.set(sessionId, stop)
+
+  for (const store of atoms) {
+    unsubscribers.push((store as { listen: (cb: () => void) => () => void }).listen(check))
+  }
+
+  timer = setInterval(check, OWNER_RETRY_POLL_MS)
+  deadline = setTimeout(() => disarmOwnerRetry(sessionId), OWNER_RETRY_MAX_MS)
 }
 
 function finishGoneRequest(sessionId: string, token: number, clearPendingAction: boolean): void {
@@ -813,6 +946,11 @@ export async function refreshSessionControl(
 
     publishFailure(sessionId, token, error, false)
 
+    if (isSessionOwnerResolutionError(error)) {
+      logOwnerMiss(sessionId, 'session.control.read')
+      armOwnerRetry(sessionId, token)
+    }
+
     return $sessionControlBySession.get()[sessionId]
   }
 }
@@ -874,6 +1012,10 @@ export async function runSessionControlAction(
       finishGoneRequest(sessionId, token, true)
     } else {
       publishFailure(sessionId, token, error, true)
+
+      if (isSessionOwnerResolutionError(error)) {
+        logOwnerMiss(sessionId, 'session.control')
+      }
     }
 
     const detail = error instanceof Error ? refusalDetail(error) : ''
