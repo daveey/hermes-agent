@@ -9,6 +9,48 @@ class CronExecutionUnknown(RuntimeError):
     """The owner may have accepted this fire; never book it as failed or re-fire."""
 
 
+class CronFireNotAdmitted(RuntimeError):
+    """[daveey] No ready owner was reached and nothing was submitted (the gateway is draining for an
+    update, starting, or absent): a scheduled fire is held and stays due, never booked as a failed
+    run. Raised only before admission; a refusal after submit stays a definite failure."""
+
+    def __init__(self, message, state, reason_code=None):
+        super().__init__(message)
+        self.state, self.reason_code = state, reason_code
+
+
+# GatewayUnavailableError states that mean "not ready yet", not "this owner refuses the job".
+_NOT_READY_STATES = frozenset({'draining', 'starting', 'absent'})
+
+
+def settle_unbooked_fire(job, exc, fire_owner, execution_id):
+    """[daveey] Settle a fire that must not be booked as a failed run; True when it was handled.
+
+    - CronFireNotAdmitted on a scheduled fire: the gateway was not ready (an update's restart gap)
+      and nothing was submitted. The slot goes back on the schedule, the streak and last verdict
+      stay, and the ledger row records the non-admission. Manual fires still fail loudly.
+    - CronExecutionUnknown: the owner may have accepted it, so the job pauses for reconciliation.
+    Every other error returns False and takes the failed-run path."""
+    import logging
+    log = logging.getLogger('cron.scheduler')
+    if isinstance(exc, CronFireNotAdmitted) and job.get('_scheduled_instant'):
+        from cron.executions import finish_execution
+        from cron.jobs import release_unadmitted_fire
+        released = release_unadmitted_fire(
+            job['id'], job['_scheduled_instant'], str(exc), expected_fire_owner=fire_owner or None)
+        finish_execution(execution_id, success=False, error=str(exc), delivery_outcome='suppressed')
+        log.warning('Cron %s held (%s): %s', job['id'],
+                    'slot stays due' if released else 'claim moved on', exc)
+        return True
+    if isinstance(exc, CronExecutionUnknown):
+        from cron.executions import give_up_execution
+        pause_for_unknown(job['id'], execution_id, str(exc))
+        give_up_execution(execution_id, reason=str(exc))
+        log.error('Cron %s paused with unverified admission: %s', job['id'], exc)
+        return True
+    return False
+
+
 def journal_path(job_id, request_id):
     from hermes_constants import get_hermes_home
     key = hashlib.sha256(json.dumps([job_id, request_id]).encode()).hexdigest()
@@ -143,6 +185,14 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
     except Exception as exc:
         if attempted:
             raise CronExecutionUnknown(f'Cron execution unverified; reconcile {journal}: {exc}') from exc
+        from hermes_cli.gateway_client import GatewayUnavailableError
+        if isinstance(exc, GatewayUnavailableError) and exc.state in _NOT_READY_STATES:
+            # The gate's probe said ready, then an update fenced the gateway before connect:
+            # nothing was submitted, so the fire is held for the next tick, not failed.
+            reason = exc.state + (f' ({exc.reason_code})' if exc.reason_code else '')
+            raise CronFireNotAdmitted(
+                f'Not admitted: the gateway is {reason}; the fire stays due: {exc}',
+                exc.state, exc.reason_code) from exc
         error = f'{type(exc).__name__}: {exc}'
         return False, f'# Cron Job: {job["id"]} (FAILED)\n\n{error}\n', '', error
 

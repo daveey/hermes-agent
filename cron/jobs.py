@@ -2371,6 +2371,39 @@ def note_fire_forward_failure(job_id: str, detail: str) -> bool:
     return _with_job(job_id, apply, False)
 
 
+def release_unadmitted_fire(
+    job_id: str, slot: Optional[str], detail: str, *, expected_fire_owner: Optional[str] = None,
+) -> bool:
+    """[daveey] Hand back a scheduled fire the gateway never admitted (draining for an update,
+    starting, absent): ``next_run_at`` returns to *slot* so the next ready tick fires it, the fire
+    claim, pending slot and run claim are dropped, a finite one-shot's ``claim_dispatch`` bump is
+    undone, and ``last_fire_error`` records why. ``last_status``/``failure_streak``/``last_run_at``
+    are left alone: nothing ran. Fenced on *expected_fire_owner*: a claim another fire took since
+    is not ours to release. True iff released."""
+    def apply(jobs, _i, job):
+        claim = job.get("fire_claim")
+        if expected_fire_owner is not None and (not isinstance(claim, dict)
+                                                or claim.get("by") != expected_fire_owner):
+            return False
+        kind = job.get("schedule", {}).get("kind")
+        if slot and kind in {"cron", "interval"}:
+            job["next_run_at"] = slot
+        repeat = job.get("repeat") or {}
+        times = repeat.get("times")
+        if (kind == "once" and isinstance(times, int) and times > 0
+                and not extra_fire.is_extra(job) and int(repeat.get("completed") or 0) > 0):
+            repeat["completed"] = int(repeat["completed"]) - 1
+        job["fire_claim"] = None
+        job.pop("pending_slot", None)
+        if job.get("run_claim") is not None:
+            job["run_claim"] = None
+        job["last_fire_error"] = {"at": _hermes_now().isoformat(), "detail": str(detail or "")[:500]}
+        save_jobs(jobs)
+        return True
+
+    return _with_job(job_id, apply, False)
+
+
 def _record_run_outcome(
     job: dict[str, Any], success: bool, error: Optional[str], delivery_error: Optional[str],
     status: Optional[str], now: str, *, agent_skipped: bool = False,

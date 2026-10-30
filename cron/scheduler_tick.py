@@ -187,9 +187,12 @@ def _tick_admitted(
 
         due_jobs = _sched.get_due_jobs()
         _sched._sweep_stale_inflight_for_tick(due_jobs)
-        if headless:
-            from cron.scheduler_gateway_gate import refuse_agent_jobs_without_gateway
-            due_jobs = refuse_agent_jobs_without_gateway(due_jobs)
+        # [daveey] Every tick that would dial the gateway (headless, or the Desktop serve ticker that
+        # takes over the store while an update restarts the gateway) holds agent jobs until it is
+        # ready; only the gateway's own ticker admits in-process and skips the probe.
+        from cron import scheduler_gateway_gate as _gw_gate
+        if due_jobs and _gw_gate.tick_needs_gate(headless):
+            due_jobs = _gw_gate.refuse_agent_jobs_without_gateway(due_jobs, may_start=not headless)
 
         if not due_jobs:
             # Idle tick: skip config load + pool setup, but still reap crashed jobs' MCP orphans.
