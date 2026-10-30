@@ -12,6 +12,7 @@ import {
 } from '../../../electron/ui-preferences'
 
 import type { UiPreferencesBridge } from './sync'
+import { observeSync } from './sync-test-bridge'
 
 // Edits made from a stale view while another client changed the store
 // (#145536 re-review round 3), against the real native writer on a real file:
@@ -23,7 +24,6 @@ const FAVORITES = 'hermes.desktop.favorite-models'
 const dirs: string[] = []
 const stops: (() => void)[] = []
 const listeners = new Set<(snapshot: UiPreferencesSnapshot) => void>()
-const tick = (ms = 400) => new Promise(resolve => setTimeout(resolve, ms))
 
 function storeFile(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ui-concurrent-'))
@@ -69,10 +69,16 @@ async function pageLoad(file: string, { net = { online: true }, favoritesStore =
   sync.hydrateFromSnapshot(net.online && fs.existsSync(file) ? readUiPreferences(file) : null)
   const store = favoritesStore ? await import('@/store/favorite-models') : null
   const storage = await import('@/lib/storage')
-  stops.push(sync.startUiPreferencesSync(bridgeFor(file, net)))
-  await tick()
+  const client = observeSync(sync.startUiPreferencesSync, bridgeFor(file, net))
+  stops.push(client.stop)
 
-  return { storage, store }
+  if (net.online) {
+    await client.connected()
+  } else {
+    await expect(client.connected()).rejects.toThrow('fetch failed')
+  }
+
+  return { ...client, storage, store }
 }
 
 const closeTabs = () => stops.splice(0).forEach(stop => stop())
@@ -93,14 +99,13 @@ it('a favorite another client removed stays removed when a tab that still lists 
   const file = storeFile()
   await writeUiPreferences(file, { values: { [FAVORITES]: JSON.stringify(['p::X', 'p::Y']) } })
   window.localStorage.setItem(FAVORITES, JSON.stringify(['p::X', 'p::Y']))
-  const { store } = await pageLoad(file)
+  const { store, writeAfter } = await pageLoad(file)
 
   // Native unfavorites X; the push lands here, the favorites atom keeps its read.
   const snapshot = await writeUiPreferences(file, { values: { [FAVORITES]: JSON.stringify(['p::Y']) } })
   listeners.forEach(callback => callback(snapshot))
-  await tick(50)
-  store?.toggleFavoriteModel('p', 'W')
-  await tick()
+  expect(window.localStorage.getItem(FAVORITES)).toBe(JSON.stringify(['p::Y']))
+  await writeAfter(() => store?.toggleFavoriteModel('p', 'W'))
 
   expect(favorites(file)).toEqual(['p::Y', 'p::W'])
 })
@@ -115,7 +120,6 @@ it('an offline star carried over a reload or a takeover joins the favorites nati
 
     const { store } = await pageLoad(file, { net: { online: false } })
     store?.toggleFavoriteModel('p', 'W')
-    await tick()
 
     if (carry === 'takeover') {
       window.dispatchEvent(new PageTransitionEvent('pagehide'))
@@ -124,7 +128,8 @@ it('an offline star carried over a reload or a takeover joins the favorites nati
 
     closeTabs()
     await writeUiPreferences(file, { values: { [FAVORITES]: JSON.stringify(['p::A', 'p::N']) } })
-    await pageLoad(file)
+    const reloaded = await pageLoad(file)
+    await reloaded.flushed()
 
     expect([carry, favorites(file).sort()]).toEqual([carry, ['p::A', 'p::N', 'p::W']])
     closeTabs()
@@ -134,26 +139,29 @@ it('an offline star carried over a reload or a takeover joins the favorites nati
 }, 15_000)
 
 it('a frozen tab whose unsent edit another tab took over never re-sends it over a newer choice', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
   const file = storeFile()
   await writeUiPreferences(file, { values: { [MODE]: 'light' } })
   window.localStorage.setItem(MODE, 'light')
   const frozenNet = { online: true }
   const frozen = await pageLoad(file, { favoritesStore: false, net: frozenNet })
   frozenNet.online = false
-  frozen.storage.writeKey(MODE, 'dark')
-  await tick()
+  await frozen.writeAfter(() => frozen.storage.writeKey(MODE, 'dark')).catch(error => {
+    expect(error.message).toBe('fetch failed')
+  })
 
   // That tab stops beating for two minutes; a new tab adopts its edit, then
   // the user picks again there.
-  vi.useFakeTimers({ now: Date.now() + 120_000, toFake: ['Date'] })
+  vi.setSystemTime(Date.now() + 120_000)
   window.sessionStorage.clear()
   const fresh = await pageLoad(file, { favoritesStore: false })
-  fresh.storage.writeKey(MODE, 'system')
-  await tick()
-  vi.useRealTimers()
+  await fresh.writeAfter(() => fresh.storage.writeKey(MODE, 'system'))
 
+  const attempts = frozen.write.mock.calls.length
   frozenNet.online = true // the frozen tab wakes; its retry fires
-  await tick(6000)
+  // Exercise the scheduled retry, not an immediately-true negative assertion.
+  await vi.advanceTimersByTimeAsync(6000)
+  expect(frozen.write).toHaveBeenCalledTimes(attempts)
 
   expect(stored(file, MODE)).toBe('system')
 }, 15_000)

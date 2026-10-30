@@ -13,6 +13,7 @@ import {
 import { writeKey } from '../storage'
 
 import { captureOwnPreferences, hydrateFromSnapshot, startUiPreferencesSync, type UiPreferencesBridge } from './sync'
+import { observeSync } from './sync-test-bridge'
 
 // The renderer sync against the real native writer on a real file (#145536 review).
 const DENSITY = 'hermes.desktop.sessionListDensity'
@@ -21,7 +22,6 @@ const THEME = 'hermes-desktop-theme-v2'
 const USER_THEMES = 'hermes-desktop-user-themes-v1'
 const KEYBINDS = 'hermes.desktop.keybinds'
 const dirs: string[] = []
-const tick = (ms = 400) => new Promise(resolve => setTimeout(resolve, ms))
 
 function storeFile(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ui-sync-'))
@@ -61,11 +61,10 @@ it('a store a fresh client created never removes another client’s values: it i
   // its default as its module loads, then makes first contact and changes one.
   captureOwnPreferences()
   window.localStorage.setItem(KEYBINDS, '{}')
-  let stop = startUiPreferencesSync(realBridge(file).bridge)
-  await tick()
-  writeKey(DENSITY, 'detailed')
-  await tick()
-  stop()
+  let client = observeSync(startUiPreferencesSync, realBridge(file).bridge)
+  await client.connected()
+  await client.writeAfter(() => writeKey(DENSITY, 'detailed'))
+  client.stop()
 
   // Native Desktop, another origin, launches with its own preferences.
   window.localStorage.clear()
@@ -73,9 +72,9 @@ it('a store a fresh client created never removes another client’s values: it i
   Object.entries(mine).forEach(([key, value]) => window.localStorage.setItem(key, value))
   captureOwnPreferences()
   hydrateFromSnapshot(readUiPreferences(file))
-  stop = startUiPreferencesSync(realBridge(file).bridge)
-  await tick()
-  stop()
+  client = observeSync(startUiPreferencesSync, realBridge(file).bridge)
+  await client.connected()
+  client.stop()
 
   expect(Object.fromEntries(Object.keys(mine).map(key => [key, window.localStorage.getItem(key)]))).toEqual(mine)
   expect(window.localStorage.getItem(DENSITY)).toBe('detailed')
@@ -91,16 +90,15 @@ it('a corrupt store is kept aside and open windows follow its replacement, re-im
   }
 
   const { bridge, push } = realBridge(file)
-  const stop = startUiPreferencesSync(bridge)
-  await tick()
-  expect(window.localStorage.getItem(DENSITY)).toBe('d4')
+  const client = observeSync(startUiPreferencesSync, bridge)
+  await client.connected()
+  await vi.waitFor(() => expect(window.localStorage.getItem(DENSITY)).toBe('d4'))
 
   const torn = '{"version":1,"revision":6,"val'
   fs.writeFileSync(file, torn)
   await writeUiPreferences(file, { values: { [DENSITY]: 'compact' } }) // e.g. the Webapp's next write
-  push()
-  await tick()
-  stop()
+  await client.writeAfter(push)
+  client.stop()
 
   const backups = fs.readdirSync(path.dirname(file)).filter(name => name.startsWith('ui-preferences.json.corrupt-'))
 
@@ -138,9 +136,10 @@ it('same-origin tabs keep each other’s unsent changes', async () => {
   Object.entries(sessionA).forEach(([key, value]) => window.sessionStorage.setItem(key, value))
   vi.resetModules()
   const reloadedA = await import('./sync')
-  const stop = reloadedA.startUiPreferencesSync(realBridge(file).bridge)
-  await tick()
-  stop()
+  const client = observeSync(reloadedA.startUiPreferencesSync, realBridge(file).bridge)
+  await client.connected()
+  await client.flushed()
+  client.stop()
 
   expect(readUiPreferences(file).values[DENSITY]).toBe('detailed')
 })

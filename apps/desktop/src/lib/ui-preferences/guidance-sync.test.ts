@@ -6,6 +6,8 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import { parseUiPreferencesWrite, readUiPreferences, writeUiPreferences } from '../../../electron/ui-preferences'
 
+import { observeSync } from './sync-test-bridge'
+
 // Transform the stores this file loads while it is collected, outside the
 // test's timeout: vi.resetModules() keeps the transformed code, so a load only
 // re-evaluates it. Left to the first load(), the cold transform timed the test
@@ -18,7 +20,6 @@ window.localStorage.clear()
 window.sessionStorage.clear()
 
 const dirs: string[] = []
-const tick = (ms = 400) => new Promise(resolve => setTimeout(resolve, ms))
 
 afterEach(() => {
   window.localStorage.clear()
@@ -38,14 +39,14 @@ async function load(file: string) {
   sync.captureOwnPreferences()
   sync.hydrateFromSnapshot(readUiPreferences(file))
 
-  const stop = sync.startUiPreferencesSync({
+  const client = observeSync(sync.startUiPreferencesSync, {
     read: async () => readUiPreferences(file),
     write: payload => writeUiPreferences(file, parseUiPreferencesWrite(payload))
   })
 
   return {
     onboarding: await import('@/store/onboarding'),
-    stop,
+    ...client,
     tips: await import('@/store/tips')
   }
 }
@@ -56,16 +57,17 @@ it('onboarding skipped and tips seen or dismissed in one browser stay so in anot
   const file = path.join(dir, 'ui-preferences.json')
 
   const first = await load(file)
-  await tick()
-  first.onboarding.dismissFirstRunOnboarding()
-  first.tips.showTip({ side: 'top', targets: [], text: 'One', tipId: 'catalog:one' })
-  first.tips.retireTips(['catalog:two'])
-  await tick()
+  await first.connected()
+  await first.writeAfter(() => {
+    first.onboarding.dismissFirstRunOnboarding()
+    first.tips.showTip({ side: 'top', targets: [], text: 'One', tipId: 'catalog:one' })
+    first.tips.retireTips(['catalog:two'])
+  })
   first.stop()
 
   // A phone, or the same Webapp on another origin: its own empty localStorage.
   const second = await load(file)
-  await tick()
+  await second.connected()
   second.stop()
 
   expect(second.onboarding.$desktopOnboarding.get().firstRunSkipped).toBe(true)

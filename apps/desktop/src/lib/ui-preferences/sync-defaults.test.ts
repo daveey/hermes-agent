@@ -12,6 +12,7 @@ import {
 } from '../../../electron/ui-preferences'
 
 import type { UiPreferencesBridge } from './sync'
+import { observeSync } from './sync-test-bridge'
 
 // A value a store writes for itself at load (its default, a migration from
 // config) is not the user's choice and must never reach the machine's store
@@ -53,7 +54,6 @@ window.localStorage.clear()
 window.sessionStorage.clear()
 
 const dirs: string[] = []
-const tick = (ms = 400) => new Promise(resolve => setTimeout(resolve, ms))
 
 function storeFile(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ui-defaults-'))
@@ -78,18 +78,36 @@ function realBridge(file: string) {
   return { bridge, push: () => changed?.(readUiPreferences(file)) }
 }
 
+function storageKeys() {
+  return Array.from({ length: window.localStorage.length }, (_, index) => window.localStorage.key(index) ?? '')
+}
+
+function expectNoPendingDefaults(ownKeys: Set<string>) {
+  // A leaked provisional write is queued synchronously. Checking the outbox
+  // catches it even before the debounce fires; stopping sync must not hide it.
+  // A value this client already owned may legitimately be queued during join.
+  const pending = storageKeys()
+    .filter(key => key.startsWith('hermes:ui-preferences:outbox:'))
+    .flatMap(key => Object.keys(JSON.parse(window.localStorage.getItem(key) ?? '{}').values ?? {}))
+    .filter(key => !ownKeys.has(key))
+
+  expect(pending).toEqual([])
+}
+
 /** One page load, as boot.ts + main.tsx run it: capture, hydrate, then the app's stores. */
 async function load(file: string, app: () => Promise<void>) {
   vi.resetModules()
   const sync = await import('./sync')
   sync.captureOwnPreferences()
   sync.hydrateFromSnapshot(readUiPreferences(file))
+  const ownKeys = new Set(storageKeys())
   const { bridge, push } = realBridge(file)
-  const stop = sync.startUiPreferencesSync(bridge)
+  const client = observeSync(sync.startUiPreferencesSync, bridge)
   await app()
-  await tick()
+  await client.connected()
+  expectNoPendingDefaults(ownKeys)
 
-  return { push, stop }
+  return { ...client, push }
 }
 
 /** One page load in production order: the app's stores evaluate before main.tsx starts the sync. */
@@ -98,14 +116,16 @@ async function boot(file: string) {
   const sync = await import('./sync')
   sync.captureOwnPreferences()
   sync.hydrateFromSnapshot(readUiPreferences(file))
+  const ownKeys = new Set(storageKeys())
 
   for (const load of LOAD_WRITERS) {
     await load()
   }
 
-  const stop = sync.startUiPreferencesSync(realBridge(file).bridge)
-  await tick()
-  stop()
+  const client = observeSync(sync.startUiPreferencesSync, realBridge(file).bridge)
+  await client.connected()
+  expectNoPendingDefaults(ownKeys)
+  client.stop()
 }
 
 /** Native Desktop's localStorage is another origin's: switch to it. */
@@ -173,12 +193,10 @@ it('a migrated auto-speak value stays put here while the store lacks it, and a r
   // Another client's change reaches this joined window: nothing it lacks is pruned.
   await writeUiPreferences(file, { values: { [THEME]: 'mono' } })
   native.push()
-  await tick()
   expect(window.localStorage.getItem(AUTO_SPEAK)).toBe('true')
   expect(readUiPreferences(file).values).toEqual({ [THEME]: 'mono' })
 
-  await choose.autoSpeak?.(false)
-  await tick()
+  await native.writeAfter(() => choose.autoSpeak?.(false))
   native.stop()
 
   expect(readUiPreferences(file).values).toEqual({ [AUTO_SPEAK]: 'false', [THEME]: 'mono' })
