@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Optional
 
 from agent.deadline import poll_until
+from agent.memory_provider import spawn_context_thread
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +257,7 @@ def _refresh_probe_in_background() -> None:
             with _refresh_lock:
                 _refresh_running = False
 
-    threading.Thread(target=_run, name="host-gateway-reprobe", daemon=True).start()
+    spawn_context_thread(_run, name="host-gateway-reprobe").start()
 
 
 def host_gateway(*, wait_for_channel: float = 0.0) -> Optional[HostGateway]:

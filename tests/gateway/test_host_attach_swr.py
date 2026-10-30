@@ -84,7 +84,7 @@ def test_dashboard_mode_serves_stale_memo_while_reprobing(silent_gateway, monkey
     monkeypatch.setattr(host_attach, "HOST_GATEWAY_CACHE_TTL_S", 0.05)
     first = host_attach.host_gateway()  # the one probe that pays the hang
     assert first is not None and first.served_known is False
-    time.sleep(0.1)  # memo now expired
+    time.sleep(0.1)  # health: allow HX013 -- memo TTL expiry is the behaviour under test
     spent = _spent(2)
     assert spent < 0.5, spent
     assert host_attach.host_gateway() is first or host_attach.host_gateway() is not None
@@ -93,7 +93,7 @@ def test_dashboard_mode_serves_stale_memo_while_reprobing(silent_gateway, monkey
 def test_cli_mode_keeps_synchronous_probe(silent_gateway, monkeypatch):
     monkeypatch.setattr(host_attach, "HOST_GATEWAY_CACHE_TTL_S", 0.05)
     host_attach.host_gateway()
-    time.sleep(0.1)
+    time.sleep(0.1)  # health: allow HX013 -- memo TTL expiry is the behaviour under test
     assert _spent(1) >= 0.9  # lifecycle/CLI callers still get a fresh answer
 
 
@@ -102,7 +102,7 @@ def test_stale_memo_older_than_cap_is_reprobed_synchronously(silent_gateway, mon
     monkeypatch.setattr(host_attach, "HOST_GATEWAY_CACHE_TTL_S", 0.05)
     monkeypatch.setattr(host_attach, "HOST_GATEWAY_MAX_STALE_S", 0.1)
     host_attach.host_gateway()
-    time.sleep(0.2)
+    time.sleep(0.2)  # health: allow HX013 -- memo TTL expiry is the behaviour under test
     assert _spent(1) >= 0.9
 
 
@@ -141,7 +141,7 @@ def test_profiles_http_requests_do_not_repay_silent_socket(silent_gateway, monke
 
         monkeypatch.setattr(host_attach, "host_gateway", measured)
         for _ in range(2):
-            time.sleep(0.1)  # each request sees an expired memo
+            time.sleep(0.1)  # health: allow HX013 -- memo TTL expiry is the behaviour under test
             response = client.get("/api/profiles")
             assert response.status_code == 200
             assert response.json()["profiles"]
