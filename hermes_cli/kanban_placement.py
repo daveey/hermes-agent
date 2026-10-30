@@ -35,7 +35,8 @@ A card stays local when any of these holds:
   built-in list, ``extra_local_markers`` extends it): Chrome, Keychain, TCC, Apple apps, launchd,
   the Desktop app, a Desktop DOM/CDP readback, this Mac's Keychain... A bare host name (MacBook,
   the mini) pins only when it is the subject of the title. A body mention — a repro, or "verify
-  live on the hub and the MacBook" — is not a local-only need;
+  live on the hub and the MacBook" — is not a local-only need. A product name (Baby Bear) in the
+  title pins only when the card names no Linux, or also names Apple/device work;
 * the target is not live: this gateway's hermes-hub sync has not succeeded recently, or the
   target's capability record is stale.
 
@@ -102,6 +103,19 @@ DEFAULT_LOCAL_MARKERS = (
 TITLE_ONLY_LOCAL_MARKERS = frozenset({
     r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b", BABYBEAR_MARKER,
 })
+# Product names (not hosts, not Apple tech): a product with Linux parts (BB pods, their CI on
+# self-hosted Linux runners) is not an Apple/local need by name alone. With the built-in list, a
+# product-name hit is skipped when the card names Linux and nothing Apple- or device-bound.
+PRODUCT_NAME_MARKERS = frozenset({BABYBEAR_MARKER})
+# Linux named outright: self-hosted runners, runs-on, docker and containers exist on Macs too.
+LINUX_CONTEXT_MARKERS = (r"\blinux\b", r"\bubuntu\b")
+APPLE_CONTEXT_MARKERS = (
+    r"\bxcode", r"\bxcrun\b", r"\bfastlane\b", r"\bsimulator\b", r"\bcodesign", r"\bcode ?signing\b",
+    r"\bsigning identit", r"\bdeveloper id\b", r"\bprovisioning\b", r"\bnotari[sz]", r"\btestflight\b",
+    r"\bapp store\b", r"\bios\b", r"\biphone\b", r"\bipad\b", r"\bwatchos\b", r"\bswift(ui)?\b", r"\.app\b",
+    r"\bcatalyst\b", r"\bcore ?ml\b", r"\bwatch app\b", r"\bav(foundation|audiosession)\b", r"\bapple\b",
+    r"\bmac\b", MACOS_MARKER, r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bkeychain\b", r"\btcc\b",
+)
 LOCAL_MARKER_REMEDY = (
     "if the work doesn't need this machine, archive and re-create with placement='hub'")
 DEFAULT_LOCAL_SKILL_MARKERS = (
@@ -246,10 +260,17 @@ def is_placeholder_session(value: str) -> bool:
 
 def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
     """The first local-only hit, or None. Host-name markers (see
-    :data:`TITLE_ONLY_LOCAL_MARKERS`) scan the title only, unless the caller replaced the list."""
+    :data:`TITLE_ONLY_LOCAL_MARKERS`) scan the title only, unless the caller replaced the list.
+    A product name (:data:`PRODUCT_NAME_MARKERS`) does not pin a card whose text names Linux
+    and no Apple or device-bound work (same exception: not with a replaced list)."""
     full = f"{title or ''}\n{body or ''}"
     replaced = isinstance(cfg.raw.get("local_markers"), list)
+    linux_only = (not replaced
+                  and any(re.search(p, full, re.IGNORECASE) for p in LINUX_CONTEXT_MARKERS)
+                  and not any(re.search(p, full, re.IGNORECASE) for p in APPLE_CONTEXT_MARKERS))
     for rx in cfg.markers():
+        if linux_only and rx.pattern in PRODUCT_NAME_MARKERS:
+            continue
         text = (title or "") if (not replaced and rx.pattern in TITLE_ONLY_LOCAL_MARKERS) else full
         m = rx.search(text)
         if m:
