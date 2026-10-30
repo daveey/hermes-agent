@@ -146,6 +146,9 @@ export function coreAppEnv(sandbox: CoreSandbox, extra: Record<string, string> =
     PATH: `${sandbox.bin}${path.delimiter}${env.PATH ?? ''}`,
     HOME: sandbox.home,
     HERMES_HOME: sandbox.hermesHome,
+    // Lifecycle ownership is not an agent runtime knob. The run/host reapers need it even
+    // after gateway ensure detaches the daemon and a killed worker cannot clean its sandbox.
+    ...(process.env.HERMES_E2E_RUN_TMP ? { HERMES_E2E_RUN_TMP: process.env.HERMES_E2E_RUN_TMP } : {}),
     HERMES_DESKTOP_USER_DATA_DIR: sandbox.userDataDir,
     HERMES_DESKTOP_IGNORE_EXISTING: '1',
     HERMES_DESKTOP_HERMES_ROOT: REPO_ROOT,
