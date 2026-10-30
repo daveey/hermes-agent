@@ -216,13 +216,20 @@ def _gateway_run_command() -> list[str]:
                            python=_gw().get_python_path())
 
 
-# [daveey] Inline source of the signed-bundle launchd wrapper (see ``launchd_program_arguments``). Default
-# SIGTERM disposition on purpose: launchd signals the job's process group, so the gateway gets exactly one
-# SIGTERM, the same as under the osascript wrapper. Signal deaths map to 128+N like the JXA wrapper.
-# gateway.status matches SIGNED_LAUNCHD_WRAPPER_MARKER so the wrapper's ps line is never taken for the gateway.
+# [daveey] Inline source of the signed-bundle launchd wrapper (see ``launchd_program_arguments``). The wrapper is
+# the launchd job's main pid, so it must not end before the gateway: it catches SIGTERM/SIGHUP/SIGUSR1/SIGUSR2,
+# forwards each to its child (the ``sh -c exec`` launcher chain) and keeps waiting, then exits with the child's
+# status. With the default disposition it died at launchd's first SIGTERM while the gateway was still draining,
+# launchd counted the job as ended and started new gateways into a host the old one still owned
+# (start_refused owner_alive=true, defect gateway-cc28b19bca). A signal that lands before the child exists is
+# queued and delivered right after the spawn. Signal deaths map to 128+N like the JXA wrapper. One line on
+# purpose: gateway.status matches SIGNED_LAUNCHD_WRAPPER_MARKER on the wrapper's ps line.
 _SIGNED_WRAPPER_SOURCE = (
-    "import signal, subprocess, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); "
-    "rc = subprocess.Popen(['/bin/sh', '-c', sys.argv[1]]).wait(); "
+    "import signal, subprocess, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); kid = []; pend = []; "
+    "fwd = lambda n, _f: kid[0].send_signal(n) if kid else pend.append(n); "
+    "[signal.signal(s, fwd) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGUSR1, signal.SIGUSR2)]; "  # windows-footgun: ok — inline source run only by the macOS launchd job
+    "kid.append(subprocess.Popen(['/bin/sh', '-c', sys.argv[1]])); "
+    "[kid[0].send_signal(n) for n in pend]; rc = kid[0].wait(); "
     "sys.exit(128 - rc if rc < 0 else rc)"
 )
 
@@ -289,7 +296,8 @@ def launchd_program_arguments(
     for "osascript", a grant that also covers every unrelated script on the Mac. A signed bundle with
     ``NSLocalNetworkUsageDescription`` keeps LAN access (verified live on macOS 26.6), and its grants survive
     rebuilds because TCC keys them by bundle id + team. It waits for ``/bin/sh -c exec …`` like JXA's
-    ``system()`` and dies on launchd's SIGTERM like osascript, so lifecycle semantics are unchanged.
+    ``system()``, but unlike osascript it forwards launchd's stop signals to the gateway and lives until the
+    gateway exits, so launchd never counts the job as ended while the gateway still drains.
     """
     shell = f"exec {shlex.join(command)} >> {shlex.quote(str(stdout_log))} 2>> {shlex.quote(str(stderr_log))}"
     if responsible is not None:

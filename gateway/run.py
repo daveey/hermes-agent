@@ -47,6 +47,7 @@ from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get
 from hermes_cli.fallback_config import pre_agent_fallback_notice
 from gateway.turn_executor import _UnboundedThreadExecutor
 from gateway.run_exit_reason import note_start_refused
+from gateway.run_signal_handlers import _start_gateway_make_restart_signal_handler, repeat_stop_signal
 from gateway import exit_deadline
 
 # Per-session AIAgent cache bounds (agents are heavy); see _enforce_agent_cache_cap/_session_housekeeping_watcher.
@@ -5119,22 +5120,9 @@ def _start_gateway_configure_logging(verbosity: Optional[int]) -> None:
             root.setLevel(_stderr_level)
 
 
-def _start_gateway_make_restart_signal_handler(runner):
-    """Build the SIGUSR1 handler: log what the signal means, then the drain-aware service restart."""
-    def restart_signal_handler():
-        # systemd's `reload` verb (ExecReload=kill -USR1) lands here too; say so, because operators
-        # expect `reload` to mean an in-process config reload, not a drain-and-relaunch (#117267).
-        logger.info(
-            "SIGUSR1 received (systemctl reload / hermes gateway restart): performing a graceful "
-            "gateway restart — drain active turns, exit, supervisor relaunches. Not an in-process "
-            "config reload.")
-        runner.request_restart(detached=False, via_service=True)
-    return restart_signal_handler
-
-
 def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdown: list):
     """Build the SIGINT/SIGTERM handler; ``_signal_initiated_shutdown[0]`` records an unplanned signal."""
-    planned_stop_seen = [False]
+    planned_stop_seen, stop_signals = [False], [0]  # [daveey] stop_signals: see repeat_stop_signal
 
     def shutdown_signal_handler(received_signal=None):
         # Planned --replace takeover (sibling marked this PID): exit 0 so systemd won't revive us.
@@ -5161,6 +5149,8 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
             planned_stop_seen[0] = True
         elif planned_stop_seen[0] and not planned_takeover:
             planned_stop = True
+        if repeat_stop_signal(runner, stop_signals, received_signal):
+            return
         _shutdown_ctx = _best_effort(_snapshot, "snapshot_shutdown_context failed: %s")
         sig_name = _shutdown_ctx["signal"] if _shutdown_ctx else None
 
