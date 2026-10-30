@@ -239,18 +239,24 @@ def test_metadata_only_sync_pass_keeps_the_record_served(home):
 
 def test_sync_replacing_a_plugin_file_with_its_old_mtime_still_invalidates(home):
     """rsync -a writes changed content to a temp file, renames it over the old one and restores the
-    source mtime: same mtime, maybe same size, new inode. That must still read as a change."""
+    source mtime: same size, same mtime, same dir mtime, new inode. That must still read as a change."""
+    init = home / "plugins" / "bystander" / "__init__.py"
+    before, after = textwrap.dedent(BYSTANDER), textwrap.dedent(OBSERVER)
+    size = max(len(before), len(after)) + 1
+    init.write_text(before + "#" * (size - len(before)))  # same-size content on both sides
     _config(home, ["bystander"])
     tid = _run(home, "setup")["task_id"]
     _run(home, "discover")
     assert "on_kanban_task_updated" not in _hooks_record(home)["hooks"]
-    init = home / "plugins" / "bystander" / "__init__.py"
-    old = init.stat()
+    old, old_dir = init.stat(), init.parent.stat()
     tmp = init.with_name(".__init__.py.tmp")
-    tmp.write_text(textwrap.dedent(OBSERVER))
+    tmp.write_text(after + "#" * (size - len(after)))
     os.utime(tmp, ns=(old.st_atime_ns, old.st_mtime_ns))
     os.replace(tmp, init)
-    assert init.stat().st_mtime_ns == old.st_mtime_ns
+    os.utime(init.parent, ns=(old_dir.st_atime_ns, old_dir.st_mtime_ns))
+    new = init.stat()
+    assert (new.st_size, new.st_mtime_ns, init.parent.stat().st_mtime_ns) == (old.st_size, old.st_mtime_ns, old_dir.st_mtime_ns)
+    assert new.st_ino != old.st_ino
     out = _run(home, "assign", task_id=tid, profile="bob")
     assert out["assigned"] is True and out["sweeps"] == 1
     assert _observed(home) == [{"task_id": tid, "changed_fields": ["assignee"]}]

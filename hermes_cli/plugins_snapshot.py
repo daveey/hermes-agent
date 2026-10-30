@@ -88,7 +88,8 @@ def _stat_entry(path: Path, label: str) -> list:
     # bb gate's next cold assign paid a full discovery (20-45 s) again. A content change still moves
     # one of the kept fields: an in-place write sets a new mtime, and a sync that restores the source
     # mtime writes a temp file and renames it (new inode). Only an in-place, same-size rewrite that
-    # then forges the old mtime back goes unseen; nothing on the sync or edit paths does that.
+    # then forges the old mtime back goes unseen (cp -p / rsync --inplace onto an existing file); no
+    # path hermes uses does that (hermes-sync rsync without --inplace, git, pip, editors).
     try:
         st = path.stat()
     except OSError as exc:
