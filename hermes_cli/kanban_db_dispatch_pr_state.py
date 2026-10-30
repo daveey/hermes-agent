@@ -132,14 +132,24 @@ def _immediate_checkpoint_after(
         return False
     ended_at = kb._to_epoch(run["ended_at"])
     meta = kb._json_dict(run["metadata"])
-    # A server-derived comment watermark distinguishes ordering within one second.
+    # A server-derived comment watermark distinguishes ordering within one second. It is a
+    # row id on the host that parked, so map it to the local row first (replica cards); a
+    # watermark that names no single local row falls back to strict time ordering.
     event = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? "
+        "SELECT payload, created_at FROM task_events WHERE task_id = ? AND run_id = ? "
         "AND kind = 'continued' ORDER BY id DESC LIMIT 1", (task_id, run["id"]),
     ).fetchone()
     watermark = kb._json_dict(event["payload"]).get("comment_id_at_checkpoint") if event else None
-    if type(watermark) is not int or watermark < latest_pr_comment_id:
+    if type(watermark) is not int:
         return False
+    local = _local_comment_id(conn, task_id, watermark) if watermark > 0 else None
+    if local is not None:
+        if local < latest_pr_comment_id:
+            return False
+    else:
+        parked_at = kb._to_epoch(event["created_at"])
+        if parked_at is None or parked_at <= since:
+            return False
     return bool(
         ended_at is not None and ended_at >= since
         and meta.get("checkpoint") and meta.get("resume_after_seconds") == 0
@@ -170,27 +180,106 @@ def _comment_rejections(conn: sqlite3.Connection, task_id: str, urls: Iterable[s
             comment_rejection(conn, task_id, url, _rejections[url.rstrip("/").lower()])
 
 
-def _foreign_pr_comment_ids(conn: sqlite3.Connection, task_id: str) -> set[int]:
-    """Known foreign writers are FYI; absent or unreadable provenance fails closed.
+# ``add_comment`` stamps the row before taking the write lock and its ``commented`` event
+# after, so the event can trail its row by lock-wait seconds (31 s seen on the hub).
+COMMENT_EVENT_SKEW_SECONDS = 120
 
-    The display author is a profile shared by workers and chats, not ownership.
-    Read events once per card, rather than issuing a query per comment.
+
+def _comment_rows(conn: sqlite3.Connection, task_id: str) -> dict[int, tuple[str, Optional[int], int]]:
+    """Local ``task_comments`` rows: id -> (author, created_at epoch, len(body))."""
+    from hermes_cli import kanban_db as _kb
+
+    return {r[0]: (r[1], _kb._to_epoch(r[2]), r[3] or 0) for r in conn.execute(
+        "SELECT id, author, created_at, length(body) FROM task_comments WHERE task_id = ?", (task_id,))}
+
+
+def _row_matches(row: tuple[str, Optional[int], int], at: int, author: str, length: int, *, exact: bool) -> bool:
+    r_author, r_at, r_len = row
+    if r_at is None or r_author != author or not 0 <= at - r_at <= COMMENT_EVENT_SKEW_SECONDS:
+        return False
+    # The row body is stripped and the payload ``len`` is not: stripping only shortens.
+    return r_len == length if exact else r_len <= length
+
+
+def _event_row_id(rows: dict[int, tuple[str, Optional[int], int]], at: Optional[int],
+                  data: dict) -> Optional[int]:
+    """The local row a ``commented`` event describes, or None when it can't be told.
+
+    A replica keeps the home board's events verbatim, so ``comment_id`` is the HOME row id;
+    the synced local row has a different one (2026-10-30: home 6684 = hub row 9723). Match
+    by (created_at, author, len). The payload id is used only when that local row has the
+    same triple and no other row does, so a home board, where ids agree, maps as before.
+    Two rows with the event's triple are indistinguishable: None (the caller fails closed).
     """
-    foreign: set[int] = set()
-    seen: set[int] = set()
-    for row in conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented'",
+    author, length, cid = data.get("author"), data.get("len"), data.get("comment_id")
+    if at is None or not isinstance(author, str) or type(length) is not int:
+        return None
+    author = author.strip()
+    exact = [i for i, r in rows.items() if _row_matches(r, at, author, length, exact=True)]
+    row = rows.get(cid) if type(cid) is int else None
+    if row is not None and _row_matches(row, at, author, length, exact=False) \
+            and all(i == cid for i in exact):
+        return cid
+    return exact[0] if len(exact) == 1 else None
+
+
+def _comment_events(conn: sqlite3.Connection, task_id: str) -> Optional[list[tuple[dict, Optional[int], Optional[int]]]]:
+    """Every ``commented`` event as (payload, event epoch, local row id or None).
+
+    None when any event is unreadable: it cannot be associated with a comment.
+    """
+    from hermes_cli import kanban_db as _kb
+
+    rows = _comment_rows(conn, task_id)
+    out: list[tuple[dict, Optional[int], Optional[int]]] = []
+    for payload, created_at in conn.execute(
+        "SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = 'commented'",
         (task_id,),
     ):
         try:
-            data = json.loads(row[0])
+            data = json.loads(payload)
         except (ValueError, TypeError):
-            return set()  # cannot associate this unreadable event with a comment
-        if not isinstance(data, dict) or type(data.get("comment_id")) is not int:
-            return set()
-        cid = data["comment_id"]
+            return None
+        if not isinstance(data, dict) or type(data.get("comment_id")) is not int \
+                or not isinstance(data.get("author"), str) or type(data.get("len")) is not int:
+            return None
+        at = _kb._to_epoch(created_at)
+        out.append((data, at, _event_row_id(rows, at, data)))
+    return out
+
+
+def _local_comment_id(conn: sqlite3.Connection, task_id: str, comment_id: int) -> Optional[int]:
+    """Translate a payload comment id (any host's id space) to the local row it names.
+
+    None unless every ``commented`` event carrying that id maps to one and the same row.
+    """
+    events = _comment_events(conn, task_id)
+    if events is None:
+        return None
+    hits = {row for data, _at, row in events if data["comment_id"] == comment_id}
+    if len(hits) != 1 or None in hits:
+        return None
+    return hits.pop()
+
+
+def _foreign_pr_comment_ids(conn: sqlite3.Connection, task_id: str) -> set[int]:
+    """Local row ids of comments from known foreign writers (FYI); absent, unreadable
+    or ambiguous provenance fails closed.
+
+    The display author is a profile shared by workers and chats, not ownership.
+    Read events once per card, rather than issuing a query per comment. Events are
+    matched to rows by :func:`_event_row_id`, so replica cards work too.
+    """
+    events = _comment_events(conn, task_id)
+    if events is None:
+        return set()
+    foreign: set[int] = set()
+    seen: set[int] = set()
+    for data, _at, cid in events:
+        if cid is None:
+            continue  # no row is tied to it; an unmatched row stays owned (fail closed)
         if cid in seen:
-            foreign.discard(cid)  # ambiguous duplicate provenance fails closed
+            foreign.discard(cid)  # two events for one row: ambiguous provenance fails closed
             continue
         seen.add(cid)
         writer = data.get("writer_run_id")
