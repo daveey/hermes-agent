@@ -162,6 +162,47 @@ def _pr_comments_predate_first_run(conn: sqlite3.Connection, task_id: str, newes
     return first_run is None or newest_pr_at < _kb._to_epoch(first_run)
 
 
+def _comment_rejections(conn: sqlite3.Connection, task_id: str, urls: Iterable[str]) -> None:
+    from hermes_cli.kanban_db_dispatch_pr_rejection import comment_rejection
+
+    for url in dict.fromkeys(urls):
+        if pr_state(url) == "REJECTED":
+            comment_rejection(conn, task_id, url, _rejections[url.rstrip("/").lower()])
+
+
+def _foreign_pr_comment_ids(conn: sqlite3.Connection, task_id: str) -> set[int]:
+    """Known foreign writers are FYI; absent or unreadable provenance fails closed.
+
+    The display author is a profile shared by workers and chats, not ownership.
+    Read events once per card, rather than issuing a query per comment.
+    """
+    foreign: set[int] = set()
+    seen: set[int] = set()
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented'",
+        (task_id,),
+    ):
+        try:
+            data = json.loads(row[0])
+        except (ValueError, TypeError):
+            return set()  # cannot associate this unreadable event with a comment
+        if not isinstance(data, dict) or type(data.get("comment_id")) is not int:
+            return set()
+        cid = data["comment_id"]
+        if cid in seen:
+            foreign.discard(cid)  # ambiguous duplicate provenance fails closed
+            continue
+        seen.add(cid)
+        writer = data.get("writer_run_id")
+        if "writer_run_id" not in data:
+            foreign.add(cid)
+        elif type(writer) is int:
+            run = conn.execute("SELECT task_id FROM task_runs WHERE id = ?", (writer,)).fetchone()
+            if run is not None and run[0] != task_id:
+                foreign.add(cid)
+    return foreign
+
+
 def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Optional[str]:
     """Respawn-guard step 4: ``"active_pr"`` when a comment in the last 24 h names a PR, else None.
 
@@ -178,16 +219,19 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     crash/reclaim is not a handoff, so the worker that opened the PR is still not re-spawned
     against it. A latest immediate checkpoint also permits a same-second PR report;
     scheduled checkpoints do not get that same-second exception. Dispatcher guard
-    notices are diagnostic, not new PR publication evidence, and cannot invalidate
-    an existing handoff.
-    Also lifted once EVERY PR named in those comments is MERGED or CLOSED (gh, cached; any
+    notices and comments known to come from another card's run or a chat are
+    diagnostic/FYI, not new PR publication evidence, and cannot invalidate an
+    existing handoff. Missing or unreadable provenance remains fail-closed.
+    Also lifted once EVERY PR named in publication comments is MERGED or CLOSED (gh, cached; any
     gh failure keeps the hold), or has a completed queue rejection requiring repair. [daveey]
     """
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
 
+    foreign_ids = _foreign_pr_comment_ids(conn, task_id)
     pr_times: list[int] = []
     pr_urls: list[str] = []
+    fyi_urls: list[str] = []
     latest_pr_comment_id = 0
     for t, c in _kbd._rows_since(conn, "task_comments", task_id, now - _kbd._RESPAWN_GUARD_PR_WINDOW,
                                  cols=", id, body, author", unreadable=now):  # duplicate-PR risk: fail closed
@@ -195,11 +239,17 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
         if c["author"] == "kanban-dispatcher" and body.startswith("[respawn-guard]"):
             continue  # a diagnostic must not rearm its own handoff barrier
         urls = _kbd._RESPAWN_GUARD_PR_URL_RE.findall(body)
+        if c["id"] in foreign_ids:
+            fyi_urls.extend(urls)
+            continue
         if urls:
             latest_pr_comment_id = max(latest_pr_comment_id, c["id"])
             pr_times.append(t)
             pr_urls.extend(urls)
     if not pr_times:
+        # Foreign handoffs may still carry queue-rejection repair instructions,
+        # but cannot create a duplicate-publication hold.
+        _comment_rejections(conn, task_id, fyi_urls)
         return None
     if _pr_comments_predate_first_run(conn, task_id, max(pr_times)):
         # Not held, but a queue-rejected PR in the handoff still gets its repair note,
