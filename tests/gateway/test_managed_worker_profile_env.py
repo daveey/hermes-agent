@@ -10,8 +10,7 @@ def test_secondary_worker_env_drops_launch_terminal_policy_and_env_settings(tmp_
     env a standalone ``hermes -p X`` gateway would build — X's HERMES_HOME and X's ``.env`` over a
     base without the launch profile's ``TERMINAL_*`` policy or launch-only ``.env`` settings."""
     from gateway.session_managed_worker import _worker_env
-    # Own the terminal inputs: worker shells can carry derived flags (e.g. image pinning)
-    # that are not launch-profile config or dotenv residue.
+    # Own the terminal inputs independently of the invoking worker shell.
     for key in list(os.environ):
         if key.upper().startswith('TERMINAL_'):
             monkeypatch.delenv(key)
@@ -24,6 +23,9 @@ def test_secondary_worker_env_drops_launch_terminal_policy_and_env_settings(tmp_
     monkeypatch.setenv('HERMES_MODEL', 'launch-model')
     monkeypatch.setenv('TERMINAL_ENV', 'docker')
     monkeypatch.setenv('TERMINAL_CWD', str(root))
+    # These launch-bridge settings are derived outside TERMINAL_CONFIG_ENV_MAP.
+    monkeypatch.setenv('TERMINAL_DOCKER_IMAGE_PINNED', '1')
+    monkeypatch.setenv('TERMINAL_HOME_MODE', 'profile')
     set_multiplex_active(True)
     try:
         env = _worker_env(SimpleNamespace(profile_id=str(beta)))
@@ -33,6 +35,24 @@ def test_secondary_worker_env_drops_launch_terminal_policy_and_env_settings(tmp_
     assert env['BETA_ONLY_TOKEN'] == 'beta-secret'
     assert not {k for k in env if k.startswith('TERMINAL_')}, env
     assert 'HERMES_MODEL' not in env
+
+
+def test_derived_terminal_policy_preserves_launch_and_managed_values(tmp_path, monkeypatch):
+    from hermes_cli import env_loader
+    from tools.environments.local import strip_launch_profile_env
+
+    root = tmp_path / '.hermes'
+    root.mkdir()
+    beta = root / 'profiles' / 'beta'
+    beta.mkdir(parents=True)
+    monkeypatch.setenv('HERMES_HOME', str(root))
+    values = {'TERMINAL_DOCKER_IMAGE_PINNED': '1', 'TERMINAL_HOME_MODE': 'profile'}
+    monkeypatch.setattr(env_loader, 'managed_dotenv_keys', lambda: set())
+    assert strip_launch_profile_env(values.copy(), root) == values
+    assert strip_launch_profile_env(values.copy(), beta) == {}
+    assert strip_launch_profile_env({k.lower(): v for k, v in values.items()}, beta) == {}
+    monkeypatch.setattr(env_loader, 'managed_dotenv_keys', lambda: set(values))
+    assert strip_launch_profile_env(values.copy(), beta) == values
 
 
 def test_launch_scrub_runs_before_the_turn_context_is_injected(tmp_path, monkeypatch):
