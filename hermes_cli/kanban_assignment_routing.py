@@ -71,7 +71,8 @@ def _supervisor(task):
         try:
             # Unconstrained scratch validation intentionally skips profile IO;
             # routing still needs an existing configured profile, never a label.
-            if not (Path(resolve_profile_env(name)) / 'config.yaml').is_file():
+            from hermes_cli.config_backend import config_exists
+            if not config_exists(Path(resolve_profile_env(name)) / 'config.yaml'):
                 continue
             required = validate_assignment(name, requires=[*(task.requires or []), 'kanban'],
                                            workspace_kind=task.workspace_kind,

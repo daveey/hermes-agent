@@ -202,5 +202,5 @@ def test_worker_bound_to_an_explicit_config_never_reads_the_profile_file(profile
     with patch("builtins.open", spy):
         assert global_context_file_paths(profile.home) == [other]
     assert not any(p.endswith("config.yaml") for p in opened)
-    monkeypatch.setattr(policy, "worker_config_snapshot", lambda: {})
+    monkeypatch.setattr(policy, "worker_config_snapshot", dict)
     assert global_context_file_paths(profile.home) == []

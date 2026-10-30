@@ -81,11 +81,11 @@ def declaration_required() -> bool:
     except Exception:  # health: allow BLE001 S110 -- a policy flag read never breaks create; default is off
         pass
     try:
+        from hermes_cli.config_backend import config_exists, read_config_doc_readonly
         from hermes_cli.kanban_db import kanban_home
-        from utils import load_yaml_file_readonly
         path = kanban_home() / "config.yaml"
-        if path.is_file():
-            return _flag(load_yaml_file_readonly(path))
+        if config_exists(path):
+            return _flag(read_config_doc_readonly(path))
     except Exception:  # health: allow BLE001 S110 -- an unreadable board config means the default (off)
         pass
     return False
@@ -113,11 +113,11 @@ def queue_assignees() -> frozenset[str]:
     except Exception:  # health: allow BLE001 S110 -- a policy read never breaks create; default is none
         pass
     try:
+        from hermes_cli.config_backend import config_exists, read_config_doc_readonly
         from hermes_cli.kanban_db import kanban_home
-        from utils import load_yaml_file_readonly
         path = kanban_home() / "config.yaml"
-        if path.is_file():
-            _add(load_yaml_file_readonly(path))
+        if config_exists(path):
+            _add(read_config_doc_readonly(path))
     except Exception:  # health: allow BLE001 S110 -- an unreadable board config declares none
         pass
     return frozenset(names)
@@ -289,17 +289,17 @@ def _profile_capabilities(assignee: str, required: list[str] | None = None) -> s
     """Capabilities ``assignee``'s policy grants. ``required`` (validate_assignment's list) only
     lets the toolset lookup skip plugin discovery when a recorded one already grants it."""
     from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
+    from hermes_cli.config_backend import read_config_doc_readonly
     from hermes_cli.config_effective import load_user_config_effective
     from hermes_cli.profiles import resolve_profile_env
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from tools.terminal_scope import build_profile_terminal_scope, reset_terminal_scope, set_terminal_scope
-    from utils import load_yaml_file_readonly
 
     home = Path(resolve_profile_env(assignee))
     config_path = home / "config.yaml"
     # Missing files and malformed roots are otherwise treated as default policy by the
     # shared loader. That is fine for startup, but cannot establish assignment authority.
-    _check_policy_shape(load_yaml_file_readonly(config_path))
+    _check_policy_shape(read_config_doc_readonly(config_path))
     with ExitStack() as stack:
         stack.callback(reset_hermes_home_override, set_hermes_home_override(str(home)))
         stack.callback(reset_secret_scope, set_secret_scope(build_profile_secret_scope(home)))

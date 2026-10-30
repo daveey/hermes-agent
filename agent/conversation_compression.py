@@ -34,7 +34,7 @@ from agent.context_engine import automatic_compaction_status_message, sanitize_m
 from agent.conversation_compression_codex import _compress_context_via_codex_app_server
 from agent.conversation_compression_deadline import (
     DEFAULT_CONTEXT_TIMEOUT_SECONDS,
-    DEFAULT_CONTEXT_TOTAL_CEILING_SECONDS,  # noqa: F401 - re-exported for callers of the old location
+    DEFAULT_CONTEXT_TOTAL_CEILING_SECONDS,
     resolve_context_compression_timeouts,
 )
 from agent.conversation_compression_telemetry import (

@@ -261,9 +261,9 @@ def sync_config() -> Mapping[str, Any]:
     sync as off and drop the board's capture triggers under the gateway."""
     try:
         from hermes_cli import kanban_db
-        from utils import load_yaml_file_readonly
+        from hermes_cli.config_backend import config_exists, read_config_doc_readonly
         path = kanban_db.kanban_home() / "config.yaml"
-        kanban = ((load_yaml_file_readonly(path) if path.exists() else None) or {}).get("kanban") or {}
+        kanban = ((read_config_doc_readonly(path) if config_exists(path) else None) or {}).get("kanban") or {}
     except Exception as exc:  # health: allow BLE001 -- an unreadable config reads as sync off; connect() must not break
         _log.warning("kanban sync: cannot read config (%s: %s); sync stays off", type(exc).__name__, exc)
         return {}

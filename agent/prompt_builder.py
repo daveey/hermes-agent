@@ -1758,10 +1758,10 @@ def global_context_file_paths(home_override: Path | None = None) -> list[Path]:
         # A worker bound to an explicit config (ignore_user_config) never reads the profile's file.
         cfg = worker_config_snapshot()
         if cfg is None:
-            from utils import load_yaml_file_readonly
+            from hermes_cli.config_backend import config_exists, read_config_doc_readonly
             home = Path(home_override) if home_override is not None else get_hermes_home()
             cfg_path = home / "config.yaml"
-            cfg = load_yaml_file_readonly(cfg_path) if cfg_path.is_file() else {}
+            cfg = read_config_doc_readonly(cfg_path) if config_exists(cfg_path) else {}
         raw = ((cfg or {}).get("agent") or {}).get("global_context_files") if isinstance(cfg, dict) else None
     except Exception as e:
         logger.debug("Could not read agent.global_context_files: %s", e)

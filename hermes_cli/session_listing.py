@@ -130,8 +130,9 @@ def strip_inherited_sidebar_policy(config_path: Path, profile_name: str, root_ho
     it: otherwise the copied ``interactive_sources`` / ``automated_sources`` would count as the new
     profile's own explicit choice and override the "unlisted profiles start automated" default.
     Returns the dotted keys removed (``[]`` when nothing applies)."""
+    from hermes_cli.config_backend import config_exists
     sidebar_profiles = _sessions_source_list(root_home, "sidebar_profiles")
-    if not sidebar_profiles or profile_name.lower() in sidebar_profiles or not config_path.is_file():
+    if not sidebar_profiles or profile_name.lower() in sidebar_profiles or not config_exists(config_path):
         return []
     from hermes_cli.config import atomic_config_replace, read_user_config_raw
     raw = read_user_config_raw(config_path)

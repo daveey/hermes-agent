@@ -114,16 +114,14 @@ def _lease_live(entry):
 
 
 def _notifications_enabled(home):
-    from utils import fast_safe_load
-    path = Path(home) / "config.yaml"
+    # Through the config backend (check_config_yaml_readers); the parse is version-cached. [daveey]
+    from hermes_cli.config_backend import read_config_doc_readonly
     try:
-        with path.open() as stream:
-            raw = stream.read(262145)
+        cfg = read_config_doc_readonly(Path(home) / "config.yaml")
     except FileNotFoundError:
         return True
-    if len(raw) > 262144:
-        return False
-    cfg = fast_safe_load(raw) or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
     value = (cfg.get("display") or {}).get("background_process_notifications")
     return value is not False and str(value or "").strip().lower() != "off"
 
