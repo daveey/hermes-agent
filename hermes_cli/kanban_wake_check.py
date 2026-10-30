@@ -410,7 +410,14 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
         from hermes_cli import kanban_db_connect as kbc
         conn = kbc.connect(Path(db_path))
         try:
-            apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation, diagnostics=diag)
+            answered = None
+            if rc == 1 and not output_error(out):
+                # [daveey] The probe says "not yet" but the hermes-hub request this park names is answered:
+                # the probe cannot see the reply (t_01a17f81686694ec, 38 h). wake_probe_stale wakes it once.
+                from hermes_cli.kanban_comment_origin import answered_request
+                answered = answered_request(conn, task_id, cmd)
+            apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation, diagnostics=diag,
+                         answered=answered)
         finally:
             conn.close()
         return rc
@@ -421,7 +428,7 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
 
 def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out: str,
                  *, generation: str, now: Optional[int] = None,
-                 diagnostics: Optional[dict] = None) -> Optional[str]:
+                 diagnostics: Optional[dict] = None, answered: Optional[dict] = None) -> Optional[str]:
     """Record one probe result; wake the card on success or a broken probe. Returns the event
     kind appended (``condition_met`` / ``wake_check_broken``) or None. A result for a probe
     that is no longer the card's (re-parked, unblocked) is dropped."""
@@ -439,6 +446,15 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
         if rc == 0:
             return _wake(conn, task_id, CONDITION_MET_EVENT, {
                 "wake_check": cmd, "output": tail, **({"diagnostics": diagnostics} if diagnostics else {})})
+        if rc == 1 and not output_error(out) and answered:
+            from hermes_cli.kanban_comment_origin import WAKE_PROBE_STALE_EVENT, stale_note
+            note = stale_note(answered, cmd)
+            woke = _wake(conn, task_id, WAKE_PROBE_STALE_EVENT, {
+                "wake_check": cmd, "output": tail, "request": answered["request"], "owner": answered["owner"],
+                "note": note})
+            if woke:
+                kb.add_comment(conn, task_id, "kanban-dispatcher", note)
+            return woke
         if rc == 1 and not output_error(out):
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
@@ -582,14 +598,19 @@ def _render_wake_context(conn: sqlite3.Connection, task_id: str) -> str:
     from hermes_cli.kanban_continuation import SCHEDULED_ENTRY_EVENTS
 
     lines: list[str] = []
-    kinds = (*SCHEDULED_ENTRY_EVENTS, CONDITION_MET_EVENT, BROKEN_EVENT)
+    from hermes_cli.kanban_comment_origin import WAKE_PROBE_STALE_EVENT
+
+    kinds = (*SCHEDULED_ENTRY_EVENTS, CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT)
     marks = ",".join("?" for _ in kinds)
     row = conn.execute(
         f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
         "ORDER BY id DESC LIMIT 1", (task_id, *kinds)).fetchone()
-    if row is not None and row[0] in (CONDITION_MET_EVENT, BROKEN_EVENT):
+    if row is not None and row[0] in (CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT):
         payload = kb._json_dict(row[1])
-        if row[0] == CONDITION_MET_EVENT:
+        if row[0] == WAKE_PROBE_STALE_EVENT:
+            lines.append("## Woken because the awaited reply arrived but the wake check missed it")
+            lines.append(f"{payload.get('note')} Last output:")
+        elif row[0] == CONDITION_MET_EVENT:
             lines.append("## Woken by wake check (condition met)")
             lines.append(f"The park's wake_check `{payload.get('wake_check')}` exited 0, so this card "
                          "woke before its deadline. Its output:")

@@ -631,6 +631,7 @@ class PluginLoaderMixin:
             self._dispose_registrations(owned)
             self._forget_registrations(owned)
             loaded.error = _load_error_text(exc)
+            loaded.load_timed_out = isinstance(exc, PluginLoadTimeout)
             # register() may have subscribed before raising; a failed plugin must leave no callable reachable
             # from later event dispatch.
             self._remove_plugin_subscriptions(plugin_key)

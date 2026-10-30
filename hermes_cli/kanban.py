@@ -655,6 +655,11 @@ def _cmd_wait_check(args: argparse.Namespace) -> int:
     return kanban_wait_check.run(args)
 
 
+def _cmd_wait_comment(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_comment_origin
+    return kanban_comment_origin.run_wait_comment(args)
+
+
 def _cmd_capabilities(args: argparse.Namespace) -> int:
     from hermes_cli import kanban_capability_registry
     return kanban_capability_registry.run_cli(args)
@@ -1011,7 +1016,11 @@ def _cmd_comment(args: argparse.Namespace) -> int:
             body = body[: max(0, args.max_len - len(suffix))].rstrip() + suffix
     author = args.author or _profile_author()
     with kbc.connect_closing() as conn:
-        kb.add_comment(conn, args.task_id, author, body)
+        try:
+            kb.add_comment(conn, args.task_id, author, body,
+                           origin_gateway=getattr(args, "origin_gateway", None))
+        except ValueError as exc:
+            return _err(f"kanban comment: {exc}", 2)
         live = kb.live_run_id(conn, args.task_id)
     print(f"Comment added to {args.task_id}")
     own_run = os.environ.get("HERMES_KANBAN_TASK") == args.task_id
@@ -1866,6 +1875,7 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
 _HANDLERS = {
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show, "wait-check": _cmd_wait_check,
+    "wait-comment": _cmd_wait_comment,
     "capabilities": _cmd_capabilities,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
     "reclaim": _cmd_reclaim, "move": _cmd_move, "reassign": _cmd_reassign,

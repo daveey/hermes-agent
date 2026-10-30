@@ -474,6 +474,9 @@ def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Op
             wake_check: Optional[str] = None, clock_only: bool = False, op: str = "schedule",
             wake_in: Optional[int] = None) -> dict:
     """The ``awaiting`` record for a park, or ``AwaitingError``. Read-only."""
+    # [daveey] A probe that matches comment authors misses relayed replies (hub:gw:<gw>): author_probe.
+    from hermes_cli.kanban_comment_origin import check_park
+    check_park(conn, task_id, wake_check)
     declared = normalize(awaiting)
     if declared is None:
         return _infer(conn, task_id, reason=reason, wake_check=wake_check, clock_only=clock_only,

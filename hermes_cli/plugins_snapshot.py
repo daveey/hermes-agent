@@ -189,6 +189,116 @@ def record(stamp: Optional[str], home: Optional[Path] = None) -> None:
         logger.debug("plugin discovery snapshot write failed", exc_info=True)
 
 
+# --- Hook presence -------------------------------------------------------------------------------
+# [daveey] ``plugins.has_hook`` gates observer hooks (kanban ``on_kanban_task_updated`` after every
+# assign) and, in a process that never discovered, used to import every plugin first: 38-57 s in a
+# cold background-QoS helper on a loaded Mac. Every discovery now records the hook names its plugins
+# handle, stamped with the same pre-sweep :func:`fingerprint`, in a file of its own (so its writers
+# never invalidate the toolset record above). :func:`load_hooks` serves the set only while the
+# fingerprint matches; a missing, corrupt, stale or incomplete record returns None and the caller
+# discovers exactly as before. The set over-approximates: an over-reported hook only costs the
+# discovery the caller's invoke runs anyway, while an under-reported one would drop an observer, so:
+#
+# * a sweep in which any plugin's load timed out (its register() never finished) does not vouch for
+#   the set; it only adds to a complete record with the same stamp, never writes one of its own;
+# * hooks a manifest declares (``provides_hooks``) count even when the plugin did not register them;
+# * records with the same stamp are unioned, so processes that load the same inputs differently
+#   (another surface, a config-owned shell hook) can only grow the set.
+#
+# Contract for plugins: whether register() subscribes a hook must depend only on fingerprinted
+# inputs (plugin files, config.yaml, .env, the env flags above, installed packages); a hook gated on
+# anything else (another env var, argv, the surface, a data file) must be listed in the manifest's
+# ``provides_hooks``. A register() that raises (other than a timeout) is recorded as contributing
+# only its declared hooks: a plugin that always fails would otherwise prevent any record.
+
+HOOKS_VERSION = 1
+
+
+def _hooks_path(home: Path) -> Path:
+    return home / "cache" / "plugin_hooks.json"
+
+
+def discovered_hooks(manager) -> Optional[set[str]]:
+    """Hook names ``manager``'s sweep handles (registered or declared); None when a plugin's load
+    timed out, since what it would have registered is unknown."""
+    plugins = list(dict(getattr(manager, "_plugins", {}) or {}).values())
+    if any(getattr(p, "load_timed_out", False) for p in plugins):
+        return None
+    names = {name for name, callbacks in dict(getattr(manager, "_hooks", {}) or {}).items() if callbacks}
+    for plugin in plugins:
+        declared = getattr(getattr(plugin, "manifest", None), "provides_hooks", None) or ()
+        if isinstance(declared, (list, tuple)):
+            names.update(h for h in declared if isinstance(h, str))
+    return names
+
+
+def _read_hooks_blob(home: Path) -> Optional[dict]:
+    try:
+        blob = json.loads(_hooks_path(home).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(blob, dict) or blob.get("version") != HOOKS_VERSION:
+        return None
+    stamp, hooks = blob.get("fingerprint"), blob.get("hooks")
+    if not isinstance(stamp, str) or not isinstance(hooks, list) or not all(isinstance(h, str) for h in hooks):
+        return None
+    return blob
+
+
+def record_hooks(stamp: Optional[str], manager, home: Optional[Path] = None) -> None:
+    """Persist ``manager``'s hook set stamped with the pre-sweep ``stamp`` (best-effort; see above)."""
+    if stamp is None:
+        return
+    try:
+        from utils import atomic_json_write
+
+        home = Path(home) if home is not None else get_hermes_home()
+        names = discovered_hooks(manager)
+        prior = _read_hooks_blob(home)
+        prior_hooks = set(prior["hooks"]) if prior is not None and prior["fingerprint"] == stamp else None
+        if names is None:
+            if prior_hooks is None:
+                return  # incomplete, and no complete record with these inputs to add to
+            names = prior_hooks | {n for n, cbs in dict(getattr(manager, "_hooks", {}) or {}).items() if cbs}
+        elif prior_hooks is not None:
+            names |= prior_hooks
+        if prior_hooks == names:
+            return  # nothing new; spare the write
+        blob = {"version": HOOKS_VERSION, "fingerprint": stamp, "hooks": sorted(names)}
+        atomic_json_write(_hooks_path(home), blob, indent=None, mode=0o600)  # type: ignore[arg-type]
+    except Exception:
+        logger.debug("plugin hook record write failed", exc_info=True)
+
+
+def load_hooks(home: Optional[Path] = None) -> Optional[frozenset[str]]:
+    """The recorded hook set for ``home`` while its discovery inputs are unchanged; None otherwise."""
+    try:
+        home = Path(home) if home is not None else get_hermes_home()
+        blob = _read_hooks_blob(home)
+        if blob is None or fingerprint(home) != blob["fingerprint"]:
+            return None
+        return frozenset(blob["hooks"])
+    except Exception:
+        logger.debug("plugin hook record read failed", exc_info=True)
+        return None
+
+
+def served_hooks(manager) -> Optional[frozenset[str]]:
+    """What ``plugins.has_hook`` answers from for an undiscovered ``manager``: its home's recorded
+    hook set, or None when discovery must decide (already discovered, discovery suppressed, a
+    background sweep in flight to join instead, or no usable record)."""
+    from hermes_cli import plugins as _plugins
+    from hermes_cli.plugins_discovery import plugin_discovery_suppressed
+
+    if getattr(manager, "_discovered", True) or plugin_discovery_suppressed():
+        return None
+    t = _plugins._background_discovery_thread
+    if t is not None and t.is_alive():
+        return None
+    home = getattr(manager, "home_path", None)
+    return load_hooks(Path(home)) if home is not None else None
+
+
 def load(home: Optional[Path] = None) -> Optional[Snapshot]:
     """The last recorded discovery for ``home`` when its inputs are unchanged and it showed no
     built-in collision; None otherwise (missing, corrupt, older format, stale, or colliding)."""

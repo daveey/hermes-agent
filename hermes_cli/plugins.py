@@ -60,6 +60,7 @@ from hermes_cli.plugins_dispatch import (
 from hermes_cli.plugins_capability_ctx import PluginCapabilityCtxMixin
 from hermes_cli.plugins_ledger import PluginLedgerMixin, PluginRegistration
 from hermes_cli.plugins_registrars import _SCOPED_PROVIDER_REGISTRARS, make_scoped_provider_registrar
+from hermes_cli import plugins_snapshot
 from hermes_cli.plugins_state import (
     PluginState, _locked_plugin_state, _nested_plugin_mapping, _nested_plugin_value,
     _plugin_relative_segments, _plugin_settings_entry, save_plugin_setting,
@@ -228,6 +229,7 @@ class LoadedPlugin:
     error: Optional[str] = None
     # Bundled platform recorded as a not-yet-imported loader (see _register_deferred_platform).
     deferred: bool = False
+    load_timed_out: bool = False  # [daveey] load overran its deadline (plugins_snapshot.discovered_hooks)
 
 
 class PluginContext(PluginCapabilityCtxMixin):
@@ -1229,6 +1231,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
                 logger.info("HERMES_SAFE_MODE=1 — plugin discovery skipped")
                 self._discovered = True
                 return
+            hook_stamp = plugins_snapshot.fingerprint(self.home_path)  # [daveey] pre-sweep, for record_hooks
             # Flag set up front as a re-entrancy guard (register() can trigger discovery again) but
             # reset on failure so a failed scan is NOT cached as "discovered with an empty registry"
             # — callers swallow the exception and would be stranded on the early return above.
@@ -1254,6 +1257,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             except BaseException:
                 self._discovered = False
                 raise
+            plugins_snapshot.record_hooks(hook_stamp, self, self.home_path)  # best-effort, never raises
         # Outside the lock: a listener (the gateway's re-wire) may read the registry from another thread.
         self._notify_plugin_loaded(loaded_before)
 
@@ -1738,21 +1742,9 @@ def _join_background_discovery(timeout: float = 30.0) -> None:
     t.join(timeout=timeout)
 
 
-def _plugin_toolset_keys_cache_path() -> Path:
-    return get_hermes_home() / "cache" / "plugin_toolset_keys.json"
-
-
-def _persist_plugin_toolset_keys() -> None:
-    """Persist discovered plugin toolset keys + portable MCP names (best-effort), unstamped: a
-    reader that needs the inputs to be unchanged (plugins_snapshot.load) ignores this record."""
-    from hermes_cli import plugins_snapshot
-    plugins_snapshot.record(None)
-
-
 def _nowait_plugin_set(cache_field: str, live: Callable[[PluginManager], set[str]]) -> set[str]:
     """Shared body of the ``*_nowait`` probes: an active recorded snapshot (plugins_snapshot.serving),
     else live registry, else last launch's cache, else block."""
-    from hermes_cli import plugins_snapshot
     snapshot = plugins_snapshot.active()
     if snapshot is not None:
         return set(snapshot.toolset_keys if cache_field == "toolset_keys" else snapshot.portable_mcp)
@@ -1763,7 +1755,7 @@ def _nowait_plugin_set(cache_field: str, live: Callable[[PluginManager], set[str
         return live(manager)
     if in_flight:
         with suppress(Exception):
-            blob = json.loads(_plugin_toolset_keys_cache_path().read_text(encoding="utf-8-sig"))
+            blob = json.loads(plugins_snapshot._cache_path(get_hermes_home()).read_text(encoding="utf-8-sig"))
             values = blob.get(cache_field) if isinstance(blob, dict) else None
             if isinstance(values, list) and all(isinstance(v, str) for v in values):
                 return set(values)
@@ -1851,8 +1843,12 @@ def has_middleware(kind: str) -> bool:
 def has_hook(hook_name: str) -> bool:
     """True when a loaded plugin handles a hook (lazy-discovers first, like :func:`has_middleware`).
 
-    Lazy-discovers first — same gate-before-invoke rationale as :func:`has_middleware` (tracking #64178).
+    [daveey] Undiscovered, it answers from the last same-input sweep's record (plugins_snapshot.served_hooks).
     """
+    manager = get_plugin_manager()
+    recorded = plugins_snapshot.served_hooks(manager)
+    if recorded is not None:
+        return hook_name in recorded or manager.has_hook(hook_name)  # True discovers in the invoke
     return _delivery_manager().has_hook(hook_name)
 
 
