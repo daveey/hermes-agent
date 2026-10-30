@@ -29,6 +29,7 @@ from gateway.restart import (
 )
 from gateway.run_common import _UNSET
 from gateway.run_runtime import interrupt_side_agents, managed_turn_count, stop_managed_turns
+from gateway.run_shutdown_notice_gate import GatewayShutdownNoticeGateMixin
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
 from gateway import exit_deadline
 from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_watchdog_delay
@@ -185,7 +186,7 @@ def _effective_watchdog_leash(runner: object) -> float:
     return effective_stop_watchdog_delay(runner, resolve_shutdown_watchdog_delay(effective_stop_drain_timeout(runner)))
 
 
-class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin):
+class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, GatewayShutdownNoticeGateMixin):
     """Stop/drain/restart, scale-to-zero and active-work accounting methods for GatewayRunner."""
 
     @dataclasses.dataclass
@@ -900,23 +901,6 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin):
                 marked.append(_sk)
         return marked
 
-    def _restart_notification_allowed(self, platform: Platform) -> bool:
-        """False when the platform config sets ``gateway_restart_notification=false``."""
-        platform_cfg = self.config.platforms.get(platform)
-        return platform_cfg is None or bool(platform_cfg.gateway_restart_notification)
-
-    def _notice_allowed(self, platform: Platform, what: str, platform_cfg=None) -> bool:
-        """``_restart_notification_allowed`` with the INFO suppression line for shutdown notices.
-        ``platform_cfg`` is a SERVED profile's own platform entry; ``self.config`` is the launch profile's."""
-        allowed = (self._restart_notification_allowed(platform) if platform_cfg is None
-                   else bool(platform_cfg.gateway_restart_notification))
-        if allowed:
-            return True
-        logger.info(
-            "Shutdown notification suppressed for %s: %s has gateway_restart_notification=false", what, platform.value,
-        )
-        return False
-
     async def _notify_interrupted_cron_jobs(self, job_ids) -> int:
         """Tell the owner of each just-interrupted cron job that its run died; returns notices sent.
 
@@ -1120,7 +1104,8 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin):
             adapter = (self.adapters if profile is None else profile_adapters.get(profile) or {}).get(platform)
             if adapter is None:
                 continue
-            if not self._notice_allowed(platform, "home channel", platform_cfg):
+            config_home = self._profile_config_home(profile)
+            if not self._notice_allowed(platform, "home channel", platform_cfg, profile_home=config_home):
                 continue
             dedup_key = _delivery_target_key(platform.value, home.chat_id, home.thread_id, profile=profile)
             if dedup_key in notified:

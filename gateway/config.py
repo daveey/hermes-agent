@@ -851,6 +851,38 @@ def load_gateway_config() -> GatewayConfig:
     return config
 
 
+def restart_notification_enabled_on_disk(home: Optional[Path], platform: "Platform", cached: bool) -> bool:
+    """``gateway_restart_notification`` for *platform* as ``home``'s config.yaml says NOW. [daveey]
+
+    The running gateway keeps the config it loaded at boot (served profiles' in ``_profile_configs``),
+    so an opt-out written after boot used to take effect only after one more "restarting" notice
+    went out on the next shutdown. The shutdown pass re-reads the flag here so the edit counts at
+    once. Falls back to *cached* when there is no home, no readable file, or no value for the
+    platform; a top-level ``<platform>:`` block wins over ``platforms.<platform>``, as in the loader.
+    """
+    if home is None:
+        return cached
+    from gateway import config_loader
+
+    try:
+        yaml_cfg = config_loader.read_yaml_layers(Path(home))
+        gateway_section = yaml_cfg.get("gateway")
+        merged = config_loader.merge_platform_sections(yaml_cfg, gateway_section, {})
+    except Exception:  # deliberate boundary: a malformed/unreadable config keeps the boot-time value
+        logger.debug("restart-notification re-read failed for %s", home, exc_info=True)
+        return cached
+    name = getattr(platform, "value", platform)
+    for block in (yaml_cfg.get(name), merged.get(name)):
+        if not isinstance(block, dict):
+            continue
+        extra = block.get("extra")
+        extra = extra if isinstance(extra, dict) else {}
+        value = block.get("gateway_restart_notification", extra.get("gateway_restart_notification"))
+        if value is not None:
+            return _coerce_bool(value, cached)
+    return cached
+
+
 def _validate_gateway_config(config: GatewayConfig) -> None:
     """Validate and sanitize a loaded GatewayConfig in place (after all sources are merged)."""
     try:

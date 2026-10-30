@@ -239,3 +239,75 @@ async def test_a_served_profiles_reconnect_replays_the_owed_notice(multiplex_run
     coder.send.assert_awaited_once()
     assert coder.send.await_args.args[:2] == ("coder-home", ONLINE_NOTICE)
     assert not marker.exists(), "the owed target was reached on reconnect: the obligation is discharged"
+
+
+@pytest.mark.asyncio
+async def test_served_profile_opt_out_gets_neither_shutdown_nor_online_notice(multiplex_runner, tmp_path, monkeypatch):
+    """A served profile with ``gateway_restart_notification: false`` hears nothing on a restart.
+
+    Both halves of the restart pair: the "Hermes is restarting" home-channel broadcast on the way
+    down and the "Gateway online" notice on the way up. The launch profile (no opt-out) is the
+    control and still gets both. [daveey]
+    """
+    runner, _marker = multiplex_runner
+    monkeypatch.setattr("gateway.drain_control.drain_notification_suppressed", lambda: False)
+    runner._profile_configs["coder"].platforms[Platform.TELEGRAM].gateway_restart_notification = False
+    runner._served_profile_homes = {"coder": tmp_path / "coder-home-dir"}
+    runner._restart_requested = True
+    runner._restart_command_source = None
+    runner._snapshot_running_agents = list
+    launch, coder = _adapter(), _adapter()
+    runner.adapters[Platform.DISCORD] = launch
+    runner._profile_adapters["coder"][Platform.TELEGRAM] = coder
+
+    await runner._notify_active_sessions_of_shutdown()
+    await runner._replay_pending_planned_restart_notification()
+
+    coder.send.assert_not_awaited()
+    assert launch.send.await_count == 2, "control: the launch profile gets the shutdown AND the online notice"
+
+
+@pytest.mark.asyncio
+async def test_opt_out_written_after_boot_silences_the_next_shutdown(multiplex_runner, tmp_path, monkeypatch):
+    """The boot-time config said notify; the profile's config.yaml was edited to opt out since.
+
+    The next shutdown must already honour the file, not the stale in-memory copy: otherwise an
+    opt-out added to a live gateway still posts one more "restarting" notice. [daveey]
+    """
+    runner, _marker = multiplex_runner
+    monkeypatch.setattr("gateway.drain_control.drain_notification_suppressed", lambda: False)
+    coder_home = tmp_path / "coder-home-dir"
+    coder_home.mkdir()
+    (coder_home / "config.yaml").write_text(
+        "platforms:\n  telegram:\n    enabled: true\n    gateway_restart_notification: false\n", encoding="utf-8")
+    runner._served_profile_homes = {"coder": coder_home}
+    runner._restart_requested = True
+    runner._restart_command_source = None
+    runner._snapshot_running_agents = list
+    launch, coder = _adapter(), _adapter()
+    runner.adapters[Platform.DISCORD] = launch
+    runner._profile_adapters["coder"][Platform.TELEGRAM] = coder
+    assert runner._profile_configs["coder"].platforms[Platform.TELEGRAM].gateway_restart_notification
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    coder.send.assert_not_awaited()
+    launch.send.assert_awaited_once(), "control: a profile with no opt-out on disk is still notified"
+
+
+@pytest.mark.parametrize("text, cached, expected", [
+    ("platforms:\n  slack:\n    gateway_restart_notification: false\n", True, False),
+    ("slack:\n  gateway_restart_notification: 'false'\n", True, False),
+    ("platforms:\n  slack:\n    extra:\n      gateway_restart_notification: false\n", True, False),
+    ("platforms:\n  slack:\n    gateway_restart_notification: true\n", False, True),
+    ("platforms:\n  slack:\n    enabled: true\n", True, True),
+    ("platforms:\n  slack:\n    enabled: true\n", False, False),
+    (": : not yaml [\n", False, False),
+    (None, True, True),
+])
+def test_restart_notification_enabled_on_disk(tmp_path, text, cached, expected):
+    from gateway.config import restart_notification_enabled_on_disk
+    if text is not None:
+        (tmp_path / "config.yaml").write_text(text, encoding="utf-8")
+    assert restart_notification_enabled_on_disk(tmp_path, Platform.SLACK, cached) is expected
+    assert restart_notification_enabled_on_disk(None, Platform.SLACK, cached) is cached
