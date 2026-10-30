@@ -732,6 +732,9 @@ class CLIAgentSetupMixin:
                 provider_data_collection=self._provider_data_collection,
                 openrouter_min_coding_score=self._openrouter_min_coding_score,
                 session_id=self.session_id, platform="cli", session_db=self._session_db,
+                # A single-query process exits right after its turn, so a post-turn review fork
+                # could never finish; it would only cost a full-history request (cron precedent).
+                skip_background_review=single_query_mode,
                 clarify_callback=clarify_callback, connection_callback=connection_callback,
                 reasoning_callback=self._current_reasoning_callback(),
                 fallback_model=self._fallback_model, thinking_callback=self._on_thinking,
