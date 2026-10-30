@@ -610,6 +610,7 @@ async def _reset_and_retarget_local(authority, runner, session_key, old_session_
     exhausted turn ran) still name the pre-reset transcript and are retargeted at the fresh one,
     in the same ordered worker step as the rotation; left stale, the drain refuses them
     (``admission_conflict``) and the Bot Chat's FIFO pauses for good, across restarts."""
+    import asyncio
     from gateway.session_runtime_workers import tracked_write
     from hermes_state_runtime import retarget_local_automation
     live = authority.sessions[owner.session_id]
@@ -631,8 +632,18 @@ async def _reset_and_retarget_local(authority, runner, session_key, old_session_
             authority._publish_pending(owner)
         return entry
 
-    async with live.mutation_lock:
-        return await tracked_write(authority, rotate_and_retarget, settle, ordered=True)
+    # The lock fences the drain's claim until the commit lands, so it must outlive a cancelled
+    # caller: ``tracked_write`` is shielded and keeps writing, and a lock released by the
+    # cancellation would let a claim start the queued head before the retarget/cancel reached it.
+    await live.mutation_lock.acquire()
+    write = asyncio.ensure_future(tracked_write(authority, rotate_and_retarget, settle, ordered=True))
+
+    def committed(done):
+        live.mutation_lock.release()
+        if not done.cancelled():
+            done.exception()  # a cancelled caller no longer observes it
+    write.add_done_callback(committed)
+    return await asyncio.shield(write)
 
 
 async def reset_and_rehome_messages(runner, session_key, old_session_id):
