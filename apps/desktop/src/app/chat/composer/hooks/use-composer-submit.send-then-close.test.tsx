@@ -241,7 +241,14 @@ scenario('a body resumed after its case timed out never touches the next case', 
   await expect(stale(() => openPage(async () => true))).rejects.toThrow('this case already ended')
   await expect(stale(() => saveDraft('stale words'))).rejects.toThrow('this case already ended')
   await expect(stale(() => closeWindow())).rejects.toThrow('this case already ended')
-  const storage = () => JSON.stringify({ ...window.localStorage })
+
+  const storage = () =>
+    JSON.stringify(
+      Array.from({ length: window.localStorage.length }, (_, index) => window.localStorage.key(index) ?? '').map(
+        key => [key, window.localStorage.getItem(key)]
+      )
+    )
+
   const storageBefore = storage()
   await expect(
     stale(() => lateSnapshot([{ admission_id: 'adm-1', input_id: 'stale', status: 'queued', text: 'stale words' }]))
