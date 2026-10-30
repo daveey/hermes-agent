@@ -157,8 +157,12 @@ def _deferred_class_runtime(frozen, model, provider, key, launch_url):
     target = model or (frozen.get('model') or {}).get('default')
     if key or launch_url or not is_class_selector(target):
         return None
-    requested = provider or 'auto'
-    return {'provider': requested, 'requested_provider': requested, 'model': target, 'class_deferred': True}
+    # A class selector never runs on a concrete provider: a frozen ``model.provider`` (a policy frozen
+    # before class launches froze ``auto``, or a profile route under a ``class:`` model override) would
+    # reach AIAgent and fail with "Class selectors require provider auto".
+    del provider
+    return {'provider': 'auto', 'requested_provider': 'auto', 'model': target, 'class_deferred': True,
+            'api_key': None, 'base_url': None, 'api_mode': None}
 
 
 def route_runtime(policy, frozen, model, key, *, fallback=True):
