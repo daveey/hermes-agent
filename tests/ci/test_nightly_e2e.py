@@ -1,4 +1,5 @@
 """scripts/ci/nightly_e2e.py: dispatch the nightly e2e and report it on the board (card per failing-test set)."""
+
 from __future__ import annotations
 
 import sys
@@ -16,9 +17,15 @@ SHA = "a" * 40
 
 
 def _log(*ids: str) -> str:
-    lines = ["2026-10-30T10:09:00.1Z   ║ FAILED " + i + " - live copy" for i in ids]  # must be ignored
-    lines += [f"2026-10-30T10:20:07.5Z === Summary: 116 files, 780 tests passed, {len(ids)} failed ==="]
-    lines += ["2026-10-30T10:20:07.6Z FAILED " + i + " - AssertionError: x" for i in ids]
+    lines = [
+        "2026-10-30T10:09:00.1Z   ║ FAILED " + i + " - live copy" for i in ids
+    ]  # must be ignored
+    lines += [
+        f"2026-10-30T10:20:07.5Z === Summary: 116 files, 780 tests passed, {len(ids)} failed ==="
+    ]
+    lines += [
+        "2026-10-30T10:20:07.6Z FAILED " + i + " - AssertionError: x" for i in ids
+    ]
     return "\n".join(lines)
 
 
@@ -41,9 +48,16 @@ class FakeGitHub:
     def make_run(self, status="queued", conclusion=None, job_conclusion=None, log=""):
         rid = self.next_id
         self.next_id += 1
-        self.runs[rid] = {"id": rid, "html_url": f"https://gh/run/{rid}", "status": status, "conclusion": conclusion,
-                          "jobs": [{"id": rid * 10, "name": "resolve", "conclusion": "success"},
-                                   {"id": rid * 10 + 1, "name": "e2e / e2e", "conclusion": job_conclusion}]}
+        self.runs[rid] = {
+            "id": rid,
+            "html_url": f"https://gh/run/{rid}",
+            "status": status,
+            "conclusion": conclusion,
+            "jobs": [
+                {"id": rid * 10, "name": "resolve", "conclusion": "success"},
+                {"id": rid * 10 + 1, "name": "e2e / e2e", "conclusion": job_conclusion},
+            ],
+        }
         self.logs[rid * 10 + 1] = log
         return rid
 
@@ -73,7 +87,13 @@ class FakeBoard:
 
     def create(self, title, body, key, *, distinct_from=None, distinct_reason=None):
         cid = f"t_{len(self.cards) + 1}"
-        self.cards[cid] = {"status": "ready", "title": title, "body": body, "comments": [], "key": key}
+        self.cards[cid] = {
+            "status": "ready",
+            "title": title,
+            "body": body,
+            "comments": [],
+            "key": key,
+        }
         self.created.append((cid, key))
         return cid
 
@@ -99,14 +119,22 @@ def test_failing_tests_are_sorted_unique_and_skip_live_copies():
 
 
 def test_failure_key_depends_only_on_the_set():
-    assert ne.failure_key(["b", "a"]) == ne.failure_key(["a", "b"]) != ne.failure_key(["a"])
+    assert (
+        ne.failure_key(["b", "a"])
+        == ne.failure_key(["a", "b"])
+        != ne.failure_key(["a"])
+    )
 
 
 def test_dispatch_records_the_new_run(env):
     gh, _board, state = env
     entry = _dispatch(gh, state)
     assert gh.dispatched == [("main", SHA)]
-    assert entry["run_id"] == 100 and entry["url"] == "https://gh/run/100" and entry["sha"] == SHA
+    assert (
+        entry["run_id"] == 100
+        and entry["url"] == "https://gh/run/100"
+        and entry["sha"] == SHA
+    )
     assert state["pending"] == [entry]
 
 
@@ -133,7 +161,9 @@ def test_failed_run_files_one_card_with_run_and_tests(env):
     assert len(board.cards) == 1
     card = next(iter(board.cards.values()))
     assert "https://gh/run/100" in card["body"]
-    assert card["body"].index("tests/e2e/a.py::t") < card["body"].index("tests/e2e/z.py::t")
+    assert card["body"].index("tests/e2e/a.py::t") < card["body"].index(
+        "tests/e2e/z.py::t"
+    )
     assert "29953696677a" in card["body"]
 
 
@@ -179,7 +209,10 @@ def test_green_comments_on_open_failure_card_only(env):
     _dispatch(gh, state, now=T0 + 20)
     gh.finish(101, "success")
     ne.report(gh, board, state, now=T0 + 30)
-    assert "GREEN" in board.cards["t_1"]["comments"][0] and "https://gh/run/101" in board.cards["t_1"]["comments"][0]
+    assert (
+        "GREEN" in board.cards["t_1"]["comments"][0]
+        and "https://gh/run/101" in board.cards["t_1"]["comments"][0]
+    )
     board.cards["t_1"]["status"] = "done"
     _dispatch(gh, state, now=T0 + 40)
     gh.finish(102, "success")
@@ -214,7 +247,10 @@ def test_dispatch_that_never_creates_a_run_is_reported(env):
     ne.report(gh, board, state, now=T0 + 600)
     assert len(state["pending"]) == 1  # still within the lookup window
     ne.report(gh, board, state, now=T0 + 31 * 60)
-    assert state["pending"] == [] and "no workflow run was created" in board.cards["t_1"]["title"]
+    assert (
+        state["pending"] == []
+        and "no workflow run was created" in board.cards["t_1"]["title"]
+    )
 
 
 def test_cancelled_run_is_a_did_not_run_card(env):
@@ -222,7 +258,9 @@ def test_cancelled_run_is_a_did_not_run_card(env):
     _dispatch(gh, state)
     gh.finish(100, "cancelled")
     ne.report(gh, board, state, now=T0 + 600)
-    assert len(board.cards) == 1 and "did not run" in board.cards["t_1"]["title"].lower()
+    assert (
+        len(board.cards) == 1 and "did not run" in board.cards["t_1"]["title"].lower()
+    )
 
 
 def test_failure_outside_pytest_still_files_a_card(env):
@@ -261,11 +299,17 @@ def _wf(name):
 def test_nightly_workflow_is_dispatch_only_and_calls_the_gates_e2e_job():
     wf = _wf("nightly-e2e.yml")
     triggers = wf.get("on", wf.get(True))
-    assert set(triggers) == {"workflow_dispatch"}, "no schedule/push: the hub cron dispatches it"
+    assert set(triggers) == {"workflow_dispatch"}, (
+        "no schedule/push: the hub cron dispatches it"
+    )
     assert triggers["workflow_dispatch"]["inputs"]["ref"]["default"] == "main"
     call = wf["jobs"]["e2e"]
     assert call["uses"] == "./.github/workflows/tests.yml"
-    assert call["with"]["python"] is False and call["with"]["e2e"] is True and call["with"]["e2e_upgrade"] is False
+    assert (
+        call["with"]["python"] is False
+        and call["with"]["e2e"] is True
+        and call["with"]["e2e_upgrade"] is False
+    )
     # the same definition the gate runs, not a copy
     gate = _wf("upstream-sync.yml")["jobs"]["full-suite"]
     assert gate["uses"] == call["uses"] and gate["with"]["e2e"] is True
