@@ -211,6 +211,13 @@ const saveDraft = (text: string) => {
   window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': text }))
 }
 
+// A resume snapshot that arrives after the page offered its draft (this page's pending store).
+async function lateSnapshot(pending: unknown) {
+  const { reconcilePendingSubmissions } = await import('@/store/pending-submissions')
+  stillRunning()
+  act(() => reconcilePendingSubmissions('stored-B', pending))
+}
+
 // Enter on `text` (with a url attachment), then the window closes before prompt.submit: the id it sent.
 async function sendThenClose(text: string): Promise<string | undefined> {
   saveDraft(text)
@@ -225,7 +232,7 @@ async function sendThenClose(text: string): Promise<string | undefined> {
 
 // The guard itself: a body whose case already timed out resumes into the next case and stops
 // before it renders a page, unmounts one, or writes the drafts the next case reads.
-it('a body resumed after its case timed out never touches the next case', async () => {
+scenario('a body resumed after its case timed out never touches the next case', async () => {
   saveDraft('next case draft')
   const drafts = window.localStorage.getItem('hermes:composer-drafts:v3')
   const ended = AbortSignal.abort(new Error('timed out'))
@@ -234,6 +241,12 @@ it('a body resumed after its case timed out never touches the next case', async 
   await expect(stale(() => openPage(async () => true))).rejects.toThrow('this case already ended')
   await expect(stale(() => saveDraft('stale words'))).rejects.toThrow('this case already ended')
   await expect(stale(() => closeWindow())).rejects.toThrow('this case already ended')
+  const storage = () => JSON.stringify({ ...window.localStorage })
+  const storageBefore = storage()
+  await expect(
+    stale(() => lateSnapshot([{ admission_id: 'adm-1', input_id: 'stale', status: 'queued', text: 'stale words' }]))
+  ).rejects.toThrow('this case already ended')
+  expect(storage()).toBe(storageBefore)
   expect(screen.queryByTestId('editor')).toBeNull()
   expect(window.localStorage.getItem('hermes:composer-drafts:v3')).toBe(drafts)
 
@@ -317,8 +330,7 @@ scenario('a send the owner admitted before the window closed is never offered ag
 
     if ('late' in held) {
       expect(handles.editor()).toBe(text)
-      const { reconcilePendingSubmissions } = await import('@/store/pending-submissions')
-      act(() => reconcilePendingSubmissions('stored-B', held.late))
+      await lateSnapshot(held.late)
     }
 
     // Shown once (in the chat), never also back in the composer.
@@ -431,12 +443,7 @@ scenario('recovery never discards a file the user attached while it was running'
   await openPage(vi.fn<ChatBarProps['onSubmit']>(async () => true))
   await waitFor(() => expect(handles.editor()).toBe('late words'))
   act(() => handles.attach('new-file.txt'))
-  const { reconcilePendingSubmissions } = await import('@/store/pending-submissions')
-  act(() =>
-    reconcilePendingSubmissions('stored-B', [
-      { admission_id: 'adm-1', input_id: lateId, status: 'queued', text: 'late words' }
-    ])
-  )
+  await lateSnapshot([{ admission_id: 'adm-1', input_id: lateId, status: 'queued', text: 'late words' }])
   await act(async () => {})
   expect(await attached()).toEqual(['new-file.txt'])
   expect(handles.editor()).toBe('late words')
