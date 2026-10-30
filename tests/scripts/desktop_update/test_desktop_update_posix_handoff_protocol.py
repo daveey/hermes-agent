@@ -424,11 +424,19 @@ def test_line_two_stays_young_through_the_r6_release_wait(tmp_path):
         while "keeping the update marker" not in (log.read_text(encoding="utf-8-sig") if log.exists() else ""):
             assert time.monotonic() < deadline and script.poll() is None, log.read_text(encoding="utf-8-sig")
             time.sleep(0.05)
-        for _ in range(4):  # several refresh intervals, all inside the wait
-            time.sleep(1.5)
+        # The invariant is "line 2 keeps being rewritten, far below the 20 min delete threshold",
+        # not "never older than N refresh ticks": a CPU-starved runner can miss a tick or two, so
+        # bound the age generously (30 s vs the 1200 s threshold) and wait for progress with a
+        # deadline instead of sleeping a fixed time.
+        seen = {int(marker.read_text(encoding="utf-8-sig").splitlines()[1])}
+        deadline = time.monotonic() + 60
+        while len(seen) < 4:  # several distinct refreshes, all inside the wait
+            assert time.monotonic() < deadline, sorted(seen)
+            time.sleep(0.2)
             pid, started = marker.read_text(encoding="utf-8-sig").splitlines()[:2]
             assert script.poll() is None and pid == _custodian(home)
-            assert time.time() - int(started) <= 3.5, started
+            assert time.time() - int(started) <= 30, started
+            seen.add(int(started))
     finally:
         completion.touch()
         if script.poll() is None:
