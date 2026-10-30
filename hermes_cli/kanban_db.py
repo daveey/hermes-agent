@@ -2432,25 +2432,6 @@ def goal_run_status(
     return task.status
 
 
-def heartbeat_claim(
-    conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
-) -> bool:
-    """Extend a running claim; True if we still own it."""
-    expires = int(time.time()) + _resolve_claim_ttl_seconds(ttl_seconds)
-    lock = claimer or _claimer_id()
-    expires = _sync.heartbeat_expiry(conn, task_id, expires)  # bounded by the lease on synced boards
-    with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET claim_expires = ? "
-            "WHERE id = ? AND status = 'running' AND claim_lock = ?", (expires, task_id, lock),
-        )
-        if cur.rowcount != 1:
-            return False
-        _extend_run_claim(conn, task_id, expires)
-        return True
-
-
 def _extend_run_claim(conn: sqlite3.Connection, task_id: str, expires: int) -> Optional[int]:
     """Mirror a task claim extension onto its active run row; returns that run id."""
     run_id = _current_run_id(conn, task_id)
@@ -4538,6 +4519,7 @@ from hermes_cli.kanban_db_workspace import (
     _scratch_workspace,
 )
 from hermes_cli.kanban_db_stale_claims import _extend_live_stale_claim
+from hermes_cli.kanban_db_heartbeat import heartbeat_claim
 from hermes_cli.kanban_db_dispatch import (
     DEFAULT_FAILURE_LIMIT,
     DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,

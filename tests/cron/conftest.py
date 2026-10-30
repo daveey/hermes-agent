@@ -138,3 +138,21 @@ def cron_owner(monkeypatch):
     run = owner_execution_runner()
     monkeypatch.setattr("cron.scheduler_authority.run_canonical_job", run)
     return run
+@pytest.fixture(autouse=True)
+def _drain_shared_metrics_worker(monkeypatch):
+    """Let the fire-and-forget shared-metrics worker finish before the test is torn down.
+
+    Cron runs hand ``hermes.cron.run`` recordings to a background thread
+    (``shared_metrics_gateway._submit``) that reads config and compiles regexes. Left running it
+    races the next phase: pytest's per-phase ``catch_warnings`` setup compiles filter regexes, and
+    ``re._compile`` evicting its cache while another thread inserts raises "dictionary changed
+    size during iteration" (a teardown ERROR, then "previous item was not torn down properly" on
+    the next test). Requesting ``monkeypatch`` makes this fixture tear down first, so the worker
+    drains while the test's patched home/env are still in place. The worker is FIFO, so the drain
+    marker returns once every earlier recording is done; the timeout only bounds a hung worker.
+    """
+    yield
+    from hermes_cli.observability import shared_metrics_gateway as smg
+
+    if smg._executor is not None:
+        smg.drain(timeout=120.0)

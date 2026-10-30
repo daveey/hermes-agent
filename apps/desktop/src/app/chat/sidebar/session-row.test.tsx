@@ -906,6 +906,31 @@ describe('SidebarSessionRow stored outcome', () => {
     expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
   })
 
+  // [daveey] A Kanban close-out turn the backend woke in a chat this window never opened: no stream state, only
+  // the row's `turn_live` stamp. The decision must yield to it (working, no red stripe), and paint red again after.
+  it('a backend-reported running turn (turn_live) overrides a decision outcome; without it the decision is red', () => {
+    const decision = { kind: 'decision', items: [{ id: 'us_1', question: 'Merge PR #12?' }] }
+
+    const live = renderRow(
+      makeSession({ message_count: 4, outcome: decision, title: 'Close-out', turn_live: true } as Partial<
+        SessionInfo
+      > & { title: string })
+    )
+
+    expect(live.container.querySelector('[data-sidebar-stripe]')).toBeNull()
+    expect(live.container.querySelector('[data-working="true"]')).not.toBeNull()
+    live.unmount()
+
+    const settled = renderRow(
+      makeSession({ message_count: 4, outcome: decision, title: 'Close-out' } as Partial<SessionInfo> & {
+        title: string
+      })
+    )
+
+    expect(settled.container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stuck')
+    expect(settled.container.querySelector('[data-working="true"]')).toBeNull()
+  })
+
   it('reads the park from row.muted', () => {
     const { container } = renderRow(
       makeSession({ message_count: 4, muted: true, title: 'Parked' } as Partial<SessionInfo> & { title: string })

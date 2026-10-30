@@ -99,6 +99,9 @@ def add_notify_sub(
     caught up (``last_event_id`` =
     ``MAX(task_events.id)``) so the notifier never replays history at boot.
     """
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if platform in ("hub", "tui") and is_placeholder_session(chat_id):
+        return
     valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
     # api_server is stateless: the adapter has no send(), the wake self-post IS
     # the delivery. A plain 'notify' default would leave those subs with no

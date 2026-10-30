@@ -558,7 +558,8 @@ all = [
 # Build and test tooling never ships in runtime payloads.
 dev = [
   "debugpy==1.8.22",
-  "pytest==9.1.1",
+  # 9.1+ races logger registration during capture setup (pytest-dev/pytest#15237). [daveey]
+  "pytest==9.0.3",
   "pytest-asyncio==1.4.0",
   "mcp==2.3.0",
   "httpx2==2.15.1",

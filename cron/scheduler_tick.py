@@ -39,8 +39,64 @@ def tick(verbose=True, adapters=None, loop=None, sync=True, *, can_dispatch=None
     with retirement.work() as admitted:
         if not admitted:
             return 0
-        return _tick_admitted(verbose, adapters, loop, sync, can_dispatch=can_dispatch,
-                              headless=headless)
+        with update_admission() as update_admitted:
+            if not update_admitted:
+                return 0  # due jobs stay due: nothing advanced, they fire on the first tick after the hold
+            return _tick_admitted(verbose, adapters, loop, sync, can_dispatch=can_dispatch,
+                                  headless=headless)
+
+
+_update_hold_logged: set = set()
+
+
+@contextlib.contextmanager
+def update_admission():
+    """The cross-process core-update admission reservation for one tick's scan/advance/submit. [daveey]
+
+    hermes-sync's drain window sets the admission hold, waits for reservations to reach zero, then
+    publishes the update intent (the gateway's SIGUSR1). Cron used only the process fence, so a job due
+    inside the window started under the hold, held the gateway's restart open past the window, and the
+    update gave up while the restart still went ahead on the old code (David-MBP 2026-10-29 15:29-15:47,
+    t_01a189db034f3b2b). While the hold stands this yields False and the tick dispatches nothing; runs
+    registered inside it take their own reservation (``scheduler._take_run_reservation``) before this
+    one is released. A reservation error (lock busy past 50 ms, unwritable root) fails open: cron must
+    not stop because the fence file is unavailable, and the drainer reads such a root as busy anyway.
+    """
+    try:
+        from hermes_cli.admission_fence import reserve, SUPPORTED
+    except ImportError:
+        yield True
+        return
+    if not SUPPORTED:
+        yield True
+        return
+    from cron import scheduler as _sched
+    from hermes_constants import get_default_hermes_root
+
+    pending = None
+    root = None
+    try:
+        root = get_default_hermes_root(home=_sched._get_hermes_home())
+        pending = reserve(root)
+    except (OSError, TimeoutError) as exc:
+        logger.debug("Cron update admission unavailable (%s); dispatching", exc)
+        yield True
+        return
+    key = str(root)
+    if pending is None:
+        if key not in _update_hold_logged:
+            _update_hold_logged.add(key)
+            logger.info("cron dispatch held for a core update (admission hold under %s); running jobs continue, "
+                        "due jobs fire after the hold", root)
+        yield False
+        return
+    if key in _update_hold_logged:
+        _update_hold_logged.discard(key)
+        logger.info("cron dispatch resumed: core update admission hold released under %s", root)
+    try:
+        yield True
+    finally:
+        pending.close()
 
 
 def _acquire_tick_lock_or_degrade(_sched):

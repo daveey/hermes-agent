@@ -5,6 +5,7 @@ load/save paths (state.db gateway_routing primary, sessions.json legacy mirror).
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import json
 import threading
@@ -21,6 +22,9 @@ logger = logging.getLogger("gateway.session")
 # "No SessionDB pinned" sentinel: lets ``_db`` distinguish "resolve from the active scope" from a
 # deliberate ``store._db = None`` (JSONL fallback).
 _DB_UNPINNED = object()
+
+# Routing writers that take ``patience_s`` (shortened while the gateway is exiting).
+_PATIENCE_WRITERS = frozenset({"save_gateway_routing_entry", "replace_gateway_routing_entries"})
 
 # Self-documenting sentinel written first into sessions.json; "_" keys are skipped on load.
 _SESSIONS_JSON_README = (
@@ -277,9 +281,18 @@ class SessionPersistenceMixin:
             return str(self.sessions_dir)
 
     def _routing_db_method(self, name: str):
-        """Bound ``_routing_db.<name>`` if the handle exists and has it, else None."""
+        """Bound ``_routing_db.<name>`` if the handle exists and has it, else None. Once the
+        gateway is exiting, writes use the short drain patience: a save blocked by another
+        process's state.db write lock falls back to sessions.json in seconds instead of eating
+        20s of the supervisor's stop budget per attempt."""
         method = getattr(self._routing_db or None, name, None)
-        return method if callable(method) else None
+        if not callable(method):
+            return None
+        if name in _PATIENCE_WRITERS:
+            from gateway import exit_deadline
+            if exit_deadline.is_exiting():
+                return functools.partial(method, patience_s=exit_deadline.DRAIN_DB_PATIENCE_S)
+        return method
 
     @staticmethod
     def _chat_labels_meta_key(platform, scope_id, chat_id) -> str:

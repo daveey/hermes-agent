@@ -5,8 +5,10 @@
 `hermes-hub`, Docker `docker-ci`, or long-lived observer `hermes-hub-poll` lanes.
 Jobs keep their existing names, conditions, dependencies, steps, permissions,
 timeouts and required-result semantics. In particular, neither heavy tests nor
-the advisory full-tree `ruff + ty diff` moves here. Existing aggregators stay on
-the poll lane; no checks are added to that lane.
+the advisory full-tree `ruff + ty diff` moves here. Completion aggregates and the
+CI timing report use the general `hermes-hub` lane, never the observer-only pool:
+long-running live-comment pollers can await those very jobs and occupy every slot.
+The `!cancelled()` condition still keeps superseded runs from latching their group.
 
 ## Evidence behind admission
 

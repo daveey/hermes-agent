@@ -235,7 +235,7 @@ class SessionGatewayMixin:
         self, session_id: str, *, source: str, user_id: str | None = None, session_key: str | None = None,
         chat_id: str | None = None, chat_type: str | None = None, thread_id: str | None = None, display_name: str | None = None,
         origin_json: str | None = None, include_compression_ancestors: bool = False,
-        transport_profile: str | None = None) -> None:
+        transport_profile: str | None = None, patience_s: float | None = None) -> None:
         """Persist the gateway routing peer for an existing session row. ``display_name`` / ``origin_json``:
         ``None`` leaves the stored value untouched (consumers read routing data from state.db, not
         sessions.json). ``include_compression_ancestors`` keeps a compression lineage on one routing peer
@@ -299,11 +299,14 @@ class SessionGatewayMixin:
                     (session_id, source, source, user_id, session_key, chat_id, chat_type, thread_id, display_name,
                      origin_json, self._own_profile_name(), transport_profile, time.time()),
                 )
-        self._execute_write(_do)
+        self._execute_write(_do, patience_s=patience_s)
 
-    def save_gateway_routing_entry(self, session_key: str, entry_json: str, *, scope: str = "") -> None:
+    def save_gateway_routing_entry(
+        self, session_key: str, entry_json: str, *, scope: str = "", patience_s: Optional[float] = None,
+    ) -> None:
         """Upsert one gateway routing entry (session_key -> SessionEntry JSON); ``scope``
-        namespaces the index per sessions_dir so two stores never share routing state."""
+        namespaces the index per sessions_dir so two stores never share routing state.
+        ``patience_s`` overrides the write-lock patience (short while the gateway exits)."""
         if not session_key or not entry_json:
             return
         from hermes_state_mutation_retirement import ROUTE_RETIRED_SQL, route_retired_params
@@ -314,9 +317,12 @@ class SessionGatewayMixin:
                    entry_json = excluded.entry_json,
                    updated_at = excluded.updated_at""",
             {'scope': scope, 'key': session_key, **route_retired_params(session_key, entry_json, time.time())},
+            patience_s=patience_s,
         )
 
-    def replace_gateway_routing_entries(self, entries: dict[str, str], *, scope: str = "") -> set[str]:
+    def replace_gateway_routing_entries(
+        self, entries: dict[str, str], *, scope: str = "", patience_s: Optional[float] = None,
+    ) -> set[str]:
         """Atomically replace the routing index for *scope* (keys absent from *entries*
         are removed); other scopes untouched. Returns the keys skipped as retired routes, which
         the sessions.json mirror must leave out too."""
@@ -332,7 +338,7 @@ class SessionGatewayMixin:
                     rows)
             kept = {r[0] for r in conn.execute("SELECT session_key FROM gateway_routing WHERE scope = ?", (scope,))}
             return {row['key'] for row in rows} - kept
-        return self._execute_write(_do)
+        return self._execute_write(_do, patience_s=patience_s)
 
     def load_gateway_routing_entries(self, *, scope: str = "") -> dict[str, str]:
         """Load routing entries for *scope* as {session_key: entry_json}."""

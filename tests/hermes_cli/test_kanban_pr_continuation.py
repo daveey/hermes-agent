@@ -8,7 +8,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_dispatch_pr_state as prs
-from tests.hermes_cli.kanban_guard_helpers import worker_ran
+from tests.hermes_cli.kanban_guard_helpers import worker_comment, worker_ran
 from tests.hermes_cli.test_kanban_park_invariants import kanban_home
 
 __all__ = ["kanban_home"]  # register the shared isolated-board fixture
@@ -29,11 +29,11 @@ def test_immediate_checkpoint_with_open_pr_dispatches(monkeypatch, all_assignees
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="finish owned PR", assignee="a")
         kb.claim_task(conn, tid)
-        kb.add_comment(conn, tid, "a", f"Draft work remains: {URL}")
+        worker_comment(conn, tid, "a", f"Draft work remains: {URL}")
         result = kc.continue_task(conn, tid, checkpoint="Continue implementation of existing PR")
         assert result["ok"] and result["status"] == "ready"
         monkeypatch.setattr(time, "time", lambda: now + 1)
-        kb.add_comment(conn, tid, "kanban-dispatcher", f"[respawn-guard] Held on {URL}")
+        worker_comment(conn, tid, "kanban-dispatcher", f"[respawn-guard] Held on {URL}")
         dispatched = kbd.dispatch_once(conn, spawn_fn=lambda task, *a, **k: spawned.append(task.id) or 1)
         assert tid not in dict(dispatched.respawn_guarded)
         assert spawned == [tid]
@@ -46,14 +46,14 @@ def test_guard_notice_cannot_supersede_real_handoff(monkeypatch):
     monkeypatch.setattr(time, "time", lambda: now)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="review fixes", assignee="a")
-        kb.add_comment(conn, tid, "a", f"PR {URL}")
+        worker_comment(conn, tid, "a", f"PR {URL}")
         monkeypatch.setattr(time, "time", lambda: now + 1)
         kb._append_event(conn, tid, "unblocked", {"reason": "finish this PR"})
         monkeypatch.setattr(time, "time", lambda: now + 2)
-        kb.add_comment(conn, tid, "kanban-dispatcher", f"[respawn-guard] Held on {URL}")
+        worker_comment(conn, tid, "kanban-dispatcher", f"[respawn-guard] Held on {URL}")
         assert kbd.check_respawn_guard(conn, tid) is None
         # An actual later work report still forms a new barrier.
-        kb.add_comment(conn, tid, "a", f"Waiting for external owner: {URL}")
+        worker_comment(conn, tid, "a", f"Waiting for external owner: {URL}")
         assert kbd.check_respawn_guard(conn, tid) == "active_pr"
 
 
@@ -71,10 +71,10 @@ def test_checkpoint_orders_only_real_pr_comments(monkeypatch, author, body, expe
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="owned PR", assignee="a")
         kb.claim_task(conn, tid)
-        kb.add_comment(conn, tid, "a", f"Draft {URL}")
+        worker_comment(conn, tid, "a", f"Draft {URL}")
         assert kc.continue_task(conn, tid, checkpoint="finish owned PR")["ok"]
         monkeypatch.setattr(time, "time", lambda: now + delay)
-        kb.add_comment(conn, tid, author, body)
+        worker_comment(conn, tid, author, body)
         assert kbd.check_respawn_guard(conn, tid) == expected
 
 
@@ -85,7 +85,7 @@ def test_invalid_or_legacy_checkpoint_watermark_fails_closed(monkeypatch, waterm
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="legacy checkpoint", assignee="a")
         kb.claim_task(conn, tid)
-        kb.add_comment(conn, tid, "a", f"Draft {URL}")
+        worker_comment(conn, tid, "a", f"Draft {URL}")
         result = kc.continue_task(conn, tid, checkpoint="finish", metadata={"comment_id_at_checkpoint": 999999})
         assert result["ok"]
         row = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='continued'",
@@ -105,7 +105,7 @@ def test_non_immediate_or_superseded_continuation_still_guards(monkeypatch, mode
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="external wait", assignee="a")
         kb.claim_task(conn, tid)
-        kb.add_comment(conn, tid, "a", f"PR {URL}")
+        worker_comment(conn, tid, "a", f"PR {URL}")
         result = kc.continue_task(conn, tid, checkpoint="Existing PR",
                                   resume_after_seconds=60 if mode == "scheduled" else 0)
         assert result["ok"]
@@ -116,7 +116,7 @@ def test_non_immediate_or_superseded_continuation_still_guards(monkeypatch, mode
             kb._end_run(conn, tid, outcome="crashed", status="crashed", summary="worker failed")
         elif mode == "new_pr_report":
             monkeypatch.setattr(time, "time", lambda: now + 1)
-            kb.add_comment(conn, tid, "a", f"External PR remains: {URL}")
+            worker_comment(conn, tid, "a", f"External PR remains: {URL}")
         else:
             conn.execute("UPDATE task_runs SET metadata='{}' WHERE id=?", (result["run_id"],))
         assert kbd.check_respawn_guard(conn, tid) == "active_pr"
@@ -137,5 +137,5 @@ def test_worker_that_opened_pr_then_crashed_is_still_held(monkeypatch):
         tid = kb.create_task(conn, title="impl", assignee="a")
         kb.claim_task(conn, tid)
         monkeypatch.setattr(time, "time", lambda: now + 5)
-        kb.add_comment(conn, tid, "a", f"Opened {URL}")
+        worker_comment(conn, tid, "a", f"Opened {URL}")
         assert kbd.check_respawn_guard(conn, tid) == "active_pr"

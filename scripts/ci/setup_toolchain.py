@@ -9,6 +9,11 @@ import platform
 import re
 import sys
 
+# The cache key hashes pm/** after this bootstrap ran. A .pyc embeds its source's mtime, so
+# bytecode written here made the key differ on every checkout: no job ever hit the PM tools
+# cache, and each one re-uploaded ~114 MB in its post hook (the step that stalled lint jobs).
+sys.dont_write_bytecode = True
+
 # The runner invokes this file before the checkout has been installed.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))

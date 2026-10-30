@@ -565,6 +565,9 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
     session's last completed poll: no commit means no new event to claim. 21 open chats each probing every board
     every 5 s, and opening it writable to re-claim nothing, kept the Desktop backend busy. The signature is taken
     before the poll, so a commit during it is polled again next tick."""
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(session_key):
+        return []
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
     db_path = sig = None
@@ -745,6 +748,7 @@ def _collect_remote_kanban_notifications(session_key: str, claims: list | None) 
         text = _KanbanText(item["text"])
         if item.get("event_key"):
             text._kb_keys = (item["event_key"],)  # type: ignore[attr-defined]  # same identity the sweeper records
+        text._kb_blocked = bool(item.get("blocked_on_human"))  # type: ignore[attr-defined]  # notice guarantee
         texts.append(text)
         if claims is not None:
             claims.append({"remote": item, "texts": [text]})
@@ -912,6 +916,8 @@ def _kb_persist_batch(session: dict, batch: list, diagnostic: bool) -> tuple:
                         "display_text": text, "kanban_event_keys": fresh_keys}
             if diagnostic:
                 metadata["notification_category"] = "diagnostic"
+            if any(getattr(t, "_kb_blocked", False) for t in fresh):
+                metadata["blocked_on_human"] = True  # [daveey] a remote card: the guarantee can't look it up here
             from agent.context_compressor import _DB_PERSISTED_MARKER
             from agent.message_metadata import stamp_message_timestamp, stamp_message_uid
             staged = stamp_message_timestamp({"role": "user", "content": text, "display_kind": "kanban_notice",

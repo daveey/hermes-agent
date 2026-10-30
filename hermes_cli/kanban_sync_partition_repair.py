@@ -9,11 +9,14 @@ from hermes_cli.kanban_db_connect import write_txn
 
 
 def repair_partition_links(live: sqlite3.Connection, replica: sqlite3.Connection, gateway: str) -> list[str]:
-    """Restore replica edges from foreign parents to local children, without echoing them.
+    """Restore replica edges from foreign parents to cards in this file, without echoing them.
 
-    The old partition consumed these changes without applying them. A newer filter
-    cannot recover them by pulling from the advanced cursor. Only primary boards
-    may replay them; local tombstones and unanswered operations retain precedence.
+    The old partition consumed these changes without applying them, and a newer filter cannot recover them by
+    pulling from the advanced cursor. Two later paths lost them the same way: evicting a picked-up foreign parent
+    dropped its edges to our children, and a picked-up copy arrived without its own parent edges (hub 2026-10-29,
+    t_01a189f115bdb5ef promoted 51 times against the Board's parents_not_done). So every edge whose child is in
+    this file is restored, whether the parent is a local copy or absent. Only primary boards may replay them;
+    local tombstones and unanswered operations retain precedence.
     Run after both pulls and before refreshing the foreign-parent status mirror.
     """
     if sync.board_mode(live) != "primary":
@@ -32,14 +35,12 @@ def repair_partition_links(live: sqlite3.Connection, replica: sqlite3.Connection
         held = {(t, u) for t, u in live.execute(
             "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state IN ('pending', 'rejected') "
             "UNION SELECT table_name, row_uid FROM kanban_sync_tombstones")}
-        mine = {r[0] for r in live.execute(
-            "SELECT id FROM tasks WHERE created_on = ? OR created_on IS NULL", (gateway,))}
         present = {r[0] for r in live.execute("SELECT id FROM tasks")}
         applying = sync.sync_state(live)["applying"]
         live.execute("UPDATE kanban_sync_state SET applying = 1")
         for parent, child in edges:
             uid = f"{parent}>{child}"
-            if child not in mine or parent in present:
+            if child not in present:
                 continue
             if any(key in held for key in (("task_links", uid), ("tasks", parent), ("tasks", child))):
                 continue

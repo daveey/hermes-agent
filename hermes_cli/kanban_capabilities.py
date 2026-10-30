@@ -91,6 +91,38 @@ def declaration_required() -> bool:
     return False
 
 
+def queue_assignees() -> frozenset[str]:
+    """Queue-only assignee names declared in ``kanban.queue_assignees``. Never raises. [daveey]
+
+    A queue assignee is a parking name with no Hermes profile on purpose (bb-queue): the
+    dispatcher can never spawn it, and an external gate reassigns the card to a real worker
+    profile, which is validated then. Read from the active profile's config and the board
+    home's config, like :func:`declaration_required`.
+    """
+    names: set[str] = set()
+
+    def _add(cfg) -> None:
+        raw = ((cfg or {}).get("kanban") or {}).get("queue_assignees") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        names.update(n.strip() for n in raw if isinstance(n, str) and n.strip())
+
+    try:
+        from hermes_cli.config import load_config_readonly
+        _add(load_config_readonly())
+    except Exception:  # health: allow BLE001 S110 -- a policy read never breaks create; default is none
+        pass
+    try:
+        from hermes_cli.kanban_db import kanban_home
+        from utils import load_yaml_file_readonly
+        path = kanban_home() / "config.yaml"
+        if path.is_file():
+            _add(load_yaml_file_readonly(path))
+    except Exception:  # health: allow BLE001 S110 -- an unreadable board config declares none
+        pass
+    return frozenset(names)
+
+
 def _skill_frontmatter(name: str) -> dict | None:
     """Frontmatter of skill *name* resolved the way ``skill_view`` resolves it in this home, or None."""
     from agent.skill_utils import normalize_skill_lookup_name
@@ -331,6 +363,9 @@ def validate_assignment(
             required = [n for n in _CAPABILITIES if n in merged] + [n for n in required if n not in _CAPABILITIES]
     if not any(name in _CAPABILITIES for name in required) or assignee is None:
         # Unassigned drafts cannot dispatch; assign_task validates before binding.
+        return required
+    if assignee in queue_assignees():
+        # Declared parking name (kanban.queue_assignees): no profile, never spawned. [daveey]
         return required
     try:
         available = _profile_capabilities(assignee, required)

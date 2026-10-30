@@ -5,6 +5,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli import kanban_db_dispatch_pr_state as prs
+from tests.hermes_cli.kanban_guard_helpers import worker_comment
 
 PR = "https://github.com/example/repo/pull/10"
 
@@ -22,7 +23,7 @@ def parked(conn, *, authenticated=True):
     task = kb.create_task(conn, title="implementation", assignee="dev")
     kb.claim_task(conn, task)
     run = kb.get_task(conn, task).current_run_id
-    kb.add_comment(conn, task, "dev", PR)
+    worker_comment(conn, task, "dev", PR)
     reviews = [kb.create_task(conn, title="review", assignee="reviewer") for _ in range(2)]
     for review in reviews:
         kb.link_tasks(conn, review, task, expected_child_run_id=run)
@@ -73,7 +74,7 @@ def test_dependency_and_comments_do_not_grant_generic_retry(board, mode):
                        verdict="changes_required",
                        pr=PR + "1" if mode == "unrelated" else PR)
     if mode == "new_pr":
-        kb.add_comment(board, task, "dev", PR + "1")
+        worker_comment(board, task, "dev", PR + "1")
     if mode == "noop_assign":
         kb.assign_task(board, task, "dev")
     kb.add_comment(board, task, "reviewer", "changes_required " + PR)
@@ -116,5 +117,5 @@ def test_exact_head_approval_of_unrelated_pr_stays_held(board):
 def test_new_pr_after_exact_head_approval_stays_held(board):
     task, reviews = parked(board)
     finish_reviews(board, reviews, metadata={"verdict": "APPROVE", "head": HEAD})
-    kb.add_comment(board, task, "reviewer", "Opened a new head " + PR + "9")
+    worker_comment(board, task, "dev", "Opened a new head " + PR + "9")
     assert dispatch.check_respawn_guard(board, task) == "active_pr"

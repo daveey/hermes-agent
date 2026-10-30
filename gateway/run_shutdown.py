@@ -30,7 +30,9 @@ from gateway.restart import (
 from gateway.run_common import _UNSET
 from gateway.run_runtime import interrupt_side_agents, managed_turn_count, stop_managed_turns
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
+from gateway import exit_deadline
 from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_watchdog_delay
+from gateway.run_shutdown_restart_wait import RESTART_CANCELLED, GatewayRestartWaitMixin
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -178,13 +180,12 @@ def _delivery_target_key(platform_value: str, chat_id, thread_id, *, profile: Op
 
 
 def _effective_watchdog_leash(runner: object) -> float:
-    """Thread-watchdog leash for the stop in progress: effective drain + grace, clamped under
-    launchd's live ``ExitTimeOut`` minus the dump margin. Lives here (not in gateway.restart)
-    because restart.py cannot import shutdown_watchdog without a cycle."""
+    """Thread-watchdog leash for the stop in progress: drain + grace, clamped under launchd's live
+    ``ExitTimeOut`` minus the dump margin (here: restart.py can't import shutdown_watchdog)."""
     return effective_stop_watchdog_delay(runner, resolve_shutdown_watchdog_delay(effective_stop_drain_timeout(runner)))
 
 
-class GatewayShutdownMixin(GatewaySessionEndMixin):
+class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin):
     """Stop/drain/restart, scale-to-zero and active-work accounting methods for GatewayRunner."""
 
     @dataclasses.dataclass
@@ -1579,48 +1580,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             + self._restart_wait_cron_counts()["awaitable"]
         )
 
-    def _describe_active_work(self) -> list:
-        """One dict per in-flight work unit the restart wait is holding for, so an observer
-        (``hermes update``, ``hermes gateway status``) can name it instead of printing a bare count.
-
-        ``kind`` ∈ ``chat`` (session turn), ``cron`` (job id + external worker pid when the run was
-        handed to a restart-safe scope), ``managed`` / ``api`` / ``deferred`` (count only — those sources expose
-        no identity). Best-effort: a source that can't be read is omitted, never raises.
-        """
-        from gateway.run import _AGENT_PENDING_SENTINEL
-        now = time.time()
-        units: list = []
-        for key, state in list(self._sessions_map().items()):
-            agent = state.turn.agent
-            if agent is None:
-                continue
-            unit: dict = {"kind": "chat", "session": key, "pid": os.getpid()}
-            if state.turn.started_ts:
-                unit["elapsed_s"] = round(now - state.turn.started_ts, 1)
-            if agent is not _AGENT_PENDING_SENTINEL:
-                unit["model"] = getattr(agent, "model", None)
-                summary_fn = getattr(agent, "get_activity_summary", None)
-                if callable(summary_fn):
-                    with suppress(Exception):
-                        summary = summary_fn()
-                        unit["current_tool"] = summary.get("current_tool")
-                        unit["idle_s"] = summary.get("seconds_since_activity")
-            units.append(unit)
-        with suppress(Exception):
-            from cron.scheduler import get_running_job_details, get_wedged_job_ids
-            wedged = get_wedged_job_ids()
-            for job in get_running_job_details():
-                units.append({"kind": "cron", "job_id": job["job_id"], "elapsed_s": job["elapsed_s"],
-                              "pid": job["worker_pid"] or os.getpid(), "external": bool(job["worker_pid"]),
-                              "wedged": job["job_id"] in wedged,
-                              "restart_safe": bool(job.get("restart_safe"))})
-        for kind, count in (("managed", managed_turn_count(self)), ("api", self._active_api_run_count()),
-                            ("deferred", self._active_deferred_agent_worker_count())):
-            units.extend({"kind": kind, "pid": os.getpid()} for _ in range(count))
-        return units
-
-    async def _await_active_work_before_restart(self) -> bool:
+    async def _await_active_work_before_restart(self) -> Any:
         """Wait for in-flight work before ``stop()`` so the requesting turn isn't force-interrupted.
+        ``RESTART_CANCELLED``: the core update behind it gave up (``_update_intent_withdrawn``).
 
         Wedged turns are excluded (restart is their remedy). True when drained to zero, False when the
         cap elapsed or only wedged work remains (caller proceeds to ``stop()``).
@@ -1653,8 +1615,11 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         last_status_at = 0.0
+        intent = getattr(self, "_restart_update_intent", None)
         while self._awaitable_work_count() > 0:
             now = loop.time()
+            if self._update_intent_withdrawn(intent):
+                return RESTART_CANCELLED
             if now >= deadline:
                 logger.warning(
                     "Restart after-turn wait timed out after %.0fs with %d "
@@ -1688,6 +1653,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
     def request_restart(self, *, detached: bool = False, via_service: bool = False) -> bool:
         if self._restart_task_started:
             return False
+        self._restart_update_intent = self._core_update_intent_path()
         self._restart_requested = True
         self._restart_detached = detached
         self._restart_via_service = via_service
@@ -1701,7 +1667,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         self._mark_api_runs_shutdown_requested()
 
         async def _run_restart() -> None:
-            await self._await_active_work_before_restart()
+            if await self._restart_wait_cancelled():
+                self._cancel_restart()
+                return
             # Detached helper only AFTER the after-turn wait, or its drain_timeout+5 deadline fires mid-turn.
             if detached:
                 with _log_suppressed(logging.ERROR, "Failed to launch detached gateway restart helper: %s"):
@@ -2198,17 +2166,16 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
     async def _stop_impl(self) -> None:
         """Run every ``_stop_*`` phase under the thread-based shutdown watchdog."""
         from gateway.run import GatewayRunner
-        # Thread-based watchdog (asyncio timeouts cannot recover a frozen loop): dumps stacks and
-        # os._exit past drain+grace so the service manager revives us. Skipped under pytest.
-        # Arm a plain OS thread at the start of stop(); if teardown never finishes within drain+grace it
-        # dumps faulthandler stacks and os._exit so KeepAlive/systemd can revive. Skip under pytest so
-        # stop()-driving unit tests don't get a delayed hard-exit in the worker. See #66892.
+        # Thread watchdog (asyncio timeouts can't recover a frozen loop): stack dump + os._exit past drain+grace,
+        # skipped under pytest (#66892). It covers stop() only; gateway.exit_deadline covers up to os._exit.
         _watchdog_done = threading.Event()
         self._shutdown_watchdog_done = _watchdog_done
         # Shutdown-path doubles may lack the deferred-worker counter.
         ctx = GatewayShutdownMixin._StopContext(
             deferred_count=getattr(self, "_active_deferred_agent_worker_count", lambda: 0)
         )
+        exit_deadline.arm_for_stop(
+            self, _effective_watchdog_leash(self), lambda: GatewayRunner._shutdown_watchdog_snapshot(self, ctx))
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             arm_shutdown_watchdog(
                 _effective_watchdog_leash(self), done_event=_watchdog_done,
@@ -2234,6 +2201,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             await GatewayRunner._stop_persist_exit_state(self, ctx)
         finally:
             _watchdog_done.set()
+            exit_deadline.mark_phase("stop_done")
 
     async def stop(
         self, *, restart: bool = False, detached_restart: bool = False, service_restart: bool = False

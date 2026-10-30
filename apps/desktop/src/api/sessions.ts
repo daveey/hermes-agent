@@ -228,6 +228,8 @@ export interface SidebarSessionsRequest {
   cronLimit: number
   messagingLimit: number
   messagingExclude: string[]
+  /** [daveey] Ask this connection instead of the window's (the primary's own recents while the window is remote). */
+  connectionId?: string
 }
 
 // The batched /sidebar endpoint shipped later than the per-slice route, so a
@@ -333,7 +335,7 @@ export async function listSidebarSessions(req: SidebarSessionsRequest): Promise<
 
   try {
     result = await hermesApi<SidebarSessionsResponse>({
-      ...profileScoped(),
+      ...(req.connectionId ? { connectionId: req.connectionId } : profileScoped()),
       path: `/api/profiles/sessions/sidebar?${params.toString()}`,
       timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
     })
@@ -353,7 +355,8 @@ export async function listSidebarSessions(req: SidebarSessionsRequest): Promise<
   return {
     recents: {
       ...result.recents,
-      sessions: stampActiveConnectionOwner(result.recents?.sessions ?? []),
+      // [daveey] An explicit connection's rows are tagged by the caller, never with the window's connection.
+      sessions: req.connectionId ? (result.recents?.sessions ?? []) : stampActiveConnectionOwner(result.recents?.sessions ?? []),
       ...(result.errors?.length ? { errors: result.errors } : {})
     },
     cron: {

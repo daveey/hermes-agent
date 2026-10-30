@@ -60,17 +60,52 @@ _UNBLOCK = re.compile(r"\bun-?block", re.IGNORECASE)
 _ARCHIVE = re.compile(r"\barchiv", re.IGNORECASE)
 
 
+RELAY_ASK_CODE = "agent_relay_ask"
+# "from/in your own Hermes (Desktop|CLI) chat", "ask/tell your (Hermes) chat/agent/session to ...": the ask only
+# makes David carry a message to an agent. Kept narrow: "asks the vendor's agent" or "sign in" never match.
+_RELAY = re.compile(
+    r"\b(?:from|in|via|using)\s+your\s+own\s+(?:hermes\s+)?(?:desktop\s+|cli\s+)?(?:or\s+cli\s+)?"
+    r"(?:chat|session|agent)\b"
+    r"|\b(?:ask|tell|have|get)\s+your\s+(?:own\s+)?(?:hermes\s+)?(?:desktop\s+|cli\s+)?"
+    r"(?:chat|session|agent)\b",
+    re.IGNORECASE)
+
+
+def agent_relay_ask_error(action: str) -> Optional[str]:
+    """Typed refusal for an ask that only relays a message from David to an agent (self-heal agent-c03353a3cf).
+
+    Hub t_01a188c8ddf998ac asked David to "ask for the broker Gemini secret repair from your own Hermes chat on
+    the AWS-authorized Mac"; that chat did it itself in 10 minutes. Such a block is a routing gap shown to David
+    as his task, so the worker must route it to an agent instead.
+    """
+    if not _RELAY.search(action):
+        return None
+    return (f"{RELAY_ASK_CODE}: human_request.action asks David to pass a message to an agent or chat "
+            "(\"from your own Hermes chat\", \"ask your agent to ...\"). Agents can do that without him: "
+            "(1) declare the capability the other gateway holds with kanban_block(needs=['aws:<account>:<scope>' "
+            "| 'ssh:<host>' | 'host:<gateway>']) so an owner card opens there; or (2) kanban_comment the exact "
+            "request and send it to the owning chat with cross_session (action='send'), or kanban_create the "
+            "owner card on that gateway (placement='<gateway>') and park on it. If no gateway holds the "
+            "capability, the gap is the capability registry: fix the probe config (kanban.capabilities.probes) "
+            "on the host that has the access. Keep human_request for what only David can do: approve, pay, "
+            "sign in, a physical step.")
+
+
 def user_ask_lint_error(human_request) -> Optional[str]:
     """Typed refusal when a block on David does not say, in its ask line, what unblock and archive mean.
 
     ``human_request.action`` is the one line every surface shows David verbatim (card view, For-you queue, chat
     close-out and ask-relay notices). An action like "Pick A or B" or "the safety change" left him reading
     "blocked" with no idea what to do or what his click would do (coach pattern blocked-card-missing-user-ask).
+    An action that only asks him to relay a message to an agent is refused too (:func:`agent_relay_ask_error`).
     Only agent entry points (kanban_block / kanban_create tools) call this; internal trackers are not linted.
     """
     if not isinstance(human_request, dict):
         return None
     action = " ".join(str(human_request.get("action") or "").split())
+    relay = agent_relay_ask_error(action)
+    if relay:
+        return relay
     missing = [label for label, rx in (("what unblocking the card does", _UNBLOCK),
                                        ("what archiving it does", _ARCHIVE)) if not rx.search(action)]
     if not missing:
@@ -86,7 +121,8 @@ def user_ask_lint_error(human_request) -> Optional[str]:
 def ask_lint_check(human_request) -> tuple:
     """``_check`` args for the tool entry points: ``(ok, message, rejection)``."""
     err = user_ask_lint_error(human_request)
-    return err is None, err or "", ASK_LINT_CODE
+    code = RELAY_ASK_CODE if err and err.startswith(RELAY_ASK_CODE) else ASK_LINT_CODE
+    return err is None, err or "", code
 
 
 def creation_lint_error(title, initial_status, human_request, *, triage=False) -> Optional[str]:

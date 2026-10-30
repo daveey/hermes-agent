@@ -8,16 +8,16 @@ from __future__ import annotations
 from typing import Any
 
 
-def _moved_evidence(tasks: dict[tuple, dict[str, Any]], heartbeats: dict[tuple[str, str, str], float],
-                    now: float, fresh_s: float) -> dict[str, Any]:
+def _moved_evidence(tasks: dict[tuple, dict[str, Any]], heartbeats: dict[tuple[str, str, str], tuple[float, float]],
+                    now: float) -> dict[str, Any]:
     """What a fresh replica proves about where each card lives (``_retire_moved``): the gateways publishing a
     profile-qualified record per ``(board, id, created_at)``, and the owner scopes whose collector read cleanly within
-    ``fresh_s`` (``SCOPE_HEARTBEAT_FRESH_S``). [daveey]"""
+    that owner's window (``heartbeats`` values are ``(observed_at, window)``, ``kanban_scope_heartbeat.scope_heartbeats``). [daveey]"""
     published: dict[tuple[str, str, Any], set[str]] = {}
     for (gw, owner_profile, board, tid), t in tasks.items():
         if owner_profile is not None and t.get('created_at') is not None:
             published.setdefault((board, tid, t.get('created_at')), set()).add(gw)
-    live = {scope for scope, beat in heartbeats.items() if 0 <= now - beat <= fresh_s}
+    live = {scope for scope, (beat, window) in heartbeats.items() if 0 <= now - beat <= window}
     return {'published': {k: frozenset(v) for k, v in published.items()}, 'live_scopes': frozenset(live)}
 
 

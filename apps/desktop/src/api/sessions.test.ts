@@ -289,6 +289,27 @@ describe('listSidebarSessions remote ownership', () => {
 
     expect(result.recents.sessions[0]).toMatchObject({ connection_id: 'prometheus', id: 'remote-session' })
   })
+
+  it("an explicit connection is asked directly and its rows never wear the window's connection", async () => {
+    hermesApi.mockResolvedValue({
+      cron: { sessions: [] },
+      messaging: { sessions: [] },
+      recents: { sessions: [{ id: 'own-session', profile: 'default', source: 'desktop', title: 'Own chat' }] }
+    } as never)
+
+    const result = await listSidebarSessions({
+      connectionId: 'local',
+      recentsProfile: 'default',
+      recentsLimit: 40,
+      recentsExclude: [],
+      cronLimit: 20,
+      messagingLimit: 40,
+      messagingExclude: []
+    })
+
+    expect(hermesApi.mock.calls[0][0]).toMatchObject({ connectionId: 'local' })
+    expect(result.recents.sessions[0].connection_id).toBeUndefined()
+  })
 })
 
 describe('listSidebarSessions storage health', () => {

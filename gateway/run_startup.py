@@ -1016,10 +1016,20 @@ class GatewayStartupMixin:
         an upgrade may encode the old default, so SIGKILL hits mid-drain). Never raises."""
         with _log_suppressed(logging.DEBUG, "check_systemd_timing_alignment failed: %s"):
             from gateway.shutdown_forensics import check_systemd_timing_alignment
+            from gateway.shutdown_watchdog import resolve_shutdown_watchdog_delay
             _alignment = check_systemd_timing_alignment(
                 self._restart_drain_timeout,
                 getattr(self, "_cron_drain_timeout", DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT),
+                stop_leash_s=resolve_shutdown_watchdog_delay(self._restart_drain_timeout),
             )
+            if _alignment is not None and _alignment.get("tail_mismatch"):
+                logger.warning(
+                    "systemd unit %s has TimeoutStopSec=%.0fs but a stop may need %.0fs (stop() leash "
+                    "plus the post-stop tail). The exit deadline will cut the tail short before SIGKILL; "
+                    "run `hermes gateway install --force` or shorten agent.restart_drain_timeout.",
+                    _alignment.get("unit", "(unknown)"), _alignment["timeout_stop_sec"],
+                    _alignment["stop_envelope_s"],
+                )
             if _alignment is not None and _alignment.get("mismatch"):
                 logger.warning(
                     "Stale systemd unit detected: %s has TimeoutStopSec=%.0fs but drain_timeout=%.0fs "

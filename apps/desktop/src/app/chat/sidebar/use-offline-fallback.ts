@@ -18,7 +18,8 @@ import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { sessionGatewayId } from '@/store/gateway-visibility'
 import { notify } from '@/store/notifications'
 import { offlineOpenNotice } from '@/store/offline-session-actions'
-import { $sessionListFreshness, mergeOfflineFallback } from '@/store/offline-sessions'
+import { $sessionListFreshness, mergeOfflineFallback, projectTreeSessionRows } from '@/store/offline-sessions'
+import { $projectTree } from '@/store/project-tree'
 
 export function useOfflineFallback(
   liveSessions: SessionInfo[],
@@ -27,10 +28,12 @@ export function useOfflineFallback(
   // [daveey] Plugin rows of unreachable gateways + the cold-start boot snapshot's rows.
   const offlineSessions = useStore($sidebarFallbackSessions)
   const freshness = useStore($sessionListFreshness)
+  const projectTree = useStore($projectTree)
+  const treeRows = useMemo(() => projectTreeSessionRows(projectTree), [projectTree])
 
   const sessions = useMemo(
-    () => mergeOfflineFallback(liveSessions, offlineSessions, freshness),
-    [liveSessions, offlineSessions, freshness]
+    () => mergeOfflineFallback(liveSessions, offlineSessions, freshness, treeRows),
+    [liveSessions, offlineSessions, freshness, treeRows]
   )
 
   const onResumeSession = useCallback(

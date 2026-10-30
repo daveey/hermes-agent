@@ -200,6 +200,11 @@ _SESSION_SIGNATURE_FIELDS = (
 # normal 0.5 s watch pass stat-only; SQLite is read only after another process
 # actually commits (and for ``utils.RACY_MTIME_WINDOW_NS`` after it, see _settled_mtime).
 _sessions_db_sig_cache: dict[str, tuple[object, tuple | None]] = {}
+# A busy fleet commits to state.db continuously, so the mtime guard alone re-digests every
+# session row (thousands) on nearly every 0.5 s pass. Re-digest a moved db at most this often;
+# the cached mtime stays stale in between, so the change is still seen on the trailing edge.
+SESSION_DIGEST_MIN_S = 3.0
+_sessions_digest_at: dict[str, float] = {}
 
 
 def _session_db_content_sig(db_path: Path):
@@ -216,6 +221,10 @@ def _session_db_content_sig(db_path: Path):
     cached = _sessions_db_sig_cache.get(cache_key)
 
     if cached is not None and cached[0] == mtime:
+        return cached[1]
+    now = time.monotonic()
+    if (cached is not None and cached[1] is not None
+            and now - _sessions_digest_at.get(cache_key, -SESSION_DIGEST_MIN_S) < SESSION_DIGEST_MIN_S):
         return cached[1]
     if not db_path.exists():
         _sessions_db_sig_cache[cache_key] = (mtime, None)
@@ -256,6 +265,7 @@ def _session_db_content_sig(db_path: Path):
             conn.close()
 
     _sessions_db_sig_cache[cache_key] = (_settled_mtime(mtime), signature)
+    _sessions_digest_at[cache_key] = now
 
     return signature
 

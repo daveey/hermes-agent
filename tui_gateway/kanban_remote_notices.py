@@ -241,10 +241,24 @@ def _completion_text(gw: str, key: str, task: dict, me: str, profile: str, sid: 
     notice = task.get("completion_notice")
     if task.get("status") != "done" or not isinstance(notice, dict) or "event_id" not in notice:
         return None
-    from tui_gateway.session_notifications import _format_kanban_event_text
+    from tui_gateway import server
     sub = {"task_id": task["id"], "chat_id": f"{me}/{profile}/{sid}"}
     ev = SimpleNamespace(kind="completed", payload=notice.get("payload"))
-    return _format_kanban_event_text(sub, SimpleNamespace(**task), ev, task.get("board", "default"))
+    return server._format_kanban_event_text(sub, SimpleNamespace(**task), ev, task.get("board", "default"))
+
+
+def remote_blocked_on_human(task: dict) -> bool:
+    """Whether a remote card is parked on a validated human request, from its replicated task record. Stored in
+    the notice's metadata: the notice guarantee cannot look the card up on this gateway. [daveey]"""
+    try:
+        from types import SimpleNamespace
+
+        from tui_gateway.kanban_unloaded import _blocked_on_human
+        return bool(_blocked_on_human(SimpleNamespace(status=task.get("status"), block_kind=task.get("block_kind"),
+                                                      human_request=task.get("human_request"))))
+    except Exception:
+        logger.debug("remote blocked_on_human check failed", exc_info=True)
+        return False
 
 
 def _notice_item(card: dict, session_key: str, me: str, profile: str) -> dict:
@@ -253,7 +267,8 @@ def _notice_item(card: dict, session_key: str, me: str, profile: str) -> dict:
     sid = card.get("sid") or session_key
     text = _completion_text(card["gw"], card["key"], task, me, profile, sid)
     item = {"text": text or format_notice(card["gw"], card["key"], task), "session": session_key,
-            "ref": f"{card['gw']}/{card['key']}", "state": f"{task['status']}@{int(at) if at else 0}"}
+            "ref": f"{card['gw']}/{card['key']}", "state": f"{task['status']}@{int(at) if at else 0}",
+            "blocked_on_human": remote_blocked_on_human(task)}
     if text:
         item["event_key"] = _event_key(card["gw"], card["key"], task["completion_notice"])
     elif task.get("status") == "blocked":
@@ -360,6 +375,9 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
     local placeholder already reports. ``transcript_has(notice_key, task_id)`` lets a dead holder's claim be
     acked instead of re-offered, and re-offers a legacy ``delivered=1`` row once. Never raises.
     """
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(session_key):
+        return []
     path = hub_db or hub_db_path()
     if not session_key or not path.is_file():
         return []
@@ -570,11 +588,13 @@ def _sweep_payload(owner: str, key: str, task: dict, me: str, profile: str, sid:
         event_key = _event_key(owner, key, notice)
         metadata = {"notice_id": f"remote:{owner}:{key}:{event_id}:{profile}:{sid}",
                     "board": task.get("board", "default"), "task_id": task["id"],
-                    "gateway": owner, "event_ids": [event_id], "kanban_event_keys": [event_key]}
+                    "gateway": owner, "event_ids": [event_id], "kanban_event_keys": [event_key],
+                    "blocked_on_human": False}
         return event_key, metadata, _completion_text(owner, key, task, me, profile, sid)
     event_key = _shared_key(owner, key, task, profile, sid)
     metadata = {"notice_id": event_key, "board": task.get("board", "default"),
-                "task_id": task["id"], "gateway": owner, "kanban_event_keys": [event_key]}
+                "task_id": task["id"], "gateway": owner, "kanban_event_keys": [event_key],
+                "blocked_on_human": remote_blocked_on_human(task)}
     return event_key, metadata, format_notice(owner, key, task)
 
 
@@ -596,10 +616,54 @@ def _sweep_cards(rows: list[tuple], me: str):
         yield owner, key, task, links
 
 
+def _settle_claim(claim: dict, memo_key: tuple, ledger) -> None:
+    """The notice reached the chat (a started turn or a written row): ledger delivered, memo and ``swept`` set."""
+    ack(claim, ledger=ledger)
+    _record_swept([memo_key], ledger)
+    _remember_delivered(memo_key)
+
+
+def _persist_claimed(session_db, profile: str, sid: str, text: str, metadata: dict, claim: dict, memo_key: tuple,
+                     ledger) -> bool:
+    """The passive row for a claimed notice whose wake did not start. A chat mid-turn (or any failure) hands the
+    claim back, so the next pass (or the chat's live poller) delivers it instead of nobody. Never raises."""
+    from hermes_state_errors import SessionTurnLeaseLostError
+    try:
+        with session_db(profile, sid) as (db, tip):
+            if db is None:
+                release(claim, ledger=ledger)
+                return False
+            db.append_kanban_notice(tip, text, metadata)
+            from hermes_state_outcome import refresh_outcomes_quietly
+            refresh_outcomes_quietly([tip], "notice", db=db)  # [daveey] the passive row is the chat's last word
+    except SessionTurnLeaseLostError:
+        release(claim, ledger=ledger)
+        logger.info("remote Kanban notice %s for chat %s deferred: a turn is running; retrying next pass",
+                    claim["ref"], sid)
+        return False
+    except Exception:
+        release(claim, ledger=ledger)
+        logger.warning("remote Kanban notice %s for chat %s not written; retrying next pass", claim["ref"], sid,
+                       exc_info=True)
+        return False
+    _settle_claim(claim, memo_key, ledger)
+    return True
+
+
 def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session_db, ledger, settled,
-                  delivered: list, swept: list) -> None:
-    """Append one fresh notice unless the memo or the ledger already settled it. A failed write is not remembered."""
+                  delivered: list, swept: list, waker=None, observed_at=None, now=None) -> None:
+    """Deliver one fresh notice unless the memo or the ledger already settled it. A failed write is not remembered.
+
+    Without ``waker`` the notice is a passive row. With one (the production sweeper, ``kanban_unloaded``) the
+    notice is claimed in the ledger, like ``collect`` claims it, and handed to the waker, which starts ONE turn
+    with it and falls back to the row. A row alone is not a turn: an idle chat sat on two hub cards' rows for
+    2-3.5 h until an unrelated local card woke it (David-MBP 2026-10-29). A state younger than the waker's grace
+    window is left for the chat's live poller, which may run in another backend on this host. [daveey]"""
     profile, sid = link.get("profile"), link.get("session")
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(sid):
+        logger.warning("Dropped Kanban notice to placement placeholder %s", sid)
+        return
     if not profile or not sid or sid in live:
         return
     try:
@@ -607,26 +671,47 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
         memo_key = (str(path), profile, sid, metadata["notice_id"])
         if memo_key in _delivered:
             return
+        if waker is not None and observed_at is not None and now is not None and now - observed_at < waker.grace_s:
+            return  # a live poller (any backend) claims within seconds; it owns the chat's turn
+        claim = {"session": sid, "ref": ref, "state": state, "notice_key": event_key}
         with session_db(profile, sid) as (db, tip):
             if db is None or not text:
                 return
             from tui_gateway.notice_fanout import chat_skip_reason
             if chat_skip_reason(db, sid) is not None:  # [daveey] archived chat or a copy moved to another gateway
                 return
-            if not settled((sid, tip), ref, state):
+            if settled((sid, tip), ref, state):
+                _remember_delivered(memo_key)
+                return
+            if waker is None:
                 row_id = db.append_kanban_notice(tip, text, metadata)
                 from hermes_state_outcome import refresh_outcomes_quietly
                 refresh_outcomes_quietly([tip], "notice", db=db)  # [daveey] unloaded sweeper's remote rows too
                 delivered.append({"task_id": task["id"], "session_id": tip, "message_row": row_id})
                 swept.append(memo_key)
-                ack({"session": sid, "ref": ref, "state": state, "notice_key": event_key}, ledger=ledger)
+                ack(claim, ledger=ledger)
+                _remember_delivered(memo_key)
+                return
+            with contextlib.closing(_ledger(ledger)) as conn:
+                verdict = _claim_notice(conn, session=sid, ref=ref, state=state, now=now or time.time(), fresh=True,
+                                        notice_key=event_key, task_id=str(task["id"]),
+                                        transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t))
+        if verdict == "acked":
             _remember_delivered(memo_key)
+            return
+        if verdict != "offer":
+            return  # another consumer holds it in flight
+        result = waker.deliver(
+            tip, text, metadata, task, now or time.time(),
+            persist=lambda: _persist_claimed(session_db, profile, sid, text, metadata, claim, memo_key, ledger),
+            started=lambda: _settle_claim(claim, memo_key, ledger))
+        delivered.append({"task_id": task["id"], "session_id": tip, "wake": result})
     except Exception:
         logger.debug("remote Kanban notice deferred for %s/%s", owner, key, exc_info=True)
 
 
 def _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, settled, delivered, swept,
-                   counts) -> None:
+                   counts, waker=None) -> None:
     for owner, key, task, links in cards:
         at = _terminal_at(task)
         ref, state = f"{owner}/{key}", f"{task['status']}@{int(at) if at else 0}"
@@ -637,11 +722,11 @@ def _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, 
         for link in links:
             _deliver_link(owner, key, task, link, me=me, ref=ref, state=state, path=path, live=live,
                           session_db=session_db, ledger=ledger, settled=settled,
-                          delivered=delivered, swept=swept)
+                          delivered=delivered, swept=swept, waker=waker, observed_at=observed_at, now=now)
 
 
 def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session_db, live_ids=None,
-                         ledger=None, now: Optional[float] = None) -> list[dict]:
+                         ledger=None, now: Optional[float] = None, waker=None) -> list[dict]:
     """Persist addressed notices, then ack the ledger. Write-first: a failed append leaves no delivered row
     and the next sweep retries (no claim-before-durable). ``live_ids`` are open chats; their poller writes the
     row and starts the turn, so this sweep skips them. Done and blocked share one ``kanban_event_keys`` value
@@ -653,6 +738,9 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
     state.db for a notice this process already persisted. Without the guards a rollout that changed the
     blocked notice key replayed 293 ``blocked`` notices from days earlier, of cards long done, into idle
     chats (MacBook 2026-10-29 00:22Z).
+
+    ``waker`` (``kanban_unloaded._RemoteWaker``, passed by the production sweeper) turns each fresh notice into ONE
+    turn in the chat, after a grace window for its live poller; without it the notice is only the passive row.
     """
     from hermes_cli.kanban_origin import _hub_db, gateway_names
 
@@ -694,7 +782,8 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
                         ledger_conn.append(None)
                 return _ledger_settled(ledger_conn[0], sessions, ref, state)
 
-            _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, settled, delivered, swept, counts)
+            _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, settled, delivered, swept, counts,
+                           waker=waker)
         stale = counts.get("stale", 0)
         if stale and stale != _last_stale.get(str(path)):
             _last_stale[str(path)] = stale

@@ -25,6 +25,9 @@ def _subscribe_origin(conn, task_id: str, origin: dict) -> None:
     Same row shape as ``kanban_db_notify.add_notify_sub``, which opens its own non-nested txn."""
     import time
 
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(origin['session']):
+        return
     chat_id = f"{origin['gateway']}/{origin['profile']}/{origin['session']}"
     conn.execute(
         "INSERT OR IGNORE INTO kanban_notify_subs (task_id, platform, chat_id, thread_id, chat_type, "

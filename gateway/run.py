@@ -48,6 +48,8 @@ from gateway.run_common import _csv_or_list_to_set
 from hermes_cli.fallback_config import pre_agent_fallback_notice
 from gateway.turn_executor import _UnboundedThreadExecutor
 from gateway.run_exit_reason import note_start_refused
+from gateway.run_signal_handlers import _start_gateway_make_restart_signal_handler, repeat_stop_signal
+from gateway import exit_deadline
 
 # Per-session AIAgent cache bounds (agents are heavy); see _enforce_agent_cache_cap/_session_housekeeping_watcher.
 _AGENT_CACHE_MAX_SIZE = 128
@@ -4738,17 +4740,6 @@ async def _wait_for_pid_exit(pid: int, attempts: int, delay: float) -> bool:
     return False
 
 
-def _start_gateway_make_restart_signal_handler(runner):
-    """Build the SIGUSR1 handler: log what the signal means, then the drain-aware service restart."""
-    def restart_signal_handler():
-        # systemd's `reload` verb (ExecReload=kill -USR1) lands here too; say so, because operators
-        # expect `reload` to mean an in-process config reload, not a drain-and-relaunch (#117267).
-        logger.info(
-            "SIGUSR1 received (systemctl reload / hermes gateway restart): performing a graceful "
-            "gateway restart — drain active turns, exit, supervisor relaunches. Not an in-process "
-            "config reload.")
-        runner.request_restart(detached=False, via_service=True)
-    return restart_signal_handler
 
 
 def _claim_host_gateway_role(force: bool = False) -> None:
@@ -5135,6 +5126,7 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
         from hermes_logging import drain_log_queue
         drain_log_queue(timeout=1.0)
 
+    exit_deadline.disarm()  # here and only here: the exit deadline covers everything up to os._exit
     for _step in (_release_locks, _mark_exited, _flush_metrics, _drain_logs):
         _best_effort(_step)
     os._exit(exit_code)

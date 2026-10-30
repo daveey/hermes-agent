@@ -388,6 +388,7 @@ import { registerMcpOauthCallbackIpc } from './mcp-oauth-callback-ipc'
 import { isMediaCapturePermission } from './media-capture-permission'
 import { createMediaProtocolHandler, MEDIA_PROTOCOL, mediaProtocolDownloadName } from './media-protocol'
 import { fetchLocalMedia } from './media-range'
+import { extensionForMimeType } from './mime-extension'
 import { createMinimizeToTray } from './minimize-to-tray'
 import {
   createNativeAccessTokenCoordinator,
@@ -437,6 +438,7 @@ import {
   undialedSshRouteSeeds
 } from './plugin-profile-routes'
 import { createPortalSession, resolvePortalBaseUrl } from './portal-session'
+import { attachPowerSettle, isPowerSettlingError, PowerSettleGate } from './power-settle'
 import { readPreUpdateBackupEnabled } from './pre-update-backup-config'
 import { registerPreparedSubmissions } from './prepared-submissions'
 import { capturePreviewContents } from './preview-capture'
@@ -5489,39 +5491,6 @@ function mimeTypeForPath(filePath) {
   return MEDIA_MIME_TYPES[ext] || 'application/octet-stream'
 }
 
-function extensionForMimeType(mimeType) {
-  const type = String(mimeType || '')
-    .split(';')[0]
-    .trim()
-    .toLowerCase()
-
-  if (type === 'image/png') {
-    return '.png'
-  }
-
-  if (type === 'image/jpeg') {
-    return '.jpg'
-  }
-
-  if (type === 'image/gif') {
-    return '.gif'
-  }
-
-  if (type === 'image/webp') {
-    return '.webp'
-  }
-
-  if (type === 'image/bmp') {
-    return '.bmp'
-  }
-
-  if (type === 'image/svg+xml') {
-    return '.svg'
-  }
-
-  return ''
-}
-
 async function resourceBufferFromUrl(rawUrl) {
   if (!rawUrl) {
     throw new Error('Missing URL')
@@ -6236,6 +6205,9 @@ function sendPowerResume() {
 
 let powerResumeRegistered = false
 
+// [daveey] Background GETs fail fast while asleep and come back staggered after a wake (power-settle.ts).
+const powerSettleGate = new PowerSettleGate()
+
 // Mirror of powerMonitor's AC/battery state, broadcast to every window so
 // renderer backstop polls can slow down on battery (see store/power.ts).
 // `null` until the first powerMonitor read after app ready.
@@ -6275,6 +6247,9 @@ function registerPowerResumeListeners() {
     powerMonitor.on('suspend', () => keepAwake.noteSuspend(powerMonitor.getSystemIdleTime()))
     powerMonitor.on('resume', () => keepAwake.noteResume())
     powerMonitor.on('unlock-screen', sendPowerResume)
+    attachPowerSettle(powerSettleGate, powerMonitor, rememberLog)
+    // A focused window means the user is here: a suspend whose 'resume' never arrived must not hold reads.
+    app.on('browser-window-focus', () => powerSettleGate.noteActive())
     powerMonitor.on('on-battery', () => broadcastBatteryState(true))
     powerMonitor.on('on-ac', () => broadcastBatteryState(false))
     onBatteryPower = powerMonitor.isOnBatteryPower()
@@ -16375,6 +16350,8 @@ ipcMain.handle('hermes:api', async (_event, request) => {
   const registryConnectionId = apiRequestRegistryConnectionId(request)
 
   try {
+    await powerSettleGate.admit(request)
+
     if (deletingProfile && registryConnectionId) {
       return await dispatchConnectionScopedProfileDelete(request, {
         acquire: profile => profileDeletionGate.acquire(profile),
@@ -16412,6 +16389,11 @@ ipcMain.handle('hermes:api', async (_event, request) => {
     // failure still rejects and still logs in full.
     if (isNotFoundApiError(error)) {
       return { [HERMES_API_EXPECTED_404]: String((error as any)?.message ?? error) }
+    }
+
+    // A background read skipped while the Mac sleeps never dialed; the wake line in power-settle counts them.
+    if (isPowerSettlingError(error)) {
+      throw error
     }
 
     // Persist the failure (full stack) before the rejection crosses to the

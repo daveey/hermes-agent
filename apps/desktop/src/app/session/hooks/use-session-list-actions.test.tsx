@@ -2,7 +2,7 @@ import { act, render, renderHook } from '@testing-library/react'
 import { Suspense } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { SessionInfo, SidebarSessionsResponse } from '@/hermes'
+import { type SessionInfo, setApiRequestConnection, type SidebarSessionsResponse } from '@/hermes'
 import { $cronJobs, setCronJobs } from '@/store/cron'
 import {
   beginGatewaySwitch,
@@ -10,6 +10,11 @@ import {
   recoverActiveSourceAfterFailedGatewaySwitch,
   registerGatewaySwitchLifecycle
 } from '@/store/gateway-switch'
+import {
+  _resetOfflineSessionsForTests,
+  mergeOfflineFallback,
+  offlineSessionsFromReplica
+} from '@/store/offline-sessions'
 import {
   $cronSessions,
   $messagingPlatformTotals,
@@ -187,6 +192,78 @@ describe('workspace-only sidebar refresh', () => {
       })
     }
   )
+})
+
+describe("this Mac's own chats while the window is on another gateway", () => {
+  afterEach(() => {
+    setApiRequestConnection(null)
+    _resetOfflineSessionsForTests()
+  })
+
+  // [daveey] Window on the hub: its list has none of this Mac's chats, so the sidebar painted them from the boot
+  // snapshot's stamp-less copies and a chat owning a live cron job lost its periodic stripe until relaunch.
+  it("lists the primary's recents too, so its stamped rows replace the boot copies", async () => {
+    setApiRequestConnection('hermes-hub')
+    listSidebarSessions.mockImplementation((req: { connectionId?: string }) =>
+      Promise.resolve(
+        req.connectionId === 'local'
+          ? sidebar({ sessions: [row('cron-chat', { cron_active: true, pinned: true })] })
+          : sidebar({ sessions: [row('h1', { connection_id: 'hermes-hub' })] })
+      )
+    )
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+
+    expect(listSidebarSessions).toHaveBeenCalledTimes(2)
+    expect(listSidebarSessions.mock.calls[1][0]).toMatchObject({ connectionId: 'local' })
+    expect($sessions.get().find(s => s.id === 'cron-chat')).toMatchObject({ connection_id: 'local', cron_active: true })
+
+    const bootCopy = offlineSessionsFromReplica(
+      [{ activity: 5_000, gateway: 'macbook', id: 'cron-chat', key: 'default/cron-chat', local: true,
+        message_count: 4, profile: 'default', source: 'desktop', stale: false, synced_at: 9_000, title: 'Cron chat',
+        version: 1 }],
+      gateway => (gateway === 'macbook' ? 'local' : undefined),
+      9_000,
+      { includeLocal: true }
+    )
+
+    const painted = mergeOfflineFallback($sessions.get(), bootCopy).filter(s => s.id === 'cron-chat')
+
+    expect(painted).toHaveLength(1)
+    expect(painted[0]).toMatchObject({ cron_active: true })
+    expect(painted[0].offline_synced_at).toBeUndefined()
+  })
+
+  it('keeps the hub page when the primary list fails', async () => {
+    setApiRequestConnection('hermes-hub')
+    listSidebarSessions.mockImplementation((req: { connectionId?: string }) =>
+      req.connectionId === 'local'
+        ? Promise.reject(new Error('ECONNREFUSED'))
+        : Promise.resolve(sidebar({ sessions: [row('h1', { connection_id: 'hermes-hub' })] }))
+    )
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+
+    expect($sessions.get().map(s => s.id)).toEqual(['h1'])
+  })
+
+  it('asks only once while the window is on the primary', async () => {
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a')] }))
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+
+    expect(listSidebarSessions).toHaveBeenCalledTimes(1)
+    expect(listSidebarSessions.mock.calls[0][0].connectionId).toBeUndefined()
+  })
 })
 
 it('refreshes a retained remote row outside the recency page on its own owner', async () => {

@@ -35,7 +35,8 @@ A card stays local when any of these holds:
   built-in list, ``extra_local_markers`` extends it): Chrome, Keychain, TCC, Apple apps, launchd,
   the Desktop app, a Desktop DOM/CDP readback, this Mac's Keychain... A bare host name (MacBook,
   the mini) pins only when it is the subject of the title. A body mention — a repro, or "verify
-  live on the hub and the MacBook" — is not a local-only need;
+  live on the hub and the MacBook" — is not a local-only need. A product name (Baby Bear) in the
+  title pins only when the card names no Linux, or also names Apple/device work;
 * the target is not live: this gateway's hermes-hub sync has not succeeded recently, or the
   target's capability record is stale.
 
@@ -102,8 +103,30 @@ DEFAULT_LOCAL_MARKERS = (
 TITLE_ONLY_LOCAL_MARKERS = frozenset({
     r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b", BABYBEAR_MARKER,
 })
+# Product names (not hosts, not Apple tech): a product with Linux parts (BB pods, their CI on
+# self-hosted Linux runners) is not an Apple/local need by name alone. With the built-in list, a
+# product-name hit is skipped when the card names Linux and nothing Apple- or device-bound.
+PRODUCT_NAME_MARKERS = frozenset({BABYBEAR_MARKER})
+# Linux named outright: self-hosted runners, runs-on, docker and containers exist on Macs too.
+LINUX_CONTEXT_MARKERS = (r"\blinux\b", r"\bubuntu\b")
+APPLE_CONTEXT_MARKERS = (
+    r"\bxcode", r"\bxcrun\b", r"\bfastlane\b", r"\bsimulator\b", r"\bcodesign", r"\bcode ?signing\b",
+    r"\bsigning identit", r"\bdeveloper id\b", r"\bprovisioning\b", r"\bnotari[sz]", r"\btestflight\b",
+    r"\bapp store\b", r"\bios\b", r"\biphone\b", r"\bipad\b", r"\bwatchos\b", r"\bswift(ui)?\b", r"\.app\b",
+    r"\bcatalyst\b", r"\bcore ?ml\b", r"\bwatch app\b", r"\bav(foundation|audiosession)\b", r"\bapple\b",
+    r"\bmac\b", MACOS_MARKER, r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bkeychain\b", r"\btcc\b",
+)
 LOCAL_MARKER_REMEDY = (
     "if the work doesn't need this machine, archive and re-create with placement='hub'")
+PINNED_LOCAL_WHY = "placement pinned local by the caller"
+
+
+def local_pin_note(target: str) -> str:
+    """Result note for a placement='local' pin whose card would run on ``target`` without it. [daveey]"""
+    return ("placement='local' was pinned, but nothing in the card names a machine-only need; without the pin "
+            f"it would run on {target}. If the work doesn't need this machine, archive this card and create it "
+            "again without the pin.")
+
 DEFAULT_LOCAL_SKILL_MARKERS = (
     r"^apple", r"^imessage$", r"^findmy$", r"^macos-", r"^mac-", r"^invisible-chrome-agent$",
     r"^local-chrome-remote-debugging$", r"^computer-use$", r"^babybear", r"^bb-", r"^ios-",
@@ -234,12 +257,29 @@ def config() -> dict:
         return {}
 
 
+def is_placeholder_session(value: str) -> bool:
+    """Placement attribution IDs must never become notification destinations."""
+    session = str(value or "").rsplit("/", 1)[-1]
+    if session.startswith(DEFAULT_CREATOR_SESSION):
+        return True
+    configured = config().get("creator_session")
+    values = configured.values() if isinstance(configured, dict) else (configured,)
+    return bool(session) and session in values
+
+
 def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
     """The first local-only hit, or None. Host-name markers (see
-    :data:`TITLE_ONLY_LOCAL_MARKERS`) scan the title only, unless the caller replaced the list."""
+    :data:`TITLE_ONLY_LOCAL_MARKERS`) scan the title only, unless the caller replaced the list.
+    A product name (:data:`PRODUCT_NAME_MARKERS`) does not pin a card whose text names Linux
+    and no Apple or device-bound work (same exception: not with a replaced list)."""
     full = f"{title or ''}\n{body or ''}"
     replaced = isinstance(cfg.raw.get("local_markers"), list)
+    linux_only = (not replaced
+                  and any(re.search(p, full, re.IGNORECASE) for p in LINUX_CONTEXT_MARKERS)
+                  and not any(re.search(p, full, re.IGNORECASE) for p in APPLE_CONTEXT_MARKERS))
     for rx in cfg.markers():
+        if linux_only and rx.pattern in PRODUCT_NAME_MARKERS:
+            continue
         text = (title or "") if (not replaced and rx.pattern in TITLE_ONLY_LOCAL_MARKERS) else full
         m = rx.search(text)
         if m:
@@ -487,7 +527,7 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
         self_gw = reg.self_gateway() if self_gw is None else self_gw
         pin = canonical_pin(args.get("placement") or "auto", self_gw, c.raw)
         if pin in ("local", "here", (self_gw or "").lower()):
-            return {"where": "local", "why": "placement pinned local by the caller"}
+            return {"where": "local", "why": PINNED_LOCAL_WHY}
         explicit = pin not in ("", "auto")
         target = c.target(self_gw)
         if explicit and (not target or pin != target.lower()):

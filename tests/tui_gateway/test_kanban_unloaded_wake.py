@@ -154,10 +154,10 @@ def test_card_blocked_on_a_human_is_not_woken(db):
 
 def test_diagnostic_only_notice_is_not_woken(db, monkeypatch):
     from gateway.warning_notifications import DiagnosticText
-    from tui_gateway import session_notifications as sn
+    from tui_gateway import server
 
     _card()
-    monkeypatch.setattr(sn, "_format_kanban_event_text", lambda *a: DiagnosticText("worker heartbeat late"))
+    monkeypatch.setattr(server, "_format_kanban_event_text", lambda *a: DiagnosticText("worker heartbeat late"))
     wake = _Wake()
 
     out = _sweep(db, wake)

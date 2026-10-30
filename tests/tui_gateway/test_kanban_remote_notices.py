@@ -586,3 +586,48 @@ def test_canonical_drops_only_superseded_legacy_rows():
             ("mini", "default/t_a", 3, "other-gateway-legacy")]  # another owner gateway: kept
     assert sorted(r[3] for r in krn._canonical(rows)) == [
         "current-a", "legacy-only", "other-gateway-legacy", "other-profile-a"]
+
+
+def test_both_remote_writers_record_blocked_on_human(tmp_path, monkeypatch):
+    """The notice guarantee cannot look a remote card up locally, so both writers store its human-block state."""
+    from tui_gateway import kanban_remote_notices as krn
+    from tui_gateway import server
+
+    human = {"action": "Reply ship or hold here. Unblock = deploy; archive = drop it.",
+             "why_human": "Only David approves prod.", "interaction": "approval", "scope": "prod deploy",
+             "evidence": "CI green"}
+    now = time.time()
+    asks = _card("t_asks", CHAT, status="blocked", at=now - 60, summary="need a yes")
+    asks["task"]["human_request"] = human
+    plain = _card("t_plain", CHAT, status="blocked", at=now - 50, summary="tool broke")
+    plain["task"]["block_kind"] = "transient"
+    done = _card("t_done2", CHAT, status="done", at=now - 40, summary="shipped")
+    replica = _hub(tmp_path, [asks, plain, done])
+
+    krn._reset_for_tests()
+    db, opener = _sweep_db(tmp_path, (CHAT,))
+    with db:
+        sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                             ledger=tmp_path / "sweep.db", now=now)
+        flags = {m["display_metadata"]["task_id"]: m["display_metadata"].get("blocked_on_human")
+                 for m in db.get_messages(CHAT)}
+    assert flags == {"t_asks": True, "t_plain": False, "t_done2": False}
+
+    krn._reset_for_tests()
+    got = {item["ref"].rsplit("/", 1)[1]: item.get("blocked_on_human")
+           for item in krn.collect(CHAT, "default", hub_db=replica, ledger=tmp_path / "poll.db", now=now)}
+    assert got == {"t_asks": True, "t_plain": False, "t_done2": False}
+
+    # The open-chat poller's persisted row carries it too (any remote item in the batch blocked on a human).
+    monkeypatch.setattr(krn, "hub_db_path", lambda: replica)
+    monkeypatch.setattr(krn, "collect", lambda *a, **k: [
+        {"text": "⏸ t_asks blocked", "event_key": "remote:hub:default/default/t_asks:x", "blocked_on_human": True,
+         "ref": "hub/default/default/t_asks", "state": "blocked@1", "session": CHAT}])
+    texts = server._collect_remote_kanban_notifications(CHAT, None)
+    with SessionDB(tmp_path / "live.db") as live:
+        live.create_session(CHAT, "desktop")
+        monkeypatch.setattr(server, "_get_db", lambda: live)
+        verdict, _batch, _kwargs = server._kb_persist_batch({"session_key": CHAT, "history": []}, texts, False)
+        assert verdict == "written"
+        rows = [m for m in live.get_messages(CHAT) if m.get("display_kind") == "kanban_notice"]
+    assert rows[-1]["display_metadata"].get("blocked_on_human") is True

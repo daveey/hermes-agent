@@ -12,9 +12,12 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
 import logging
 import re
 import sqlite3
+import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
@@ -36,6 +39,7 @@ from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
+from plugins.kanban.dashboard.board_diagnostics import _attach_diagnostics, _warnings_summary_from_diagnostics
 from hermes_cli.kanban_db import KANBAN_ATTACHMENT_MAX_BYTES, _collision_free_path, _safe_attachment_name
 
 log = logging.getLogger(__name__)
@@ -250,31 +254,6 @@ def _compute_task_diagnostics(conn: sqlite3.Connection, task_ids: Optional[list[
     return out
 
 
-def _warnings_summary_from_diagnostics(diagnostics: list[dict]) -> Optional[dict]:
-    """Compact card badge summary ``{count, kinds, latest_at, highest_severity}``; None when empty."""
-    if not diagnostics:
-        return None
-    kinds: dict[str, int] = {}
-    count = latest = 0
-    highest_idx, highest_sev = -1, None
-    for d in diagnostics:
-        n = d.get("count", 1)
-        kinds[d["kind"]] = kinds.get(d["kind"], 0) + n
-        count += n
-        latest = max(latest, d.get("last_seen_at") or 0)
-        sev = d.get("severity")
-        if sev in kd.SEVERITY_ORDER and kd.SEVERITY_ORDER.index(sev) > highest_idx:
-            highest_idx, highest_sev = kd.SEVERITY_ORDER.index(sev), sev
-    return {"count": count, "kinds": kinds, "latest_at": latest, "highest_severity": highest_sev}
-
-
-def _attach_diagnostics(task_d: dict, diags: Optional[list[dict]]) -> None:
-    """Full list in the payload (drawer renders without a second round-trip); card badge gets the summary."""
-    if diags:
-        task_d["diagnostics"] = diags
-        task_d["warnings"] = _warnings_summary_from_diagnostics(diags)
-
-
 def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
     """Return {'parents': [...], 'children': [...]} for a task."""
     def _ids(col: str, other: str) -> list[str]:
@@ -367,7 +346,17 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
             p = progress.setdefault(row["pid"], {"done": 0, "total": 0})
             p["total"] += 1
             p["done"] += row["cstatus"] == "done"
-        diagnostics_per_task = _compute_task_diagnostics(conn, task_ids=None)
+        # Done cards past ``done_limit`` never reach the payload: trim them before the per-card
+        # work (diagnostics alone were ~1.2 of the 1.5 s cold read on a 1.2k-card board).
+        # Same order as the done column below: completed_at DESC NULLS LAST, id DESC.
+        done_all = sorted(sorted((t for t in tasks if t.status == "done"), key=lambda t: t.id, reverse=True),
+                          key=lambda t: (t.completed_at is None, -(t.completed_at or 0)))
+        done_total = len(done_all)
+        done_cap = int(done_limit or 0)
+        dropped = {t.id for t in done_all[done_cap:]} if 0 < done_cap < done_total else set()
+        tasks = [t for t in tasks if t.id not in dropped]
+        diagnostics_per_task = _compute_task_diagnostics(
+            conn, task_ids=[t.id for t in tasks if t.status != "archived"])
         latest_event_id = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]
         columns: dict[str, list[dict]] = {c: [] for c in BOARD_COLUMNS}
         if include_archived:
@@ -398,10 +387,6 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
         # into the "completed_at DESC NULLS LAST, id DESC" SQL key.
         columns["done"].sort(key=lambda d: d["id"], reverse=True)
         columns["done"].sort(key=lambda d: (d["completed_at"] is None, -(d["completed_at"] or 0)))
-        done_total = len(columns["done"])
-        limit = int(done_limit or 0)
-        if limit > 0 and done_total > limit:
-            columns["done"] = columns["done"][:limit]
 
         # Queue columns keep list_tasks' dispatch order (priority DESC, created_at ASC).
         tenants = [r["tenant"] for r in conn.execute("SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant")]
@@ -424,7 +409,7 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
             "assignees": assignees, "latest_event_id": int(latest_event_id), "now": int(time.time())}
 
 
-_read_board = coalesced_read(get_board)
+_read_board = coalesced_read(get_board, admission_key=lambda a: (a.get("board") or "").strip().lower(), max_concurrent=2)  # one read per board, at most 2 boards: hub A/B, a cap of 4 made the default board's cold read time out
 
 
 # --- GET /session-labels ------------------------------------------------------
@@ -2084,3 +2069,9 @@ async def stream_events(ws: WebSocket):
             pass
     finally:
         await tail.shutdown()
+
+
+# Boot: read the active board before the Desktop's first poll.
+from plugins.kanban.dashboard.board_prewarm import start_board_prewarm
+
+start_board_prewarm(sys.modules[__name__])

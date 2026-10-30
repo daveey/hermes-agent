@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import sys
 import textwrap
@@ -137,7 +138,11 @@ _BACKEND = textwrap.dedent(
         os._exit(0)
 
     signal.signal(signal.SIGTERM, on_term)
-    out.with_suffix(".port").write_text(str(server.server_address[1]))
+    # Existence is the parent's ready signal; publish only after the port is fully written.
+    port = out.with_suffix(".port")
+    tmp = port.with_suffix(".port.tmp")
+    tmp.write_text(str(server.server_address[1]))
+    os.replace(tmp, port)
     time.sleep(600)
     """
 )
@@ -156,6 +161,49 @@ def _spawn_backend(tmp_path: Path, *, calls: int, call_s: float, wait_s: float =
         assert proc.poll() is None and time.monotonic() < deadline, "backend stand-in did not start"
         time.sleep(0.02)
     return proc, out, int(port_file.read_text())
+
+
+def test_backend_port_is_not_visible_until_its_contents_are_complete(tmp_path):
+    """Pause the real child's first write after open, before any port bytes reach disk."""
+    from tests.waiting import wait_until
+
+    opened_r, opened_w = os.pipe()
+    resume_r, resume_w = os.pipe()
+    paused_write = textwrap.dedent(
+        """
+        import os, pathlib, sys
+        def paused_write_text(self, data, *args, **kwargs):
+            with self.open("w") as stream:
+                os.write(int(sys.argv[5]), b"opened")
+                assert os.read(int(sys.argv[6]), 1) == b"x"
+                return stream.write(data)
+        pathlib.Path.write_text = paused_write_text
+        """
+    )
+    out = tmp_path / "backend.out"
+    port_file = out.with_suffix(".port")
+    env = dict(os.environ, HERMES_DASHBOARD_SESSION_TOKEN="publication-test-token",
+               PYTHONPATH=str(Path(__file__).resolve().parents[2]))
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", paused_write + _BACKEND, str(out), "0", "0", "300",
+             str(opened_w), str(resume_r)],
+            env=env, stdin=subprocess.DEVNULL, pass_fds=(opened_w, resume_r),
+        )
+        assert select.select([opened_r], [], [], 30)[0], "backend never began publishing its port"
+        assert os.read(opened_r, 6) == b"opened"
+        # Existence is the parent's ready signal: it must not expose the empty staging write.
+        assert not port_file.exists()
+        os.write(resume_w, b"x")
+        assert wait_until(port_file.exists, timeout=10)
+        assert 0 < int(port_file.read_text()) < 65536
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait(timeout=10)
+        for fd in (opened_r, opened_w, resume_r, resume_w):
+            os.close(fd)
 
 
 def _events(out: Path) -> list[str]:

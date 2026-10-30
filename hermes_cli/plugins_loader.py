@@ -16,6 +16,7 @@ import logging
 import re
 import sys
 import threading
+import traceback
 import types
 from contextlib import contextmanager
 from functools import wraps
@@ -195,6 +196,17 @@ def _load_error_text(exc: BaseException) -> str:
     if isinstance(exc, SystemExit):
         return f"SystemExit({exc.code!r}) raised during import/register()"
     return str(exc)
+
+
+def _load_error_origin(exc: BaseException) -> str:
+    """`` (raised at <file>:<line> in <func>)`` for the innermost frame, so a load failure logged without
+    a traceback (the default; HERMES_PLUGINS_DEBUG=1 adds one) still says whether Hermes or the plugin
+    raised it. The sys.modules eviction race was logged for days with only its message to go on."""
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ is not None else []
+    if not frames:
+        return ""
+    last = frames[-1]
+    return f" (raised at {last.filename}:{last.lineno} in {last.name})"
 
 
 def _dist_name(req: str) -> str:
@@ -622,7 +634,8 @@ class PluginLoaderMixin:
             # register() may have subscribed before raising; a failed plugin must leave no callable reachable
             # from later event dispatch.
             self._remove_plugin_subscriptions(plugin_key)
-            logger.warning("Failed to load plugin '%s': %s", manifest.name, _load_error_text(exc), exc_info=_PLUGINS_DEBUG)
+            logger.warning("Failed to load plugin '%s': %s%s", manifest.name, _load_error_text(exc),
+                           _load_error_origin(exc), exc_info=_PLUGINS_DEBUG)
         # The failure path swept this plugin's whole ledger (not just the registration_start slice), so
         # discovery-time pre-registrations are gone too.
         # There is no live tool left to credit — attribution and the registry agree at zero. Only the

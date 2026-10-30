@@ -61,6 +61,7 @@ import { $sessionTiles, $workingSessionIds, getRecentlySettledSessionIds } from 
 
 import { refreshCronJobs as refreshCronJobsStore } from '../../cron/cron-actions'
 
+import { withPrimaryRecents } from './primary-recents'
 import { refreshRetainedKanban, withKanbanEvidence } from './refresh-retained-kanban'
 
 /** [daveey] Backoff for re-listing while a failed list leaves owners stale (last value repeats). */
@@ -395,15 +396,23 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
         // Batched: one request opens each profile DB once and returns all three
         // source-scoped slices, instead of three separate listAllProfileSessions
         // calls that each reopened + re-counted every profile DB per refresh.
-        const fetchPage = () =>
-          listSidebarSessions({
-            recentsProfile: sessionProfile,
-            recentsLimit: limit,
-            recentsExclude: SIDEBAR_EXCLUDED_SOURCES,
-            cronLimit: CRON_SECTION_LIMIT,
-            messagingLimit: MESSAGING_SECTION_LIMIT,
-            messagingExclude: MESSAGING_EXCLUDED_SOURCES
-          })
+        const pageRequest = {
+          recentsProfile: sessionProfile,
+          recentsLimit: limit,
+          recentsExclude: SIDEBAR_EXCLUDED_SOURCES,
+          cronLimit: CRON_SECTION_LIMIT,
+          messagingLimit: MESSAGING_SECTION_LIMIT,
+          messagingExclude: MESSAGING_EXCLUDED_SOURCES
+        }
+
+        // [daveey] A window on another gateway still lists this Mac's own chats live (see primary-recents.ts).
+        const fetchPage = () => {
+          const primary = primaryGatewayConnectionId()
+
+          return withPrimaryRecents(listSidebarSessions(pageRequest), requestConnection, primary, () =>
+            listSidebarSessions({ ...pageRequest, connectionId: primary })
+          )
+        }
 
         let activationEpoch: number
         let result: Awaited<ReturnType<typeof fetchPage>>

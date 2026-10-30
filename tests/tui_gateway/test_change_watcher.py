@@ -18,6 +18,7 @@ from tui_gateway import server
 
 @pytest.fixture()
 def watcher_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "SESSION_DIGEST_MIN_S", 0.0)
     (tmp_path / "config.yaml").write_text("display: {}\n")
     (tmp_path / "cron").mkdir()
 

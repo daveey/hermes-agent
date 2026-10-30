@@ -765,14 +765,14 @@ def test_tree_rows_carry_session_activity_stamps(monkeypatch, tmp_path):
     """[daveey] Project-mode rows older than the recents page are the sidebar's only copy:
     they must carry goal/kanban/cron/background stamps or the row paints done (green)."""
     from hermes_cli import (cron_session_activity, goal_session_activity,
-                            kanban_session_activity, process_session_activity)
+                            kanban_session_activity, process_session_activity, turn_session_activity)
 
     launch_home = _profile_dir(tmp_path, "launch")
     repo = tmp_path / "repos" / "activity"
     repo.mkdir(parents=True)
     _bind_profiles(monkeypatch, tmp_path, {"default": launch_home})
     project = _create_project(launch_home, "Act", repo, use=True)
-    for sid in ("s_goal", "s_cards", "s_quiet"):
+    for sid in ("s_goal", "s_cards", "s_quiet", "s_turn"):
         _create_session(launch_home, sid, repo)
 
     monkeypatch.setattr(goal_session_activity, "active_goal_sessions", lambda: frozenset({"s_goal"}))
@@ -789,6 +789,8 @@ def test_tree_rows_carry_session_activity_stamps(monkeypatch, tmp_path):
     monkeypatch.setattr(kanban_session_activity, "_all_counts", counts)
     monkeypatch.setattr(cron_session_activity, "cron_owner_sessions", lambda: frozenset())
     monkeypatch.setattr(process_session_activity, "_owned_processes", lambda: {"s_quiet": set()})
+    # A turn another process runs (a backend-woken close-out turn) holds this lineage's turn lease.
+    monkeypatch.setattr(turn_session_activity, "live_turn_session_ids", lambda: frozenset({"s_turn"}))
 
     with _serving_launch_profile(launch_home):
         tree = _call("projects.tree", {"preview_limit": 5})
@@ -802,5 +804,7 @@ def test_tree_rows_carry_session_activity_stamps(monkeypatch, tmp_path):
         assert rows["s_cards"]["kanban_remote_stale"] == 1
         assert rows["s_cards"]["kanban_waiting_on"] == ["t_open"]
         assert all("kanban_unknown" not in row for row in rows.values())
+        assert rows["s_turn"].get("turn_live") is True
         # Control: an idle session carries none of them.
-        assert not {"goal_active", "kanban_active", "kanban_remote_stale", "background_active", "cron_active"} & rows["s_quiet"].keys()
+        assert not {"goal_active", "kanban_active", "kanban_remote_stale", "background_active", "cron_active",
+                    "turn_live"} & rows["s_quiet"].keys()

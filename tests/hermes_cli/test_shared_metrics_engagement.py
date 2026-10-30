@@ -14,6 +14,7 @@ from hermes_cli.observability import relay_shared_metrics
 from hermes_cli.observability import shared_metrics_engagement as engagement
 from hermes_cli.observability.shared_metrics import SharedMetricsStore
 from tests.hermes_cli.test_relay_shared_metrics_runtime import (
+    _join_export_workers,
     _stored_values,
     direct_runtime,
 )
@@ -23,9 +24,17 @@ OTHER = "openai/gpt-5"
 DAY1 = datetime(2026, 9, 27, 9, 0, tzinfo=UTC).timestamp()
 
 
-def _flush() -> None:
-    for runtime in list(relay_shared_metrics._RUNTIMES.values()):
+def _flush(*extra_stores) -> None:
+    """Make every write the test caused readable. A store another writer holds past its 250 ms busy
+    timeout keeps the write in memory for its next write (by design), and a CPU-starved runner makes
+    that contention likely: wait for the export worker, then drain each store's deferred writes."""
+    runtimes = list(relay_shared_metrics._RUNTIMES.values())
+    for runtime in runtimes:
         runtime.relay.subscribers.flush()
+    _join_export_workers()
+    stores = [runtime.subscriber.store for runtime in runtimes] + list(engagement._root_stores.values())
+    for store in (*stores, *extra_stores):
+        store.drain_deferred()
 
 
 def _turn(session_id, task_id, *, platform="cli", model=PUBLIC, tools=0, clock=None, at=None, took=0.0):
@@ -74,7 +83,7 @@ def test_a_closed_day_reports_active_time_surfaces_and_primary_model_once(direct
     clock["now"] = DAY1 + 86_400
     engagement.record(other_process, resource, surface="cli", route=None)
     _turn("cli-2", "t3", clock=clock, at=DAY1 + 86_400 + 5)
-    _flush()
+    _flush(other_process)
 
     assert _rows(tmp_path, "hermes.engagement.surface_day.count") == sorted([
         (json.dumps({"active_minutes_bucket": "5m_to_30m", "surface": "cli"}, sort_keys=True), 1),

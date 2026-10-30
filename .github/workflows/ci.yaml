@@ -108,6 +108,8 @@ jobs:
       e2e_desktop_core: ${{ steps.gate-lanes.outputs.e2e_desktop_core }}
       e2e_desktop_update: ${{ steps.gate-lanes.outputs.e2e_desktop_update }}
       event_name: ${{ github.event_name }}
+      python_changed: ${{ steps.python-plan.outputs.changed }}
+      python_slices: ${{ steps.python-plan.outputs.slices }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
@@ -148,6 +150,53 @@ jobs:
                   output.write(f'{lane}={value}\n')
           PY
 
+      - name: Restore per-file duration cache
+        # The planner sizes the slice count from test_durations.json (tests.yml saves it on main).
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: test_durations.json
+          key: test-durations-never-exact
+          restore-keys: |
+            test-durations-
+
+      - name: Plan Python tests (affected files on PRs, full suite otherwise)
+        # Pull requests run the test files their change can reach plus a smoke set
+        # (scripts/ci/affected_tests.py); every other event, the label ci:full-tests, a failed
+        # compare (empty list) or a list at the compare API's 300-file cap runs the full suite.
+        # Main pushes still run everything, so a miss surfaces there. Each tests.yml slice
+        # recomputes the same file list from `changed` and its own checkout.
+        id: python-plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:full-tests') }}
+        run: |
+          set -euo pipefail
+          changed_file="$RUNNER_TEMP/detect-changed-files.txt"
+          mapfile -t changed < <(grep -v '^$' "$changed_file" 2>/dev/null || true)
+          full=""
+          if [ "$EVENT_NAME" != "pull_request" ]; then full="$EVENT_NAME runs the full suite"
+          elif [ "$FULL_LABEL" = "true" ]; then full="label ci:full-tests"
+          elif [ "${#changed[@]}" -eq 0 ]; then full="no changed-file list from the compare API"
+          elif [ "${#changed[@]}" -ge 300 ]; then full="${#changed[@]} changed files (compare API caps the list at 300)"
+          fi
+          plan_out="$RUNNER_TEMP/python-plan.txt"
+          if [ -n "$full" ]; then
+            python3 scripts/ci/affected_tests.py --full "$full" --github-output "$plan_out" > /dev/null
+          else
+            python3 scripts/ci/affected_tests.py --changed "${changed[@]}" --github-output "$plan_out" > /dev/null
+          fi
+          cat "$plan_out"
+          mode=$(sed -n 's/^mode=//p' "$plan_out")
+          reason=$(sed -n 's/^reason=//p' "$plan_out")
+          slices=$(sed -n 's/^slices=//p' "$plan_out")
+          echo "slices=$slices" >> "$GITHUB_OUTPUT"
+          {
+            echo "changed<<CHANGED_EOF"
+            if [ "$mode" = "affected" ]; then printf '%s\n' "${changed[@]}"; fi
+            echo "CHANGED_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "### Python tests: $mode ($reason)" >> "$GITHUB_STEP_SUMMARY"
+
   # ─────────────────────────────────────────────────────────────────────
   # Lane-gated sub-workflows. Each runs in parallel after detect finishes.
   # Skipped workflows (if condition is false) don't spin up runners.
@@ -166,6 +215,8 @@ jobs:
     uses: ./.github/workflows/tests.yml
     with:
       commit: ${{ inputs.commit }}
+      python_changed: ${{ needs.detect.outputs.python_changed }}
+      python_slices: ${{ needs.detect.outputs.python_slices }}
       e2e: ${{ needs.detect.outputs.e2e == 'true' }}
       e2e_upgrade: ${{ needs.detect.outputs.e2e_upgrade == 'true' }}
       strict_acceptance: ${{ inputs.strict_acceptance || '' }}
@@ -478,7 +529,7 @@ jobs:
       # to block a merge. A separate run also stops it from holding this
       # run open. That is what blocked ``gh run rerun``.
     if: ${{ !cancelled() }}
-    runs-on: [self-hosted, hermes-hub-poll]
+    runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 10
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
@@ -516,7 +567,7 @@ jobs:
       actions: read # download completed jobs' cache transfer logs
     needs: [all-checks-pass]
     if: ${{ !cancelled() }}
-    runs-on: [self-hosted, hermes-hub-poll]
+    runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 10
     steps:
       - name: Checkout code

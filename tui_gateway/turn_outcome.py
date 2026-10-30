@@ -19,9 +19,9 @@ def refresh_turn_outcome(session: dict, agent=None) -> None:
         return
     try:
         from hermes_state_outcome import refresh_outcome
-        from tui_gateway.session_workdir import _session_db
+        from tui_gateway import server  # split helpers only work rebound onto server globals (bind_module)
 
-        with _session_db(session) as db:
+        with server._session_db(session) as db:
             if db is not None:
                 refresh_outcome(sid, "turn_end", db=db)
     except Exception:  # health: allow BLE001 -- the turn already concluded; a failed refresh is logged

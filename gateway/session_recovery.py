@@ -4,6 +4,7 @@ peer). Mixin split out of ``gateway/session.py``; bound onto ``SessionStore`` vi
 
 from __future__ import annotations
 
+import functools
 import logging
 import json
 import math
@@ -339,6 +340,10 @@ class SessionRecoveryMixin:
         peer = dict(
             source=storage_source(db, source, session_id, api_storage_source(db, session_id, source.platform.value)), user_id=source.user_id, session_key=session_key,
             chat_id=source.chat_id, chat_type=source.chat_type, thread_id=source.thread_id)
+        from gateway import exit_deadline
+        if exit_deadline.is_exiting():
+            # Best-effort bookkeeping: while exiting, never spend the stop budget on a held lock.
+            recorder = functools.partial(recorder, patience_s=exit_deadline.DRAIN_DB_PATIENCE_S)
         try:
             recorder(
                 session_id, **peer, display_name=display_name or source.chat_name,

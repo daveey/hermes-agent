@@ -153,7 +153,10 @@ def repair_ms_timestamps(conn: sqlite3.Connection) -> int:
 _UID_TABLES = ("task_comments", "task_events", "task_runs", "task_attachments", "task_chat_links")
 # Append-only rows leave only with their task; a delete trigger there would echo
 # every cascade row of a task delete the service already cascades itself.
-_DELETE_CAPTURED = ("tasks", "task_links", "task_attachments")
+# Chat links are not append-only: a local delete with no trigger left the Board's row behind forever, a shadow-only
+# ``task_chat_links`` mismatch nothing could heal (238 retired placement links on the hub, 2026-10-30). No local
+# path cascades them with a task delete, and evict deletes under ``applying``, so the trigger echoes nothing.
+_DELETE_CAPTURED = ("tasks", "task_links", "task_attachments", "task_chat_links")
 
 _NOW_MS_SQL = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
 # UUIDv7 inline (no subquery: SQLite may evaluate an uncorrelated subquery once per statement).

@@ -9,7 +9,6 @@ import shutil
 import sqlite3
 import stat
 import threading
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -1687,13 +1686,25 @@ def test_cross_process_client_active_attempts_record_one_install(tmp_path):
     assert active["value"] == 1
 
 
-def test_schema_initialization_waits_for_an_existing_writer(tmp_path):
+def test_schema_initialization_waits_for_an_existing_writer(tmp_path, monkeypatch):
     database_path = tmp_path / "metrics.sqlite3"
     outbox_directory = tmp_path / "outbox"
     database_path.touch()
     blocker = sqlite3.connect(database_path)
     blocker.execute("BEGIN IMMEDIATE")
+    schema_write_started = threading.Event()
+    connect = sqlite3.connect
 
+    def trace(statement):
+        if statement.upper() == "BEGIN IMMEDIATE":
+            schema_write_started.set()
+
+    def traced_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(trace)
+        return connection
+
+    monkeypatch.setattr(shared_metrics_module.sqlite3, "connect", traced_connect)
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
             SharedMetricsStore,
@@ -1701,12 +1712,15 @@ def test_schema_initialization_waits_for_an_existing_writer(tmp_path):
             outbox_directory,
         )
         try:
-            time.sleep(0.4)
+            # Observe the real write attempt, not a sleep that can expire before
+            # the worker is scheduled on a busy CI runner.
+            assert schema_write_started.wait(timeout=60)
             assert not future.done()
         finally:
             blocker.rollback()
             blocker.close()
-        store = future.result(timeout=2)
+        # This is a deadlock guard, not a schema-initialization speed contract.
+        store = future.result(timeout=60)
 
     assert store.counter_snapshot() == []
 

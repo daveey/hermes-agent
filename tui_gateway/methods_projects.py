@@ -360,7 +360,7 @@ def _project_tree_row(r: dict, automated_sources: list[str] | None = None) -> di
 
 def _annotate_tree_activity(sessions: list[dict]) -> list[dict]:
     """[daveey] Stamp the same activity fields the session lists carry (``kanban_active`` /
-    ``kanban_blocked``, ``goal_active``, ``cron_active``, ``background_active``, ``review_wait``) on tree rows.
+    ``kanban_blocked``, ``goal_active``, ``cron_active``, ``background_active``, ``turn_live``, ``review_wait``) on tree rows.
     In project mode an older session's ONLY loaded row is this one (it's past the recents
     page), so without them the sidebar painted it done (green) while its /goal, cards or
     background jobs were still in flight. ``build_tree`` passes these dicts through by
@@ -371,8 +371,9 @@ def _annotate_tree_activity(sessions: list[dict]) -> list[dict]:
         from hermes_cli.kanban_session_activity import annotate_kanban_activity
         from hermes_cli.process_session_activity import annotate_background_activity
         from hermes_cli.review_session_activity import annotate_review_wait
-        annotate_review_wait(annotate_background_activity(annotate_cron_activity(
-            annotate_goal_activity(annotate_kanban_activity(sessions)))))
+        from hermes_cli.turn_session_activity import annotate_turn_activity
+        annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
+            annotate_goal_activity(annotate_kanban_activity(sessions))))))
     except Exception:  # the tree must render without them
         pass
     return sessions

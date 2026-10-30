@@ -7,6 +7,18 @@ on:
         description: Commit to test and build. Empty keeps the triggering commit.
         type: string
         default: ''
+      python_changed:
+        description: >-
+          Pull requests: the changed files (newline list) whose affected tests the slices run
+          (scripts/ci/affected_tests.py). Empty runs the full suite.
+        type: string
+        required: false
+        default: ''
+      python_slices:
+        description: JSON list of slice numbers, 1..N (ci.yaml detect sizes it from test_durations.json).
+        type: string
+        required: false
+        default: '[1, 2]'
       # The E2E jobs below are slow lanes (scripts/ci/classify_changes.py).
       # ci.yaml passes the classifier's answer; a caller that passes nothing
       # gets every job.
@@ -50,13 +62,16 @@ jobs:
     # takes ~60-70 min under contention. 30 min cancelled both slices at
     # 45%/78% (run 39732864100). 120 leaves headroom; revisit if the hub
     # gets more cores.
-    name: Run tests (${{ matrix.slice }}/2)
+    #
+    # Pull requests usually run one slice of affected files (ci.yaml detect sizes the
+    # matrix, scripts/ci/affected_tests.py); every other event runs both.
+    name: Run tests (${{ inputs.python_changed != '' && 'affected, ' || '' }}${{ matrix.slice }}/${{ strategy.job-total }})
     runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        slice: [1, 2]
+        slice: ${{ fromJSON(inputs.python_slices) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
@@ -134,13 +149,25 @@ jobs:
         # written to the flaky report; the hub's ci-flaky-cards cron turns
         # each id into one deflake Kanban card. A test that fails twice fails
         # the job.
+        #
+        # Pull requests pass python_changed: the slice runs only the affected files
+        # (scripts/ci/affected_tests.py, the same selection ci.yaml detect sized).
         run: |
           HERMES_TEST_WORKERS="$(python3 scripts/ci/test_workers.py)"
           export HERMES_TEST_WORKERS
           echo "HERMES_TEST_WORKERS=$HERMES_TEST_WORKERS (nproc=$(nproc))"
-          scripts/run_tests.sh
+          if [ -n "$PYTHON_CHANGED" ]; then
+            mapfile -t changed < <(printf '%s\n' "$PYTHON_CHANGED" | grep -v '^$')
+            selection="$RUNNER_TEMP/affected-tests.txt"
+            "$HERMES_PYTHON" scripts/ci/affected_tests.py --changed "${changed[@]}" --files-out "$selection" > /dev/null
+            echo "Affected selection: $(wc -l < "$selection") files"
+            scripts/run_tests.sh --files-from "$selection"
+          else
+            scripts/run_tests.sh
+          fi
         env:
-          HERMES_TEST_SLICE: ${{ matrix.slice }}/2
+          PYTHON_CHANGED: ${{ inputs.python_changed }}
+          HERMES_TEST_SLICE: ${{ matrix.slice }}/${{ strategy.job-total }}
           HERMES_TEST_FILE_TIMEOUT: 600
           HERMES_TEST_FLAKY_REPORT: ${{ runner.temp }}/flaky-tests/slice-${{ matrix.slice }}.json
           # Ensure tests don't accidentally call real APIs

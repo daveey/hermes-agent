@@ -175,8 +175,8 @@ def _start_gateway_configure_logging(verbosity: Optional[int]) -> None:
 
 def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdown: list):
     """Build the SIGINT/SIGTERM handler; ``_signal_initiated_shutdown[0]`` records an unplanned signal."""
-    from gateway.run import (_best_effort, _hermes_home, asyncio, logger, os, signal)
-    planned_stop_seen = [False]
+    from gateway.run import (_best_effort, _hermes_home, asyncio, exit_deadline, logger, os, repeat_stop_signal, signal)
+    planned_stop_seen, stop_signals = [False], [0]  # [daveey] stop_signals: see repeat_stop_signal
 
     def shutdown_signal_handler(received_signal=None):
         # Planned --replace takeover (sibling marked this PID): exit 0 so systemd won't revive us.
@@ -203,6 +203,8 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
             planned_stop_seen[0] = True
         elif planned_stop_seen[0] and not planned_takeover:
             planned_stop = True
+        if repeat_stop_signal(runner, stop_signals, received_signal):
+            return
         _shutdown_ctx = _best_effort(_snapshot, "snapshot_shutdown_context failed: %s")
         sig_name = _shutdown_ctx["signal"] if _shutdown_ctx else None
 
@@ -237,6 +239,8 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
 
             _best_effort(_log_context, "format_context_for_log failed: %s")
             _best_effort(_diagnostic, "spawn_async_diagnostic failed: %s")
+        # ONE deadline for the whole exit (supervisor SIGKILL budget), armed past stop(): see gateway.exit_deadline.
+        _best_effort(lambda: exit_deadline.arm_for_signal(runner), "Exit deadline arm failed: %s")
         if not planned_takeover:
             # Supervisor/operator SIGNAL stop (bootout, kickstart -k, systemd, s6, bare kill) — the
             # only kind launchd times with ExitTimeOut. In-band SIGUSR1 restarts never pass through
@@ -481,7 +485,7 @@ async def _start_gateway_shutdown_tail(
     _planned_stop_watcher_stop: threading.Event, _planned_stop_watcher_thread: threading.Thread,
     _signal_initiated_shutdown: list) -> bool:
     """Post-``wait_for_shutdown`` teardown; returns the process exit verdict (True = exit 0)."""
-    from gateway.run import (_CRON_SHUTDOWN_DRAIN_TIMEOUT, _HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT, _await_thread_exit, _best_effort, _resolve_gateway_exit_verdict, _shutdown_mcp_servers_nonblocking, _stop_cron_provider)
+    from gateway.run import (_CRON_SHUTDOWN_DRAIN_TIMEOUT, _HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT, _await_thread_exit, _best_effort, _resolve_gateway_exit_verdict, _shutdown_mcp_servers_nonblocking, _stop_cron_provider, exit_deadline)
     # Control socket first: once shutdown begins we are no longer a truthful "serving here" answer and a
     # successor must be able to bind. Early-exit paths rely on the atexit cleanup_files hook instead.
     if _control_server is not None:
@@ -503,12 +507,15 @@ async def _start_gateway_shutdown_tail(
     # cron_thread.join() would block the loop, so that delivery could never run — it timed out and the
     # message was silently dropped (#58818). Awaiting keeps the loop alive so the in-flight delivery
     # finishes before we tear down.
+    # Each wait is clamped to what is left of the exit deadline, minus the steps after it. [daveey]
     cron_stop.set()
     _stop_cron_provider(cron_provider)
-    if not await _await_thread_exit(cron_thread, timeout=_CRON_SHUTDOWN_DRAIN_TIMEOUT):
+    _cron_wait = exit_deadline.clamp_wait(_CRON_SHUTDOWN_DRAIN_TIMEOUT, phase="cron_wait")
+    if not await _await_thread_exit(cron_thread, timeout=_cron_wait):
         logger.warning("Cron ticker did not exit within %.0fs of shutdown — an in-flight "
-                       "delivery may have been dropped.", _CRON_SHUTDOWN_DRAIN_TIMEOUT)
-    await _await_thread_exit(housekeeping_thread, timeout=_HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT)
+                       "delivery may have been dropped.", _cron_wait)
+    await _await_thread_exit(housekeeping_thread, timeout=exit_deadline.clamp_wait(
+        _HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT, phase="housekeeping_wait"))
 
     # Stop the planned-stop watcher (daemon=True so this is belt-and-suspenders).
     _planned_stop_watcher_stop.set()
@@ -517,7 +524,8 @@ async def _start_gateway_shutdown_tail(
     # Never suppressed: a raise here is a real teardown failure (it once hid a changed signature,
     # leaving every MCP connection and the shared loop up while the gateway reported a clean exit).
     try:
-        await _shutdown_mcp_servers_nonblocking(config=getattr(runner, "config", None))
+        await _shutdown_mcp_servers_nonblocking(
+            timeout=exit_deadline.clamp_wait(5.0, 2.0, phase="mcp"), config=getattr(runner, "config", None))
     except Exception:
         logger.warning("MCP shutdown failed; connections may be left open", exc_info=True)
 

@@ -39,6 +39,10 @@ def nonzero_exit_record() -> tuple[str, dict]:
     if (sig := last_signal_exit()) is not None:
         return "gateway.exit_signal", sig
     if (refusal := last_start_refusal()) is not None:
+        # [daveey] A refusal by a LIVE owner under a service manager means the supervisor restarted into a gateway
+        # still draining (gateway-cc28b19bca); the coach self-heal collector keys on this flag.
+        if "--external-supervisor" in sys.argv[1:]:
+            refusal = {**refusal, "external_supervisor": True}
         return "gateway.start_refused", refusal
     return "gateway.exit_nonzero", {}
 

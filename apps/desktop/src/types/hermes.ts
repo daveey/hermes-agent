@@ -725,6 +725,7 @@ export interface SessionInfo {
   /** [daveey] What those processes are (oldest first, capped): the sidebar's
    *  process badge lists each command and its age, with a Stop button. */
   background_processes?: SessionBackgroundProcess[]
+  turn_live?: boolean // [daveey] a live turn lease on the lineage, any process (hermes_cli/turn_session_activity.py)
   /** [daveey] Set when this conversation's latest reply links an open GitHub
    *  PR still waiting on a code review: `stuck` when the review is on the
    *  viewer (or nobody / others asked >24h ago), `parked` when only other

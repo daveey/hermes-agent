@@ -165,3 +165,32 @@ class TestParseSystemdDuration:
 # ---------------------------------------------------------------------------
 # check_systemd_timing_alignment
 # ---------------------------------------------------------------------------
+
+
+class TestSystemdTimingAlignmentTail:
+    """The stop() leash plus the post-stop tail must fit TimeoutStopSec (defect gateway-a2bcd6fabc)."""
+
+    def _under_unit(self, monkeypatch, timeout_s: float):
+        monkeypatch.setattr(sf, "current_systemd_unit", lambda: "hermes-gateway.service")
+        monkeypatch.setattr(sf, "_systemd_timeout_stop_us", lambda unit: int(timeout_s * 1_000_000))
+
+    def test_tail_mismatch_when_leash_plus_tail_exceeds_timeout(self, monkeypatch):
+        self._under_unit(monkeypatch, 70)
+        result = sf.check_systemd_timing_alignment(0, 30, stop_leash_s=65)
+        assert result["mismatch"] is False
+        assert result["tail_mismatch"] is True
+        assert result["stop_envelope_s"] == 65 + sf.SHUTDOWN_TAIL_RESERVE_S
+
+    def test_default_leash_fits_default_unit(self, monkeypatch):
+        self._under_unit(monkeypatch, 70)
+        result = sf.check_systemd_timing_alignment(0, 30, stop_leash_s=60)
+        assert result["tail_mismatch"] is False
+
+    def test_timeout_stop_s_reads_live_unit(self, monkeypatch):
+        self._under_unit(monkeypatch, 70)
+        assert sf.current_systemd_timeout_stop_s() == 70.0
+
+    def test_not_under_systemd(self, monkeypatch):
+        monkeypatch.delenv("INVOCATION_ID", raising=False)
+        assert sf.current_systemd_unit() is None
+        assert sf.check_systemd_timing_alignment(0, 30, stop_leash_s=60) is None
