@@ -208,7 +208,11 @@ def plan(needs: list[str], *, now: Optional[float] = None, **lookup) -> dict:
         raise CapabilityRouteError(
             "no_capability_holder",
             f"no gateway holds {f['need']} (hermes-hub capability registry). If only David can grant it, "
-            "block with kind='needs_input' and a human_request naming the exact command and scope.",
+            "block with kind='needs_input' and a human_request naming the exact command and scope. If an "
+            "agent on another host has the access but does not advertise it, that is a registry gap, not a "
+            "human ask: never ask David to relay a request to his chat (refused as agent_relay_ask); send it "
+            "to that chat with cross_session or kanban_create the owner card there, and add the probe to "
+            "that host's kanban.capabilities.probes.",
             details={"need": f["need"]})
     return {"routes": routes, "local": local}
 
