@@ -131,6 +131,62 @@ def test_explicit_opt_out_allows_only_the_disposable_canary(protected_home):
     assert target.read_text(encoding="utf-8") == "opted out"
 
 
+@pytest.mark.parametrize("keyword_database", [False, True])
+def test_sqlite_uri_reads_isolated_replica_from_protected_cwd(tmp_path, monkeypatch, keyword_database):
+    from tests.home_io_guard import HomeIOGuard
+
+    replica = tmp_path / "hub # replica.db"
+    connection = sqlite3.connect(replica)
+    try:
+        connection.execute("CREATE TABLE replica (value TEXT)")
+        connection.execute("INSERT INTO replica VALUES ('isolated')")
+        connection.commit()
+    finally:
+        connection.close()
+    protected = tmp_path / "protected-cwd"
+    protected.mkdir()
+    monkeypatch.chdir(protected)
+    with monkeypatch.context() as patcher:
+        HomeIOGuard(lambda: [protected]).install(patcher)
+        uri = replica.as_uri() + "?mode=ro"
+        connection = (sqlite3.connect(database=uri, uri=True) if keyword_database
+                      else sqlite3.connect(uri, uri=True))
+        try:
+            assert connection.execute("SELECT value FROM replica").fetchone() == ("isolated",)
+        finally:
+            connection.close()
+
+
+@pytest.mark.parametrize("form", ["absolute", "encoded", "localhost", "relative", "symlink", "symlink-nul"])
+def test_sqlite_uri_denies_protected_database_from_checkout(tmp_path, monkeypatch, form):
+    from tests.home_io_guard import HomeIOGuard
+
+    protected = tmp_path / "protected uri"
+    protected.mkdir()
+    target = protected / "state.db"
+    connection = sqlite3.connect(target)
+    connection.close()
+    monkeypatch.chdir(PROJECT_ROOT)  # The checkout is an allowed source/interpreter prefix.
+    if form in ("symlink", "symlink-nul"):
+        link = tmp_path / "replica-link.db"
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        uri = link.as_uri() + ("%00suffix" if form == "symlink-nul" else "")
+    else:
+        uri = {
+            "absolute": lambda: f"file:{target}",
+            "encoded": lambda: target.as_uri().replace("state.db", "%73tate.db"),
+            "localhost": lambda: target.as_uri().replace("file:///", "file://localhost/", 1),
+            "relative": lambda: "file:" + os.path.relpath(target, PROJECT_ROOT).replace(os.sep, "/"),
+        }[form]()
+    with monkeypatch.context() as patcher:
+        HomeIOGuard(lambda: [protected]).install(patcher)
+        with pytest.raises(AssertionError, match="REAL hermes home"):
+            sqlite3.connect(uri + "?mode=ro", uri=True).close()
+
+
 def test_close_keeps_a_reused_descriptors_new_owner(tmp_path, monkeypatch):
     from tests.home_io_guard import HomeIOGuard
 

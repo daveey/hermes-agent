@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import sys
 import threading
+from urllib.parse import unquote_to_bytes
 
 
 def linked_worktree_git_dirs(checkout: Path) -> set[Path]:
@@ -247,7 +248,34 @@ class HomeIOGuard:
         for name in ("rename", "replace"):
             wrap(os, name, (("src", "src_dir_fd"), ("dst", "dst_dir_fd")), destructive=True)
         wrap(shutil, "rmtree", (("path", "dir_fd"),), destructive=True)
-        wrap(sqlite3, "connect", (("database", None),))
+        original_connect = sqlite3.connect
+
+        @wraps(original_connect)
+        def guarded_connect(*args, **kwargs):
+            database = args[0] if args else kwargs.get("database")
+            # sqlite3's URI is its eighth positional argument on Python < 3.15.
+            uri = args[7] if len(args) > 7 else kwargs.get("uri", False)
+            candidate = os.fsdecode(database) if database is not None else None
+            if uri and candidate is not None and candidate.startswith("file:"):
+                # Check SQLite's effective filename, not <cwd>/file:/...?... . Split before
+                # decoding so escaped '?'/'#' stay filename bytes. Avoid urlsplit, which
+                # silently strips tabs/newlines that SQLite treats as filename characters.
+                candidate = candidate[5:].split("?", 1)[0].split("#", 1)[0]
+                if candidate.startswith("//"):
+                    authority, _, candidate = candidate[2:].partition("/")
+                    if authority not in ("", "localhost"):
+                        self.refuse(database)  # No unverified remote/UNC authority in tests.
+                    candidate = "/" + candidate
+                if (os.name == "nt" and len(candidate) > 2 and candidate[0] == "/"
+                        and candidate[1].isascii() and candidate[1].isalpha() and candidate[2] == ":"):
+                    candidate = candidate[1:]  # file:///C:/... names C:/..., not /C:/...
+                candidate = os.fsdecode(unquote_to_bytes(candidate))
+                if "\x00" in candidate:
+                    self.refuse(database)  # SQLite truncates here; realpath cannot check a NUL.
+            self.check(candidate)
+            return original_connect(*args, **kwargs)
+
+        monkeypatch.setattr(sqlite3, "connect", guarded_connect)
 
         original_open, original_close = os.open, os.close
 
