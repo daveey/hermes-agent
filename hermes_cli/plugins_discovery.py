@@ -179,6 +179,13 @@ def _dedupe_same_name(
     return [m for m in level if keep.get(manifest_key(m)) is m]
 
 
+def is_skipped_plugin_dir(name: str) -> bool:
+    """True for directory names discovery never treats as plugins. Cache/dunder dirs (__pycache__,
+    __MACOSX__, …) can raise PermissionError when walked and take down every later tool call
+    (#86996); foreign-harness dirs hold another tool's manifest convention."""
+    return (name.startswith("__") and name.endswith("__")) or name in _FOREIGN_HARNESS_MANIFEST_DIRS
+
+
 def scan_directory(
     path: Path, source: str, *, skip_names: Optional[set[str]] = None, prefix: str = "", depth: int = 0,
     conflicts: Optional[list[PluginDirConflict]] = None,
@@ -198,14 +205,8 @@ def scan_directory(
         logger.warning("Skipping unreadable plugin directory %s: %s", path, exc)
         return manifests
     for child in children:
-        # Cache/dunder dirs (__pycache__, __MACOSX__, …) are never
-        # plugins. Walking them can raise PermissionError and take
-        # down every subsequent tool call (#86996).
-        if child.name.startswith("__") and child.name.endswith("__"):
-            logger.debug("Skipping dunder plugin path %s", child)
-            continue
-        if child.name in _FOREIGN_HARNESS_MANIFEST_DIRS:
-            logger.debug("Skipping %s (foreign-harness manifest convention)", child)
+        if is_skipped_plugin_dir(child.name):
+            logger.debug("Skipping %s (dunder or foreign-harness manifest dir)", child)
             continue
         if is_backup_plugin_dir(child.name):
             if conflicts is not None:
