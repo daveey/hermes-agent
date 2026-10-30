@@ -574,10 +574,10 @@ export function pendingSessionReplay(runtimeId: string): Promise<boolean> | unde
   return pending.length ? Promise.all(pending).then(results => results.every(Boolean)) : undefined
 }
 
-/** Untagged-row owner. `'pin'` omits the 'local' fallback that force-spawns a local serve. */
-export function primaryGatewayConnectionId(mode?: 'pin'): null | string {
-  return mode === 'pin' ? g.primaryConnectionId : (g.primaryConnectionId ?? 'local')
-}
+/** Owner of untagged unified-list rows, never the foreground secondary. */
+export const primaryGatewayConnectionId = (): string => g.primaryConnectionId ?? 'local'
+/** The same owner without the 'local' fallback, which force-spawns a local serve. */
+export const pinnedPrimaryGatewayConnectionId = (): null | string => g.primaryConnectionId
 
 /**
  * The registry connection serving the gateway the user is currently looking
