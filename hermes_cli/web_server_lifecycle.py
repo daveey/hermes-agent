@@ -317,7 +317,7 @@ def _make_orphan_check(desktop_pid, expected_start_marker=None, *, clock=time.mo
                 from gateway.status import _pid_exists as pid_exists
             try:
                 return not bool(pid_exists(int(desktop_pid)))
-            except Exception:
+            except (OSError, ValueError, TypeError):
                 return False
         orphaned = _is_serve_orphaned(desktop_pid, expected_start_marker, **probes)
         state["verified_at"] = None if orphaned else now
