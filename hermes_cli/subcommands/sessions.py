@@ -20,6 +20,15 @@ def cmd_sessions_lazy(args, **kwargs):
 
 
 def _add_rename_and_discard(sessions_subparsers) -> None:
+    sessions_branch = sessions_subparsers.add_parser(
+        "branch", help="Copy a session into a hidden probe session and print the copy's id (test on the copy, "
+                       "never in a person's chat)")
+    sessions_branch.add_argument("session_id", help="Session ID (or unique prefix) to copy")
+    sessions_branch.add_argument("--title", help="Title for the copy (default: 'probe copy of <id>')")
+    sessions_branch.add_argument("--source", default="oneshot",
+                                 help="Source for the copy (default: oneshot, hidden from session lists)")
+    sessions_branch.add_argument("--json", action="store_true", help="Print a JSON object instead of the bare id")
+
     sessions_rename = sessions_subparsers.add_parser(
         "rename", help="Set or change a session's title")
     sessions_rename.add_argument("session_id", help="Session ID to rename")

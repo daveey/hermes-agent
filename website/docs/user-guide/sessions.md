@@ -525,6 +525,20 @@ hermes sessions rename 20250305_091523_a1b2c3d4 debugging auth flow
 
 If the title is already in use by another session, an error is shown.
 
+### Copy a Session for a Test
+
+To try a prompt against a chat's history without adding turns to that chat, copy it first:
+
+```bash
+copy=$(hermes sessions branch 20250305_091523_a1b2c3d4)   # prints the copy's id
+hermes chat --resume "$copy" --oneshot -q "your test prompt"
+hermes sessions delete --yes "$copy"
+```
+
+The copy carries the full transcript and system prompt but is a hidden `oneshot` session (it never shows in the
+sidebar or `/resume` picker), and the original is not touched. `--title`, `--source` and `--json` are optional.
+Unlike the interactive `/branch`, this does not switch you into the copy.
+
 ### Discard a Turn Lost in a Gateway Crash
 
 If the gateway stops in the middle of a turn, that turn's outcome is unknown and it is never replayed. It blocks

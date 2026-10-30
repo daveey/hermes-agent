@@ -28,9 +28,8 @@ from rich.panel import Panel
 
 from hermes_constants import display_hermes_home
 from hermes_state_ids import new_session_id as mint_session_id
+from hermes_cli.sessions_cmd_branch import branch_rows  # /branch rows: one owner with `hermes sessions branch`
 from agent.i18n import t
-from agent.message_metadata import message_identity
-from agent.turn_context import extract_api_content_sidecar
 from hermes_cli.cli_agent_setup_mixin import _gateway_open, _retire_agent
 from hermes_cli.cli_commands_session_tools import (
     CLICommandsSessionToolsMixin, _TTYBuf, _accent, _accent_line, _command_arg, _cp, _dim,
@@ -117,10 +116,6 @@ _WORKTREE_SUBCOMMANDS = {
     **dict.fromkeys(("prune", "gc", "clean"), "_worktree_prune"),
     **dict.fromkeys(("list", "ls"), "_worktree_list"),
     **dict.fromkeys(("new", "add", "create"), "_worktree_new")}
-
-# Message fields copied verbatim onto a /branch row (plus role / tool_name / api_content).
-_BRANCH_COPY_KEYS = ("content", "tool_calls", "tool_call_id", "reasoning", "reasoning_content", "reasoning_details",
-                     "codex_reasoning_items", "codex_message_items", "timestamp", "data_use")
 
 # /hatch progress event -> catalog key (``cli.commands.hatch.*``).
 _HATCH_PROGRESS = {"compose": "hatch.progress_compose", "save": "hatch.progress_save"}
@@ -957,11 +952,8 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         # Best-effort chunked copy (a failed copy still yields a usable branch); the api_content
         # sidecar lets the branch's first turn replay the parent's exact wire bytes (warm cache).
         with suppress(Exception):
-            self._session_db.append_messages_batch(new_session_id, [
-                {"role": msg.get("role", "user"), "tool_name": msg.get("tool_name") or msg.get("name"),
-                 "api_content": extract_api_content_sidecar(msg),
-                 **{k: msg.get(k) for k in _BRANCH_COPY_KEYS}, **message_identity(msg, with_tool_uids=True)}
-                for msg in self.conversation_history], chunk_rows=500)
+            self._session_db.append_messages_batch(new_session_id, branch_rows(self.conversation_history),
+                                                   chunk_rows=500)
         with suppress(Exception):
             self._session_db.set_session_title(new_session_id, branch_title)
         # Switch to the new session

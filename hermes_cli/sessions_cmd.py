@@ -1388,6 +1388,7 @@ _PRE_DB_HANDLERS = {
 _OBSERVATIONAL_DB_ACTIONS = frozenset({"list", "stats", "pinned"})
 _DB_HANDLERS = {
     "list": _cmd_list, "export": _cmd_export, "delete": _cmd_delete, "rename": _cmd_rename, "pinned": _cmd_pinned,
+    "branch": lambda db, a: _cmd_branch(db, a),
     "prune": partial(_cmd_prune_or_archive, action="prune"), "pin": partial(_cmd_pin, pinning=True),
     "archive": partial(_cmd_prune_or_archive, action="archive"), "unpin": partial(_cmd_pin, pinning=False),
     "retitle-skills": _cmd_retitle_skills, "browse": _cmd_browse, "optimize": _cmd_optimize,
@@ -1399,6 +1400,11 @@ _DB_HANDLERS = {
     "outcome": lambda db, a: _outcome_cmd().cmd_outcome(db, a),
     "outcome-audit": lambda db, a: _outcome_cmd().cmd_outcome_audit(db, a),
 }
+
+
+def _cmd_branch(db, args):
+    from hermes_cli.sessions_cmd_branch import cmd_branch
+    return cmd_branch(db, args)
 
 
 def _outcome_cmd():
