@@ -7,6 +7,7 @@ override), and the shared dispatch-note formatter.
 """
 
 import json
+import queue
 import time
 from unittest.mock import MagicMock
 
@@ -28,7 +29,7 @@ def _clean_state():
     while not process_registry.completion_queue.empty():
         process_registry.completion_queue.get_nowait()
     yield
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 30.0
     while ad.active_count() and time.monotonic() < deadline:
         time.sleep(0.02)
     ad._reset_for_tests()
@@ -233,14 +234,13 @@ def test_start_review_dispatches_background_and_completes(monkeypatch):
     assert re_mod._REVIEW_GOAL in built["context"]
 
     # The completion re-enters via the shared queue like any subagent.
-    deadline = time.monotonic() + 5.0
-    evt = None
-    while time.monotonic() < deadline:
-        try:
-            evt = process_registry.completion_queue.get(timeout=0.2)
-            break
-        except Exception:
-            continue
+    # Event-driven wait: returns the moment the worker thread pushes the event. The generous
+    # ceiling only matters on CPU-throttled runners, where the worker (state.db writes + pool
+    # thread start) can take far longer than a fixed few-second deadline.
+    try:
+        evt = process_registry.completion_queue.get(timeout=120.0)
+    except queue.Empty:
+        evt = None
     assert evt is not None and evt["type"] == "async_delegation"
     assert evt["results"][0]["summary"] == "REVIEW: looks good"
 
