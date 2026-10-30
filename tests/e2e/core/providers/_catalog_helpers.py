@@ -221,14 +221,11 @@ def write_home(root: Path, model: dict[str, Any], extra_cfg: dict[str, Any] | No
 
 
 def stop_auto_started_gateway(hermes_home: Path, timeout: float = 30.0) -> None:
-    """Stop the daemon a ``hermes -z`` client auto-started for this hermetic home.
+    """Stop this row's daemon before its fake/proxy closes or another row starts.
 
-    The oneshot client spawns the home's gateway (``ensure_gateway_runtime``), which outlives the
-    client for ``gateway.unmanaged_idle_exit_seconds`` (600 s). A matrix shard drives dozens of
-    homes, so un-reaped daemons (each a full gateway: cron, kanban dispatcher, housekeeping) pile up
-    across the whole E2E run and starve later children of CPU/RAM until they miss ``TURN_TIMEOUT``
-    with no request ever sent. Only the live process the gateway's own identity check proves is
-    this home's gateway is signalled (a recycled PID in a stale record is left alone).
+    Oneshot clients leave a shared runtime alive for 600 s. Retaining dozens of sandbox
+    gateways leaks processes and lets background requests outlive their proxy's ownership.
+    Only signal the live process the canonical identity check proves belongs to this home.
     """
     import psutil
     from gateway.status import live_gateway_pid_for_home
