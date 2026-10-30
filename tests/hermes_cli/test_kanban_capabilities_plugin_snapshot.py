@@ -197,6 +197,12 @@ def test_new_plugin_dir_and_config_edit_invalidate_the_record(home):
     assert _run(home)["discoveries"] == 0
     _tool_plugin(home, "late", "late_ping", "late")
     assert _run(home)["discoveries"] == 1
+    # A concurrent importer can create bytecode after discovery recorded its inputs.
+    # That moves the plugin directory's mtime, but must not invalidate the new record.
+    plugin = home / "plugins" / "late"
+    (plugin / "__pycache__").mkdir()
+    st = plugin.stat()
+    os.utime(plugin, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
     assert _run(home)["discoveries"] == 0
     _config(home, "platform_toolsets:\n  cli: [terminal, file]\n" + ENABLED % "late")
     assert _run(home)["discoveries"] == 1
