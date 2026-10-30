@@ -18,6 +18,7 @@ from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_activity_identity as _identity
 from hermes_cli import kanban_annotation_disk as _annotation_copy
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
+from hermes_cli.kanban_db_sync import sync_enabled as _board_sync_enabled
 from hermes_cli.kanban_scope_heartbeat import scope_heartbeats as _scope_heartbeats
 from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases, _moved_evidence, _retire_moved
 from hermes_cli.kanban_session_activity_attention import AttentionCache as _AttentionCache
@@ -457,13 +458,12 @@ def replica_task_resolution(ids: list[str], now: float | None = None) -> tuple[s
     """Which ``t_<hex>`` ids exist as tasks in the hermes-hub replica of any gateway (same file ``_remote_links``
     reads; replica keys are ``[profile/]board/<id>``, so qualified ``@task:p@gw/<id>`` refs resolve by id).
 
-    Returns ``(found, authoritative)``. ``authoritative`` is False when a replica exists but cannot answer
-    (unreadable, offline, or not synced within ``HUB_STALE_AFTER_S``): an id absent from it is then *unknown*,
-    not missing, and callers must not flag it. No replica at all (no hub installed) is authoritative: nothing
-    exists beyond the local board."""
+    Returns ``(found, authoritative)``; False when a replica exists but can't answer (unreadable, offline, or not
+    synced within ``HUB_STALE_AFTER_S``): absent ids are *unknown*, never flagged. No replica is authoritative only
+    when ``kanban.sync`` is off; a Board-synced host (worker node: no hub sync) holds a partial board. [daveey]"""
     path = _hub_db_path()
-    if path is None or not ids:
-        return set(), True
+    if path is None or not ids:  # sync_enabled never raises: an unreadable config reads as sync off (standalone)
+        return set(), not ids or not _board_sync_enabled()
     try:
         conn = _open_ro(path)
         try:

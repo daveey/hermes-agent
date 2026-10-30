@@ -40,7 +40,7 @@ from tools.process_registry_output_log import ProcessOutputLogMixin, open_output
 from tools.process_registry_ownership import ProcessOwnershipMixin
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
-from tools.process_registry_env_log import log_delta_command
+from tools.process_registry_env_log import env_poller_loop, log_delta_command
 from tools.process_registry_wsl import _is_wsl_launcher_command
 
 logger = logging.getLogger(__name__)
@@ -1430,64 +1430,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
     _log_delta_command = staticmethod(log_delta_command)
 
     def _env_poller_loop(self, session: ProcessSession, env: Any, log_path: str, pid_path: str, exit_path: str):
-        """Background thread: poll a sandbox log file for non-local backends."""
-        q = shlex.quote
-        # Byte offset already read from the log (bytes, not chars: the shell counts bytes).
-        prev_output_bytes = 0
-        while not session.exited:
-            time.sleep(2)
-            try:
-                # Read only the bytes written since the last poll.
-                raw = env.execute(self._log_delta_command(q(log_path), prev_output_bytes),
-                                  timeout=10).get("output", "")
-                header, _, delta = raw.partition("\n")
-                try:
-                    size_str, offset_str = header.split()
-                    new_size = int(size_str)
-                    used_offset = int(offset_str)
-                except ValueError:
-                    # No usable header (command failed, shell missing a tool): skip this
-                    # poll rather than act on a half-read value.
-                    new_size = None
-                    used_offset = None
-                    delta = ""
-                if new_size is not None:
-                    if used_offset < prev_output_bytes:
-                        # Log rotated/truncated: what we hold no longer lines up. Restart.
-                        with session._lock:
-                            if session.exited:
-                                return
-                            session.output_buffer = ""
-                    prev_output_bytes = new_size
-                if delta:
-                    # A kill that landed after this fetch already published its output
-                    # snapshot: leave the output as the kill reported it (as the PTY reader does).
-                    with session._lock:
-                        if session.exited:
-                            return
-                        session.output_buffer += delta
-                        if len(session.output_buffer) > session.max_output_chars:
-                            session.output_buffer = session.output_buffer[-session.max_output_chars:]
-                    self._check_watch_patterns(session, delta)
-                    self._emit_output(session, delta)
-
-                check = env.execute(
-                    f"kill -0 \"$(cat {q(pid_path)} 2>/dev/null)\" 2>/dev/null; echo $?", timeout=5)
-                check_output = check.get("output", "").strip()
-                if check_output and check_output.splitlines()[-1].strip() != "0":
-                    # Exited -- read the exit code captured by the wrapper shell.
-                    exit_str = env.execute(f"cat {q(exit_path)} 2>/dev/null", timeout=5).get("output", "").strip()
-                    try:
-                        exit_code = int(exit_str.splitlines()[-1].strip())
-                    except (ValueError, IndexError):
-                        exit_code = -1
-                    self._finish_exited(session, exit_code)
-                    return
-            except Exception:
-                # Environment might be gone (sandbox reaped, etc.). A kill that already
-                # settled the session keeps its result.
-                self._finish_exited(session, -1, reason="lost", source="backend_lost")
-                return
+        """Background thread: poll a sandbox log file for non-local backends (see ``env_poller_loop``)."""
+        env_poller_loop(self, session, env, log_path, pid_path, exit_path)
 
     def _pty_reader_loop(self, session: ProcessSession):
         """Background thread: read output from a PTY process."""

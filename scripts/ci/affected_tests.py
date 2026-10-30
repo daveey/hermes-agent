@@ -41,8 +41,10 @@ ROOT = Path(__file__).resolve().parents[2]
 WIDE = (
     re.compile(r"(^|/)conftest\.py$"),
     re.compile(r"^(pyproject\.toml|uv\.lock|pytest\.ini|setup\.cfg|tox\.ini)$"),
-    re.compile(r"^scripts/(run_tests\.sh|run_tests_parallel\.py|run-in-hermes-env)$"),
-    re.compile(r"^scripts/ci/(affected_tests|test_workers)\.py$"),
+    # PM activation inputs include the interpreter pin, not just Python dependencies.
+    re.compile(r"^pm/(lock\.json|environments\.py|testenv\.py)$"),
+    re.compile(r"^scripts/(run_tests\.sh|run_tests_parallel\.py|run-in-hermes-env|_activation\.sh)$"),
+    re.compile(r"^scripts/ci/(affected_tests|test_workers|setup_toolchain)\.py$"),
     re.compile(r"^\.github/actions/setup-pm/"),
     re.compile(r"^tests/[^/]+\.py$"),  # tests/ helpers imported by name from anywhere (fakes, fixtures)
 )

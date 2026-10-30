@@ -72,6 +72,50 @@ def test_unknown_id_flagged_without_any_replica(board):
     assert len(_phantom_events(conn, tid)) == 1
 
 
+HOME_BOARD_ID = "t_01a18d13cfd3dc82"  # a real card on the home board that this worker node never claimed
+
+
+@pytest.fixture
+def worker_node(tmp_path, monkeypatch):
+    """A Board worker node: its boards sync to the Board service, it runs no hermes-hub sync (no ``hub.db``), and
+    its live file holds only the cards it claimed."""
+    home = support.kanban_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "hubstate"))
+    support.write_sync_config(home, True)
+    leases = support.lease_client()
+    next(leases)
+    conn = kbc.connect(home / "kanban.db")
+    yield conn
+    conn.close()
+    leases.close()
+
+
+def test_worker_node_summary_naming_unclaimed_home_board_card_is_not_flagged(worker_node):
+    """(a) worker-1 completed t_01a18d195d03d5b7 naming t_01a18d13cfd3dc82, a real MacBook-board card it never
+    copied; with no hub replica the scan used to call the local file the whole world and flag it."""
+    conn = worker_node
+    assert kb.get_task(conn, HOME_BOARD_ID) is None  # not in this node's partial view
+    tid = _complete_with_summary(conn, f"the MacBook board shows {HOME_BOARD_ID} as archived")
+    assert _phantom_events(conn, tid) == []
+    events = kb.list_events(conn, tid)
+    assert not [d for d in kd.compute_task_diagnostics(kb.get_task(conn, tid), events, [], now=int(time.time()))
+                if d.kind == "prose_phantom_refs"]
+
+
+def test_standalone_host_without_hub_still_flags_made_up_id(board, tmp_path):
+    """(b) No Board sync and no hub replica: the local board is everything, so a made-up id is still flagged
+    (and stays flagged in diagnostics)."""
+    conn, hub = board
+    support.write_sync_config(tmp_path / ".hermes", False)
+    assert not hub.exists()
+    tid = _complete_with_summary(conn, f"made up {UNKNOWN_ID}")
+    payloads = [r[0] for r in _phantom_events(conn, tid)]
+    assert len(payloads) == 1 and UNKNOWN_ID in payloads[0]
+    events = kb.list_events(conn, tid)
+    diags = kd.compute_task_diagnostics(kb.get_task(conn, tid), events, [], now=int(time.time()))
+    assert [d.data["phantom_refs"] for d in diags if d.kind == "prose_phantom_refs"] == [[UNKNOWN_ID]]
+
+
 @pytest.mark.parametrize("kw", [{"fresh": False}, {"offline": True}])
 def test_stale_or_offline_replica_does_not_flag(board, kw):
     conn, hub = board

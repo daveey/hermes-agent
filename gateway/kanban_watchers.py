@@ -332,6 +332,12 @@ class GatewayKanbanWatchersMixin:
                     # Core-update drain hold: spawns only are suppressed; wake probes,
                     # promotion and reclaim keep running. [daveey]
                     gate = _kanban_dispatch_gate()
+                    if gate is None and getattr(self, "_restart_requested", False):
+                        # A deferred restart (``request_restart``'s after-turn wait) claims nothing new
+                        # either: the draining owner refuses a new worker anyway, and with no hermes-sync
+                        # claim hold (core declares GATEWAY_RESTART_SAFE) a claim made now only adds a
+                        # run the restart must carry. A cancelled restart clears the flag. [daveey]
+                        gate = "drain"
                     if gate == "estop":
                         bad_ticks = 0
                     elif gate == "drain":

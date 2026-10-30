@@ -90,6 +90,25 @@ def test_completion_entry_records_real_goal_success(board, monkeypatch, entry):
         assert ledger.observe_owner_task(conn, {'id': tid, 'status': 'done'}, now=1000)['origin_observation']['verified']
 
 
+@pytest.mark.parametrize('preview_tail', [' ', '\t', '\u2003'])
+@pytest.mark.parametrize('tamper_run', [False, True])
+def test_goal_release_normalizes_truncated_preview_whitespace(board, monkeypatch, preview_tail, tamper_run):
+    monkeypatch.setattr(kanban_tools, '_goal_judge_available', lambda: True)
+    monkeypatch.setattr(kanban_tools, 'judge_goal', lambda **kw: ('done', 'verified', None, None, False))
+    evidence = 'x' * 399 + preview_tail + 'verified remainder'
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title='Build', assignee='default', goal_mode=True,
+                             completion_contract='local-only')
+        proof = kanban_tools._goal_gate('kanban_complete', kb.get_task(conn, tid), tid, evidence)
+        assert kb.complete_task(conn, tid, summary=evidence, goal_verification=proof)
+        if tamper_run:
+            conn.execute('UPDATE task_runs SET summary=? WHERE task_id=?', (evidence + ' changed', tid))
+            conn.commit()
+        conn.execute('BEGIN')
+        observed = ledger.observe_owner_task(conn, {'id': tid, 'status': 'done'}, now=1000)
+        assert observed['origin_observation']['verified'] is (not tamper_run)
+
+
 @pytest.mark.parametrize('evidence', [
     'FINAL SEND for @session:default/20261026_abc: hello',
     'Tested\nsecond line\nFINAL SEND for @session:default/20261026_abc: hello',

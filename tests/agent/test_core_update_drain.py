@@ -111,7 +111,7 @@ def _dispatcher_board(tmp_path, monkeypatch):
     return dict(parent=parent, child=child, ready=ready, parked=parked), spawned
 
 
-def _run_one_tick(tmp_path, monkeypatch):
+def _run_one_tick(tmp_path, monkeypatch, *, restart_requested=False):
     import asyncio
 
     from gateway import kanban_watchers as watchers
@@ -129,6 +129,7 @@ def _run_one_tick(tmp_path, monkeypatch):
     monkeypatch.setattr(kwc, "run_due_wake_checks", probe)
     runner = watchers.GatewayKanbanWatchersMixin()
     runner._running = True
+    monkeypatch.setattr(runner, "_restart_requested", restart_requested, raising=False)
     cfg = {"auto_decompose": False, "dispatch_interval_seconds": 1}
     monkeypatch.setattr(runner, "_kanban_dispatcher_boot", lambda: (lambda: {"kanban": cfg}, kb, cfg))
 
@@ -174,6 +175,19 @@ def test_without_hold_the_same_tick_claims(tmp_path, monkeypatch):
     _run_one_tick(tmp_path, monkeypatch)
     assert ids["ready"] in spawned
     assert _statuses(ids)["ready"] == "running"
+
+
+def test_a_deferred_restart_claims_nothing_but_keeps_wake_probes_and_promotion(tmp_path, monkeypatch):
+    """With no hermes-sync hold (core declares GATEWAY_RESTART_SAFE), the gateway's own deferred restart
+    must not claim: each claim would add a run the after-turn wait has to carry. [daveey]"""
+    monkeypatch.setattr(drain, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(drain, "_canonical_root", lambda: tmp_path)
+    ids, spawned = _dispatcher_board(tmp_path, monkeypatch)
+    probes = _run_one_tick(tmp_path, monkeypatch, restart_requested=True)
+    assert [ids["parked"]] in probes
+    st = _statuses(ids)
+    assert st["parked"] == "ready" and st["child"] == "ready"
+    assert st["ready"] == "ready" and spawned == []
 
 
 def test_estop_still_skips_the_whole_tick(tmp_path, monkeypatch):

@@ -66,7 +66,8 @@ def main():
     os.environ['HERMES_KANBAN_HOME'] = str(home)
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     peer.requests = []
-    peer.mode = os.environ.get('KANBAN_PROBE_MODE', 'complete')
+    contended = os.environ.get('KANBAN_PROBE_MODE') == 'timeout_contended'
+    peer.mode = 'timeout' if contended else os.environ.get('KANBAN_PROBE_MODE', 'complete')
     peer.blocked, peer.release = threading.Event(), threading.Event()
     threading.Thread(target=peer.serve_forever, daemon=True).start()
     url = f'http://127.0.0.1:{peer.server_port}/v1'
@@ -121,7 +122,28 @@ def main():
             subprocess.Popen = spawn
             try:
                 with closing(connect(board='owned')) as conn:
-                    launched = dispatch.dispatch_once(conn, board='owned', max_spawn=1)
+                    from contextlib import nullcontext
+                    from hermes_cli.admission_fence import admission_lock
+                    from hermes_constants import get_default_hermes_root
+                    # A descheduled reservation publisher can own this flock when the first tick runs.
+                    with admission_lock(get_default_hermes_root()) if contended else nullcontext():
+                        launched = dispatch.dispatch_once(conn, board='owned', max_spawn=1)
+                    if contended:
+                        assert launched.spawned == [], launched
+                        receipt['initial_claim_deferred'] = True
+                    from tests.waiting import wait_until
+                    def launch_when_admitted():
+                        nonlocal launched
+                        if launched.spawned:
+                            return launched
+                        # Only an unclaimed tick is retryable: never hide a failed/lost launch.
+                        pending = kb.get_task(conn, tid)
+                        runs = conn.execute('SELECT count(*) FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0]
+                        assert pending is not None
+                        assert pending.status == 'ready' and pending.current_run_id is None and runs == 0, (pending, runs, launched)
+                        launched = dispatch.dispatch_once(conn, board='owned', max_spawn=1)
+                        return launched if launched.spawned else None
+                    launched = wait_until(launch_when_admitted, timeout=60, what='dispatcher claim and spawn')
                     assert [s[0] for s in launched.spawned] == [tid], launched
                     task = kb.get_task(conn, tid)
                     params = dict(task_id=tid, board='owned', run_id=task.current_run_id, claim_lock=task.claim_lock)

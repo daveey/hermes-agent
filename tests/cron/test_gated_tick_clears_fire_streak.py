@@ -11,7 +11,7 @@ behaviour. Entry path: ``S.tick`` against an owner reached through ``connect_gat
 answers a gate tick with ``job_flags = {"_agent_skipped": True}`` (as ``gateway.session_cron`` does).
 """
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 import itertools
 
 import pytest
@@ -32,10 +32,12 @@ _slots = itertools.count(2)
 
 
 def _make_due(job_id):
-    """Due at a fresh slot: a completed fire at the same slot (same second) dedups the next one."""
+    """Allocate distinct past occurrences independently of elapsed wall time."""
     stored = J.load_jobs()
     rec = next(r for r in stored if r["id"] == job_id)
-    slot = J._hermes_now().replace(microsecond=0) - timedelta(minutes=1, seconds=next(_slots))
+    # A moving `now - counter` collides when both advance by one second.
+    anchor = datetime.fromisoformat(rec["created_at"]).replace(microsecond=0)
+    slot = anchor - timedelta(minutes=1, seconds=next(_slots))
     rec["next_run_at"] = slot.isoformat()
     J.save_jobs(stored)
 
@@ -158,7 +160,10 @@ def test_gate_tick_keeps_an_agent_only_streak(monkeypatch):
     assert kept["last_error"] == "RuntimeError: model said no"
 
 
-def test_real_success_resets_the_kind(monkeypatch):
+@pytest.mark.parametrize("elapsed_seconds", [0, 1, 2])
+def test_real_success_resets_the_kind(monkeypatch, elapsed_seconds):
+    now = J._hermes_now()
+    monkeypatch.setattr(J, "_hermes_now", lambda: now)
     _bypass_gate(monkeypatch)
     job_id, _slot = _due_agent_job()
     _agent_failure(monkeypatch, job_id)
@@ -167,6 +172,8 @@ def test_real_success_resets_the_kind(monkeypatch):
     S.tick(verbose=False)
     healed = _stored(job_id)
     assert healed["failure_streak"] == 0 and "last_error_kind" not in healed
+    # A scheduling gap must not reuse the successful occurrence's slot.
+    now += timedelta(seconds=elapsed_seconds)
     # The next fire refusal starts a fresh fire-only streak.
     _fire_fault(monkeypatch)
     _make_due(job_id)

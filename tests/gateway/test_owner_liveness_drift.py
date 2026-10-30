@@ -58,6 +58,14 @@ def test_one_second_drift_keeps_owner_live(site, monkeypatch, tmp_path):
         assert _async_delegation_alive(monkeypatch, tmp_path) is True
 
 
+@pytest.mark.parametrize("junk", [float("inf"), float("-inf"), float("nan"), None, "abc"])
+@pytest.mark.parametrize("side", ["recorded", "current"])
+def test_junk_fingerprint_raises_contract_error(junk, side):
+    recorded, current = (junk, RECORDED) if side == "recorded" else (RECORDED, junk)
+    with pytest.raises((TypeError, ValueError)):
+        status.start_time_fingerprints_match(recorded, current)
+
+
 def test_far_fingerprint_is_still_a_recycled_pid(monkeypatch):
     monkeypatch.setattr(status, "get_process_start_time", lambda pid: RECORDED + 3600)
     assert _delivery_ledger_alive() is False

@@ -1165,6 +1165,9 @@ def worker_archive_scope(conn, task_id: str) -> tuple[Optional[str], Optional[st
     task = kb.get_task(conn, task_id)
     if task is None:
         return f"no such task: {task_id}", None
+    waiting = _capability_owner_waiting_card(task)
+    if waiting and (waiting == env_tid or _creator_task_id(conn, waiting) == env_tid):
+        return _worker_may_archive_capability_owner(task, waiting), f"capability owner of {waiting} by {env_tid}"
     if _creator_task_id(conn, task_id) != env_tid:
         if not (task.claim_lock or task.worker_pid) and _is_stranded_runs_on_copy(conn, task):
             return None, f"stranded-runs_on sweep by {env_tid}"
@@ -1178,11 +1181,40 @@ def worker_may_archive(conn, task_id: str) -> Optional[str]:
 
     A dispatcher worker may archive an unclaimed card its own task created
     (``creator_task_id`` is ``HERMES_KANBAN_TASK``), or a foreign card that is a
-    provably stranded ``runs_on`` copy (see ``_is_stranded_runs_on_copy``). Every
+    provably stranded ``runs_on`` copy (see ``_is_stranded_runs_on_copy``), or a done or
+    unclaimed capability owner card (``capability-owner:<card>:...``) whose ``<card>`` is
+    ``HERMES_KANBAN_TASK`` or a card that task created. A reviewer of that task runs with the
+    same ``HERMES_KANBAN_TASK``, so it may archive them too. Every
     other foreign card is refused — that is the "scoped worker can't archive it"
     wall. No env task (a human or an orchestrator) may archive any card, as before.
     """
     return worker_archive_scope(conn, task_id)[0]
+
+
+def _capability_owner_waiting_card(task) -> Optional[str]:
+    """The waiting card of a capability owner card (``capability-owner:<card>:<need>``), else None.
+
+    Owner cards are created by the routing path (``created_by="capability-relay"`` for a
+    relayed local owner), never by the waiting card's task, so the creator rule alone
+    never lets that task clean them up. [daveey]
+    """
+    from hermes_cli.kanban_capability_routing import _task_of
+
+    return _task_of(task.idempotency_key or "")
+
+
+def _worker_may_archive_capability_owner(task, waiting: str) -> Optional[str]:
+    """The refusal for an owner card of ``waiting`` (the worker's task or a card it created), else None.
+
+    A done owner card may be archived (the readback is in; this is the cleanup), and so may an
+    unclaimed one. A claimed owner card is refused: its worker is doing the action.
+    """
+    if task.status == "archived":
+        return f"cannot archive {task.id}: status=archived"
+    if task.status != "done" and (task.status == "running" or task.claim_lock or task.worker_pid):
+        return (f"cannot archive {task.id}: capability owner card of {waiting} is claimed "
+                f"(status={task.status}). A worker may archive only a done or unclaimed owner card.")
+    return None
 
 
 def _worker_may_archive_own(task) -> Optional[str]:
