@@ -217,7 +217,40 @@ def write_home(root: Path, model: dict[str, Any], extra_cfg: dict[str, Any] | No
            **(extra_cfg or {})}
     (home / ".hermes" / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     select_test_dependencies(home / ".hermes", REPO_ROOT)
+    # The fake model has public metadata too. Seed it so a cold cache cannot make an
+    # unrelated OpenRouter catalog refresh look like foreign inference routing.
+    cache = home / ".hermes" / "cache"
+    cache.mkdir(exist_ok=True)
+    (cache / "openrouter_model_metadata.json").write_text(json.dumps({
+        "catalog-model-a": {"context_length": 128000, "max_completion_tokens": 4096,
+                            "name": "catalog-model-a", "pricing": {}},
+    }), encoding="utf-8")
     return home
+
+
+def stop_auto_started_gateway(hermes_home: Path, timeout: float = 30.0) -> None:
+    """Stop this row's daemon before its fake/proxy closes or another row starts.
+
+    Oneshot clients leave a shared runtime alive for 600 s. Retaining dozens of sandbox
+    gateways leaks processes and lets background requests outlive their proxy's ownership.
+    Only signal the live process the canonical identity check proves belongs to this home.
+    """
+    import psutil
+    from gateway.status import live_gateway_pid_for_home
+
+    pid = live_gateway_pid_for_home(hermes_home)
+    if pid is None:
+        return
+    try:
+        gateway = psutil.Process(pid)  # binds the create time: terminate() refuses a reused PID
+        gateway.terminate()
+        try:
+            gateway.wait(timeout=timeout)
+        except psutil.TimeoutExpired:
+            gateway.kill()
+            gateway.wait(timeout=timeout)
+    except psutil.NoSuchProcess:
+        return
 
 
 def run_hermes(home: Path, cwd: Path, env_extra: dict[str, str], *args: str,
@@ -233,6 +266,8 @@ def run_hermes(home: Path, cwd: Path, env_extra: dict[str, str], *args: str,
             proc.kill()
             proc.wait()
             rc, why = -9, f"\nTIMEOUT after {timeout}s"
+        finally:
+            stop_auto_started_gateway(home / ".hermes")
         out.seek(0)
         err.seek(0)
         return subprocess.CompletedProcess(proc.args, rc, out.read(), err.read() + why)
