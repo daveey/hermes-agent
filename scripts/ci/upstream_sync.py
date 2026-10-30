@@ -180,7 +180,10 @@ def _push(repo, src: str, ref: str, stage: str) -> None:
     """Push ``src`` to ``ref`` as the gate. A protection refusal raises Refused with GitHub's words."""
     push = _run(repo, "push", "-q", "origin", f"{src}:{ref}", env=_gate_env(stage))
     if push.returncode:
-        message = (push.stderr or push.stdout or "").strip()[-600:]
+        lines = [line.strip() for line in (push.stderr or push.stdout or "").splitlines() if line.strip()]
+        remote = [line for line in lines if line.startswith("remote:")]
+        # GitHub's verdict lines first (``remote: error: GH006 …``): the tail is paths and hints
+        message = " | ".join([line for line in remote if "error" in line.lower()] or remote or lines)[:600]
         if is_protection_refusal(message):
             raise Refused(f"GitHub refused the push to {ref}: {message}")
         raise GateError(f"git push to {ref} failed: {message}")

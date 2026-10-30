@@ -170,6 +170,7 @@ def protect_main(world_root, refs=("refs/heads/main",), code="GH006"):
     hook.write_text("#!/bin/sh\nstatus=0\nwhile read old new ref; do\n  case \" " + " ".join(refs) + " \" in\n"
                     "    *\" $ref \"*) echo \"remote: error: " + code + ": Protected branch update failed for $ref.\" >&2\n"
                     "      echo 'remote: error: Required status check \"All required checks pass (v2)\" is expected.' >&2\n"
+                    "      echo 'remote: hint: " + "x" * 700 + "' >&2\n"  # GitHub's verdict is never the tail
                     "      status=1 ;;\n  esac\ndone\nexit $status\n")
     hook.chmod(0o755)
 
