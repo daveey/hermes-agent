@@ -1,4 +1,8 @@
-import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { expect, test } from 'vitest'
 
@@ -6,9 +10,10 @@ import {
   DEFAULT_UNIT_MIB,
   RESERVED_MIB,
   memoryBudgetMiB,
+  oomKills,
   schedule,
   unitsOf,
-} from '../.github/scripts/run-workspace-checks.mjs'
+} from '../.github/scripts/workspace-check-admission.mjs'
 
 const GIB = 2 ** 30
 
@@ -101,15 +106,37 @@ test("apps/desktop's real manifest keeps its heavy units from all starting toget
   const location = 'apps/desktop'
   const manifest = JSON.parse(readFileSync(new URL('../apps/desktop/package.json', import.meta.url), 'utf-8'))
   const units = unitsOf([{ location, scripts: manifest.scripts }], () => manifest.checkMemoryMiB)
-  const heavy = units.filter((u) => u.memoryMiB > DEFAULT_UNIT_MIB).map((u) => u.script)
-  expect(heavy.sort()).toEqual(
-    ['check:lint', 'check:test:desktop:all', 'check:test:desktop:platforms', 'check:test:ui'].sort(),
-  )
   const budgetMiB = memoryBudgetMiB({ constrained: 8 * GIB, total: 32 * GIB })
+  // The four units that were SIGKILLed together must not fit together.
+  const killedTogether = ['check:lint', 'check:test:desktop:all', 'check:test:desktop:platforms', 'check:test:ui']
+  const declared = units.filter((u) => killedTogether.includes(u.script)).reduce((sum, u) => sum + u.memoryMiB, 0)
+  expect(declared).toBeGreaterThan(budgetMiB)
   const { results, peakMiB, peakCount } = await trace(units, { concurrency: 4, budgetMiB })
   expect(results).toHaveLength(units.length)
   expect(peakMiB).toBeLessThanOrEqual(budgetMiB)
   expect(peakCount).toBeLessThan(4)
+})
+
+test('the CLI runs when started through a symlinked path, so it never exits green having run nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rwc-'))
+  try {
+    const link = join(dir, 'run-workspace-checks.mjs')
+    symlinkSync(fileURLToPath(new URL('../.github/scripts/run-workspace-checks.mjs', import.meta.url)), link)
+    const out = execFileSync(process.execPath, [link, '--list'], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      encoding: 'utf-8',
+    })
+    expect(out).toMatch(/^apps\/desktop :: check:lint {2}\(\d+ MiB\)$/m)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('oom_kill is read from memory.events, and its absence is not zero', () => {
+  const events = 'low 0\nhigh 0\nmax 12\noom 3\noom_kill 2\noom_group_kill 0\n'
+  expect(oomKills(events)).toBe(2)
+  expect(oomKills('low 0\nmax 0\n')).toBeNull()
+  expect(oomKills(null)).toBeNull()
 })
 
 test('a declared peak for a check that does not exist is an error, not a silent default', () => {
