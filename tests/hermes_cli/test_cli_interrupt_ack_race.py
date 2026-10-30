@@ -63,16 +63,29 @@ def _make_cli():
         "prompt_toolkit.formatted_text": MagicMock(),
         "prompt_toolkit.auto_suggest": MagicMock(),
     }
-    with patch.dict(sys.modules, prompt_toolkit_stubs), patch.dict(
-        "os.environ", clean_env, clear=False
-    ):
-        import cli as _cli_mod
+    import cli as _cli_mod
 
+    # sys.modules restoration cannot undo names bound by reload (notably
+    # _pt_print and _PT_ANSI). Restore the facade's namespace as well, including
+    # on constructor failure, so subsequent tests keep real terminal output.
+    with patch.dict(_cli_mod.__dict__), patch.dict(
+        sys.modules, prompt_toolkit_stubs
+    ), patch.dict("os.environ", clean_env, clear=False):
         _cli_mod = importlib.reload(_cli_mod)
         with patch.object(_cli_mod, "get_tool_definitions", return_value=[]), patch.dict(
             _cli_mod.__dict__, {"CLI_CONFIG": _clean_config}
         ):
             return _cli_mod.HermesCLI()
+
+
+def test_make_cli_preserves_real_terminal_output(capsys):
+    """Constructing a stubbed CLI must not silence later resume/status output."""
+    import cli as cli_mod
+
+    _make_cli()
+    cli_mod._cprint("terminal output survives CLI construction")
+
+    assert "terminal output survives CLI construction" in capsys.readouterr().out
 
 
 class _StubAgent:

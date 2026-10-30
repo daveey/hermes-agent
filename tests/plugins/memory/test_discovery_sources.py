@@ -255,3 +255,43 @@ def test_unreadable_user_plugin_does_not_abort_memory_discovery(tmp_path, monkey
     assert "goodmem" in names
     assert "denied" not in names
     assert memory_plugins.find_provider_dir("denied") is None
+
+
+def test_provider_via_aliased_import_past_8kb_is_still_discovered(tmp_path, monkeypatch):
+    """The parse fallback's substring precheck must not hide a provider whose only base is an
+    ``import MemoryProvider as X`` alias and whose contract names sit past the first 8 KB."""
+    provider = tmp_path / "plugins" / "aliasmem"
+    provider.mkdir(parents=True)
+    docstring = '"""' + "Plain prose about storage.\n" * 400 + '"""\n'  # pushes every token past 8 KB
+    (provider / "__init__.py").write_text(
+        docstring
+        + "from agent.memory_provider import MemoryProvider as Base\n\n\n"
+        + "class Provider(Base):\n    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    assert "aliasmem" in memory_plugins.list_memory_provider_names()
+
+
+def test_non_provider_plugin_dirs_are_not_ast_parsed(tmp_path, monkeypatch):
+    """Discovery runs at dashboard/web_server_config import; ast-parsing every module of every
+    ordinary user plugin cost ~1.4 cpu-s per import on a 61-plugin home (t_01a18b118d75b278)."""
+    import ast
+
+    plugins_root = tmp_path / "plugins"
+    for i in range(3):
+        plain = plugins_root / f"plain{i}"
+        plain.mkdir(parents=True)
+        body = "".join(f"def f{n}(x):\n    return x + {n}\n\n" for n in range(2000))  # ~60 KB
+        (plain / "__init__.py").write_text(body, encoding="utf-8")
+        (plain / "helpers.py").write_text(body, encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    calls = []
+    real_parse = ast.parse
+    monkeypatch.setattr(ast, "parse", lambda *a, **kw: calls.append(a) or real_parse(*a, **kw))
+
+    names = memory_plugins.list_memory_provider_names()
+
+    assert not any(n.startswith("plain") for n in names)
+    assert calls == []

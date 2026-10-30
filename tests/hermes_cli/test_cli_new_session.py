@@ -109,16 +109,28 @@ def _make_cli(env_overrides=None, config_overrides=None, **kwargs):
         "prompt_toolkit.formatted_text": MagicMock(),
         "prompt_toolkit.auto_suggest": MagicMock(),
     }
-    with patch.dict(sys.modules, prompt_toolkit_stubs), patch.dict(
-        "os.environ", clean_env, clear=False
-    ):
-        import cli as _cli_mod
+    import cli as _cli_mod
 
+    # reload binds prompt_toolkit mocks into cli's globals; restoring only
+    # sys.modules leaves subsequent status output silently mocked out.
+    with patch.dict(_cli_mod.__dict__), patch.dict(
+        sys.modules, prompt_toolkit_stubs
+    ), patch.dict("os.environ", clean_env, clear=False):
         _cli_mod = importlib.reload(_cli_mod)
         with patch.object(_cli_mod, "get_tool_definitions", return_value=[]), patch.dict(
             _cli_mod.__dict__, {"CLI_CONFIG": _clean_config}
         ):
             return _cli_mod.HermesCLI(**kwargs)
+
+
+def test_make_cli_preserves_real_terminal_output(capsys):
+    """Constructing a stubbed CLI must not silence later resume/status output."""
+    import cli as cli_mod
+
+    _make_cli()
+    cli_mod._cprint("terminal output survives CLI construction")
+
+    assert "terminal output survives CLI construction" in capsys.readouterr().out
 
 
 def _prepare_cli_with_active_session(tmp_path):
