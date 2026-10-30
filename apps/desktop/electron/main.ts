@@ -401,6 +401,7 @@ import { registerMcpOauthCallbackIpc } from './mcp-oauth-callback-ipc'
 import { isMediaCapturePermission } from './media-capture-permission'
 import { createMediaProtocolHandler, MEDIA_PROTOCOL } from './media-protocol'
 import { fetchLocalMedia } from './media-range'
+import { extensionForMimeType } from './mime-extension'
 import { createMinimizeToTray } from './minimize-to-tray'
 import {
   createNativeAccessTokenCoordinator,
@@ -5872,39 +5873,6 @@ function mimeTypeForPath(filePath) {
   const ext = path.extname(filePath || '').toLowerCase()
 
   return MEDIA_MIME_TYPES[ext] || 'application/octet-stream'
-}
-
-function extensionForMimeType(mimeType) {
-  const type = String(mimeType || '')
-    .split(';')[0]
-    .trim()
-    .toLowerCase()
-
-  if (type === 'image/png') {
-    return '.png'
-  }
-
-  if (type === 'image/jpeg') {
-    return '.jpg'
-  }
-
-  if (type === 'image/gif') {
-    return '.gif'
-  }
-
-  if (type === 'image/webp') {
-    return '.webp'
-  }
-
-  if (type === 'image/bmp') {
-    return '.bmp'
-  }
-
-  if (type === 'image/svg+xml') {
-    return '.svg'
-  }
-
-  return ''
 }
 
 function filenameFromUrl(rawUrl, fallback = 'image') {
