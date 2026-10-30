@@ -130,3 +130,31 @@ def test_an_old_chat_a_webapp_tab_edited_is_adopted_by_the_owner(store):
         adopt('uid:999999')
     adopt(OWNER)
     assert store.db.get_session('legacy-web')['user_id'] == OWNER
+
+
+def _ssh_desktop_request(tmp_path):
+    """A REST request as an SSH-served Desktop presents it: the loopback ``serve --isolated`` binds the
+    validated token file's ownership id as ``provider='desktop-ssh'`` (web_server._ssh_bootstrap_session)."""
+    from hermes_cli.dashboard_auth.base import Session
+    session = Session(user_id='a' * 32, provider='desktop-ssh', email='', display_name='', org_id='',
+                      expires_at=0, access_token='', refresh_token='')
+    return SimpleNamespace(state=SimpleNamespace(native_http_principal=None, session=session),
+                           app=SimpleNamespace(state=SimpleNamespace(session_authority=None, gateway_runner=None)))
+
+
+def test_another_macs_ssh_desktop_edits_the_owners_desktop_chat(store, tmp_path):
+    """Archive/pin/rename from another Mac's Desktop over SSH is the owner (it logged in over SSH as this
+    host's OS user), so the owner's routeless desktop chat (user_id = the owner) is its to edit (#archive 403)."""
+    from hermes_cli.web_server_sessions import _session_mutation_context
+    from hermes_state_mutation_binding import authorize_history
+    _authority, actor = _session_mutation_context(_ssh_desktop_request(tmp_path), None)
+    assert actor.subject == OWNER
+    store.db.create_session('hub-desktop-chat', source='desktop', user_id=OWNER)
+    with store.db._read_ctx() as conn:
+        assert authorize_history(conn, actor, 'hub-desktop-chat') is True
+
+
+@pytest.mark.parametrize('stamp', ['desktop-ssh:' + 'a' * 32, 'auth:v1:["desktop-ssh","","' + 'a' * 32 + '"]'])
+def test_a_stamp_an_ssh_desktop_stored_reads_as_the_owners(stamp):
+    assert same_owner(stamp, OWNER) is True
+    assert same_owner(stamp, 'uid:999999') is False

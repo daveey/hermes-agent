@@ -41,7 +41,10 @@ def principal_subject(identity: dict) -> str:
 # (:func:`_login_provider`). ``session-token`` is the loopback Webapp's own credential and
 # ``server-internal`` the PTY child a signed-in dashboard spawns: both act for whoever opened that page,
 # the owner. ``local`` (a native grant) is not a sign-in: its stamp names an OS user (:func:`_owner_login`).
-_BUNDLED_LOGINS = frozenset({'basic', 'nous', 'self-hosted', 'session-token', 'server-internal'})
+# [daveey] ``desktop-ssh`` is another Mac's Desktop driving this host's loopback ``serve --isolated`` through
+# a token file it wrote over SSH as this host's OS user (web_server._ssh_bootstrap_session): the owner too,
+# or its archive/pin/rename of the owner's own chats is refused as permission_denied.
+_BUNDLED_LOGINS = frozenset({'basic', 'nous', 'self-hosted', 'session-token', 'server-internal', 'desktop-ssh'})
 
 
 def _login_provider(provider: str) -> bool:
