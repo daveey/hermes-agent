@@ -84,6 +84,10 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
         mark_kwargs["status"] = "blocked_config"
+    if not d.success and job.pop("_fire_error", False):
+        # [daveey] The fire never reached the agent (refused or unreachable before admission):
+        # booked as last_error_kind="fire", so a later gate tick may clear a streak made only of these.
+        mark_kwargs["fire_error"] = True
     if job.pop("_agent_skipped", False) and d.success:
         # [daveey] A gate tick (wakeAgent=false / unchanged monitor) says nothing about agent health:
         # resetting the streak and alert marker here hid a job whose every woken run failed.

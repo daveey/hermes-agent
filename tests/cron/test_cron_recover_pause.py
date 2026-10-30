@@ -40,6 +40,7 @@ def test_missing_admission_is_booked_failed_not_paused(tmp_path, monkeypatch):
         saved = jobs.get_job(job['id'])
         assert saved['state'] != 'paused' and saved['enabled'] is True
         assert saved['last_status'] == 'error'
+        assert saved['last_error_kind'] == 'fire', 'never admitted: the agent never ran'
         assert executions.get_execution(fire)['status'] == 'failed'
         assert not journal.exists()
 

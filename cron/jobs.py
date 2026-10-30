@@ -2406,9 +2406,13 @@ def release_unadmitted_fire(
 
 def _record_run_outcome(
     job: dict[str, Any], success: bool, error: Optional[str], delivery_error: Optional[str],
-    status: Optional[str], now: str, *, agent_skipped: bool = False,
+    status: Optional[str], now: str, *, agent_skipped: bool = False, fire_error: bool = False,
 ) -> None:
-    """Stamp one completed run onto *job*: status fields, failure streak, alert markers, claims."""
+    """Stamp one completed run onto *job*: status fields, failure streak, alert markers, claims.
+
+    ``last_error_kind`` says what the current failure streak is made of: ``"fire"`` while every
+    failure in it was a fire that never reached the agent (*fire_error*: the owner refused or could
+    not be reached before admission), ``"agent"`` once any failure in it is the agent's own."""
     job["last_run_at"] = now
     job.pop("manual_run_at", None)
     job.pop("manual_run_restore_at", None)
@@ -2418,6 +2422,11 @@ def _record_run_outcome(
     # [daveey] A gated tick (agent suppressed) keeps the last real run's verdict; only a job with
     # no verdict yet records it as ok.
     keep_verdict = agent_skipped and success and job.get("last_status") is not None
+    if keep_verdict and job.get("last_error_kind") == "fire":
+        # [daveey] A streak made only of fire/infra refusals is no agent verdict to keep: it heals
+        # like a real success. Otherwise a monitor whose input never changes (so it never wakes
+        # the agent) held failure_streak >= threshold forever and self_heal never saw it fixed.
+        keep_verdict = False
     if not keep_verdict:
         job["last_status"] = status or (
             "error" if not success else ("delivery_failed" if delivery_failed else "ok"))
@@ -2430,7 +2439,11 @@ def _record_run_outcome(
         job.pop("preflight_alerted", None)
         job.pop("last_fire_error", None)
         job["failure_streak"] = 0
+        job.pop("last_error_kind", None)
     else:
+        fire_only_so_far = (int(job.get("failure_streak") or 0) == 0
+                            or job.get("last_error_kind") == "fire")
+        job["last_error_kind"] = "fire" if fire_error and fire_only_so_far else "agent"
         # Consecutive agent-failure streak; delivery failures do NOT count
         # (scheduler._failure_streak_nudge).
         job["failure_streak"] = int(job.get("failure_streak") or 0) + 1
@@ -2515,6 +2528,7 @@ def mark_job_run(
     quota_hold_seconds: Optional[float] = None,
     recover_consumed_fire: bool = False,
     agent_skipped: bool = False,
+    fire_error: bool = False,
 ) -> bool:
     """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
     and retire the record as a terminal completion when the repeat limit is reached. A manual run
@@ -2540,7 +2554,11 @@ def mark_job_run(
 
     ``agent_skipped``: a gate (``wakeAgent=false`` script, unchanged monitor) suppressed the agent,
     so this successful tick is not evidence of agent health. ``last_status``, ``last_error``,
-    ``failure_streak`` and ``preflight_alerted`` keep the last real run's values. [daveey]
+    ``failure_streak`` and ``preflight_alerted`` keep the last real run's values, unless every
+    failure in the streak was a *fire_error*: then the tick heals the job like a success.
+
+    ``fire_error``: this failed run never reached the agent (the owner gateway refused or could not
+    be reached before admission); booked as ``last_error_kind = "fire"``. [daveey]
     """
     def apply(jobs, _i, job):
         if execution_id is not None and execution_id in job.get("canonical_completions", []):
@@ -2556,7 +2574,7 @@ def mark_job_run(
         extra = extra_fire.is_extra(job)  # read before the outcome clears the claim
         held = extra_fire.held_markers(job) if extra else {}
         _record_run_outcome(job, success, error, delivery_error, status, now,
-                            agent_skipped=agent_skipped)
+                            agent_skipped=agent_skipped, fire_error=fire_error)
         job.update(held)  # a run-now queued mid-run is its own fire, not this one
         if execution_id is not None:  # retire ids recovery can no longer replay; latest stays last
             from cron.scheduler_authority import replayable_completions as live

@@ -134,6 +134,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 if state['status'] == 'missing':
                     error = f'{type(exc).__name__}: {exc}'
                     result = [False, f'# Cron Job: {job["id"]} (FAILED)\n\n{error}\n', '', error]
+                    job['_fire_error'] = True  # refused before admission: the agent never ran
                     record['refusal'] = result
                     record['job'] = dict(job)
                     save()
@@ -194,6 +195,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 f'Not admitted: the gateway is {reason}; the fire stays due: {exc}',
                 exc.state, exc.reason_code) from exc
         error = f'{type(exc).__name__}: {exc}'
+        job['_fire_error'] = True  # nothing was submitted: a fire/infra failure, not an agent verdict
         return False, f'# Cron Job: {job["id"]} (FAILED)\n\n{error}\n', '', error
 
 def reconcile_pending(*, allow_connect=True):
@@ -253,7 +255,7 @@ def reconcile_pending(*, allow_connect=True):
                     journal.unlink(missing_ok=True)
                     continue
                 error = 'Cron admission missing: the owner never admitted this fire'
-                state = {'status': 'terminal', 'job': current,
+                state = {'status': 'terminal', 'job': current, 'job_flags': {'_fire_error': True},
                          'result': [False, f'# Cron Job: {params["job_id"]} (FAILED)\n\n{error}\n', '', error]}
             if state['status'] != 'terminal':
                 if state['status'] == 'unknown' and not record.get('pause_recorded'):
