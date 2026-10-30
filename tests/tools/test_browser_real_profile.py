@@ -180,9 +180,31 @@ class TestSnapshotRealProfile:
         assert stat.S_IMODE(os.stat(cookies).st_mode) == 0o600
 
 
-# A stand-in browser process for the argv scan. The base interpreter, not a venv's: a Windows venv launcher
-# re-spawns it with the same argv, which would put two processes on the dir.
-_SLEEPER = [getattr(sys, "_base_executable", sys.executable), "-c", "import time; time.sleep(60)"]
+@pytest.fixture
+def stand_in_browser(tmp_path):
+    """Own real argv-bearing children until teardown, and wait for their startup."""
+    import subprocess
+    from contextlib import ExitStack
+    from itertools import count
+    from tests.waiting import wait_until
+
+    # Popen can return while /proc still exposes an empty argv during exec. A marker
+    # from the child proves startup completed, without retrying the assertion itself.
+    # EOF also releases the child if the parent dies; no wall-clock lifetime to race.
+    script = "import pathlib, sys; pathlib.Path(sys.argv[1]).touch(); sys.stdin.read()"
+    sequence = count()
+    with ExitStack() as children:
+        def spawn(*args):
+            ready = tmp_path / f"ready-{next(sequence)}"
+            # Use the base interpreter: Windows venv launchers re-spawn with the
+            # same argv, putting two processes on the profile directory.
+            argv = [getattr(sys, "_base_executable", sys.executable), "-c", script, str(ready), *args]
+            proc = children.enter_context(subprocess.Popen(argv, stdin=subprocess.PIPE))
+            children.callback(proc.kill)
+            wait_until(ready.exists, timeout=120, what="stand-in browser startup")
+            return proc
+
+        yield spawn
 
 
 class TestRealProfileCdpLaunch:
@@ -313,16 +335,15 @@ class TestRealProfileCdpLaunch:
 
     @pytest.mark.platforms("posix")
     @pytest.mark.parametrize("live_browser_id", ["/devtools/browser/x", "/devtools/browser/other"])
-    def test_reattaches_to_surviving_chrome_instead_of_overlaying_its_profile(self, tmp_path, live_browser_id):
+    def test_reattaches_to_surviving_chrome_instead_of_overlaying_its_profile(self, tmp_path, live_browser_id, stand_in_browser):
         """A Chrome from an earlier Hermes process can survive holding the copy dir: attach to it (never
         owned, so never killed), never re-run the snapshot over its open databases. A DevToolsActivePort left
         by a crash whose port was recycled by ANOTHER CDP server (browser id mismatch) must not be attached
         to; the normal launch path runs."""
         import socket
-        import subprocess
 
         (tmp_path / "DevToolsActivePort").write_text("41000\n/devtools/browser/x\n", encoding="utf-8")
-        chrome = subprocess.Popen([*_SLEEPER, f"--user-data-dir={tmp_path}"])  # the survivor holding the dir
+        chrome = stand_in_browser(f"--user-data-dir={tmp_path}")  # the survivor holding the dir
         os.symlink(f"{socket.gethostname()}-{chrome.pid}", tmp_path / "SingletonLock")
         if live_browser_id != "/devtools/browser/x":  # the crash case: the dir's browser is gone, its lock stale
             chrome.kill()
@@ -350,13 +371,12 @@ class TestRealProfileCdpLaunch:
             assert cdp is None and "boom" in err
 
     @pytest.mark.platforms("windows")
-    def test_windows_reattach_finds_the_surviving_chrome_by_its_argv(self, tmp_path):
+    def test_windows_reattach_finds_the_surviving_chrome_by_its_argv(self, tmp_path, stand_in_browser):
         """Windows Chrome leaves no ``SingletonLock`` symlink: the surviving browser is the process whose argv
         names the copy dir, and finding it is what keeps the snapshot off its open databases."""
-        import subprocess
 
         (tmp_path / "DevToolsActivePort").write_text("41000\n/devtools/browser/x\n", encoding="utf-8")
-        chrome = subprocess.Popen([*_SLEEPER, f"--user-data-dir={tmp_path}"])
+        chrome = stand_in_browser(f"--user-data-dir={tmp_path}")
         version = Mock()
         version.json.return_value = {"webSocketDebuggerUrl": "ws://127.0.0.1:41000/devtools/browser/x"}
         try:
@@ -375,27 +395,19 @@ class TestRealProfileCdpLaunch:
         snapshot.assert_not_called()
         assert attached is not None and attached.owned is False and attached.pid == chrome.pid
 
-    def test_the_browser_holding_a_dir_is_found_by_its_argv_never_a_helper(self, tmp_path, monkeypatch):
+    def test_the_browser_holding_a_dir_is_found_by_its_argv_never_a_helper(self, tmp_path, monkeypatch, stand_in_browser):
         """The argv scan behind the Windows singleton check (real processes, any host): the browser process
         naming the dir, never a ``--type=`` helper naming it too, and nothing for another dir."""
-        import subprocess
         import psutil
 
-        helper = subprocess.Popen([*_SLEEPER, "--type=renderer", f"--user-data-dir={tmp_path}"])
-        browser = subprocess.Popen([*_SLEEPER, f"--user-data-dir={tmp_path}"])
-        try:
-            # [daveey] Inspect real argv, but only for children this test owns:
-            # unrelated live browsers can name (and realpath) the real Hermes home.
-            children = [psutil.Process(proc.pid) for proc in (helper, browser)]
-            monkeypatch.setattr(psutil, "process_iter", lambda attrs: iter(children))
-            found = launcher._pid_naming_dir(str(tmp_path))
-            other = launcher._pid_naming_dir(str(tmp_path / "other"))
-        finally:
-            for proc in (helper, browser):
-                proc.kill()
-                proc.wait(timeout=30)
-        assert found == browser.pid
-        assert other is None
+        helper = stand_in_browser("--type=renderer", f"--user-data-dir={tmp_path}")
+        browser = stand_in_browser(f"--user-data-dir={tmp_path}")
+        # [daveey] Inspect real argv, but only for children this test owns:
+        # unrelated live browsers can name (and realpath) the real Hermes home.
+        children = [psutil.Process(proc.pid) for proc in (helper, browser)]
+        monkeypatch.setattr(psutil, "process_iter", lambda attrs: iter(children))
+        assert launcher._pid_naming_dir(str(tmp_path)) == browser.pid
+        assert launcher._pid_naming_dir(str(tmp_path / "other")) is None
 
 
 class TestConsentConfigRead:
