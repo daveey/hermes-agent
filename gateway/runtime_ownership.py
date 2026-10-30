@@ -249,6 +249,26 @@ def lock_record_unpublished(home: Path) -> bool:
     return not record or _live_pid_from_record(record) in (None, os.getpid())
 
 
+def live_gateway_lock_holder(home: Path) -> int | None:
+    """PID of the live gateway whose published ``gateway.lock`` record holds *home*, else None.
+
+    [daveey] A start that loses the reservation race to a gateway booting at the same moment (its
+    flock is taken before it writes ``gateway.pid``) was refused, not crashed, so the boot names
+    that holder (mini 10-30, gateway-0a890988a6). Maintenance (``purpose``), the caller itself, a
+    dead or recycled pid, and a live process that is not this home's gateway all read None.
+    Advisory only, never grants the lock."""
+    from gateway.status import (_live_pid_from_record, _read_gateway_lock_record,
+                                _record_matches_live_gateway_pid)
+    home = canonical_home(home)
+    record = _read_gateway_lock_record(home / 'gateway.lock')
+    if not record or record.get('purpose'):
+        return None
+    pid = _live_pid_from_record(record)
+    if pid is None or pid == os.getpid():
+        return None
+    return pid if _record_matches_live_gateway_pid(record, pid, expected_home=home) else None
+
+
 # A client's discovery probe (gateway.status._probe_lock_file) holds a gateway.lock flock for an
 # instant; the next attempt after this pause normally finds it gone.
 PROBE_RETRY_BACKOFF_S = 0.015

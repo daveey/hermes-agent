@@ -652,6 +652,18 @@ def _reserve_waiting_out_browse_reconcile(ownership, homes, *, wait_s: float | N
     return reserve_waiting_out_transient_holders(ownership, homes, wait_s=wait_s)
 
 
+def _reservation_conflict_gateway_holder(homes):
+    """``(home, pid)`` of the first conflicting home held by a live gateway, else None."""
+    from gateway.runtime_ownership import _conflicting_homes, live_gateway_lock_holder
+    try:
+        for home in _conflicting_homes(homes):
+            if (pid := live_gateway_lock_holder(home)) is not None:
+                return home, pid
+    except Exception:  # health: allow BLE001 -- naming the holder must not change the exit
+        logger.debug("Could not identify the gateway.lock holder", exc_info=True)
+    return None
+
+
 def _start_gateway_reserve_profiles(profile_homes) -> bool:
     """Reserve the launch home plus every served profile home; False when startup must abort."""
     from gateway.run import get_hermes_home
@@ -676,6 +688,13 @@ def _start_gateway_reserve_profiles(profile_homes) -> bool:
             _write_runtime_status_quiet(gateway_state="startup_failed", exit_reason=str(exc))
             raise SystemExit(GATEWAY_FATAL_CONFIG_EXIT_CODE)
         from gateway.run_exit_reason import note_exit_cause
+        # [daveey] Losing the race to a live gateway of this home is a refused start, like pid_claim:
+        # the winner held gateway.lock before it wrote gateway.pid (gateway-0a890988a6). Exit code
+        # stays 1; a holder that is not a live gateway keeps the exit_nonzero cause below.
+        if (holder := _reservation_conflict_gateway_holder(homes)) is not None:
+            from gateway.run_exit_reason import note_start_refused
+            home, pid = holder
+            note_start_refused("profile_reservation", owner_pid=pid, detail=str(home))
         note_exit_cause("profile_reservation_conflict", exc)
         return False
     except OSError as exc:

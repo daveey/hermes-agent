@@ -164,6 +164,73 @@ def test_early_start_gateway_false_records_its_cause(monkeypatch):
     assert "disk full" in extra["exit_reason"]
 
 
+# --- [daveey] a start that loses the profile-reservation race is a refusal, not a crash ---------------------
+# Two gateways starting at once on one home (mini, 10-30 05:01Z: client auto-start vs the launchd service): the
+# loser found the winner's gateway.lock flock before any gateway.pid existed and wrote exit_nonzero
+# (cause=profile_reservation_conflict). The winner is a live gateway, so the start was refused, like pid_claim.
+
+_HOLDER_SRC = """
+import sys
+sys.path.insert(0, {repo!r})
+from gateway.runtime_ownership import ProfileOwnership
+owner = ProfileOwnership()  # kept alive: dropping it closes the handle and frees the flock
+owner.reserve([{home!r}])
+print("ready", flush=True)
+sys.stdin.read()
+"""
+
+
+@pytest.fixture
+def lock_holder(tmp_path):
+    """Start a process that holds ``<HERMES_HOME>/gateway.lock`` (real flock + published record)."""
+    import subprocess
+    import sys
+    procs = []
+
+    def _start(script_name: str, *argv: str):
+        home = os.environ["HERMES_HOME"]
+        script = tmp_path / script_name
+        script.write_text(_HOLDER_SRC.format(repo=str(Path(__file__).resolve().parents[2]), home=home))
+        proc = subprocess.Popen([sys.executable, str(script), *argv], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, text=True, env={**os.environ, "HERMES_HOME": home})
+        procs.append(proc)
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "ready"
+        return proc
+
+    yield _start
+    for proc in procs:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def _reservation_conflict_record(monkeypatch):
+    from gateway import run_bootstrap
+    from hermes_cli.gateway_exit_diag import nonzero_exit_record
+    import hermes_cli.gateway as gateway_cli
+    monkeypatch.setattr(gateway_cli, "named_profile_served_by_running_multiplexer", lambda: False)
+    monkeypatch.setattr(run_bootstrap, "_browse_reconcile_reserve_wait_s", lambda: 0.0)
+    assert run_bootstrap._start_gateway_reserve_profiles([]) is False  # exit code stays 1
+    return nonzero_exit_record()
+
+
+@pytest.mark.spawns_gateway_lookalike  # a stub that only holds the lock; the fixture reaps it
+def test_reservation_conflict_with_live_gateway_holder_is_start_refused(monkeypatch, lock_holder):
+    holder = lock_holder("hermes", "gateway", "run")
+    tag, extra = _reservation_conflict_record(monkeypatch)
+    assert tag == "gateway.start_refused"
+    assert extra["reason"] == "profile_reservation"
+    assert extra["owner_pid"] == holder.pid
+    assert extra["owner_alive"] is True
+
+
+def test_reservation_conflict_with_non_gateway_holder_stays_exit_nonzero(monkeypatch, lock_holder):
+    lock_holder("holder.py")
+    tag, extra = _reservation_conflict_record(monkeypatch)
+    assert tag == "gateway.exit_nonzero"
+    assert extra["cause"] == "profile_reservation_conflict"
+
+
 _NOTE_CALLS = {"note_exit_cause", "note_start_refused"}
 
 
