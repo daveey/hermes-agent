@@ -283,6 +283,23 @@ def _owner_evidence(task: dict) -> dict:
     return evidence
 
 
+def _verified_terminal(task: dict) -> bool:
+    """The release invariant: a terminal owner record with verified completion evidence is released."""
+    return (isinstance(task, dict) and task.get('status') in ('done', 'archived')
+            and _owner_evidence(task).get('verified') is True)
+
+
+def _stuck_unreleased(task_raw: str, released: int) -> bool:
+    """[daveey] A row stored unreleased at a terminal, verified version (the pre-fix accept INSERT omitted
+    ``released``). No newer replica version will ever arrive for it, so the version check cannot heal it."""
+    if released:
+        return False
+    try:
+        return _verified_terminal(json.loads(task_raw))
+    except (ValueError, TypeError):
+        return False
+
+
 def _advanced_observation(binding_raw: str, observed: int, source: sqlite3.Connection) -> tuple | None:
     """``(task, version, released)`` when the replica holds a newer, exactly bound record for this obligation."""
     binding = json.loads(binding_raw)
@@ -304,9 +321,7 @@ def _advanced_observation(binding_raw: str, observed: int, source: sqlite3.Conne
             {k: v for k, v in m.items() if k != 'publication_version'}
             for m in markers if isinstance(m, dict)]:
         return None
-    released = (task.get('status') in ('done', 'archived')
-                and _owner_evidence(task).get('verified') is True)
-    return task, row[0], released
+    return task, row[0], _verified_terminal(task)
 
 
 def refresh_observations(path: Path, replica: Path, *, timeout: float = 5) -> None:
@@ -329,19 +344,24 @@ def refresh_observations(path: Path, replica: Path, *, timeout: float = 5) -> No
         try:
             with closing(_ro(path)) as ledger:
                 pending = any(
-                    _advanced_observation(raw, observed, source) is not None
-                    for raw, observed in ledger.execute(
-                        "SELECT binding_json,observation_version FROM origin_obligations").fetchall())
+                    _stuck_unreleased(task_raw, released)
+                    or _advanced_observation(raw, observed, source) is not None
+                    for raw, observed, task_raw, released in ledger.execute(
+                        "SELECT binding_json,observation_version,task_json,released FROM origin_obligations"
+                    ).fetchall())
         except sqlite3.OperationalError:
             pending = True  # no table yet (or unreadable read-only): the locked path below decides
         if not pending:
             return
         with _db(path, timeout=timeout) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            for key, raw, observed in conn.execute(
-                    "SELECT binding_id,binding_json,observation_version FROM origin_obligations").fetchall():
+            for key, raw, observed, task_raw, stored_released in conn.execute(
+                    "SELECT binding_id,binding_json,observation_version,task_json,released"
+                    " FROM origin_obligations").fetchall():
                 advanced = _advanced_observation(raw, observed, source)
                 if advanced is None:
+                    if _stuck_unreleased(task_raw, stored_released):
+                        conn.execute("UPDATE origin_obligations SET released=1 WHERE binding_id=?", (key,))
                     continue
                 task, version, released = advanced
                 conn.execute(
@@ -460,8 +480,8 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                         task = local
                         released = _owner_evidence(task).get('verified') is True
                 status = task.get('status')
-                # Acceptance alone is not a release, including an initially
-                # terminal publication. Unknown status also remains unfinished.
+                # Acceptance alone is not a release: an initially terminal publication releases only with
+                # verified owner evidence (checked above). Unknown status also remains unfinished.
                 known = status in ('todo', 'ready', 'running', 'scheduled', 'review',
                                    'blocked', 'triage', 'done', 'archived')
                 # [daveey] A currently observed owner archive without a verified completion produces nothing: the
@@ -558,8 +578,11 @@ def accept_binding(*, path: Path, replica: Path, binding: dict, request_id: str,
             # An immutable binding retry acknowledges what is actually durable,
             # not a newer resolution that this transaction did not store.
             ack["resolved_session"], ack["publication_version"] = existing[1], existing[2]
-        conn.execute("INSERT INTO origin_obligations (binding_id,binding_hash,binding_json,resolved_session,task_json,observation_version) VALUES (?,?,?,?,?,?) ON CONFLICT(binding_id) DO NOTHING",
-                     (_binding_key(binding), digest, _json(binding), resolved, _json(task), row[0]))
+        # [daveey] An obligation accepted after its owner task already finished (terminal + verified) is released
+        # at write time: no newer replica version will ever arrive for refresh_observations to advance it.
+        conn.execute("INSERT INTO origin_obligations (binding_id,binding_hash,binding_json,resolved_session,task_json,observation_version,released) VALUES (?,?,?,?,?,?,?) ON CONFLICT(binding_id) DO NOTHING",
+                     (_binding_key(binding), digest, _json(binding), resolved, _json(task), row[0],
+                      int(_verified_terminal(task))))
         conn.execute("INSERT INTO origin_receipts VALUES (?,?,?)", (request_id, digest, _json(ack)))
     readback = receipt(path, request_id)
     assert readback is not None
