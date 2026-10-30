@@ -255,6 +255,11 @@ class CLIInitMixin:
             _moa_provider_override or provider or _startup_provider_override or _nested_provider
             or _cfg_provider or "auto"
         )
+        if not provider and is_class_selector(self.model):
+            # [daveey] A class routes by policy and requires provider auto (agent/model_routing). The
+            # config's provider belongs to the config's concrete model: inheriting it under `-m class:X`
+            # failed every run before sending ("Class selectors require provider auto").
+            self.requested_provider = "auto"
         # Only a provider the command line chose is gateway launch policy: the config default is the
         # gateway's to resolve, and a resume compares launch policy against the session's frozen route.
         self._explicit_provider = _moa_provider_override or provider or _startup_provider_override or None

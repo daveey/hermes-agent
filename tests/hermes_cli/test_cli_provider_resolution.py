@@ -153,6 +153,28 @@ def test_provider_flag_uses_named_custom_default_model(monkeypatch):
     assert shell.requested_provider == "gmk-lan"
 
 
+@pytest.mark.parametrize("flag_provider, expected", [(None, "auto"), ("auto", "auto"), ("anthropic", "anthropic")])
+def test_class_model_flag_does_not_inherit_the_config_provider(monkeypatch, flag_provider, expected):
+    """[daveey] `hermes chat -m class:standard` on a profile whose model.provider is concrete (anthropic) froze
+    that provider under the class, and every run failed before sending: "Class selectors require provider
+    auto". The config's provider belongs to the config's concrete model; a class routes by policy, so only
+    an explicit --provider counts (and an explicit concrete one is still refused downstream, by name)."""
+    cli = _import_cli()
+    monkeypatch.setitem(cli.CLI_CONFIG, "model", {"default": "claude-opus-5-5", "provider": "anthropic"})
+    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "anthropic")
+    shell = cli.HermesCLI(model="class:standard", provider=flag_provider, compact=True, max_turns=1)
+    assert shell.model == "class:standard"
+    assert shell.requested_provider == expected
+
+
+def test_concrete_model_flag_keeps_the_config_provider(monkeypatch):
+    """Control: a concrete -m still runs on the profile's provider."""
+    cli = _import_cli()
+    monkeypatch.setitem(cli.CLI_CONFIG, "model", {"default": "claude-opus-5-5", "provider": "anthropic"})
+    shell = cli.HermesCLI(model="claude-sonnet-5-5", compact=True, max_turns=1)
+    assert shell.requested_provider == "anthropic"
+
+
 def test_explicit_model_wins_over_provider_default_model(monkeypatch):
     """`-m` still wins when `--provider` also names a custom default_model."""
     cli = _import_cli()
