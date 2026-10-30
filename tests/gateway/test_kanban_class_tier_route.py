@@ -79,3 +79,29 @@ def test_a_launch_key_on_a_class_route_is_still_refused(tmp_path, monkeypatch):
     policy = _kanban_policy(tmp_path, monkeypatch, model_override='class:standard')
     with pytest.raises(ModelRoutingError, match='explicit credentials'):
         worker_route(policy, {'api_key': 'sk-launch'})
+
+
+@pytest.mark.parametrize('frozen_provider', ['anthropic', 'auto'])
+@pytest.mark.parametrize('fallback', [True, False])
+def test_route_runtime_leaves_a_class_to_the_agent_with_no_session_id(tmp_path, monkeypatch, frozen_provider,
+                                                                     fallback):
+    """``route_runtime`` has no session id, for the Kanban worker and for the in-process turn and
+    one-shot (``fallback=False``) alike. Frozen ``anthropic`` raised "Class selectors require provider
+    auto"; frozen ``auto`` (mini bb-dev ``class:deep`` one-shot, agent.log 22:48 PDT 10/29) raised "Class
+    routing requires a durable session/job identity". Either way the class goes to AIAgent's boundary."""
+    import json
+    from gateway.session_policy import restore_policy
+    from gateway.session_worker_construct import route_runtime
+    from tests.gateway.test_managed_turn_contract import assignment
+    frame, _ = assignment(tmp_path, monkeypatch)
+    config = json.loads(frame['policy']['config_json'])
+    config['model'] = ({'default': 'class:deep', 'provider': 'auto'} if frozen_provider == 'auto' else
+                       {'default': 'claude-opus-5-5', 'provider': 'anthropic', 'base_url': 'https://api.anthropic.com'})
+    request = {k: v for k, v in json.loads(frame['policy']['request_json']).items() if k not in ('provider', 'base_url')}
+    policy = restore_policy({**frame['policy'], 'model': 'class:deep', 'config_json': json.dumps(config),
+                             'request_json': json.dumps(request)})
+    frozen, model = policy.effective()
+    runtime, fallback_entry = route_runtime(policy, frozen, model, None, fallback=fallback)
+    assert fallback_entry is None
+    assert runtime['provider'] == 'auto' and runtime['requested_provider'] == 'auto'
+    assert runtime.get('api_key') is None and runtime.get('base_url') is None

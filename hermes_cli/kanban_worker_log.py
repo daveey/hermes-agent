@@ -62,3 +62,30 @@ def rotate_worker_log(
         log_path.rename(_rotated_log_path(log_path, 1))
     except OSError:
         pass
+
+
+def exit_summary_marker() -> str:
+    """The CLI exit-summary header (``cli_session_mixin.show_exit_summary``), in the active language."""
+    from agent.i18n import t
+    return t("cli.session.exit_resume_hint")
+
+
+def log_noise_prefixes() -> tuple[str, ...]:
+    from agent.i18n import t
+    return ("session_id:", "Query:", t("cli.chat.initializing_agent"))
+
+
+def current_run_log(raw: str) -> str:
+    """[daveey] Only the dead run's own part of the append-only per-task log.
+
+    Every run ends with an exit trailer (``[kanban-worker-exit] rc=N``). The dead run's own trailer
+    may already close the tail; any earlier trailer closes a PREVIOUS run. Without this cut, a run that
+    printed nothing (a worker that died at start) was reported with the previous run's final message,
+    so its crash notice read as the worker re-asking the earlier question."""
+    import re
+    from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+    trailers = list(re.finditer(r"^" + re.escape(KANBAN_WORKER_EXIT_TRAILER) + r"\d+\s*$", raw.rstrip(), re.MULTILINE))
+    body = raw.rstrip()
+    if trailers and trailers[-1].end() == len(body):
+        body, trailers = body[:trailers[-1].start()], trailers[:-1]
+    return body[trailers[-1].end():] if trailers else body

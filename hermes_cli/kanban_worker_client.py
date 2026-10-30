@@ -146,9 +146,16 @@ async def _await_receipt(client, params, board_db, claim):
 
 def _exit_code(receipt, params, board_db):
     from hermes_cli.gateway_client import GatewayClientError
-    if receipt['status'] == 'unknown':
-        raise GatewayClientError('Kanban execution unknown; retained by owner')
     from gateway.session_kanban import worker_result
+    if receipt['status'] == 'unknown':
+        # [daveey] A worker that died at start booked its reason on the attempt: quote it, so the
+        # crash record names the cause instead of only the owner's unknown receipt.
+        import sqlite3
+        try:
+            cause = worker_result(board_db, params).get('last_output') or ''
+        except (OSError, sqlite3.Error, ValueError, KeyError):
+            cause = ''
+        raise GatewayClientError('Kanban execution unknown; retained by owner' + (f' ({cause})' if cause else ''))
     result = worker_result(board_db, params)
     # The attempt's reply ends the log, as a one-shot worker's did: crash diagnostics quote it.
     if result.get('last_output'):

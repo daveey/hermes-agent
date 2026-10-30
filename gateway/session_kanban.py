@@ -298,7 +298,41 @@ def record_start_failure(frame, exc):
     if context is None:
         return
     from hermes_cli.turn_exit import credential_failure_flags, turn_exit_code
-    _record_worker_result(context, turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc)), '')
+    _record_worker_result(context, turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc)),
+                          start_failure_line(exc))
+    exc._kanban_failure_booked = True
+
+
+def record_worker_failure(frame, exc):
+    """[daveey] Any other exception that kills a managed Kanban worker (a turn, the close-time token
+    flush, store.finish): book its cause as the attempt's last word, after whatever the turn booked.
+    Run 10210 died in ``flush_token_counts`` (WorkerPersistenceError) after a class failover and its
+    card said only "Kanban execution unknown". Never raises: the worker's own exit must not depend on it."""
+    if getattr(exc, '_kanban_failure_booked', False):
+        return
+    try:
+        context = json.loads(((frame or {}).get('policy') or {}).get('kanban_json') or 'null')
+        if context is None:
+            return
+        from hermes_cli.turn_exit import credential_failure_flags, turn_exit_code
+        _record_worker_result(context, turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc)),
+                              failure_line(exc, 'Worker failed'))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug('could not book the worker failure cause', exc_info=True)
+
+
+def failure_line(exc, prefix):
+    from agent.redact import redact_sensitive_text
+    text = ' '.join(f'{type(exc).__name__}: {exc}'.split())
+    return f'{prefix}: ' + redact_sensitive_text(text, force=True)[:300]
+
+
+def start_failure_line(exc):
+    """[daveey] One redacted line naming why the worker could not start. Without it the card's crash
+    record read only "Kanban execution unknown; retained by owner" and the cause (e.g. a
+    ModelRoutingError) lived only in managed-worker.log, so every crashed card had to be diagnosed by hand."""
+    return failure_line(exc, 'Worker could not start')
 
 
 def _record_worker_result(context, code, last_output):

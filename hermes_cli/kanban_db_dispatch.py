@@ -1211,15 +1211,8 @@ _PROTOCOL_VIOLATION_ERROR = (
 _LOG_CHROME = re.compile(r"[─━═╭╮╰╯│┃┌┐└┘]+|☤\s*Hermes")
 
 
-def _exit_summary_marker() -> str:
-    """The CLI exit-summary header (``cli_session_mixin.show_exit_summary``), in the active language."""
-    from agent.i18n import t
-    return t("cli.session.exit_resume_hint")
-
-
-def _log_noise_prefixes() -> tuple[str, ...]:
-    from agent.i18n import t
-    return ("session_id:", "Query:", t("cli.chat.initializing_agent"))
+from hermes_cli.kanban_worker_log import (
+    current_run_log, exit_summary_marker as _exit_summary_marker, log_noise_prefixes as _log_noise_prefixes)
 
 
 def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
@@ -1243,7 +1236,7 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
         return ""
     if not raw:
         return ""
-    raw = _EXIT_TRAILER_RE.sub("", raw)
+    raw = _EXIT_TRAILER_RE.sub("", current_run_log(raw))
     cut = raw.rfind(_exit_summary_marker())
     if cut != -1:
         raw = raw[:cut]

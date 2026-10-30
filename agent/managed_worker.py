@@ -459,13 +459,17 @@ def main():
     if not logger.handlers:
         logger.addHandler(logging.StreamHandler(sys.stderr))
     logger.propagate = False
+    frame = None
     try:
         channel.send('hello', **hello())
         frame = validate_bootstrap(read_frame(sys.stdin.buffer))
         execute(frame, channel)
-    except Exception:
+    except Exception as exc:
         # Runtime exceptions can contain credentials; the owner gets no raw traceback.
         logger.exception('managed worker failed')
+        if frame is not None:  # [daveey] a Kanban attempt books one redacted cause line on its card
+            from gateway.session_kanban import record_worker_failure
+            record_worker_failure(frame, exc)
         channel.send('error', reason='managed_worker_failed')
         return 1
     finally:
