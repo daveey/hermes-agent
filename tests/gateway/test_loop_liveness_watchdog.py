@@ -289,9 +289,15 @@ def test_loop_liveness_watchdog_marks_runtime_degraded_before_restart():
     write_runtime_status(gateway_state="running", exit_reason=None)
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
     fired = threading.Event()
+    handle_ready = threading.Event()
     exit_codes = []
 
     def fake_exit(code: int) -> None:
+        assert handle_ready.wait(timeout=5.0)
+        # Real os._exit never returns. Disarm before returning from its test double,
+        # not later in the waiting test thread (which may be descheduled).
+        assert handle is not None
+        handle.stop()
         exit_codes.append(code)
         fired.set()
 
@@ -303,6 +309,7 @@ def test_loop_liveness_watchdog_marks_runtime_degraded_before_restart():
             loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=2
         )
         assert handle is not None
+        handle_ready.set()
         # Returns as soon as the exit is reached. Must outlast the pre-exit
         # status persist, which itself waits out a throttled writer.
         assert fired.wait(timeout=30.0), "watchdog did not reach its restart exit"
@@ -336,9 +343,15 @@ def test_loop_liveness_watchdog_status_stamp_survives_a_slow_persist(monkeypatch
     status.write_runtime_status(gateway_state="running", exit_reason=None)
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
     fired = threading.Event()
+    handle_ready = threading.Event()
     exit_codes = []
 
     def fake_exit(code: int) -> None:
+        assert handle_ready.wait(timeout=5.0)
+        # Real os._exit never returns. Disarm before returning from its test double,
+        # not later in the waiting test thread (which may be descheduled).
+        assert handle is not None
+        handle.stop()
         exit_codes.append(code)
         fired.set()
 
@@ -350,6 +363,7 @@ def test_loop_liveness_watchdog_status_stamp_survives_a_slow_persist(monkeypatch
             loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=2
         )
         assert handle is not None
+        handle_ready.set()
         assert fired.wait(timeout=30.0), "watchdog did not reach its restart exit"
         handle.stop()
         handle.join(timeout=5.0)

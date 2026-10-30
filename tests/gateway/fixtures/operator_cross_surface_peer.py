@@ -165,10 +165,16 @@ async def probe(peer, creator):
                        for request in peer.requests]
             assert systems[0] == systems[1], 'operator handoff changed frozen system policy'
             assert 'local_operator_v1' not in json.dumps(peer.requests)
-            replay = await rpc(viewer, 'session.events.since', session_id=sid,
-                               replay_epoch=initial['replay_epoch'], last_sequence=initial['last_sequence'])
-            assert not replay['snapshot_required'], replay
-            assert len([event for event in replay['events'] if event['type'] == 'message.complete']) == 2
+            # Admission terminality precedes event publication; observe the contract we assert.
+            async with asyncio.timeout(45):
+                while True:
+                    replay = await rpc(viewer, 'session.events.since', session_id=sid,
+                                       replay_epoch=initial['replay_epoch'], last_sequence=initial['last_sequence'])
+                    assert not replay['snapshot_required'], replay
+                    completed = [event for event in replay['events'] if event['type'] == 'message.complete']
+                    if len(completed) == 2:
+                        break
+                    assert len(completed) < 2, replay
             snapshot = await rpc(viewer, 'session.resume', session_id=sid)
             assert snapshot['stored_session_id'] == sid
             assert 'LOCAL_ACK_WS_SHARED' in json.dumps(snapshot['messages'])
