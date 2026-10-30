@@ -4,6 +4,7 @@ import pytest
 
 from hermes_cli.web_server_lifecycle import (
     _is_serve_orphaned,
+    _make_orphan_check,
     _parent_start_marker_mismatch_is_conclusive,
     _valid_parent_start_marker,
 )
@@ -293,3 +294,37 @@ def test_parent_watchdog_arms_a_daemon_hard_exit_ceiling(monkeypatch):
         assert 0 < ceiling.interval <= 30
     finally:
         ceiling.cancel()
+
+
+def test_orphan_check_pays_for_the_start_marker_probe_once_per_window():
+    calls = {"marker": 0}
+    now = {"t": 0.0}
+
+    def marker(pid):
+        calls["marker"] += 1
+        return "linux:1"
+
+    check = _make_orphan_check(
+        4242, "linux:1", clock=lambda: now["t"], recheck_s=30.0,
+        process_start_marker=marker, pid_exists=lambda pid: True,
+    )
+    for i in range(10):
+        now["t"] = i * 2.0
+        assert check() is False
+    assert calls["marker"] == 1
+    now["t"] = 31.0
+    assert check() is False
+    assert calls["marker"] == 2
+
+
+def test_orphan_check_still_sees_a_dead_parent_between_marker_probes():
+    alive = {"v": True}
+    now = {"t": 0.0}
+    check = _make_orphan_check(
+        4242, "linux:1", clock=lambda: now["t"], recheck_s=30.0,
+        process_start_marker=lambda pid: "linux:1", pid_exists=lambda pid: alive["v"],
+    )
+    assert check() is False
+    alive["v"] = False
+    now["t"] = 2.0
+    assert check() is True

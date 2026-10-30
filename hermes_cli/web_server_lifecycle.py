@@ -300,6 +300,38 @@ def _is_serve_orphaned(
         return False
 
 
+#: Full marker verification (a ``ps`` spawn on macOS) runs at most this often; polls in
+#: between use the cheap pid-liveness check, which still catches a dead parent.
+_MARKER_RECHECK_S = 30.0
+
+
+def _make_orphan_check(desktop_pid, expected_start_marker=None, *, clock=time.monotonic, recheck_s=None, **probes):
+    """Return a no-arg orphan probe that pays for the start-marker check once per window.
+
+    PID recycling is all the marker defends against; re-verifying it every 2s (one ``ps``
+    fork each) burned idle CPU, while a dead parent is still seen on the next poll.
+    """
+    interval = _MARKER_RECHECK_S if recheck_s is None else recheck_s
+    state = {"verified_at": None}
+
+    def check() -> bool:
+        now = clock()
+        verified = state["verified_at"]
+        if expected_start_marker is not None and verified is not None and now - verified < interval:
+            pid_exists = probes.get("pid_exists")
+            if pid_exists is None:
+                from gateway.status import _pid_exists as pid_exists
+            try:
+                return not bool(pid_exists(int(desktop_pid)))
+            except (OSError, ValueError, TypeError):
+                return False
+        orphaned = _is_serve_orphaned(desktop_pid, expected_start_marker, **probes)
+        state["verified_at"] = None if orphaned else now
+        return orphaned
+
+    return check
+
+
 #: Ceiling on the post-orphan graceful unwind before the hard exit takes over.
 #: The desktop is already gone, so nothing escalates for us and this is the
 #: whole budget: comfortably past the 5s exit-flush budget
@@ -368,7 +400,8 @@ def _start_parent_death_watchdog() -> None:
         poll = 2.0
 
     def _loop() -> None:
-        while not _is_serve_orphaned(desktop_pid, start_marker):
+        is_orphaned = _make_orphan_check(desktop_pid, start_marker)
+        while not is_orphaned():
             time.sleep(poll)
         try:
             _log.warning(
