@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -116,6 +119,22 @@ def _dispatch(gh, state, ref="main", now=T0):
 def test_failing_tests_are_sorted_unique_and_skip_live_copies():
     log = _log("tests/e2e/b.py::t[2]", "tests/e2e/a.py::t", "tests/e2e/b.py::t[2]")
     assert ne.failing_tests(log) == ["tests/e2e/a.py::t", "tests/e2e/b.py::t[2]"]
+
+
+def test_failing_tests_include_pytest_error_summary_ids():
+    log = "\n".join(
+        [
+            _log("tests/e2e/a.py::t"),
+            "2026-10-30T10:09:00.1Z   ║ ERROR tests/e2e/live.py::t - live copy",
+            "2026-10-30T10:20:07.7Z ERROR tests/e2e/c.py::t - fixture 'tmux' not found",
+            "2026-10-30T10:20:07.8Z ERROR tests/e2e/broken.py - ImportError: x",
+        ]
+    )
+    assert ne.failing_tests(log) == [
+        "tests/e2e/a.py::t",
+        "tests/e2e/broken.py",
+        "tests/e2e/c.py::t",
+    ]
 
 
 def test_failure_key_depends_only_on_the_set():
@@ -271,14 +290,115 @@ def test_failure_outside_pytest_still_files_a_card(env):
     assert "outside pytest" in board.cards["t_1"]["body"]
 
 
-def test_api_error_keeps_run_pending_then_gives_up(env):
+def _raise(err):
+    def fn(*_a, **_k):
+        raise err
+
+    return fn
+
+
+@pytest.mark.parametrize("failing", ["run", "job_log"])
+def test_persistent_github_error_files_did_not_run_card_past_deadline(env, failing):
     gh, board, state = env
     _dispatch(gh, state)
-    gh.run = lambda rid: (_ for _ in ()).throw(RuntimeError("503"))
-    ne.report(gh, board, state, now=T0 + 600)
+    gh.finish(100, "failure", _log("tests/e2e/a.py::t"))
+    setattr(gh, failing, _raise(OSError("HTTP 503")))
+    lines = ne.report(gh, board, state, now=T0 + 3.9 * 3600)
+    assert len(state["pending"]) == 1 and board.cards == {} and "retrying" in lines[0]
+    lines = ne.report(gh, board, state, now=T0 + 4.1 * 3600)
+    assert state["pending"] == [] and len(board.cards) == 1
+    card = board.cards["t_1"]
+    assert "did NOT run" in card["body"] and "HTTP 503" in card["body"]
+    assert "https://gh/run/100" in card["body"] and "did-not-run after errors" in lines[0]
+    # the next night's persistent error comments on the same open card
+    _dispatch(gh, state, now=T0 + 86400)
+    gh.finish(101, "failure", _log("tests/e2e/a.py::t"))
+    ne.report(gh, board, state, now=T0 + 86400 + 4.1 * 3600)
+    assert len(board.cards) == 1 and "HTTP 503" in card["comments"][0]
+
+
+class BrokenBoard(FakeBoard):
+    create = status = comment = _raise(RuntimeError("hermes kanban create failed (1): db locked"))
+
+
+def test_board_failure_past_deadline_keeps_run_pending_and_says_so(env):
+    gh, _board, state = env
+    _dispatch(gh, state)
+    gh.run = _raise(OSError("HTTP 503"))
+    lines = ne.report(gh, BrokenBoard(), state, now=T0 + 5 * 3600)
     assert len(state["pending"]) == 1
-    ne.report(gh, board, state, now=T0 + 7 * 3600)
-    assert state["pending"] == []
+    assert ne.BOARD_FAILED in lines[0] and "HTTP 503" in lines[0] and "db locked" in lines[0]
+    board = FakeBoard()  # the board recovers: the next tick files the card
+    ne.report(gh, board, state, now=T0 + 5 * 3600 + 600)
+    assert state["pending"] == [] and len(board.cards) == 1
+
+
+def _seed(path, gh, dispatched_at):
+    with ne.locked_state(path) as state:
+        _dispatch(gh, state, now=dispatched_at)
+
+
+@pytest.mark.platforms("posix")
+def test_main_report_exits_1_and_keeps_pending_when_board_fails(tmp_path, monkeypatch, capsys):
+    gh, path = FakeGitHub(), tmp_path / "state.json"
+    _seed(path, gh, time.time() - 5 * 3600)
+    gh.run = _raise(OSError("HTTP 503"))
+    monkeypatch.setenv("GH_TOKEN", "x")
+    monkeypatch.setattr(ne, "RestGitHub", lambda *a: gh)
+    monkeypatch.setattr(ne, "NightlyBoard", lambda *a: BrokenBoard())
+    assert ne.main(["report", "--state", str(path)]) == 1
+    assert ne.BOARD_FAILED in capsys.readouterr().out
+    assert [e["run_id"] for e in ne.load_state(path)["pending"]] == [100]
+
+
+# A real process per command: report loads pending, then (inside GitHub calls) a dispatch runs and saves.
+_CHILD = r"""
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import nightly_e2e as ne
+mode, state, signal = sys.argv[2], sys.argv[3], Path(sys.argv[4])
+
+class GH:
+    def __init__(self, *a): pass
+    def resolve(self, ref): return "b" * 40
+    def dispatch(self, ref, sha): pass
+    def runs_since(self, since): return [{"id": 5000, "html_url": "https://gh/run/5000"}]
+    def run(self, run_id):
+        signal.touch()  # report holds the pending list it loaded; the racing dispatch starts now
+        time.sleep(1.5)
+        return {"status": "completed", "conclusion": "success"}
+    def jobs(self, run_id): return [{"id": 1, "name": "e2e / e2e", "conclusion": "success"}]
+
+ne.RestGitHub, ne.NightlyBoard = GH, lambda *a: None
+sys.exit(ne.main([mode, "--state", state]))
+"""
+
+
+@pytest.mark.platforms("posix")
+def test_concurrent_report_and_dispatch_processes_do_not_lose_the_dispatch(tmp_path):
+    path, signal = tmp_path / "state.json", tmp_path / "report-inside-github"
+    _seed(path, FakeGitHub(), time.time() - 600)  # run 100, pending; the report settles it green
+    child = tmp_path / "child.py"
+    child.write_text(_CHILD, encoding="utf-8")
+    env = {**os.environ, "GH_TOKEN": "x"}
+
+    def start(mode):
+        argv = [sys.executable, str(child), str(ROOT / "scripts" / "ci"), mode, str(path), str(signal)]
+        return subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    report = start("report")
+    deadline = time.monotonic() + 30
+    while not signal.exists():
+        assert report.poll() is None and time.monotonic() < deadline, report.communicate()[0]
+        time.sleep(0.02)
+    dispatch = start("dispatch")
+    outs = [p.communicate(timeout=60)[0] for p in (report, dispatch)]
+    assert [report.returncode, dispatch.returncode] == [0, 0], outs
+    state = ne.load_state(path)
+    # unserialized, the report saves the pending list it loaded before the dispatch: run 5000 is wiped
+    assert [e["run_id"] for e in state["pending"]] == [5000], outs
+    assert set(state["seen"]) == {100, 5000}
 
 
 def test_state_round_trip(tmp_path):
