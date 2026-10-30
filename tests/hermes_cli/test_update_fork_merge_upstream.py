@@ -72,7 +72,7 @@ def test_flag_on_stages_the_merge_and_lands_only_a_green_one(repo, capsys, verdi
         assert gate.main() == pre and "LANDED" not in out
         assert "full suite failed" in out or "failed its full suite" in out, out
     else:
-        assert gate.main() == merged and "LANDED" in out, out
+        assert gate.landed(merged) and "LANDED" in out, out
         assert gate.staged() == []  # the twin merge of the next update is not staged again
     assert sh("git", "rev-parse", "HEAD", cwd=live) == pre
     assert sh("git", "status", "--porcelain", cwd=live) == ""

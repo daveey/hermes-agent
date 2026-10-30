@@ -4,6 +4,7 @@ The fixture API reports for each staged ``sync/upstream-<sha>`` branch the verdi
 on that exact checkout produced, so "red is refused, green lands" is decided by real test code.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -69,11 +70,20 @@ def merge_upstream(checkout):
 
 
 class FakeActions:
-    """GitHub Actions for the bare origin: a staged sync branch runs real pytest at its head."""
+    """GitHub for the bare origin: Actions runs real pytest on each staged sync branch; PRs merge like GitHub.
+
+    A landing PR gets ci.yaml's required check (``aggregate``: None = no run yet, else (status,
+    conclusion)) on its head. ``gh pr merge`` refuses unless that check is green on the exact head
+    (enforce_admins: no --admin bypass), then writes GitHub's merge commit (main, head) server-side.
+    """
 
     def __init__(self, origin: Path, scratch: Path):
         self.origin, self.scratch, self.runs, self.finished = origin, scratch, [], True
         self.job_override: Callable[[list], None] | None = None
+        self.pulls: list[dict] = []
+        self.aggregate: tuple[str, str | None] | None = ("completed", "success")
+        self.merge_error: str | None = None
+        self.gh_calls: list[tuple] = []
 
     def ci(self):
         """Run 'CI' for every staged branch that has no run yet (status pending until finish())."""
@@ -96,6 +106,17 @@ class FakeActions:
                               "html_url": f"https://ci.example/run/{run_id}",
                               "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
 
+    def branch_sha(self, branch):
+        return subprocess.run(["git", "-C", str(self.origin), "rev-parse", "-q", "--verify", f"refs/heads/{branch}"],
+                              capture_output=True, text=True, check=False).stdout.strip()
+
+    def check_runs(self, sha):
+        if self.aggregate is None or not any(p["head"]["sha"] == sha for p in self.pulls):
+            return []
+        status, conclusion = self.aggregate
+        return [{"id": 7, "name": sync.REQUIRED_CHECK, "head_sha": sha, "status": status, "conclusion": conclusion,
+                 "app": {"id": sync.ACTIONS_APP_ID}, "html_url": f"https://ci.example/check/{sha[:7]}"}]
+
     def request(self, endpoint):
         if "/jobs?" in endpoint:
             run = next(r for r in self.runs if f"/runs/{r['id']}/jobs" in endpoint)
@@ -104,16 +125,67 @@ class FakeActions:
             if self.job_override:
                 self.job_override(jobs)
             return [{"jobs": jobs}]
+        if "/pulls?" in endpoint:
+            branch = endpoint.split("head=", 1)[1].split("&", 1)[0].split(":", 1)[1]
+            return [[p for p in self.pulls if p["state"] == "open" and p["head"]["ref"] == branch]]
+        if "/check-runs?" in endpoint:
+            assert f"check_name={sync.REQUIRED_CHECK.replace(' ', '%20')}" in endpoint
+            return [{"check_runs": self.check_runs(endpoint.split("/commits/", 1)[1].split("/", 1)[0])}]
         assert f"workflows/{sync.WORKFLOW_FILE}/runs" in endpoint
         return [{"workflow_runs": list(reversed(self.runs))}]
 
+    def gh(self, *args, reason=None):
+        self.gh_calls.append(args)
+        done = lambda rc, out="", err="": subprocess.CompletedProcess(["gh", *args], rc, out, err)
+        if args[:2] == ("pr", "create"):
+            branch = args[args.index("--head") + 1]
+            number = len(self.pulls) + 1
+            self.pulls.append({"number": number, "state": "open", "base": {"ref": args[args.index("--base") + 1]},
+                               "head": {"ref": branch, "sha": self.branch_sha(branch)},
+                               "html_url": f"https://github.com/example/fork/pull/{number}"})
+            return done(0, f"https://github.com/example/fork/pull/{number}\n")
+        assert args[:2] == ("pr", "merge") and "--admin" not in args, args
+        pr = next(p for p in self.pulls if p["number"] == int(args[2]))
+        head = self.branch_sha(pr["head"]["ref"])
+        if self.merge_error:
+            return done(1, err=self.merge_error)
+        if args[args.index("--match-head-commit") + 1] != head:
+            return done(1, err="GraphQL: Head branch was modified. Review and try the merge again.")
+        if [(r["status"], r["conclusion"]) for r in self.check_runs(head)] != [("completed", "success")]:
+            return done(1, err=f"X Pull request example/fork#{pr['number']} is not mergeable: "
+                               "the base branch policy prohibits the merge.")
+        main = git(self.origin, "rev-parse", "refs/heads/main")
+        tree = git(self.origin, "merge-tree", "--write-tree", main, head).splitlines()[0]
+        env = {**os.environ, "GIT_AUTHOR_NAME": "GitHub", "GIT_AUTHOR_EMAIL": "noreply@github.com",
+               "GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": "noreply@github.com"}
+        merge = git(self.origin, "commit-tree", tree, "-p", main, "-p", head, "-m", f"Merge PR #{pr['number']}", env=env)
+        git(self.origin, "update-ref", "refs/heads/main", merge, main)  # server-side: no pre-receive hook
+        pr["state"] = "merged"
+        return done(0, f"Merged pull request #{pr['number']}\n")
+
+
+def protect_main(world_root, refs=("refs/heads/main",), code="GH006"):
+    """GitHub's branch protection with enforce_admins: every direct push to ``refs`` is refused."""
+    hook = world_root / "origin.git" / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nstatus=0\nwhile read old new ref; do\n  case \" " + " ".join(refs) + " \" in\n"
+                    "    *\" $ref \"*) echo \"remote: error: " + code + ": Protected branch update failed for $ref.\" >&2\n"
+                    "      echo 'remote: error: Required status check \"All required checks pass (v2)\" is expected.' >&2\n"
+                    "      status=1 ;;\n  esac\ndone\nexit $status\n")
+    hook.chmod(0o755)
+
 
 def gate(checkout, head, actions, **kw):
-    return sync.advance(checkout, head, gh_repo="example/fork", request=actions.request, **kw)
+    return sync.advance(checkout, head, gh_repo="example/fork", request=actions.request, gh=actions.gh, **kw)
 
 
 def main_of(world_root):
     return git(world_root / "origin.git", "rev-parse", "main")
+
+
+def landed_by_merge(world_root, head, before):
+    """GitHub's PR merge: a merge commit (main as it was, the exact tested head) and nothing else."""
+    tip = main_of(world_root)
+    return git(world_root / "origin.git", "rev-list", "--parents", "-n1", tip).split()[1:] == [before, head]
 
 
 @pytest.mark.parametrize("red", [True, False])
@@ -132,22 +204,26 @@ def test_red_sync_is_refused_and_green_sync_lands(world, red):
 
     rc = gate(checkout, head, actions)
     assert rc == (sync.REFUSED if red else sync.LANDED)
-    assert main_of(root) == (before if red else head)  # green lands the exact tested head (ff)
+    if red:
+        assert main_of(root) == before
+    else:  # green lands the exact tested head through its PR's merge commit
+        assert landed_by_merge(root, head, before)
 
 
 def test_pending_run_does_not_land_then_lands_when_green(world):
     root, checkout = world
     upstream_commit(root, {"u.txt": "u\n"}, "upstream")
     head = merge_upstream(checkout)
+    before = main_of(root)
     actions = FakeActions(root / "origin.git", root)
     actions.finished = False
     gate(checkout, head, actions)
     actions.ci()
     assert gate(checkout, head, actions) == sync.NOT_YET
-    assert main_of(root) != head
+    assert main_of(root) == before
     actions.runs[0].update(status="completed", conclusion="success")
     assert gate(checkout, head, actions) == sync.LANDED
-    assert main_of(root) == head
+    assert landed_by_merge(root, head, before)
 
 
 def test_moved_main_gets_a_non_forced_merge_of_the_tested_head(world):
@@ -253,11 +329,12 @@ def test_another_hosts_green_candidate_is_landed_by_a_bare_call(world):
     root, checkout = world
     upstream_commit(root, {"u.txt": "u\n"}, "upstream")
     head = merge_upstream(checkout)
+    before = main_of(root)
     actions = FakeActions(root / "origin.git", root)
     gate(checkout, head, actions)
     actions.ci()
-    assert sync.advance(checkout, None, gh_repo="example/fork", request=actions.request) == sync.LANDED
-    assert main_of(root) == head
+    assert sync.advance(checkout, None, gh_repo="example/fork", request=actions.request, gh=actions.gh) == sync.LANDED
+    assert landed_by_merge(root, head, before)
 
 
 def test_unreadable_evidence_is_a_refusal(world):
@@ -270,6 +347,92 @@ def test_unreadable_evidence_is_a_refusal(world):
         raise sync.GateError("API down")
     assert sync.advance(checkout, head, gh_repo="example/fork", request=broken) == sync.REFUSED
     assert main_of(root) == before
+
+
+def green_candidate(world):
+    """A staged sync whose full suite went green, on an origin whose main refuses direct pushes."""
+    root, checkout = world
+    upstream_commit(root, {"u.txt": "u\n"}, "upstream")
+    head = merge_upstream(checkout)
+    actions = FakeActions(root / "origin.git", root)
+    assert gate(checkout, head, actions) == sync.NOT_YET  # staged
+    actions.ci()
+    protect_main(root)
+    return root, checkout, head, actions, main_of(root)
+
+
+def merges(actions):
+    return [c for c in actions.gh_calls if c[:2] == ("pr", "merge")]
+
+
+def test_protected_main_lands_through_a_pr_never_a_direct_push(world, capsys):
+    root, checkout, head, actions, before = green_candidate(world)
+    assert gate(checkout, head, actions) == sync.LANDED, capsys.readouterr().out
+    assert landed_by_merge(root, head, before)
+    [pr] = actions.pulls
+    assert pr["head"] == {"ref": f"sync/upstream-{head}", "sha": head} and pr["base"]["ref"] == "main"
+    [merge] = merges(actions)
+    assert merge[merge.index("--match-head-commit") + 1] == head and "--merge" in merge and "--admin" not in merge
+    assert not git(root / "origin.git", "branch", "--list", f"sync/upstream-{head}")  # cleaned up
+
+
+@pytest.mark.parametrize("aggregate,expected", [
+    (("completed", "success"), sync.LANDED),
+    (("in_progress", None), sync.NOT_YET),
+    (("queued", None), sync.NOT_YET),
+    (None, sync.NOT_YET),  # ci.yaml has not reported on the head yet
+    (("completed", "failure"), sync.REFUSED),
+    (("completed", "cancelled"), sync.REFUSED),
+])
+def test_landing_pr_merges_only_on_a_green_required_check_at_the_exact_head(world, capsys, aggregate, expected):
+    root, checkout, head, actions, before = green_candidate(world)
+    actions.aggregate = aggregate
+    assert gate(checkout, head, actions) == expected
+    out = capsys.readouterr().out
+    assert "main moved" not in out
+    if expected == sync.LANDED:
+        assert landed_by_merge(root, head, before) and len(merges(actions)) == 1
+        return
+    assert main_of(root) == before and merges(actions) == [], out
+    assert sync.REQUIRED_CHECK in out and "PR #1" in out
+    if expected == sync.NOT_YET:  # the next call reuses the PR and merges once the check turns green
+        actions.aggregate = ("completed", "success")
+        assert gate(checkout, head, actions) == sync.LANDED
+        assert landed_by_merge(root, head, before) and len(actions.pulls) == 1
+
+
+GH006 = ("remote: error: GH006: Protected branch update failed for refs/heads/main.\n"
+         "remote: error: Required status check \"All required checks pass (v2)\" is expected.")
+
+
+def test_a_gh006_refusal_is_refused_with_githubs_message_not_main_moved(world, capsys):
+    root, checkout, head, actions, before = green_candidate(world)
+    actions.merge_error = GH006  # GitHub refuses the merge itself (e.g. the check went stale meanwhile)
+    assert gate(checkout, head, actions) == sync.REFUSED
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "GH006: Protected branch update failed" in out and "main moved" not in out
+    assert main_of(root) == before
+
+
+def test_a_protected_staging_branch_is_refused_with_githubs_message(world, capsys):
+    root, checkout = world
+    upstream_commit(root, {"u.txt": "u\n"}, "upstream")
+    head = merge_upstream(checkout)
+    protect_main(root, refs=("refs/heads/main", f"refs/heads/sync/upstream-{head}"), code="GH013")
+    assert gate(checkout, head, FakeActions(root / "origin.git", root)) == sync.REFUSED
+    out = capsys.readouterr().out
+    assert "GitHub refused the push to refs/heads/sync/upstream-" in out and "GH013" in out
+
+
+@pytest.mark.parametrize("message,refusal", [
+    (GH006, True),
+    ("remote: error: GH013: Repository rule violations found for refs/heads/main.", True),
+    ("X Pull request daveey/hermes#12 is not mergeable: the base branch policy prohibits the merge.", True),
+    ("! [rejected]        x -> main (fetch first)", False),
+    ("fatal: unable to access 'https://github.com/daveey/hermes.git/': Could not resolve host", False),
+])
+def test_protection_refusals_are_recognized(message, refusal):
+    assert sync.is_protection_refusal(message) is refusal
 
 
 def install_guard(checkout):
