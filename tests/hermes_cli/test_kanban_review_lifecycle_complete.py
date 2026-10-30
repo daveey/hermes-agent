@@ -625,6 +625,34 @@ def test_goal_run_status_is_bound_to_original_run(conn) -> None:
     assert current.current_run_id == successor.current_run_id
 
 
+def test_goal_run_status_reports_own_timed_park_not_superseded(conn) -> None:
+    """A worker that parks its own run (kanban_schedule / kind='time') ends the goal loop with
+    ``scheduled``, not ``superseded``: the stale label read as an ownership loss in a crash
+    record (t_82f0fe15 runs 7630/7649). A real successor still reads ``superseded``. [daveey]"""
+    task_id = kb.create_task(conn, title="Goal timed park", assignee="builder")
+    parked = kb.claim_task(conn, task_id)
+    assert parked is not None
+    assert kb.schedule_task(
+        conn, task_id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on a clock",
+        expected_run_id=parked.current_run_id, clock_only=True,
+    )
+    parked_task = kb.get_task(conn, task_id)
+    assert parked_task is not None and parked_task.status == "scheduled"
+    assert kb.goal_run_status(conn, task_id, parked.current_run_id) == "scheduled"
+
+    assert kb.unblock_task(conn, task_id)
+    successor = kb.claim_task(conn, task_id)
+    assert successor is not None
+    assert kb.goal_run_status(conn, task_id, successor.current_run_id) == "running"
+    # The parked run's loop must not mistake the successor's live run for its own.
+    assert kb.goal_run_status(conn, task_id, parked.current_run_id) == "scheduled"
+    lost = kb.claim_task(conn, kb.create_task(conn, title="Reclaimed", assignee="builder"))
+    assert lost is not None
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_runs SET outcome = 'reclaimed' WHERE id = ?", (lost.current_run_id,))
+    assert kb.goal_run_status(conn, lost.id, lost.current_run_id) == "superseded"
+
+
 def test_parked_review_approval_without_evidence_still_creates_audit_run(conn) -> None:
     task_id = kb.create_task(conn, title="Manual approval", assignee="reviewer")
     assert kb.request_review(conn, task_id, summary="implementation handoff")

@@ -358,7 +358,15 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
     task = _kb.get_task(conn, sub["task_id"])
     with session_db(sub["chat_id"]) as (db, tip):
         if db is None or tip is None:
-            return None  # no store holds this chat (deleted): leave the cursor alone
+            # No store holds this chat (deleted): leave the cursor alone, since the chat may still appear. An
+            # archived card's sub can never drain this way (its chat's poller never runs), so it kept that chat in
+            # unseen counts forever (chat s1, t_01a18c03307c8661): drop it. [daveey]
+            if task is not None and getattr(task, "status", "") == "archived":
+                with contextlib.suppress(Exception):
+                    _kbn.remove_notify_sub(conn, **ident)
+                    logger.info("Dropped notify sub for archived %s/%s: no store holds chat %s",
+                                slug, ident["task_id"], ident["chat_id"])
+            return None
         from tui_gateway.notice_fanout import chat_skip_reason
         skip = chat_skip_reason(db, sub["chat_id"])  # [daveey] archived / moved copy: the notice goes nowhere
         old, new, claimed = _kbn.claim_unseen_events_for_sub(conn, kinds=kinds, durable=skip is None, **ident)

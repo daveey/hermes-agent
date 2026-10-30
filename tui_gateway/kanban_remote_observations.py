@@ -37,13 +37,67 @@ def _snapshot(replica: Path, previous=None) -> tuple[bool, list[tuple] | None, t
                 "SELECT COUNT(*), MAX(seq), TOTAL(seq) FROM replica WHERE coll='tasks'").fetchone())
         if signature is not None and signature == previous:
             return True, None, signature
-        cards = []
-        for owner, key, _seq, raw in _canonical(_task_rows(conn, meta.get("gateway"))):
-            with contextlib.suppress(TypeError, ValueError):
-                task = json.loads(raw)
-                if isinstance(task, dict) and task.get("status") in _TERMINAL:
-                    cards.append((owner, key, task))
+        if signature is None:
+            cards = []
+            for owner, key, _seq, raw in _canonical(_task_rows(conn, meta.get("gateway"))):
+                with contextlib.suppress(TypeError, ValueError):
+                    task = json.loads(raw)
+                    if isinstance(task, dict) and task.get("status") in _TERMINAL:
+                        cards.append((owner, key, task))
+            return ready, cards, signature
+        cards = _changed_rows_cards(conn, replica, meta.get("gateway"))
     return ready, cards, signature
+
+
+# (replica, owner, key) -> (seq, terminal summary or None). The replica holds thousands of
+# task rows (~30 MB of JSON on a busy fleet) and its signature moves whenever any card does,
+# so decoding every row per change kept the notice pollers busy while Desktop sat idle. A row
+# is re-read only when its seq moved; the summary keeps just the fields _persist reads.
+_decoded: dict[tuple, tuple] = {}
+
+
+def _summary(task) -> dict | None:
+    if not isinstance(task, dict) or task.get("status") not in _terminal_states():
+        return None
+    run = task.get("run")
+    run = run if isinstance(run, dict) else {}
+    notice = task.get("completion_notice")
+    notice = notice if isinstance(notice, dict) else {}
+    return {"status": task.get("status"), "completed_at": task.get("completed_at"),
+            "run": {"ended_at": run.get("ended_at")},
+            "completion_notice": {"created_at": notice.get("created_at")}}
+
+
+def _terminal_states():
+    from tui_gateway.kanban_remote_notices import _TERMINAL
+    return _TERMINAL
+
+
+def _changed_rows_cards(conn, replica: Path, me) -> list[tuple]:
+    from tui_gateway.kanban_remote_notices import _canonical
+
+    sql = "SELECT gw, key, seq, NULL FROM replica WHERE coll = 'tasks'"
+    rows = conn.execute(sql + " AND gw != ?", (me,)).fetchall() if me else conn.execute(sql).fetchall()
+    rows = _canonical(rows)
+    tag = str(replica)
+    seen = set()
+    cards = []
+    for owner, key, seq, _ in rows:
+        ident = (tag, owner, key)
+        seen.add(ident)
+        hit = _decoded.get(ident)
+        if hit is None or hit[0] != seq:
+            raw = conn.execute("SELECT data FROM replica WHERE gw = ? AND coll = 'tasks' AND key = ?",
+                               (owner, key)).fetchone()
+            summary = None
+            with contextlib.suppress(TypeError, ValueError):
+                summary = _summary(json.loads(raw[0])) if raw else None
+            hit = _decoded[ident] = (seq, summary)
+        if hit[1] is not None:
+            cards.append((owner, key, hit[1]))
+    for ident in [ident for ident in _decoded if ident[0] == tag and ident not in seen]:
+        del _decoded[ident]
+    return cards
 
 
 def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple, float | None]:

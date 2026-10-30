@@ -107,3 +107,54 @@ def test_quiet_kanban_worker_exits_tempfail_when_credentials_are_rate_limited(mo
     with pytest.raises(SystemExit) as exc:
         cli._run_single_query_mode(stub, "do the thing", None, True, True)
     assert exc.value.code == expected
+
+
+# [daveey] Goal-mode workers (t_82f0fe15, 2026-10-30): a loop that stops because the worker parked the
+# card (scheduled, read back as superseded) or the dispatcher owns it exits 0; a broken loop exits 1.
+_PARKED = {"outcome": "stopped", "reason": "status=superseded", "turns_used": 0, "failed": False}
+_BROKEN = {"outcome": "stopped", "reason": "run_turn error: RuntimeError", "turns_used": 1, "failed": True}
+
+
+@pytest.mark.parametrize(("loop", "expected"), [(_PARKED, 0), (_BROKEN, 1), (None, 0)])
+def test_q_goal_worker_exit_follows_the_goal_loop(monkeypatch, loop, expected):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    monkeypatch.setenv("HERMES_KANBAN_GOAL_MODE", "1")
+    monkeypatch.setattr(cli, "_run_kanban_goal_loop_chat", lambda c, r: loop)
+    assert _run_non_quiet(monkeypatch, {"final_response": "parked", "completed": True}) == expected
+
+
+def _run_quiet_goal(monkeypatch, loop, follow_up=None):
+    """Drive the ``-Q`` driver through one settled turn and a stubbed goal loop; return the exit code."""
+    from agent import kanban_turn_recovery as recovery
+    from hermes_cli import quiet_single_query as qsq
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    monkeypatch.setenv("HERMES_KANBAN_GOAL_MODE", "1")
+    monkeypatch.setattr(recovery, "recover_failed_kanban_turns", lambda *a, **k: None)
+    monkeypatch.setattr(qsq, "continue_quiet_notify_completions", lambda *a, **k: None)
+    monkeypatch.setattr(qsq, "quiet_notify_linger_seconds", lambda: 0)
+    monkeypatch.setattr(cli, "_sync_cli_session_id_from_agent", lambda c: None)
+
+    def _loop(c, response, turn_results=None):
+        if follow_up is not None:
+            turn_results.append(follow_up)
+        return loop
+    monkeypatch.setattr(cli, "_run_kanban_goal_loop_q", _loop)
+    agent = SimpleNamespace(run_conversation=lambda **k: {"final_response": "parked", "completed": True})
+    stub = SimpleNamespace(agent=agent, conversation_history=[], session_id="s1")
+    with pytest.raises(SystemExit) as exc:
+        cli._run_quiet_single_query(stub, "work kanban task")
+    return exc.value.code
+
+
+def test_quiet_goal_worker_that_parks_itself_exits_0(monkeypatch):
+    assert _run_quiet_goal(monkeypatch, _PARKED) == 0
+
+
+def test_quiet_goal_worker_whose_loop_broke_exits_1(monkeypatch):
+    assert _run_quiet_goal(monkeypatch, _BROKEN) == 1
+
+
+def test_quiet_goal_worker_keeps_a_follow_up_turns_provider_wall(monkeypatch):
+    wall = {"failed": True, "failure_reason": "rate_limit", "final_response": ""}
+    assert _run_quiet_goal(monkeypatch, {**_BROKEN, "reason": "worker failed: rate_limit"}, wall) \
+        == KANBAN_RATE_LIMIT_EXIT_CODE

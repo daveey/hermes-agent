@@ -17,6 +17,7 @@ from unittest.mock import patch
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kbn
+from tests.waiting import wait_until
 from tui_gateway.server import (
     _collect_kanban_notifications,
     _format_kanban_event_text,
@@ -284,16 +285,16 @@ class TestNotificationPollerLoopKanbanWiring:
         thread.start()
         return stop, thread, emits, submits
 
-    @staticmethod
-    def _wait_for(predicate, timeout: float = 5.0) -> bool:
-        import time as _time
+    # A deadline, not a delay: each wait returns the moment its condition holds. The poller's first pass
+    # (imports + board read + persist) takes ~0.4 s idle but ~7 s on a CPU-throttled runner, so the old fixed
+    # 5 s deadline failed there ("agent turn was never dispatched", CI run 41010503776).
+    _DEADLINE_S = 60.0
 
-        deadline = _time.monotonic() + timeout
-        while _time.monotonic() < deadline:
-            if predicate():
-                return True
-            _time.sleep(0.02)
-        return False
+    @classmethod
+    def _stop_poller(cls, stop, thread) -> None:
+        stop.set()
+        thread.join(timeout=cls._DEADLINE_S)
+        assert not thread.is_alive(), "poller thread did not stop"
 
     def _poller_session(self, *, running: bool = False) -> dict:
         import threading
@@ -311,10 +312,9 @@ class TestNotificationPollerLoopKanbanWiring:
 
         stop, thread, emits, submits = self._start_poller(session, monkeypatch)
         try:
-            assert self._wait_for(lambda: submits), "agent turn was never dispatched"
+            wait_until(lambda: submits, timeout=self._DEADLINE_S, what="agent turn dispatched")
         finally:
-            stop.set()
-            thread.join(timeout=5)
+            self._stop_poller(stop, thread)
 
         status_texts = [p["text"] for e, p in emits if e == "status.update" and p]
         assert any(tid in t for t in status_texts), status_texts
@@ -332,19 +332,19 @@ class TestNotificationPollerLoopKanbanWiring:
         try:
             # Busy: the status line appears and the event is buffered, but no
             # agent turn is dispatched while another turn is running.
-            assert self._wait_for(
+            wait_until(
                 lambda: any(e == "status.update" for e, _ in emits)
-                and session.get("_kanban_pending")
+                and session.get("_kanban_pending"),
+                timeout=self._DEADLINE_S, what="status line and buffered notice",
             )
             assert not submits
 
             with session["history_lock"]:
                 session["running"] = False
 
-            assert self._wait_for(lambda: submits), "pending batch never flushed"
+            wait_until(lambda: submits, timeout=self._DEADLINE_S, what="pending batch flushed")
         finally:
-            stop.set()
-            thread.join(timeout=5)
+            self._stop_poller(stop, thread)
 
         assert any(tid in text for text in submits), submits
         assert session["_kanban_pending"] == []

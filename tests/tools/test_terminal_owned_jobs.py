@@ -30,15 +30,18 @@ if role.startswith("recovering"):
 ids = {}
 for name, kwargs in (("job", {}), ("pty_job", {"use_pty": True}), ("persisted_job", {"persist_on_release": True})):
     marker = root / f"{role}.{name}"
-    # A job that ignores SIGHUP (nohup'd servers): a PTY hangup alone does not stop it.
-    s = process_registry.spawn_local(f"trap '' HUP; sleep 120 & echo $! > {marker}; wait", cwd=str(root), **kwargs)
+    # A job that ignores SIGHUP (nohup'd servers): a PTY hangup alone does not stop it. The pid goes
+    # in through a rename: a bare `> marker` creates the file before echo writes, and a poll landing
+    # in that gap read '' and crashed this owner before it wrote its receipt.
+    s = process_registry.spawn_local(f"trap '' HUP; sleep 120 & echo $! > {marker}.tmp; mv {marker}.tmp {marker}; wait",
+                                     cwd=str(root), **kwargs)
     wait_until = time.time() + 30
     while not marker.exists() and time.time() < wait_until:
         time.sleep(0.05)
     ids[name] = [s.pid, int(marker.read_text().strip())]
 env = LocalEnvironment(cwd=str(root), timeout=600)
 fg = root / f"{role}.fg"
-threading.Thread(target=env.execute, args=(f"sleep 120 & echo $! > {fg}; wait",), daemon=True).start()
+threading.Thread(target=env.execute, args=(f"sleep 120 & echo $! > {fg}.tmp; mv {fg}.tmp {fg}; wait",), daemon=True).start()
 wait_until = time.time() + 30
 while not fg.exists() and time.time() < wait_until:
     time.sleep(0.05)
@@ -62,8 +65,14 @@ def _alive(identity):
         return False
 
 
-def _read(path):
-    wait_until(path.exists, timeout=60, what=f"owner receipt {path.name}")
+def _read(path, owner, log):
+    """The owner's receipt; fails at once, with the owner's output, if the owner died before writing it."""
+    wait_until(lambda: path.exists() or owner.poll() is not None, timeout=60,
+               what=f"owner receipt {path.name}")
+    if not path.exists():
+        log.flush()
+        output = Path(log.name).read_text(encoding="utf-8", errors="replace")[-4000:]
+        raise AssertionError(f"owner exited {owner.returncode} without writing {path.name}:\n{output}")
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
@@ -98,7 +107,7 @@ def test_owner_sigkill_takes_its_jobs_and_commands_not_a_live_owners(tmp_path):
     owners, log = _run_owners(tmp_path, ("control", "victim"))
     ids = {}
     try:
-        ids = {role: _read(tmp_path / f"{role}.json") for role in owners}
+        ids = {role: _read(tmp_path / f"{role}.json", owner, log) for role, owner in owners.items()}
         owners["victim"].kill()  # SIGKILL: no atexit, no finally, nothing of ours runs
         owners["victim"].wait(timeout=10)
 
@@ -118,7 +127,7 @@ def test_a_checkpoint_recovering_hosts_jobs_outlive_its_crash(tmp_path):
     owners, log = _run_owners(tmp_path, ("recovering",))
     ids = {}
     try:
-        ids = {"recovering": _read(tmp_path / "recovering.json")}
+        ids = {"recovering": _read(tmp_path / "recovering.json", owners["recovering"], log)}
         owners["recovering"].kill()
         owners["recovering"].wait(timeout=10)
         # The foreground command is not a job: it dies even here.

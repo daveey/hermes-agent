@@ -271,3 +271,29 @@ def test_profile_scoped_caller_reads_the_profile_record(home):
     assert first["discoveries"] == 1 and (prof / "cache" / "plugin_toolset_keys.json").exists()
     assert _run(home, assignee="worker")["discoveries"] == 0
     assert _run(prof)["discoveries"] == 0  # the profile's own process (HERMES_HOME=profile) shares it
+
+
+def test_fingerprint_ignores_bytecode_cache_creation_but_sees_plugin_changes(home, monkeypatch):
+    """Another process byte-compiling a plugin (or a first __pycache__ in a site dir) moves the
+    directory mtime without changing what discovery reads; that must not stale the record."""
+    from hermes_cli import plugins_snapshot as S
+
+    plugin = _tool_plugin(home, "extra", "extra_ping", "extra")
+    site = home.parent / "site-packages"
+    (site / "pkg-1.0.dist-info").mkdir(parents=True)
+    monkeypatch.setattr(sys, "path", [*sys.path, str(site)])
+    before = S.fingerprint(home)
+    assert before
+    (plugin / "__pycache__").mkdir()
+    (plugin / "__pycache__" / "__init__.cpython-312.pyc").write_bytes(b"x")
+    (site / "__pycache__").mkdir()
+    os.utime(plugin, ns=(1, 1))
+    os.utime(home / "plugins", ns=(1, 1))
+    os.utime(site, ns=(1, 1))
+    assert S.fingerprint(home) == before
+    (plugin / "extra_more.py").write_text("X = 1\n")
+    changed = S.fingerprint(home)
+    assert changed != before
+    (plugin / "extra_more.py").unlink()
+    (site / "other-2.0.dist-info").mkdir()
+    assert S.fingerprint(home) not in (before, changed)
