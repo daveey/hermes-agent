@@ -22,6 +22,8 @@ _cache: dict[tuple, tuple] = {}
 _cache_lock = threading.Lock()
 _refresh_lock = threading.Lock()
 _refresh_thread: Optional[threading.Thread] = None
+# key -> Event set when the first read of that key (a request or the boot prewarm) finishes.
+_first_reads: dict[tuple, threading.Event] = {}
 
 
 def file_sig(path: str) -> Optional[tuple]:
@@ -84,6 +86,41 @@ def serve(key, sig, read: Callable[[], dict], now: Optional[float] = None) -> di
             return dict(hit[2], now=int(time.time()))
         _schedule(read, key, sig, now)
         return dict(hit[2], now=int(time.time()))
-    result = read()
-    _publish(key, sig, now, result)
-    return result
+    return _first_read(read, key, sig, now)
+
+
+def _first_read(read: Callable[[], dict], key, sig, now) -> dict:
+    """The first read of ``key`` runs once. A caller that arrives while another (the boot prewarm
+    or an earlier poll) is reading waits for it instead of repeating the 4-5 s read under the
+    GIL contention of the Desktop's cold-start burst."""
+    with _cache_lock:
+        pending = _first_reads.get(key)
+        leader = pending is None
+        if leader:
+            pending = _first_reads[key] = threading.Event()
+    if not leader:
+        pending.wait()
+        with _cache_lock:
+            hit = _cache.get(key)
+        if hit is not None:
+            return dict(hit[2], now=int(time.time()))
+        return read()  # the leader failed: read for ourselves
+    try:
+        result = read()
+        _publish(key, sig, now, result)
+        return result
+    finally:
+        with _cache_lock:
+            _first_reads.pop(key, None)
+        pending.set()
+
+
+def prewarm(read: Callable[[], dict], key, sig, now: Optional[float] = None) -> None:
+    """Take the first read of ``key`` off the first Desktop poll (boot, background thread).
+    A no-op if a snapshot exists or a read is already running."""
+    if key is None or sig is None:
+        return
+    with _cache_lock:
+        if key in _cache:
+            return
+    _first_read(read, key, sig, time.monotonic() if now is None else now)

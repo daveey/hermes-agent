@@ -147,3 +147,77 @@ def test_busy_board_is_not_reread_more_often_than_min_refresh(board, monkeypatch
     client.get("/api/plugins/kanban/board")
     join_refresh()
     assert len(reads) == 2
+
+
+from plugins.kanban.dashboard.board_prewarm import prewarm_boards as _prewarm, start_board_prewarm
+
+
+def _complete(conn, task_id: str, at: int) -> None:
+    conn.execute("UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?", (at, task_id))
+    conn.commit()
+
+
+def test_cold_read_computes_diagnostics_only_for_cards_in_the_payload(board, monkeypatch):
+    """Done cards past done_limit are dropped from the payload; the cold read must not run the
+    diagnostics rules over them (~1.2 of 1.5 s on the hub's 1.2k-card board)."""
+    mod, client, _reads = board
+    ids = []
+    conn = kbc.connect()
+    try:
+        for i in range(6):
+            ids.append(kb.create_task(conn, title=f"done-{i}", assignee="w"))
+            _complete(conn, ids[-1], 100 + i)
+        live = kb.create_task(conn, title="live", assignee="w")
+    finally:
+        conn.close()
+    seen = []
+    real = mod._compute_task_diagnostics
+    monkeypatch.setattr(mod, "_compute_task_diagnostics", lambda c, task_ids=None: seen.append(task_ids) or real(c, task_ids))
+    body = client.get("/api/plugins/kanban/board?done_limit=2").json()
+    done = next(c for c in body["columns"] if c["name"] == "done")
+    assert [t["title"] for t in done["tasks"]] == ["done-5", "done-4"]
+    assert (done["total"], done["omitted"]) == (6, 4)
+    assert len(seen) == 1 and seen[0] is not None
+    assert set(seen[0]) == {live, ids[5], ids[4]}
+
+
+def test_first_read_runs_once_when_prewarm_and_poll_overlap(board, monkeypatch):
+    """The boot prewarm owns the cold read; the Desktop's first poll joins it instead of repeating it."""
+    mod, client, reads = board
+    _create("first")
+    started, release = threading.Event(), threading.Event()
+    real = mod._get_board_uncached
+
+    def slow(*args):
+        started.set()
+        release.wait(10)
+        return real(*args)
+
+    monkeypatch.setattr(mod, "_get_board_uncached", slow)
+    warm = threading.Thread(target=lambda: _prewarm(mod))
+    warm.start()
+    assert started.wait(5)
+    got = {}
+    poll = threading.Thread(target=lambda: got.update(client.get("/api/plugins/kanban/board").json()))
+    poll.start()
+    poll.join(0.5)
+    assert poll.is_alive()  # waiting on the warm read, not reading
+    release.set()
+    warm.join(10)
+    poll.join(10)
+    assert len(reads) == 1 and _titles(got) == {"first"}
+
+
+def test_prewarm_makes_the_first_poll_a_snapshot_hit(board):
+    mod, client, reads = board
+    _create("first")
+    _prewarm(mod)
+    assert len(reads) == 1
+    assert _titles(client.get("/api/plugins/kanban/board").json()) == {"first"}
+    assert len(reads) == 1
+
+
+def test_prewarm_thread_is_skipped_under_test_isolation(board, monkeypatch):
+    mod, _client, _reads = board
+    monkeypatch.setenv("HERMES_TEST_ISOLATION", "1")
+    assert start_board_prewarm(mod) is None
