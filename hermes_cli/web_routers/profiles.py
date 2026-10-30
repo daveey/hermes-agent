@@ -523,6 +523,46 @@ def get_profiles_sessions(
             "storage": _corrupt_profile_stores(targets)}
 
 
+# [daveey] Row columns a stamp answer carries besides the annotators' own keys: the project placement (cwd/git) and
+# the stored outcome, which a replica record also lacks.
+_SESSION_STAMP_COLUMNS = ("cwd", "git_branch", "git_repo_root", "outcome", "muted")
+
+
+@sessions_router.get("/api/profiles/sessions/stamps")
+def get_profiles_session_stamps(ids: str = Query(..., max_length=8000), profile: str = "default"):
+    """[daveey] Activity stamps (kanban_*, goal/cron/background/turn/review, outcome, cwd) of the named sessions of
+    one profile, read the way the list endpoints annotate their rows. The Desktop sidebar shows another gateway's
+    older chats from the hub replica, whose records carry none of these; the projects tree carries only a few
+    previews per project, so a replica row outside it painted no waiting/stuck stripe. Missing ids are omitted."""
+    from hermes_state_outcome import stamp_outcome_rows
+
+    wanted = list(dict.fromkeys(s.strip() for s in ids.split(",") if s.strip()))[:100]
+    name, home = _cron_profile_home(profile or "default")
+    now = time.time()
+
+    def _read(db) -> list[dict[str, Any]]:
+        found = []
+        for sid in wanted:
+            row = db.get_session(sid)
+            if row:
+                row["_lineage_ids"] = db.get_compression_chain(sid)
+                found.append(row)
+        return found
+
+    rows = _read_profile_db(name, home, None, _read) or []
+    stamp_outcome_rows(_tag_rows(rows, name, now))
+    stamp_automated(rows, home)
+    base = [set(row) for row in rows]
+    annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
+        annotate_goal_activity(annotate_kanban_activity(rows))))))
+    out = []
+    for row, before in zip(rows, base):
+        stamps = {key: row[key] for key in row if key not in before and not key.startswith("_")}
+        stamps.update({key: row.get(key) for key in _SESSION_STAMP_COLUMNS})
+        out.append({"id": row["id"], "profile": name, **stamps})
+    return {"sessions": out}
+
+
 @sessions_router.get("/api/profiles/sessions/sidebar")
 @_sidebar_singleflight_cache
 def get_profiles_sessions_sidebar(

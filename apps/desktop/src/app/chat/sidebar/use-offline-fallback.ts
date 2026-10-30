@@ -7,7 +7,7 @@
  * timeout, after a notice that names the connection.
  */
 import { useStore } from '@nanostores/react'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 
 import { prepaintClickedTranscript } from '@/app/session/hooks/use-session-actions/provisional-transcript'
 import type { SessionInfo } from '@/hermes'
@@ -19,7 +19,10 @@ import { sessionGatewayId } from '@/store/gateway-visibility'
 import { notify } from '@/store/notifications'
 import { offlineOpenNotice } from '@/store/offline-session-actions'
 import { $sessionListFreshness, mergeOfflineFallback, projectTreeSessionRows } from '@/store/offline-sessions'
+import { $ownerRowStamps, refreshOwnerRowStamps, rowsNeedingOwnerStamps } from '@/store/owner-row-stamps'
 import { $projectTree } from '@/store/project-tree'
+
+const OWNER_STAMP_TICK_MS = 45_000
 
 export function useOfflineFallback(
   liveSessions: SessionInfo[],
@@ -31,10 +34,34 @@ export function useOfflineFallback(
   const projectTree = useStore($projectTree)
   const treeRows = useMemo(() => projectTreeSessionRows(projectTree), [projectTree])
 
+  const ownerStamps = useStore($ownerRowStamps)
+
   const sessions = useMemo(
-    () => mergeOfflineFallback(liveSessions, offlineSessions, freshness, treeRows),
-    [liveSessions, offlineSessions, freshness, treeRows]
+    () => mergeOfflineFallback(liveSessions, offlineSessions, freshness, treeRows, ownerStamps),
+    [liveSessions, offlineSessions, freshness, treeRows, ownerStamps]
   )
+
+  // [daveey] Awake replica rows the projects tree doesn't carry have no activity stamps: ask their owner for them
+  // when the rows change and on a slow tick (kanban counts change without the row changing). Throttled per row.
+  const stampRows = useMemo(() => rowsNeedingOwnerStamps(sessions), [sessions])
+  const stampRowsRef = useRef(stampRows)
+  stampRowsRef.current = stampRows
+
+  useEffect(() => {
+    if (stampRows.length) {
+      void refreshOwnerRowStamps(stampRows)
+    }
+  }, [stampRows])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (stampRowsRef.current.length) {
+        void refreshOwnerRowStamps(stampRowsRef.current)
+      }
+    }, OWNER_STAMP_TICK_MS)
+
+    return () => window.clearInterval(timer)
+  }, [])
 
   const onResumeSession = useCallback(
     (sessionId: string, session?: SessionInfo) => {
