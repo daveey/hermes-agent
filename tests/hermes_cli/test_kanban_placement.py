@@ -1481,3 +1481,91 @@ def test_archive_forward_failure_is_reported_and_retried_and_plain_cards_are_unt
     mac["calls"].clear()
     assert "placed_copy" not in json.loads(kt._handle_archive({"task_id": plain}))
     assert mac["calls"] == []
+
+
+def _unresolved_forwarded_card(mac, monkeypatch, conn):
+    """A deferred card whose create request was sent but the target has not made the card yet."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_placement_forward as kpf
+    from tools import kanban_tools as kt
+    parent = kb.create_task(conn, title="Orchestrate", assignee="default")
+    created = json.loads(kt._handle_create({"title": "Fix the flaky lint", "body": "Push it.", "parents": [parent],
+                                            "session_id": "20261027_183000_abc123"}))
+    kb.complete_task(conn, parent, summary="fanned out", force=True)
+    kb.recompute_ready(conn)
+    child = created["task_id"]
+    assert _forwarder(conn, child, mac, monkeypatch, await_tid=None).run() == "requeued"
+    st = kpf.state(conn, child)
+    assert st["request_id"] and not st.get("remote_task_id"), st
+    mac["calls"].clear()
+    return child, st["request_id"]
+
+
+def _archive_requests(mac):
+    return [a for a in mac["calls"] if a[1] == "request" and "archive" in a]
+
+
+def test_archive_waits_briefly_for_the_remote_id_and_sends_the_archive(mac, monkeypatch):
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+    with kbc.connect_closing() as conn:
+        child, _rid = _unresolved_forwarded_card(mac, monkeypatch, conn)
+    # The target makes the card while the archive waits for it (``hermes-hub outcomes``).
+    mac["result"].update(top_help="{sync,requests,create-task,outcomes}", apply_on="outcomes")
+    out = json.loads(kt._handle_archive({"task_id": child}))
+    assert out["placed_copy"] == {"gateway": "hub", "task_id": "t_hub0001", "status": "pending"}, out
+    assert _archive_requests(mac)[0][1:6] == ["request", "hub", "tasks", "default/default/t_hub0001", "archive"]
+
+
+def test_unresolved_archive_is_sent_by_the_dispatcher_sweep_once_the_target_makes_the_card(mac, monkeypatch):
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_owner_archive_relay as oar
+    from hermes_cli import kanban_placement_forward as kpf
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kpf, "ARCHIVE_AWAIT_BUDGET", 0.0)
+    with kbc.connect_closing() as conn:
+        child, rid = _unresolved_forwarded_card(mac, monkeypatch, conn)
+    out = json.loads(kt._handle_archive({"task_id": child}))
+    assert out["ok"] and out["placed_copy"]["status"] == "unresolved", out
+    assert _archive_requests(mac) == []
+    # Tick while the target still has no card: nothing is sent and nothing is recorded.
+    with kbc.connect_closing() as conn:
+        assert oar.apply_remote_archives(conn) == []
+        assert [e["status"] for e in kpf._archive_events(conn, child)] == ["unresolved"]
+    assert _archive_requests(mac) == []
+    # The target makes the card; its result reaches the replica. The next tick sends the archive.
+    mac["hub"].execute("UPDATE sent SET state='done', result=? WHERE id=?",
+                       (json.dumps({"ok": True, "task_id": "t_hub0001", "status": "ready"}), rid))
+    mac["hub"].commit()
+    with kbc.connect_closing() as conn:
+        oar.apply_remote_archives(conn)
+        assert [e["status"] for e in kpf._archive_events(conn, child)] == ["unresolved", "pending"]
+        assert kpf.archive_forward_view(conn, child) == {"gateway": "hub", "task_id": "t_hub0001",
+                                                         "status": "pending"}
+    sent = _archive_requests(mac)
+    assert len(sent) == 1 and sent[0][1:6] == ["request", "hub", "tasks", "default/default/t_hub0001", "archive"]
+    # Later ticks send nothing more.
+    with kbc.connect_closing() as conn:
+        oar.apply_remote_archives(conn)
+    assert len(_archive_requests(mac)) == 1
+
+
+def test_unresolved_archive_sweep_gives_up_after_seven_days_with_a_comment(mac, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kpf, "ARCHIVE_AWAIT_BUDGET", 0.0)
+    with kbc.connect_closing() as conn:
+        child, _rid = _unresolved_forwarded_card(mac, monkeypatch, conn)
+    kt._handle_archive({"task_id": child})
+    with kbc.connect_closing() as conn:
+        assert kpf.sweep_unresolved_archives(conn, now=time.time() + 6 * 86400) == []
+        assert [e["status"] for e in kpf._archive_events(conn, child)] == ["unresolved"]
+        assert kpf.sweep_unresolved_archives(conn, now=time.time() + 7 * 86400 + 60) == []
+        assert [e["status"] for e in kpf._archive_events(conn, child)] == ["unresolved", "expired"]
+        assert any("gave up" in c.body for c in kb.list_comments(conn, child))
+        assert kpf.archive_forward_view(conn, child)["status"] == "expired"
+        kpf.sweep_unresolved_archives(conn, now=time.time() + 30 * 86400)  # not swept again
+        assert len(kpf._archive_events(conn, child)) == 2
+    assert _archive_requests(mac) == []

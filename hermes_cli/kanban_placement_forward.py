@@ -40,6 +40,8 @@ REQUEUE_SECONDS = 600          # retry a not-live target / a still-queued reques
 SETTLE_PARK_SECONDS = 14 * 86400  # timer backstop of the settle park; the wake probe ends it first
 CHECK_EVERY = 300
 AWAIT_BUDGET = 45.0
+ARCHIVE_AWAIT_BUDGET = 5.0     # archive: wait this long for the target's card id before recording ``unresolved``
+ARCHIVE_SWEEP_GIVE_UP = 7 * 86400  # the dispatcher sweep stops retrying an ``unresolved`` archive after this
 UNTIL = ("done", "archived")
 MODULE = "hermes_cli.kanban_placement_forward"
 
@@ -141,28 +143,53 @@ def archive_forward_view(conn: sqlite3.Connection, task_id: str) -> Optional[dic
     return view
 
 
-def forward_archive(conn: sqlite3.Connection, task_id: str, *, runner: Optional[Callable] = None) -> Optional[dict]:
+def _resolve_remote_id(st: dict, budget: float) -> Optional[str]:
+    """The target's card id for the forward request in ``st``: the recorded one, else the replica's, else (when
+    ``budget`` > 0) what the target answers within ``budget`` seconds (:func:`kanban_placement.await_task_id`)."""
+    from hermes_cli import kanban_placement as kp
+    rid = st.get("request_id")
+    rtid = st.get("remote_task_id") or (kp.remote_task_id(rid) if rid else None)
+    if rtid or not rid or budget <= 0:
+        return rtid
+    try:
+        from hermes_cli import kanban_capability_registry as reg
+        rtid, _status = kp.await_task_id(rid, hub_cli=reg.hub_cli_path(kp.config().get("hub_cli")), budget=budget)
+    except Exception as exc:  # health: allow BLE001 -- unresolved is reported, and the sweep retries it
+        print(f"placement archive forward: resolving {rid} failed: {exc!r}", file=sys.stderr)
+        return None
+    return rtid
+
+
+def forward_archive(conn: sqlite3.Connection, task_id: str, *, runner: Optional[Callable] = None,
+                    await_budget: Optional[float] = None, record_unresolved: bool = True) -> Optional[dict]:
     """Archive the copy of ``task_id`` that placement forwarded to another gateway. Never raises.
 
     Sends ``hermes-hub request <gw> tasks default/<remote id> archive``: the hub client queues it durably
     (rc 3 = target or hub unreachable, applied when it reconnects). Records ``placement_archive_forwarded``
-    on the local card and returns :func:`archive_forward_view`. None when the card was never forwarded."""
+    on the local card and returns :func:`archive_forward_view`. None when the card was never forwarded.
+
+    When the target has not made the card yet (request sent, no id), it waits up to ``await_budget`` seconds
+    (default :data:`ARCHIVE_AWAIT_BUDGET`) for the id, then records ``unresolved``; the dispatcher sweep
+    (:func:`sweep_unresolved_archives`) sends the archive once the id arrives. ``record_unresolved=False`` (the
+    sweep) records nothing and returns None while the id is still unknown."""
     try:
         st = state(conn, task_id)
         if not st or not (st.get("request_id") or st.get("remote_task_id")):
             return None
         prior = _archive_events(conn, task_id)
-        if prior and prior[-1].get("status") in ("pending", "archived"):
+        if prior and prior[-1].get("status") in ("pending", "archived", "expired"):
             return archive_forward_view(conn, task_id)  # one request per card
         from hermes_cli import kanban_capability_registry as reg
         from hermes_cli import kanban_placement as kp
         target = st["target"]
-        rtid = st.get("remote_task_id") or (kp.remote_task_id(st["request_id"]) if st.get("request_id") else None)
+        rtid = _resolve_remote_id(st, ARCHIVE_AWAIT_BUDGET if await_budget is None else await_budget)
+        if not rtid and not record_unresolved:
+            return None
         payload: dict = {"gateway": target, "request_id": None, "remote_task_id": rtid, "status": "pending"}
         if not rtid:
             payload.update(status="unresolved", note=(
-                f"{target} had not made the card for request {st.get('request_id')} yet, so there is nothing to "
-                f"archive there by id; check `hermes-hub tasks --gw {target}` for the copy."))
+                f"{target} had not made the card for request {st.get('request_id')} yet; the dispatcher archives "
+                f"the copy there once {target} makes it (gives up after {ARCHIVE_SWEEP_GIVE_UP // 86400} days)."))
         else:
             cfg = kp.config()
             self_gw = reg.self_gateway() or "local"
@@ -180,6 +207,45 @@ def forward_archive(conn: sqlite3.Connection, task_id: str, *, runner: Optional[
     except Exception as exc:  # health: allow BLE001 -- an archive must never fail on the courtesy forward
         print(f"placement archive forward failed: {exc!r}", file=sys.stderr)
         return None
+
+
+def sweep_unresolved_archives(conn: sqlite3.Connection, *, now: Optional[float] = None,
+                              runner: Optional[Callable] = None) -> list[str]:
+    """Dispatcher tick: send the archive for each archived card whose last ``placement_archive_forwarded`` is
+    ``unresolved`` once the target's card id reached this gateway's hub replica (no waiting here: the tick reads
+    the replica only). A card still unresolved after :data:`ARCHIVE_SWEEP_GIVE_UP` gets an ``expired`` event and
+    a comment, and is not swept again. Returns the ids whose archive request was sent."""
+    now = time.time() if now is None else now
+    rows = conn.execute(
+        "SELECT t.id FROM tasks t WHERE t.status = 'archived' AND EXISTS "
+        "(SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = ?)", (ARCHIVE_FORWARDED,)).fetchall()
+    sent: list[str] = []
+    for (task_id,) in rows:
+        last = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = ? "
+                            "ORDER BY id DESC LIMIT 1", (task_id, ARCHIVE_FORWARDED)).fetchone()
+        try:
+            payload = json.loads(last[0] or "{}")
+        except ValueError:
+            continue
+        if payload.get("status") != "unresolved":
+            continue
+        if forward_archive(conn, task_id, runner=runner, await_budget=0, record_unresolved=False) is not None:
+            sent.append(task_id)
+            continue
+        if now - float(last[1] or 0) < ARCHIVE_SWEEP_GIVE_UP:
+            continue
+        from hermes_cli import kanban_db as kb
+        gw = payload.get("gateway") or "the target"
+        days = ARCHIVE_SWEEP_GIVE_UP // 86400
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, ARCHIVE_FORWARDED, {
+                **payload, "status": "expired",
+                "note": f"{gw} never made the card for this request in {days} days; stopped retrying the archive."})
+        kb.add_comment(conn, task_id, "placement",
+                       f"Placement archive forward gave up: {gw} still had no card for request "
+                       f"{payload.get('request_id') or '?'} {days} days after this card was archived, so no copy "
+                       f"was archived there. If one appears later, archive it with `hermes-hub tasks --gw {gw}`.")
+    return sent
 
 
 # --- the forwarder -----------------------------------------------------------------------------

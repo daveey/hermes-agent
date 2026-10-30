@@ -241,7 +241,9 @@ def worker_archive(conn: sqlite3.Connection, tid: str, *,
 
 def apply_remote_archives(conn: sqlite3.Connection) -> list[str]:
     """Dispatcher tick: apply stop requests (:mod:`hermes_cli.kanban_remote_stop`) and forwarded owner archives
-    (:func:`apply_requests`). Returns the ids archived; a failing source is logged and skipped."""
+    (:func:`apply_requests`), then send the archives of placed copies whose remote id has resolved since their card
+    was archived (:func:`hermes_cli.kanban_placement_forward.sweep_unresolved_archives`). Returns the ids archived
+    here; a failing source is logged and skipped."""
     from hermes_cli.kanban_remote_stop import apply_stop_requests
 
     done: list[str] = []
@@ -250,4 +252,11 @@ def apply_remote_archives(conn: sqlite3.Connection) -> list[str]:
             done += apply(conn)
         except Exception:  # health: allow BLE001 -- one failing source must not stop the dispatcher tick
             _log.warning("kanban: applying %s failed", label, exc_info=True)
+    # [daveey] Placed copies whose remote id was unknown when their card was archived here: archive them there now.
+    try:
+        from hermes_cli.kanban_placement_forward import sweep_unresolved_archives
+        for tid in sweep_unresolved_archives(conn):
+            _log.info("kanban: sent the deferred archive of %s's placed copy", tid)
+    except Exception:  # health: allow BLE001 -- one failing source must not stop the dispatcher tick
+        _log.warning("kanban: sweeping unresolved placement archives failed", exc_info=True)
     return done
