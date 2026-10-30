@@ -266,12 +266,12 @@ class HomeIOGuard:
                     if authority not in ("", "localhost"):
                         self.refuse(database)  # No unverified remote/UNC authority in tests.
                     candidate = "/" + candidate
-                if (os.name == "nt" and len(candidate) > 2 and candidate[0] == "/"
-                        and candidate[1].isascii() and candidate[1].isalpha() and candidate[2] == ":"):
-                    candidate = candidate[1:]  # file:///C:/... names C:/..., not /C:/...
                 candidate = os.fsdecode(unquote_to_bytes(candidate))
                 if "\x00" in candidate:
                     self.refuse(database)  # SQLite truncates here; realpath cannot check a NUL.
+                if (os.name == "nt" and len(candidate) > 2 and candidate[0] == "/"
+                        and candidate[1].isascii() and candidate[1].isalpha() and candidate[2] == ":"):
+                    candidate = candidate[1:]  # SQLite's Windows VFS strips this after decoding.
             self.check(candidate)
             return original_connect(*args, **kwargs)
 

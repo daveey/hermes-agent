@@ -187,6 +187,27 @@ def test_sqlite_uri_denies_protected_database_from_checkout(tmp_path, monkeypatc
             sqlite3.connect(uri + "?mode=ro", uri=True).close()
 
 
+@pytest.mark.platforms("windows")
+@pytest.mark.parametrize("encoded", ["letter", "colon"])
+def test_sqlite_uri_denies_encoded_windows_drive(tmp_path, monkeypatch, encoded):
+    from tests.home_io_guard import HomeIOGuard
+
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    target = protected / "state.db"
+    connection = sqlite3.connect(target)
+    connection.close()
+    uri = target.as_uri()
+    letter = target.drive[0]
+    replacements = {"letter": (letter, f"%{ord(letter):02X}"), "colon": (":", "%3A")}
+    before, after = replacements[encoded]
+    uri = uri.replace("/" + target.drive, "/" + target.drive.replace(before, after), 1)
+    with monkeypatch.context() as patcher:
+        HomeIOGuard(lambda: [protected]).install(patcher)
+        with pytest.raises(AssertionError, match="REAL hermes home"):
+            sqlite3.connect(uri + "?mode=ro", uri=True).close()
+
+
 def test_close_keeps_a_reused_descriptors_new_owner(tmp_path, monkeypatch):
     from tests.home_io_guard import HomeIOGuard
 
