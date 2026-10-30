@@ -911,7 +911,8 @@ CREATE TABLE IF NOT EXISTS task_comments (
     task_id    TEXT NOT NULL,
     author     TEXT NOT NULL,
     body       TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    origin_gateway TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_events (
@@ -1731,11 +1732,16 @@ def _writer_run_id(task_id: str) -> Optional[int]:
         return None
 
 
-def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str) -> int:
+def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, *,
+                origin_gateway: Optional[str] = None) -> int:
+    """Append a comment. ``origin_gateway``: the gateway it came from (the hermes-hub relay passes the
+    sender); default: the gateway the author spelling names, else this gateway (kanban_comment_origin). [daveey]"""
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
         raise ValueError("comment author is required")
+    from hermes_cli.kanban_comment_origin import resolve_origin
+    origin = resolve_origin(author, origin_gateway)
     now = int(time.time())
     # [daveey] A comment written from inside a worker run records that run on its
     # ``commented`` event, so the live comment bridge can skip exactly the run's own notes
@@ -1746,8 +1752,8 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str) 
     with write_txn(conn, allow_nested=True):
         _require_task(conn, task_id)
         cur = conn.execute(
-            "INSERT INTO task_comments (task_id, author, body, created_at) "
-            "VALUES (?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now),
+            "INSERT INTO task_comments (task_id, author, body, created_at, origin_gateway) "
+            "VALUES (?, ?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now, origin),
         )
         cid = int(cur.lastrowid or 0)
         payload: dict = {"author": author, "len": len(body), "comment_id": cid}

@@ -84,7 +84,8 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
         "lease_expires", "lease_version",
     }),
     "task_links": frozenset(),
-    "task_comments": frozenset(),
+    # ``origin_gateway``: the sending gateway as this gateway saw it (relay sender); peers keep their own.
+    "task_comments": frozenset({"origin_gateway"}),
     "task_events": frozenset(),
     # ``sync_version``: the Board version of the row this gateway last applied or had acknowledged (the fence that
     # keeps an older copy of a run from the feed off a newer local row).

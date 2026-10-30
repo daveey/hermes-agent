@@ -391,7 +391,20 @@ _SPECS = [
         _arg("text", nargs="+", help="Comment body"),
         _arg("--author", help="Author name (default: $HERMES_PROFILE or 'user')"),
         _arg("--max-len", type=int, help="Trim the stored comment body to this many characters"),
+        _arg("--origin-gateway", default=None,
+             help="Gateway the comment came from (the hermes-hub relay passes the sender). Default: the gateway "
+                  "the author names (hub:gw:<gw>, <gw>/t_...), else this gateway"),
     ], help="Append a comment"),
+    _cmd("wait-comment", [
+        _TASK_ID,
+        _arg("--after-id", type=int, default=0,
+             help="Only comments with a higher id (the last comment id when you parked)"),
+        _arg("--from-gateway", default=None,
+             help="Only comments from this gateway: its origin_gateway, or any author spelling of it "
+                  "(hub:gw:<gw>, <gw>, <gw>-chat, <gw>/t_...)"),
+        _arg("--contains", default=None, help="Only comments whose body contains this text (case-insensitive)"),
+    ], help="Wake-probe primitive for a reply: exit 0 a matching comment exists, 1 not yet, 2 cannot tell. "
+            "Use it instead of matching task_comments.author (the park guard refuses that: author_probe)"),
     _cmd("attach", [
         _TASK_ID,
         _arg("path", help="Path to the local file to attach"),

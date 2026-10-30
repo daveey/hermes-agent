@@ -1131,6 +1131,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(idempotency_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)")
 
+    # [daveey] task_comments.origin_gateway: which gateway a comment came from (relay sender), so wake
+    # probes match the gateway, not a free-text author. Back-filled from ``hub:gw:<x>`` / ``<x>/t_...``.
+    if _table_exists(conn, "task_comments") and "origin_gateway" not in _column_names(conn, "task_comments"):
+        if _add_column_if_missing(conn, "task_comments", "origin_gateway", "origin_gateway TEXT"):
+            from hermes_cli.kanban_comment_origin import backfill
+            backfill(conn)
+
     # task_events.run_id back-fills as NULL for historical events (they predate
     # runs and can't be attributed).
     if "run_id" not in _column_names(conn, "task_events"):

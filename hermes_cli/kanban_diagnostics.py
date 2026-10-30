@@ -705,7 +705,7 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
 # the classic ready transitions plus every claim/park/wake on the way back.
 _READY_WAIT_FLOOR_KINDS = frozenset({
     "created", "promoted", "reclaimed", "unblocked",
-    "claimed", "spawned", "continuation_woken", "condition_met",
+    "claimed", "spawned", "continuation_woken", "condition_met", "wake_probe_stale",
 })
 
 
