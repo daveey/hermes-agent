@@ -6,6 +6,8 @@ separately, best-effort (live poller, unloaded sweeper wake, chat-closeout). Res
 unloaded sweeper's loop therefore looks, in every profile store, for chats whose last active message is a
 ``kanban_notice`` older than ``GRACE_S`` with no live turn, and:
 
+- a "blocked" notice whose card has moved on since (answered, rescheduled, done, archived) never wakes: it is
+  stamped ``closeout.state = "superseded"`` and the chat's outcome is refreshed;
 - a notice about a card blocked on a human never wakes: the chat's outcome is refreshed (it reads ``decision``);
 - otherwise the notice row is claimed (``display_metadata.closeout``, compare-and-swap on the row, so exactly one
   backend acts on it) and ONE close-out turn is started with ``server._wake_session_turn``; the claim records the
@@ -143,6 +145,44 @@ def blocked_on_human(cand: dict) -> bool:
         return flagged or any(_blocked_on_human(_kb.get_task(conn, tid)) for tid in sorted(tasks))
 
 
+def superseded(cand: dict) -> bool:
+    """True when this is a "blocked" notice whose card has moved on since: answered and unblocked, rescheduled,
+    finished or archived. Its question needs no answer any more, so no close-out turn re-asks it (coach pattern
+    closeout-notice-stale-decision: a 3-day-old "Decision needed" notice woke a turn after the card had resolved
+    it itself). Local notices are judged by the live board (every card on a blocked line must be found and out of
+    blocked/triage); remote notices, and local ones whose board is gone, by the ``stale`` flag the fan-out sets
+    when the card changes (``notice_fanout.mark_stale_blocked_notices``). [daveey]"""
+    from hermes_cli import kanban_db as _kb
+    from hermes_cli import kanban_db_connect as _kbc
+    from tui_gateway.notice_fanout import _BLOCKED_LINE
+    meta = cand["meta"]
+    stale = bool(meta.get("stale"))  # only ever set on blocked notices, by the fan-out
+    blocked = sorted(set(_BLOCKED_LINE.findall(cand["content"])))
+    if not blocked or _is_remote(meta):
+        return stale
+    keys = [str(k) for k in meta.get("kanban_event_keys") or () if ":" in str(k) and not str(k).startswith("remote:")]
+    board = meta.get("board") or (keys[0].rsplit(":", 1)[0] if keys else None)
+    try:
+        conn = _kbc.connect(board=board) if board else _kbc.connect()
+    except ValueError:
+        return stale
+    with contextlib.closing(conn):
+        tasks = [_kb.get_task(conn, tid) for tid in blocked]
+    if any(t is None for t in tasks):
+        return stale
+    return all(str(getattr(t, "status", "") or "") not in ("blocked", "triage") for t in tasks)
+
+
+def _supersede(db: Any, cand: dict, now: float) -> str:
+    """Stamp the notice ``superseded`` (compare-and-swap like a claim) and refresh the chat's outcome."""
+    meta = {**cand["meta"], "closeout": {"state": "superseded", "at": now, "pid": os.getpid()}}
+    if db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
+                          (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"])) != 1:
+        return "skipped:claimed"
+    _refresh(db, cand["sid"])
+    return "superseded"
+
+
 def _wake(sid: str, msg_id: int) -> str:
     from tui_gateway import server
     meta = {"display_text": CLOSEOUT_DISPLAY, "closeout": {"state": "self", "of": msg_id}}
@@ -187,6 +227,8 @@ def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn) -> 
         return "skipped:held"
     if _live_turn(db, sid):
         return "skipped:live"
+    if superseded(cand):
+        return _supersede(db, cand, now)
     if blocked_on_human(cand):
         _refresh(db, sid)
         return "refreshed:human"

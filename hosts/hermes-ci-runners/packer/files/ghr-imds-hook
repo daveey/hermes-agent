@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Fail-closed IMDS hook. Runs as root, once, BEFORE the runner agent starts.
+#   1. read identity + tags + JIT config over IMDS (still enabled)
+#   2. delete the one-shot SSM JIT parameter
+#   3. disable IMDS for this instance (ec2:ModifyInstanceMetadataOptions)
+#   4. read the option back with DescribeInstances AND probe 169.254.169.254
+#   5. write the JIT config to a root-only file for the launcher
+# Any failure exits non-zero; ghr-start then powers the instance off without ever
+# starting the runner. Credentials live only in shell variables of this process
+# (never exported, so never in /proc/*/environ) and die with it.
+set -euo pipefail
+OUT=${GHR_JIT_OUT:-/run/ghr/jitconfig}
+IMDS=${GHR_IMDS_URL:-http://169.254.169.254}
+umask 077
+mkdir -p "$(dirname "$OUT")"
+
+imds() { curl -fsS -m 5 -H "X-aws-ec2-metadata-token: $TOKEN" "$IMDS/latest/$1"; }
+awsc() { AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK AWS_SESSION_TOKEN=$ST AWS_DEFAULT_REGION=$REGION aws "$@"; }
+
+TOKEN=$(curl -fsS -m 5 -X PUT "$IMDS/latest/api/token" -H 'X-aws-ec2-metadata-token-ttl-seconds: 120')
+IID=$(imds meta-data/instance-id)
+REGION=$(imds meta-data/placement/region)
+ROLE=$(imds meta-data/iam/security-credentials/)
+CREDS=$(imds "meta-data/iam/security-credentials/$ROLE")
+AK=$(jq -er .AccessKeyId <<<"$CREDS"); SK=$(jq -er .SecretAccessKey <<<"$CREDS"); ST=$(jq -er .Token <<<"$CREDS")
+CFG_PATH=$(imds meta-data/tags/instance/ghr:ssm_config_path)
+
+PARAMS=$(awsc ssm get-parameters-by-path --path "$CFG_PATH" --query 'Parameters[*].{Name:Name,Value:Value}' --output json)
+TOKEN_PATH=$(jq -er --arg p "$CFG_PATH/token_path" '.[]|select(.Name==$p)|.Value' <<<"$PARAMS")
+
+CONFIG=""
+for _ in $(seq 1 120); do
+  CONFIG=$(awsc ssm get-parameter --name "$TOKEN_PATH/$IID" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)
+  if [ -n "$CONFIG" ] && [ "$CONFIG" != None ]; then break; fi
+  CONFIG=""; sleep 1
+done
+[ -n "$CONFIG" ] || { echo "ghr-imds-hook: no JIT config" >&2; exit 10; }
+awsc ssm delete-parameter --name "$TOKEN_PATH/$IID" >/dev/null
+
+awsc ec2 modify-instance-metadata-options --instance-id "$IID" --http-endpoint disabled >/dev/null
+
+# Readback 1: the control plane says disabled.
+STATE=$(awsc ec2 describe-instances --instance-ids "$IID" --query 'Reservations[0].Instances[0].MetadataOptions.HttpEndpoint' --output text)
+[ "$STATE" = "disabled" ] || { echo "ghr-imds-hook: readback says '$STATE'" >&2; exit 11; }
+# Readback 2: the data plane really refuses (allow a few seconds to propagate).
+# A disabled endpoint answers 403 rather than refusing the connection, so only a successful (-f, 2xx)
+# token PUT counts as "still reachable". A tokenless GET would be 401 under tokens-required and look gone.
+GONE=0
+for _ in $(seq 1 15); do
+  if ! curl -fsS -m 2 -o /dev/null -X PUT "$IMDS/latest/api/token" -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null; then GONE=1; break; fi
+  sleep 1
+done
+[ "$GONE" = 1 ] || { echo "ghr-imds-hook: IMDS still reachable" >&2; exit 12; }
+
+printf '%s' "$CONFIG" > "$OUT"
+echo "ghr-imds-hook: IMDS disabled and verified for $IID"

@@ -445,6 +445,22 @@ def _patch_worker_apply(client, monkeypatch, isolated_python, body):
     monkeypatch.setattr(client, "runtime_command", lambda path, **kwargs: [str(isolated_python), "-I", "-B", "-c", script])
 
 
+def test_permission_error_survives_worker_with_denied_path(client, tmp_path, monkeypatch, isolated_python):
+    import errno
+    from pm.environments import install_state_dir, install_state_permission_message
+
+    repo = _current_environment(tmp_path, monkeypatch, [])
+    denied = install_state_dir(repo) / "pm-runtime" / ".prepare.lock"
+    (repo / "uv.lock").write_text("version = 2\n")
+    _patch_worker_apply(client, monkeypatch, isolated_python,
+                        f"raise PermissionError({errno.EACCES}, 'Permission denied', {str(denied)!r})")
+    with pytest.raises(PermissionError) as caught:
+        client.sync_venv([], explicit=True, plugins=Members([]))
+    assert caught.value.errno == errno.EACCES
+    assert caught.value.filename == str(denied)
+    assert install_state_permission_message(repo, caught.value) is not None
+
+
 def test_resolution_conflict_survives_worker_and_receipt(client, tmp_path, monkeypatch, isolated_python, capfd):
     from pm import receipt
     from pm.workspace import ResolutionConflict

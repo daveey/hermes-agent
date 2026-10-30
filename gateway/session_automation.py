@@ -702,19 +702,28 @@ async def reset_and_rehome_messages(runner, session_key, old_session_id):
         await fresh.claim_gate.acquire()
         return result, fresh
 
-    async with live.mutation_lock:
-        write = asyncio.ensure_future(tracked_write(authority, rotate_and_move, fence, ordered=True))
-        try:
-            (entry, new, moved), fresh = await asyncio.shield(write)
-        except asyncio.CancelledError:
-            # The rotation still commits and takes the fence: lift it, or the fresh FIFO never runs.
-            def lift(done):
-                gate = None if done.cancelled() or done.exception() else done.result()[1]
-                if gate is not None:
-                    gate.claim_gate.release()
-                    authority._schedule(done.result()[0][1])
-            write.add_done_callback(lift)
-            raise
+    # The old owner's lock fences its drain's claim until the move commits, so it must outlive a
+    # cancelled caller: ``tracked_write`` is shielded and keeps writing, and a lock released by the
+    # cancellation would let the old drain claim a queued row the move is about to transfer.
+    await live.mutation_lock.acquire()
+    write = asyncio.ensure_future(tracked_write(authority, rotate_and_move, fence, ordered=True))
+
+    def committed(done):
+        live.mutation_lock.release()
+        if not done.cancelled():
+            done.exception()  # a cancelled caller no longer observes it
+    write.add_done_callback(committed)
+    try:
+        (entry, new, moved), fresh = await asyncio.shield(write)
+    except asyncio.CancelledError:
+        # The rotation still commits and takes the fence: lift it, or the fresh FIFO never runs.
+        def lift(done):
+            gate = None if done.cancelled() or done.exception() else done.result()[1]
+            if gate is not None:
+                gate.claim_gate.release()
+                authority._schedule(done.result()[0][1])
+        write.add_done_callback(lift)
+        raise
     if fresh is None:
         return entry, lambda: None
     if moved:

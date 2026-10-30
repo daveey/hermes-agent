@@ -6,7 +6,7 @@
 
 A candidate X (a commit that brings upstream/main commits into the fork) is pushed to its own
 branch ``sync/upstream-<X>``. ``.github/workflows/upstream-sync.yml`` runs the full suite there
-(both Python slices and e2e, self-hosted, never cancelled by main's concurrency). Only an X whose
+(all eight Python slices and e2e, self-hosted, never cancelled by main's concurrency). Only an X whose
 run completed green, with every required job succeeding on a self-hosted runner at exactly X, is
 landed through a pull request from that same branch. main is protected for admins too: GitHub
 refuses any direct push whose exact sha lacks a green "All required checks pass (v2)" (ci.yaml).
@@ -45,7 +45,7 @@ WORKFLOW_FILE = "upstream-sync.yml"
 WORKFLOW_PATH = f".github/workflows/{WORKFLOW_FILE}"
 BRANCH_PREFIX = "sync/upstream-"
 # The job names tests.yml gives the full suite (called as job "Full suite"); all must succeed.
-REQUIRED_JOBS = ("Run tests (1/2)", "Run tests (2/2)", "e2e")
+REQUIRED_JOBS = (*(f"Run tests ({n}/8)" for n in range(1, 9)), "e2e")
 RED_BACKOFF_S = 6 * 3600
 STALE_PENDING_S = 6 * 3600  # a run queued this long never got runners: it no longer holds the slot
 # Set on the gate's own pushes; the pre-push guard lets exactly those through.

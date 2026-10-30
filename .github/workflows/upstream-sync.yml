@@ -1,7 +1,7 @@
 name: Upstream sync full suite
 
 # The evidence scripts/ci/upstream_sync.py requires before an upstream sync may reach main:
-# the full suite (both Python slices + e2e) on the fork's own self-hosted runners, at exactly
+# the full suite (all eight Python slices + e2e) on the fork's own self-hosted runners, at exactly
 # the candidate's head. The gate stages each candidate on sync/upstream-<sha>; nothing else
 # should push these branches.
 on:
@@ -25,6 +25,8 @@ jobs:
     with:
       commit: ${{ github.sha }}
       python_changed: ''
-      python_slices: '[1, 2]'
+      # tests.yml's 30 min job timeout is sized for 8 slices; two slices (~45 min each) were
+      # cancelled at the timeout on every candidate.
+      python_slices: '[1, 2, 3, 4, 5, 6, 7, 8]'
       e2e: true
       e2e_upgrade: false

@@ -46,9 +46,10 @@ def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, di
     Hub-sync used to key records ``board/id``; it now publishes ``profile/board/id`` and the old rows linger,
     so every pre-qualification card was both counted twice and stuck ``unknown`` forever. A legacy record is
     folded only when exactly one profile on the same owner gateway publishes that board/id AND both records
-    carry the same non-null ``created_at`` and ``created_by`` (identity, not an ID match). Its shepherd links
-    move onto the twin, so no session loses the association; anything ambiguous stays a separate ``unknown``
-    obligation. [daveey]
+    carry the same non-null ``created_at`` and ``created_by`` (identity, not an ID match). A finished twin takes its
+    shepherd links, so no session misses the terminal release. A twin still open publishes every live link itself:
+    the frozen record's extra links are ones the owner released, and folding them would keep those chats waiting on
+    the card for good. Anything ambiguous stays a separate ``unknown`` obligation. [daveey]
     """
     qualified: dict[tuple[str, str, str], list[tuple]] = {}
     for key in tasks:
@@ -65,8 +66,9 @@ def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, di
                 or old.get('created_by') != new.get('created_by')):
             continue
         twin = tasks[twins[0]]
-        links = [*(twin.get('sessions') if isinstance(twin.get('sessions'), list) else []),
-                 *(link for link in (old.get('sessions') if isinstance(old.get('sessions'), list) else [])
-                   if isinstance(link, dict) and link.get('rel') == 'shepherd')]
+        links = [*(twin.get('sessions') if isinstance(twin.get('sessions'), list) else [])]
+        if twin.get('status') in ('done', 'archived'):
+            links += [link for link in (old.get('sessions') if isinstance(old.get('sessions'), list) else [])
+                      if isinstance(link, dict) and link.get('rel') == 'shepherd']
         tasks[twins[0]] = {**twin, 'sessions': links, '_legacy_key': f'{gw}/{board}/{tid}'}
         del tasks[key]

@@ -31,6 +31,7 @@ self-hosted-runner:
     - tfgar-tests
     # Dedicated single-job macOS state-suite runner on the mini.
     - hermes-state
+    - tfgar-probe
 
 # fork (daveey/hermes): known findings that are not bugs. The lint runs in
 # .github/workflows/actionlint.yml. Keep each pattern narrow.

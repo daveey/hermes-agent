@@ -109,7 +109,10 @@ def _raise_worker_error(error: dict):
     if error["type"] == "DownloadPaused":
         from pm.downloader import DownloadPaused
         raise DownloadPaused(error["message"])
-    raise _WORKER_ERRORS.get(error["type"], RuntimeError)(error["message"])
+    kind = _WORKER_ERRORS.get(error["type"], RuntimeError)
+    if issubclass(kind, OSError) and error.get("filename") is not None:
+        raise kind(error.get("errno"), error.get("strerror"), error["filename"])
+    raise kind(error["message"])
 
 
 def _request(operation, arguments, *, callbacks=None, pause_event=None, project_root=None):

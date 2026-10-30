@@ -101,6 +101,29 @@ def test_worker_failure_is_an_error_result(tmp_path, use_source):
 
 
 @posix
+def test_currency_permission_error_keeps_denied_path(tmp_path, use_source, monkeypatch):
+    from pm.environments import install_state_dir, install_state_permission_message
+    from hermes_cli import venv_sync
+
+    root = tmp_path / "project"
+    denied = install_state_dir(root) / "pm-runtime" / ".prepare.lock"
+    denied.parent.mkdir(parents=True)
+    denied.write_text("")
+    denied.chmod(0o444)
+    use_source(_fake_source(tmp_path, f"open({str(denied)!r}, 'a+b')", "pass"))
+    real_probe = launch_probe.probe
+    monkeypatch.setattr(launch_probe, "probe", lambda root: real_probe(root, timeout=BOUND))
+    try:
+        with pytest.raises(PermissionError) as caught:
+            venv_sync._launch_currency(root, ["-z", "hello"])
+        assert caught.value.errno == 13
+        assert caught.value.filename == str(denied)
+        assert install_state_permission_message(root, caught.value) is not None
+    finally:
+        denied.chmod(0o644)
+
+
+@posix
 def test_stdout_noise_from_imports_does_not_corrupt_the_reply(tmp_path, use_source):
     use_source(_fake_source(tmp_path, "print('noise'); return True", "pass"))
     assert launch_probe.probe(tmp_path, timeout=BOUND) == {"schema": 1, "state": "current"}

@@ -1,0 +1,14 @@
+{
+  "name": "hermes-ci-runners-probe",
+  "url": "https://github.com/daveey/hermes",
+  "public": false,
+  "hook_attributes": { "url": "https://example.invalid/set-after-apply", "active": false },
+  "redirect_url": "http://localhost:8765/callback",
+  "default_permissions": {
+    "actions": "read",
+    "administration": "write",
+    "checks": "read",
+    "metadata": "read"
+  },
+  "default_events": ["workflow_job"]
+}

@@ -4,6 +4,7 @@ import concurrent.futures
 import contextlib
 import logging
 import time
+from datetime import datetime
 
 from cron import store_health
 from cron.constants import is_recurring
@@ -39,6 +40,10 @@ def tick(verbose=True, adapters=None, loop=None, sync=True, *, can_dispatch=None
     with retirement.work() as admitted:
         if not admitted:
             return 0
+        if drain_held():
+            from cron.planned_pause import begin
+            begin()
+            return 0  # as under the admission hold: due jobs stay due and run once after the drain
         with update_admission() as update_admitted:
             if not update_admitted:
                 from cron.planned_pause import begin
@@ -46,6 +51,57 @@ def tick(verbose=True, adapters=None, loop=None, sync=True, *, can_dispatch=None
                 return 0  # due jobs stay due: nothing advanced, they fire on the first tick after the hold
             return _tick_admitted(verbose, adapters, loop, sync, can_dispatch=can_dispatch,
                                   headless=headless)
+
+
+_drain_deferred_logged: set = set()
+
+
+def drain_held() -> bool:
+    """True while hermes-sync's core-update drain holds new kanban claims (``<home>/core-update/drain-hold``,
+    the signal the kanban dispatcher reads). [daveey]
+
+    A cron run that starts mid-drain keeps the drain busy: hermes-hub 2026-10-30 16:19-16:53 UTC, four runs
+    started during the drain and the update landed after 34.1 min against a 30 min target
+    (t_01a18dbde9f8b2f0). While the hold stands the tick dispatches nothing and names each due job once;
+    recurring jobs keep their slot (catch-up runs them once after the hold, however many slots passed) and
+    one-shots are covered by the planned pause. A hold whose writer died does not count, and a read error
+    fails open: cron must not stop because the hold file is unreadable.
+    """
+    try:
+        from agent.core_update_drain import check_drain_hold
+        held = check_drain_hold("cron", logger)
+    except Exception as exc:  # fail open
+        logger.debug("Cron drain-hold check failed (%s); dispatching", exc, exc_info=True)
+        return False
+    if not held:
+        if _drain_deferred_logged:
+            logger.info("cron dispatch resumed: core update drain hold released; deferred jobs run now: %s",
+                        ", ".join(sorted(_drain_deferred_logged)))
+            _drain_deferred_logged.clear()
+        return False
+    _log_drain_deferred_jobs()
+    return True
+
+
+def _log_drain_deferred_jobs() -> None:
+    """Name each job that is due while the drain hold stands, once per hold. Read-only (no advance, no claim)."""
+    try:
+        from cron import jobs as _jobs
+        now = _jobs._hermes_now()
+        for job in _jobs.load_jobs():
+            job_id = job.get("id")
+            if not job_id or job_id in _drain_deferred_logged or not job.get("enabled", True):
+                continue
+            if _jobs._has_pause_marker(job) or not job.get("next_run_at"):
+                continue
+            due = _jobs._ensure_aware(datetime.fromisoformat(job["next_run_at"]))
+            if due > now:
+                continue
+            _drain_deferred_logged.add(job_id)
+            logger.info("cron job %s (%s) due at %s deferred by the core-update drain hold; it runs once after "
+                        "the hold", job_id, job.get("name") or "?", job["next_run_at"])
+    except Exception as exc:  # naming is diagnostics only
+        logger.debug("Could not list cron jobs deferred by the drain hold: %s", exc, exc_info=True)
 
 
 _update_hold_logged: set = set()

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Boot entrypoint (called from user-data). Fail closed: if the hook fails the runner is
+# never started and the instance powers off (launch template behaviour = terminate).
+set -uo pipefail
+RUN_AS=${GHR_RUN_AS:-ubuntu}
+HOOK=${GHR_HOOK:-/usr/local/sbin/ghr-imds-hook}
+JIT=${GHR_JIT_OUT:-/run/ghr/jitconfig}
+RUNNER_DIR=${GHR_RUNNER_DIR:-/opt/actions-runner}
+POWEROFF=${GHR_POWEROFF:-/usr/sbin/poweroff}
+
+if ! "$HOOK"; then
+  echo "ghr-start: IMDS hook failed; not starting the runner" >&2
+  rm -f "$JIT"
+  $POWEROFF
+  exit 1
+fi
+cfg=$(cat "$JIT"); rm -f "$JIT"
+cd "$RUNNER_DIR" || { $POWEROFF; exit 1; }
+sudo -u "$RUN_AS" -- ./run.sh --jitconfig "$cfg"
+echo "ghr-start: runner finished"
+$POWEROFF

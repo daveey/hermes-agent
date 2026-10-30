@@ -226,7 +226,7 @@ def _reclaim_abandoned_staging(home: Path, prefix: str) -> None:
                 staged.unlink()
 
 
-def preflight_state_db(home: Path) -> dict:
+def preflight_state_db(home: Path, *, busy_timeout_seconds: float = 10.0) -> dict:
     """Publish an emergency snapshot; do not prune recovery files on failure."""
     source = home / "state.db"
     if not source.exists():
@@ -239,7 +239,7 @@ def preflight_state_db(home: Path) -> dict:
     # cleanup below; _safe_copy_db creates it owner-only and refuses a symlink.
     staged = home / f"{prefix}{stamp}-{os.getpid()}.partial"
     try:
-        if not _safe_copy_db(source, staged):
+        if not _safe_copy_db(source, staged, timeout_seconds=busy_timeout_seconds):
             raise RuntimeError("SQLite safe copy failed; previous emergency snapshots were retained")
         connection = sqlite3.connect(str(staged))
         try:
@@ -266,4 +266,6 @@ if __name__ == "__main__":
     # The Desktop stops a pre-flight past its deadline with SIGTERM; exit through
     # the staging cleanup instead of dying with a full-size .partial left behind.
     signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
-    print(json.dumps(preflight_state_db(Path(sys.argv[1]))))
+    # Optional argv[2]: tests hold the source locked as a barrier and need the lock wait to outlast a starved runner.
+    _busy = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
+    print(json.dumps(preflight_state_db(Path(sys.argv[1]), busy_timeout_seconds=_busy)))

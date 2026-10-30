@@ -120,13 +120,21 @@ test("apps/desktop's real manifest keeps its heavy units from all starting toget
 test('the CLI runs when started through a symlinked path, so it never exits green having run nothing', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rwc-'))
   try {
+    const script = fileURLToPath(new URL('../.github/scripts/run-workspace-checks.mjs', import.meta.url))
     const link = join(dir, 'run-workspace-checks.mjs')
-    symlinkSync(fileURLToPath(new URL('../.github/scripts/run-workspace-checks.mjs', import.meta.url)), link)
-    const out = execFileSync(process.execPath, [link, '--list'], {
-      cwd: fileURLToPath(new URL('..', import.meta.url)),
-      encoding: 'utf-8',
-    })
-    expect(out).toMatch(/^apps\/desktop :: check:lint {2}\(\d+ MiB\)$/m)
+    symlinkSync(script, link)
+    const run = (/** @type {string} */ path) =>
+      execFileSync(process.execPath, [path, '--list'], {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        encoding: 'utf-8',
+      })
+    const viaLink = run(link)
+    // `npm query .workspace` lists only the workspaces this checkout installed
+    // (the Prebuilt TUI job installs ui-tui and tests-js alone), so the set
+    // varies with the install shape. The contract is that a symlinked start
+    // lists the same units a direct start does, and that this workspace is one.
+    expect(viaLink).toMatch(/^tests-js :: check {2}\(\d+ MiB\)$/m)
+    expect(viaLink).toBe(run(script))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
