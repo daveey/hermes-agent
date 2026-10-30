@@ -28,6 +28,7 @@ class Owner:
         from hermes_state import SessionDB
         from hermes_state_runtime import begin_runtime_epoch
         self.loop, self.events, self.running = asyncio.get_running_loop(), asyncio.Queue(), threading.Event()
+        self.stuck = threading.Event()  # the viewer's socket is blocked on a frame (set by write while paused)
         self.pause, self.gaps, self.turns, self.ref = pause, [], [], SessionRef("owned", "s")
         self.running.set()
         self.db = SessionDB(db_path=db_path)
@@ -41,6 +42,8 @@ class Owner:
         self.conn = AuthorityConnection(self.authority, self, {"user_id": "viewer"})
 
     def write(self, frame):  # the viewer's socket
+        if not self.running.is_set():
+            self.stuck.set()
         self.running.wait(30)
         self.loop.call_soon_threadsafe(self.events.put_nowait, frame)
         return True
@@ -66,11 +69,19 @@ class Owner:
         from gateway.session_settlement_recovery import commit_and_publish
         self.authority._stamp_claim(self.ref, self.live, row)
         if pause:
+            self.stuck.clear()
             self.running.clear()  # Ctrl-Z mid-turn
         for index, delta in enumerate(DELTAS):
+            if pause and index == 1:
+                # The overflow must not depend on thread scheduling. The fanout's drain hands the socket
+                # everything queued so far as one batch; a drain thread that runs late (a starved CI
+                # container) took ~200 deltas at once, blocked on them, and fewer than the frame cap
+                # queued behind it, so nothing overflowed. Once the socket is blocked, every later delta
+                # queues: the 399 (or 599) left exceed the 256-frame cap.
+                assert self.stuck.wait(30), "the paused viewer's socket never received a frame"
             if pause == "live" and index == 400:
                 self.running.set()  # fg mid-turn
-                deadline = time.monotonic() + 5
+                deadline = time.monotonic() + 30
                 while not self.live.subscribers and time.monotonic() < deadline:
                     time.sleep(0.01)  # health: allow HX013 -- the owner thread waits for the re-attach
             self.authority.publish_execution("s", row["generation"], "message.delta", {"text": delta})

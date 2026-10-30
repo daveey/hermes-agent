@@ -241,6 +241,23 @@ def _custom_job_runs_gateway_for(argv: list, home: Path) -> bool:
     return entry == "hermes_cli.main" or Path(entry).name in {"hermes", "hermes.exe"}
 
 
+def custom_launchd_supervisor_for_home(home: Path, *, deadline: float) -> ExistingService | None:
+    """[daveey] The loaded KeepAlive LaunchAgent (any label) that serves ``home``, else None.
+
+    ``hermes update`` asks this before relaunching a MANUAL gateway: a home that such a job serves is
+    that job's to restart (gateway-e2cd786685, second occurrence). macOS only; any probe failure
+    answers None so the caller keeps its old behavior."""
+    if sys.platform != "darwin":
+        return None
+    import pwd
+    try:
+        account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)  # windows-footgun: ok — native launchd only
+        return _custom_launchd_job(Path(home).expanduser().resolve(), account_home / "Library/LaunchAgents",
+                                   f"gui/{os.getuid()}", deadline)  # windows-footgun: ok — native launchd only
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 def _custom_launchd_job(home: Path, agents: Path, domain: str, deadline: float) -> ExistingService | None:
     """[daveey] A KeepAlive LaunchAgent that serves THIS home under a label Hermes did not install.
 

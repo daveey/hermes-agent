@@ -368,7 +368,25 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
     if row["delivered"]:
         return "skip"
     holder = row["holder_pid"]
-    if _holder_is_me(holder) or _holder_alive(holder, row["holder_start"]):
+    if _holder_is_me(holder):
+        # [daveey] This process's own claim: a woken turn was admitted and its row is written later, on the
+        # turn thread (``_settle_started`` leaves the claim in flight until then). Ack it once its own key is
+        # in the transcript; until then it stays in flight, and a death re-offers it below in the successor.
+        key = notice_key or row["notice_key"] or ""
+        if key and transcript_has is not None and transcript_has(key, ""):
+            with conn:
+                cur = conn.execute(
+                    "UPDATE notices SET delivered=?, holder_pid=NULL, holder_start=NULL, notice_key=? "
+                    "WHERE session=? AND ref=? AND state=? AND delivered=0 AND holder_pid IS ?",
+                    (DELIVERED, key, session, ref, state, holder))
+                if cur.rowcount == 1:
+                    _swept_row(conn, swept_key, "delivered")
+            if cur.rowcount == 1:
+                logger.info("remote kanban: started turn's notice %s %s for chat %s is in the transcript; acked",
+                            ref, state, session)
+                return "acked"
+        return "skip"
+    if _holder_alive(holder, row["holder_start"]):
         return "skip"
     if holder is None:
         return "skip"  # old silent delivered=0 record: never announced, do not flood
@@ -744,10 +762,36 @@ def _sweep_cards(rows: list[tuple], me: str):
 
 
 def _settle_claim(claim: dict, memo_key: tuple, ledger) -> None:
-    """The notice reached the chat (a started turn or a written row): ledger delivered, memo and ``swept`` set."""
+    """The notice is in the chat's transcript (a written row, or a started turn's row found by its key): ledger
+    delivered, memo and ``swept`` set."""
     ack(claim, ledger=ledger)
     _record_swept([memo_key], ledger, reason="delivered")
     _remember_delivered(memo_key)
+
+
+def _settle_started(session_db, profile: str, sid: str, event_key: str, claim: dict, memo_key: tuple,
+                    ledger) -> bool:
+    """A woken turn was ADMITTED: ack only if its notice row is already durable, else leave the claim in flight.
+
+    [daveey] ``_RemoteWaker`` calls this when ``_wake_session_turn`` returns "started", which means the turn
+    passed admission (``_notif_submit``); the turn's ``kanban_notice`` user row is written later, on the turn
+    thread (``prompt_turn._invoke_agent``). Acking here wrote DELIVERED ("in the transcript") with no row, so a
+    backend that died in between lost the notice for good (the failure class of ledger row 1245). A claim left
+    in flight is acked by this process's next pass once the key lands (``_claim_notice``, holder-is-me branch:
+    the sweep, or ``collect`` once the woken chat is live here); if this process dies first, the successor's
+    dead-holder check finds no key in the transcript and re-offers it. Never raises."""
+    try:
+        with session_db(profile, sid) as (db, tip):
+            durable = db is not None and notice_in_transcript(db, tip, event_key, "")
+    except Exception:
+        logger.debug("remote kanban: transcript check after a started wake failed", exc_info=True)
+        durable = False
+    if durable:
+        _settle_claim(claim, memo_key, ledger)
+        return True
+    logger.info("remote kanban notice %s %s for chat %s: turn admitted, row not yet written; claim stays in "
+                "flight until it is", claim["ref"], claim["state"], sid)
+    return False
 
 
 def _persist_claimed(session_db, profile: str, sid: str, text: str, metadata: dict, claim: dict, memo_key: tuple,
@@ -831,7 +875,7 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
         result = waker.deliver(
             tip, text, metadata, task, now or time.time(),
             persist=lambda: _persist_claimed(session_db, profile, sid, text, metadata, claim, memo_key, ledger),
-            started=lambda: _settle_claim(claim, memo_key, ledger))
+            started=lambda: _settle_started(session_db, profile, sid, event_key, claim, memo_key, ledger))
         delivered.append({"task_id": task["id"], "session_id": tip, "wake": result})
     except Exception:
         logger.debug("remote Kanban notice deferred for %s/%s", owner, key, exc_info=True)

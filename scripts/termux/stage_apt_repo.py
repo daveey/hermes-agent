@@ -356,14 +356,19 @@ def _gpg_run(
     *,
     stdin: bytes | None = None,
     passphrase: str | None = None,
+    batch: bool = True,
 ) -> subprocess.CompletedProcess:
     """Run gpg with an explicit isolated homedir.
 
     The passphrase, when the key needs one, is fed on STDIN via
     ``--passphrase-fd 0`` -- it is never placed in argv (visible in
     /proc or error output) and never written to disk.
+
+    ``batch=False`` swaps ``--batch`` for ``--no-tty`` (still never
+    prompts); only the protected-key import needs it, see sign().
     """
-    cmd = ["gpg", "--batch", "--yes", "--homedir", _gpg_homedir_arg(homedir)]
+    mode = "--batch" if batch else "--no-tty"
+    cmd = ["gpg", mode, "--yes", "--homedir", _gpg_homedir_arg(homedir)]
     if passphrase is not None:
         cmd += ["--pinentry-mode", "loopback", "--passphrase-fd", "0"]
         if stdin is not None:
@@ -471,8 +476,22 @@ def sign(dists: Path, release_path: Path, gpg_key_file: Path) -> None:
     passphrase = os.environ.get("TERMUX_APT_GPG_PASSPHRASE", "")
     homedir = Path(tempfile.mkdtemp(prefix="apt-stage-gnupg-"))
     try:
-        secret = gpg_key_file.read_bytes()
-        _gpg_run(homedir, ["--import"], stdin=secret)
+        if passphrase:
+            # Import a protected key WITH its passphrase and WITHOUT --batch,
+            # so gpg-agent unlocks and re-protects it at import time. A
+            # --batch import is "unattended": the agent stores the OpenPGP
+            # packet as-is ("openpgp-native") and its key-file writer
+            # (GnuPG 2.4 name-value.c nvc_set_private_key) drops spaces that
+            # follow "(", ")" or a space even inside quoted strings. A random
+            # S2K salt/IV printed as such a string (e.g. bytes "]) b") is
+            # stored corrupted, and signing then fails with "Bad passphrase"
+            # for that export only -- a key-dependent, random-looking failure.
+            _gpg_run(
+                homedir, ["--import", str(gpg_key_file)],
+                passphrase=passphrase, batch=False,
+            )
+        else:
+            _gpg_run(homedir, ["--import"], stdin=gpg_key_file.read_bytes())
         key_id = _sole_secret_key_fingerprint(homedir)
 
         _gpg_run(

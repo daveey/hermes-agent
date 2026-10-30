@@ -96,6 +96,81 @@ def _squat_proof_fallback(bind_path: Path) -> Path:
     return path
 
 
+# A gateway killed with SIGKILL (a crash, the OOM killer, a test harness's kill()) never runs
+# ``cleanup_files``, so its shared-temp ``hermes-gw-<hash>`` dir outlives it. The next fallback bind
+# reaps such siblings, but only what is provably ours and dead (``_reap_stale_fallback_dirs``).
+_FALLBACK_DIR_PREFIX = "hermes-gw-"
+_STALE_FALLBACK_AGE_S = 600.0
+_MAX_FALLBACK_REAP_SCAN = 200
+
+
+def _socket_refuses(path: Path) -> bool:
+    """True only when nothing listens at ``path``: connect fails with ECONNREFUSED. A live listener,
+    a timeout or any other error (EACCES, EAGAIN on a full backlog) reads as maybe alive."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        try:
+            probe.connect(str(path))
+        except ConnectionRefusedError:
+            return True
+        except OSError:
+            return False
+    return False
+
+
+def _reap_stale_fallback_dirs(parent: Path, keep: str) -> int:
+    """Remove dead ``hermes-gw-*`` siblings in ``parent`` (never ``keep``) that a killed gateway
+    left behind. A sibling is reaped only when its lstat is a real directory (never a symlink)
+    owned by this uid with mode exactly 0700, older than ``_STALE_FALLBACK_AGE_S``, holding nothing
+    but ``control.sock`` (itself our own socket, not a symlink), and that socket refuses a connect.
+    At most ``_MAX_FALLBACK_REAP_SCAN`` candidates are examined per call; each failure is skipped.
+    Returns the number of directories removed."""
+    if _IS_WINDOWS:
+        return 0
+    removed = scanned = 0
+    uid = os.getuid()  # windows-footgun: ok — POSIX only (returns above on Windows)
+    try:
+        entries = os.scandir(parent)
+    except OSError:
+        return 0
+    with entries:
+        for entry in entries:
+            if not entry.name.startswith(_FALLBACK_DIR_PREFIX) or entry.name == keep:
+                continue
+            scanned += 1
+            if scanned > _MAX_FALLBACK_REAP_SCAN:
+                break
+            with contextlib.suppress(OSError):
+                directory = Path(entry.path)
+                info = directory.lstat()
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid != uid
+                        or stat.S_IMODE(info.st_mode) != 0o700
+                        or time.time() - info.st_mtime < _STALE_FALLBACK_AGE_S):
+                    continue
+                names = os.listdir(directory)
+                if not set(names) <= {"control.sock"}:
+                    continue
+                sock = directory / "control.sock"
+                if names:
+                    sock_info = sock.lstat()
+                    if not stat.S_ISSOCK(sock_info.st_mode) or sock_info.st_uid != uid:
+                        continue
+                    if not _socket_refuses(sock):
+                        continue
+                    # Unlink only the very inode we probed, in a dir nobody re-bound into meanwhile.
+                    now_dir, now_sock = directory.lstat(), sock.lstat()
+                    if ((now_sock.st_dev, now_sock.st_ino) != (sock_info.st_dev, sock_info.st_ino)
+                            or now_dir.st_mtime != info.st_mtime):
+                        continue
+                    sock.unlink()
+                directory.rmdir()  # fails (ENOTEMPTY) if anything appeared since: then it stays
+                removed += 1
+    if removed:
+        logger.info("Removed %d stale control socket director%s from %s", removed,
+                    "y" if removed == 1 else "ies", parent)
+    return removed
+
+
 def _publish_pointer(pointer_file: Path, bind_path: Path) -> None:
     """Replace ``pointer_file`` with one naming ``bind_path``, atomically: the listener is already
     accepting, so a client polling for it may read the pointer at any instant, and an empty or
@@ -264,6 +339,8 @@ class GatewayControlServer:
         """Bind the listener at ``bind_path`` (moved to a squat-proof root when its shared-temp
         directory is not private) and return where it actually listens."""
         if pointer_file is not None:
+            with contextlib.suppress(Exception):  # housekeeping only: never fails the bind
+                _reap_stale_fallback_dirs(bind_path.parent.parent, keep=bind_path.parent.name)
             with contextlib.suppress(FileExistsError):
                 bind_path.parent.mkdir(mode=0o700)
                 info = bind_path.parent.lstat()

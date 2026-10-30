@@ -38,11 +38,11 @@ AGENT_BLOCK_KINDS = ("transient", "capability", "assignment", "needs_input")
 # ``continued`` is a continuation checkpoint parking the card ``scheduled`` with a ``wake_at``.
 PARK_EVENT_KINDS = ("scheduled", "blocked", "gave_up", "continuation_exhausted", "block_loop_detected",
                     "triage_swept", "supervisor_escalated", "continued", "status", "dependency_wait",
-                    "agent_block_escalated")
+                    "agent_block_escalated", "ask_rechecked")
 # Triage reached this way is agent work (the worker gave up / ran out of budget / was escalated to a supervisor).
 # Triage after a block loop waits on a human or a shared blocker; triage from intake (no park event) belongs to
 # its specifier.
-AGENT_TRIAGE_EVENTS = ("gave_up", "continuation_exhausted", "supervisor_escalated", "triage_swept")
+AGENT_TRIAGE_EVENTS = ("gave_up", "continuation_exhausted", "supervisor_escalated", "triage_swept", "ask_rechecked")
 # A replicated card carries only its last run's outcome; these outcomes mean a run failed into triage.
 _FAILED_RUN_OUTCOMES = ("gave_up", "reclaimed", "crashed", "timed_out", "oom_killed", "continuation_exhausted")
 

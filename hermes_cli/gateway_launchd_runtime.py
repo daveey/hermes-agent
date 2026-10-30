@@ -6,6 +6,8 @@ every surviving descendant becomes responsible for itself: a bare venv Python, w
 with ``EHOSTUNREACH`` on any LAN connect (a model server on another machine). A job that launchd
 spawns through ``/usr/bin/osascript`` is attributed to osascript, an exempt Apple platform binary,
 for its whole life, whoever asked for it (#71206; ``gateway_launchd.launchd_program_arguments``).
+[daveey] When the signed Hermes Python.app is installed it owns the job instead (``responsible_app``),
+so the gateway's children use its TCC grants rather than prompting for "osascript".
 
 Nothing is installed: the plist is loaded once and deleted, it is never in ~/Library/LaunchAgents
 and has no KeepAlive, so the job never starts at login and launchd never restarts the gateway.
@@ -17,6 +19,7 @@ import os
 import plistlib
 import re
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -72,7 +75,8 @@ class GatewayJob:
         return self._status
 
     def _record_gateway_pid(self, wrapper_pid: int) -> None:
-        # The job's own process is osascript; the gateway is its only child (the shell execs it).
+        # The job's own process is the wrapper (Hermes Python.app or osascript); the gateway is its only
+        # child (the shell execs it).
         # Its pid is what gateway_state.json names, so a startup-failure report can match it.
         if self.pid not in (None, wrapper_pid) or not (timeout := _budget(self._deadline, 5)):
             return
@@ -91,6 +95,32 @@ def _remove_finished_jobs(deadline: float | None) -> None:
         fields = line.split()
         if len(fields) == 3 and fields[0] == "-" and fields[2].startswith(LABEL_PREFIX):
             _launchctl("remove", fields[2], timeout=_budget(deadline, 10))
+
+
+def responsible_app(command: list[str]) -> Path | None:
+    """[daveey] The Developer-ID-signed Hermes Python.app executable to own the job instead of osascript.
+
+    macOS charges every privacy request of the job's descendants to its responsible process. Under
+    osascript, an agent's ``find ~`` or ``mdfind`` in the gateway's terminal tool prompted "osascript would
+    like to access files in your Desktop folder" (osascript has no Full Disk Access, and a grant for it
+    would cover every script on the Mac). The signed bundle holds the user's grants (keyed by bundle id +
+    team) and keeps Local Network access (``gateway_launchd.launchd_program_arguments``). Stdlib only: the
+    restart watcher calls this from a bare interpreter. ``None`` (no matching bundle) keeps osascript.
+    """
+    try:
+        from hermes_cli._launchers import signed_python_app
+    except Exception:  # a bare interpreter missing the checkout's helpers: osascript still works
+        return None
+    for candidate in (command[0] if command else "", sys.executable):
+        path = Path(candidate)
+        if "/Hermes Python.app/Contents/MacOS/" in str(path) and path.is_file():
+            return path  # already the signed bundle's executable
+        try:
+            if (signed := signed_python_app(path)) is not None:
+                return signed
+        except Exception:
+            continue
+    return None
 
 
 def start_gateway_job(command: list[str], *, env: dict[str, str], cwd: str | Path,
@@ -112,7 +142,8 @@ def start_gateway_job(command: list[str], *, env: dict[str, str], cwd: str | Pat
         with os.fdopen(fd, "wb") as handle:
             plistlib.dump({
                 "Label": label,
-                "ProgramArguments": launchd_program_arguments(wrapped, log_path, log_path),
+                "ProgramArguments": launchd_program_arguments(wrapped, log_path, log_path,
+                                                              responsible=responsible_app(command)),
                 "EnvironmentVariables": dict(env),
                 "WorkingDirectory": str(cwd),
                 "RunAtLoad": True,

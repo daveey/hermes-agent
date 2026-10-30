@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, expect, it, vi } from 'vitest'
 
 import { parseUiPreferencesWrite, readUiPreferences, writeUiPreferences } from '../../../electron/ui-preferences'
 
@@ -110,6 +110,23 @@ const outboxes = () =>
   Array.from({ length: window.localStorage.length }, (_, index) => window.localStorage.key(index) ?? '').filter(key =>
     key.startsWith(OUTBOX_PREFIX)
   )
+
+// Transform the store graph once, under hookTimeout: each pageLoad re-evaluates it after
+// vi.resetModules(), and the first test paying the cold transform inside its own 15s budget
+// timed out when CI ran every workspace check at once (1.2s alone, >15s there).
+beforeAll(async () => {
+  await import('./sync')
+  await import('@/lib/storage')
+  await import('@/store/favorite-models')
+
+  for (const load of LOAD_WRITERS) {
+    await load()
+  }
+
+  vi.resetModules()
+  window.localStorage.clear()
+  window.sessionStorage.clear()
+})
 
 afterEach(() => {
   closeTabs()

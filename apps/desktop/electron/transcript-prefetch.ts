@@ -146,6 +146,12 @@ export function needsRefresh(
 export class TranscriptPrefetcher {
   private readonly deps: PrefetchDeps
   private readonly downUntil = new Map<string, number>()
+  /**
+   * Targets whose last fetch stored nothing (empty page, 404, unstorable): the hub meta they were tried at.
+   * The cache has no row for them, so without this needsRefresh() saw "never fetched" and every tick refetched
+   * them. They are retried once their activity/message_count moves (and MIN_REFETCH_MS passed).
+   */
+  private readonly unstored = new Map<string, { activity: null | number; messageCount: null | number; savedAt: number }>()
   private running: null | Promise<PrefetchTickResult> = null
   private timer: null | ReturnType<typeof setTimeout> = null
   private stopped = true
@@ -219,8 +225,25 @@ export class TranscriptPrefetcher {
     const targets = selectPrefetchTargets(records, gateway => names.get(gateway))
     result.targets = targets.length
 
-    const due = targets.filter(target => needsRefresh(this.deps.store.meta(target.key), target, now))
+    const keyOf = (target: PrefetchTarget) =>
+      `${target.key.connectionId}\u0000${target.key.profile}\u0000${target.key.sessionId}`
+
+    // Forget memo entries for sessions no longer targeted, so the map stays bounded by the target set.
+    const live = new Set(targets.map(keyOf))
+
+    for (const key of this.unstored.keys()) {
+      if (!live.has(key)) {
+        this.unstored.delete(key)
+      }
+    }
+
+    const due = targets.filter(target =>
+      needsRefresh(this.deps.store.meta(target.key) ?? this.unstored.get(keyOf(target)) ?? null, target, now)
+    )
     result.skipped = targets.length - due.length
+
+    const markUnstored = (target: PrefetchTarget) =>
+      this.unstored.set(keyOf(target), { ...target.meta, savedAt: this.deps.now?.() ?? Date.now() })
 
     // Two fetches per gateway at a time: one slow SSH route never stalls the rest.
     const queues = new Map<string, PrefetchTarget[]>()
@@ -246,8 +269,10 @@ export class TranscriptPrefetcher {
               const rows = await this.deps.fetchLatest(target.key, LATEST_ROWS)
 
               if (rows.length > 0 && this.deps.store.putLatest(target.key, rows, target.meta)) {
+                this.unstored.delete(keyOf(target))
                 result.fetched += 1
               } else {
+                markUnstored(target)
                 result.skipped += 1
               }
             } catch (error) {
@@ -258,6 +283,8 @@ export class TranscriptPrefetcher {
                 this.deps.log?.(
                   `transcript prefetch: ${connectionId} unreachable (${(error as Error)?.message || error}); backing off`
                 )
+              } else {
+                markUnstored(target) // a 4xx for this one session: wait for it to move
               }
             }
           }

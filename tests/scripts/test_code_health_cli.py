@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.code_health import cli
+from scripts.code_health import cli, gitio
 from scripts.code_health.config import ENFORCEMENT
 
 REPO = Path(__file__).resolve().parents[2]
@@ -537,3 +537,52 @@ def test_tooling_failure_exits_2_without_a_traceback(tmp_path, monkeypatch, caps
     assert cli.main(["--base", base, "--head", "HEAD"]) == 2
     err = capsys.readouterr().err
     assert err.startswith("code health:") and "npm" in err
+
+
+# --- a merge is judged against each parent (upstream syncs)  [daveey] --------------------------
+
+
+def _merge_repo(tmp_path: Path, merged: str) -> tuple[Path, str, str, str]:
+    """main (parent 1) and a side branch (parent 2) both start from _LEGACY; the side branch
+    grows pkg/a.py to _GROWN. Returns the repo, both parents and a merge whose pkg/a.py is
+    ``merged``."""
+    repo, root = _ratchet_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "side")
+    side = _commit(repo, {"pkg/a.py": _GROWN})
+    _git(repo, "checkout", "-q", "main")
+    first = _commit(repo, {"pkg/other.py": "def other():\n    return 3\n"})
+    _git(repo, "merge", "--no-commit", "--no-ff", "-X", "theirs", "side")
+    _write(repo, {"pkg/a.py": merged})
+    _git(repo, "add", "pkg/a.py")
+    _git(repo, "commit", "-q", "-m", "merge")
+    assert root and len(_git(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()) == 3
+    return repo, first, side, _git(repo, "rev-parse", "HEAD")
+
+
+def test_merge_growth_within_one_parents_cap_does_not_block(tmp_path, capsys):
+    repo, first, side, head = _merge_repo(tmp_path, _GROWN)
+    assert cli.run(repo, first, head) == 1  # against parent 1 alone it blocks
+    capsys.readouterr()
+    assert cli.run(repo, first, head, also_bases=(side,)) == 0, capsys.readouterr().out
+
+
+def test_merge_growth_over_both_parents_blocks(tmp_path, capsys):
+    repo, first, side, head = _merge_repo(tmp_path, _GROWN + "    if x == 100:\n        return 100\n")
+    assert cli.run(repo, first, head, also_bases=(side,)) == 1, capsys.readouterr().out
+
+
+def test_non_merge_commit_is_judged_against_its_base_only(tmp_path, capsys):
+    repo, base = _ratchet_repo(tmp_path)
+    head = _commit(repo, {"pkg/a.py": _GROWN})
+    assert cli.run(repo, base, head) == 1
+    assert gitio.merge_parents(repo, head) == []
+    capsys.readouterr()
+
+
+def test_main_uses_a_merge_commits_parents_automatically(tmp_path, monkeypatch, capsys):
+    repo, _first, _side, head = _merge_repo(tmp_path, _GROWN)
+    monkeypatch.chdir(repo)
+    assert cli.main(["--head", head]) == 0, capsys.readouterr().out
+    bad = _commit(repo, {"pkg/a.py": _GROWN + "    if x == 100:\n        return 100\n"})
+    assert gitio.merge_parents(repo, bad) == []
+    assert cli.main(["--head", bad, "--base", head]) == 1
