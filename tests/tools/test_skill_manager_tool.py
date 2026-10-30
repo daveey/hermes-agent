@@ -487,7 +487,7 @@ class TestSkillMutationLock:
                 call = calls
             if call == 1:
                 first_entered.set()
-                assert release_first.wait(timeout=2)
+                assert release_first.wait(timeout=60)
             else:
                 second_entered.set()
             return real_replace(*args, **kwargs)
@@ -502,14 +502,18 @@ class TestSkillMutationLock:
                 first = threading.Thread(target=run_patch, args=("# Test Skill", "# Test Skill Updated"))
                 second = threading.Thread(target=run_patch, args=("Step 1:", "Step 1 Updated:"))
                 first.start()
-                assert first_entered.wait(timeout=2)
+                assert first_entered.wait(timeout=60)
                 second.start()
                 assert not second_entered.wait(timeout=0.15), "second writer entered before first committed"
                 release_first.set()
-                first.join(timeout=2)
-                second.join(timeout=2)
+                # join() returns silently on timeout: use a generous bound (returns as soon
+                # as the thread ends) and assert both finished before reading results.
+                first.join(timeout=60)
+                second.join(timeout=60)
+                assert not first.is_alive() and not second.is_alive()
             content = (tmp_path / "my-skill" / "SKILL.md").read_text()
 
+        assert len(results) == 2
         assert all(result["success"] for result in results)
         assert "# Test Skill Updated" in content
         assert "Step 1 Updated:" in content
