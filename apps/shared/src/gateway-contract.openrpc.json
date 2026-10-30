@@ -10715,6 +10715,17 @@
             ],
             "default": null,
             "title": "Open Requests"
+          },
+          "inflight": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InflightTurn"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -21258,6 +21269,30 @@
             "default": "",
             "title": "Assistant",
             "type": "string"
+          },
+          "segment_only": {
+            "anyOf": [
+              {
+                "const": true,
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Segment Only"
+          },
+          "segment_stamp": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SegmentStamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "streaming": {
             "default": false,
@@ -35497,6 +35532,36 @@
           "role"
         ],
         "title": "SeedMessage",
+        "type": "object"
+      },
+      "SegmentStamp": {
+        "additionalProperties": false,
+        "description": "``gateway.session_events.SessionEvents.live_span``: where an ``InflightTurn.assistant`` snapshot sits in\nthe turn's stamped reply (``tui_gateway/stream_segments.py``); offsets count UTF-16 code units.",
+        "properties": {
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          },
+          "segment": {
+            "title": "Segment",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "end": {
+            "title": "End",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "turn_id",
+          "segment",
+          "offset",
+          "end"
+        ],
+        "title": "SegmentStamp",
         "type": "object"
       },
       "SessionActivateParams": {

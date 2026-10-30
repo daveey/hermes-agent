@@ -5,6 +5,8 @@ listing/browsing stored rows, spawn-tree snapshots, event replay and the statele
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from .base import JsonValue, Params, Result, WireEnum
@@ -70,11 +72,25 @@ class OpenRequestEntry(Result):
     params: dict[str, JsonValue]
 
 
+class SegmentStamp(Result):
+    """``gateway.session_events.SessionEvents.live_span``: where an ``InflightTurn.assistant`` snapshot sits in
+    the turn's stamped reply (``tui_gateway/stream_segments.py``); offsets count UTF-16 code units."""
+
+    turn_id: str
+    segment: int
+    offset: int
+    end: int
+
+
 class InflightTurn(Result):
     """``session_auto_continue._inflight_snapshot``: the live (or retained failed) turn a reconnecting
     client rebuilds its bubbles from."""
 
     assistant: str = ""
+    # Canonical producers snapshot only the current segment; legacy producers omit this discriminator.
+    segment_only: Literal[True] | None = None
+    # The snapshot's span in the stamped stream: a client merges it with deltas it already received by offset.
+    segment_stamp: SegmentStamp | None = None
     streaming: bool = False
     user: str = ""
     display_kind: str | None = None

@@ -5,6 +5,8 @@ import type { ErrorSurface } from '@/lib/error-surface'
 import type { ToolResultMetadata } from '@/lib/tool-result-metadata'
 import type { MessageReaction, SessionMessage, UsageStats } from '@/types/hermes'
 
+import type { StreamSpan } from './stream-span'
+
 export interface TimelinePartMetadata {
   toolResultMetadata?: ToolResultMetadata
   /** Unix seconds when this visible activity segment began. Fractional values
@@ -17,6 +19,8 @@ export interface TimelinePartMetadata {
   /** Raw streamed text behind a `text` part whose MEDIA tags are already rendered,
    * so the next delta re-renders from the source instead of the render. */
   mediaSource?: string
+  /** Live text only: the stamped offsets its trailing raw text covers (stream-span.ts). */
+  streamSpan?: StreamSpan
   /** Stored tool result without a matching assistant call in the loaded page.
    *  Render for history, but never treat it as authoritative Todo state. */
   unpairedStoredToolResult?: boolean

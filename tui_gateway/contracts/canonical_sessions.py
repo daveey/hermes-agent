@@ -9,7 +9,7 @@ from pydantic import Field, RootModel
 from .base import JsonValue, Params, Result
 from .common import ProfileParams, TranscriptMessage
 from .connectors_operation import ConnectionRequestPayload
-from .sessions import OpenRequestEntry, TodoState
+from .sessions import InflightTurn, OpenRequestEntry, TodoState
 from .canonical import AdmissionStatus, CanonicalSessionRef, PromptResponseResult, SessionInventoryFields
 from .registry import canonical_method
 
@@ -161,6 +161,8 @@ class CanonicalSnapshot(Result):
     todo_state: TodoState | None = None
     # The owner's server→client requests still unanswered (``session_server_requests.open_requests``).
     open_requests: list[OpenRequestEntry] | None = None
+    # The streaming assistant segment so far, snapshotted with ``last_sequence`` (null between segments).
+    inflight: InflightTurn | None = None
 
 
 class CanonicalListParams(ProfileParams):

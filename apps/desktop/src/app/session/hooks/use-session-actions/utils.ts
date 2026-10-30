@@ -78,6 +78,7 @@ import {
   pageReplyCommittingLiveRow,
   replyAfterLastTool
 } from './committed-reply'
+import { appendCurrentSegment, projectionCorrections } from './current-segment'
 import { chatMessageArraysEquivalent, chatMessagesEquivalent } from './message-equivalence'
 import {
   acknowledgedTranscriptBoundary,
@@ -958,6 +959,10 @@ type ReconciledSessionResumeResult = SessionResumeResult & {
 }
 
 export function appendLiveSessionProjection(messages: ChatMessage[], projection: LiveSessionProjection): ChatMessage[] {
+  if (projection.inflight?.segment_only) {
+    return appendCurrentSegment(messages, projection.session_id, projection.inflight)
+  }
+
   const inflightUser = projection.inflight?.user?.trim() ?? ''
   const inflightAssistant = projection.inflight?.assistant ?? ''
   const inflightStreaming = Boolean(projection.inflight?.streaming)
@@ -967,18 +972,8 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   // streamed when they were typed, before the output they redirected.
   // `correction_offsets` (assistant-text length at each accepted correction)
   // carries that boundary; older gateways omit it.
-  const rawCorrections = projection.inflight?.corrections ?? []
-  const rawOffsets = projection.inflight?.correction_offsets
-
-  const inflightCorrectionEntries = rawCorrections
-    .map((correction, index) => ({ text: correction?.trim() ?? '', offset: rawOffsets?.[index] }))
-    .filter(entry => entry.text)
-
-  const inflightCorrections = inflightCorrectionEntries.map(entry => entry.text)
-
-  const correctionOffsetsUsable =
-    inflightCorrectionEntries.length > 0 &&
-    inflightCorrectionEntries.every(entry => typeof entry.offset === 'number' && entry.offset >= 0)
+  const { entries: inflightCorrectionEntries, texts: inflightCorrections, offsetsUsable: correctionOffsetsUsable } =
+    projectionCorrections(projection)
 
   // A retained failed turn (the gateway keeps error snapshots replayable when
   // the terminal frame may have been lost to a disconnect) — surface the

@@ -47,6 +47,18 @@ export function reconcileAuthoritativeChatMessages(
     }
   }
 
+  // A canonical segment snapshot is the newest text of the row the warm view
+  // already streams into: advance that row so reconcile pairs it with the
+  // durable shell instead of appending a second row beside it.
+  const warmTail = previousMessages.at(-1)
+
+  if (liveProjection?.inflight?.segment_only && warmTail?.role === 'assistant' && warmTail.pending) {
+    return reconcileDurableHistory(
+      authoritativeMessages,
+      appendLiveSessionProjection(previousMessages, liveProjection)
+    )
+  }
+
   return reconcileDurableHistory(
     liveProjection ? appendLiveSessionProjection(authoritativeMessages, liveProjection) : authoritativeMessages,
     previousMessages
@@ -73,6 +85,18 @@ export function livePromptStreamId(
   const live = projections.find(Boolean)
 
   return live ? { awaitingResponse: false, sawAssistantPayload: true, streamId: live.streamId } : {}
+}
+
+/**
+ * The backend projection's pending live row (`assistant-stream-<runtime id>`)
+ * when `messages` hold it. A warm cache that held no live row (the turn started
+ * while this window was away) gets that row from the projection; without a
+ * stream target the next delta opens a second bubble.
+ */
+export function pendingSnapshotRowId(messages: ChatMessage[], runtimeId: string): null | string {
+  const id = `assistant-stream-${runtimeId}`
+
+  return messages.some(message => message.id === id && message.pending) ? id : null
 }
 
 /**

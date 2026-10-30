@@ -1,5 +1,6 @@
 import { mediaDisplayLabel, mediaMarkdownHref } from '@/lib/media'
 
+import { admitStreamText, type StreamSpan } from './stream-span'
 import type { ChatMessage, ChatMessagePart } from './types'
 
 export function textPart(text: string, timestamp?: number): ChatMessagePart {
@@ -634,20 +635,38 @@ export function appendReasoningPart(parts: ChatMessagePart[], delta: string, tim
 export function appendAssistantTextPart(
   parts: ChatMessagePart[],
   delta: string,
-  timestamp?: number
+  timestamp?: number,
+  span?: StreamSpan
 ): ChatMessagePart[] {
-  const { index, parts: next } = appendStreamPart(parts, 'text', delta, timestamp)
-  const part = next[index]
+  const tail = parts.at(-1)
+  const openTail = tail?.type === 'text' && tail.completedAt === undefined ? tail : undefined
 
-  if (part?.type !== 'text') {
+  // A stamped delta lands by offset: a chunk this part already holds (a
+  // replay, the resume snapshot it was cut into) adds only its unseen tail.
+  const admitted = span ? admitStreamText(openTail?.streamSpan, span, delta) : null
+  const text = admitted ? admitted.text : delta
+
+  if (!text) {
+    return parts
+  }
+
+  const { index, parts: next } = appendStreamPart(parts, 'text', text, timestamp)
+  const appended = next[index]
+
+  if (appended?.type !== 'text') {
     return next
   }
+
+  // Unstamped text after a claimed run breaks the claim that the part ends with it.
+  const { streamSpan: _unclaimed, ...unclaimedPart } = appended
+  const part = admitted ? { ...appended, streamSpan: admitted.span } : appended.streamSpan ? unclaimedPart : appended
+  next[index] = part
 
   // Re-render from the raw stream, never from the previous render: an unquoted
   // spaced path (`MEDIA:/tmp/AI Brain/report.pdf`) split across deltas would
   // otherwise settle on a card for `/tmp/AI` and keep the rest as prose (#96657).
   const previous = parts[index]
-  const source = `${previous?.type === 'text' ? (previous.mediaSource ?? previous.text) : ''}${delta}`
+  const source = `${previous?.type === 'text' ? (previous.mediaSource ?? previous.text) : ''}${text}`
 
   if (!source.includes('MEDIA:')) {
     return next

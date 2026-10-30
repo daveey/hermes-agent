@@ -3271,6 +3271,8 @@ export interface SessionResumeResult {
 /** ``session_auto_continue._inflight_snapshot``: the live (or retained failed) turn a reconnecting client rebuilds its bubbles from. */
 export interface InflightTurn {
   assistant?: string
+  segment_only?: true | null
+  segment_stamp?: SegmentStamp | null
   streaming?: boolean
   user?: string
   display_kind?: string | null
@@ -3281,6 +3283,13 @@ export interface InflightTurn {
   status?: string | null
   recoverable?: boolean | null
   error_surface?: Record<string, unknown> | null
+}
+/** ``gateway.session_events.SessionEvents.live_span``: where an ``InflightTurn.assistant`` snapshot sits in the turn's stamped reply (``tui_gateway/stream_segments.py``); offsets count UTF-16 code units. */
+export interface SegmentStamp {
+  turn_id: string
+  segment: number
+  offset: number
+  end: number
 }
 export interface QueuedPrompt {
   user: string
@@ -5112,6 +5121,7 @@ export interface CanonicalSnapshot {
   pending_connection?: ConnectionRequestPayload | null
   todo_state?: TodoState | null
   open_requests?: OpenRequestEntry[] | null
+  inflight?: InflightTurn | null
 }
 export interface CanonicalPendingAdmission {
   admission_id: string

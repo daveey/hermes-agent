@@ -156,6 +156,7 @@ async function journalLiveRowBeforeReload() {
 
 it.each([
   ['the in-flight journal', true, undefined],
+  ['the canonical current-segment projection', false, { user: '', assistant: 'A2 ', streaming: true, segment_only: true }],
   ['the backend in-flight projection', false, { user: 'U2 second', assistant: 'A2 ', streaming: true }]
 ] as const)('a reply streaming across a reload extends the live row %s restored', async (_label, journaled, inflight) => {
   if (journaled) {

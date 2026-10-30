@@ -174,8 +174,9 @@ import { branchCreateKey } from './branch-create-key'
 import { confirmLinkedArchive } from './confirm-linked-archive'
 import type { SessionCreateOverrides } from './create-overrides'
 import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this-run'
+import { graftEarlySegmentDeltas, mergeSegmentSnapshotIntoLiveRow } from './current-segment'
 import { captureDisplayHydration } from './display-hydration'
-import { withoutEarlyClarifyProjection } from './early-clarify-projection'
+import { overlayCacheWithoutEarlyClarify, withoutEarlyClarifyProjection } from './early-clarify-projection'
 import { goneSessionSwitchInFlight } from './gone-session-switch'
 import {
   dispatchedConnectionId,
@@ -207,6 +208,7 @@ import {
 import {
   livePromptStreamId,
   liveTurnSettledDuringResume,
+  pendingSnapshotRowId,
   reconcileAuthoritativeChatMessages,
   reconcileAuthoritativeMessages,
   resumedStreamTarget
@@ -1935,9 +1937,7 @@ export function useSessionActions({
                   const latestCachedMessages = sessionStateByRuntimeIdRef.current.get(cachedRuntimeId)?.messages
 
                   const cachedWithoutEarlyClarify =
-                    latestCachedMessages && pendingClarify
-                      ? withoutEarlyClarifyProjection(latestCachedMessages, pendingClarify.requestId)
-                      : latestCachedMessages
+                    latestCachedMessages && withoutEarlyClarifyProjection(latestCachedMessages, pendingClarify?.requestId)
 
                   const currentLiveTurn = reconcilePersistedLiveTurn(
                     persistedMessages,
@@ -1955,25 +1955,21 @@ export function useSessionActions({
                 }
               }
 
-              const currentMessages = sessionStateByRuntimeIdRef.current.get(cachedRuntimeId)?.messages
-
-              // The early publish may have appended a synthetic request-id row so
-              // the hold could not hide the question. Drop it before overlaying
-              // concurrent edits; the projection below re-derives one row.
-              const currentForOverlay =
-                currentMessages && pendingClarify
-                  ? withoutEarlyClarifyProjection(currentMessages, pendingClarify.requestId)
-                  : currentMessages
-
               // The occurrence-aware path already read the latest cache. An
               // additional identity overlay would restore its consumed tools.
-              if (currentForOverlay && !reconciledCurrentLiveTurn) {
-                activatedMessages = overlayConcurrentMessageChanges(
+              if (!reconciledCurrentLiveTurn) {
+                activatedMessages = overlayCacheWithoutEarlyClarify(
                   activatedMessages,
                   cachedViewState.messages,
-                  currentForOverlay
+                  sessionStateByRuntimeIdRef.current.get(cachedRuntimeId)?.messages,
+                  pendingClarify?.requestId
                 )
               }
+
+              // Either branch above can adopt the live row a stamped delta past
+              // the snapshot's cut reached during the RPC; that row never held
+              // the snapshot's range.
+              activatedMessages = mergeSegmentSnapshotIntoLiveRow(activatedMessages, cachedRuntimeId, activated.inflight)
 
               const pendingClarifyProjection = pendingClarify
                 ? restorePendingClarifyToolCall(activatedMessages, pendingClarifyToolPayload(pendingClarify))
@@ -2017,10 +2013,13 @@ export function useSessionActions({
                 // Keep the existing array when the content is unchanged —
                 // same guard the cold-resume path uses below.
                 const messages = preserveEquivalentTranscript(state.messages, visibleActivatedMessages)
+                const snapshotRowId = running && !state.streamId ? pendingSnapshotRowId(messages, cachedRuntimeId) : null
+                const streamTarget = snapshotRowId ?? state.streamId
 
                 return {
                   ...state,
                   messages,
+                  ...(snapshotRowId ? { sawAssistantPayload: true, streamId: snapshotRowId } : {}),
                   transcriptProvenance:
                     acceptedPersistedDisplayTranscript || hasValidProvenance
                       ? (expectedProvenance ?? undefined)
@@ -2028,7 +2027,7 @@ export function useSessionActions({
                   ...livePromptStreamId(pendingConnectionProjection, pendingClarifyProjection),
                   ...(clearedClarifyProjection
                     ? {
-                        streamId: state.busy ? (clearedClarifyProjection.streamId ?? state.streamId) : null
+                        streamId: state.busy ? (clearedClarifyProjection.streamId ?? streamTarget) : null
                       }
                     : {})
                 }
@@ -2344,10 +2343,10 @@ export function useSessionActions({
         const currentRuntimeMessages =
           sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? resumeRuntimeBaselineMessages
 
-        const preferredWithRuntimeChanges = overlayConcurrentMessageChanges(
-          preferredMessages,
-          resumeRuntimeBaselineMessages,
-          currentRuntimeMessages
+        const preferredWithRuntimeChanges = graftEarlySegmentDeltas(
+          overlayConcurrentMessageChanges(preferredMessages, resumeRuntimeBaselineMessages, currentRuntimeMessages),
+          currentRuntimeMessages,
+          resumed.inflight
         )
 
         // #70449: same stale-snapshot guard as the warm path — a turn that

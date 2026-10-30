@@ -82,6 +82,9 @@ class SubscriptionSnapshot:
     prompts: tuple[JsonObject, ...]
     # The physical transcript a history-less attach resolved under the stream lock (``history=False``).
     transcript_target: str | None = None
+    # The streaming assistant segment's text so far (``InflightTurn`` wire shape), read under the stream lock
+    # with ``last_sequence``: deltas after that watermark are exactly the ones this viewer still receives.
+    inflight: JsonObject | None = None
 
 
 class SessionAuthority(Protocol):

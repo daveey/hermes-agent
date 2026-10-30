@@ -19,6 +19,7 @@ def _attach_snapshot(owner_ref):
         prompts=(),
         replay_epoch='e',
         last_sequence=0,
+        inflight=None,
         handle=SimpleNamespace(
             ref=owner_ref,
             execution_state='idle',

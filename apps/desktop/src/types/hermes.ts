@@ -906,6 +906,12 @@ export interface SessionResumeResult {
   hydrating?: boolean
   inflight?: null | {
     assistant?: string
+    /** Canonical cumulative text of only the current segment, never the whole turn. */
+    segment_only?: true
+    /** Where `assistant` sits in the turn's stamped reply (UTF-16 offsets,
+     *  tui_gateway/stream_segments.py): deltas that reached this window before
+     *  the resume answered merge with it by offset. */
+    segment_stamp?: null | { turn_id: string; segment: number; offset: number; end: number }
     /** Mid-turn redirect corrections, oldest first. The turn's original prompt
      *  stays in `user`; these are the follow-ups typed while it ran. */
     corrections?: string[]

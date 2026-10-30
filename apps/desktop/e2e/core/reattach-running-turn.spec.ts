@@ -169,10 +169,36 @@ test('re-attaching to a running tool turn renders each segment once', async () =
       await provider.streamStarted(U(4), 1)
       await expect(viewport(page)).toContainText(A(4))
       session.expectUserMarkers.push(U(4))
+      // History can paint before the new window subscribes. Force the entire
+      // held tail into that gap: resume must snapshot it, not rely on the old
+      // window's journal or on a fresh socket having a reconnect replay cursor.
+      const resumeRequested = gate()
+      const attach = gate()
+
+      await page.routeWebSocket(/\/api\/ws/, client => {
+        const server = client.connectToServer()
+
+        client.onMessage(async raw => {
+          const request = JSON.parse(String(raw))
+
+          if (request.method === 'session.resume') {
+            resumeRequested.open()
+            await attach.opened
+          }
+
+          server.send(raw)
+        })
+        server.onMessage(raw => client.send(raw))
+      })
       await page.reload()
+      await resumeRequested.opened
       await expect(viewport(page)).toContainText(AI(4), { timeout: 60_000 })
       await installDuplicateSampler(page)
       hold.open()
+      await expect
+        .poll(() => provider.completions.find(c => c.marker === U(4) && c.step === 1)?.sentText)
+        .toContain('across a reload')
+      attach.open()
 
       // Before the turn completes, the rest of the answer extends the reply the
       // reloaded window restored: one bubble, not a second one beside it.
@@ -185,6 +211,10 @@ test('re-attaching to a running tool turn renders each segment once', async () =
       await expect(answer).toContainText(A(4))
       finish.open()
       await settled(page, ws, A(4))
+      // The reloaded window's resume snapshot carries the segment text streamed
+      // before it subscribed, so the wire holds only the later deltas; the
+      // render oracle still requires the full reply exactly once.
+      session.lossyWire = [U(4)]
       await assertTranscriptOracle(page, ws, provider, session, 're-attach after a reload')
     })
     await test.step('a steer during the answer, then switch away and back mid-turn', async () => {
@@ -240,7 +270,7 @@ test('re-attaching to a running tool turn renders each segment once', async () =
         // The tail, and even message.complete, can fall in the reconnect gap
         // (a lossy wire), so the view, not a frame, says the turn settled.
         await expect(stopButton(page)).toHaveCount(0, { timeout: 120_000 })
-        session.lossyWire = [U(7)]
+        session.lossyWire = [...(session.lossyWire ?? []), U(7)]
         await assertTranscriptOracle(page, ws, provider, session, 'reconnect during a tool turn')
       } finally {
         await proxy.close()

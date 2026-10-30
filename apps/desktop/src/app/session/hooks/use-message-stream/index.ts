@@ -18,7 +18,9 @@ import {
   partsText,
   reasoningPart,
   renderMediaTags,
+  sameStreamSegment,
   sealOpenToolParts,
+  type StreamSpan,
   toolCallOwnerMessageId,
   upsertToolPart
 } from '@/lib/chat-messages'
@@ -78,6 +80,8 @@ interface QueuedStreamDelta {
   occurredAt: number
   text: string
   type: 'assistant' | 'reasoning'
+  /** Stamped assistant text: the offsets `text` covers (stream-span.ts). */
+  span?: StreamSpan
 }
 
 // Date.now() alone can collide when an interim seal and the next segment's
@@ -326,7 +330,9 @@ export function useMessageStream({
           queued.reduce(
             (next, delta) =>
               delta.type === 'assistant'
-                ? dedupeGeneratedImageEchoesInParts(appendAssistantTextPart(next, delta.text, delta.occurredAt))
+                ? dedupeGeneratedImageEchoesInParts(
+                    appendAssistantTextPart(next, delta.text, delta.occurredAt, delta.span)
+                  )
                 : appendReasoningPart(next, delta.text, delta.occurredAt),
             parts
           )
@@ -449,7 +455,13 @@ export function useMessageStream({
   }, [flushQueuedDeltas])
 
   const queueDelta = useCallback(
-    (sessionId: string, key: 'assistant' | 'reasoning', delta: string, occurredAt = Date.now() / 1000) => {
+    (
+      sessionId: string,
+      key: 'assistant' | 'reasoning',
+      delta: string,
+      occurredAt = Date.now() / 1000,
+      span?: StreamSpan
+    ) => {
       if (!delta) {
         return
       }
@@ -457,10 +469,21 @@ export function useMessageStream({
       const queued = queuedDeltasRef.current.get(sessionId) ?? []
       const tail = queued.at(-1)
 
-      if (tail?.type === key) {
+      // Coalesce only what stays one contiguous claim (or none): a stamped
+      // chunk keeps the offsets the row merges it by.
+      const contiguous =
+        !span && !tail?.span
+          ? true
+          : Boolean(span && tail?.span && sameStreamSegment(tail.span, span) && tail.span.end === span.start)
+
+      if (tail?.type === key && contiguous) {
         tail.text += delta
+
+        if (tail.span && span) {
+          tail.span = { ...tail.span, end: span.end }
+        }
       } else {
-        queued.push({ occurredAt, text: delta, type: key })
+        queued.push({ occurredAt, text: delta, type: key, ...(span ? { span } : {}) })
       }
 
       queuedDeltasRef.current.set(sessionId, queued)
@@ -525,13 +548,18 @@ export function useMessageStream({
         return
       }
 
+      let span: StreamSpan | undefined
+
       if (stamp) {
         const admitted = admitSegmentDelta(segmentCursorsRef.current.get(sessionId), stamp, delta)
         segmentCursorsRef.current.set(sessionId, admitted.cursor)
+        // The admitted text is the delta's unseen tail, so it ends where the delta does.
+        const end = (stamp.offset ?? 0) + delta.length
+        span = { turnId: stamp.turnId, segment: stamp.segment, start: end - admitted.text.length, end }
         delta = admitted.text
       }
 
-      queueDelta(sessionId, 'assistant', delta, occurredAt)
+      queueDelta(sessionId, 'assistant', delta, occurredAt, span)
     },
     [queueDelta]
   )

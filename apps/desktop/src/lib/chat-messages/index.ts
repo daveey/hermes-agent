@@ -26,6 +26,7 @@ export {
   preserveLocalSystemNotices,
   spliceOlderPreservedRows
 } from './reconciliation'
+export { admitStreamText, closingStreamRun, sameStreamSegment, type StreamSpan } from './stream-span'
 export {
   concatPartsByToolCall,
   hasUnresolvedToolCall,

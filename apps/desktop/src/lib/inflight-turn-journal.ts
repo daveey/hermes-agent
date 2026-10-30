@@ -680,18 +680,24 @@ function overlayProjectionRow(projection: ChatMessage, journalRow: ChatMessage):
 
   const parts: ChatMessagePart[] = []
   let textReplaced = false
+  // The projection's stamped offsets travel with its text (stream-span.ts):
+  // the journal part's own claim, if any, describes text this swap discards.
+  // A rendered MEDIA card has no raw source here, so its offsets cannot travel.
+  const projectionTail = projection.parts.findLast(part => part.type === 'text')
+  const projectionSpan = projectionTail?.mediaSource === undefined ? projectionTail?.streamSpan : undefined
 
   for (const part of journalRow.parts) {
     if (part.type !== 'text') {
       parts.push(part)
     } else if (!textReplaced) {
-      parts.push({ ...part, text: projectionText })
+      const { streamSpan: _journalSpan, ...journalPart } = part
+      parts.push({ ...journalPart, text: projectionText, ...(projectionSpan ? { streamSpan: projectionSpan } : {}) })
       textReplaced = true
     }
   }
 
   if (!textReplaced) {
-    parts.push({ type: 'text', text: projectionText })
+    parts.push({ type: 'text', text: projectionText, ...(projectionSpan ? { streamSpan: projectionSpan } : {}) })
   }
 
   return { ...merged, parts }
@@ -913,6 +919,28 @@ export function resetInFlightTurnJournalStateForTests(): void {
   persistTimers.clear()
   persistLatest.clear()
   sessionStoreSwept = false
+}
+
+/** Write every throttled-but-unwritten tail now. A clean unload (reload,
+ *  relaunch) is not a crash: the reloaded window recovers the newest streamed
+ *  text from this journal alone, so the throttle window must not be lost. */
+function flushPendingWrites(): void {
+  const pending = [...persistLatest]
+
+  for (const timer of persistTimers.values()) {
+    clearTimeout(timer)
+  }
+
+  persistTimers.clear()
+  persistLatest.clear()
+
+  for (const [storedSessionId, state] of pending) {
+    writeSnapshot(storedSessionId, state)
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', flushPendingWrites)
 }
 
 function writeSnapshot(storedSessionId: string, state: JournalableSessionState): void {

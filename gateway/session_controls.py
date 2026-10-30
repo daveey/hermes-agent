@@ -696,7 +696,7 @@ class AuthorityConnection:
                 'subscription_id': snapshot.subscription_id, 'revision': snapshot.handle.revision,
                 'execution_generation': snapshot.handle.execution_generation,
                 'pending': [asdict(r) for r in snapshot.pending],
-                'prompts': list(snapshot.prompts), 'info': info,
+                'prompts': list(snapshot.prompts), 'info': info, 'inflight': snapshot.inflight,
                 'pending_connection': pending_connection(self.authority, ref.session_id),
                 # Still-waiting server→client requests: the event ring cannot say "still open".
                 'open_requests': open_requests(self.authority.sessions[snapshot.handle.ref.session_id].event_stream,

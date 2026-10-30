@@ -8,6 +8,25 @@ from tui_gateway import event_replay
 from tui_gateway.transport import FanoutTransport
 
 
+def _utf16_len(text):
+    return len(text.encode('utf-16-le', errors='surrogatepass')) // 2
+
+
+def _utf16_tail(text, start):
+    """``text`` from UTF-16 code unit ``start``, the unit ``stream_segments`` offsets count in."""
+    return text.encode('utf-16-le', errors='surrogatepass')[2 * start:].decode('utf-16-le', errors='surrogatepass')
+
+
+def _delta_stamp(payload):
+    """``(turn_id, segment, offset)`` of a stamped ``message.delta``, or ``None`` when it carries no identity."""
+    turn_id, segment, offset = payload.get('turn_id'), payload.get('segment'), payload.get('offset')
+    if not (isinstance(turn_id, str) and turn_id):
+        return None
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in (segment, offset)):
+        return None
+    return turn_id, segment, offset
+
+
 class SessionEvents:
     def __init__(self):
         self.lock = threading.RLock()
@@ -25,6 +44,52 @@ class SessionEvents:
         # Set by the authority that attaches transports: retires the subscription of a
         # peer whose bounded backlog overflowed, so it cannot linger looking subscribed.
         self.on_overflow = None
+        # The current assistant segment's cumulative streamed text, kept under ``lock`` as frames publish, so
+        # a viewer attaching mid-stream snapshots what ring replay may no longer (or never) hold for it.
+        self.live_text = ''
+        # Where ``live_text`` sits in the turn's stamped reply (``tui_gateway/stream_segments.py``): ``turn_id``,
+        # ``segment`` and the UTF-16 ``offset``/``end`` of that text inside the segment; ``None`` once an unstamped
+        # delta fed it. A viewer merges the snapshot with stamped deltas it already received by offset, never by
+        # comparing text: the first delta after ``last_sequence`` starts exactly at ``end``.
+        self.live_span = None
+
+    def live_inflight(self):
+        """Caller holds ``lock``: the ``InflightTurn`` of the streaming segment, or ``None`` between segments."""
+        if not self.live_text:
+            return None
+        inflight = {'assistant': self.live_text, 'streaming': True, 'user': '', 'segment_only': True}
+        if self.live_span is not None:
+            inflight['segment_stamp'] = dict(self.live_span)
+        return inflight
+
+    def _track_live_text(self, event_type, payload):
+        if event_type == 'message.delta' and isinstance(payload, dict) and isinstance(payload.get('text'), str):
+            self._track_live_delta(payload['text'], _delta_stamp(payload))
+        elif event_type in ('message.start', 'message.complete', 'message.delta', 'message.interim', 'tool.start',
+                            'tool.started'):
+            # A new turn, a settled turn, a sealed segment (interim) or a boundary inside one (``text: None``, a
+            # tool call): the text after it paints in a new place, so the snapshot restarts there.
+            self.live_text, self.live_span = '', None
+
+    def _track_live_delta(self, text, stamp):
+        span = self.live_span
+        if stamp is None or (span is None and self.live_text):
+            # No identity to place this text by (or text before it had none): append, claim no span.
+            self.live_text, self.live_span = self.live_text + text, None
+            return
+        turn_id, segment, offset = stamp
+        end = offset + _utf16_len(text)
+        if span is not None and span['turn_id'] == turn_id and segment < span['segment']:
+            return  # a re-sent delta of a segment this turn already moved past
+        if span is None or span['turn_id'] != turn_id or segment > span['segment'] or offset > span['end']:
+            # The first text of a segment (or of the run after a boundary), or a gap: the span restarts at it.
+            self.live_text = text
+            self.live_span = {'turn_id': turn_id, 'segment': segment, 'offset': offset, 'end': end}
+            return
+        if end <= span['end']:
+            return  # wholly re-sent: a replayed copy or a superseded attempt re-streaming what it already sent
+        self.live_text += _utf16_tail(text, span['end'] - offset)
+        span['end'] = end
 
     def watermark(self):
         with self.lock:
@@ -52,6 +117,7 @@ class SessionEvents:
             frame['params']['session_id'] = session_id
             self._public_id = session_id
             self.sequence = frame['params']['seq']
+            self._track_live_text(event_type, payload)
 
             def overflow(transport):
                 # The peer's socket is healthy; only its event subscription ended. Same

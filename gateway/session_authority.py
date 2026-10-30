@@ -378,7 +378,7 @@ class SessionAuthority:
                 history, target = (), self.unless_deleted(ref, lambda: transcript_target(self, ref))
             snapshot = SubscriptionSnapshot(subscription, handle, epoch, sequence, history,
                                         tuple(self._pending_receipt(r) for r in pending_rows(self, ref)), prompts,
-                                        transcript_target=target)
+                                        transcript_target=target, inflight=live.event_stream.live_inflight())
         from gateway.session_viewer_close import cancel_persisted_close
         await asyncio.to_thread(cancel_persisted_close, self, ref.session_id)  # the viewer cancels it
         from gateway.session_deferred_pick import reask_on_attach

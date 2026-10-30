@@ -105,6 +105,35 @@ describe('persistInFlightTurnState', () => {
     expect(window.localStorage.getItem(sessionStorageKey('stored-1'))).not.toBeNull()
   })
 
+  it('writes the pending tail when the window unloads inside the throttle', () => {
+    // A reload inside the 400ms trailing-edge throttle used to drop the newest
+    // streamed text: the reloaded window recovers it from this journal alone.
+    persistInFlightTurnState(journalState())
+
+    expect(readInFlightTurnJournal('stored-1')).toBeNull()
+
+    window.dispatchEvent(new Event('pagehide'))
+
+    expect(readInFlightTurnJournal('stored-1')?.messages.at(-1)?.parts).toEqual([
+      { type: 'text', text: 'partial answer' }
+    ])
+
+    // The flush consumed the timer: it must not write a second time.
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+
+    vi.advanceTimersByTime(400)
+
+    expect(setItem).not.toHaveBeenCalled()
+  })
+
+  it('does not resurrect a settled turn when the window unloads', () => {
+    persistInFlightTurnState(journalState())
+    persistInFlightTurnState(journalState({ awaitingResponse: false, busy: false, streamId: null }))
+    window.dispatchEvent(new Event('pagehide'))
+
+    expect(readInFlightTurnJournal('stored-1')).toBeNull()
+  })
+
   it('keeps another session snapshot when one session settles', () => {
     persistInFlightTurnState(journalState())
     persistInFlightTurnState(journalState({ storedSessionId: 'stored-2' }))
