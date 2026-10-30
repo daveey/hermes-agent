@@ -35,7 +35,7 @@ from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as 
 from hermes_cli import kanban_db_dispatch_quota as _kbq
 from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code_kind
 from hermes_cli import kanban_worker_scope as _worker_scope
-from hermes_cli import kanban_host_reboot as _host_reboot
+from hermes_cli import kanban_host_reboot as _host_reboot, kanban_owner_unavailable as _ou  # [daveey]
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
 from hermes_cli.kanban_db_dispatch_queries import lane_rows, skip_reap
 
@@ -1269,7 +1269,7 @@ def _classify_dead_worker(
         dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
                            {"pid": pid, "claimer": claimer, **failure})
     else:
-        dead = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board)
+        dead = _ou.noted(_classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board), conn, task_id, run_id)
     if task_id and not dead.rate_limited:
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
@@ -1340,7 +1340,7 @@ def _classify_dead_worker_exit(
             {"pid": pid, "claimer": claimer, "exit_kind": kind, "exit_code": code, "terminal_provider": True},
             terminal_provider=True,
         )
-    if kind == "nonzero_exit":
+    if kind in ("nonzero_exit", "owner_unavailable"):  # owner_unavailable: kanban_owner_unavailable.note rebooks it
         error_text = f"pid {pid} exited with code {code}"
     elif kind == "signaled":
         error_text = f"pid {pid} killed by signal {code}"
@@ -1360,6 +1360,7 @@ class _CrashSweep:
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
     host_rebooted: list[str] = field(default_factory=list)  # reboot bystanders, requeued uncounted [daveey]
+    owner_unavailable: list[str] = field(default_factory=list)  # owner never answered, requeued uncounted [daveey]
     # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
     # ``_record_task_failure`` (needs its own write_txn).
     crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
@@ -1442,11 +1443,10 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
-            if dead.host_reboot and not dead.reboot_culprit:
-                # A bystander of a reboot: back to its source phase, no failure counted. [daveey]
-                conn.execute("UPDATE tasks SET last_failure_error = ? WHERE id = ?",
-                             (dead.error_text[:500], row["id"]))
-                sweep.host_rebooted.append(row["id"])
+            if (dead.host_reboot and not dead.reboot_culprit) or dead.owner_unavailable:
+                # A reboot bystander, or an owner that never answered (no turn ran): no failure counted. [daveey]
+                conn.execute("UPDATE tasks SET last_failure_error = ? WHERE id = ?", (dead.error_text[:500], row["id"]))
+                (sweep.owner_unavailable if dead.owner_unavailable else sweep.host_rebooted).append(row["id"])
             elif dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
                 try:
