@@ -134,6 +134,11 @@ def test_cold_assign_with_a_recorded_hook_set_does_no_discovery(home, requires):
     assert "on_kanban_task_updated" not in record["hooks"]
     if requires:
         _run(home, "assign", task_id=tid, profile="default")  # seeds the admission toolset record too
+    # A concurrent interpreter importing this plugin may create bytecode after
+    # recording. Generated cache directories are not discovery inputs.
+    generated = home / "plugins" / "bystander" / "__pycache__"
+    generated.mkdir()
+    (generated / "cached.pyc").write_bytes(b"bytecode")
     out = _run(home, "assign", task_id=tid, profile="bob" if not requires else "default")
     assert out["assigned"] is True
     assert out["sweeps"] == 0 and out["discover_and_load"] == 0, out
