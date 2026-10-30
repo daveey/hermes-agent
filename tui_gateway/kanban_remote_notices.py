@@ -36,6 +36,12 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 FRESH_S = 6 * 3600.0
+# ``notices.delivered``: 0 = in flight (or an old silent record), DELIVERED = the notice is in the chat transcript,
+# SETTLED = recorded without a notice (stale, or a local placeholder reports it). Only a transcript write (``ack``)
+# or a keyed transcript row (``_claim_notice``) sets DELIVERED; a SETTLED row also gets a ``swept`` row with the
+# reason, so a ledger ack always means a transcript row. [daveey]
+DELIVERED = 1
+SETTLED = 2
 MAX_PER_POLL = 10
 LINK_RELS = ("shepherd",)
 _TERMINAL = ("done", "blocked")
@@ -192,6 +198,14 @@ def _event_key(owner: str, key: str, notice: dict) -> str:
     return f"remote:{owner}:{key}:{notice['event_id']}"
 
 
+def _notice_id(owner: str, key: str, task: dict, profile: str, sid: str) -> str:
+    """The sweeper's per-chat ``notice_id`` (its ``swept`` and memo identity) for this card state."""
+    notice = task.get("completion_notice")
+    if task.get("status") == "done" and isinstance(notice, dict) and "event_id" in notice:
+        return f"remote:{owner}:{key}:{notice['event_id']}:{profile}:{sid}"
+    return _shared_key(owner, key, task, profile, sid)
+
+
 def _shared_key(owner: str, key: str, task: dict, profile: str, sid: str) -> str:
     """The ``kanban_event_keys`` value both paths record. Done uses :func:`_event_key`; blocked has no
     completion event, so the terminal state plus the destination is the identity."""
@@ -322,12 +336,20 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
     return out
 
 
-def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id, transcript_has) -> str:
+def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id, transcript_has,
+                  swept_key: Optional[tuple] = None, settle_reason: str = "stale") -> str:
     """``offer`` a new or orphaned claim, ``acked`` when the transcript already has it, else ``skip``.
 
     A fresh claim is in flight (delivered=0, this process's pid + start). It becomes delivered only in
     :func:`ack`, after the transcript write. A holder that is gone is re-offered unless the key is already
-    in the transcript.
+    in the transcript. A state that is not fresh is recorded SETTLED (never DELIVERED) with a ``swept`` row
+    carrying ``settle_reason`` when ``swept_key`` is given.
+
+    [daveey] The dead-holder check matches the claim's own key only. It used ``notice_in_transcript``'s legacy
+    ``Kanban <task id>`` text match too, so ANY earlier notice of the same card (an earlier blocked state)
+    proved this new state delivered: hub card t_b49c4888 blocked again at 22:01 PDT 2026-10-29, the claiming
+    Desktop backend was replaced by the 22:06 core update, and its successor acked ledger row 1245 against the
+    16:03 notice of the previous block. The chat never saw the new block.
     """
     row = conn.execute(
         "SELECT delivered, holder_pid, holder_start, notice_key FROM notices WHERE session=? AND ref=? AND state=?",
@@ -338,8 +360,10 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
             conn.execute(
                 "INSERT INTO notices (session, ref, state, at, delivered, holder_pid, holder_start, notice_key, "
                 "legacy_seen) VALUES (?,?,?,?,?,?,?,?,?)",
-                (session, ref, state, now, 0 if fresh else 1, pid if fresh else None, start if fresh else None,
-                 notice_key, 0 if fresh else 1))
+                (session, ref, state, now, 0 if fresh else SETTLED, pid if fresh else None,
+                 start if fresh else None, notice_key, 0 if fresh else 1))
+            if not fresh:
+                _swept_row(conn, swept_key, settle_reason)
         return "offer" if fresh else "skip"
     if row["delivered"]:
         return "skip"
@@ -349,12 +373,16 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
     if holder is None:
         return "skip"  # old silent delivered=0 record: never announced, do not flood
     key = notice_key or row["notice_key"] or ""
-    if transcript_has is not None and transcript_has(key, task_id):
+    # A keyed claim is proven only by its own key; the task-id text match is for unkeyed (legacy) rows.
+    if transcript_has is not None and transcript_has(key, "" if key else task_id):
         with conn:
             conn.execute(
-                "UPDATE notices SET delivered=1, holder_pid=NULL, holder_start=NULL, notice_key=? "
+                "UPDATE notices SET delivered=?, holder_pid=NULL, holder_start=NULL, notice_key=? "
                 "WHERE session=? AND ref=? AND state=? AND delivered=0",
-                (key, session, ref, state))
+                (DELIVERED, key, session, ref, state))
+            _swept_row(conn, swept_key, "transcript")
+        logger.info("remote kanban: dead holder pid %s's claim %s %s for chat %s is already in the transcript; "
+                    "acked", holder, ref, state, session)
         return "acked"
     with conn:
         cur = conn.execute(
@@ -412,13 +440,17 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                 fresh = at_fresh is not None and now - at_fresh <= FRESH_S
                 if not fresh and (card["gw"], card["key"], state) not in fresh_times:
                     continue  # partial sync: don't permanently settle a not-yet-observed arrival
+                reason = "stale"
                 if fresh and skip is not None and conn.execute(
                         "SELECT 1 FROM notices WHERE session=? AND ref=? AND state=?",
                         (session_key, ref, state)).fetchone() is None and skip(str(task["id"])):
-                    fresh = False  # recorded silently: the placeholder's own notice covers it
-                key = _shared_key(card["gw"], card["key"], task, profile, card.get("sid") or session_key)
+                    fresh, reason = False, "placeholder"  # recorded silently: the placeholder's notice covers it
+                sid = card.get("sid") or session_key
+                key = _shared_key(card["gw"], card["key"], task, profile, sid)
+                swept_key = (str(path), profile, sid, _notice_id(card["gw"], card["key"], task, profile, sid))
                 verdict = _claim_notice(conn, session=session_key, ref=ref, state=state, now=now, fresh=fresh,
-                                        notice_key=key, task_id=str(task["id"]), transcript_has=transcript_has)
+                                        notice_key=key, task_id=str(task["id"]), transcript_has=transcript_has,
+                                        swept_key=swept_key, settle_reason=reason)
                 if verdict == "offer":
                     out.append(_notice_item(card, session_key, me, profile))
         finally:
@@ -436,9 +468,9 @@ def ack(claim: dict, *, ledger: Optional[Path] = None) -> bool:
         try:
             with conn:
                 cur = conn.execute(
-                    "UPDATE notices SET delivered=1, holder_pid=NULL, holder_start=NULL "
+                    "UPDATE notices SET delivered=?, holder_pid=NULL, holder_start=NULL "
                     "WHERE session=? AND ref=? AND state=? AND delivered=0",
-                    (claim["session"], claim["ref"], claim["state"]))
+                    (DELIVERED, claim["session"], claim["ref"], claim["state"]))
                 if cur.rowcount == 0 and claim.get("notice_key") and conn.execute(
                         "SELECT 1 FROM notices WHERE session=? AND ref=? AND state=?",
                         (claim["session"], claim["ref"], claim["state"])).fetchone() is None:
@@ -450,7 +482,7 @@ def ack(claim: dict, *, ledger: Optional[Path] = None) -> bool:
             row = conn.execute(
                 "SELECT delivered FROM notices WHERE session=? AND ref=? AND state=?",
                 (claim["session"], claim["ref"], claim["state"])).fetchone()
-            return row is not None and int(row["delivered"]) == 1
+            return row is not None and int(row["delivered"]) == DELIVERED
         finally:
             conn.close()
     except Exception:
@@ -496,6 +528,20 @@ def _remember_delivered(key: tuple) -> None:
 def _swept(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS swept (replica TEXT NOT NULL, profile TEXT NOT NULL, session TEXT NOT NULL, "
                  "notice_id TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY (replica, profile, session, notice_id))")
+    if "reason" not in {row[1] for row in conn.execute("PRAGMA table_info(swept)")}:
+        # [daveey] why the notice is settled: delivered (row written / turn started), transcript (a dead holder's
+        # claim found by its key), stale or placeholder (recorded without a notice: ``notices.delivered=SETTLED``)
+        conn.execute("ALTER TABLE swept ADD COLUMN reason TEXT")
+
+
+def _swept_row(conn: sqlite3.Connection, swept_key: Optional[tuple], reason: str) -> None:
+    """Record one settled notice in ``swept`` inside the caller's ledger transaction, and in this process's memo."""
+    if not swept_key:
+        return
+    _swept(conn)
+    conn.execute("INSERT OR REPLACE INTO swept (replica, profile, session, notice_id, at, reason) VALUES (?,?,?,?,?,?)",
+                 (*swept_key, time.time(), reason))
+    _remember_delivered(tuple(swept_key))
 
 
 def _load_swept(ledger: Optional[Path]) -> None:
@@ -518,7 +564,7 @@ def _load_swept(ledger: Optional[Path]) -> None:
         logger.debug("remote notice ledger unreadable; delivered notices kept in memory only", exc_info=True)
 
 
-def _record_swept(keys: list[tuple], ledger: Optional[Path]) -> None:
+def _record_swept(keys: list[tuple], ledger: Optional[Path], reason: str = "delivered") -> None:
     if not keys:
         return
     try:
@@ -527,8 +573,8 @@ def _record_swept(keys: list[tuple], ledger: Optional[Path]) -> None:
             with conn:
                 _swept(conn)
                 now = time.time()
-                conn.executemany("INSERT OR REPLACE INTO swept (replica, profile, session, notice_id, at) "
-                                 "VALUES (?,?,?,?,?)", [(*key, now) for key in keys])
+                conn.executemany("INSERT OR REPLACE INTO swept (replica, profile, session, notice_id, at, reason) "
+                                 "VALUES (?,?,?,?,?,?)", [(*key, now, reason) for key in keys])
         finally:
             conn.close()
     except sqlite3.Error:
@@ -575,8 +621,8 @@ def _ledger_settled(conn: Optional[sqlite3.Connection], sessions: tuple, ref: st
         return False
     marks = ",".join("?" * len(sessions))
     row = conn.execute(
-        f"SELECT 1 FROM notices WHERE session IN ({marks}) AND ref=? AND state=? AND delivered=1 "
-        "AND notice_key IS NOT NULL LIMIT 1", (*sessions, ref, state)).fetchone()
+        f"SELECT 1 FROM notices WHERE session IN ({marks}) AND ref=? AND state=? AND delivered IN (?, ?) "
+        "AND notice_key IS NOT NULL LIMIT 1", (*sessions, ref, state, DELIVERED, SETTLED)).fetchone()
     return row is not None
 
 
@@ -663,7 +709,7 @@ def _sweep_payload(owner: str, key: str, task: dict, me: str, profile: str, sid:
     if task.get("status") == "done":
         event_id = notice["event_id"]
         event_key = _event_key(owner, key, notice)
-        metadata = {"notice_id": f"remote:{owner}:{key}:{event_id}:{profile}:{sid}",
+        metadata = {"notice_id": _notice_id(owner, key, task, profile, sid),
                     "board": task.get("board", "default"), "task_id": task["id"],
                     "gateway": owner, "event_ids": [event_id], "kanban_event_keys": [event_key],
                     "blocked_on_human": False}
@@ -772,10 +818,10 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
             with contextlib.closing(_ledger(ledger)) as conn:
                 verdict = _claim_notice(conn, session=sid, ref=ref, state=state, now=now or time.time(), fresh=True,
                                         notice_key=event_key, task_id=str(task["id"]),
-                                        transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t))
+                                        transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t),
+                                        swept_key=memo_key)
         if verdict == "acked":
-            _remember_delivered(memo_key)
-            return
+            return  # _claim_notice recorded it in ``swept`` (reason transcript) and the memo
         if verdict != "offer":
             return  # another consumer holds it in flight
         result = waker.deliver(

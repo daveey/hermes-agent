@@ -419,7 +419,7 @@ def test_swept_rows_older_than_the_keep_window_are_pruned_on_load(tmp_path):
     conn = krn._ledger(ledger)
     with conn:
         krn._swept(conn)
-        conn.executemany("INSERT INTO swept VALUES (?,?,?,?,?)", [
+        conn.executemany("INSERT INTO swept (replica, profile, session, notice_id, at) VALUES (?,?,?,?,?)", [
             ("hub.db", "default", CHAT, "old", time.time() - krn.SWEPT_KEEP_S - 60),
             ("hub.db", "default", CHAT, "new", time.time())])
     conn.close()
