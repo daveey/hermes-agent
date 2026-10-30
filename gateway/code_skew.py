@@ -59,7 +59,7 @@ def _process_boot_fingerprint() -> str | None:
         from hermes_cli.git_fingerprint import process_boot_fingerprint
 
         return process_boot_fingerprint(_PROJECT_ROOT)
-    except Exception:
+    except ImportError:  # a tree from before the module existed
         return None
 
 
@@ -110,23 +110,23 @@ def note_import_error(exc: BaseException, where: str) -> bool:
 
     One ``code-skew import mix`` WARNING per (boot, disk) pair, so the error signal shows the cause
     (a process running two revisions; restart it) instead of a bare ``cannot import name``
-    (agent-529f2244ac). Returns True when the error happened under skew. Never raises."""
-    try:
-        if not isinstance(exc, ImportError):
-            return False
-        boot = _boot_fingerprint or _process_boot_fingerprint()
-        current = _fingerprint() if boot else None
-        if not current or current == boot:
-            return False
-        pair = (boot, current)
-        if pair not in _import_mix_noted:
-            _import_mix_noted.add(pair)
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "code-skew import mix: %s raised %s: %s; this process booted on %s but the checkout "
-                "is now %s, so it runs two revisions — restart it to load one",
-                where, type(exc).__name__, exc, _short(boot), _short(current))
-        return True
-    except Exception:
+    (agent-529f2244ac). Returns True when the error happened under skew. Never raises: the
+    fingerprint readers swallow their own failures and the rest is string work."""
+    if not isinstance(exc, ImportError):
         return False
+    boot = _boot_fingerprint or _process_boot_fingerprint()
+    if not boot:
+        return False
+    current = _fingerprint()
+    if not current or current == boot:
+        return False
+    pair = (boot, current)
+    if pair not in _import_mix_noted:
+        _import_mix_noted.add(pair)
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "code-skew import mix: %s raised %s: %s; this process booted on %s but the checkout "
+            "is now %s, so it runs two revisions — restart it to load one",
+            where, type(exc).__name__, exc, _short(boot), _short(current))
+    return True

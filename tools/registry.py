@@ -950,8 +950,8 @@ class ToolRegistry:
                 try:
                     from gateway.code_skew import note_import_error
                     note_import_error(e, f"tool {name}")
-                except Exception:
-                    pass  # a skew note must never change how the tool error is returned
+                except ImportError:  # gateway package absent: the tool error still returns
+                    logger.debug("code-skew note unavailable", exc_info=True)
             # Sanitize so framing tokens/CDATA/fences in exception text aren't structural noise.
             raw = f"Tool execution failed: {type(e).__name__}: {e}"
             try:

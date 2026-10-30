@@ -555,7 +555,7 @@ def _record_boot_revision() -> None:
         from hermes_cli.git_fingerprint import record_process_boot_fingerprint
 
         record_process_boot_fingerprint(_root)
-    except Exception:
+    except Exception:  # health: allow BLE001 -- a fingerprint read must never fail a launch; the guard falls back to recording late
         return  # older tree (mid-update) or unreadable .git: the guard records late, as before
 
 
