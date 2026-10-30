@@ -2638,45 +2638,15 @@ def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
 # critical section (#56066 sweeper finding / #64231 disposition): a slow subscriber must never extend the
 # lock hold and stall a sibling dispatcher's tick.
 TRIAGE_STALE_SECONDS = 3600
-_TRIAGE_BRIEF = (
-    "\n\n---\n[triage sweep] This card sat in triage with no specifier. Specify it "
-    "(clarify title/body, then do the work), or park it with kanban_schedule + a wake_check "
-    "probe if it waits on something external. Do not return it to triage."
-)
 
 
 def sweep_stale_triage(
     conn: sqlite3.Connection, *, default_assignee: Optional[str] = None,
     older_than: int = TRIAGE_STALE_SECONDS, now: Optional[int] = None,
 ) -> list[str]:
-    """Nothing consumes ``triage`` on boards without a specifier, so it becomes a
-    parking lot. Move triage cards idle for ``older_than`` seconds to ``ready`` on the
-    default profile with a "specify or park with a probe" brief. Once per card
-    (``triage_swept`` event) so a worker that re-triages cannot loop; cards with an
-    open human request are left alone. Returns swept task ids."""
-    import time as _time
-    now = int(now if now is not None else _time.time())
-    cutoff = now - older_than
-    swept: list[str] = []
-    rows = conn.execute(
-        "SELECT t.id, t.body, t.assignee, t.human_request FROM tasks t WHERE t.status = 'triage' "
-        "AND COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id), t.created_at) <= ? "
-        "AND NOT EXISTS (SELECT 1 FROM task_events s WHERE s.task_id = t.id AND s.kind = 'triage_swept')",
-        (cutoff,),
-    ).fetchall()
-    for row in rows:
-        if row["human_request"]:
-            continue
-        assignee = (row["assignee"] or "").strip() or default_assignee or "default"
-        with _kb.write_txn(conn):
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', assignee = ?, body = ? WHERE id = ? AND status = 'triage'",
-                (assignee, (row["body"] or "") + _TRIAGE_BRIEF, row["id"]),
-            )
-            if cur.rowcount:
-                _kb._append_event(conn, row["id"], "triage_swept", {"assignee": assignee, "older_than": older_than})
-                swept.append(row["id"])
-    return swept
+    """Release stale triage cards once per triage entry (``hermes_cli.kanban_triage_sweep``). [daveey]"""
+    from hermes_cli.kanban_triage_sweep import sweep_stale_triage as _sweep
+    return _sweep(conn, default_assignee=default_assignee, older_than=older_than, now=now)
 
 
 def _dispatch_once_locked(
