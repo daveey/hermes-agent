@@ -1480,14 +1480,6 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, Gate
             env=GatewayShutdownMixin._restart_watcher_env(), start_new_session=True,  # detached-spawn: ok — restart watcher, must outlive the gateway it restarts
         )
 
-    def _wedged_agent_count(self) -> int:
-        """Work units the restart wait may skip: chat agents idle past ``agent.gateway_timeout`` and
-        cron runs older than the scheduler's stale-inflight allowance (#115469).
-
-        API work has no activity clock and pending sentinels are brand-new, so neither counts.
-        """
-        return self._wedged_chat_agent_count() + self._wedged_cron_job_count()
-
     def _restart_wait_cron_counts(self) -> dict:
         """``cron.scheduler.get_restart_wait_cron_counts``, counted per profile-scoped run.
 
@@ -1600,10 +1592,14 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, Gate
         deadline = loop.time() + timeout
         last_status_at = 0.0
         intent = getattr(self, "_restart_update_intent", None)
+        kanban_since = None
         while self._awaitable_work_count() > 0:
             now = loop.time()
             if self._update_intent_withdrawn(intent):
                 return RESTART_CANCELLED
+            kanban_since, kanban_expired = self._kanban_restart_wait_state(intent, now, kanban_since)
+            if kanban_expired:
+                return False
             if now >= deadline:
                 logger.warning(
                     "Restart after-turn wait timed out after %.0fs with %d "

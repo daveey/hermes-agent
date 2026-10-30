@@ -16,6 +16,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Optional
 
+from gateway.session_runtime_workers import kanban_managed_count
+
+# Only the update's post-grace Kanban wait: human turns retain their normal budget.
+CORE_UPDATE_KANBAN_WAIT_S = 15.0
+
 logger = logging.getLogger("gateway.run")
 
 # ``_await_active_work_before_restart`` result: the core update behind the restart gave up.
@@ -24,6 +29,33 @@ RESTART_CANCELLED = object()
 
 class GatewayRestartWaitMixin:
     """Mixed into ``GatewayShutdownMixin``; methods use the runner's restart/drain state."""
+
+    def _wedged_agent_count(self) -> int:
+        """Work units the restart wait may skip: chat agents idle past ``agent.gateway_timeout`` and
+        cron runs older than the scheduler's stale-inflight allowance (#115469).
+
+        API work has no activity clock and pending sentinels are brand-new, so neither counts.
+        """
+        return self._wedged_chat_agent_count() + self._wedged_cron_job_count()
+
+    def _kanban_restart_wait_state(self, intent, now, since):
+        """15 monotonic seconds with ONLY confirmed cards left, only for an update's restart.
+
+        Unknown claims/mutations/managed human turns keep their original wait. Reset if other
+        work appears. Withdrawing the intent is checked by the caller before this cap.
+        """
+        kanban = kanban_managed_count(self) if intent is not None else 0
+        if kanban <= 0 or self._awaitable_work_count() != kanban:
+            return None, False
+        since = now if since is None else since
+        expired = now - since >= CORE_UPDATE_KANBAN_WAIT_S
+        if expired:
+            logger.warning(
+                "Core update Kanban-only wait capped at %.0fs with %d managed card(s); "
+                "proceeding to restart drain (interrupted attempts requeued uncounted)",
+                CORE_UPDATE_KANBAN_WAIT_S, kanban,
+            )
+        return since, expired
 
     def _describe_active_work(self) -> list:
         """One dict per in-flight work unit the restart wait is holding for, so an observer

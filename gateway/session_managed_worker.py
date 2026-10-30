@@ -164,6 +164,7 @@ class ManagedWorker:
         self.stopped_at = None
         # The gateway restart/shutdown reason when that stop (not a user's) signalled this worker.
         self.stop_cause = None
+        self.kanban_card = False  # owner stamps the frozen launch policy before yielding
         self.writer = threading.Thread(target=self._write_controls, name='managed-control-writer', daemon=True)
         # One dedicated reader thread per worker (never the loop's shared default executor, which
         # parked pipe reads would exhaust). It reads one frame per demand, so the pipe keeps its
@@ -454,7 +455,7 @@ def _launch_env_only_credentials(home, env):
 def _interrupted_before_bootstrap(authority, row, cause=None):
     authority.pending_results[row['admission_id']] = {
         'result': {'final_response': '', 'interrupted': True, **({'interrupt_message': cause} if cause else {})},
-        'usage': {}}
+        'usage': {}, 'runtime_stop_cause': cause}
     return ''
 
 
@@ -625,7 +626,18 @@ async def admit_managed(authority, ref, row, policy):
         result = workspace_unavailable_result(policy)
         authority.pending_results[row['admission_id']] = {'result': result, 'usage': {}}
         return result['final_response']
-    return await execute_managed(authority, ref, row, policy)
+    reply = await execute_managed(authority, ref, row, policy)
+    pending = authority.pending_results.get(row['admission_id'], {})
+    result = pending.get('result', {})
+    from gateway.run import _INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN
+    if (policy.kanban_json and result.get('interrupted') and pending.get('runtime_stop_cause') in
+            (_INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN)):
+        # The child booked exit 130 (or never bootstrapped). Supersede it BEFORE the
+        # receipt becomes terminal: a runtime Stop must not spend the card's retries.
+        from gateway.session_kanban_restart import record_restart_interruption
+        from gateway.session_runtime_workers import tracked_write
+        await tracked_write(authority, partial(record_restart_interruption, policy))
+    return reply
 
 
 async def execute_managed(authority, ref, row, policy):
@@ -648,6 +660,7 @@ async def execute_managed(authority, ref, row, policy):
     if spawned is None:
         return ''
     worker, process = spawned
+    worker.kanban_card = getattr(policy, 'source', None) == 'kanban' and bool(policy.kanban_json)
     workers = authority._managed_workers
     # A Stop acknowledged during the env/spawn awaits found no worker and was latched for this
     # generation; consume it in the same step that makes the worker reachable to interrupt_managed.
@@ -707,6 +720,7 @@ async def execute_managed(authority, ref, row, policy):
                 # Like in-process execution, settlement belongs to the drain's stream lock.
                 authority.pending_results[row['admission_id']] = {
                     'result': {**accepted, 'local_viewer': True}, 'usage': usage,
+                    'runtime_stop_cause': worker.stop_cause,
                     **await asyncio.to_thread(_settled_session_usage, authority, scope['session_id'], accepted, scope['execution_id'])}
                 return accepted['final_response']
             raise RuntimeStoreError('invalid_worker_frame')

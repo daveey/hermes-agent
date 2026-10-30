@@ -23,6 +23,17 @@ def uncounted_runtime_work(runner):
             + sum(len(mutation_tasks(authority)) + len(side_agents(authority)) for authority in authorities))
 
 
+def kanban_managed_count(runner):
+    """Confirmed Kanban workers only; unknown/pre-bootstrap claims and mutations stay awaitable.
+
+    The owner stamps the frozen launch policy at registration, avoiding profile-sensitive
+    adapter lookups during a whole-runtime restart. A managed Desktop turn is NOT a card.
+    """
+    return sum(getattr(worker, 'kanban_card', False) is True and not worker.closed.is_set()
+               for authority in all_authorities(runner)
+               for worker in getattr(authority, '_managed_workers', {}).values())
+
+
 def side_agents(authority):
     """``(thread, holder)`` for each detached side agent (/bg, /btw, preview restart) whose thread
     has not unwound (``gateway/session_tui_side.py`` ``_spawn``). A stopped ``/btw`` whose fork
