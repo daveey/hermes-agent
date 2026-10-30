@@ -466,6 +466,7 @@ import {
   parseKeepAwakeMode,
   readKeepAwakeMode
 } from './power-save'
+import { attachPowerSettle, isPowerSettlingError, PowerSettleGate } from './power-settle'
 import { readPreUpdateBackupEnabled } from './pre-update-backup-config'
 import { capturePreviewContents } from './preview-capture'
 import { onPreviewWatchOwnerDestroyed, sendPreviewFileChangedToOwner } from './preview-file-watch'
@@ -6629,6 +6630,9 @@ function sendPowerResume() {
 
 let powerResumeRegistered = false
 
+// [daveey] Background GETs fail fast while asleep and come back staggered after a wake (power-settle.ts).
+const powerSettleGate = new PowerSettleGate()
+
 // Mirror of powerMonitor's AC/battery state, broadcast to every window so
 // renderer backstop polls can slow down on battery (see store/power.ts).
 // `null` until the first powerMonitor read after app ready.
@@ -6666,6 +6670,9 @@ function registerPowerResumeListeners() {
     // full suspend. Either can drop an idle socket.
     powerMonitor.on('resume', sendPowerResume)
     powerMonitor.on('unlock-screen', sendPowerResume)
+    attachPowerSettle(powerSettleGate, powerMonitor, rememberLog)
+    // A focused window means the user is here: a suspend whose 'resume' never arrived must not hold reads.
+    app.on('browser-window-focus', () => powerSettleGate.noteActive())
     powerMonitor.on('on-battery', () => broadcastBatteryState(true))
     powerMonitor.on('on-ac', () => broadcastBatteryState(false))
     onBatteryPower = powerMonitor.isOnBatteryPower()
@@ -17827,6 +17834,8 @@ ipcMain.handle('hermes:api', async (_event, request) => {
   const registryConnectionId = apiRequestRegistryConnectionId(request)
 
   try {
+    await powerSettleGate.admit(request)
+
     if (deletingProfile && registryConnectionId) {
       return await dispatchConnectionScopedProfileDelete(request, {
         acquire: profile => profileDeletionGate.acquire(profile),
@@ -17864,6 +17873,11 @@ ipcMain.handle('hermes:api', async (_event, request) => {
     // failure still rejects and still logs in full.
     if (isNotFoundApiError(error)) {
       return { [HERMES_API_EXPECTED_404]: String((error as any)?.message ?? error) }
+    }
+
+    // A background read skipped while the Mac sleeps never dialed; the wake line in power-settle counts them.
+    if (isPowerSettlingError(error)) {
+      throw error
     }
 
     // Persist the failure (full stack) before the rejection crosses to the
