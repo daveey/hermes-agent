@@ -614,6 +614,37 @@ describe('withRowActivity', () => {
 
     expect(withRowActivity('idle', { goal_active: false, kanban_active: 0, kanban_observed_at: Date.now() / 1000 })).toBe('idle')
   })
+
+  // [daveey] A backend-woken Kanban close-out turn in a chat this window never opened (or one on a gateway other
+  // than the active one) reaches the renderer only as the row's `turn_live` stamp.
+  it('a running turn the backend reports (turn_live) reads as working over every non-live state', () => {
+    for (const state of ['idle', 'unread', 'draft', 'background'] as const) {
+      expect(withRowActivity(state, { turn_live: true })).toBe('working')
+      expect(hasLiveTurn(withRowActivity(state, { turn_live: true, kanban_active: 2 }))).toBe(true)
+    }
+
+    // A live turn the stream already knows keeps its own, more specific state.
+    for (const state of ['working', 'stalled', 'needs-input'] as const) {
+      expect(withRowActivity(state, { turn_live: true })).toBe(state)
+    }
+
+    // An offline cached copy proves nothing about now.
+    expect(withRowActivity('idle', { offline_cached: true, turn_live: true })).toBe('idle')
+  })
+
+  it('a decision outcome yields to a running close-out turn and paints red again once it ends', () => {
+    const decision = { kind: 'decision', summary: 'Pick A or B' } as const
+    const row = { kanban_active: 0, kanban_observed_at: Date.now() / 1000 }
+
+    const during = withRowActivity('idle', { ...row, turn_live: true })
+    expect(during).toBe('working')
+    expect(sessionStatusStripe(during, true, false, 0, false, null, 0, 0, 0, decision as never)).toBeNull()
+
+    // Control: no live turn, so the stored decision still paints the red stripe.
+    const after = withRowActivity('idle', row)
+    expect(after).toBe('idle')
+    expect(sessionStatusStripe(after, true, false, 0, false, null, 0, 0, 0, decision as never)).toBe('stuck')
+  })
 })
 
 // [daveey] A chat that was not loaded anywhere when its cards finished.

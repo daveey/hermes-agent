@@ -386,26 +386,40 @@ export const kanbanStripeCounts = (row: KanbanCounts): { blocked: number; stalle
  *  comes from the project tree and is in neither — so a session with an active
  *  /goal, open kanban cards or a live background job painted done (green).
  *  Same claim (and priority) as the store: it beats idle/unread/draft only. */
-export const withRowActivity = (
-  state: SessionDotState,
-  row: Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active' | 'kanban_blocked'> &
-    Partial<Pick<SessionInfo, 'kanban_held' | 'kanban_parked'>> &
-    Partial<Pick<SessionInfo, 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen' | 'offline_cached'>>
-): SessionDotState =>
-  row.offline_cached
-    ? 'idle'
-    : (state === 'idle' || state === 'unread' || state === 'draft') &&
-        (row.goal_active === true ||
-          liveKanbanCount(row) > 0 ||
-          row.kanban_unknown === true ||
-          (row.kanban_remote_stale ?? 0) > 0 ||
-          !hasFreshKanbanObservation(row) ||
-          (row.kanban_blocked ?? 0) > 0 ||
-          (row.background_active ?? 0) > 0)
-      ? 'background'
-      : (state === 'idle' || state === 'draft') && (row.kanban_unseen ?? 0) > 0
-        ? 'unread'
-        : state
+type RowActivity = Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active' | 'kanban_blocked'> &
+  Partial<Pick<SessionInfo, 'kanban_held' | 'kanban_parked'>> &
+  Partial<Pick<SessionInfo, 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen' | 'offline_cached'>> &
+  Partial<Pick<SessionInfo, 'turn_live'>>
+
+/** [daveey] Work the row's own stamps say is still in flight outside a turn: a goal, cards, a background job. */
+const rowHasBackgroundWork = (row: RowActivity): boolean =>
+  row.goal_active === true ||
+  liveKanbanCount(row) > 0 ||
+  row.kanban_unknown === true ||
+  (row.kanban_remote_stale ?? 0) > 0 ||
+  !hasFreshKanbanObservation(row) ||
+  (row.kanban_blocked ?? 0) > 0 ||
+  (row.background_active ?? 0) > 0
+
+export const withRowActivity = (state: SessionDotState, row: RowActivity): SessionDotState => {
+  if (row.offline_cached) {
+    return 'idle'
+  }
+
+  // [daveey] A turn the backend reports running (any process, any gateway) is a live turn even when this window
+  // never saw its stream: a backend-woken close-out turn in an unopened chat, or a chat on a gateway other than the
+  // active one (only the active gateway's `session.active_list` is polled). It beats every non-live state, so the
+  // stored outcome (a red decision) yields to it like any live turn.
+  if (row.turn_live === true && !hasLiveTurn(state)) {
+    return 'working'
+  }
+
+  if ((state === 'idle' || state === 'unread' || state === 'draft') && rowHasBackgroundWork(row)) {
+    return 'background'
+  }
+
+  return (state === 'idle' || state === 'draft') && (row.kanban_unseen ?? 0) > 0 ? 'unread' : state
+}
 
 /** Whether this turn is the session's own, live: brighter title, and the row's
  *  age yields to the actions menu. Wider than the arc — a turn waiting on an
