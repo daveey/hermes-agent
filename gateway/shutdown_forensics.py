@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from gateway.exit_deadline import TAIL_RESERVE_S
+
 from gateway.restart import DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT, resolve_systemd_timeout_stop_sec
 import contextlib
 
@@ -197,32 +199,61 @@ def context_as_json(ctx: dict[str, Any]) -> str:
         return "{}"
 
 
-def check_systemd_timing_alignment(
-    drain_timeout: float, cron_drain_timeout: float = DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT
-) -> Optional[dict[str, Any]]:
-    """At startup, sanity-check that systemd's TimeoutStopSec covers stop. A stale unit file
-    (upgraded without re-running ``hermes setup``) can have ``TimeoutStopSec`` below the stop
-    budget, so systemd SIGKILLs the cgroup mid-drain (a phantom ``code=killed status=9`` in the
-    journal). ``None`` when aligned OR undeterminable (not under systemd, no ``systemctl``);
-    otherwise a dict with ``timeout_stop_sec``/``drain_timeout``/``expected_min``/``mismatch``.
-    """
+def current_systemd_unit() -> Optional[str]:
+    """The ``*.service`` unit this process runs in, or ``None`` when not under systemd."""
     if not os.environ.get("INVOCATION_ID"):
         return None  # Not running under systemd (or at least not directly)
     # /proc/self/cgroup: "0::/user.slice/.../hermes-gateway.service"
-    unit_name: Optional[str] = None
     with contextlib.suppress(OSError), open("/proc/self/cgroup", encoding="utf-8") as fh:
         for line in fh:
             parts = reversed(line.strip().split("/"))
             unit_name = next((p for p in parts if p.endswith(".service")), None)
             if unit_name:
-                break
+                return unit_name
+    return None
+
+
+def current_systemd_timeout_stop_s() -> Optional[float]:
+    """Live ``TimeoutStopSec`` (seconds) of this process's unit; ``None`` when undeterminable.
+    Runs ``systemctl`` (up to ~4s): never call it on the event loop."""
+    unit_name = current_systemd_unit()
+    if (timeout_us := _systemd_timeout_stop_us(unit_name) if unit_name else None) is None:
+        return None
+    return timeout_us / 1_000_000.0
+
+
+# Worst-case work after stop() returns: MCP shutdown + the exit funnel. The cron/housekeeping
+# waits are clamped to the exit deadline, so they are not part of the envelope.
+SHUTDOWN_TAIL_RESERVE_S = TAIL_RESERVE_S
+
+
+def check_systemd_timing_alignment(
+    drain_timeout: float, cron_drain_timeout: float = DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
+    *, stop_leash_s: Optional[float] = None, tail_s: float = SHUTDOWN_TAIL_RESERVE_S,
+) -> Optional[dict[str, Any]]:
+    """At startup, sanity-check that systemd's TimeoutStopSec covers stop. A stale unit file
+    (upgraded without re-running ``hermes setup``) can have ``TimeoutStopSec`` below the stop
+    budget, so systemd SIGKILLs the cgroup mid-drain (a phantom ``code=killed status=9`` in the
+    journal). ``None`` when undeterminable (not under systemd, no ``systemctl``); otherwise a
+    dict with ``timeout_stop_sec``/``drain_timeout``/``expected_min``/``mismatch``.
+
+    ``stop_leash_s`` (the stop() watchdog leash) adds the tail check: the leash plus the
+    post-stop() tail must also fit, or a stop that uses its whole leash is SIGKILLed in the tail
+    (``tail_mismatch``). The exit deadline then cuts it, but the drain was sized wrong.
+    """
+    unit_name = current_systemd_unit()
     if (timeout_us := _systemd_timeout_stop_us(unit_name) if unit_name else None) is None:
         return None
     timeout_stop_sec = timeout_us / 1_000_000.0
     expected = float(resolve_systemd_timeout_stop_sec(drain_timeout, cron_drain_timeout))
-    return {"unit": unit_name, "timeout_stop_sec": timeout_stop_sec, "drain_timeout": drain_timeout,
-            "cron_drain_timeout": cron_drain_timeout, "expected_min": expected,
-            "mismatch": timeout_stop_sec < expected}
+    result: dict[str, Any] = {
+        "unit": unit_name, "timeout_stop_sec": timeout_stop_sec, "drain_timeout": drain_timeout,
+        "cron_drain_timeout": cron_drain_timeout, "expected_min": expected,
+        "mismatch": timeout_stop_sec < expected, "tail_mismatch": False}
+    if stop_leash_s is not None:
+        envelope = float(stop_leash_s) + float(tail_s)
+        result.update(stop_envelope_s=envelope, tail_mismatch=envelope > timeout_stop_sec)
+    return result
 
 
 def _systemd_timeout_stop_us(unit_name: str) -> Optional[int]:

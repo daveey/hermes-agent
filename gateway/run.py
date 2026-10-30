@@ -47,6 +47,7 @@ from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get
 from hermes_cli.fallback_config import pre_agent_fallback_notice
 from gateway.turn_executor import _UnboundedThreadExecutor
 from gateway.run_exit_reason import note_start_refused
+from gateway import exit_deadline
 
 # Per-session AIAgent cache bounds (agents are heavy); see _enforce_agent_cache_cap/_session_housekeeping_watcher.
 _AGENT_CACHE_MAX_SIZE = 128
@@ -5194,6 +5195,8 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
 
             _best_effort(_log_context, "format_context_for_log failed: %s")
             _best_effort(_diagnostic, "spawn_async_diagnostic failed: %s")
+        # ONE deadline for the whole exit (supervisor SIGKILL budget), armed past stop(): see gateway.exit_deadline.
+        _best_effort(lambda: exit_deadline.arm_for_signal(runner), "Exit deadline arm failed: %s")
         if not planned_takeover:
             # Supervisor/operator SIGNAL stop (bootout, kickstart -k, systemd, s6, bare kill) — the
             # only kind launchd times with ExitTimeOut. In-band SIGUSR1 restarts never pass through
@@ -5648,12 +5651,15 @@ async def _start_gateway_shutdown_tail(
     # cron_thread.join() would block the loop, so that delivery could never run — it timed out and the
     # message was silently dropped (#58818). Awaiting keeps the loop alive so the in-flight delivery
     # finishes before we tear down.
+    # Each wait is clamped to what is left of the exit deadline, minus the steps after it.
     cron_stop.set()
     _stop_cron_provider(cron_provider)
-    if not await _await_thread_exit(cron_thread, timeout=_CRON_SHUTDOWN_DRAIN_TIMEOUT):
+    _cron_wait = exit_deadline.clamp_wait(_CRON_SHUTDOWN_DRAIN_TIMEOUT, phase="cron_wait")
+    if not await _await_thread_exit(cron_thread, timeout=_cron_wait):
         logger.warning("Cron ticker did not exit within %.0fs of shutdown — an in-flight "
-                       "delivery may have been dropped.", _CRON_SHUTDOWN_DRAIN_TIMEOUT)
-    await _await_thread_exit(housekeeping_thread, timeout=_HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT)
+                       "delivery may have been dropped.", _cron_wait)
+    await _await_thread_exit(housekeeping_thread, timeout=exit_deadline.clamp_wait(
+        _HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT, phase="housekeeping_wait"))
 
     # Stop the planned-stop watcher (daemon=True so this is belt-and-suspenders).
     _planned_stop_watcher_stop.set()
@@ -5662,7 +5668,8 @@ async def _start_gateway_shutdown_tail(
     # Never suppressed: a raise here is a real teardown failure (it once hid a changed signature,
     # leaving every MCP connection and the shared loop up while the gateway reported a clean exit).
     try:
-        await _shutdown_mcp_servers_nonblocking(config=getattr(runner, "config", None))
+        await _shutdown_mcp_servers_nonblocking(
+            timeout=exit_deadline.clamp_wait(5.0, 2.0, phase="mcp"), config=getattr(runner, "config", None))
     except Exception:
         logger.warning("MCP shutdown failed; connections may be left open", exc_info=True)
 
@@ -5956,17 +5963,9 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
     thread — exactly the hang a wedged worker causes. It bypasses ``atexit``, so PID/lock release and the
     bounded log drain (file handlers sit behind a ``QueueListener`` thread) are done here explicitly.
 
-    Graceful teardown is already complete by the time this runs, so there is nothing left that needs a clean
-    interpreter shutdown. See #53107.
-    ``os._exit`` bypasses ``atexit`` handlers, so we cannot rely on the ``atexit``-registered
-    ``remove_pid_file`` / ``release_gateway_runtime_lock`` (registered in ``start_gateway``) to run. The
-    full-shutdown path releases both explicitly in ``_stop_impl``, but the EARLY exit paths —
-    clean-fatal-config (#51228) and startup-aborted-before-running — raise ``SystemExit`` right after
-    ``runner.start()`` without going through ``_stop_impl``, so on those paths ``atexit`` was the only thing
-    releasing them. Now that those paths are routed through this backstop (#53107), release both here
-    explicitly. Both calls are idempotent — ``remove_pid_file`` only unlinks a PID file that belongs to this
-    process, and ``release_gateway_runtime_lock`` no-ops when the lock is already released — so this is a
-    no-op on the normal shutdown path and the actual cleanup on the early-exit paths.
+    Graceful teardown is already complete by the time this runs (#53107). The early exit paths
+    (clean-fatal-config #51228, startup-aborted) skip ``_stop_impl``, so the idempotent PID/lock release
+    here is their only cleanup and a no-op on the normal path.
     """
     for stream in (sys.stdout, sys.stderr):
         with suppress(Exception):
@@ -5991,6 +5990,7 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
         from hermes_logging import drain_log_queue
         drain_log_queue(timeout=1.0)
 
+    exit_deadline.disarm()  # here and only here: the exit deadline covers everything up to os._exit
     for _step in (_release_locks, _mark_exited, _drain_logs):
         _best_effort(_step)
     os._exit(exit_code)

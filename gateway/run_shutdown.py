@@ -29,6 +29,7 @@ from gateway.restart import (
 )
 from gateway.run_common import _UNSET
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
+from gateway import exit_deadline
 from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_watchdog_delay
 from gateway.run_shutdown_restart_wait import RESTART_CANCELLED, GatewayRestartWaitMixin
 
@@ -178,9 +179,8 @@ def _delivery_target_key(platform_value: str, chat_id, thread_id, *, profile: Op
 
 
 def _effective_watchdog_leash(runner: object) -> float:
-    """Thread-watchdog leash for the stop in progress: effective drain + grace, clamped under
-    launchd's live ``ExitTimeOut`` minus the dump margin. Lives here (not in gateway.restart)
-    because restart.py cannot import shutdown_watchdog without a cycle."""
+    """Thread-watchdog leash for the stop in progress: drain + grace, clamped under launchd's live
+    ``ExitTimeOut`` minus the dump margin (here: restart.py can't import shutdown_watchdog)."""
     return effective_stop_watchdog_delay(runner, resolve_shutdown_watchdog_delay(effective_stop_drain_timeout(runner)))
 
 
@@ -2188,17 +2188,16 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin):
     async def _stop_impl(self) -> None:
         """Run every ``_stop_*`` phase under the thread-based shutdown watchdog."""
         from gateway.run import GatewayRunner
-        # Thread-based watchdog (asyncio timeouts cannot recover a frozen loop): dumps stacks and
-        # os._exit past drain+grace so the service manager revives us. Skipped under pytest.
-        # Arm a plain OS thread at the start of stop(); if teardown never finishes within drain+grace it
-        # dumps faulthandler stacks and os._exit so KeepAlive/systemd can revive. Skip under pytest so
-        # stop()-driving unit tests don't get a delayed hard-exit in the worker. See #66892.
+        # Thread watchdog (asyncio timeouts can't recover a frozen loop): stack dump + os._exit past drain+grace,
+        # skipped under pytest (#66892). It covers stop() only; gateway.exit_deadline covers up to os._exit.
         _watchdog_done = threading.Event()
         self._shutdown_watchdog_done = _watchdog_done
         # Shutdown-path doubles may lack the deferred-worker counter.
         ctx = GatewayShutdownMixin._StopContext(
             deferred_count=getattr(self, "_active_deferred_agent_worker_count", lambda: 0)
         )
+        exit_deadline.arm_for_stop(
+            self, _effective_watchdog_leash(self), lambda: GatewayRunner._shutdown_watchdog_snapshot(self, ctx))
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             arm_shutdown_watchdog(
                 _effective_watchdog_leash(self), done_event=_watchdog_done,
@@ -2222,6 +2221,7 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin):
             await GatewayRunner._stop_persist_exit_state(self, ctx)
         finally:
             _watchdog_done.set()
+            exit_deadline.mark_phase("stop_done")
 
     async def stop(
         self, *, restart: bool = False, detached_restart: bool = False, service_restart: bool = False
