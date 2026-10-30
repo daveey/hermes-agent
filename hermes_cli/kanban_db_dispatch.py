@@ -34,6 +34,7 @@ from hermes_cli.kanban_suspend_ledger import awake_seconds as _awake_seconds, re
 from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as _guard_hold_started_at
 from hermes_cli import kanban_db_dispatch_quota as _kbq
 from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code_kind
+from hermes_cli.kanban_db_dispatch_allowlist import _dispatch_profile_allowlist, dispatch_profile_allowlist_summary
 from hermes_cli import kanban_worker_scope as _worker_scope
 from hermes_cli import kanban_host_reboot as _host_reboot
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
@@ -128,6 +129,14 @@ _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
 # wall, burning a worker slot every tick for hours. Overridable via
 # ``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS``.
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 300  # 5 minutes
+# Spacing after a run lost to its profile owner's restart (``owner_restart_lost``): long enough for
+# the drain to end and the next owner to start, so the respawn does not dial the same drain. [daveey]
+OWNER_RESTART_COOLDOWN_SECONDS = 120
+
+
+def _is_owner_restart_run(run) -> bool:
+    """A ``task_runs`` row the sweep booked as lost to an owner restart (neutral, never a failure)."""
+    return (run["outcome"] or "") == "reclaimed" and bool(_kb._json_dict(run["metadata"]).get("owner_restart"))
 
 # Within this window a GitHub PR URL in a comment blocks re-spawn.
 _RESPAWN_GUARD_PR_WINDOW = 86400  # 24 hours
@@ -1178,7 +1187,7 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     ).fetchall()
     for row in rows:
         outcome = row["outcome"] or ""
-        if outcome == "rate_limited":
+        if outcome == "rate_limited" or _is_owner_restart_run(row):
             continue
         head = (row["error"] or "").partition(WORKER_OUTPUT_SEP)[0]  # never the worker's own words
         if outcome == "crashed" and (
@@ -1328,6 +1337,16 @@ def _classify_dead_worker_exit(
             {"pid": pid, "claimer": claimer, "exit_code": code},
             rate_limited=True,
         )
+    if kind == "owner_restart":
+        # The profile owner restarted under the attempt (``KANBAN_OWNER_RESTART_EXIT_CODE``): the
+        # host's event, not the card's, so it never charges the breaker, however many die at once. [daveey]
+        return _DeadWorker(
+            kind, code,
+            f"pid {pid} lost its turn to a gateway restart — requeued without counting a failure",
+            "owner_restart_lost",
+            {"pid": pid, "claimer": claimer, "exit_code": code, "owner_restart": True},
+            owner_restart=True,
+        )
     if kind == "terminal_provider":
         # The worker classified its own provider failure as unhealable (credential
         # revoked, model gone): every further spawn would hit the same wall, so
@@ -1360,6 +1379,7 @@ class _CrashSweep:
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
     host_rebooted: list[str] = field(default_factory=list)  # reboot bystanders, requeued uncounted [daveey]
+    owner_restarted: list[str] = field(default_factory=list)  # lost to an owner restart, requeued uncounted [daveey]
     # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
     # ``_record_task_failure`` (needs its own write_txn).
     crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
@@ -1447,6 +1467,10 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 conn.execute("UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                              (dead.error_text[:500], row["id"]))
                 sweep.host_rebooted.append(row["id"])
+            elif dead.owner_restart:  # lost to its owner's restart: requeued, no failure counted [daveey]
+                conn.execute("UPDATE tasks SET last_failure_error = ? WHERE id = ?",
+                             (dead.error_text[:500], row["id"]))
+                sweep.owner_restarted.append(row["id"])
             elif dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
                 try:
@@ -1565,6 +1589,7 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
     detect_crashed_workers._last_rate_limited = sweep.rate_limited  # type: ignore[attr-defined]
     detect_crashed_workers._last_host_rebooted = sweep.host_rebooted  # type: ignore[attr-defined]
+    detect_crashed_workers._last_owner_restarted = sweep.owner_restarted  # type: ignore[attr-defined]
     # Fired only now, after the reclaim txn AND breaker accounting have
     # committed, so subscribers always observe fully durable board state.
     if sweep.exited_hook_payloads and _kb._kanban_observer_consumed("on_kanban_worker_exited"):
@@ -1828,6 +1853,13 @@ def check_respawn_guard(
             ended_at = _kb._to_epoch(latest_run["ended_at"])
             if ended_at is not None and (now - ended_at) < rl_cooldown:
                 return "infrastructure_cooldown"
+    if latest_run is not None and _is_owner_restart_run(latest_run):
+        # Lost to its owner's restart: spaced so it does not respawn into the same drain. [daveey]
+        ended_at = _kb._to_epoch(latest_run["ended_at"])
+        cooldown = _kb._env_int("HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", OWNER_RESTART_COOLDOWN_SECONDS)
+        if ended_at is not None and (now - ended_at) < cooldown:
+            return "owner_restart_cooldown"
+        return None
     if latest_run is not None and latest_run["outcome"] == "rate_limited":
         if rl_cooldown <= 0:
             # Cooldown disabled — respawn immediately, skipping blocker_auth so
@@ -1960,75 +1992,6 @@ def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
         return canon in allowlist and bool(profile_exists(name))
 
     return _gated
-
-
-def _dispatch_profile_allowlist(normalize_profile_name) -> Optional[frozenset]:
-    """Per-home claim allowlist ``kanban.dispatch_profiles`` (#110995).
-
-    On a shared board (one ``kanban.db`` mounted across several Hermes homes),
-    every home's ``profile_exists`` returns True for ``default`` — the root
-    profile every home has — so a card assigned to ``default`` is claimable by
-    every home's dispatcher. A home opts out of foreign claims by declaring
-    which assignees it may claim::
-
-        kanban:
-          dispatch_profiles: ["sage", "researcher"]   # or "sage,researcher"
-
-    Returns ``None`` only when the key is absent from the user config (upstream
-    behavior: any existing profile is claimable). A present value is
-    fail-closed: an empty list, ``null`` or a bare ``dispatch_profiles:`` claims
-    nothing. The user layer is read without the ``DEFAULT_CONFIG`` merge (whose
-    ``None`` placeholder would make the key look present in every home), and a
-    config read that raises also claims nothing — a corrupt config on a shared
-    board must never widen this home's claim scope silently (#113620).
-    """
-    try:
-        from hermes_cli.config_effective import load_user_config_effective
-        kanban = (load_user_config_effective(fail_closed=True) or {}).get("kanban", {})
-    except Exception as exc:
-        _kb._log.warning(
-            "kanban: could not read kanban.dispatch_profiles (%s: %s) — "
-            "this home claims no cards until the config is readable",
-            type(exc).__name__, exc,
-        )
-        return frozenset()
-    if not isinstance(kanban, Mapping) or "dispatch_profiles" not in kanban:
-        return None
-    raw = kanban["dispatch_profiles"]
-    if raw is None or (isinstance(raw, str) and not raw.strip()):
-        _kb._log.warning(
-            "kanban: kanban.dispatch_profiles is present but empty — this home "
-            "claims no cards; omit the key to allow any existing profile"
-        )
-        return frozenset()
-    names = [str(n) for n in raw] if isinstance(raw, (list, tuple)) else str(raw).split(",")
-    allowed = set()
-    for n in names:
-        try:
-            allowed.add(normalize_profile_name(n))
-        except ValueError:
-            continue
-    return frozenset(allowed)
-
-
-def dispatch_profile_allowlist_summary() -> str:
-    """Human-readable resolution of ``kanban.dispatch_profiles`` for this home.
-
-    Surfaced by ``hermes kanban diagnostics`` so an operator on a shared board
-    can see what a home believes it may claim (#113620): ``any`` (key absent),
-    the sorted allowed names, or ``none (fail-closed: ...)``.
-    """
-    try:
-        from hermes_cli.profiles import normalize_profile_name
-    except Exception as exc:
-        return f"none (fail-closed: profiles unavailable: {exc})"
-    allowlist = _dispatch_profile_allowlist(normalize_profile_name)
-    if allowlist is None:
-        return "any"
-    if allowlist:
-        return ", ".join(sorted(allowlist))
-    return ("none (fail-closed: kanban.dispatch_profiles is present but names no valid "
-            "profile, or the config could not be read — omit the key to allow any)")
 
 
 def _local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
@@ -2497,6 +2460,7 @@ def _run_reclaim_phase(
     # went back to ``ready`` and the respawn guard defers them until quota clears.
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
+    result.reclaimed += len(getattr(detect_crashed_workers, "_last_owner_restarted", []))  # [daveey]
     result.timed_out = enforce_max_runtime(conn)
     from hermes_cli.kanban_continuation import wake_due_continuations
     result.woken_continuations = wake_due_continuations(conn)

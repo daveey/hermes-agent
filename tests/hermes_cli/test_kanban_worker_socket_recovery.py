@@ -202,19 +202,35 @@ async def test_connecting_is_not_an_answer(monkeypatch, _worker_env, clock):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", [
     gateway_client.GatewayClientError("Gateway connection failed; no local fallback"),
-    GUE("Gateway starting: deadline", "starting", "deadline"),
     GUE("Gateway inaccessible: invalid_control_peer", "inaccessible", "invalid_control_peer"),
-    gateway_client.GatewayRPCError("runtime_draining"),
-], ids=["refused", "starting", "control-reset", "draining"])
+], ids=["refused", "control-reset"])
 async def test_an_owner_silent_for_the_whole_budget_fails_the_worker(monkeypatch, _worker_env, clock, fault):
-    # Every restart shape still ends at OWNER_WAIT_S when it never clears.
+    # A restart shape with no live owner answer still ends at OWNER_WAIT_S when it never clears.
     owner = _Owner(connects=[None], receipts=["pending", _disconnect()], after=fault)
 
-    with pytest.raises(gateway_client.GatewayClientError, match=rf"owner silent for 1[89]\ds: {fault}"):
+    with pytest.raises(gateway_client.GatewayClientError, match=rf"owner silent for 1[89]\ds: {fault}") as raised:
         await _run(owner, monkeypatch, _worker_env)
+    assert not isinstance(raised.value, kanban_worker_client.OwnerRestartLost)
     assert clock.now >= kanban_worker_client.OWNER_WAIT_S
     # Jittered exponential backoff (capped at 8-16 s) between dials, not one dial a second.
     assert 3 < owner.dials < 40 and owner.calls.count("kanban.run") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [
+    GUE("Gateway starting: deadline", "starting", "deadline"),
+    gateway_client.GatewayRPCError("runtime_draining"),
+], ids=["starting", "draining"])
+async def test_a_draining_or_starting_owner_is_waited_on_up_to_its_restart_cap(monkeypatch, _worker_env, clock, fault):
+    # A draining/starting owner is alive and answering: the worker waits past OWNER_WAIT_S, up to the
+    # owner's own restart_after_turn_timeout, then exits as an owner restart (requeued uncounted).
+    monkeypatch.setenv("HERMES_RESTART_AFTER_TURN_TIMEOUT", "1800")
+    owner = _Owner(connects=[None], receipts=["pending", _disconnect()], after=fault)
+
+    with pytest.raises(kanban_worker_client.OwnerRestartLost, match=rf"owner silent for 1[89]\ds: {fault}"):
+        await _run(owner, monkeypatch, _worker_env)
+    assert 1800 + kanban_worker_client.OWNER_WAIT_S - 20 <= clock.now < 1800 + kanban_worker_client.OWNER_WAIT_S + 60
+    assert owner.calls.count("kanban.run") == 1
 
 
 @pytest.mark.asyncio

@@ -24,11 +24,14 @@ class _DeadWorker:
     stdlib_shadow: bool = False  # traceback from a workspace ``<stdlib>.py``: blocked at once [daveey]
     host_reboot: bool = False  # the host rebooted under the worker: no failure counted [daveey]
     reboot_culprit: Optional[dict] = None  # this card's own sudo shutdown (journal line): blocked at once [daveey]
+    owner_restart: bool = False  # the profile owner restarted under the attempt: requeued uncounted [daveey]
 
     @property
     def run_outcome(self) -> str:
         if self.host_reboot:
             return HOST_REBOOT_OUTCOME
+        if self.owner_restart:
+            return "reclaimed"
         if self.event_kind in {"oom_killed", "signaled"}:
             return self.kind
         # A rate-limited requeue is recorded as ``rate_limited`` so board history

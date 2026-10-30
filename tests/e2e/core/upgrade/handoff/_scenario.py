@@ -269,6 +269,22 @@ def _quiet_wait(pred, *, timeout: float, what: str, interval: float = 1.0):
 
 # -- the scenario ---------------------------------------------------------------------------------
 
+# How long into the update's drain the held kanban turn ends: past the 180 s a worker used to give
+# up on a draining owner (``kanban_worker_client.OWNER_WAIT_S``), well inside the drain's cap. [daveey]
+HOLD_INTO_DRAIN_S = 210
+_DRAIN_STARTED = "Restart requested with"
+
+
+def _release_inside_the_drain(inst, model: Model) -> None:
+    log = inst.hermes_home / "logs" / "gateway.log"
+    deadline = time.monotonic() + 1500
+    while not model.release.is_set() and time.monotonic() < deadline:
+        if log.exists() and _DRAIN_STARTED in log.read_text(errors="replace"):
+            model.release.wait(timeout=HOLD_INTO_DRAIN_S)
+            model.release.set()
+            return
+        time.sleep(1)
+
 
 def run(column: str, root: Path) -> SimpleNamespace:
     """Boot the fleet, update, let everything settle, and record what the user would see."""
@@ -309,6 +325,11 @@ def run(column: str, root: Path) -> SimpleNamespace:
             o.job_id = job["id"]
             assert not model.cron_calls, "premise: the job ran before it was due"
 
+            # The held turn ends inside the update's drain, past the old 180 s worker give-up: the
+            # drain waits for it and the worker outlasts it (it used to give up at 180 s and the
+            # update's drain "completed" on a dead turn). The update returning releases it too.
+            releaser = threading.Thread(target=_release_inside_the_drain, args=(inst, model), daemon=True)
+            releaser.start()
             o.up = inst.update()
             o.sha_after = inst.sha()
 
@@ -472,6 +493,12 @@ class HandoffProperties:
         # The in-flight worker finishes, or the update interrupts it and it is re-queued exactly once.
         assert len(o.runs[o.card1]) <= 2, f"the in-flight card ran {len(o.runs[o.card1])} times\n{o.diag}"
         assert len(o.runs[o.card2]) == 1, f"the new card ran {len(o.runs[o.card2])} times\n{o.diag}"
+        if o.column == "head":
+            # The updater under test drains its own restart: the in-flight turn outlives the old
+            # 180 s give-up and finishes in its one run, never booked a crash. (n1's worker is the
+            # previous release's and still gives up at 180 s.) [daveey]
+            outcomes = [r["outcome"] for r in o.runs[o.card1]]
+            assert outcomes == ["completed"], f"the drain lost the in-flight run: {outcomes}\n{o.diag}"
 
 
 def dashboard_verdict(o) -> str:
