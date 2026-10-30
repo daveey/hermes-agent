@@ -266,7 +266,11 @@ def evict(conn: sqlite3.Connection) -> list[str]:
                 continue
             for table in present:
                 conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (tid,))
-            conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (tid, tid))
+            # The copy's own edges go with it; an edge from it to a card still in this file belongs to that child
+            # (own_partition keeps it, the Board still holds it). Dropping it un-gated a hub child of a copy evicted
+            # between review hand-off and re-pickup: 51 promoted / 97 claim_rejected parents_not_done (2026-10-29).
+            conn.execute("DELETE FROM task_links WHERE child_id = ? OR (parent_id = ? AND child_id NOT IN "
+                         "(SELECT id FROM tasks WHERE id != ?))", (tid, tid, tid))
             conn.execute("DELETE FROM tasks WHERE id = ?", (tid,))
             gone.append(tid)
         conn.execute("UPDATE kanban_sync_state SET applying = 0")
@@ -330,6 +334,11 @@ def _changes_for(replica: sqlite3.Connection, tid: str, card: sqlite3.Row) -> li
             version = int(row["sync_version"] or 0) if "sync_version" in row.keys() else 0
             out.append(sync.RemoteChange(0, table, row["uid"], "upsert", ksc._row_fields(replica, table, row),
                                          version, "", ""))
+    # Its parent edges too: once the copy is here the feed applies its later links (own_partition), so a copy
+    # without the earlier ones disagreed with the Board for as long as it ran.
+    for row in replica.execute("SELECT * FROM task_links WHERE child_id = ? ORDER BY parent_id", (tid,)).fetchall():
+        out.append(sync.RemoteChange(0, "task_links", f"{row['parent_id']}>{tid}", "upsert",
+                                     ksc._row_fields(replica, "task_links", row), 0, "", ""))
     return out
 
 
@@ -346,6 +355,9 @@ def import_cards(conn: sqlite3.Connection, replica: sqlite3.Connection, ids: Ite
     if changes:
         cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
         sync.apply_remote_changes(conn, changes, new_cursor=cursor, observers=False)
+        # The copy's foreign parents are gated by the mirror; filled only in the sync round, a parent read as
+        # missing in this tick would demote the ready copy to todo and push that to the Board.
+        sync.refresh_remote_parents(conn, replica)
     return done
 
 
