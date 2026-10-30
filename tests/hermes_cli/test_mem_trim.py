@@ -38,13 +38,43 @@ def test_config_kill_switch_overrides_force_from_config_file(monkeypatch, tmp_pa
 
 
 def test_gc_collect_runs_even_without_platform_primitive(monkeypatch):
-    # No page-release primitive (macOS, musl): the rate-limited gc.collect() still runs;
+    # No page-release primitive (macOS, musl): the rate-limited collection still runs, young generations only;
     # only the success flag stays False.
     collect = Mock()
     monkeypatch.setattr(mem_trim.gc, "collect", collect)
 
     assert mem_trim.trim_memory(force=True, reason="test") is False
-    collect.assert_called_once()
+    collect.assert_called_once_with(1)
+
+
+def _collected_generations(monkeypatch, primitive):
+    """Run one real trim (real gc, no mock) and return the generations the collector actually walked."""
+    import gc
+    monkeypatch.setattr(mem_trim, "_malloc_trim", primitive)
+    seen = []
+
+    def _cb(phase, info):
+        if phase == "start":
+            seen.append(info["generation"])
+
+    gc.callbacks.append(_cb)
+    try:
+        mem_trim.trim_memory(force=True, reason="test")
+    finally:
+        gc.callbacks.remove(_cb)
+    return seen
+
+
+def test_no_page_release_never_walks_the_old_generation(monkeypatch):
+    # A full (generation 2) collection holds the GIL for the whole heap walk: 2-3 s for ~6M objects on a loaded
+    # Mac, which starved the gateway API loop past Desktop's 4 s timeout (t_01a18e1adb124d2e).
+    # (Automatic generation-0 passes from the test's own allocations may interleave.)
+    seen = _collected_generations(monkeypatch, None)
+    assert 1 in seen and max(seen) == 1
+
+
+def test_page_release_platform_still_runs_full_collection(monkeypatch):
+    assert 2 in _collected_generations(monkeypatch, lambda pad: 1)
 
 
 def test_collect_memory_snapshot_parses_linux_proc_status(monkeypatch):
@@ -68,14 +98,14 @@ def test_collect_memory_snapshot_parses_linux_proc_status(monkeypatch):
 
 def test_success_collects_then_trims(monkeypatch):
     calls = []
-    monkeypatch.setattr(mem_trim.gc, "collect", lambda: calls.append("gc"))
+    monkeypatch.setattr(mem_trim.gc, "collect", lambda *gen: calls.append(("gc", *gen)))
     monkeypatch.setattr(
         mem_trim, "_malloc_trim", lambda pad: calls.append(("trim", pad)) or 1
     )
     monkeypatch.setattr(mem_trim.time, "monotonic", lambda: 100.0)
 
     assert mem_trim.trim_memory(reason="turn", cooldown_seconds=60) is True
-    assert calls == ["gc", ("trim", 0)]
+    assert calls == [("gc",), ("trim", 0)]
     assert mem_trim._last_trim_monotonic == 100.0
 
 

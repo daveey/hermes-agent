@@ -1,8 +1,10 @@
 """Rate-limited heap release for long-lived Hermes gateway processes.
 
-On Linux/glibc, ``malloc_trim(0)`` can return pages from freed Python/C allocations to the OS. Every
-platform runs the rate-limited ``gc.collect()``; only the page release is glibc-only. Behavior is configured
-under ``context.memory_trim`` in ``config.yaml``.
+On Linux/glibc, ``malloc_trim(0)`` can return pages from freed Python/C allocations to the OS, so a full
+``gc.collect()`` runs first to free as much as possible. Without that page release (macOS, musl) only the young
+generations are collected (``gc.collect(1)``, well under a millisecond): a full collection holds the GIL for the
+whole heap walk (2-3 s for ~6M objects on a loaded Mac) and starves the gateway's API loop, for a ~3% footprint
+gain. Behavior is configured under ``context.memory_trim`` in ``config.yaml``.
 """
 
 from __future__ import annotations
@@ -33,6 +35,8 @@ _last_trim_monotonic = 0.0
 _probe_done = False
 _malloc_trim: Callable[[int], int] | None = None
 _trim_call_count = 0
+# Collected generation when no page-release primitive follows: young generations only (see module docstring).
+_NO_RELEASE_GC_GENERATION = 1
 
 
 def _config_settings() -> tuple[bool, float, int, float]:
@@ -165,8 +169,12 @@ def trim_memory(
         try:
             before = collect_memory_snapshot()
             started = time.perf_counter()
-            gc.collect()
-            # Cycle collection is allocator-independent; only the page release needs glibc.
+            if trim is not None:
+                gc.collect()
+            else:
+                # No page release follows, so a full GIL-holding heap walk would buy little and stall every other
+                # thread (the gateway API loop missed Desktop's 4 s timeouts on 2026-10-30, t_01a18e1adb124d2e).
+                gc.collect(_NO_RELEASE_GC_GENERATION)
             trim_result = trim(0) if trim is not None else 0
             released = bool(trim_result)
             after = collect_memory_snapshot()
