@@ -202,6 +202,23 @@ def test_new_plugin_dir_and_config_edit_invalidate_the_record(home):
     assert _run(home)["discoveries"] == 1
 
 
+def test_metadata_only_sync_pass_keeps_the_record_served(home):
+    """A sync pass that rewrites nothing (macOS openrsync -a --checksum) re-applies mode and times,
+    moving only ctime: the record must stay served. [daveey]"""
+    _tool_plugin(home, "extra", "extra_ping", "extra")
+    _config(home, "platform_toolsets:\n  cli: [terminal, file, extra]\n" + ENABLED % "extra")
+    first = _run(home)
+    assert first["discoveries"] == 1
+    files = [p for p in [home / "config.yaml", *(home / "plugins").rglob("*")] if p.is_file()]
+    for p in files:
+        st = p.stat()
+        os.chmod(p, st.st_mode)
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+    second = _run(home)
+    assert _verdict(second) == _verdict(first)
+    assert second["discoveries"] == 0
+
+
 @pytest.mark.parametrize("blob", ["", "{not json", "[]", json.dumps({"toolset_keys": [], "portable_mcp": []}),
                                   json.dumps({"version": 1, "fingerprint": "0" * 64, "builtin_collision": None,
                                               "toolset_keys": [], "portable_mcp": []})])

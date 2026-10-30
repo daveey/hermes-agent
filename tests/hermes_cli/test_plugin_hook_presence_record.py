@@ -212,3 +212,45 @@ def test_assignment_is_committed_before_notify_so_a_killed_helper_leaves_it_whol
         assert [json.loads(p)["assignee"] for _, p in events] == ["bob"]
     finally:
         con.close()
+
+
+def _metadata_only_touch(paths) -> None:
+    """What a sync pass that rewrites nothing does (macOS openrsync -a --checksum every 10 min on the
+    mini): re-apply each file's mode and times, which moves only its ctime."""
+    for p in paths:
+        st = p.stat()
+        os.chmod(p, st.st_mode)
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def test_metadata_only_sync_pass_keeps_the_record_served(home):
+    _config(home, ["bystander"])
+    tid = _run(home, "setup")["task_id"]
+    _run(home, "discover")
+    before = {p: p.stat() for p in [home / "config.yaml", *(home / "plugins").rglob("*")] if p.is_file()}
+    _metadata_only_touch(before)
+    assert any(p.stat().st_ctime_ns != st.st_ctime_ns for p, st in before.items())
+    assert all((p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+               for p, st in before.items())
+    out = _run(home, "assign", task_id=tid, profile="bob")
+    assert out["assigned"] is True
+    assert out["sweeps"] == 0 and out["discover_and_load"] == 0, out
+
+
+def test_sync_replacing_a_plugin_file_with_its_old_mtime_still_invalidates(home):
+    """rsync -a writes changed content to a temp file, renames it over the old one and restores the
+    source mtime: same mtime, maybe same size, new inode. That must still read as a change."""
+    _config(home, ["bystander"])
+    tid = _run(home, "setup")["task_id"]
+    _run(home, "discover")
+    assert "on_kanban_task_updated" not in _hooks_record(home)["hooks"]
+    init = home / "plugins" / "bystander" / "__init__.py"
+    old = init.stat()
+    tmp = init.with_name(".__init__.py.tmp")
+    tmp.write_text(textwrap.dedent(OBSERVER))
+    os.utime(tmp, ns=(old.st_atime_ns, old.st_mtime_ns))
+    os.replace(tmp, init)
+    assert init.stat().st_mtime_ns == old.st_mtime_ns
+    out = _run(home, "assign", task_id=tid, profile="bob")
+    assert out["assigned"] is True and out["sweeps"] == 1
+    assert _observed(home) == [{"task_id": tid, "changed_fields": ["assignee"]}]
