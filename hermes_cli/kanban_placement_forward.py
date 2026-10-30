@@ -268,8 +268,8 @@ def forward_completion(conn: sqlite3.Connection, task_id: str) -> Optional[dict]
                 words = (out or "").split()
                 if rc == 0 and len(words) >= 2 and words[0] == rtid and words[1] in UNTIL:
                     return None
-            except Exception:  # health: allow BLE001 -- unavailable observation must not prevent durable cancellation
-                pass
+            except Exception as exc:  # health: allow BLE001 -- unavailable observation must not prevent durable cancellation
+                print(f"placement completion observation failed; forwarding archive: {exc!r}", file=sys.stderr)
         return forward_archive(conn, task_id)
     except Exception as exc:  # health: allow BLE001 -- courtesy forwarding must not undo a committed completion
         print(f"placement completion forward failed: {exc!r}", file=sys.stderr)
