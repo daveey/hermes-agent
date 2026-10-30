@@ -169,3 +169,16 @@ def test_profile_scopes_are_restored_on_success_and_failure(profiles):
 def test_skill_names_are_not_guessed_as_capabilities(profiles):
     # Skill capability metadata has no established convention; do not infer from names/prose.
     assert validate_assignment("legacy", skills=["git", "terminal"]) == []
+
+
+def test_declared_queue_assignee_skips_profile_policy(profiles):
+    """A name in kanban.queue_assignees has no profile and still takes dir/worktree cards."""
+    with pytest.raises(CapabilityMismatchError) as caught:
+        validate_assignment("bb-queue", workspace_kind="dir")
+    assert "does not exist" in str(caught.value) or "unavailable" in str(caught.value)
+    profiles("default", "kanban:\n  queue_assignees: [bb-queue]\n")
+    assert validate_assignment("bb-queue", workspace_kind="dir") == ["terminal", "file", "host_repo"]
+    assert validate_assignment("bb-queue", workspace_kind="worktree") == ["terminal", "file", "git", "host_repo"]
+    # Only the declared name is exempt; other missing profiles still refuse.
+    with pytest.raises(CapabilityMismatchError):
+        validate_assignment("bb-typo", workspace_kind="dir")
