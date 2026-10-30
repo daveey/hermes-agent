@@ -56,6 +56,12 @@ def default_base(repo: Path, tip: str = "HEAD") -> str:
     raise RuntimeError("no merge-base with origin/main or main; pass --base")
 
 
+def merge_parents(repo: Path, commit: str) -> list[str]:
+    """The parents of ``commit`` when it is a merge, else []."""
+    parts = git(repo, "rev-list", "--parents", "-n", "1", commit).split()
+    return parts[1:] if len(parts) > 2 else []
+
+
 @dataclass(frozen=True)
 class Change:
     status: str  # A, M, D, R
