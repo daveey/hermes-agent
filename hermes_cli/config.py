@@ -3952,4 +3952,13 @@ def __getattr__(name: str):  # CORE_DECLARED_ENV_NAMES, BUNDLED_PLATFORM_SECRET_
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-_env_registry.install(_env_registry_stages, ensure_home=ensure_hermes_home)
+def _ensure_home_at_import() -> None:
+    """The import-time home init the eager discovery's ``load_config()`` used to do. A bound
+    worker config snapshot short-circuits ``load_config()`` before it touches the home, so a safe
+    worker never seeded or read SOUL.md at import; keep it that way. [daveey]"""
+    if _worker_config_snapshot() is not None:
+        return
+    ensure_hermes_home()
+
+
+_env_registry.install(_env_registry_stages, ensure_home=_ensure_home_at_import)
