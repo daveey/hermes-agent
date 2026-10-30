@@ -1,5 +1,6 @@
 """Maintenance must not replace the database behind a live authority."""
 import asyncio
+from contextlib import closing
 from http.server import ThreadingHTTPServer
 import json
 import os
@@ -35,7 +36,10 @@ def test_restore_refuses_live_authority_without_changing_data(tmp_path):
                OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
 
     def rows():
-        with sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True) as db:
+        # closing(): `with connect()` only ends the transaction. A connection left open until GC holds
+        # a WAL generation, and the raw read_bytes() of the sidecars below cancels its POSIX locks, so
+        # the daemon's exit unlinks the WAL under it and the restarted daemon refuses (DeletedWalGeneration).
+        with closing(sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True)) as db:
             return list(db.execute('SELECT request_id,status FROM session_admissions ORDER BY rowid'))
 
     async def exercise(desc):
