@@ -4,7 +4,7 @@ import { listPreparedImageDrafts, type PreparedSubmission, preparedSubmissionKey
 import { storedJournal } from './prepared-submissions-test-utils'
 import type { SubmissionDestination } from './submission-destination'
 
-afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear() })
 
 test('image recovery never offers expanded slash intent as an ordinary draft and leaves its exact journal intact', async () => {
   vi.stubGlobal('hermesDesktop', undefined)
@@ -33,10 +33,15 @@ test('a browser journal read lists the storage keys once, however many stores it
   }
 
   await removePreparedSubmission('c', 'c')
-  const key = vi.spyOn(Storage.prototype, 'key')
+  // jsdom Storage needs a prototype spy; Node 26's setup fallback owns key itself.
+  const storage = window.localStorage
+  const target = storage.key === Storage.prototype.key ? Storage.prototype : storage
+  const key = vi.spyOn(target, 'key')
   expect((await readPreparedSubmission('a'))?.text).toBe('a')
   expect(await readPreparedSubmission('c')).toBeUndefined()
   expect(key).toHaveBeenCalledTimes(2 * window.localStorage.length)
+  const indices = Array.from({ length: storage.length }, (_, index) => [index])
+  expect(key.mock.calls).toEqual([...indices, ...indices])
 })
 
 test('native preparation waits for acknowledgement and never downgrades a write failure to browser storage', async () => {
