@@ -113,11 +113,9 @@ jobs:
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
+          # The PR planner reads the source/test import graph and runner discovery;
+          # a classifier-only sparse checkout cannot produce a sound selection.
           ref: ${{ inputs.commit }}
-          sparse-checkout: |
-            .github/actions/detect-changes
-            scripts/ci/classify_changes.py
-          sparse-checkout-cone-mode: false
       - name: Detect affected areas
         id: classify
         uses: ./.github/actions/detect-changes
