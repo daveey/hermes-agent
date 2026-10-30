@@ -42,9 +42,8 @@ def test_sigterm_mid_copy_removes_the_staging_copy(tmp_path):
     holder.execute("BEGIN EXCLUSIVE")
     try:
         # The child's own 10s lock deadline must not expire while a starved runner delays the SIGTERM.
-        env = {**os.environ, "HERMES_PREFLIGHT_BUSY_TIMEOUT_SECONDS": "600"}
-        proc = subprocess.Popen([sys.executable, "-I", "-S", str(SCRIPT), str(home)],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        proc = subprocess.Popen([sys.executable, "-I", "-S", str(SCRIPT), str(home), "600"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             wait_until(lambda: _staging(home) or proc.poll() is not None, timeout=30, what="the staging copy")
             assert proc.poll() is None and _staging(home), "the pre-flight must still be copying"

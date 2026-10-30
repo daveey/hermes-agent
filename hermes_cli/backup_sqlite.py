@@ -266,6 +266,6 @@ if __name__ == "__main__":
     # The Desktop stops a pre-flight past its deadline with SIGTERM; exit through
     # the staging cleanup instead of dying with a full-size .partial left behind.
     signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
-    # Tests hold the source locked as a barrier and need the lock wait to outlast a starved runner.
-    _busy = float(os.environ.get("HERMES_PREFLIGHT_BUSY_TIMEOUT_SECONDS") or 10.0)
+    # Optional argv[2]: tests hold the source locked as a barrier and need the lock wait to outlast a starved runner.
+    _busy = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
     print(json.dumps(preflight_state_db(Path(sys.argv[1]), busy_timeout_seconds=_busy)))
