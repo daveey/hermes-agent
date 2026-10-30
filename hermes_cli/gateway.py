@@ -4334,6 +4334,35 @@ def _host_decision_exit_code(decision) -> int:
     return GATEWAY_FATAL_CONFIG_EXIT_CODE
 
 
+def _supervised_attach_to_owner_of_this_home(decision) -> None:
+    """[daveey] A supervised start that ATTACHES to a live gateway launched from THIS home is a refusal.
+
+    gateway-e2cd786685: ``hermes update`` (run by hermes-sync) relaunched an unsupervised gateway for
+    the home that the mini's KeepAlive job supervises. Once that gateway published its host record,
+    every KeepAlive retry stopped here ("nothing to start", exit 75) before ``start_gateway`` ran, so
+    neither the duplicate guard's handback (``run_bootstrap._hand_home_back_to_supervisor``) nor any
+    exit-diag row ever happened, and the job looped for hours with no signal. Record the refusal in
+    ``gateway-exit-diag.log`` (the coach's wedge detector reads it) and ask a MANUAL owner to drain;
+    the exit code stays the caller's. A profile unit attaching to a host multiplexer launched from
+    another home is a real attach and is left alone.
+    """
+    owner = getattr(decision, "owner", None)
+    if owner is None:
+        return
+    try:
+        if Path(owner.home).expanduser().resolve() != Path(get_hermes_home()).expanduser().resolve():
+            return
+        from gateway.run_bootstrap import _hand_home_back_to_supervisor
+        from gateway.run_exit_reason import note_start_refused
+        from hermes_cli.gateway_exit_diag import make_exit_diag, nonzero_exit_record
+        note_start_refused("already_running", owner_pid=owner.pid, detail="host_attach")
+        _hand_home_back_to_supervisor(owner.pid)
+        tag, extra = nonzero_exit_record()
+        make_exit_diag()(tag, **extra)
+    except Exception:  # health: allow BLE001 -- recording/handback is best-effort; the attach exit stands
+        logger.debug("Supervised attach refusal record failed", exc_info=True)
+
+
 def _attach_to_host_gateway_or_guard(force: bool = False, replace: bool = False) -> None:
     """``gateway run`` against the ONE host gateway: attach, rescan-then-attach, replace, or refuse.
 
@@ -4364,6 +4393,7 @@ def _attach_to_host_gateway_or_guard(force: bool = False, replace: bool = False)
             logger.warning("gateway run refused (exit %d): %s", code, decision.message)
             sys.exit(code)
         if _running_under_gateway_supervisor():
+            _supervised_attach_to_owner_of_this_home(decision)
             sys.exit(_host_decision_exit_code(decision))
         sys.exit(0)
     # No host record (older gateway, unwritable lock dir): the config-derived refusal still applies.
