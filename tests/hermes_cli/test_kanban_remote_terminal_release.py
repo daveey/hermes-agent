@@ -98,6 +98,14 @@ def test_legacy_alias_folds_into_its_proven_twin(tmp_path):
     assert counted(rows) == []
 
 
+def test_a_link_the_owner_released_does_not_come_back_from_a_frozen_alias(tmp_path):
+    legacy_link = {**LINK, 'session': 's_old'}
+    legacy = {k: v for k, v in card('todo', sessions=[legacy_link, LINK]).items() if k not in ('gateway', 'profile')}
+    path = replica(tmp_path, [('default/t_1', legacy), ('default/default/t_1', observed(card('scheduled')))])
+    rows = activity._read_remote_links(path, now=NOW)
+    assert [r['session'] for r in rows] == [LINK['session']]
+
+
 def test_open_legacy_alias_is_counted_once_under_the_qualified_key(tmp_path):
     legacy = {k: v for k, v in card('todo').items() if k not in ('gateway', 'profile')}
     path = replica(tmp_path, [('default/t_1', legacy), ('default/default/t_1', observed(card('todo')))])
