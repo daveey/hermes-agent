@@ -123,6 +123,15 @@ async def standalone_lifespan(app: "FastAPI"):
         except Exception:
             logger.warning("kanban unloaded-session sweeper start failed", exc_info=True)
 
+    # Build the session-list kanban annotation now, before the Desktop's reconnect burst: a cold one made every
+    # session read, GET /api/sessions/<id> included, wait 4-10 s on one pass under that burst. [daveey]
+    try:
+        from hermes_cli.kanban_annotation_prewarm import start_annotation_prewarm
+
+        start_annotation_prewarm()
+    except Exception:
+        logger.warning("kanban annotation prewarm did not start", exc_info=True)
+
     # Re-adopt background jobs a previous backend's chats left running (orphans of a Desktop
     # restart) and wake each chat when its job exits (tools/process_registry_readopt.py). [daveey]
     from hermes_cli.process_identity import is_desktop_owned_backend

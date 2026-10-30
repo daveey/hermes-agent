@@ -11,7 +11,7 @@ import os
 
 from fastapi.testclient import TestClient
 
-from hermes_cli import free_tier_bootstrap, web_server
+from hermes_cli import free_tier_bootstrap, kanban_annotation_prewarm, web_server
 from hermes_cli.local_runtime import bootstrap as local_runtime_bootstrap
 from tools import process_registry_readopt
 from tui_gateway import kanban_unloaded
@@ -35,6 +35,7 @@ def _quiet_boot(monkeypatch):
     monkeypatch.setattr(methods_groups, "start_hosted_room_service", lambda: None)
     monkeypatch.setattr(methods_groups, "stop_hosted_room_service", lambda **_k: True)
     monkeypatch.setattr(startup_resume, "start_startup_resume_sweep", lambda: None)
+    monkeypatch.setattr(kanban_annotation_prewarm, "start_annotation_prewarm", lambda: None)
 
 
 def test_serve_lifespan_starts_unloaded_sweeper_without_websocket(monkeypatch):
