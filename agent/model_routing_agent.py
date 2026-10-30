@@ -131,7 +131,16 @@ def try_class_fallback(agent):
     _reset_stale_streak(agent)
     agent._fallback_activated = False
     _snapshot_primary_runtime(agent)
-    persist_class_metadata(agent)
+    # The failover is committed in memory and in the routing allocation store; the session-row mirror is
+    # best-effort here. A failed mirror write must not turn a recoverable route failure (402, 429) into a
+    # dead turn: the retry continues on the new route and the next persist re-syncs the row.
+    try:
+        persist_class_metadata(agent)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Class failover to %s/%s: session row mirror failed; continuing on the new route",
+            agent.provider, agent.model, exc_info=True)
     return True
 
 

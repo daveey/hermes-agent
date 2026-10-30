@@ -491,6 +491,12 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
 
     def patch_session_model_config(self, session_id, patch):
         self._session(session_id)
+        # The owner refuses any key outside the shared registry; refusing here, before the patch is
+        # journaled, fails only this call. A journaled refusal latches ``failure`` and every later write
+        # and the close-time flush re-raise it, turning a best-effort sidecar into a dead worker.
+        from hermes_state_sidecar_keys import SIDECAR_KEYS
+        if not isinstance(patch, dict) or set(patch) - SIDECAR_KEYS:
+            raise WorkerPersistenceError('invalid_params')
         self._apply('session.sidecars', {'patch': patch})
 
     def update_session_tool_names(self, session_id, pin):
