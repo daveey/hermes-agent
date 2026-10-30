@@ -3,7 +3,9 @@
 No execution, transport, or authority objects live here. Every mutation uses the
 SessionDB transaction owner, including its inode guard and SQLite retry policy.
 """
+import contextvars
 import json
+import time
 import uuid
 from typing import NamedTuple, Optional
 
@@ -12,6 +14,29 @@ from agent.message_metadata import (
     CANONICAL_ROW, DATA_USE, DB_ROW_SNAPSHOT, MESSAGE_UID, PERSISTENCE_ONLY_MESSAGE_FIELDS, TOOL_CALL_UID, TOOL_CALL_UIDS,
 )
 from hermes_state_keys import admission_fingerprint
+
+#: Slack the worker adds on top of the owner's longest write patience: the owner's event loop can
+#: stall 10-20 s under load before a ``worker.*`` handler even starts (David-MBP, load 150).
+WORKER_RECEIPT_MARGIN_S = 30.0
+
+
+def worker_receipt_timeout_s() -> float:
+    """How long a worker waits for the owner's reply to one ``worker.*`` RPC.
+
+    Derived, never a literal: the longest state.db write patience any owner handler of
+    ``worker.register`` / ``worker.adopt`` (default patience) or ``worker.persist`` (every family
+    goes through ``apply_worker_receipt``: transcript patience) may spend, plus
+    ``WORKER_RECEIPT_MARGIN_S``. A worker that gave up first would die on ``worker_receipt_timeout``
+    while the owner is still allowed to commit the write (outcome unknown, never resent).
+    """
+    from hermes_state import SessionDB
+    return max(SessionDB._WRITE_PATIENCE_S, SessionDB._TRANSCRIPT_WRITE_PATIENCE_S) + WORKER_RECEIPT_MARGIN_S
+
+
+#: A mutable dict the owner's ``worker.persist`` dispatcher installs for one request;
+#: ``apply_worker_receipt`` records into it how long the write waited for the state.db lock.
+#: ``asyncio.to_thread`` copies the context, so the same dict object is shared with the thread.
+WORKER_RECEIPT_TIMING: contextvars.ContextVar = contextvars.ContextVar('worker_receipt_timing', default=None)
 
 
 class SessionGoneEvent(NamedTuple):
@@ -989,7 +1014,11 @@ def apply_worker_receipt(db, *, epoch, execution_id, session_id, generation, seq
         raise RuntimeStoreError('invalid_params')
     digest = admission_fingerprint(canonical_target=session_id,
                                   payload={'operation': operation, 'payload': json.loads(encoded)})
+    timing = WORKER_RECEIPT_TIMING.get()
+    asked = time.monotonic()
     def write(conn):
+        if timing is not None:  # the last (successful) attempt wins: lock waits and retries included
+            timing['lock_wait_s'] = time.monotonic() - asked
         _epoch(conn, epoch)
         row = worker_receipt_assignment(conn, execution_id, session_id, generation, sequence, digest)
         if row['owner_epoch'] != epoch:

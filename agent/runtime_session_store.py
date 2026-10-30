@@ -47,6 +47,11 @@ class WorkerPersistenceError(RuntimeError):
     pass
 
 
+def _receipt_timeout_s():
+    from hermes_state_runtime import worker_receipt_timeout_s
+    return worker_receipt_timeout_s()
+
+
 def _caller_summary(limit=8):
     """module:function:line of the frames above this store (its own frames skipped), never
     locals or argument values: best-effort callers swallow the guard's raise (#139029)."""
@@ -194,7 +199,9 @@ class WorkerRPC:
                     self._drop()
                     link = self._connection()
                     link.send(request_id, message)
-                response = link.receive(20)
+                # Never shorter than the owner may take to answer (its write patience + a loop-stall
+                # margin): giving up first kills the run while the owner may still commit the write.
+                response = link.receive(_receipt_timeout_s())
             except BaseException:
                 # Outcome unknown once sent: surface the error and never resend; the next call redials.
                 self._drop()

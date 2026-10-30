@@ -5,15 +5,47 @@ the owner on its parent's receipt stream (gateway/session_worker_child.py), neve
 """
 import asyncio
 import hmac
+import logging
 import os
+import time
 
 from gateway.session_admission import admission_fingerprint
 from hermes_state_runtime import (
-    RuntimeStoreError, _secret_digest, adopt_worker_execution,
+    WORKER_RECEIPT_TIMING, RuntimeStoreError, _secret_digest, adopt_worker_execution,
     mutate_worker_execution, register_worker_execution,
 )
 
+logger = logging.getLogger(__name__)
+
 _SCOPE = {'profile_id', 'session_id', 'execution_id', 'generation', 'pid', 'birth', 'secret'}
+
+#: A ``worker.persist`` slower than this is logged: the worker waits ``worker_receipt_timeout_s()``
+#: for the reply, and before this line a stall stayed invisible until a worker died of it.
+SLOW_WORKER_PERSIST_S = 5.0
+
+
+async def timed_persist(params, persist):
+    """Await ``persist()`` (one ``worker.persist`` request) and log it once if it was slow.
+
+    The WARNING names the operation, the session, how long its write waited for the state.db lock
+    (``n/a`` when it never reached the write), the total handler time and the outcome.
+    """
+    timing = {}
+    token = WORKER_RECEIPT_TIMING.set(timing)
+    started, outcome = time.monotonic(), 'ok'
+    try:
+        return await persist()
+    except BaseException as exc:
+        outcome = getattr(exc, 'reason', None) or type(exc).__name__
+        raise
+    finally:
+        WORKER_RECEIPT_TIMING.reset(token)
+        total = time.monotonic() - started
+        if total >= SLOW_WORKER_PERSIST_S:
+            lock_wait = timing.get('lock_wait_s')
+            logger.warning('slow worker.persist: operation=%s session=%s lock_wait=%s total=%.1fs outcome=%s',
+                           params.get('operation'), params.get('session_id'),
+                           'n/a' if lock_wait is None else f'{lock_wait:.1f}s', total, outcome)
 
 
 def _claim(connection, ref, params):
@@ -63,6 +95,12 @@ def _verify(connection, ref, params, claim):
 
 
 async def worker_request(connection, ref, params, *, operation):
+    if operation == 'persist':
+        return await timed_persist(params, lambda: _worker_request(connection, ref, params, operation=operation))
+    return await _worker_request(connection, ref, params, operation=operation)
+
+
+async def _worker_request(connection, ref, params, *, operation):
     from gateway.session_authorities import require_serving
     require_serving(connection.authority)  # adopt/persist would write with the released epoch
     if operation == "persist" and isinstance(params.get("operation"), str) and params["operation"].startswith("delegation."):
