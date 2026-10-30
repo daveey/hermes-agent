@@ -375,14 +375,19 @@ class TestRealProfileCdpLaunch:
         snapshot.assert_not_called()
         assert attached is not None and attached.owned is False and attached.pid == chrome.pid
 
-    def test_the_browser_holding_a_dir_is_found_by_its_argv_never_a_helper(self, tmp_path):
+    def test_the_browser_holding_a_dir_is_found_by_its_argv_never_a_helper(self, tmp_path, monkeypatch):
         """The argv scan behind the Windows singleton check (real processes, any host): the browser process
         naming the dir, never a ``--type=`` helper naming it too, and nothing for another dir."""
         import subprocess
+        import psutil
 
         helper = subprocess.Popen([*_SLEEPER, "--type=renderer", f"--user-data-dir={tmp_path}"])
         browser = subprocess.Popen([*_SLEEPER, f"--user-data-dir={tmp_path}"])
         try:
+            # [daveey] Inspect real argv, but only for children this test owns:
+            # unrelated live browsers can name (and realpath) the real Hermes home.
+            children = [psutil.Process(proc.pid) for proc in (helper, browser)]
+            monkeypatch.setattr(psutil, "process_iter", lambda attrs: iter(children))
             found = launcher._pid_naming_dir(str(tmp_path))
             other = launcher._pid_naming_dir(str(tmp_path / "other"))
         finally:
