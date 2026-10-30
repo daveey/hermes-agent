@@ -16,6 +16,7 @@ from pathlib import Path
 import queue
 import sys
 import threading
+import time
 from hermes_dir_acl import make_user_dir
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,11 @@ def apply_row_annotations(messages, annotations):
 
 class WorkerPersistenceError(RuntimeError):
     pass
+
+
+def _receipt_timeout_s():
+    from hermes_state_runtime import worker_receipt_timeout_s
+    return worker_receipt_timeout_s()
 
 
 def _caller_summary(limit=8):
@@ -138,16 +144,25 @@ class WorkerRPC:
         from hermes_cli.gateway_client import _session_ticket, gateway_ws_target
         from hermes_cli.gateway_runtime_discovery import query_identify
         from websockets.sync.client import connect
+        from hermes_cli.ws_logging import ws_logger
         # A served secondary has no socket; its multiplexer's descriptor names it.
         from hermes_cli.gateway_runtime import discover_gateway_endpoint
-        discovery = discover_gateway_endpoint(self.home, timeout=5)
+        # Discovery, identify and the WebSocket upgrade share ONE deadline, the same owner-stall budget
+        # as a receipt: nothing is sent yet, so waiting is safe, while a fixed 5 s step failed the
+        # whole run whenever the owner's loop stalled longer (David-MBP 10-30, handshake timeout).
+        deadline = time.monotonic() + _receipt_timeout_s()
+
+        def remaining():
+            return max(0.1, deadline - time.monotonic())
+
+        discovery = discover_gateway_endpoint(self.home, timeout=remaining())
         if discovery.state == 'ready' and discovery.endpoint is not None:
             self.endpoint = discovery.endpoint
         elif discovery.state != 'draining' or self.endpoint is None:
             raise WorkerPersistenceError('owner_unavailable')
         from hermes_cli.gateway_runtime import control_home_for
         endpoint = self.endpoint
-        descriptor = query_identify(control_home_for(self.home, endpoint), timeout=5)
+        descriptor = query_identify(control_home_for(self.home, endpoint), timeout=remaining())
         if descriptor.get('pid') == os.getpid():
             raise WorkerPersistenceError('synchronous_self_rpc')
         ticket = _session_ticket(self.home, endpoint, purpose='worker-adoption')
@@ -155,8 +170,9 @@ class WorkerRPC:
         # The owner is loopback, like connect_gateway's peer: an inherited HTTPS_PROXY must not carry it.
         # No library keepalive: its pong deadline would run independently of (and could fail) a call
         # inside its receipt budget; that budget and the observed close are the liveness checks.
-        self.link = _OwnerLink(connect(url, subprotocols=protocols, open_timeout=5, close_timeout=1,
-                                       max_size=8 * 1024 * 1024, proxy=None, ping_interval=None))
+        self.link = _OwnerLink(connect(url, subprotocols=protocols, open_timeout=remaining(), close_timeout=1,
+                                       max_size=8 * 1024 * 1024, proxy=None, ping_interval=None,
+                                       logger=ws_logger()))
         return self.link
 
     def _drop(self):
@@ -194,7 +210,9 @@ class WorkerRPC:
                     self._drop()
                     link = self._connection()
                     link.send(request_id, message)
-                response = link.receive(20)
+                # Never shorter than the owner may take to answer (its write patience + a loop-stall
+                # margin): giving up first kills the run while the owner may still commit the write.
+                response = link.receive(_receipt_timeout_s())
             except BaseException:
                 # Outcome unknown once sent: surface the error and never resend; the next call redials.
                 self._drop()
