@@ -10,6 +10,11 @@ def test_secondary_worker_env_drops_launch_terminal_policy_and_env_settings(tmp_
     env a standalone ``hermes -p X`` gateway would build — X's HERMES_HOME and X's ``.env`` over a
     base without the launch profile's ``TERMINAL_*`` policy or launch-only ``.env`` settings."""
     from gateway.session_managed_worker import _worker_env
+    # Own the terminal inputs: worker shells can carry derived flags (e.g. image pinning)
+    # that are not launch-profile config or dotenv residue.
+    for key in list(os.environ):
+        if key.upper().startswith('TERMINAL_'):
+            monkeypatch.delenv(key)
     root = tmp_path / '.hermes'
     beta = root / 'profiles' / 'beta'
     beta.mkdir(parents=True)
