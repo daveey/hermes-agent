@@ -667,6 +667,7 @@ async def execute_managed(authority, ref, row, policy):
     authority.adopt_agent(ref.session_id, row['generation'], worker)
     accepted = usage = None
     scope = None
+    close_worker = worker.close
     try:
         # The interpreter behind the handle introduces itself first; the owner verifies that
         # identity (alive, same birth, descends from the handle) before reserving for it.
@@ -736,6 +737,8 @@ async def execute_managed(authority, ref, row, policy):
                 return _interrupted_before_bootstrap(authority, row, worker.stop_cause)
             _record_lost_attempt(authority, policy, exc, reason, scope)  # nothing bound: a late note is dropped, never misbooked
             raise
+        from gateway.session_kanban_restart import close_and_book_restart_loss
+        close_worker = await close_and_book_restart_loss(authority, policy, worker)
         await _settle_lost(authority, row, scope, _record_lost_attempt(authority, policy, exc, reason, scope))
         live = authority.sessions[ref.session_id]
         with live.event_stream.lock:
@@ -752,4 +755,4 @@ async def execute_managed(authority, ref, row, policy):
         raise ManagedExecutionUnknown('managed_worker_unknown') from exc
     finally:
         workers.pop(ref.session_id, None)
-        await asyncio.to_thread(worker.close)
+        await asyncio.to_thread(close_worker)

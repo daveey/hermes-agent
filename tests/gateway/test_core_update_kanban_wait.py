@@ -25,6 +25,30 @@ def test_count_confirmed_workers_across_profiles(tmp_path):
     assert kanban_managed_count(runner) == 2
 
 
+def test_default_gateway_drain_bound_is_75_seconds():
+    from gateway.shutdown_watchdog import resolve_shutdown_watchdog_delay
+    runner, _ = make_restart_runner()
+    # Same core path on hub and Mac; launchd may shorten, never extend, this watchdog.
+    assert wait.CORE_UPDATE_KANBAN_WAIT_S + resolve_shutdown_watchdog_delay(runner._restart_drain_timeout) == 75.0
+
+
+def test_real_managed_counts_reach_the_short_wait(tmp_path):
+    from gateway.session_managed_worker import ManagedWorker
+    runner, _ = make_restart_runner()
+    card = ManagedWorker(SimpleNamespace())
+    card.kanban_card = True
+    runner.session_authority = SimpleNamespace(_managed_workers={'s': card}, sessions={})
+    assert runner._active_work_count() == runner._awaitable_work_count() == 1
+    since, expired = runner._kanban_restart_wait_state(tmp_path / 'intent', 0.0, None)
+    assert (since, expired) == (0.0, False)
+    assert runner._kanban_restart_wait_state(tmp_path / 'intent', 15.0, since) == (0.0, True)
+    # A real managed human worker is not a card, even though it has the same process class.
+    human = ManagedWorker(SimpleNamespace())
+    runner.session_authority._managed_workers['human'] = human
+    assert runner._awaitable_work_count() == 2
+    assert runner._kanban_restart_wait_state(tmp_path / 'intent', 16.0, since) == (None, False)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('other', [None, 'chat', 'cron', 'api', 'mutation', 'unclassified'])
 async def test_core_update_caps_only_kanban_wait(monkeypatch, tmp_path, other):

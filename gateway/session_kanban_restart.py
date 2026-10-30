@@ -1,6 +1,24 @@
-"""Owner-side disposition of a Kanban turn that cooperatively accepted a runtime Stop."""
+"""Owner-side disposition of a Kanban turn interrupted by a runtime Stop."""
+import asyncio
+from functools import partial
 import json
 from pathlib import Path
+
+
+async def close_and_book_restart_loss(authority, policy, worker):
+    """Return final cleanup; a restart-lost child is closed and booked before unknown publishes.
+
+    Closing first prevents its late130 from overwriting76. Other losses retain ordinary cleanup.
+    The returned no-op means the caller's finally never closes that same child twice.
+    """
+    from gateway.run import _INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN
+    if (not policy.kanban_json or worker.stop_cause not in
+            (_INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN)):
+        return worker.close
+    await asyncio.to_thread(worker.close)
+    from gateway.session_runtime_workers import tracked_write
+    await tracked_write(authority, partial(record_restart_interruption, policy))
+    return lambda: None
 
 
 def record_restart_interruption(policy):
@@ -23,6 +41,6 @@ def record_restart_interruption(policy):
                 or tuple(run) != ('running', context['claim_lock'], context['task_id'])):
             return
         kb._append_event(conn, task.id, 'worker_result', {
-            'claim_lock': context['claim_lock'], 'exit_code': KANBAN_OWNER_RESTART_EXIT_CODE,
+            'pid': task.worker_pid, 'claim_lock': context['claim_lock'], 'exit_code': KANBAN_OWNER_RESTART_EXIT_CODE,
             'last_output': 'Kanban attempt interrupted by gateway restart/shutdown; requeued uncounted.',
             'owner_restart': True}, run_id=context['run_id'])
