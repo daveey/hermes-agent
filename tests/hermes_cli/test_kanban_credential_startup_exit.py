@@ -6,17 +6,19 @@ import pytest
 import cli
 from hermes_cli.auth import AuthError, CODEX_RATE_LIMITED_CODE
 from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
+from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
 
 
 @pytest.mark.parametrize("quiet", [False, True])
 @pytest.mark.parametrize("worker", [False, True])
-@pytest.mark.parametrize("kind,worker_exit", [("revoked", 78), ("quota", 75), ("unknown", 1)])
+@pytest.mark.parametrize("kind,worker_exit", [("revoked", 78), ("quota", 75), ("subscription", 75), ("unknown", 1)])
 def test_credential_resolution_exit(monkeypatch, quiet, worker, kind, worker_exit):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_GOAL_MODE", raising=False)
     if worker:
         monkeypatch.setenv("HERMES_KANBAN_TASK", "t_fixture")
     errors = {
+        "subscription": SubscriptionQuotaUnavailable("anthropic", "exact-model", 1_900_000_000),
         "revoked": AuthError("fixture revoked", provider="openai-codex", code="invalid_grant", relogin_required=True),
         "quota": AuthError("fixture quota", provider="openai-codex", code=CODEX_RATE_LIMITED_CODE),
         "unknown": RuntimeError("fixture transport"),

@@ -9,8 +9,10 @@ from hermes_cli import kanban_provider_walls as walls
 from hermes_cli.kanban_model_tier import apply_model_tier
 
 from tests.hermes_cli.test_kanban_model_tier import (
-    OPUS, SONNET, _dispatch, _tier_events, _write_cfg, board,
+    OPUS, SONNET, _dispatch, _tier_events, _write_cfg, board as _board_fixture,
 )
+
+board = _board_fixture
 
 CODEX = "openai-codex"
 
@@ -47,7 +49,7 @@ def test_keep_pattern_card_retiered_off_walled_profile_provider(board, monkeypat
     assert "wall:openai-codex" in _tier_events(conn, tid)[-1]["reason"]
 
 
-def test_pinned_card_on_walled_provider_moves_unless_require_model(board, monkeypatch):
+def test_pinned_card_on_walled_provider_keeps_exact_pin(board, monkeypatch):
     _write_cfg(board, default_model=SONNET, default_provider="anthropic")
     monkeypatch.setattr(walls, "walls_path", lambda: board / "w.json")
     walls.record_wall(CODEX, 524389, path=board / "w.json")
@@ -56,7 +58,7 @@ def test_pinned_card_on_walled_provider_moves_unless_require_model(board, monkey
     b = kb.create_task(conn, title="b require_model", assignee="default", model_override="gpt-6-astra",
                        provider_override=CODEX)
     seen = _dispatch(conn)
-    assert seen[a][:2] == (SONNET, "anthropic")
+    assert seen[a][:2] == ("gpt-6-astra", CODEX)
     assert seen[b][:2] == ("gpt-6-astra", CODEX)
 
 

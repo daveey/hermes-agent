@@ -307,13 +307,14 @@ class CLIAgentSetupMixin:
                 if runtime is not None:
                     _primary_exc = None
         if runtime is None:
-            from hermes_cli.auth import AuthError, is_rate_limited_auth_error
-            self._credentials_rate_limited = bool(_primary_exc) and is_rate_limited_auth_error(_primary_exc)
+            from hermes_cli.turn_exit import credential_failure_flags
+            flags = credential_failure_flags(_primary_exc)
+            self._credentials_rate_limited = flags.get("credentials_rate_limited", False)
             # Only an explicit re-authentication requirement, or a pin the managed routing
             # registry refuses (config; a retry never heals it), is terminal. Unknown
             # resolver/network failures must not acquire the sticky Kanban block.
             from agent.model_routing_managed import ManagedPinRejectedError
-            self._credentials_terminal = ((isinstance(_primary_exc, AuthError) and _primary_exc.relogin_required)
+            self._credentials_terminal = (flags.get("credentials_terminal", False)
                                           or isinstance(_primary_exc, ManagedPinRejectedError))
             message = format_runtime_provider_error(_primary_exc) if _primary_exc else t("cli.startup.provider_resolution_failed")
             if getattr(self, "tool_progress_mode", "full") == "off":

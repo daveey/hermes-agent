@@ -147,6 +147,19 @@ def handle_api_error(
         reason=classified.reason.value,
     )
 
+    # A local quota refusal is not another provider response: rotating it would
+    # re-bench the last token and lose the original reset. Yield to the scheduler.
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    if isinstance(api_error, SubscriptionQuotaUnavailable):
+        return _verdict("return", max_retries_exhausted_result(
+            agent, api_error, classified, attempts=retry_count, is_rate_limited=True,
+            error_msg=str(api_error), api_kwargs=api_kwargs, api_messages=api_messages,
+            messages=messages, conversation_history=conversation_history,
+            api_call_count=api_call_count, approx_tokens=approx_tokens, provider=agent.provider,
+            base_url=agent.base_url, model=agent.model,
+            delivered=settle_delivered_partial(agent, messages, current_turn_user_idx),
+        ))
+
     # This machine lost its network (DNS fails locally, e.g. a laptop's dark wake): wait for it to
     # come back on awake time before consuming retry or credential-rotation recovery budgets.
     _offline = wait_out_offline(

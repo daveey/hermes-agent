@@ -49,9 +49,12 @@ def credential_failure_flags(exc) -> dict:
     ``AuthError`` is transient, only an explicit re-authentication requirement is terminal. The
     cause chain is walked because agent construction wraps the resolver's error."""
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
+        if isinstance(exc, SubscriptionQuotaUnavailable):
+            return {"credentials_rate_limited": True, "credentials_terminal": False}
         if isinstance(exc, AuthError):
             return {"credentials_rate_limited": is_rate_limited_auth_error(exc),
                     "credentials_terminal": bool(exc.relogin_required)}

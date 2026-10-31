@@ -305,7 +305,7 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
         elif unresolved:
             logger.warning("kanban model tier: %s pin has no provider (%s)", getattr(task, "id", "?"), unresolved)
             reason = "pinned+provider_unresolved"
-    if reason not in ("off", "profile_out_of_scope"):
+    if reason not in ("off", "profile_out_of_scope") and not reason.startswith("pinned"):
         try:
             from hermes_cli import kanban_provider_walls as _walls
             cfg_ = load_tier_config() if cfg is None else cfg

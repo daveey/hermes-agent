@@ -28,6 +28,8 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         from hermes_cli.config_effective import load_user_config_effective
         config = load_user_config_effective()
     pools = {}
+    unavailable = []
+    available = []
     if _temporary_resolution.get():
         state_path = ":memory:"
 
@@ -40,7 +42,14 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         if key not in pools:
             pools[key] = load_pool(route["provider"], allowed_auth_types=
                                   {"oauth"} if route["billing"] == "subscription" else None)
-        return pools[key].has_available(model=route["model"])
+        if pools[key].has_available(model=route["model"]):
+            available.append(route)
+            return True
+        if route["billing"] == "subscription":
+            from agent.model_routing_unavailable import quota_unavailable
+            if error := quota_unavailable(pools[key], route["model"]):
+                unavailable.append(error)
+        return False
 
     failed = list(excluded)
     resolved = {}
@@ -68,6 +77,8 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
             prepare_runtime(resolved)
 
     while True:
+        unavailable.clear()
+        available.clear()
         try:
             resolve_model_route(model, provider, config=config, session_id=session_id,
                                 parent_session_id=parent_session_id, requirements=requirements,
@@ -76,6 +87,12 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
             return resolved
         except UnavailableCredential:
             continue
+        except ModelRoutingError:
+            # Only credential eligibility was lost: policy/capability refusals
+            # never enter eligible(), and a prepared runtime's errors stay fatal.
+            if unavailable and not available and not resolved:
+                raise min(unavailable, key=lambda error: error.resets_at) from None
+            raise
 
 
 def refresh_class_anthropic_token(agent):
@@ -142,7 +159,15 @@ def verify_class_runtime(runtime, metadata):
         return
     pool = runtime.get("credential_pool")
     entry = pool.current() if pool else None
-    if entry is None or entry.auth_type != "oauth":
+    if entry is None:
+        from agent.model_routing_unavailable import quota_unavailable
+        if pool is not None and any(
+            candidate.auth_type == "oauth" and candidate.runtime_api_key == runtime["api_key"]
+            for candidate in pool.entries()
+        ) and (unavailable := quota_unavailable(pool, metadata["selected_model"])):
+            raise unavailable
+        raise ModelRoutingError("Subscription OAuth credential is unavailable; no selected pool entry")
+    if entry.auth_type != "oauth":
         raise ModelRoutingError("Subscription routing requires an OAuth credential, never a paid API key")
     from hermes_cli.runtime_provider import _pool_entry_api_key
     if runtime["api_key"] != _pool_entry_api_key(entry):

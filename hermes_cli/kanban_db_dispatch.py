@@ -100,7 +100,7 @@ _COMPLETION_GATE_ERROR_PREFIXES = ("PR acceptance ",)
 DEFAULT_GUARD_HOLD_CAP_SECONDS = 30 * 60
 DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS = 6 * 3600
 _GUARD_HOLD_SHORT_CAP_REASONS = frozenset({"blocker_auth"})
-_GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch", "model_pin_not_in_routing_registry"})
+_GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch", "model_pin_not_in_routing_registry", "subscription_quota_reset"})
 
 
 def _env_seconds(name: str, default: int) -> int:
@@ -1728,12 +1728,10 @@ def check_respawn_guard(
         return None
 
     now = int(time.time())
-
-    # 1. Rate-limit cooldown — see docstring for why this precedes blocker_auth.
-    #    LATEST run only: a newer crash/completion supersedes the rate-limit run.
-    #    An infrastructure spawn refusal (#114720) shares the cooldown: the host
-    #    condition is not the card's, so it retries forever, spaced, and never
-    #    reaches the breaker.
+    from hermes_cli.kanban_quota_receipt import waiting_for_quota_reset
+    if waiting_for_quota_reset(conn, task_id, now):
+        return "subscription_quota_reset"
+    # Only the latest run gates admission; quota and infrastructure failures are neutral.
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
     latest_run = conn.execute(
         "SELECT outcome, ended_at, metadata FROM task_runs "
