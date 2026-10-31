@@ -92,6 +92,8 @@ class FakeBoard:
         self.created: list[tuple] = []
 
     def card(self, cid):
+        if cid in self.cards:
+            return {"id": cid, **self.cards[cid]}
         return {"id": cid} if cid == OWNER else None
 
     def create(self, title, body, key, *, distinct_from=None, distinct_reason=None, creator_task_id=None):
@@ -294,7 +296,7 @@ def test_second_failure_with_same_tests_updates_the_card(env):
     assert "https://gh/run/101" in board.cards["t_1"]["comments"][0]
 
 
-def test_different_failing_tests_get_their_own_card(env):
+def test_different_failing_tests_update_the_one_open_red_card(env):
     gh, board, state = env
     _dispatch(gh, state)
     gh.finish(100, "failure", _log("tests/e2e/a.py::t"))
@@ -302,7 +304,9 @@ def test_different_failing_tests_get_their_own_card(env):
     _dispatch(gh, state, now=T0 + 20)
     gh.finish(101, "failure", _log("tests/e2e/a.py::t", "tests/e2e/b.py::t"))
     ne.report(gh, board, state, now=T0 + 30)
-    assert len(board.cards) == 2
+    assert len(board.cards) == 1
+    (comment,) = board.cards["t_1"]["comments"]
+    assert "https://gh/run/101" in comment and "tests/e2e/b.py::t" in comment
 
 
 def test_archived_card_is_replaced_not_commented(env):
@@ -541,14 +545,16 @@ def test_python_input_defaults_on_and_gates_only_the_python_lanes():
     assert tests["jobs"]["e2e"]["if"] == "inputs.e2e"
 
 
-def test_subset_of_failing_tests_is_a_separate_fingerprint_and_card(env):
+def test_subset_of_failing_tests_comments_on_the_open_red_card(env):
+    """Obsolete contract was a card per exact failing set; the red card is now one per alert scope."""
     gh, board, state = env
     for i, ids in enumerate([["tests/e2e/a.py::t", "tests/e2e/b.py::t"], ["tests/e2e/a.py::t"]]):
         _dispatch(gh, state, now=T0 + i * 60)
         gh.finish(100 + i, "failure", _log(*ids))
         ne.report(gh, board, state, now=T0 + i * 60 + 10)
-    assert len(board.cards) == 2
-    assert not any(c["comments"] for c in board.cards.values())
+    assert len(board.cards) == 1
+    (comment,) = board.cards["t_1"]["comments"]
+    assert "https://gh/run/101" in comment
 
 
 @pytest.mark.parametrize(

@@ -258,6 +258,92 @@ def test_owner_requires_open_nightly_provenance_and_the_exact_fingerprint(tmp_pa
     assert diag.nightly_owner([], state_path=state, board=Board()) == ""
 
 
+@pytest.mark.parametrize("identity", ["nightly-e2e:red:3", None])
+@pytest.mark.parametrize("body_ids", [(A, B), (A,)])
+def test_red_owner_uses_latest_set_not_initial_body(tmp_path, body_ids, identity):
+    state = tmp_path / "nightly.json"
+    state.write_text(json.dumps({"cards": {"red": {
+        "id": "t_owner", "n": 3, "scope": "main", "failing": [B, A],
+    }}}))
+    board = StateBoard({"t_owner": {
+        "id": "t_owner", "status": "running", "created_by": "nightly-e2e",
+        "idempotency_key": identity, "body": card_body(body_ids),
+    }})
+    assert diag.nightly_owner([A, B], state_path=state, board=board) == "t_owner (running)"
+    assert diag.nightly_owner([A], state_path=state, board=board) == ""
+    assert diag.nightly_owner([A, B, PY], state_path=state, board=board) == ""
+
+
+@pytest.mark.parametrize("saved_identity", [False, True])
+def test_red_owner_keeps_adopted_legacy_identity(tmp_path, saved_identity):
+    identity = f"nightly-e2e:{failure_key([A])}:4"
+    rec = {"id": "t_owner", "n": 0, "scope": "main", "failing": [B]}
+    if saved_identity:
+        rec["idempotency_key"] = identity
+    state = tmp_path / "nightly.json"
+    state.write_text(json.dumps({"cards": {"red": rec}}))
+    board = StateBoard({"t_owner": {
+        "id": "t_owner", "status": "running", "created_by": "nightly-e2e",
+        "idempotency_key": identity, "body": "edited body" if saved_identity else card_body([A]),
+    }})
+    assert diag.nightly_owner([B], state_path=state, board=board) == "t_owner (running)"
+    assert diag.nightly_owner([A], state_path=state, board=board) == ""
+
+
+@pytest.mark.parametrize("change", [
+    {"created_by": "default"}, {"idempotency_key": "nightly-e2e:timeout:3"},
+    {"idempotency_key": "nightly-e2e:red:2"},
+    {"idempotency_key": f"nightly-e2e:{failure_key([PY])}:4"},
+    {"idempotency_key": "nightly-e2e:acceptance|red:3"}, {"status": "done"},
+    {"id": "t_unrelated"},
+])
+def test_red_owner_rejects_unrelated_provenance(tmp_path, change):
+    state = tmp_path / "nightly.json"
+    state.write_text(json.dumps({"cards": {"red": {
+        "id": "t_owner", "n": 3, "scope": "main", "failing": [B],
+    }}}))
+    card = {"id": "t_owner", "status": "running", "created_by": "nightly-e2e",
+            "idempotency_key": "nightly-e2e:red:3", "body": card_body([A]), **change}
+    assert diag.nightly_owner([B], state_path=state, board=StateBoard({"t_owner": card})) == ""
+
+
+@pytest.mark.parametrize("key", ["red", "acceptance|red", failure_key([B])])
+def test_acceptance_record_is_not_main_owner(tmp_path, key):
+    state = tmp_path / "nightly.json"
+    state.write_text(json.dumps({"cards": {key: {
+        "id": "t_owner", "n": 1, "scope": "acceptance", "failing": [B],
+    }}}))
+    card = {"id": "t_owner", "status": "running", "created_by": "nightly-e2e", "body": card_body([B])}
+    assert diag.nightly_owner([B], state_path=state, board=StateBoard({"t_owner": card})) == ""
+
+
+@pytest.mark.parametrize("saved,actual", [
+    (f"nightly-e2e:{failure_key([A])}:4", f"nightly-e2e:{failure_key([A])}:5"),
+    ("nightly-e2e:acceptance|red:3", "nightly-e2e:acceptance|red:3"),
+    ("nightly-e2e:timeout:3", "nightly-e2e:timeout:3"),
+    ("nightly-e2e:red:2", "nightly-e2e:red:2"),
+])
+def test_saved_red_identity_cannot_authorize_an_unrelated_card(tmp_path, saved, actual):
+    state = tmp_path / "nightly.json"
+    state.write_text(json.dumps({"cards": {"red": {
+        "id": "t_owner", "n": 3, "scope": "main", "failing": [B], "idempotency_key": saved,
+    }}}))
+    card = {"id": "t_owner", "status": "running", "created_by": "nightly-e2e",
+            "idempotency_key": actual, "body": card_body([A])}
+    assert diag.nightly_owner([B], state_path=state, board=StateBoard({"t_owner": card})) == ""
+
+
+@pytest.mark.parametrize("latest", [None, [], [A]])
+def test_red_latest_set_is_authoritative_over_stale_legacy_record(tmp_path, latest):
+    state = tmp_path / "nightly.json"
+    state.write_text(json.dumps({"cards": {
+        "red": {"id": "t_owner", "n": 1, "scope": "main", "failing": latest},
+        failure_key([B]): {"id": "t_old", "n": 1},
+    }}))
+    card = {"id": "t_old", "status": "running", "created_by": "nightly-e2e", "body": card_body([B])}
+    assert diag.nightly_owner([B], state_path=state, board=StateBoard({"t_old": card})) == ""
+
+
 def gate_world(monkeypatch, tmp_path):
     monkeypatch.setattr(diag, "DEFAULT_STATE", tmp_path / "nightly-e2e.json")
     (tmp_path / "nightly-e2e.json").write_text("{}")

@@ -10,8 +10,10 @@ hermes-hub from two Hermes cron jobs (never from a laptop, never a GitHub ``sche
 
 Reporting (``report``), always within ``DEADLINE_HOURS`` of the dispatch:
 
-* failed      -> ONE Kanban card per distinct set of failing test ids (sha1 of the sorted ids). A later failing run
-                 with the same ids comments on that open card instead of filing another. Body: run link + tests.
+* failed      -> ONE open red card per alert scope (below). A later failing run of that scope comments on it with
+                 the run link and the newly failing / no longer failing / still failing test IDs against the last
+                 run it reported, whatever the overlap (subset, superset, disjoint). Once that card is done or
+                 archived, the next red run files the next generation. Body: run link + tests.
 * not finished in time / cancelled / never started -> ONE "did not run" card, later occurrences comment on it.
 * green while a card of ours is open -> comment the green run on every open one.
 * GitHub (or the board) keeps erroring -> retried every tick; past the deadline the run gets the "did not run" card
@@ -22,9 +24,12 @@ Alert intent: titles name the tested ref ("RED on <ref>"). Cards of a non-main r
 ``--acceptance-marker LABEL --acceptance-owner-task t_...`` (dispatch, or report to label already-pending runs),
 say "acceptance fixture; do not repair main" / "not a current main incident" and request no repair; the owner is
 recorded as creator_task_id so the owner's cleanup can archive them. Each intent (main, ref, acceptance marker)
-keeps its own cards: production main alerts are unchanged (default assignee, "Fix main" instruction). Dedupe is the
-exact sorted failing-test-ID set within an intent; a subset or superset is a different fingerprint and a new card by
-design, not a dedupe defect.
+keeps its own cards: production main alerts are unchanged (default assignee, "Fix main" instruction).
+
+The fingerprint version filed a card per exact failing set, so one incident whose failures shifted kept opening new
+red cards. Its state (``failed-<sha1>`` records, no IDs) migrates on the next red run of each scope: an open legacy
+card is reused (other open ones of the scope get one "superseded" comment), its baseline is the fingerprint's set if
+the run hashes to it or the body's test list if that hashes to it, else it is reported as unknown.
 
 Both commands hold an exclusive flock on ``<state>.lock`` from loading the state to saving it, so the 02:00 dispatch
 and a report tick that overlap cannot overwrite each other's ``pending`` (hub-only, so fcntl is enough).
@@ -53,7 +58,7 @@ from pathlib import Path
 from typing import Any, Iterator, Protocol
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from flaky_kanban import OPEN, CliBoard, CreateRefused
+from flaky_kanban import CliBoard, CreateRefused
 
 REPO = "daveey/hermes"
 WORKFLOW = "nightly-e2e.yml"
@@ -318,8 +323,7 @@ def scope_of(entry: dict[str, Any]) -> str:
     """Alert intent: ``main`` (production), ``ref:<ref>`` (a historical/other ref) or ``acceptance:<marker>``.
 
     Only production ``main`` cards are repair work. Each scope has its own cards, so a fixture or historical-ref
-    run never comments on, or is deduped into, a production card. Within a scope the dedupe is unchanged: the
-    sorted failing-test-ID set. A subset/superset of those IDs is a different fingerprint and files a new card.
+    run never comments on, or is deduped into, a production card. Within a scope there is one open red card.
     """
     if entry.get("acceptance_marker"):
         return f"acceptance:{entry['acceptance_marker']}"
@@ -380,9 +384,10 @@ def _card_body_main(
         return (
             f"The nightly e2e (the same `e2e` job the upstream-sync gate runs) is RED at `{entry['ref']}`.\n\n"
             f"Run: {url}\n{head}\n\n{summary}\n\nFailing tests ({len(ids)}):\n{tests}\n\n"
-            f"{action}Later failing nightlies of the same scope with these exact tests are added to this card as "
-            "comments (a different set of failing tests, even a subset, is a separate fingerprint and card by "
-            "design); a green run is commented here too. Filed by scripts/ci/nightly_e2e.py on hermes-hub."
+            f"{action}Later failing nightlies of the same scope are added to this card as comments listing newly "
+            "failing, no longer failing and still failing tests (one open red card per scope; a red run after this "
+            "card is done or archived files a new one); a green run is commented here too. "
+            "Filed by scripts/ci/nightly_e2e.py on hermes-hub."
         )
     if not production:
         return (
@@ -397,6 +402,36 @@ def _card_body_main(
     )
 
 
+def _is_open(board: Any, card_id: str) -> bool:
+    status = board.status(card_id)
+    if status is None:
+        raise RuntimeError(f"nightly card {card_id} status is unreadable; refusing to replace its owner")
+    return status not in {"done", "archived"}
+
+
+def _create(
+    board: Any, entry: dict[str, Any], key: str, n: int, title: str, body: str, reason: str
+) -> str:
+    owner = entry.get("acceptance_owner")
+    extra = {"creator_task_id": owner} if owner else {}
+    try:
+        return board.create(title, body, f"nightly-e2e:{key}:{n}", **extra)
+    except CreateRefused as refused:
+        return board.create(
+            title,
+            body,
+            f"nightly-e2e:{key}:{n}",
+            distinct_from=[str(m.get("id")) for m in refused.matches if m.get("id")],
+            distinct_reason=reason,
+            **extra,
+        )
+
+
+def _noted(entry: dict[str, Any], text: str) -> str:
+    note = _scope_note(entry)
+    return f"{note}\n{text}" if note else text
+
+
 def _file_or_update(
     board: Any,
     state: dict[str, Any],
@@ -408,29 +443,159 @@ def _file_or_update(
 ) -> str:
     """Comment on this scope+key's open card, else file a new one. Returns what happened, with the card id."""
     key = _scoped_key(entry, key)
-    note = _scope_note(entry)
-    if note:
-        comment = f"{note}\n{comment}"
-    owner = entry.get("acceptance_owner")
-    extra = {"creator_task_id": owner} if owner else {}
     rec = state["cards"].get(key)
-    if rec and board.status(rec["id"]) in OPEN:
-        board.comment(rec["id"], comment)
+    if rec and _is_open(board, rec["id"]):
+        board.comment(rec["id"], _noted(entry, comment))
         return f"updated {rec['id']} ({key})"
     n = (rec or {}).get("n", 0) + 1
-    try:
-        card_id = board.create(title, body, f"nightly-e2e:{key}:{n}", **extra)
-    except CreateRefused as refused:
-        card_id = board.create(
-            title,
-            body,
-            f"nightly-e2e:{key}:{n}",
-            distinct_from=[str(m.get("id")) for m in refused.matches if m.get("id")],
-            distinct_reason="the nightly e2e finding for this exact set of failing tests",
-            **extra,
-        )
+    card_id = _create(board, entry, key, n, title, body, "the nightly e2e finding for this alert scope")
     state["cards"][key] = {"id": card_id, "n": n, "scope": scope_of(entry)}
     return f"filed {card_id} ({key})"
+
+
+# --- red cards: one open card per alert scope -------------------------------------------------------------------
+#
+# State record under _scoped_key(entry, RED_KEY): {"id", "n" (generation), "scope", "failing": the failing IDs the
+# card's last comment (or body) reported, None when unknown}. "failing" is written only after that comment lands, so
+# a failed comment is retried next tick against the same baseline. Records the fingerprint version wrote
+# ("failed-<sha1 of the sorted IDs>", one card per exact set, no IDs) are migrated by the next red run of their scope.
+
+RED_KEY = "red"
+LEGACY_RED_KEY = re.compile(r"(?:^|\|)failed-[0-9a-f]{12}$")
+BODY_IDS = re.compile(r"^Failing tests \((\d+)\):\n((?:- `[^`\n]+`(?:\n|$))+)", re.MULTILINE)
+LISTED_ID = re.compile(r"^- `([^`\n]+)`$", re.MULTILINE)
+
+
+def _rec_scope(key: str, rec: dict[str, Any]) -> str:
+    # Records filed before scopes existed carry no "scope" and only ever named main.
+    return rec.get("scope") or (key.rsplit("|", 1)[0] if "|" in key else "main")
+
+
+def _legacy_red(state: dict[str, Any], scope: str) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (k, r)
+        for k, r in sorted(state["cards"].items())
+        if LEGACY_RED_KEY.search(k) and _rec_scope(k, r) == scope
+    ]
+
+
+def _legacy_baseline(board: Any, key: str, rec: dict[str, Any], ids: list[str]) -> list[str] | None:
+    """The failing IDs a legacy card stands for: its fingerprint when the current run hashes to it, else the
+    body's full test list if that list hashes to the fingerprint (a truncated or edited list does not); else None."""
+    fingerprint = key.rsplit("|", 1)[-1]
+    if failure_key(ids) == fingerprint:
+        return sorted(ids)
+    m = BODY_IDS.search((board.card(rec["id"]) or {}).get("body") or "")
+    if m:
+        listed = LISTED_ID.findall(m.group(2))
+        if len(listed) == int(m.group(1)) and failure_key(listed) == fingerprint:
+            return sorted(listed)
+    return None
+
+
+def _id_section(name: str, ids: list[str]) -> str:
+    listed = "\n".join(f"- `{t}`" for t in ids[:MAX_LISTED]) or "- none"
+    if len(ids) > MAX_LISTED:
+        listed += f"\n- … and {len(ids) - MAX_LISTED} more (see the run log)"
+    return f"{name} ({len(ids)}):\n{listed}"
+
+
+def _red_comment(entry: dict[str, Any], before: list[str] | None, ids: list[str], summary: str) -> str:
+    head = f"Nightly e2e is RED again: {entry.get('url')} (`{entry['ref']}` = `{entry['sha']}`).\n{summary}\n\n"
+    if before is None:
+        return _noted(entry, head + (
+            "Baseline unknown: this card was filed before the reporter recorded failing test IDs, and its body "
+            "could not be matched to its fingerprint, so this run cannot be split into newly / no longer / still "
+            "failing. Later runs are compared against this one.\n\n" + _id_section("Failing now", ids)
+        ))
+    now, prev = set(ids), set(before)
+    sections = [
+        _id_section("Newly failing", sorted(now - prev)),
+        _id_section("No longer failing", sorted(prev - now)),
+        _id_section("Still failing", sorted(now & prev)),
+    ]
+    return _noted(entry, head + "\n\n".join(sections))
+
+
+def _adopt_legacy(
+    board: Any, state: dict[str, Any], entry: dict[str, Any], ids: list[str]
+) -> tuple[str, list[str] | None, str] | None:
+    """(card id, baseline, creation key) of the open fingerprint-era card this scope keeps, or None.
+
+    The card whose fingerprint is the current set wins, else the first by key. Every other open one is told where
+    results now go and dropped from state before the update is posted, so a retry never re-posts that notice."""
+    open_legacy = [(k, r) for k, r in _legacy_red(state, scope_of(entry)) if _is_open(board, r["id"])]
+    if not open_legacy:
+        return None
+    fingerprint = failure_key(ids)
+    open_legacy.sort(key=lambda kr: kr[0].rsplit("|", 1)[-1] != fingerprint)  # stable: key order otherwise
+    (key, kept), *duplicates = open_legacy
+    for dup_key, dup in duplicates:
+        board.comment(dup["id"], _noted(entry, (
+            f"Superseded by {kept['id']}: the nightly e2e now keeps one red card per alert scope, and later results "
+            "for this scope are posted there. This duplicate can be closed."
+        )))
+        del state["cards"][dup_key]
+    return kept["id"], _legacy_baseline(board, key, kept, ids), f"nightly-e2e:{key}:{kept['n']}"
+
+
+def _report_red(
+    board: Any, state: dict[str, Any], entry: dict[str, Any], ids: list[str], summary: str
+) -> str:
+    """Comment the scope's open red card with the delta to its last failing set, else file the next generation."""
+    key = _scoped_key(entry, RED_KEY)
+    rec = state["cards"].get(key)
+    if rec and _is_open(board, rec["id"]):
+        target: tuple[str, list[str] | None, str] | None = (
+            rec["id"], rec.get("failing"), rec["idempotency_key"]
+        )
+    else:
+        target = _adopt_legacy(board, state, entry, ids)
+    n = (rec or {}).get("n", 0)
+    if target is None:
+        n += 1
+        card_id = _create(
+            board, entry, key, n, _title(entry, ids, ""), _card_body("failed", entry, ids, summary),
+            "the nightly e2e red card of this alert scope (the previous one is closed)",
+        )
+        done = f"filed {card_id} ({key})"
+        creation_key = f"nightly-e2e:{key}:{n}"
+    else:
+        card_id, before, creation_key = target
+        board.comment(card_id, _red_comment(entry, before, ids, summary))
+        done = f"updated {card_id} ({key})"
+    for legacy_key, _ in _legacy_red(state, scope_of(entry)):  # migrated (or closed): never consulted again
+        del state["cards"][legacy_key]
+    state["cards"][key] = {
+        "id": card_id, "n": n, "scope": scope_of(entry), "failing": sorted(ids),
+        "idempotency_key": creation_key,
+    }
+    return done
+
+
+def _report_green(board: Any, state: dict[str, Any], entry: dict[str, Any]) -> str:
+    """Comment the green run once on every open card of the scope; a red card also hears what stopped failing."""
+    scope, notes = scope_of(entry), []
+    for key, rec in sorted(state["cards"].items()):
+        if (
+            _rec_scope(key, rec) != scope
+            or rec["id"] in notes
+            or rec.get("green_run") == entry.get("run_id")  # already told, before a later card's comment failed
+            or not _is_open(board, rec["id"])
+        ):
+            continue
+        text = (
+            f"Nightly e2e is GREEN: {entry.get('url')} (`{entry['ref']}` = `{entry['sha']}`). "
+            "Close this card if the cause is fixed."
+        )
+        if rec.get("failing"):
+            text += "\n\n" + _id_section("No longer failing", rec["failing"])
+        board.comment(rec["id"], _noted(entry, text))
+        rec["green_run"] = entry.get("run_id")
+        if "failing" in rec:
+            rec["failing"] = []
+        notes.append(rec["id"])
+    return "green" + (f"; commented on {', '.join(notes)}" if notes else "")
 
 
 def _e2e_job(jobs: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -496,18 +661,7 @@ def _settle(
     job = _e2e_job(gh.jobs(entry["run_id"]))
     job_conclusion = (job or {}).get("conclusion") or conclusion
     if job_conclusion == "success":
-        notes = []
-        note = _scope_note(entry)
-        for key, rec in sorted(state["cards"].items()):
-            if rec.get("scope", "main") == scope_of(entry) and board.status(rec["id"]) in OPEN:
-                board.comment(
-                    rec["id"],
-                    (f"{note}\n" if note else "")
-                    + f"Nightly e2e is GREEN: {url} (`{entry['ref']}` = `{entry['sha']}`). "
-                    "Close this card if the cause is fixed.",
-                )
-                notes.append(rec["id"])
-        return True, "green" + (f"; commented on {', '.join(notes)}" if notes else "")
+        return True, _report_green(board, state, entry)
     if job_conclusion == "failure":
         log = gh.job_log(job["id"]) if job else ""
         ids = failing_tests(log)
@@ -517,17 +671,7 @@ def _settle(
             ids = [
                 "(no failing test id parsed: the e2e job failed outside pytest, see the run)"
             ]
-        key = failure_key(ids)
-        return True, "failed: " + _file_or_update(
-            board,
-            state,
-            entry,
-            key,
-            _title(entry, ids, ""),
-            _card_body("failed", entry, ids, summary),
-            f"Nightly e2e failed again with the same {len(ids)} test(s): {url} "
-            f"(`{entry['ref']}` = `{entry['sha']}`).\n{summary}",
-        )
+        return True, "failed: " + _report_red(board, state, entry, ids, summary)
     return True, f"{job_conclusion or conclusion}: " + _file_or_update(
         board,
         state,

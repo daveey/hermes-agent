@@ -16,9 +16,10 @@ A failing id that also failed there is a main-baseline failure: upstream did not
 failure only when a complete run of that job kind at the base (every job finished, full Python slices, every failed
 job's ids parsed) did not fail it; that is an observation, not proof that upstream caused it (tests flake). Anything
 else is "baseline comparison unknown". The e2e failing set is then matched against the nightly reporter's cards
-(``~/.hermes/state/nightly-e2e.json``, key = ``nightly_e2e.failure_key``): a card is named only when it is open, was
-created by nightly-e2e, is the state's card for that exact key and its body lists exactly that set. An e2e set that
-was not fully parsed (no ids, or a whole-file crash/timeout in the log) gets "owner lookup unknown".
+(``~/.hermes/state/nightly-e2e.json``): only open main-scope cards created by nightly-e2e qualify. The red record's
+latest ``failing`` set is authoritative, not its initial body. Legacy fingerprint records still require that body
+proof. A supplied board idempotency key must match creation provenance, including an adopted legacy identity.
+An e2e set that was not fully parsed (no ids, or a whole-file crash/timeout) gets "owner lookup unknown".
 """
 from __future__ import annotations
 
@@ -149,11 +150,38 @@ def _lists_exactly(body: str, ids: list[str]) -> bool:
     return f"Failing tests ({len(ids)}):" in body and all(f"- `{i}`" in body for i in ids[:MAX_LISTED])
 
 
+def _owner_identity(card: dict, rec: dict, key: str) -> bool:
+    """Match the creation key, including a fingerprint-era card adopted into the red slot."""
+    idem = card.get("idempotency_key")
+    if idem is None:  # kanban show --json omits it; state id and creator still bind the card
+        return True
+    expected = f"nightly-e2e:{key}:{rec.get('n')}"
+    if key != "red":
+        return idem == expected
+    saved = rec.get("idempotency_key")
+    if saved is not None:
+        return (isinstance(saved, str)
+                and re.fullmatch(r"nightly-e2e:(?:red|failed-[0-9a-f]{12}):[1-9][0-9]*", saved) is not None
+                and (not saved.startswith("nightly-e2e:red:") or saved == expected)
+                and idem == saved)
+    if idem == expected:
+        return True
+    # Early red records did not retain adoption provenance. Only a complete original
+    # body can recover its fingerprint; never accept an arbitrary failed-* prefix.
+    match = re.fullmatch(r"nightly-e2e:(failed-[0-9a-f]{12}):[1-9][0-9]*", str(idem))
+    body = re.search(r"^Failing tests \((\d+)\):\n((?:- `[^`\n]+`(?:\n|$))+)",
+                     str(card.get("body") or ""), re.MULTILINE)
+    if not match or not body:
+        return False
+    listed = re.findall(r"^- `([^`\n]+)`$", body[2], re.MULTILINE)
+    return len(listed) == int(body[1]) and failure_key(listed) == match[1]
+
+
 def nightly_owner(ids, *, state_path: Path | None = None, board=None) -> str:
     """The open nightly-e2e card filed for exactly this failing set, else ''. Unreadable state or board raises.
 
-    Provenance: the reporter's state maps ``failure_key`` -> card id, the card was created by nightly-e2e, and its body
-    lists exactly these ids. ``kanban show --json`` carries no idempotency key; a board that returns one must match."""
+    The main red record binds the latest exact set to a card; old state binds a fingerprint and body instead.
+    ``kanban show --json`` carries no idempotency key; a board that returns one must match creation provenance."""
     state_path = Path(state_path or DEFAULT_STATE)
     if not ids or not state_path.exists():
         return ""
@@ -163,18 +191,22 @@ def nightly_owner(ids, *, state_path: Path | None = None, board=None) -> str:
     cards = state.get("cards", {}) if isinstance(state, dict) else None  # no key yet: nothing filed
     if not isinstance(cards, dict):
         raise ValueError(f"{state_path} has no nightly-e2e card map")
+    key = "red" if "red" in cards else key
     rec = cards.get(key)
     if not rec:
         return ""
     if not isinstance(rec, dict) or not rec.get("id"):
         raise ValueError(f"{state_path} card record for {key} is malformed: {rec!r}")
+    if rec.get("scope", "main") != "main":
+        return ""
+    if key == "red" and (not isinstance(rec.get("failing"), list) or set(rec["failing"]) != set(ids)):
+        return ""
     card = (board or NightlyBoard("hermes")).card(rec["id"])
     if card is None:  # CliBoard.card answers None for a failed `hermes kanban show`: unknown, not "no owner"
         raise RuntimeError(f"nightly card {rec['id']} for {key} is unreadable on this host's board")
-    idem = card.get("idempotency_key")
-    if (card.get("status") in OPEN and card.get("created_by") == "nightly-e2e"
-            and (idem is None or str(idem).startswith(f"nightly-e2e:{key}:"))
-            and _lists_exactly(str(card.get("body") or ""), ids)):
+    if (card.get("id") == rec["id"] and card.get("status") in OPEN and card.get("created_by") == "nightly-e2e"
+            and _owner_identity(card, rec, key)
+            and (key == "red" or _lists_exactly(str(card.get("body") or ""), ids))):
         return f"{card['id']} ({card['status']})"
     return ""
 
