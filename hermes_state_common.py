@@ -448,6 +448,12 @@ def emit_session_deleted(db, deleted_ids, *, reason, primary=None, sessions_dir=
 _FTS_TRIGGERS = ("messages_fts_insert", "messages_fts_delete", "messages_fts_update",
                  "messages_fts_trigram_insert", "messages_fts_trigram_delete", "messages_fts_trigram_update")
 
+# Shared literally with the partial index: a bound GLOB parameter cannot prove
+# its predicate to SQLite. CASE keeps malformed receipts writable and unindexed.
+LOCAL_LINEAGE_PREDICATE_SQL = (
+    "key GLOB 'gateway.local_policy.v1:*' AND "
+    "CASE WHEN json_valid(value) THEN json_array_length(value, '$.lineage') > 1 ELSE 0 END")
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
@@ -783,6 +789,10 @@ CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(
 CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
     ON async_delegations(delivery_state, completed_at);
 """
+# Receipt JSON can include a large launch policy. Index only multi-segment
+# receipts so unrelated writes do not force listings to parse every policy again.
+SCHEMA_SQL += ("CREATE INDEX IF NOT EXISTS idx_state_meta_local_lineage ON state_meta(key) WHERE "
+               + LOCAL_LINEAGE_PREDICATE_SQL + ";\n")
 
 # Indexes on later-added columns must run AFTER _reconcile_columns(), or executescript fails on legacy DBs.
 # sessions_runtime_ledger_delete_guard: every delete path in this release retires a session's ledger rows
