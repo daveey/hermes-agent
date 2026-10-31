@@ -41,6 +41,7 @@ _REASON_TO_LAYER = {
     "session_turn_lease_lost": LAYER_GATEWAY,  # [daveey] tui_gateway/prompt_turn._surface_system_interrupt
     "gateway_connection": LAYER_GATEWAY, "host_error": LAYER_GATEWAY, "workspace_unavailable": LAYER_GATEWAY,
     "launch_credentials_unavailable": LAYER_GATEWAY, "route_refused": LAYER_GATEWAY,
+    "local_runtime_unavailable": LAYER_ENDPOINT,  # the managed local model server is down
     "truncated": LAYER_PROVIDER, "empty_response": LAYER_PROVIDER, "invalid_response": LAYER_PROVIDER,
     "context_overflow": LAYER_PROVIDER,  # a bigger-window model IS the fix, so Switch provider applies
 }

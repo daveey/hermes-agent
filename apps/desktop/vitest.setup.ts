@@ -1,6 +1,7 @@
 import { configure } from '@testing-library/react'
-import { afterAll } from 'vitest'
+import { afterAll, afterEach } from 'vitest'
 
+import { clearPlaybackSourceCache } from './src/lib/playback-source-cache'
 import { InertResizeObserver } from './src/test/jsdom'
 
 // Shared tooltips measure their arrow through Radix's useSize hook.
@@ -86,9 +87,7 @@ if ('Element' in globalThis) {
 // genuinely hung await still surfaces as this assertion, not a test timeout.
 configure({ asyncUtilTimeout: 12_000 })
 
-// Radix FocusScope restores focus in a setTimeout(0) scheduled at unmount. When a
-// file's last test unmounts a menu or dialog, that timer can outlive the file's
-// jsdom and throw "parameter 1 is not of type 'Event'" as an unhandled error,
-// failing the whole run (profile-rail-fleet, run 41058102554 on a 4-core runner).
-// Let it fire while this file's window still exists.
+// Flush Radix focus restoration before disposing jsdom.
 afterAll(() => new Promise<void>(resolve => setTimeout(resolve, 0)))
+// Resolved media URLs must not leak between tests.
+afterEach(() => clearPlaybackSourceCache())

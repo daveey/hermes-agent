@@ -27,6 +27,9 @@ export interface CredentialFailureMetadata {
 
 export interface RuntimeCheckSnapshot extends CredentialFailureMetadata {
   error?: string
+  /** Why the check failed, when the backend names it (`local_runtime_unavailable`: the managed
+   *  local model server is down). Absent on older backends and for unclassified failures. */
+  error_code?: string
   /** True when the resolved route is the free tier rather than a credential of
    *  the user's own. Absent on older backends. */
   free_tier_route?: boolean
@@ -50,6 +53,8 @@ export interface RuntimeReadinessOptions {
 
 export interface RuntimeReadinessResult extends CredentialFailureMetadata {
   checksDisagree: boolean
+  /** Passed through from `setup.runtime_check.error_code`. */
+  errorCode?: string
   /** Passed through from `setup.runtime_check`: the resolved route is the free
    *  tier. Undefined when the check did not answer (older backend, transport
    *  fallback) — never read it as "not free tier". */
@@ -139,6 +144,13 @@ function reportedFailure(
   return { any: raw, raw, runtime }
 }
 
+function failedRuntimeReason(reason: string, credentialsConfigured: boolean, route: { errorCode?: string }): string {
+  // A coded failure names its own cause; the suffix exists to explain an uncoded disagreement.
+  return credentialsConfigured && !route.errorCode
+    ? `${reason} setup.status reports configured credentials, but runtime resolution still failed.`
+    : reason
+}
+
 export function interpretRuntimeReadiness(
   signals: RuntimeReadinessSignals,
   options: RuntimeReadinessOptions = {}
@@ -166,6 +178,7 @@ export function interpretRuntimeReadiness(
     failure_kind: signals.runtime?.failure_kind,
     provider: signals.runtime?.provider,
     reset_at: signals.runtime?.reset_at,
+    errorCode: normalizeMessage(signals.runtime?.error_code) ?? undefined,
     freeTier: typeof signals.runtime?.free_tier_route === 'boolean' ? signals.runtime.free_tier_route : undefined,
     model: normalizeMessage(signals.runtime?.model) ?? undefined
   }
@@ -184,17 +197,11 @@ export function interpretRuntimeReadiness(
       }
     }
 
-    let reason = failure.runtime ?? defaultReason
-
-    if (checksDisagree && setupConfigured) {
-      reason = `${reason} setup.status reports configured credentials, but runtime resolution still failed.`
-    }
-
     return {
       ...route,
       checksDisagree,
       ready: false,
-      reason,
+      reason: failedRuntimeReason(failure.runtime ?? defaultReason, checksDisagree && setupConfigured === true, route),
       source: 'runtime_check'
     }
   }

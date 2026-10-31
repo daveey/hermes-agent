@@ -435,6 +435,11 @@ def _synthesize_upstream_merge(git_cmd: list[str], cwd: Path, upstream: str) -> 
               "    Conflicting paths: " + (", ".join(p for p in conflicts if p.strip())[:400] or "?") + "\n"
               "    Resolve by hand: merge upstream/main on a branch, fix, commit, then land it with\n"
               "    python3 scripts/ci/upstream_sync.py --head <merge sha>  (never a direct push to main)")
+        if tree_proc.returncode == 1 and any(p.strip() for p in conflicts):
+            from hermes_cli.update_upstream_conflict import report
+            task_id = report(cwd, upstream, [p for p in conflicts if p.strip()])
+            if task_id:
+                print(f"    Repair owner: {task_id}")
         return None
     msg = f"Merge upstream/main ({upstream[:10]}) into fork"
     commit = _git_stdout(git_cmd, ["commit-tree", tree, "-p", head, "-p", upstream, "-m", msg], cwd)
