@@ -41,7 +41,8 @@ def comment_rejection(conn: sqlite3.Connection, task_id: str, url: str, reason: 
     from hermes_cli import kanban_db as kb
 
     body = (f"Respawn guard released rejected merge-queue PR {url}. "
-            "Repair and resubmit this PR; do not open a duplicate.\n\n"
+            "Follow the rejection and any superseding scope ruling before retrying; "
+            "do not blindly resubmit an unchanged rejection or open a duplicate.\n\n"
             + "\n".join("> " + line for line in reason.splitlines()))
     if not conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND body = ?",
                         (task_id, body)).fetchone():

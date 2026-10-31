@@ -1,0 +1,148 @@
+"""Mixed historical dependencies must not require repeated reviews of old PRs."""
+import json
+import time
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_dispatch as dispatch
+from hermes_cli import kanban_db_dispatch_pr_state as prs
+from tests.hermes_cli.kanban_guard_helpers import worker_comment
+from tests.hermes_cli.test_kanban_dependency_review import HEAD, PR, finish_reviews, parked
+
+OLD_PR = "https://github.com/example/repo/pull/9"
+
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(prs, "pr_state", lambda _: "OPEN")
+    kb.init_db()
+    with kbc.connect() as conn:
+        yield conn
+
+
+def mixed_park(conn, monkeypatch, *, legacy=False):
+    now = int(time.time())
+    monkeypatch.setattr(time, "time", lambda: now)
+    historical = kb.create_task(conn, title="old design ruling", assignee="reviewer")
+    finish_reviews(conn, [historical], metadata={"verdict": "approved", "head": HEAD, "pr": OLD_PR})
+    task = kb.create_task(conn, title="sequential implementation", assignee="dev")
+    kb.claim_task(conn, task)
+    run = kb.get_task(conn, task).current_run_id
+    worker_comment(conn, task, "dev", OLD_PR + " and " + PR)
+    fresh = kb.create_task(conn, title="new review", assignee="reviewer")
+    for parent in [historical, fresh]:
+        kb.link_tasks(conn, parent, task, expected_child_run_id=run)
+    monkeypatch.setattr(time, "time", lambda: now + 10)
+    assert kb.block_task(conn, task, kind="dependency", reason="review", expected_run_id=run)
+    if legacy:
+        row = conn.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND kind = 'dependency_wait'", (task,)).fetchone()
+        payload = json.loads(row["payload"])
+        payload["review_checkpoint"].pop("awaited", None)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET payload = ? WHERE id = ?", (json.dumps(payload), row["id"]))
+    monkeypatch.setattr(time, "time", lambda: now + 20)
+    finish_reviews(conn, [fresh], metadata={"verdict": "APPROVE", "head": HEAD, "pr": 10})
+    return task, historical
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("old_state", ["MERGED", "CLOSED", "REJECTED"])
+def test_historical_parent_and_discharged_pr_allow_one_continuation(board, monkeypatch, legacy, old_state):
+    task, _ = mixed_park(board, monkeypatch, legacy=legacy)
+    monkeypatch.setattr(prs, "pr_state", lambda url: old_state if url == OLD_PR else "OPEN")
+    monkeypatch.setitem(prs._rejections, OLD_PR, "size judge: SPLIT")
+    assert dispatch.check_respawn_guard(board, task) is None
+    if old_state == "REJECTED":
+        notes = [r["body"] for r in board.execute(
+            "SELECT body FROM task_comments WHERE task_id = ? AND author = 'respawn-guard'", (task,),
+        )]
+        assert len(notes) == 1
+        assert "size judge: SPLIT" in notes[0]
+        assert "superseding scope ruling" in notes[0]
+        assert "do not blindly resubmit" in notes[0]
+        assert dispatch.check_respawn_guard(board, task) is None
+        assert board.execute(
+            "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = 'respawn-guard'", (task,),
+        ).fetchone()[0] == 1
+    assert kb.claim_task(board, task) is not None
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+    assert kb.reclaim_task(board, task, reason="crash", signal_fn=lambda *_: None)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("state", [None, "OPEN"])
+def test_integer_review_does_not_cover_other_open_or_unknown_pr(board, monkeypatch, state):
+    task, _ = mixed_park(board, monkeypatch)
+    monkeypatch.setattr(prs, "pr_state", lambda url: state if url == OLD_PR else "OPEN")
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("named", [10, "#10", "example/repo#10", PR])
+def test_present_pr_reference_resolves_only_its_captured_url(board, named):
+    task, reviews = parked(board)
+    finish_reviews(board, reviews, metadata={"verdict": "APPROVE", "head": HEAD, "pr": named})
+    assert dispatch.check_respawn_guard(board, task) is None
+
+
+@pytest.mark.parametrize("named", [None, True, 99, "#99", "other/repo#10", "", {}, []])
+@pytest.mark.parametrize("verdict", ["APPROVE", "changes_required"])
+def test_present_invalid_reference_is_not_missing_reference(board, named, verdict):
+    task, reviews = parked(board)
+    finish_reviews(board, reviews, metadata={"verdict": verdict, "reviewed_sha": HEAD, "pr": named})
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_historical_parent_lifecycle_activity_invalidates_exemption(board, monkeypatch, legacy):
+    task, historical = mixed_park(board, monkeypatch, legacy=legacy)
+    with kb.write_txn(board):
+        kb._synthesize_ended_run(board, historical, outcome="completed", summary="Superseding ruling", metadata={})
+    monkeypatch.setattr(prs, "pr_state", lambda url: "MERGED" if url == OLD_PR else "OPEN")
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("event", ["archived", "worker_result"])
+def test_historical_parent_bookkeeping_does_not_rearm_hold(board, monkeypatch, legacy, event):
+    task, historical = mixed_park(board, monkeypatch, legacy=legacy)
+    with kb.write_txn(board):
+        if event == "archived":
+            board.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (historical,))
+        kb._append_event(board, historical, event, {})
+    monkeypatch.setattr(prs, "pr_state", lambda url: "MERGED" if url == OLD_PR else "OPEN")
+    assert dispatch.check_respawn_guard(board, task) is None
+
+
+def test_ambiguous_numeric_reference_does_not_cover_two_repositories(board):
+    from hermes_cli.kanban_dependency_review import _named_prs
+    assert _named_prs({"pr": 10}, {PR, "https://github.com/other/repo/pull/10"}) == set()
+
+
+def test_missing_nonlocal_parent_can_be_checkpointed(board):
+    task = kb.create_task(board, title="implementation", assignee="dev")
+    kb.claim_task(board, task)
+    run = kb.get_task(board, task).current_run_id
+    worker_comment(board, task, "dev", PR)
+    with kb.write_txn(board):
+        board.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", ("t_remote_missing", task))
+    assert kb.parent_states(board, task) == [("t_remote_missing", None)]
+    assert kb.block_task(board, task, kind="dependency", reason="remote review", expected_run_id=run)
+    row = board.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'dependency_wait'", (task,)).fetchone()
+    assert json.loads(row["payload"])["review_checkpoint"]["awaited"] == ["t_remote_missing"]
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("awaited", [None, {}, "parent", [42], ["unknown"], []])
+def test_malformed_or_empty_awaited_checkpoint_cannot_authorize(board, awaited):
+    task, reviews = parked(board)
+    finish_reviews(board, reviews, metadata={"verdict": "APPROVE", "head": HEAD})
+    row = board.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND kind = 'dependency_wait'", (task,)).fetchone()
+    payload = json.loads(row["payload"])
+    payload["review_checkpoint"]["awaited"] = awaited
+    with kb.write_txn(board):
+        board.execute("UPDATE task_events SET payload = ? WHERE id = ?", (json.dumps(payload), row["id"]))
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+

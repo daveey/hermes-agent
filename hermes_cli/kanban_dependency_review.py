@@ -38,7 +38,10 @@ def checkpoint(conn, task_id, expected_run_id):
         urls.update(u.lower() for u in _RESPAWN_GUARD_PR_URL_RE.findall(comment["body"] or ""))
     if not parents or not urls:
         return None
-    return {"run_id": expected_run_id, "parents": sorted(parents), "prs": sorted(urls)}
+    awaited = [p for p, status in kb.parent_states(conn, task_id)
+               if status not in {"done", "archived"}]
+    return {"run_id": expected_run_id, "parents": sorted(parents),
+            "awaited": sorted(awaited), "prs": sorted(urls)}
 
 
 def apply_block_update(conn, task_id, expected_run_id, kind, new_status, set_sql, params, payload):
@@ -79,11 +82,27 @@ def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
     return row
 
 
-def _named_pr(data) -> str | None:
-    pr = data.get("pr")
-    if isinstance(pr, str) and pr.strip():
-        return pr.strip().rstrip("/").lower()
-    return None
+def _named_prs(data, captured: set[str]) -> set[str] | None:
+    """Absent is checkpoint-bound; present must resolve uniquely, or fail closed."""
+    if "pr" not in data:
+        return None
+    pr = data["pr"]
+    if type(pr) is int and pr > 0:
+        ref = f"#{pr}"
+    elif isinstance(pr, str):
+        ref = pr.strip().rstrip("/").lower()
+    else:
+        return set()
+    if ref in captured:
+        return {ref}
+    match = re.fullmatch(r"(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<num>[1-9][0-9]*)", ref)
+    if match is None:
+        return set()
+    suffix = "/pull/" + match["num"]
+    matches = {u for u in captured if u.endswith(suffix) and (
+        match["repo"] is None or u == "https://github.com/" + match["repo"] + suffix
+    )}
+    return matches if len(matches) == 1 else set()
 
 
 def _exact_head(data) -> bool:
@@ -127,9 +146,9 @@ def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
     sha = data.get("reviewed_sha")
     if not isinstance(sha, str) or not _SHA.fullmatch(sha) or not _requests_changes(row, data):
         return set()
-    named = _named_pr(data)
+    named = _named_prs(data, captured)
     if named is not None:
-        return {named}
+        return named
     nums = set(_SUMMARY_PR_NUM.findall(row["summary"] or ""))
     if nums:
         return {u for u in captured if u.rsplit("/", 1)[-1] in nums}
@@ -153,11 +172,44 @@ def _approval_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
     verdict_norm = verdict.strip().lower() if isinstance(verdict, str) else ""
     if verdict_norm not in _APPROVALS or not _exact_head(data):
         return set()
-    named = _named_pr(data)
-    return {named} if named is not None else set(captured)
+    named = _named_prs(data, captured)
+    return named if named is not None else set(captured)
 
 
-def resumes_review(conn, task_id, pr_urls):
+def _historical_parent(conn, parent_id, parked_at):
+    """Legacy checkpoints: exempt only provably finished, unchanged dependencies."""
+    from hermes_cli import kanban_db as kb
+
+    row = conn.execute(
+        "SELECT r.ended_at, t.status FROM tasks t JOIN task_runs r ON r.task_id = t.id "
+        "WHERE t.id = ? ORDER BY r.id DESC LIMIT 1", (parent_id,),
+    ).fetchone()
+    if row is None or row["status"] not in {"done", "archived"}:
+        return False
+    ended = kb._to_epoch(row["ended_at"])
+    if ended is None or ended >= parked_at:
+        return False
+    events = conn.execute(
+        # Archival and late process-exit receipts do not reopen finished work.
+        "SELECT created_at FROM task_events WHERE task_id = ? "
+        "AND kind NOT IN ('commented', 'archived', 'worker_result')",
+        (parent_id,),
+    )
+    return all((kb._to_epoch(e["created_at"]) or float("inf")) < parked_at for e in events)
+
+
+def _awaited_parents(conn, parents, evidence, parked_at):
+    if "awaited" not in evidence:
+        return [p for p in parents if not _historical_parent(conn, p, parked_at)]
+    awaited = evidence["awaited"]
+    if (not isinstance(awaited, list) or not awaited or not all(isinstance(p, str) for p in awaited)
+            or not set(awaited).issubset(parents) or len(set(awaited)) != len(awaited)):
+        return []
+    # A historical dependency subsequently reopened is no longer historical.
+    return [p for p in parents if p in awaited or not _historical_parent(conn, p, parked_at)]
+
+
+def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     """One continuation only: claiming any new run consumes the park's permission."""
     from hermes_cli import kanban_db as kb
 
@@ -188,11 +240,17 @@ def resumes_review(conn, task_id, pr_urls):
     parked_at = kb._to_epoch(row["created_at"])
     if parked_at is None:
         return False
+    parents = _awaited_parents(conn, parents, evidence, parked_at)
+    if not parents:
+        return False
+    urls -= {u.rstrip("/").lower() for u in discharged}
+    if not urls:
+        return False
     captured_set = {u.rstrip("/").lower() for u in captured}
     reviewed = set().union(*(_reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents))
     if urls.issubset(reviewed):
         return True
-    # Every parent must authorize. One exact-head approval does not cover a
+    # Every awaited parent must authorize. One exact-head approval does not cover a
     # sibling that never reviewed, and a named unrelated PR does not cover
     # the checkpoint set.
     return all(
