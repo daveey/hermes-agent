@@ -581,12 +581,14 @@ def test_acceptance_owner_must_be_the_running_worker_task(tmp_path, monkeypatch)
 def test_nightly_board_stamps_creator_only_for_acceptance(monkeypatch):
     envs = []
     board = ne.NightlyBoard("hermes")
-    monkeypatch.setattr(board, "_run", lambda *a, **k: envs.append(k.get("extra_env")) or '{"id":"t_x"}')
+    argv = []
+    monkeypatch.setattr(board, "_run", lambda *a, **k: argv.append(a) or envs.append(k.get("extra_env")) or '{"id":"t_x"}')
     live = {"runs": [{"id": 6, "status": "ended", "ended_at": 1}, {"id": 7, "status": "running", "ended_at": None}]}
     monkeypatch.setattr(board, "_show", lambda *a, **k: live)
     board.create("t", "b", "k")
     board.create("t", "b", "k", creator_task_id=OWNER)
     assert envs == [None, {"HERMES_KANBAN_TASK": OWNER, "HERMES_KANBAN_RUN_ID": "7"}]
+    assert ["--no-requires" in a for a in argv] == [False, True]
     live["runs"].pop()
     with pytest.raises(RuntimeError, match="no live run"):
         board.create("t", "b", "k", creator_task_id=OWNER)

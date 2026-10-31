@@ -202,6 +202,8 @@ class NightlyBoard(CliBoard):
             "-",
             "--json",
             *override,
+            # A live-run identity makes this an agent-run create, which must declare needs; a fixture needs none.
+            *(["--no-requires"] if creator_task_id else []),
             stdin=body,
             extra_env=extra_env,
         )
