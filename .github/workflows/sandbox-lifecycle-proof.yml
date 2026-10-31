@@ -1,0 +1,28 @@
+name: Sandbox lifecycle proof
+on:
+  push:
+    branches: ['sandbox-proof/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  real-isolation:
+    runs-on: [self-hosted, hermes-hub]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-pm
+        with:
+          test-environment: 'true'
+      - name: Verify real non-root runner
+        run: |
+          test "$(id -u)" != 0
+          bwrap --version
+          uname -a
+      - name: Regression against b92048a2
+        run: |
+          git show b92048a2e0556115f268a8ad62e11ef885f21bcf:scripts/ci/plugin_validation_sandbox.py > scripts/ci/plugin_validation_sandbox.py
+          HERMES_TEST_FILE_RETRIES=0 scripts/run_tests.sh tests/ci/test_plugin_sandbox_normal_exit.py -v
