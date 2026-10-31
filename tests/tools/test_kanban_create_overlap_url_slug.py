@@ -542,7 +542,44 @@ def test_pinned_board_db_is_read_once_under_its_own_board_name(home, monkeypatch
      False),
     ("Fix flake X (seen in run #123)", "Fix flake X (seen in run #456)", False),
     ("Probe on the mini (for hub t_01a18bee20c483ea)", "Probe on the hub (for macbook t_01a18bee20c483ea)", False),
+    # Review of the first cut (PR 387): incidental tokens that are not a different target stay refused.
+    ("BB-434: Upkeep failing: assets-health", "BB-463: Upkeep failing: assets-health", False),  # repeat filing
+    ("Fix flake X (issue #175)", "Land PR #181: fix flake X", False),
+    ("Tune mini-batch size for fabric training", "Tune mini-batch size for fabric training on metta3", False),
+    ("sx-heart-room-mini link.stuck", "sx-conway-mini link.stuck", False),
+    ("Rebalance worker-1 lane queue", "Rebalance worker-2 lane queue", False),
+    ("Debug gateway 8080 port conflict", "Debug gateway 8081 port conflict", False),
+    ("Main CI red on daveey/hermes since 1a221b37: repair suite",
+     "Main CI red on daveey/hermes since 2bc71d8f: drop flaky test, repair suite", False),
+    ("Deploy babybear 1a2b3c4 to the hub", "Deploy babybear 5d6e7f8 to the hub and disable old flag", False),
+    ("Verify MBP hermes-mods has da19695 (Inbox OWNER_ASK_KEYS removal)",
+     "Verify MacBook runs hermes-mods a2dadd6 (inbox ask_contract RETRY_SHAPE + OWNER_ASK_KEYS)", True),
 ])
 def test_distinct_target_classes(a, b, distinct):
     from hermes_cli.kanban_overlap import distinct_target
     assert bool(distinct_target(a, b, {"hub", "macbook", "mini"})) is distinct
+
+
+@pytest.mark.parametrize(("new_body", "card_body"), [
+    ("See https://github.com/Metta-AI/metta/pull/9 for prior art.", "Use the daveey/babybear PR flow."),
+    ("Fixed earlier in daveey/hermes-mods.", "Use the daveey/babybear PR flow."),
+])
+def test_repos_named_only_in_both_bodies_do_not_make_a_duplicate_distinct(new_body, card_body):
+    from hermes_cli.kanban_overlap import distinct_target
+    title = "Repair main CI hub suite red"
+    assert distinct_target(title, title, new_body=new_body, card_body=card_body) is None
+
+
+@pytest.mark.parametrize(("text", "waits"), [
+    ("SCRATCH waiter (parks on macbook t_01a18d2db718c3d1)", True),
+    ("Blocked on hub/t_01a18d2db718c3d1 finishing", True),
+    ("Do not wait on t_01a18d2db718c3d1; redo it here", False),
+    ("Not blocked on t_01a18d2db718c3d1.", False),
+    ("Waiting on the user. See t_01a18d2db718c3d1", False),
+    ("Same producer as t_01a18d2db718c3d1: redo", False),
+    ("Second producer, replaces producer t_01a18d2db718c3d1", False),
+    ("Its parent t_01a18d2db718c3d1 never finished", False),
+])
+def test_waits_on_needs_an_unnegated_wait_on_that_card(text, waits):
+    from hermes_cli.kanban_overlap import waits_on
+    assert waits_on("t_01a18d2db718c3d1", text, "") is waits

@@ -22,10 +22,10 @@ equals a board slug does not count.
 Never matched: closed cards (a replica's stale legacy ``<board>/<id>`` row never outvotes its qualified
 ``<profile>/<board>/<id>`` twin), the creator's own card, the new card's parents, cards the same chat or the same
 worker created (fan-out), the waiting card a capability-owner create quotes, and another capability-owner
-card for that same waiting card, a card the new one parks/waits on or names as its producer or parent, and a
-card that names a different target (:func:`distinct_target`: another repo, host, process or ticket, or an
-inverted check at another revision; a newer sha alone is not a different target). Each card counts once per
-gateway. A missing or unreadable replica is skipped and logged, never a block.
+card for that same waiting card, a card the new one parks/waits/depends on (:func:`waits_on`), and a card
+that names a different target (:func:`distinct_target`: another repo, host or process, or an inverted check at
+another revision; a newer sha or another ticket number alone is not a different target). Admitted look-alikes
+are logged. Each card counts once per gateway. A missing or unreadable replica is skipped and logged, never a block.
 ``kanban.create_overlap_check: false`` turns the check off.
 """
 
@@ -135,93 +135,126 @@ def _reasons(card: dict, new_words: set[str], title: str, body: str, target_boar
 
 # Target identity (overlap audit t_01a189c70884fa59). Shared title words say two cards are the same KIND of work;
 # they do not say it is the same target. 108 refusals in 24 h matched on boilerplate while each title named a
-# different machine, process or ticket: ``David-MBP: gateway 78233 may run stale hermes-mods plugins`` vs
+# different machine, process or repo: ``David-MBP: gateway 78233 may run stale hermes-mods plugins`` vs
 # ``daveey-mini: gateway 16839 may run stale hermes-mods plugins``, a mini probe leg vs its MacBook leg,
-# ``BB-1155 ... mini`` vs ``BB-1197, BB-1202, BB-1205 ... metta3``. A class only decides when BOTH titles carry it.
+# ``BB-1155 ... mini`` vs ``BB-1197, BB-1202, BB-1205 ... metta3``. A class only decides when BOTH cards carry it.
+# Ticket numbers are deliberately NOT a class: repeat filings of one failing check (``BB-434: Upkeep failing:
+# assets-health`` and ``BB-463: Upkeep failing: assets-health``) are the duplicates this check exists for.
 _HOST_ALIASES = {
     "macbook": "macbook", "mbp": "macbook", "david-mbp": "macbook", "test-key-gen": "macbook",
     "mini": "mini", "daveey-mini": "mini", "mac-mini": "mini", "davids-mac-mini-1": "mini",
     "hermes-hub": "hub",
 }
-# Bare "hub" is not a host here: it is also the BB hub (on the mini) and "for hub t_..." quotes a card.
-_HOST_PART_ALIASES = {"mbp": "macbook", "macbook": "macbook", "mini": "mini"}
-_HOST_PATTERN = re.compile(r"(?:metta|worker|gpu|bb-linux)-?\d+")
-_TASK_REF = re.compile(r"(?:\b[a-z][\w.-]*[/ ](?:[\w-]+/)?)?\bt_[0-9a-f]{8,16}\b")
-_PROCESS = re.compile(r"\b(?:gateway|pid|process|backend|serve|worker)[\s=:#]*(\d{2,})\b")
-_TICKET = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
-_ISSUE = re.compile(r"(?<!\brun )(?<!\bjob )(?<!\bbuild )(?<!\battempt )#(\d+)\b")
+# Bare "hub" is not a host here: it is also the BB hub (on the mini) and "for hub t_..." quotes a card. A host is a
+# whole token: "mini-batch" or a device "sx-heart-room-mini" names no machine, and worker-N is a lane, not a host.
+_HOST_PATTERN = re.compile(r"(?:metta|gpu|bb-linux)-?\d+")
+_TASK_REF = re.compile(r"(?:\b[a-z][\w.-]{0,40}[/ ](?:[\w-]{1,40}/)?)?\bt_[0-9a-f]{8,16}\b")
+# A process lifetime: ``gateway 78233``, ``pid 1722`` (a port after the number is not a process).
+_PROCESS = re.compile(r"\b(?:gateway|pid)[\s=:#]*(?:pid[\s=:#]*)?(\d{3,})\b(?![\s:]*port)")
 _REVISION = re.compile(r"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b")
 # A newer revision of the same check is the same owner's work, so a differing sha alone never makes cards
-# distinct. It does when one title inverts the other's acceptance (da19695 removes OWNER_ASK_KEYS; the
-# a2dadd6 probe expects it present).
+# distinct. It does when one title inverts the other's acceptance (da19695 "OWNER_ASK_KEYS removal"; the
+# a2dadd6 probe expects them present): see :func:`_inverts`.
 _REPO_OWNERS = ("daveey", "metta-ai", "nousresearch", "softmax-ai")
 _REPO = re.compile(r"(?<![\w./~@-])(?:https?://)?(?:github\.com/)?((?:" + "|".join(_REPO_OWNERS)
-                   + r")/[a-z0-9][\w.-]*?)(?=[.,;:)'`\"]*(?:\s|$)|/(?:actions|pull|issues|commit|tree|blob)\b)")
+                   + r")/[a-z0-9][\w.-]{0,99}?)(?=[.,;:)'`\"]{0,4}(?:\s|$)|/(?:actions|pull|issues|commit|tree|blob)\b)")
 _INVERTS = frozenset(
     "remove removes removed removal removing revert reverts reverted drop drops dropped delete deletes deleted "
-    "deletion without disable disables disabled rollback".split())
+    "deletion disable disables disabled rollback".split())
+_ARTICLES = frozenset({"the", "a", "an"})
+_BODY_SCAN = 20000  # bodies can be huge; a repo named past this is not what the card is about
+_WAIT = re.compile(r"\b(?:park(?:s|ed|ing)?|wait(?:s|ed|ing)?|blocked|depend(?:s|ing)?)\s+on\s+"
+                   r"(?:[a-z][\w@-]{0,40}[ /]){0,2}(t_[0-9a-f]{8,16})\b", re.IGNORECASE)
+_NEGATED = re.compile(r"(?:\bnot|n't|\bnever|\bno longer)\s+$", re.IGNORECASE)
 
 
 def target_identity(title: str, gateways: Iterable[str] = ()) -> dict[str, frozenset[str]]:
-    """The targets a title names, by class: ``host``, ``process``, ``ticket``, ``revision``."""
-    raw = title or ""
-    low = _TASK_REF.sub(" ", raw.lower())
+    """The targets a title names, by class: ``host``, ``process``, ``revision``."""
+    low = _TASK_REF.sub(" ", (title or "").lower())
     hosts = set()
-    dynamic = {g.lower() for g in gateways if g and g.lower() not in {"hub", "local"}}
+    dynamic = {str(g).lower() for g in (gateways or ()) if g and str(g).lower() not in {"hub", "local"}}
     for tok in re.findall(r"[a-z0-9][a-z0-9.-]*[a-z0-9]|[a-z0-9]", low):
         if tok in _HOST_ALIASES:
             hosts.add(_HOST_ALIASES[tok])
         elif tok in dynamic or _HOST_PATTERN.fullmatch(tok):
             hosts.add(tok)
-        else:
-            hosts.update(_HOST_PART_ALIASES[p] for p in tok.split("-") if p in _HOST_PART_ALIASES)
-    tickets = set(_TICKET.findall(_TASK_REF.sub(" ", raw))) | {f"#{n}" for n in _ISSUE.findall(low)}
     return {"host": frozenset(hosts), "process": frozenset(_PROCESS.findall(low)),
-            "ticket": frozenset(t.upper() for t in tickets), "revision": frozenset(_REVISION.findall(low))}
+            "revision": frozenset(_REVISION.findall(low))}
 
 
 def repos(text: str) -> frozenset[str]:
     """GitHub ``owner/repo`` slugs, bare or in a URL (``daveey/hermes-mods`` is not ``daveey/hermes``)."""
-    return frozenset(_REPO.findall((text or "").lower()))
+    return frozenset(_REPO.findall((text or "")[:_BODY_SCAN].lower()))
 
 
-def _repo_of(title: str, body: str) -> frozenset[str]:
-    """A card's repo: the title's slugs, else the body's when it names exactly one (the bb_bridge card
-    "Main CI red since effa0d25f: repair the hub suite on main" names daveey/babybear only in its body)."""
+def _repo_of(title: str, body: str) -> tuple[frozenset[str], bool]:
+    """A card's repo and whether its title names it: the title's slugs, else the body's when it names exactly one
+    (the bb_bridge card "Main CI red since effa0d25f: repair the hub suite on main" names daveey/babybear only in
+    its body)."""
     named = repos(title)
     if named:
-        return named
+        return named, True
     in_body = repos(body)
-    return in_body if len(in_body) == 1 else frozenset()
+    return (in_body, False) if len(in_body) == 1 else (frozenset(), False)
+
+
+def _inverts(title: str, other: str) -> bool:
+    """``title`` inverts what ``other`` checks: an inversion word right next to a word the other title names
+    (``OWNER_ASK_KEYS removal`` vs ``... OWNER_ASK_KEYS)``), and ``other`` inverts nothing. An inversion word
+    elsewhere (``since 2bc71d8f: drop flaky test``) inverts nothing the other card checks."""
+    theirs = words(other)
+    if theirs & _INVERTS:
+        return False
+    toks = re.findall(r"[a-z0-9]+", (title or "").lower())
+
+    def neighbour(i: int, step: int) -> Optional[str]:
+        i += step
+        while 0 <= i < len(toks) and toks[i] in _ARTICLES:
+            i += step
+        tok = toks[i] if 0 <= i < len(toks) else None
+        return None if tok is None or tok in _STOP or _REVISION.fullmatch(tok) else tok
+
+    return any(tok in _INVERTS and ({neighbour(i, -1), neighbour(i, 1)} & theirs)
+               for i, tok in enumerate(toks))
 
 
 def waits_on(card_id: str, title: str, body: str) -> bool:
-    """The new card names ``card_id`` as what it parks or waits on, or as its producer or parent: a waiter is
-    not a duplicate of its producer (hub 10-30 14:19:41Z, overridden 4 s later)."""
-    cid = re.escape(card_id or "")
-    if not cid:
+    """The new card says it parks, waits, is blocked or depends on ``card_id``: a waiter is not a duplicate of
+    the producer it waits on (hub 10-30 14:19:41Z, overridden 4 s later). A negated wait (``do not wait on``)
+    is not one."""
+    if not card_id:
         return False
-    pat = (rf"\b(?:park(?:s|ed|ing)?|wait(?:s|ed|ing)?|blocked|depend(?:s|ing)?)\s+on\s+(?:[\w.@-]+[ /]){{0,3}}"
-           rf"{cid}\b|\b(?:producer|parent)\b[^.\n]{{0,40}}\b{cid}\b")
-    return bool(re.search(pat, f"{title or ''}\n{body or ''}", re.IGNORECASE))
+    text = f"{title or ''}\n{(body or '')[:_BODY_SCAN]}"
+    return any(m.group(1).lower() == card_id.lower() and not _NEGATED.search(text[max(0, m.start() - 20):m.start()])
+               for m in _WAIT.finditer(text))
+
+
+def _identity(title: str, body: str, gateways: Iterable[str]) -> dict:
+    repo, in_title = _repo_of(title, body)
+    return {"title": title or "", **target_identity(title, gateways), "repo": repo, "repo_in_title": in_title}
+
+
+def _distinct(a: dict, b: dict) -> Optional[str]:
+    # A repo only in both BODIES is a passing mention ("see daveey/hermes-mods for prior art"): one title must
+    # name it.
+    if a["repo"] and b["repo"] and not a["repo"] & b["repo"] and (a["repo_in_title"] or b["repo_in_title"]):
+        return f"repo {'/'.join(sorted(a['repo']))} != {'/'.join(sorted(b['repo']))}"
+    for cls in ("host", "process"):
+        if a[cls] and b[cls] and not a[cls] & b[cls]:
+            return f"{cls} {'/'.join(sorted(a[cls]))} != {'/'.join(sorted(b[cls]))}"
+    if (a["revision"] and b["revision"] and not a["revision"] & b["revision"]
+            and (_inverts(a["title"], b["title"]) or _inverts(b["title"], a["title"]))):
+        return f"revision {'/'.join(sorted(a['revision']))} inverts {'/'.join(sorted(b['revision']))}"
+    return None
 
 
 def distinct_target(new_title: str, card_title: str, gateways: Iterable[str] = (), *, new_body: str = "",
                     card_body: str = "") -> Optional[str]:
-    """Why two cards name different targets (a repo, a machine, a process lifetime, a ticket, an inverted
-    check at another revision), else None. Same-target pairs, and pairs where either side names no target in
-    a class, are left to the word-overlap rules."""
-    a, b = target_identity(new_title, gateways), target_identity(card_title, gateways)
-    ra, rb = _repo_of(new_title, new_body), _repo_of(card_title, card_body)
-    if ra and rb and not ra & rb:
-        return f"repo {'/'.join(sorted(ra))} != {'/'.join(sorted(rb))}"
-    for cls in ("host", "process", "ticket"):
-        if a[cls] and b[cls] and not a[cls] & b[cls]:
-            return f"{cls} {'/'.join(sorted(a[cls]))} != {'/'.join(sorted(b[cls]))}"
-    if a["revision"] and b["revision"] and not a["revision"] & b["revision"]:
-        if bool(words(new_title) & _INVERTS) != bool(words(card_title) & _INVERTS):
-            return f"revision {'/'.join(sorted(a['revision']))} inverts {'/'.join(sorted(b['revision']))}"
-    return None
+    """Why two cards name different targets (a repo, a machine, a process lifetime, an inverted check at another
+    revision), else None. Same-target pairs, and pairs where either side names no target in a class, are left to
+    the word-overlap rules."""
+    gws = tuple(gateways or ())
+    return _distinct(_identity(new_title, new_body, gws), _identity(card_title, card_body, gws))
 
 
 def _board_files() -> Iterable[tuple[str, Path]]:
@@ -367,7 +400,7 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
         skip = set(parents) | ({self_tid} if self_tid else set())
         waiting = capability_owner_waiting_id(title, body)
         new_words = words(title)
-        out, seen = [], set()
+        out, seen, mine = [], set(), None
         cards = [*_local_cards(self_gw), *_replica_cards(self_gw)]
         gateways = {g for g in (self_gw, *(c["gateway"] for c in cards)) if g}
         if gateways & {"hub", "hermes-hub"}:
@@ -378,14 +411,21 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
                     or (session_id and card["session_id"] == session_id)
                     or (self_tid and card["creator_task_id"] == self_tid)
                     or (family and card.get("key_family") == family)
-                    or (card["gateway"], card["id"]) in seen
-                    or waits_on(card["id"], title, body)
-                    or distinct_target(title, card.get("title") or "", gateways,
-                                       new_body=body, card_body=card.get("body") or "")):
+                    or (card["gateway"], card["id"]) in seen):
                 continue
             seen.add((card["gateway"], card["id"]))
             reasons, score = _reasons(card, new_words, title, body, target_board, gateways)
-            if reasons:
+            if not reasons:
+                continue
+            if mine is None:
+                mine = _identity(title, body, gateways)
+            admit = (f"waits on {card['id']}" if waits_on(card["id"], title, body)
+                     else _distinct(mine, _identity(card.get("title") or "", card.get("body") or "", gateways)))
+            if admit:
+                # Logged so an audit can tell an admitted look-alike from a missed one.
+                _log.info("kanban create overlap: admitted %r despite %s/%s/%s (%s): %s", title, card["gateway"],
+                          card["board"], card["id"], "; ".join(reasons), admit)
+            else:
                 out.append({**{k: card[k] for k in ("id", "board", "gateway", "status", "title", "chats")},
                             "why": "; ".join(reasons), "_score": score, "_local": card["local"]})
         out.sort(key=lambda m: (-m["_score"], m["status"] not in ("running", "ready", "scheduled"), m["id"]))
