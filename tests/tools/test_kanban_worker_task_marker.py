@@ -181,3 +181,14 @@ def test_nested_hermes_with_only_marker_gets_no_worker_lifecycle_tools(tmp_path,
     assert proc.returncode == 0, proc.stderr
     control = _row(proc.stdout)
     assert control["in_worker"] is True and all(control["avail"].values()), control
+
+
+def test_worker_protocol_prompt_names_the_variable_its_shells_have():
+    """The protocol prompt must not send a worker's shell commands to ``$HERMES_KANBAN_TASK``: its terminal and
+    execute_code children never have it (above), so `--card $HERMES_KANBAN_TASK` expanded to a bare `--card` and
+    `wt/$HERMES_KANBAN_TASK` to `wt/` (self-heal briefs failed with "argument --card: expected one argument")."""
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    assert f"${KANBAN_WORKER_TASK_ENV}" in KANBAN_GUIDANCE
+    for shell_use in ("wt/$HERMES_KANBAN_TASK", "`$HERMES_KANBAN_TASK`;"):
+        assert shell_use not in KANBAN_GUIDANCE, shell_use
