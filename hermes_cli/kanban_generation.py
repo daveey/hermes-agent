@@ -117,8 +117,11 @@ def recover(database) -> None:
     path = _path(database)
     if path is None:
         return
-    current = shm_identity(path)
+    # Snapshot the handles BEFORE reading the live identity. The other order races a concurrent first open:
+    # ``current`` is read while no -shm exists (None), the opener then creates it and registers its handle
+    # with the new identity, and this call would call that healthy handle stale and evict it.
     handles = _handles(path)
+    current = shm_identity(path)
     stale = any(c._hermes_generation_shm is not None and c._hermes_generation_shm != current for c in handles)
     with _lock:
         poisoned = path in _poisoned

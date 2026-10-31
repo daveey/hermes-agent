@@ -108,3 +108,28 @@ def test_threads_share_the_connection_safely(tmp_path):
     for t in threads:
         t.join()
     assert errors == [] and len(seen) == 1
+
+
+def test_recover_does_not_evict_a_reader_registered_during_the_check(tmp_path, monkeypatch):
+    """A first open racing ``recover`` registers its handle (with the freshly created -shm identity) between
+    recover's reads; that healthy handle must not be judged stale (the source of the 'evicted while waiting' flake)."""
+    from hermes_cli import kanban_generation as kg
+
+    path = tmp_path / "b.db"
+    _db(path, "v").close()  # last close removes -wal/-shm: the next open mints a new -shm
+    evicted, opened = [], []
+    monkeypatch.setattr(kg, "_reader_caches", [evicted.append])
+    real_handles = kg._handles
+
+    def handles_after_concurrent_open(p):
+        if not opened:
+            opened.append(None)  # open_ro re-enters recover() -> _handles(): mark first so it runs once
+            opened[0] = kg.open_ro(path)
+        return real_handles(p)
+
+    monkeypatch.setattr(kg, "_handles", handles_after_concurrent_open)
+    try:
+        kg.recover(path)
+    finally:
+        opened[0].close()
+    assert evicted == []
