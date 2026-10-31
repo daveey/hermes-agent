@@ -19,8 +19,9 @@ lifecycle API :func:`kanban_db.unblock_task`. It is deliberately narrow:
   ``capability`` block is refused (``human_gate``). Prose on a card that a decision "is
   resolved" is not the human's unblock; that transition stays with the human.
 * **Scope by provenance.** The target is the requester's own creator chain (the stuck card
-  spawned the recovery card, directly or through at most ``MAX_CREATOR_HOPS`` - 1 cards), or a
-  card the requester created. ``creator_task_id`` is stamped by the kernel from the creating
+  spawned the recovery card, directly or through at most ``MAX_CREATOR_HOPS`` - 1 cards) and the
+  requester was created after the target's current park (a recovery card for THIS park), or the
+  target is a card the requester created. ``creator_task_id`` is stamped by the kernel from the creating
   worker's own task, not supplied by the worker.
 * **Bounded.** At most ``MAX_RESUMES`` supervisor resumes per target, ever. The 12-run
   continuation limit itself is unchanged; the unblock only ends the trailing ``continued``
@@ -28,7 +29,8 @@ lifecycle API :func:`kanban_db.unblock_task`. It is deliberately narrow:
 * **Parent gating and graph untouched.** ``unblock_task`` re-gates on parents (``ready`` or
   ``todo``); this op adds and removes no edges.
 
-Execution re-checks everything against the board as it is then. A redelivered request (crash
+Execution re-checks everything inside the unblock's own write transaction
+(``unblock_task(precondition=...)``), so a human gate that lands mid-drain cannot be erased. A redelivered request (crash
 after apply) finds its own ``unblocked`` event and reports ``already_applied``; anything else
 that no longer qualifies fails closed.
 """
@@ -38,11 +40,12 @@ import json
 import sqlite3
 from typing import Optional
 
+from hermes_cli.kanban_continuation import HUMAN_BLOCK_KINDS
+
 OP = "resume"
 MAX_RESUMES = 2
 MAX_CREATOR_HOPS = 3
 VIA = "supervisor_resume"
-HUMAN_BLOCK_KINDS = ("needs_input", "capability")
 RESUMABLE_STATUSES = ("triage", "blocked")
 # Events that move a card between lifecycle phases. The exhausted ``blocked`` event must be the
 # newest of these, so a card that was already released (and maybe parked again for another
@@ -141,20 +144,51 @@ def exhaustion_refusal(conn: sqlite3.Connection, target: str) -> Optional[str]:
     return None
 
 
-def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
-    target = op["task_id"]
-    verdict = {**op}
+def _created_event_id(conn: sqlite3.Connection, task_id: str) -> int:
+    row = conn.execute("SELECT MIN(id) FROM task_events WHERE task_id = ? AND kind = 'created'",
+                       (task_id,)).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _park_event_id(conn: sqlite3.Connection, target: str) -> int:
+    row = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'blocked'",
+                       (target,)).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _recovery_refusal(conn: sqlite3.Connection, requester: str, target: str) -> Optional[str]:
+    """An ancestor may be resumed only by a card created for THIS park (after its exhaustion block)."""
+    if _creator(conn, target) == requester:
+        return None  # a card the requester created; the requester owns it
+    if _created_event_id(conn, requester) <= _park_event_id(conn, target):
+        return (f"{requester} predates {target}'s current continuation_exhausted park; only a recovery "
+                "card created for this park may resume it")
+    return None
+
+
+def refusal(conn: sqlite3.Connection, requester: str, target: str) -> Optional[str]:
+    """Every precondition, read from the board as it is now. ``execute`` runs this inside the
+    unblock's write transaction, so nothing can change between the check and the write."""
     row = conn.execute("SELECT status FROM tasks WHERE id = ?", (target,)).fetchone()
-    refusal = (None if row else f"unknown task {target}") or (
-        f"{target} is archived" if row[0] == "archived" else None)
-    refusal = refusal or scope_refusal(conn, requester, target) or exhaustion_refusal(conn, target)
-    if refusal is None and len(_resume_events(conn, target)) >= MAX_RESUMES:
-        refusal = (f"resume_budget_exhausted: {target} was already supervisor-resumed {MAX_RESUMES} times; "
-                   "split the work instead of resuming it again")
-    if refusal:
-        verdict.update(verdict="refused", reason=refusal)
-    else:
-        verdict.update(verdict="supervisor")
+    if row is None:
+        return f"unknown task {target}"
+    if row[0] == "archived":
+        return f"{target} is archived"
+    found = (scope_refusal(conn, requester, target) or exhaustion_refusal(conn, target)
+             or _recovery_refusal(conn, requester, target))
+    if found is None and len(_resume_events(conn, target)) >= MAX_RESUMES:
+        found = (f"resume_budget_exhausted: {target} was already supervisor-resumed {MAX_RESUMES} times; "
+                 "split the work instead of resuming it again")
+    return found
+
+
+def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
+    verdict = {**op}
+    refusal_text = refusal(conn, requester, op["task_id"])
+    if refusal_text:
+        verdict.update(verdict="refused", reason=refusal_text)
+        return verdict
+    verdict.update(verdict="supervisor")
     return verdict
 
 
@@ -163,6 +197,13 @@ def _readback(conn: sqlite3.Connection, target: str) -> dict:
     t = kb.get_task(conn, target)
     return {"status": t.status if t else None, "current_run_id": t.current_run_id if t else None,
             "unsatisfied_parents": [p for p, _ in kb.unsatisfied_parents(conn, target)]}
+
+
+def _safe_readback(conn: sqlite3.Connection, target: str) -> dict:
+    try:
+        return _readback(conn, target)
+    except Exception as exc:  # the write already committed; a readback fault must not hide it
+        return {"readback_error": f"{type(exc).__name__}: {exc}"}
 
 
 def execute(conn: sqlite3.Connection, req: dict, executor: str) -> str:
@@ -177,7 +218,7 @@ def execute(conn: sqlite3.Connection, req: dict, executor: str) -> str:
     for op in req["ops"]:
         target = op["task_id"]
         if applied_by(conn, target, rid):
-            results.append({**op, "outcome": "already_applied", **_readback(conn, target)})
+            results.append({**op, "outcome": "already_applied", **_safe_readback(conn, target)})
             continue
         verdict = {"verdict": "refused", "reason": gone} if gone else preflight_op(conn, requester, op)
         if error or verdict["verdict"] != "supervisor":
@@ -187,13 +228,24 @@ def execute(conn: sqlite3.Connection, req: dict, executor: str) -> str:
             continue
         note = (f"Resumed by supervisor request #{rid} from {requester} (executor {executor}): the "
                 "continuation budget had parked this card. Parent gating applies; acceptance unchanged.")
-        ok = kb.unblock_task(conn, target, comment=(ksr.COMMENT_AUTHOR, note),
+        late: list[str] = []
+
+        def recheck(c, _t=target):
+            found = ksr.requester_refusal(c, requester) or refusal(c, requester, _t)
+            if found:
+                late.append(found)
+            return found
+
+        ok = kb.unblock_task(conn, target, comment=(ksr.COMMENT_AUTHOR, note), precondition=recheck,
                              event_extra={"via": VIA, "request_id": rid, "by": requester})
-        if ok and applied_by(conn, target, rid):
-            results.append({**op, "outcome": "applied", **_readback(conn, target)})
+        if late:
+            error = late[0]
+            results.append({**op, "outcome": "not_applied", "detail": error})
+        elif ok and applied_by(conn, target, rid):
+            results.append({**op, "outcome": "applied", **_safe_readback(conn, target)})
         else:
             error = f"unblock_task did not move {target}"
-            results.append({**op, "outcome": "failed", "detail": error, **_readback(conn, target)})
+            results.append({**op, "outcome": "failed", "detail": error, **_safe_readback(conn, target)})
     applied = any(r["outcome"] in ("applied", "already_applied") for r in results)
     status = "done" if not error else ("failed" if applied or any(r["outcome"] == "failed" for r in results)
                                        else "rejected")

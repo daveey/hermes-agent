@@ -27,7 +27,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db_sync as _sync
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
@@ -3736,16 +3736,21 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tuple[str, str]] = None,
-                 event_extra: Optional[dict] = None) -> bool:
+                 event_extra: Optional[dict] = None,
+                 precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None) -> bool:
     """``blocked``/``scheduled``/``triage`` -> its resumable phase (parent
     re-gated; ``review`` when that is where it left off), closing any leaked run
     first. ``triage`` is accepted so a card a block loop escalated can go back
     to work without the specifier/decomposer rewriting it. ``comment`` is written in the same
     txn and only when the unblock lands (``kanban_reason_comment``). ``event_extra`` is merged
-    into the ``unblocked`` event in that txn (audit provenance, e.g. a supervisor request). [daveey]"""
+    into the ``unblocked`` event in that txn (audit provenance, e.g. a supervisor request).
+    ``precondition`` runs first inside the write txn; a returned refusal string aborts with
+    ``False`` and no change, so a caller's checks cannot go stale before the write. [daveey]"""
     from hermes_cli.kanban_reason_comment import reason_comment
     now = int(time.time())
     with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
+        if precondition is not None and precondition(conn):
+            return False
         resume_status = (
             _resume_status_from_events(conn, task_id)
             if _task_status(conn, task_id) in ("blocked", "triage")

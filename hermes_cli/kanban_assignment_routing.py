@@ -43,19 +43,28 @@ class ExecutionAuthorityMismatch(AssignmentRoutingError):
 
 # A worker of ANY profile is fenced from moving another card through its lifecycle, so a block
 # asking for that is an execution-authority gap, not a profile mismatch: reassigning cannot fix it.
+_ID = r'(t_[0-9a-f]{8,16})\b'
+# Imperative ask forms only (base verb, also inside kanban_unblock / unblock_task): "unblock t_x",
+# "kanban_unblock(t_x)", "re-queue t_x", "move t_x back to ready", "t_x needs an unblock". Past and
+# progressive forms ("was unblocked by t_x", "promotion of t_x") describe history, not an ask.
+_VERB = r'(?<![A-Za-z])(?:kanban_)?(?:un-?block|re-?queue|promote|reopen|release)(?![A-Za-z])'
 _OTHER_CARD_TRANSITION = re.compile(
-    r'\b(?:unblock\w*|re-?queue\w*|promot\w*|resum\w*)\b[^.;\n]{0,120}?\b(t_[0-9a-f]{8,16})\b'
-    r'|\b(t_[0-9a-f]{8,16})\b[^.;\n]{0,120}?\b(?:unblock\w*|re-?queue\w*|promot\w*)\b',
+    _VERB + r'[^\n]{0,80}?' + _ID
+    + r'|(?<![A-Za-z])resume\s+(?:card\s+|task\s+)?' + _ID
+    + r'|(?<![A-Za-z])move\s+' + _ID + r'[^\n]{0,30}?\bto\s+(?:ready|todo)\b'
+    + r'|' + _ID + r'[^\n.;]{0,40}?' + _VERB,
     re.IGNORECASE,
 )
-_BUDGET_RESET = re.compile(r'\breset\w*\b[^.;\n]{0,40}\bcontinuation (?:budget|limit|streak)\b', re.IGNORECASE)
+_BUDGET_RESET = re.compile(
+    r'\b(?:reset|raise|increase|extend|clear|lift)\b[^\n]{0,40}?\bcontinuation[_ ](?:budget|limit|streak|count)\b',
+    re.IGNORECASE)
 
 
 def execution_authority_need(task_id, reason):
     """The other card ids a block asks to move through its lifecycle (or ``['<budget>']`` for a
     continuation-budget reset), else ``[]``. Profile mismatches return ``[]``."""
     text = reason or ''
-    ids = [a or b for a, b in _OTHER_CARD_TRANSITION.findall(text)]
+    ids = [next(g for g in m if g) for m in _OTHER_CARD_TRANSITION.findall(text)]
     ids = [i for i in dict.fromkeys(ids) if i != task_id]
     if not ids and _BUDGET_RESET.search(text):
         ids = ['<budget>']
@@ -69,7 +78,8 @@ def _authority_error(task_id, needs):
         'assignment repair cannot fix it and none was recorded. For a card the continuation budget '
         'parked, file kanban_supervisor_request ops=[{"op": "resume", "task_id": "<id>"}] (the '
         'non-worker executor re-checks scope and refuses human-gated cards); a card waiting on a '
-        'human stays with that human.'
+        'human stays with that human. A repair card already filed for such an ask cannot complete: '
+        'archive it (an archived parent no longer gates the original), then file that request.'
     )
 
 

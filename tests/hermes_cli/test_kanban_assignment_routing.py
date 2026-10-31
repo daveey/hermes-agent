@@ -353,11 +353,43 @@ _AUTHORITY_REASON = (
     'tool unblocks. Route to a non-worker supervisor.')
 
 
-@pytest.mark.parametrize('reason', [
+_AUTHORITY_ASKS = [
     _AUTHORITY_REASON,
     'Need someone to requeue t_0123456789abcdef after the fix',
     'Please reset the continuation budget so the work can resume',
-])
+    'Call kanban_unblock on t_0123456789abcdef',
+    'kanban_unblock(t_0123456789abcdef) is fenced here',
+    'un-block t_0123456789abcdef',
+    'Move t_0123456789abcdef back to ready',
+    'Release t_0123456789abcdef from triage',
+    'Reopen t_0123456789abcdef',
+    'Unblock the stuck card. Its id is t_0123456789abcdef',
+    'Raise the continuation limit for this card',
+    'reset continuation_budget',
+]
+_PROFILE_MISMATCHES = [
+    'Worker lacks terminal tools', 'Wrong worker', 'Profile mismatch',
+    'Need the repo checkout that t_0123456789abcdef pushed',
+    'Needs the codex profile; resumes from t_0123456789abcdef checkpoint',
+    'Parent t_0123456789abcdef was promoted but this needs the gpu profile',
+    'This card was unblocked by t_0123456789abcdef but the worker lacks terminal tools',
+    'Promotion of t_0123456789abcdef is waiting; wrong worker',
+]
+
+
+@pytest.mark.parametrize('reason', _AUTHORITY_ASKS)
+def test_execution_authority_need_matches_asks(reason):
+    from hermes_cli import kanban_assignment_routing as ar
+    assert ar.execution_authority_need('t_ffffffffffffffff', reason), reason
+
+
+@pytest.mark.parametrize('reason', _PROFILE_MISMATCHES)
+def test_execution_authority_need_ignores_profile_mismatch_history(reason):
+    from hermes_cli import kanban_assignment_routing as ar
+    assert ar.execution_authority_need('t_ffffffffffffffff', reason) == [], reason
+
+
+@pytest.mark.parametrize('reason', _AUTHORITY_ASKS[:3])
 def test_execution_authority_ask_is_refused_not_reassigned(board, reason):
     """Reproduction (t_01a191a2b59741ef): an assignment block asking for another card's unblock got an
     assignment repair that only swapped profiles; every profile's worker has the same fence."""
@@ -374,8 +406,7 @@ def test_execution_authority_ask_is_refused_not_reassigned(board, reason):
                             (tid,)).fetchone()
 
 
-@pytest.mark.parametrize('reason', ['Worker lacks terminal tools', 'Wrong worker', 'Profile mismatch',
-                                    'Need the repo checkout that t_0123456789abcdef pushed'])
+@pytest.mark.parametrize('reason', _PROFILE_MISMATCHES)
 def test_profile_mismatch_still_routes_and_names_no_authority(board, reason):
     from hermes_cli import kanban_assignment_routing as ar
     conn, _ = board
@@ -401,7 +432,7 @@ def test_legacy_authority_repair_cannot_complete_on_profile_existence_alone(boar
         m.setattr(ar, 'execution_authority_need', lambda *a: [])  # the pre-fix route
         assert kb.block_task(conn, tid, kind='assignment', reason=_AUTHORITY_REASON)
     repair_id = payload(conn, tid)['supervisor_task_id']
-    with pytest.raises(ar.ExecutionAuthorityMismatch):
+    with pytest.raises(ar.ExecutionAuthorityMismatch, match='archive it'):
         kb.complete_task(conn, repair_id, result='Verified profile supervisor exists')
     assert kb.get_task(conn, repair_id).status != 'done'
     # Control: a real profile-mismatch repair still completes once its profile verifies.

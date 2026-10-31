@@ -295,17 +295,70 @@ def test_resume_cannot_be_mixed_with_edge_ops_or_extra_fields(board):
     assert extra["code"] == "invalid_ops"
 
 
+def _new_recovery(conn, monkeypatch, target, title="recover again"):
+    rec = kb.create_task(conn, title=title, assignee="default", creator_task_id=target)
+    kb.claim_task(conn, rec)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", rec)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb._current_run_id(conn, rec)))
+    return rec
+
+
+def test_recovery_card_from_an_earlier_park_cannot_resume_the_next_one(board, monkeypatch):
+    out = _tool(_resume(board["target"]))
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        assert _tick(conn) == [(out["request_id"], "done")]
+        _exhaust(conn, board["target"])  # it ran out of budget again
+    monkeypatch.setenv("HERMES_KANBAN_TASK", board["recovery"])
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(board["run_id"]))
+    again = _tool(_resume(board["target"]))
+    assert again["code"] == "refused" and "predates" in again["error"], again
+
+
 def test_per_target_cap_bounds_repeated_resumes(board, monkeypatch):
     for n in range(rx.MAX_RESUMES):
+        if n:
+            with kbc.connect() as conn:
+                _new_recovery(conn, monkeypatch, board["target"], f"recover {n}")
         out = _tool(_resume(board["target"]))
+        assert out["ok"], out
         _as_executor(monkeypatch)
         with kbc.connect() as conn:
             assert _tick(conn) == [(out["request_id"], "done")]
-            _exhaust(conn, board["target"])  # it ran out of budget again
-        monkeypatch.setenv("HERMES_KANBAN_TASK", board["recovery"])
-        monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(board["run_id"]))
+            _exhaust(conn, board["target"])
+    with kbc.connect() as conn:
+        _new_recovery(conn, monkeypatch, board["target"], "recover once more")
     out = _tool(_resume(board["target"]))
     assert out["code"] == "refused" and "resume_budget_exhausted" in out["error"], out
+
+
+def test_human_gate_landing_inside_execution_is_not_erased(board, monkeypatch):
+    """Race (review finding): a needs_input ask lands after the executor's first read but before
+    its write. The in-transaction precondition must see it and leave the human ask intact."""
+    out = _tool(_resume(board["target"]))
+    _as_executor(monkeypatch)
+    real = rx.preflight_op
+
+    def racing_preflight(conn, requester, op):
+        verdict = real(conn, requester, op)
+        other = kbc.connect()
+        try:
+            with kb.write_txn(other):
+                other.execute("UPDATE tasks SET status='blocked', block_kind='needs_input', human_request=? "
+                              "WHERE id=?", (json.dumps({"action": "pick A or B"}), op["task_id"]))
+        finally:
+            other.close()
+        return verdict
+
+    monkeypatch.setattr(rx, "preflight_op", racing_preflight)
+    with kbc.connect() as conn:
+        assert _tick(conn) == [(out["request_id"], "rejected")]
+        task = kb.get_task(conn, board["target"])
+        assert (task.status, task.block_kind) == ("blocked", "needs_input")
+        assert task.human_request["action"] == "pick A or B"
+        assert "human_gate" in ksr.get_request(conn, out["request_id"])["error"]
+        assert _resume_events(conn, board["target"]) == []
+        assert not any(c.author == ksr.COMMENT_AUTHOR for c in kb.list_comments(conn, board["target"]))
 
 
 # --- crash retry -----------------------------------------------------------------------------
