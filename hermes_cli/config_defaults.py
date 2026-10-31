@@ -5,6 +5,7 @@ docs of config.yaml.
 """
 
 from hermes_cli.config_defaults_auxiliary import _aux
+from hermes_cli.config_defaults_retries import AGENT_RETRY_DEFAULTS
 
 #: Image every container terminal backend (docker/modal/daytona, the singularity plugin) uses unless the
 #: user pins one. LEGACY_SANDBOX_IMAGES are the plain defaults that preceded the desktop stack
@@ -124,21 +125,7 @@ DEFAULT_CONFIG = {
         # many slow/unreachable MCP servers.
         # See #63078.
         "build_wait_timeout": 600,
-        # Hermes-level retry attempts for API errors (connection drops, timeouts, 5xx) wrapping the
-        # whole call; the OpenAI SDK also retries transient errors (max_retries=2). Set 1 for fast
-        # failover to fallback providers; raise to tolerate longer provider hiccups.
-        "api_max_retries": 3,
-        # Once api_max_retries AND the fallback chain are spent on a transient outage (5xx,
-        # overloaded/529, connect/read timeouts) with nothing delivered yet, wait and retry this many
-        # more cycles (jittered 15/30/60/60/60s; a provider Retry-After wins up to 120s) with a
-        # visible "retrying automatically" countdown instead of ending the turn. Esc/interrupt stops
-        # the wait; auth/format/billing/policy errors never enter. 0 disables.
-        "auto_recovery_cycles": 5,
-        # When an API call fails because THIS machine has no network (DNS fails for the provider and
-        # a control host, e.g. a laptop waking briefly from sleep), wait up to this many seconds of
-        # awake time for the network to return before spending a retry attempt. Shows "offline —
-        # waiting for network"; Esc/interrupt stops it. 0 disables.
-        "offline_wait_seconds": 900,
+        **AGENT_RETRY_DEFAULTS,
         # Seconds the Codex/Responses stream may keep reading after its terminal frame so the relay
         # finalizer can run. Relays that never close the SSE socket after response.completed would
         # otherwise wedge the turn until the idle watchdog discards the already-billed response

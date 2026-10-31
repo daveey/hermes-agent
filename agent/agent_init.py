@@ -1307,24 +1307,8 @@ def _apply_agent_section(agent, _agent_cfg):
     # platform_hints: <platform>: {append|replace}, stored verbatim (agent/system_prompt.py).
     agent._platform_hint_overrides = _cfg_dict(_agent_cfg, "platform_hints")
 
-    # App-level API retry count (wraps each model API call). Default 3; 1 = single attempt.
-    try:
-        _api_retries = max(int(_agent_section.get("api_max_retries", 3)), 1)
-    except (TypeError, ValueError):
-        _api_retries = 3
-    agent._api_max_retries = _api_retries
-    # Bounded post-exhaustion auto-recovery cycles once retries AND the fallback chain are spent
-    # on a transient outage (agent/turn_recovery_autorecover.py). 0 disables the ladder.
-    try:
-        agent._auto_recovery_cycles = max(int(_agent_section.get("auto_recovery_cycles", 5)), 0)
-    except (TypeError, ValueError):
-        agent._auto_recovery_cycles = 5
-    # Awake seconds an API call may wait for a lost LOCAL network (DNS fails on this machine, e.g. a
-    # laptop's dark wake) before its attempts are spent (agent/turn_offline_wait.py). 0 disables.
-    try:
-        agent._offline_wait_seconds = max(float(_agent_section.get("offline_wait_seconds", 900)), 0.0)
-    except (TypeError, ValueError):
-        agent._offline_wait_seconds = 900.0
+    from agent.agent_init_retries import apply_retry_config
+    apply_retry_config(agent, _agent_section)
 
 
 def _positive_int(raw: Any, *, reject: tuple = ()) -> Optional[int]:

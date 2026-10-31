@@ -259,7 +259,8 @@ def host_resolves(host: str, timeout: float = _RESOLVE_TIMEOUT_S, *, is_interrup
             _dns_slots.release()
             done.set()
 
-    worker = threading.Thread(target=_lookup, name="offline-dns-probe", daemon=True)
+    from agent.memory_provider import spawn_context_thread
+    worker = spawn_context_thread(_lookup, name="offline-dns-probe", daemon=True)
     try:
         worker.start()
     except BaseException:
