@@ -14,6 +14,8 @@ on:
   pull_request:
     paths:
       - "plugin-catalog/**"
+      # A change to the gate itself runs the gate it changes.
+      - ".github/workflows/plugin-catalog-ci.yml"
 
 permissions:
   contents: read
@@ -61,6 +63,10 @@ jobs:
 
       - name: Find changed catalog entries
         id: changed
+        env:
+          # Public upstream, fetched anonymously for the upstream-sync check.
+          UPSTREAM_REPO: https://github.com/NousResearch/hermes-agent.git
+          GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           # HEAD is the PR merge commit: diffing it against its first parent is
@@ -70,10 +76,16 @@ jobs:
             echo "::error::expected the pull_request merge commit as HEAD"
             exit 1
           fi
-          # Added + modified + renamed + typechanged entry files only; deletions
-          # and removed.yaml have nothing to clone. A rename or file->symlink
-          # change that slipped past this list would skip the supply-chain gate.
-          CHANGED=$(git diff --name-only --diff-filter=AMRT 'HEAD^1' HEAD \
+          # Added + modified + typechanged entry files only; deletions and
+          # removed.yaml have nothing to clone. A file->symlink change that
+          # slipped past this list would skip the supply-chain gate.
+          # --no-renames: this checkout is blobless and its token is already
+          # removed (persist-credentials: false), so rename detection's
+          # similarity check would lazily fetch old blobs from the private fork
+          # and die on a credential prompt. Tree entries alone answer
+          # --name-only, and a rename lists as delete-old + add-new, so the new
+          # path still reaches the gate.
+          CHANGED=$(git diff --no-renames --name-only --diff-filter=AMT 'HEAD^1' HEAD \
             -- 'plugin-catalog/*.yaml' 'plugin-catalog/*.yml')
           # The grep can only shrink the list and runs on its own so a git diff
           # failure still fails the step instead of looking like "no changes".
@@ -85,16 +97,44 @@ jobs:
             # hermes) resolves from the PR checkout, so an entry PR that also
             # touches tooling could neuter the gate vetting it. Contributor
             # email maps are data the gate never executes; README/policy/CI PRs
-            # with no entry change skip this check.
-            ALL=$(git diff --name-only 'HEAD^1' HEAD)
+            # with no entry change skip this check. Without renames, both the
+            # old and the new path of a moved file count here.
+            ALL=$(git diff --no-renames --name-only 'HEAD^1' HEAD)
             OUTSIDE=$(printf '%s' "$ALL" | grep -vE '^(plugin-catalog|contributors/emails)/' || true)
             if [ -n "$OUTSIDE" ]; then
-              echo "::error::catalog entry PRs may only touch plugin-catalog/** and contributors/emails/**, found:"
-              # Filenames are PR-controlled; a newline in one could smuggle a
-              # workflow command into the log.
-              printf '%s' "$OUTSIDE" | tr '\0\n' ' '
-              echo
-              exit 1
+              # (fork) An upstream sync lands upstream's catalog entries together
+              # with upstream's core in one merge. Such a PR passes only if EVERY
+              # changed entry is identical (mode and blob) to the newest upstream
+              # commit it contains, its merge-base with upstream main, which
+              # upstream's own catalog gate admitted. Provenance is the content,
+              # never the branch name: a single entry of the PR's own (new,
+              # re-pinned or edited) keeps the data-only rule, and an unreachable
+              # upstream fails closed. Every entry is still validated below.
+              UNTRUSTED="$CHANGED"
+              if git fetch --quiet --no-tags --filter=blob:none "$UPSTREAM_REPO" \
+                    '+refs/heads/main:refs/catalog-gate/upstream' </dev/null \
+                  && UPSTREAM_BASE=$(git merge-base HEAD refs/catalog-gate/upstream); then
+                UNTRUSTED=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do
+                    [ -z "$f" ] && continue
+                    ours=$(git ls-tree HEAD -- "$f" | cut -f1)
+                    theirs=$(git ls-tree "$UPSTREAM_BASE" -- "$f" | cut -f1)
+                    if [ -z "$ours" ] || [ "$ours" != "$theirs" ]; then printf '%s\n' "$f"; fi
+                  done)
+              else
+                echo "::warning::could not resolve upstream main; no entry counts as upstream-admitted"
+              fi
+              if [ -n "$UNTRUSTED" ]; then
+                echo "::error::catalog entry PRs may only touch plugin-catalog/** and contributors/emails/**, found:"
+                # Filenames are PR-controlled; a newline in one could smuggle a
+                # workflow command into the log.
+                printf '%s' "$OUTSIDE" | tr '\0\n' ' '
+                echo
+                echo "Entries not identical to upstream main's merge-base:"
+                printf '%s' "$UNTRUSTED" | tr '\0\n' ' '
+                echo
+                exit 1
+              fi
+              echo "Upstream sync: every changed entry matches upstream $UPSTREAM_BASE; non-catalog changes allowed."
             fi
           fi
 

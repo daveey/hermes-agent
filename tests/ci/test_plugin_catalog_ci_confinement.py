@@ -282,6 +282,43 @@ def _typechange(repo):
 
 
 NEW = {"plugin-catalog/new.yaml": "name: new\n"}
+UPSTREAM_URL = "https://github.com/NousResearch/hermes-agent.git"
+
+
+def _step_env(name_prefix: str) -> dict:
+    data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for job in data["jobs"].values():
+        for step in job["steps"]:
+            if step.get("name", "").startswith(name_prefix):
+                return {k: str(v) for k, v in (step.get("env") or {}).items()}
+    raise LookupError(name_prefix)
+
+
+def _pr_merge(repo: Path) -> None:
+    """Shape of GitHub's pull_request checkout: a merge commit of branch `pr`
+    whose first parent is the base tip, checked out detached."""
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    _git(repo, "checkout", "-q", "--detach")
+
+
+def _find_changed(tmp_path: Path, repo: Path, upstream: Path | None = None):
+    """Run the changed-entries step with its workflow env. The step's upstream
+    URL is rewritten to the `upstream` fixture, or to a missing path when None."""
+    out = tmp_path / "gh-output.txt"
+    out.write_text("", encoding="utf-8")
+    env = _step_env("Find changed catalog")
+    target = upstream if upstream is not None else tmp_path / "no-upstream"
+    env = {
+        **os.environ, **env, "GITHUB_OUTPUT": str(out),
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": f"url.{target.as_uri()}.insteadOf",
+        # Fallback so the harness also runs an older workflow copy (RED proof).
+        "GIT_CONFIG_VALUE_0": env.get("UPSTREAM_REPO", UPSTREAM_URL),
+    }
+    res = _run(_step("Find changed catalog"), tmp_path, repo, env)
+    lines = out.read_text(encoding="utf-8").splitlines()
+    return res, [f for f in lines if f and "__EOF__" not in f and f != "files<<__EOF__"]
 
 
 @pytest.mark.parametrize("change, rc, listed, text", [
@@ -304,22 +341,149 @@ def test_changed_entries_step(tmp_path, change, rc, listed, text):
     repo = tmp_path / "pr"
     _write(repo, {"plugin-catalog/old.yaml": "name: old\n", "plugin-catalog/README.md": "rules\n"})
     _git(repo, "init", "-qb", "main")
-    base = _commit(repo, "base")
+    _commit(repo, "base")
     _git(repo, "checkout", "-qb", "pr")
     change(repo)
     _commit(repo, "pr")
-    # Shape of GitHub's pull_request checkout: a merge commit whose first parent
-    # is the base tip (also origin/main, for the merge-base form of the step).
-    _git(repo, "checkout", "-q", "main")
-    _git(repo, "merge", "-q", "--no-ff", "-m", "merge", "pr")
-    _git(repo, "checkout", "-q", "--detach")
-    _git(repo, "update-ref", "refs/remotes/origin/main", base)
-    out = tmp_path / "gh-output.txt"
-    out.touch()
-    res = _run(_step("Find changed catalog"), tmp_path, repo,
-               {**os.environ, "GITHUB_OUTPUT": str(out)})
+    _pr_merge(repo)
+    res, files = _find_changed(tmp_path, repo)
     assert res.returncode == rc, res.stdout + res.stderr
-    lines = out.read_text(encoding="utf-8").splitlines()
-    assert [f for f in lines if f and "__EOF__" not in f and f != "files<<__EOF__"] == listed
+    assert files == listed
     if text:
         assert text in res.stdout
+
+
+# ── upstream sync through the changed-entries step ───────────────────────────
+
+CORE = "".join(f"line {i}\n" for i in range(40))
+
+
+def _sync_fixture(tmp_path: Path, pr_change=None) -> tuple[Path, Path]:
+    """Upstream U0 -> U1 -> U2 and a fork synced to U1 whose PR branch merges U2.
+
+    U1 re-pins old.yaml (the fork's base already has it); U2 adds up.yaml,
+    re-pins old.yaml again and moves + edits a core file, so the merge mixes
+    entries with core and a git rename candidate. `pr_change` runs on the PR
+    branch after the upstream merge.
+    """
+    up = tmp_path / "upstream"
+    _write(up, {"plugin-catalog/old.yaml": "name: old\n", "core/tool.py": CORE})
+    _git(up, "init", "-qb", "main")
+    _commit(up, "U0")
+    _write(up, {"plugin-catalog/old.yaml": "name: old\nsha: 2\n"})
+    _commit(up, "U1")
+    fork = tmp_path / "pr"
+    _git(tmp_path, "clone", "-q", str(up), str(fork))
+    _write(fork, {"fork.txt": "fork-local\n"})
+    _commit(fork, "fork main")
+    _write(up, {"plugin-catalog/up.yaml": "name: up\nsha: 1\n",
+                "plugin-catalog/old.yaml": "name: old\nsha: 3\n"})
+    _git(up, "mv", "core/tool.py", "core/moved.py")
+    (up / "core" / "moved.py").write_text(CORE + "edited\n", encoding="utf-8")
+    _commit(up, "U2")
+    _git(fork, "checkout", "-qb", "pr")
+    _git(fork, "fetch", "-q", str(up), "main")
+    _git(fork, "merge", "-q", "--no-ff", "-m", "sync", "FETCH_HEAD")
+    if pr_change:
+        pr_change(fork)
+        _commit(fork, "pr change")
+    _pr_merge(fork)
+    _git(fork, "remote", "remove", "origin")
+    return up, fork
+
+
+def _own_entry(repo):
+    _write(repo, {"plugin-catalog/evil.yaml": "name: evil\nsha: 6\n"})
+
+
+def _edited_upstream_entry(repo):
+    _write(repo, {"plugin-catalog/up.yaml": "name: up\nsha: evil\n"})
+
+
+def _stale_upstream_version(repo):
+    # Exactly U0's old.yaml: admitted upstream once, but not what U2 pins now.
+    _write(repo, {"plugin-catalog/old.yaml": "name: old\n"})
+
+
+def _mode_swapped_upstream_entry(repo):
+    # Same blob id as upstream's up.yaml, but a symlink (mode 120000).
+    (repo / "plugin-catalog" / "up.yaml").unlink()
+    (repo / "plugin-catalog" / "up.yaml").symlink_to("name: up\nsha: 1\n")
+
+
+SYNCED = ["plugin-catalog/old.yaml", "plugin-catalog/up.yaml"]
+
+
+def test_upstream_sync_of_entries_with_core_passes(tmp_path):
+    """Upstream's admitted entries may land beside upstream's core, and still
+    reach the pinned-source gate."""
+    up, fork = _sync_fixture(tmp_path)
+    res, files = _find_changed(tmp_path, fork, upstream=up)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert files == SYNCED
+    assert "Upstream sync: every changed entry matches upstream" in res.stdout
+
+
+@pytest.mark.parametrize("change, culprit", [
+    (_own_entry, "plugin-catalog/evil.yaml"),
+    (_edited_upstream_entry, "plugin-catalog/up.yaml"),
+    (_stale_upstream_version, "plugin-catalog/old.yaml"),
+    (_mode_swapped_upstream_entry, "plugin-catalog/up.yaml"),
+], ids=lambda c: c if isinstance(c, str) else c.__name__.lstrip("_"))
+def test_hostile_mixed_admission_inside_a_sync_fails(tmp_path, change, culprit):
+    """Riding an upstream merge must not admit an entry upstream never had at
+    that commit: any one such entry restores the data-only rule for the PR."""
+    up, fork = _sync_fixture(tmp_path, change)
+    res, files = _find_changed(tmp_path, fork, upstream=up)
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "may only touch plugin-catalog/**" in res.stdout
+    untrusted = res.stdout.split("Entries not identical to upstream", 1)[1]
+    assert culprit in untrusted
+    assert files == []
+
+
+def test_unreachable_upstream_fails_closed(tmp_path):
+    _, fork = _sync_fixture(tmp_path)
+    res, files = _find_changed(tmp_path, fork, upstream=None)
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "could not resolve upstream main" in res.stdout
+    assert files == []
+
+
+def _entry_rename_with_edit(tmp_path: Path) -> tuple[None, Path]:
+    repo = tmp_path / "pr"
+    _write(repo, {"plugin-catalog/old.yaml": "name: old\n" + "# pad\n" * 20})
+    _git(repo, "init", "-qb", "main")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-qb", "pr")
+    _git(repo, "mv", "plugin-catalog/old.yaml", "plugin-catalog/renamed.yaml")
+    (repo / "plugin-catalog" / "renamed.yaml").write_text(
+        "name: old\nsha: 2\n" + "# pad\n" * 20, encoding="utf-8")
+    _commit(repo, "pr")
+    _pr_merge(repo)
+    return None, repo
+
+
+@pytest.mark.parametrize("scenario, listed", [
+    (_entry_rename_with_edit, ["plugin-catalog/renamed.yaml"]),
+    (_sync_fixture, SYNCED),
+], ids=["entry-rename-with-edit", "upstream-sync"])
+def test_blobless_checkout_of_a_private_fork_needs_no_credentials(tmp_path, scenario, listed):
+    """CI checks out blobless and then drops the token, so a lazy blob fetch
+    from the private fork hits a credential prompt. The step must answer from
+    trees alone: here the promisor remote is unreachable, as the token-less
+    https remote is in CI."""
+    up, src = scenario(tmp_path)
+    _git(src, "config", "uploadpack.allowFilter", "true")
+    head = _git(src, "rev-parse", "HEAD")
+    clone = tmp_path / "blobless"
+    _git(tmp_path, "clone", "-q", "--filter=blob:none", "--no-checkout", src.as_uri(), str(clone))
+    _git(clone, "checkout", "-q", "--detach", head)
+    _git(clone, "remote", "set-url", "origin", "https://fixture.invalid/private-fork.git")
+    # HEAD^1's blobs really are missing: reading one would need the remote.
+    missing = _git(clone, "rev-list", "--objects", "--missing=print", "HEAD^1")
+    assert any(line.startswith("?") for line in missing.splitlines())
+    res, files = _find_changed(tmp_path, clone, upstream=up)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "promisor remote" not in res.stderr
+    assert files == listed
