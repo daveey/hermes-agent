@@ -125,7 +125,7 @@ def local_session_exists(_profile: str, chat: str) -> bool:
     for store in stores:
         if not store.exists():
             continue
-        conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True, timeout=10)
+        conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True, timeout=10)  # noqa: kanban-lockguard (state.db, not a board)
         try:
             if conn.execute("SELECT 1 FROM sessions WHERE id=?", (chat,)).fetchone():
                 return True
@@ -181,7 +181,7 @@ def _sent(read_id: str) -> Optional[dict]:
     path = hub_db_path()
     if not path.exists():
         return None
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)  # noqa: kanban-lockguard (hub.db, not a board)
     try:
         row = conn.execute("SELECT body, state, result FROM sent WHERE id=?", (read_id,)).fetchone()
     finally:
