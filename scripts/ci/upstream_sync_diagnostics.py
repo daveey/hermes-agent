@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from flaky_kanban import OPEN
 from nightly_e2e import DEFAULT_STATE, SETTLE_ERRORS, NightlyBoard, failure_key, failing_tests, load_state
 
 CI_WORKFLOW = ".github/workflows/ci.yaml"
@@ -35,7 +37,6 @@ NIGHTLY_RUNS_CHECKED = 10
 TESTED_SHA = re.compile(r"Z Testing \S+ = ([0-9a-f]{40})\s*$", re.MULTILINE)
 SLICE = re.compile(r"^Run tests \((affected, )?\d+/\d+\)$")
 LISTED = 20
-OPEN = {"todo", "ready", "running", "scheduled", "blocked", "review", "triage"}
 
 
 def job_kind(name: str) -> str | None:
@@ -103,24 +104,25 @@ def _tested_sha(gh_repo, run_id, request, gh) -> str | None:
     return found[-1] if found else None
 
 
-def _baseline_runs(gh_repo, base, request, gh) -> list[dict]:
-    """Completed runs that tested exactly ``base`` on main, newest first."""
+def baseline_runs(gh_repo, base, base_time: str, request, gh) -> list[dict]:
+    """Completed runs that tested exactly ``base`` on main, newest first (``base_time``: its commit time, UTC)."""
     runs = [r for page in request(f"repos/{gh_repo}/actions/runs?head_sha={base}&per_page=100")
             for r in page["workflow_runs"]]
     found = [r for r in runs if r.get("path") == CI_WORKFLOW and r.get("head_sha") == base
              and r.get("head_branch") == "main" and r.get("event") in ("push", "workflow_dispatch")]
-    nightly = [r for page in request(f"repos/{gh_repo}/actions/workflows/nightly-e2e.yml/runs?per_page={NIGHTLY_RUNS_CHECKED}")
+    # Only nightlies created after the base commit can have tested it; the newest few are read.
+    nightly = [r for page in request(f"repos/{gh_repo}/actions/workflows/nightly-e2e.yml/runs?event=workflow_dispatch"
+                                     f"&status=completed&created=%3E%3D{base_time}&per_page=100")
                for r in page["workflow_runs"]]
-    for run in nightly[:NIGHTLY_RUNS_CHECKED]:
-        if (run.get("path") == NIGHTLY_WORKFLOW and run.get("event") == "workflow_dispatch"
-                and run.get("status") == "completed" and _tested_sha(gh_repo, run["id"], request, gh) == base):
-            found.append(run)
+    nightly = sorted((r for r in nightly if r.get("path") == NIGHTLY_WORKFLOW and r.get("event") == "workflow_dispatch"
+                      and r.get("status") == "completed"), key=lambda r: r["id"], reverse=True)
+    found += [run for run in nightly[:NIGHTLY_RUNS_CHECKED] if _tested_sha(gh_repo, run["id"], request, gh) == base]
     return sorted((r for r in found if r.get("status") == "completed"), key=lambda r: r["id"], reverse=True)
 
 
-def baseline(gh_repo, base, kind, request, gh) -> BaselineEvidence | None:
-    """The newest run at ``base`` that ran ``kind`` jobs (not skipped), with their verdicts and failing ids."""
-    for run in _baseline_runs(gh_repo, base, request, gh):
+def baseline(gh_repo, runs, kind, request, gh) -> BaselineEvidence | None:
+    """The newest of ``runs`` (baseline_runs) that ran ``kind`` jobs (not skipped), with verdicts and failing ids."""
+    for run in runs:
         jobs = [j for j in _jobs(gh_repo, run["id"], request) if job_kind(j.get("name", "")) == kind]
         ran = [j for j in jobs if j.get("conclusion") in ("success", "failure")]
         if not ran:
@@ -175,21 +177,34 @@ def compare(kind, failed: list[JobEvidence], base: str, evidence: BaselineEviden
                      f"({evidence.url}) is incomplete (skipped/affected-only slices or unparsed failures)")
     if not known:
         state = "also failed" if any(j.conclusion == "failure" for j in evidence.jobs) else "passed"
-        lines.append(f"  {kind}: baseline comparison unknown for a failed job with no parsed test ids; main "
+        lines.append(f"  {kind}: baseline comparison unknown for a required job with no parsed test ids; main "
                      f"{short}'s {kind} {state} ({evidence.url})")
     return lines
 
 
-def _owner_line(e2e_sets) -> str:
+def _owner_lines(candidate_ids, main_ids) -> list[str]:
+    """The candidate's exact e2e set's owner; main's set's owner only when main fails a different set."""
     if not Path(DEFAULT_STATE).exists():
-        return f"  nightly owner lookup unavailable: no nightly-e2e state on this host ({DEFAULT_STATE}; it runs on hermes-hub)"
+        return [f"  nightly owner lookup unavailable: no nightly-e2e state on this host ({DEFAULT_STATE}; "
+                "it runs on hermes-hub)"]
     try:
-        owners = [o for o in dict.fromkeys(nightly_owner(s) for s in e2e_sets if s) if o]
+        exact = nightly_owner(candidate_ids)
+        other = nightly_owner(main_ids) if main_ids and set(main_ids) != set(candidate_ids) else ""
     except SETTLE_ERRORS as exc:  # an unreadable board or state must not hide the CI evidence above
-        return f"  nightly owner lookup unavailable: {exc!r}"
-    if owners:
-        return "  nightly-e2e owner for this exact failing set: " + ", ".join(owners)
-    return "  no open nightly-e2e card matches this exact e2e failing set"
+        return [f"  nightly owner lookup unavailable: {exc!r}"]
+    lines = [f"  nightly-e2e owner for this exact failing set: {exact}" if exact
+             else "  no open nightly-e2e card matches this exact e2e failing set"]
+    if other:
+        lines.append(f"  main's own e2e failing set (a different set) is owned by nightly-e2e card {other}")
+    return lines
+
+
+def fork_point(repo, head: str, main: str, git) -> tuple[str, str]:
+    """(sha, how): the main this sync was built on. Its first parent when that is on main, else the merge-base."""
+    first = git(repo, "rev-parse", f"{head}^1")
+    if git(repo, "merge-base", first, main) == first:
+        return first, "the sync's first parent, on main"
+    return git(repo, "merge-base", head, main), "merge-base with main"
 
 
 def explain(repo, cand, main: str, gh_repo: str, request, gh, *, required, git) -> None:
@@ -200,20 +215,19 @@ def explain(repo, cand, main: str, gh_repo: str, request, gh, *, required, git) 
         return
     for job in failed:
         tests = f" — {len(job.ids)} failing test(s){_listing(job.ids)}" if job.ids else " — no failing test id parsed"
-        print(f"  failed job: {job.name} ({job.conclusion}) {job.url}{tests}")
-    base = git(repo, "merge-base", cand.head, main)
-    print(f"  main baseline: {base[:10]} (where this sync forked from main)")
-    e2e_sets = []
+        print(f"  required job {job.conclusion}: {job.name} {job.url}{tests}")
+    base, how = fork_point(repo, cand.head, main, git)
+    print(f"  main baseline: {base[:10]} ({how})")
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(git(repo, "show", "-s", "--format=%ct", base))))
+    runs = baseline_runs(gh_repo, base, stamp, request, gh)
     for kind in ("python", "e2e"):
         of_kind = [job for job in failed if job_kind(job.name) == kind]
         if not of_kind:
             continue
-        evidence = baseline(gh_repo, base, kind, request, gh)
+        evidence = baseline(gh_repo, runs, kind, request, gh)
         for line in compare(kind, of_kind, base, evidence):
             print(line)
         if kind == "e2e":
-            e2e_sets = [sorted({i for j in of_kind for i in j.ids})]
-            if evidence:
-                e2e_sets.append(sorted(evidence.failed_ids))
-    if e2e_sets:
-        print(_owner_line(e2e_sets))
+            main_ids = sorted(evidence.failed_ids) if evidence else []
+            for line in _owner_lines(sorted({i for j in of_kind for i in j.ids}), main_ids):
+                print(line)

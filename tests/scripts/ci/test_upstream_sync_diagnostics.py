@@ -45,6 +45,20 @@ def ci_run(run_id=60, sha=BASE, branch="main", event="push"):
             "status": "completed", "html_url": f"https://ci.example/run/{run_id}"}
 
 
+BASE_TIME = 1793318400  # 2026-10-30T00:00:00Z
+
+
+def fake_git(repo, *args, first_parent_on_main=True, **kw):
+    """git for a candidate whose first parent is BASE (on main unless told otherwise)."""
+    if args[0] == "rev-parse":
+        return BASE if first_parent_on_main else OTHER
+    if args[0] == "merge-base":
+        return BASE if args[1] == BASE or not first_parent_on_main else OTHER
+    if args[0] == "show":
+        return str(BASE_TIME)
+    raise AssertionError(args)
+
+
 class FakeGitHub:
     """runs: ci.yaml runs at the base sha; nightlies: nightly-e2e.yml runs; jobs/logs keyed by run/job id."""
 
@@ -60,6 +74,7 @@ class FakeGitHub:
         if f"runs?head_sha={BASE}" in endpoint:
             return [{"workflow_runs": self.ci_runs}]
         if "workflows/nightly-e2e.yml/runs" in endpoint:
+            assert "created=%3E%3D2026-10-30T00:00:00Z" in endpoint  # only nightlies after the base commit
             return [{"workflow_runs": self.nightlies}]
         raise AssertionError(endpoint)
 
@@ -87,14 +102,14 @@ def explain(github, tmp_path, monkeypatch, capsys, owner=""):
     (tmp_path / "nightly-e2e.json").write_text("{}")
     cand = sync.Candidate("a" * 40, "red", "https://ci.example/run/20", 0, run_id=20)
     diag.explain(tmp_path, cand, "main", "example/fork", github.request, github.gh,
-                 required=sync.REQUIRED_JOBS, git=lambda *a, **k: BASE)
+                 required=sync.REQUIRED_JOBS, git=fake_git)
     return capsys.readouterr().out
 
 
 def test_main_baseline_failure_names_job_tests_owner_and_never_blames_upstream(tmp_path, monkeypatch, capsys):
     github = FakeGitHub(**nightly_at(BASE, "failure", log(A)))
     out = explain(github, tmp_path, monkeypatch, capsys, owner="t_owner (running)")
-    assert "failed job: Full suite / e2e (failure) https://ci.example/job/21" in out and A in out
+    assert "required job failure: Full suite / e2e https://ci.example/job/21" in out and A in out
     assert f"main-baseline failure: 1 failing test(s) also fail on main {BASE[:10]} (https://ci.example/run/50)" in out
     assert "not evidence that upstream caused them" in out
     assert "candidate-only" not in out
@@ -123,7 +138,7 @@ def test_python_slice_compares_by_test_id_against_main_ci_yaml(tmp_path, monkeyp
     github = FakeGitHub(cand_jobs=candidate_jobs(e2e="success", py_slice=3), ci_runs=[ci_run()],
                         jobs={60: [*slices, job(80, "Python tests / e2e", "skipped")]}, logs={33: log(PY)})
     out = explain(github, tmp_path, monkeypatch, capsys)
-    assert "failed job: Full suite / Run tests (3/8) (failure)" in out and PY in out
+    assert "required job failure: Full suite / Run tests (3/8)" in out and PY in out
     assert "python: candidate-only failure observed" in out and "https://ci.example/run/60" in out
     assert "nightly" not in out  # no e2e failure: no owner lookup
 
@@ -174,7 +189,7 @@ def test_unparsed_candidate_failure_states_baseline_fact_without_attribution(tmp
     github.logs[21] = "2026-10-30T16:48:05Z Error: the job ran out of disk\n"
     out = explain(github, tmp_path, monkeypatch, capsys)
     assert "no failing test id parsed" in out
-    assert "baseline comparison unknown for a failed job with no parsed test ids" in out and "also failed" in out
+    assert "baseline comparison unknown for a required job with no parsed test ids" in out and "also failed" in out
     assert "candidate-only" not in out
 
 
@@ -190,7 +205,7 @@ def test_owner_lookup_failure_keeps_the_ci_evidence(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(diag, "NightlyBoard", OfflineBoard)
     cand = sync.Candidate("a" * 40, "red", "https://ci.example/run/20", 0, run_id=20)
     diag.explain(tmp_path, cand, "main", "example/fork", github.request, github.gh,
-                 required=sync.REQUIRED_JOBS, git=lambda *a, **k: BASE)
+                 required=sync.REQUIRED_JOBS, git=fake_git)
     out = capsys.readouterr().out
     assert "main-baseline failure" in out
     assert "nightly owner lookup unavailable" in out and "unreadable" in out
@@ -201,7 +216,7 @@ def test_no_nightly_state_on_this_host_is_unavailable_not_no_owner(tmp_path, mon
     monkeypatch.setattr(diag, "DEFAULT_STATE", tmp_path / "absent.json")
     cand = sync.Candidate("a" * 40, "red", "https://ci.example/run/20", 0, run_id=20)
     diag.explain(tmp_path, cand, "main", "example/fork", github.request, github.gh,
-                 required=sync.REQUIRED_JOBS, git=lambda *a, **k: BASE)
+                 required=sync.REQUIRED_JOBS, git=fake_git)
     out = capsys.readouterr().out
     assert "nightly owner lookup unavailable: no nightly-e2e state on this host" in out
     assert "no open nightly-e2e card matches" not in out
@@ -232,7 +247,7 @@ def test_owner_requires_open_nightly_provenance_and_the_exact_fingerprint(tmp_pa
 def gate_world(monkeypatch, tmp_path):
     monkeypatch.setattr(diag, "DEFAULT_STATE", tmp_path / "nightly-e2e.json")
     (tmp_path / "nightly-e2e.json").write_text("{}")
-    monkeypatch.setattr(sync, "git", lambda repo, *args, **kw: BASE if args[0] == "merge-base" else "a" * 40)
+    monkeypatch.setattr(sync, "git", lambda repo, *args, **kw: "a" * 40 if args[1] == "--verify" else fake_git(repo, *args))
     monkeypatch.setattr(sync, "_fetch_main", lambda *a: "main")
     monkeypatch.setattr(sync, "_is_ancestor", lambda *a: False)
     monkeypatch.setattr(sync, "_adds_nothing", lambda *a: False)
@@ -277,3 +292,62 @@ def test_gate_still_refuses_when_diagnostic_reads_fail(tmp_path, monkeypatch, ca
     assert sync.advance(tmp_path, "a" * 40, gh_repo="example/fork", request=request) == sync.REFUSED
     out = capsys.readouterr().out
     assert "REFUSED: the full suite failed" in out and "diagnostics unavailable" in out and "API offline" in out
+
+
+def test_main_ci_yaml_e2e_failure_is_a_main_baseline(tmp_path, monkeypatch, capsys):
+    github = FakeGitHub(ci_runs=[ci_run(event="workflow_dispatch")],
+                        jobs={60: [job(61, "Python tests / e2e", "failure")]}, logs={61: log(A)})
+    out = explain(github, tmp_path, monkeypatch, capsys)
+    assert f"e2e: main-baseline failure: 1 failing test(s) also fail on main {BASE[:10]} (https://ci.example/run/60)" in out
+    assert f"main baseline: {BASE[:10]} (the sync's first parent, on main)" in out
+
+
+def test_partial_python_slice_set_cannot_prove_candidate_only(tmp_path, monkeypatch, capsys):
+    slices = [job(70 + n, f"Python tests / Run tests ({n}/8)", "success" if n != 3 else "cancelled") for n in range(1, 9)]
+    github = FakeGitHub(cand_jobs=candidate_jobs(e2e="success", py_slice=3), ci_runs=[ci_run()],
+                        jobs={60: slices}, logs={33: log(PY)})
+    out = explain(github, tmp_path, monkeypatch, capsys)
+    assert "python: baseline comparison unknown for 1 test(s)" in out and "candidate-only" not in out
+
+
+def test_python_and_e2e_failures_are_attributed_per_kind(tmp_path, monkeypatch, capsys):
+    ev = nightly_at(BASE, "failure", log(A))
+    slices = [job(70 + n, f"Python tests / Run tests ({n}/8)", "success") for n in range(1, 9)]
+    github = FakeGitHub(cand_jobs=candidate_jobs(e2e="failure", py_slice=3), ci_runs=[ci_run()],
+                        nightlies=ev["nightlies"], jobs={**ev["jobs"], 60: slices}, logs={**ev["logs"], 33: log(PY)})
+    out = explain(github, tmp_path, monkeypatch, capsys)
+    assert "python: candidate-only failure observed" in out and "e2e: main-baseline failure" in out
+
+
+def test_fork_point_falls_back_to_merge_base_when_first_parent_is_not_on_main(tmp_path):
+    assert diag.fork_point(tmp_path, "a" * 40, "main", lambda *a, **k: fake_git(*a, first_parent_on_main=False)) == (
+        BASE, "merge-base with main")
+    assert diag.fork_point(tmp_path, "a" * 40, "main", fake_git) == (BASE, "the sync's first parent, on main")
+
+
+class StateBoard:
+    def __init__(self, cards):
+        self.cards = cards
+
+    def card(self, card_id):
+        return self.cards.get(card_id)
+
+
+def test_owner_of_mains_different_set_is_never_labelled_exact(tmp_path, monkeypatch, capsys):
+    """Candidate fails {A, B}; main fails {A}; only {A} has a card: it is main's set's owner, not the exact one."""
+    github = FakeGitHub(**nightly_at(BASE, "failure", log(A)))
+    github.logs[21] = log(A, B)
+    state = tmp_path / "nightly-e2e.json"
+    key = failure_key([A])
+    state.write_text(json.dumps({"cards": {key: {"id": "t_main", "n": 1}}}))
+    board = StateBoard({"t_main": {"id": "t_main", "status": "running", "created_by": "nightly-e2e",
+                                   "idempotency_key": f"nightly-e2e:{key}:1"}})
+    monkeypatch.setattr(diag, "DEFAULT_STATE", state)
+    monkeypatch.setattr(diag, "NightlyBoard", lambda *a, **k: board)
+    cand = sync.Candidate("a" * 40, "red", "https://ci.example/run/20", 0, run_id=20)
+    diag.explain(tmp_path, cand, "main", "example/fork", github.request, github.gh,
+                 required=sync.REQUIRED_JOBS, git=fake_git)
+    out = capsys.readouterr().out
+    assert "no open nightly-e2e card matches this exact e2e failing set" in out
+    assert "main's own e2e failing set (a different set) is owned by nightly-e2e card t_main (running)" in out
+    assert "owner for this exact failing set" not in out
