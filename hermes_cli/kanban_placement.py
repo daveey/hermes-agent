@@ -318,14 +318,14 @@ HOME_GATEWAY_MARKERS = (
 
 
 def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
-                     machine_ok: Optional[Callable[[str], bool]]) -> Optional[dict]:
+                     machine_ok: Optional[Callable[[str], bool]], *, skip: bool = False) -> Optional[dict]:
     """Placement for heavy, portable work created on a gateway with no ``route`` entry (the hub): None keeps it
     here on the gateway's own host. Portable means: scratch workspace on the default board, an assignee this
     config places, no option a worker cannot carry, only carried ``requires`` and no gateway ``needs``, no
     local-only marker, no marker naming the home gateway's own state (:data:`HOME_GATEWAY_MARKERS`, extended
     by ``extra_home_markers``), a heavy marker, and a worker that is an active pickup machine."""
     worker = c.heavy_target(self_gw)
-    if not worker:
+    if skip or not worker:  # an explicit pin or a courier card is never re-routed
         return None
     if (args.get("workspace_kind") or "scratch") != "scratch":
         return None
@@ -595,11 +595,8 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             target = pin
         if not target:
             # A gateway with no ``route`` entry (the hub) can still send portable heavy work to a worker node.
-            if not explicit and origin_intent is None and c.heavy_target(self_gw):
-                d = _routeless_heavy(args, c, self_gw, machine_ok)
-                if d:
-                    return d
-            return {"where": "local", "why": "no placement route for this gateway"}
+            return (_routeless_heavy(args, c, self_gw, machine_ok, skip=explicit or origin_intent is not None)
+                    or {"where": "local", "why": "no placement route for this gateway"})
         if origin_intent is not None:
             return {"where": "local", "why": "courier creation for another gateway"}
         # Parents are local links, so the card is created here; with ``defer_parents`` (default on) it
