@@ -115,7 +115,8 @@ def test_unchanged_inputs_run_no_forced_pass(sweeps, monkeypatch):
     for _ in range(3):
         _build_tui_agent(monkeypatch)
     assert count["n"] == 0
-    assert plugins_mod.refresh_plugins_for_new_session() is False
+    from hermes_cli.plugins_refresh import refresh_plugins_for_new_session
+    assert refresh_plugins_for_new_session() is False
 
 
 def test_gateway_fresh_agent_build_loads_a_plugin_enabled_after_boot(sweeps, home, monkeypatch):

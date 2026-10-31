@@ -160,7 +160,7 @@ class GatewaySessionAgentMixin:
         policy = policy_for_source(runner, src)
         # [daveey] A plugin enabled after the gateway booted loads before a fresh agent snapshots its
         # tools (this session's home is bound here); a no-op stat check when nothing changed.
-        from hermes_cli.plugins import refresh_plugins_for_new_session
+        from hermes_cli.plugins_refresh import refresh_plugins_for_new_session
         refresh_plugins_for_new_session()
         return ctx.AIAgent(
             model=turn_route["model"], **turn_route["runtime"], **_checkpoint_agent_kwargs(ctx.user_config),

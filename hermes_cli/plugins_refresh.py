@@ -53,3 +53,17 @@ def refresh_if_inputs_changed(manager: Any) -> bool:
                     "session", home)
         manager.discover_and_load(force=True)
     return True
+
+
+def refresh_plugins_for_new_session() -> bool:
+    """:func:`refresh_if_inputs_changed` for the active home's manager; never raises (an agent build
+    must not fail on it). Call it before building a NEW session's agent, never mid-turn."""
+    try:
+        from agent.safe_worker_policy import safe_worker_enabled
+        from hermes_cli.plugins import get_plugin_manager
+        if safe_worker_enabled():
+            return False
+        return refresh_if_inputs_changed(get_plugin_manager())
+    except Exception:
+        logger.warning("plugin refresh before a new-session agent build failed", exc_info=True)
+        return False
