@@ -290,7 +290,7 @@ def _profile_capabilities(assignee: str, required: list[str] | None = None) -> s
     lets the toolset lookup skip plugin discovery when a recorded one already grants it."""
     from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
     from hermes_cli.config_backend import read_config_doc_readonly
-    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_cli.config_effective import load_profile_config_effective
     from hermes_cli.profiles import resolve_profile_env
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from tools.terminal_scope import build_profile_terminal_scope, reset_terminal_scope, set_terminal_scope
@@ -303,7 +303,7 @@ def _profile_capabilities(assignee: str, required: list[str] | None = None) -> s
     with ExitStack() as stack:
         stack.callback(reset_hermes_home_override, set_hermes_home_override(str(home)))
         stack.callback(reset_secret_scope, set_secret_scope(build_profile_secret_scope(home)))
-        config = load_user_config_effective(config_path, fail_closed=True)
+        config = load_profile_config_effective(config_path, fail_closed=True)
         _check_policy_shape(config)
         terminal = build_profile_terminal_scope(home)
         # Effective config includes managed overlays and expanded values; the terminal

@@ -97,7 +97,7 @@ def test_unreadable_policy_fails_closed(profiles, monkeypatch):
     profiles("coder", LOCAL)
     def denied(*args, **kwargs):
         raise PermissionError("denied")
-    monkeypatch.setattr(config_effective, "load_user_config_effective", denied)
+    monkeypatch.setattr(config_effective, "load_profile_config_effective", denied)
     with pytest.raises(CapabilityMismatchError):
         validate_assignment("coder", requires=["terminal"])
 

@@ -69,6 +69,19 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
         return _effective(snapshot)
     if config_path is None:
         config_path = _config.get_config_path()
+    return load_profile_config_effective(config_path, fail_closed=fail_closed, record_backup=True)
+
+
+def load_profile_config_effective(
+    config_path: Path, *, fail_closed: bool = False, record_backup: bool = False,
+) -> dict[str, Any]:
+    """Inspect a profile's current policy, NOT the calling worker's session authority.
+
+    Assignment preflight needs the assignee's configuration even inside a frozen worker.
+    Session/runtime readers must keep using ``load_user_config_effective``; this read-only
+    projection neither replaces nor unbinds their snapshot. The caller binds the target's
+    home and secret scopes, just as for an explicit-path user-config read. [daveey]
+    """
     path_key = str(config_path)
     with _config._CONFIG_LOCK:
         user_sig, cache_sig = _config._load_config_cache_sig(config_path)
@@ -98,7 +111,7 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
                 # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
                 # Only for the ACTIVE home — a read of another profile's file (doctor, TUI cwd lookup)
                 # must not create backups/ inside that profile.
-                if config_path == _config.get_config_path():
+                if record_backup and config_path == _config.get_config_path():
                     from hermes_cli.config_backups import backup_config
                     backup_config(config_path, "good")
 
