@@ -1359,6 +1359,72 @@ def test_heavy_route_machine_check_reads_the_board_registry(monkeypatch, entry, 
     assert kp._machine_picks_up("worker-1") is ok
 
 
+# --- the hub (no route entry) sends portable heavy work to the worker ---------------------------------------
+# Gap: heavy_route was only read after a route target existed, so the hub (routeless) kept every heavy card
+# on itself and worker-1's explicit pickup never saw one.
+
+HUB_HEAVY = {"route": {"macbook": "hub"}, "heavy_route": {"hub": "worker-1"}}
+
+
+def _hub(args, **kw):
+    kw.setdefault("cfg", HUB_HEAVY)
+    kw.setdefault("self_gw", "hub")
+    kw.setdefault("machine_ok", PICKS_UP)
+    return decide(args, **kw)
+
+
+@pytest.mark.parametrize("args", [
+    {"title": "Run the regression tests for the parser"},
+    {"title": "CI red", "body": "Reproduce with scripts/run_tests.sh tests/hermes_cli/ -j 4"},
+    {"title": "Benchmark the tokenizer", "requires": ["terminal", "file", "git"]},
+    {"title": "Run the benchmark", "parents": ["t_1"]},
+])
+def test_hub_origin_portable_heavy_work_runs_on_the_worker(args):
+    d = _hub(args)
+    assert d["where"] == "local" and d["runs_on"] == ["machine:worker-1"] and "defer" not in d, d
+    assert d["why"].startswith("heavy work")
+
+
+@pytest.mark.parametrize("args", [
+    {"title": "Light summary of CI failures"},                                  # not heavy
+    {"title": "Run the regression tests on hermes-hub"},                        # names the hub host
+    {"title": "pytest the hub", "body": "read ~/.hermes/kanban.db while it runs"},   # host state
+    {"title": "Run pytest", "body": "then edit the cron jobs"},                 # cron control plane
+    {"title": "Run pytest", "body": "use token-broker exec to fetch a key"},    # credentials broker
+    {"title": "Run pytest", "workspace_kind": "dir", "workspace_path": "/home/ubuntu/code/x"},
+    {"title": "Run pytest", "workspace_kind": "worktree", "workspace_path": "/home/ubuntu/code/x"},
+    {"title": "Run pytest", "board": "links"},
+    {"title": "Run pytest", "requires": ["host_repo"]},                          # checkout on this host
+    {"title": "Run pytest", "requires": ["aws:acct:ec2-describe"]},             # gateway capability
+    {"title": "Run pytest", "initial_status": "blocked"},
+    {"title": "Run pytest", "project": "hermes"},
+    {"title": "Run pytest", "assignee": "alpha"},
+    {"title": "Fix flaky macOS test in the pytest suite"},                      # Mac-only
+    {"title": "Run pytest", "skills": ["macos-performance-triage"]},
+])
+def test_hub_origin_host_specific_or_light_work_stays_on_the_hub(args):
+    d = _hub(args)
+    assert d["where"] == "local" and "runs_on" not in d, d
+
+
+def test_hub_origin_heavy_work_stays_when_the_worker_does_not_pick_up_or_is_not_configured():
+    assert "runs_on" not in _hub({"title": "Run pytest"}, machine_ok=lambda name: False)
+    assert "runs_on" not in _hub({"title": "Run pytest"}, cfg={"route": {"macbook": "hub"}})
+    assert "runs_on" not in _hub({"title": "Run pytest"}, cfg={"heavy_route": {"macbook": "worker-1"}})
+
+
+def test_hub_origin_explicit_pins_and_courier_cards_win_over_heavy_routing():
+    assert "runs_on" not in _hub({"title": "Run pytest", "placement": "local"})
+    assert "runs_on" not in _hub({"title": "Run pytest", "placement": "macbook"})
+    assert "runs_on" not in _hub({"title": "Run pytest"}, origin_intent={"x": 1})
+
+
+def test_hub_origin_extra_home_markers_extend_the_host_specific_list():
+    cfg = {**HUB_HEAVY, "extra_home_markers": [r"\bsecret-lab\b"]}
+    assert "runs_on" not in _hub({"title": "Run pytest in secret-lab"}, cfg=cfg)
+    assert _hub({"title": "Run pytest in the open"}, cfg=cfg)["runs_on"] == ["machine:worker-1"]
+
+
 # --- explicit pin to a live gateway that is not this gateway's route target ---------------------------
 # From the hub (no route entry) placement='macbook' was refused "no placement route for this gateway", so
 # kanban_create could not reach the MacBook at all. [daveey]

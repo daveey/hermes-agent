@@ -308,6 +308,59 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
     return None
 
 
+# Work that only makes sense on the gateway that owns it (the hub, for a routeless gateway): its checkout and
+# state, credentials broker, cron control plane, Kanban DB, Board/gateway admin. Used only for ``_routeless_heavy``.
+HOME_GATEWAY_MARKERS = (
+    r"~/\.hermes\b", r"/home/ubuntu/\.hermes\b", r"\bkanban\.db\b", r"\bcron ?(job|jobs|tab)?\b",
+    r"\btoken-broker\b", r"\bhermes-sync\b", r"\bhermes-hub\b", r"\bon the hub\b", r"\bthe hub's\b",
+    r"\bgateway (restart|config|service)\b", r"\bsystemctl\b", r"\blaunchd\b",
+)
+
+
+def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
+                     machine_ok: Optional[Callable[[str], bool]]) -> Optional[dict]:
+    """Placement for heavy, portable work created on a gateway with no ``route`` entry (the hub): None keeps it
+    here on the gateway's own host. Portable means: scratch workspace on the default board, an assignee this
+    config places, no option a worker cannot carry, only carried ``requires`` and no gateway ``needs``, no
+    local-only marker, no marker naming the home gateway's own state (:data:`HOME_GATEWAY_MARKERS`, extended
+    by ``extra_home_markers``), a heavy marker, and a worker that is an active pickup machine."""
+    worker = c.heavy_target(self_gw)
+    if not worker:
+        return None
+    if (args.get("workspace_kind") or "scratch") != "scratch":
+        return None
+    board = args.get("board")
+    if board and board != "default":
+        return None
+    if (args.get("assignee") or "default") not in c.assignees():
+        return None
+    if any(args.get(k) not in (None, "", [], False) for k in UNCARRIED_OPTIONS):
+        return None
+    reqs = args.get("requires") or []
+    reqs = [reqs] if isinstance(reqs, str) else list(reqs)
+    if any(reg.is_gateway_need(r) for r in reqs):
+        return None
+    if any(str(r) not in c.carried_requires() for r in reqs):
+        return None
+    title, body = args.get("title") or "", args.get("body") or ""
+    if _local_marker(title, body, args.get("skills"), c):
+        return None
+    full = f"{title}\n{body}"
+    extra = c.raw.get("extra_home_markers")
+    pats = list(HOME_GATEWAY_MARKERS) + (list(extra) if isinstance(extra, list) else [])
+    for p in pats:
+        try:
+            if re.search(p, full, re.IGNORECASE):
+                return None
+        except re.error:
+            continue
+    heavy = _heavy_marker(title, body, c)
+    if not heavy or not (machine_ok or _machine_picks_up)(worker):
+        return None
+    return {"where": "local", "runs_on": [f"machine:{worker}"],
+            "why": f"heavy work ({heavy}): runs on {worker} through the Board lease"}
+
+
 def _machine_picks_up(name: str) -> bool:
     """``name`` is an active machine in the Board registry that is not held (draining) and has not turned
     pickup off. The Board registry does not publish ``pickup`` today (10-28: every entry lacked it, the hub
@@ -541,6 +594,11 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             # liveness check below refuses a gateway that is unknown or not live.
             target = pin
         if not target:
+            # A gateway with no ``route`` entry (the hub) can still send portable heavy work to a worker node.
+            if not explicit and origin_intent is None and c.heavy_target(self_gw):
+                d = _routeless_heavy(args, c, self_gw, machine_ok)
+                if d:
+                    return d
             return {"where": "local", "why": "no placement route for this gateway"}
         if origin_intent is not None:
             return {"where": "local", "why": "courier creation for another gateway"}
