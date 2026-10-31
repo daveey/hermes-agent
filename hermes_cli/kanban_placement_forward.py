@@ -40,6 +40,8 @@ REQUEUE_SECONDS = 600          # retry a not-live target / a still-queued reques
 SETTLE_PARK_SECONDS = 14 * 86400  # timer backstop of the settle park; the wake probe ends it first
 CHECK_EVERY = 300
 AWAIT_BUDGET = 45.0
+CONFIRM_RETRIES = 2            # confirm a just-forwarded card this many extra times before parking unconfirmed
+CONFIRM_RETRY_DELAY = 3.0
 ARCHIVE_AWAIT_BUDGET = 5.0     # archive: wait this long for the target's card id before recording ``unresolved``
 ARCHIVE_SWEEP_GIVE_UP = 7 * 86400  # the dispatcher sweep stops retrying an ``unresolved`` archive after this
 CANCEL_INTENT = "placement_cancel_intent"  # written in the terminal txn: the placed copy must be cancelled
@@ -456,6 +458,7 @@ class Forwarder:
         from hermes_cli import kanban_wait_check as kwait
         self.conn, self.task_id, self.run_id = conn, task_id, run_id
         self.now = now or time.time
+        self.sleep = time.sleep
         self.cfg = kp.config()
         self.self_gw = reg.self_gateway() or "local"
         self.hub_cli = reg.hub_cli_path(self.cfg.get("hub_cli"))
@@ -551,14 +554,26 @@ class Forwarder:
         from hermes_cli import kanban_awaiting as kaw
         from hermes_cli import kanban_db as kb
         awaiting = {"kind": "card", "ref": rtid, "gateway": target}
-        try:
-            kaw.confirm_remote(awaiting)  # ssh, before the write txn
-        except kaw.AwaitingError as exc:
-            # It finished between the settle read and this confirm: settle it (completes this card), once.
-            if exc.code != kaw.PRODUCER_DONE or getattr(self, "_resettled", False):
-                raise
-            self._resettled = True
-            return self._settle(kb.get_task(self.conn, self.task_id), target, rtid)
+        for attempt in range(CONFIRM_RETRIES + 1):
+            try:
+                kaw.confirm_remote(awaiting)  # ssh, before the write txn
+                break
+            except kaw.AwaitingError as exc:
+                # It finished between the settle read and this confirm: settle it (completes this card), once.
+                if exc.code == kaw.PRODUCER_DONE and not getattr(self, "_resettled", False):
+                    self._resettled = True
+                    return self._settle(kb.get_task(self.conn, self.task_id), target, rtid)
+                if exc.code != kaw.INVALID_AWAITING:
+                    raise  # archived/triage producer: genuinely not live
+                # The target just made this card and its replica has not synced it yet (``not found in <gw>
+                # replica``), or ssh is down. The id came from the target's own create outcome, so it exists:
+                # retry briefly, then park on it anyway; the wake probe re-reads it every CHECK_EVERY.
+                if attempt < CONFIRM_RETRIES:
+                    self.sleep(CONFIRM_RETRY_DELAY)
+                    continue
+                print(f"placement forward: {rtid} on {target} not confirmable yet ({exc.code}: {str(exc)[:160]}); "
+                      "parking on it unconfirmed", flush=True)
+                kaw._REMOTE_CONFIRMED[(target, rtid)] = (time.monotonic(), "just forwarded; not in replica yet")
         ok = kb.schedule_task(
             self.conn, self.task_id, expected_run_id=self.run_id, awaiting=awaiting,
             wake_check=wake_probe(target, rtid), check_every=CHECK_EVERY,
@@ -592,7 +607,7 @@ def main(argv: Optional[list] = None) -> int:
                 st = state(conn, task_id)
                 if st and (st.get("request_id") or st.get("remote_task_id")):
                     # Already sent: a local run would duplicate it. Retry the forward later.
-                    action = fwd._park_clock(f"forward step failed ({type(exc).__name__}); retrying")
+                    action = fwd._park_clock(f"forward step failed ({type(exc).__name__}: {str(exc)[:160]}); retrying")
                 else:
                     action = fwd._cancel(f"forward failed: {exc!r}"[:400])
     except Exception as exc:

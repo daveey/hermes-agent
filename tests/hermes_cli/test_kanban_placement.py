@@ -1675,3 +1675,54 @@ def test_unresolved_archive_sweep_gives_up_after_seven_days_with_a_comment(mac, 
         kpf.sweep_unresolved_archives(conn, now=time.time() + 30 * 86400)  # not swept again
         assert len(kpf._archive_events(conn, child)) == 2
     assert _archive_requests(mac) == []
+
+
+def test_just_forwarded_card_the_replica_has_not_synced_parks_on_the_card_not_the_clock(mac, monkeypatch):
+    """confirm_remote says ``not found in <gw> replica`` right after a forward: retry, then a card-wait park."""
+    from hermes_cli import kanban_awaiting as kaw
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+    calls = []
+
+    def unsynced(awaiting):
+        calls.append(awaiting["ref"])
+        raise kaw.AwaitingError(kaw.INVALID_AWAITING, f"cannot confirm producer card {awaiting['ref']}: not found")
+
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="Orchestrate", assignee="default")
+        created = json.loads(kt._handle_create({"title": "Fix the flaky lint", "body": "Push it.", "parents": [parent],
+                                                "session_id": "20261027_183000_abc123"}))
+        kb.complete_task(conn, parent, summary="fanned out", force=True)
+        kb.recompute_ready(conn)
+        child = created["task_id"]
+        f = _forwarder(conn, child, mac, monkeypatch)
+        monkeypatch.setattr(kaw, "confirm_remote", unsynced)
+        f.sleep = lambda s: None
+        assert f.run() == "parked"
+        assert len(calls) == 3  # first try + 2 retries
+        task = kb.get_task(conn, child)
+        assert task.status == "scheduled"
+        aw, _ = kaw._latest_park(conn, child)
+        assert aw["kind"] == "card" and aw["ref"] == HUB_TID and aw["gateway"] == "hub", aw
+
+
+def test_archived_producer_is_not_parked_on(mac, monkeypatch):
+    from hermes_cli import kanban_awaiting as kaw
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    def archived(awaiting):
+        raise kaw.AwaitingError(kaw.AGENT_ACTION_WAIT, "the producer card is not live")
+
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="Orchestrate", assignee="default")
+        created = json.loads(kt._handle_create({"title": "Fix the flaky lint", "body": "Push it.", "parents": [parent],
+                                                "session_id": "20261027_183000_abc123"}))
+        kb.complete_task(conn, parent, summary="fanned out", force=True)
+        kb.recompute_ready(conn)
+        f = _forwarder(conn, created["task_id"], mac, monkeypatch)
+        monkeypatch.setattr(kaw, "confirm_remote", archived)
+        with pytest.raises(kaw.AwaitingError):
+            f.run()
