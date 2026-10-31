@@ -48,6 +48,13 @@ Callback attributes (set on the function before ``ctx.register_hook``):
   ownership still takes precedence; registration order is unchanged when no callback opts in.
 - ``include_background = True``: also run in kanban workers, delegate_task subagents and cron jobs
   (skipped there by default).
+- ``include_forks = True``: also run on detached fork turns (background review, side questions:
+  ``_turn_origin`` / ``_persist_disabled``), skipped there by default. A fork shares the parent's
+  session_id and platform, but it is not a reply in the conversation: a review fork's text is never
+  shown, and a ``/btw`` answer is a tool-less side note outside the transcript, so a hold's nudge
+  (file a card, publish an ask) cannot be acted on and only burns the fork's few iterations, while
+  per-session gate state would mix with the parent's. Same rule as ``pre_verify`` and
+  ``post_llm_call``. A fork that is also a background agent needs both opt-ins.
 """
 
 from __future__ import annotations
@@ -119,6 +126,11 @@ def is_background_agent(agent: Any) -> bool:
     return False
 
 
+def is_fork_turn(agent: Any) -> bool:
+    """Detached fork (background review, ``/btw`` side question): not a reply in the conversation."""
+    return bool(getattr(agent, "_turn_origin", None) or getattr(agent, "_persist_disabled", False))
+
+
 def eligible_callbacks(agent: Any) -> list[Callable]:
     """Registered ``pre_final_gate`` callbacks that apply to this agent's context."""
     try:
@@ -134,6 +146,8 @@ def eligible_callbacks(agent: Any) -> list[Callable]:
         return []
     if callbacks and is_background_agent(agent):
         callbacks = [cb for cb in callbacks if getattr(cb, "include_background", False)]
+    if callbacks and is_fork_turn(agent):
+        callbacks = [cb for cb in callbacks if getattr(cb, "include_forks", False)]
     return callbacks
 
 

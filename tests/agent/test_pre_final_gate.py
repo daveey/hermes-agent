@@ -515,6 +515,40 @@ def test_skipped_for_subagents_unless_opted_in(agent):
     assert _run(agent, hook)["final_response"] == "sub answer\n\nx" and calls
 
 
+@pytest.mark.parametrize("fork_attrs", [
+    {"_turn_origin": "background_review"},
+    {"_turn_origin": "side_question"},
+    {"_persist_disabled": True},
+])
+def test_skipped_for_fork_turns_unless_opted_in(agent, fork_attrs):
+    """Fork output never reaches the user: no gate judges, holds or buffers it by default."""
+    calls = []
+
+    @_buffered
+    def hook(**kw):
+        calls.append(kw["final_response"])
+        return {"hold": True, "nudge": "should not reach a fork"} if len(calls) == 1 else {"append": "x"}
+
+    hook.include_background = True  # the background opt-in alone does not cover forks
+
+    run = Run(agent, ["user answer", "user answer 2"])  # control: an ordinary user turn is gated
+    assert _run(agent, hook)["final_response"] == "user answer 2\n\nx"
+    assert calls == ["user answer", "user answer 2"] and len(run.requests) == 2
+
+    calls.clear()
+    for name, value in fork_attrs.items():
+        setattr(agent, name, value)
+    run = Run(agent, ["fork answer"])
+    assert _run(agent, hook)["final_response"] == "fork answer"
+    assert not calls and len(run.requests) == 1 and run.shown == "fork answer"
+    assert agent._final_gate_buffer is None
+
+    hook.include_forks = True
+    run = Run(agent, ["fork answer", "fork answer 2"])
+    assert _run(agent, hook)["final_response"] == "fork answer 2\n\nx"
+    assert calls == ["fork answer", "fork answer 2"] and len(run.requests) == 2
+
+
 def test_no_hook_streams_live(agent):
     run = Run(agent, ["streamed"])
     with patch("hermes_cli.lifecycle.has_hook", return_value=False), \
