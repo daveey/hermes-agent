@@ -1078,6 +1078,12 @@ class CLISessionMixin:
         agent = getattr(self, "agent", None)
         if not agent or not hasattr(agent, "_persist_session"):
             return
+        from hermes_cli.gateway_agent import GatewayAgent
+        if isinstance(agent, GatewayAgent):
+            # [daveey] The gateway ran the turn and owns its transcript and system prompt; the proxy's
+            # persistence is a no-op, so building a prompt here only ran the agent loop's restore on
+            # the proxy (agent-928bcf8050: a refused store read logged a traceback on every quit).
+            return
 
         persist_lock = getattr(agent, "_session_persist_lock", None)
 

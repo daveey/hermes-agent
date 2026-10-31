@@ -35,13 +35,21 @@ _READS = frozenset({
     "get_handoff_state", "get_meta", "get_compression_tip", "resolve_session_by_title", "get_messages",
     "session_count", "sanitize_title", "session_yolo_enabled",
     "get_session_model_config_value",
+    # [daveey] Reads the agent loop makes on whatever ``_session_db`` it holds (conversation_loop,
+    # prompt_refresh, run_agent); tests/hermes_cli/test_gateway_session_store.py pins the parity.
+    "prompt_refresh_epoch", "latest_conversation_role", "get_conversation_root",
 })
 # Writes the gateway already performs itself (persistence, accounting, maintenance).
 _GATEWAY_OWNED = frozenset({
     "create_session", "reopen_session", "append_messages_batch", "flush_token_counts",
     "update_session_model", "patch_session_model_config", "maybe_auto_archive",
     "maybe_auto_prune_and_vacuum", "set_meta", "update_token_counts", "close",
+    "update_system_prompt",  # [daveey] the gateway builds, persists and refreshes the prompt
 })
+# [daveey] Agent-loop SessionDB methods this store refuses on purpose: name -> why. The parity test
+# requires every ``_session_db`` call in the agent loop to be in one of these sets, so a new call
+# fails CI until it is classified instead of becoming a runtime refusal traceback.
+_REFUSED_BY_DESIGN: dict[str, str] = {}
 # Mutations the owner refuses without the execution generation they were read at (hermes_state_runtime).
 _GENERATION_FENCED = frozenset({"delete", "rewind", "reset", "branch", "model", "compress", "workspace"})
 _COUNTED_REPAIRS = frozenset({"prune_empty_ghost_sessions", "finalize_orphaned_compression_sessions"})
