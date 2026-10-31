@@ -3,12 +3,14 @@ owner. Diagnostics are evidence only: they never change the gate's verdict and n
 main already has. GitHub's API is a fixture; the job logs are real pytest summary line shapes."""
 import json
 import subprocess
+import sys
+from typing import Any
 
 import pytest
 
 from scripts.ci import upstream_sync as sync
 from scripts.ci import upstream_sync_diagnostics as diag
-from scripts.ci.nightly_e2e import failure_key
+from scripts.ci.nightly_e2e import _card_body, failure_key
 
 BASE = "b" * 40
 OTHER = "c" * 40
@@ -86,7 +88,7 @@ class FakeGitHub:
         return subprocess.CompletedProcess(args, 0, text, "")
 
 
-def nightly_at(base, e2e_conclusion, e2e_log, run_id=50):
+def nightly_at(base, e2e_conclusion, e2e_log, run_id=50) -> dict[str, Any]:
     """A nightly run that verifiably tested ``base`` (its Resolve ref log), with its e2e verdict and log."""
     return dict(
         nightlies=[nightly_run(run_id)],
@@ -189,7 +191,8 @@ def test_unparsed_candidate_failure_states_baseline_fact_without_attribution(tmp
     github.logs[21] = "2026-10-30T16:48:05Z Error: the job ran out of disk\n"
     out = explain(github, tmp_path, monkeypatch, capsys)
     assert "no failing test id parsed" in out
-    assert "baseline comparison unknown for a required job with no parsed test ids" in out and "also failed" in out
+    assert "baseline comparison unknown for a required job whose failing tests were not all parsed" in out
+    assert "also failed" in out
     assert "candidate-only" not in out
 
 
@@ -222,22 +225,33 @@ def test_no_nightly_state_on_this_host_is_unavailable_not_no_owner(tmp_path, mon
     assert "no open nightly-e2e card matches" not in out
 
 
-@pytest.mark.parametrize("status,creator,key_matches,expected", [
-    ("running", "nightly-e2e", True, True), ("blocked", "nightly-e2e", True, True),
-    ("done", "nightly-e2e", True, False), ("archived", "nightly-e2e", True, False),
-    ("running", "default", True, False), ("running", "nightly-e2e", False, False),
+def card_body(ids):
+    """The body the nightly reporter files for this failing set (its real renderer)."""
+    entry = {"ref": "main", "sha": BASE, "dispatched_at": BASE_TIME, "url": "https://ci.example/run/50"}
+    return _card_body("failed", entry, sorted(ids), "=== Summary: 1 failed ===")
+
+
+@pytest.mark.parametrize("status,creator,idem,body_ids,expected", [
+    ("running", "nightly-e2e", "match", (A, B), True), ("blocked", "nightly-e2e", "match", (A, B), True),
+    ("running", "nightly-e2e", None, (A, B), True),  # `kanban show --json` returns no idempotency key
+    ("done", "nightly-e2e", "match", (A, B), False), ("archived", "nightly-e2e", "match", (A, B), False),
+    ("running", "default", "match", (A, B), False), ("running", "nightly-e2e", "other", (A, B), False),
+    ("running", "nightly-e2e", None, (A,), False), ("running", "nightly-e2e", None, (A, B, PY), False),
 ])
-def test_owner_requires_open_nightly_provenance_and_the_exact_fingerprint(tmp_path, status, creator, key_matches,
+def test_owner_requires_open_nightly_provenance_and_the_exact_fingerprint(tmp_path, status, creator, idem, body_ids,
                                                                            expected):
     key = failure_key([A, B])
     state = tmp_path / "nightly.json"
     state.write_text(json.dumps({"cards": {key: {"id": "t_owner", "n": 1}}}))
+    keys = {"match": f"nightly-e2e:{key}:1", "other": "nightly-e2e:failed-000000000000:1"}
 
     class Board:
         def card(self, card_id):
             assert card_id == "t_owner"
-            return {"id": card_id, "status": status, "created_by": creator,
-                    "idempotency_key": f"nightly-e2e:{key if key_matches else 'failed-000000000000'}:1"}
+            card = {"id": card_id, "status": status, "created_by": creator, "body": card_body(body_ids)}
+            if idem:
+                card["idempotency_key"] = keys[idem]
+            return card
 
     assert bool(diag.nightly_owner([B, A], state_path=state, board=Board())) is expected
     assert diag.nightly_owner([A], state_path=state, board=Board()) == ""  # a subset is a different set
@@ -341,7 +355,7 @@ def test_owner_of_mains_different_set_is_never_labelled_exact(tmp_path, monkeypa
     key = failure_key([A])
     state.write_text(json.dumps({"cards": {key: {"id": "t_main", "n": 1}}}))
     board = StateBoard({"t_main": {"id": "t_main", "status": "running", "created_by": "nightly-e2e",
-                                   "idempotency_key": f"nightly-e2e:{key}:1"}})
+                                   "body": card_body([A])}})
     monkeypatch.setattr(diag, "DEFAULT_STATE", state)
     monkeypatch.setattr(diag, "NightlyBoard", lambda *a, **k: board)
     cand = sync.Candidate("a" * 40, "red", "https://ci.example/run/20", 0, run_id=20)
@@ -351,3 +365,87 @@ def test_owner_of_mains_different_set_is_never_labelled_exact(tmp_path, monkeypa
     assert "no open nightly-e2e card matches this exact e2e failing set" in out
     assert "main's own e2e failing set (a different set) is owned by nightly-e2e card t_main (running)" in out
     assert "owner for this exact failing set" not in out
+
+
+def test_owner_found_through_the_real_kanban_show_json_shape(tmp_path):
+    """The board is a spawned `hermes` fixture printing `kanban show --json`'s field set (no idempotency_key)."""
+    key = failure_key([A, B])
+    state = tmp_path / "nightly.json"
+    state.write_text(json.dumps({"cards": {key: {"id": "t_owner", "n": 1}}}))
+    task = {"id": "t_owner", "title": "Nightly e2e RED on main", "body": card_body([A, B]), "assignee": "default",
+            "status": "ready", "created_by": "nightly-e2e", "created_at": BASE_TIME, "skills": []}
+    fake = tmp_path / "hermes"
+    fake.write_text(f"#!{sys.executable}\nimport json, sys\nassert sys.argv[1:] == ['kanban', 'show', 't_owner', "
+                    f"'--json'], sys.argv\nprint(json.dumps({{'task': {task!r}, 'comments': []}}))\n")
+    fake.chmod(0o755)
+    assert diag.nightly_owner([A, B], state_path=state, board=diag.NightlyBoard(str(fake))) == "t_owner (ready)"
+
+
+def _real_owner_explain(github, tmp_path, monkeypatch, capsys, state_text):
+    state = tmp_path / "nightly-e2e.json"
+    state.write_text(state_text)
+    monkeypatch.setattr(diag, "DEFAULT_STATE", state)
+    monkeypatch.setattr(diag, "NightlyBoard", lambda *a, **k: StateBoard({}))
+    cand = sync.Candidate("a" * 40, "red", "https://ci.example/run/20", 0, run_id=20)
+    diag.explain(tmp_path, cand, "main", "example/fork", github.request, github.gh,
+                 required=sync.REQUIRED_JOBS, git=fake_git)
+    return capsys.readouterr().out
+
+
+def test_unavailable_candidate_log_makes_owner_lookup_unknown_not_no_owner(tmp_path, monkeypatch, capsys):
+    out = _real_owner_explain(_with(_nightly_green(), logs={21: None}), tmp_path, monkeypatch, capsys, "{}")
+    assert "no failing test id parsed" in out
+    assert "nightly owner lookup unknown" in out and "no open nightly-e2e card matches" not in out
+
+
+def test_corrupt_nightly_state_is_lookup_unavailable_not_no_owner(tmp_path, monkeypatch, capsys):
+    out = _real_owner_explain(FakeGitHub(**nightly_at(BASE, "failure", log(A))), tmp_path, monkeypatch, capsys,
+                              "{not json")
+    assert "main-baseline failure" in out
+    assert "nightly owner lookup unavailable" in out and "no open nightly-e2e card matches" not in out
+
+
+CRASH_SECTION = ("\n2026-10-30T16:48:05Z === 1 file where the interpreter CRASHED mid-run (native fault — a real bug, "
+                 "not a collection error; the tests that did run are not counted) ===\n"
+                 "2026-10-30T16:48:05Z   tests/e2e/core/test_session.py\n")
+TIMEOUT_SECTION = "\n2026-10-30T16:48:05Z (900s exceeded; process tree SIGKILL'd)\n"
+
+
+@pytest.mark.parametrize("section", [CRASH_SECTION, TIMEOUT_SECTION])
+def test_baseline_whole_file_failure_never_yields_candidate_only(tmp_path, monkeypatch, capsys, section):
+    """Main crashed/timed out in A's file (no per-test line) and failed B: A failing on the candidate is unknown."""
+    github = FakeGitHub(**nightly_at(BASE, "failure", log(B) + section))
+    out = explain(github, tmp_path, monkeypatch, capsys)
+    assert "candidate-only failure observed" not in out
+    assert "e2e: baseline comparison unknown for 1 test(s)" in out
+
+
+def test_candidate_whole_file_failure_is_not_matched_to_an_owner(tmp_path, monkeypatch, capsys):
+    github = FakeGitHub(**nightly_at(BASE, "failure", log(A)))
+    github.logs[21] = log(A) + CRASH_SECTION
+    out = _real_owner_explain(github, tmp_path, monkeypatch, capsys, "{}")
+    assert "main-baseline failure" in out  # the parsed id is still compared
+    assert "nightly owner lookup unknown" in out and "no open nightly-e2e card matches" not in out
+
+
+def test_the_oldest_nightlies_after_the_base_are_read_first(tmp_path, monkeypatch, capsys):
+    """Main moved on: twelve later nightlies tested other shas; only the oldest one tested the base."""
+    base = nightly_at(BASE, "failure", log(A), run_id=100)
+    nightlies, jobs, logs = list(base["nightlies"]), dict(base["jobs"]), dict(base["logs"])
+    for n in range(1, 13):
+        rid = 100 + 10 * n
+        nightlies.append(nightly_run(rid))
+        jobs[rid] = [job(rid + 1, "Resolve ref", "success")]
+        logs[rid + 1] = f"2026-10-31T00:42:42Z Testing main = {OTHER}\n"
+    out = explain(FakeGitHub(nightlies=nightlies, jobs=jobs, logs=logs), tmp_path, monkeypatch, capsys)
+    assert "main-baseline failure" in out and "https://ci.example/run/100" in out
+
+
+def test_spent_log_budget_reads_as_unavailable():
+    ticks = iter([0.0, 1.0, 301.0])
+    calls = []
+    gh = diag.budgeted(lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, "log", ""), 300,
+                       clock=lambda: next(ticks))
+    assert gh("api", "x").returncode == 0
+    late = gh("api", "y")
+    assert late.returncode == 1 and "budget" in late.stderr and calls == [("api", "x")]
