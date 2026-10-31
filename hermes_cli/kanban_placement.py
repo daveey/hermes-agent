@@ -314,6 +314,8 @@ HOME_GATEWAY_MARKERS = (
     r"~/\.hermes\b", r"/home/ubuntu/\.hermes\b", r"\bkanban\.db\b", r"\bcron ?(job|jobs|tab)?\b",
     r"\btoken-broker\b", r"\bhermes-sync\b", r"\bhermes-hub\b", r"\bon the hub\b", r"\bthe hub's\b",
     r"\bgateway (restart|config|service)\b", r"\bsystemctl\b", r"\blaunchd\b",
+    r"~/code/", r"/home/[^/\s]+/code/", r"\bssh\b",
+    r"\brestart(ing)? (the )?gateway\b", r"\bhermes config (set|edit|unset)\b",
 )
 
 

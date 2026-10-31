@@ -1419,6 +1419,36 @@ def test_hub_origin_explicit_pins_and_courier_cards_win_over_heavy_routing():
     assert "runs_on" not in _hub({"title": "Run pytest"}, origin_intent={"x": 1})
 
 
+@pytest.mark.parametrize("body", [
+    "Run pytest in ~/code/hermes-mods",
+    "cd /home/ubuntu/code/_wt/foo then pytest",
+    "cd /home/alice/code/project then pytest",
+    "ssh ubuntu@mini then pytest",
+    "Run pytest then restart the gateway",
+    "Run pytest before restarting gateway",
+    "Run pytest then hermes config set kanban.x y",
+    "Run pytest then hermes config edit",
+    "Run pytest then hermes config unset kanban.x",
+])
+def test_hub_origin_textual_host_operations_stay_local(body):
+    d = _hub({"title": "Maintenance", "body": body})
+    assert d["where"] == "local" and "runs_on" not in d, d
+
+
+@pytest.mark.parametrize("kind", ["dir", "worktree"])
+def test_hub_origin_workspace_kind_alone_stays_local(kind):
+    d = _hub({"title": "Run pytest", "workspace_kind": kind})
+    assert d["where"] == "local" and "runs_on" not in d, d
+
+
+def test_hub_origin_gateway_need_even_if_carried_stays_local():
+    need = "aws:acct:ec2-describe"
+    cfg = {**HUB_HEAVY, "carried_requires": ["terminal", need]}
+    assert _hub({"title": "Run pytest", "requires": ["terminal"]}, cfg=cfg)["runs_on"]
+    d = _hub({"title": "Run pytest", "requires": [need]}, cfg=cfg)
+    assert d["where"] == "local" and "runs_on" not in d, d
+
+
 def test_hub_origin_extra_home_markers_extend_the_host_specific_list():
     cfg = {**HUB_HEAVY, "extra_home_markers": [r"\bsecret-lab\b"]}
     assert "runs_on" not in _hub({"title": "Run pytest in secret-lab"}, cfg=cfg)
