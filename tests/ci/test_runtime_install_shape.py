@@ -17,6 +17,9 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
+# [daveey] The fork conftest (tests/ci/conftest.py) never turns a fork_guard failure into a skip: this file
+# asserts the fork's own required-gate wiring.
+pytestmark = pytest.mark.fork_guard
 _spec = importlib.util.spec_from_file_location(
     "classify_changes", _REPO / "scripts/ci/classify_changes.py"
 )
