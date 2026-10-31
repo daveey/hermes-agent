@@ -13,9 +13,13 @@ const isTimeout = (error: unknown) => /timed out/i.test(String((error as Error)?
 
 /** Expired sidebar evidence is a reason to read, not evidence of unfinished work.
  * Capture the row owner before awaiting; never borrow the foreground gateway.
- * Failed/malformed reads remain unknown, including incomplete ancestry. */
+ * Failed/malformed reads remain unknown, including incomplete ancestry.
+ * A fresh row that claims work is read too: its `kanban_active` also counts settled cards still waiting for the chat's
+ * close-out, which the task list leaves out, so only the read says what is open. If that read fails, the row stands. */
 export async function refreshArchiveTasks(id: string, session: SessionInfo | undefined, profile: string | undefined): Promise<SessionInfo | undefined> {
-  if (hasFreshKanbanObservation(session) && !session?.kanban_unknown && !session?.kanban_remote_stale) {
+  const fresh = hasFreshKanbanObservation(session) && !session?.kanban_unknown && !session?.kanban_remote_stale
+
+  if (fresh && !session?.kanban_active && !session?.kanban_blocked) {
     return session
   }
 
@@ -24,7 +28,7 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
     profile: profile || session?.profile || 'default'
   }
 
-  const unknown = { ...session, kanban_unknown: true } as SessionInfo
+  const unknown = (fresh ? session : { ...session, kanban_unknown: true }) as SessionInfo
   let settled = false
 
   // An unknown verdict reaches the user as "Task status unavailable". Record

@@ -111,3 +111,41 @@ it('retries a timed-out read once instead of reporting unknown', async () => {
   expect(sessionCalls).toBe(2)
   expect($confirmRequest.get()).toBeNull()
 })
+
+const nowSeconds = () => Date.now() / 1000
+
+it('archives without asking when a fresh row only counts settled cards awaiting close-out', async () => {
+  const row = { id: 'settled', connection_id: 'owner', profile: 'work', kanban_active: 7, kanban_observed_at: nowSeconds() } as SessionInfo
+
+  const api = vi.fn(async ({ path }) => path.startsWith('/api/sessions/') ? { id: 'settled', parent_session_id: null } : { tasks: [] })
+
+  vi.stubGlobal('hermesDesktop', { api })
+  await expect(confirmLinkedArchive('settled', row, 'work', en.desktop)).resolves.toBe(true)
+  expect($confirmRequest.get()).toBeNull()
+})
+
+it('asks with the live count, not the row count, when a fresh row claims work', async () => {
+  const row = { id: 'mixed', connection_id: 'owner', profile: 'work', kanban_active: 7, kanban_observed_at: nowSeconds() } as SessionInfo
+
+  const api = vi.fn(async ({ path }) => path.startsWith('/api/sessions/')
+    ? { id: 'mixed', parent_session_id: null }
+    : { tasks: [{ id: 'task', status: 'running' }, { id: 'ask', status: 'blocked' }] })
+
+  vi.stubGlobal('hermesDesktop', { api })
+  const pending = confirmLinkedArchive('mixed', row, 'work', en.desktop)
+  await vi.waitFor(() => expect($confirmRequest.get()).not.toBeNull())
+  expect($confirmRequest.get()?.details).toEqual([{ label: 'Kanban tasks', value: '1 open · 1 blocked' }])
+  settleConfirm(false)
+  await expect(pending).resolves.toBe(false)
+})
+
+it('keeps a fresh row\'s count when the live read fails', async () => {
+  const row = { id: 'offline', connection_id: 'owner', profile: 'work', kanban_active: 2, kanban_observed_at: nowSeconds() } as SessionInfo
+
+  vi.stubGlobal('hermesDesktop', { api: vi.fn(async () => { throw new Error('503') }) })
+  const pending = confirmLinkedArchive('offline', row, 'work', en.desktop)
+  await vi.waitFor(() => expect($confirmRequest.get()).not.toBeNull())
+  expect($confirmRequest.get()?.details).toEqual([{ label: 'Kanban tasks', value: '2 open' }])
+  settleConfirm(false)
+  await expect(pending).resolves.toBe(false)
+})
