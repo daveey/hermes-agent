@@ -57,6 +57,8 @@ async def probe(peer):
             async with client.post(url, json=body, headers=headers) as response:
                 data = await response.json()
                 assert response.status == 200, data
+                assert data.get('provider') == 'custom', data.get('provider')
+                assert data['model'] == 'local-wire-stub', data['model']
             authority = runner.session_authority
             ref = SessionRef('default', 'api-shared')
             assert ref.session_id in authority.sessions, 'API bypassed canonical authority'

@@ -780,11 +780,13 @@ def _parse_conversation_history(raw_history: Any) -> tuple:
 def _apply_served_runtime(response_data: dict, result: dict) -> None:
     """Name who served the turn: a class selector ("class:fast") is not a model, and clients (BB's
     egress log) attribute the request from this. ``model`` keeps echoing the request when unknown."""
-    served = result.get("served_runtime") if isinstance(result.get("served_runtime"), dict) else {}
-    if served.get("provider"):
-        response_data["provider"] = served["provider"]
-    if served.get("model"):
-        response_data["model"] = served["model"]
+    # Direct execution supplies served_runtime; the canonical FIFO stores the same
+    # post-turn agent identity at result top level (including on durable retries).
+    served = result.get("served_runtime") if isinstance(result.get("served_runtime"), dict) else result
+    for key in ("provider", "model"):
+        value = served.get(key)
+        if isinstance(value, str) and value.strip():
+            response_data[key] = value
 
 
 class OpenAICompatRoutesMixin:
