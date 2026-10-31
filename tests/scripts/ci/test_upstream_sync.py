@@ -31,6 +31,10 @@ def commit(checkout, files, msg):
 
 @pytest.fixture
 def world(tmp_path):
+    return make_world(tmp_path)
+
+
+def make_world(tmp_path):
     """origin (the fork) and upstream bare remotes, and a fork checkout tracking both."""
     for name in ("origin.git", "upstream.git"):
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(tmp_path / name)], check=True)
@@ -84,6 +88,8 @@ class FakeActions:
         self.aggregate: tuple[str, str | None] | None = ("completed", "success")
         self.merge_error: str | None = None
         self.gh_calls: list[tuple] = []
+        self.gh_fail: dict[str, str] = {}  # "comment" / "close" -> stderr of a failing gh pr <verb>
+        self.on_close: Callable[[dict], None] | None = None
 
     def ci(self):
         """Run 'CI' for every staged branch that has no run yet (status pending until finish())."""
@@ -126,8 +132,11 @@ class FakeActions:
                 self.job_override(jobs)
             return [{"jobs": jobs}]
         if "/pulls?" in endpoint:
+            open_prs = [p for p in self.pulls if p["state"] == "open"]
+            if "head=" not in endpoint:
+                return [open_prs]
             branch = endpoint.split("head=", 1)[1].split("&", 1)[0].split(":", 1)[1]
-            return [[p for p in self.pulls if p["state"] == "open" and p["head"]["ref"] == branch]]
+            return [[p for p in open_prs if p["head"]["ref"] == branch]]
         if "/check-runs?" in endpoint:
             assert f"check_name={sync.REQUIRED_CHECK.replace(' ', '%20')}" in endpoint
             return [{"check_runs": self.check_runs(endpoint.split("/commits/", 1)[1].split("/", 1)[0])}]
@@ -141,11 +150,23 @@ class FakeActions:
             branch = args[args.index("--head") + 1]
             number = len(self.pulls) + 1
             self.pulls.append({"number": number, "state": "open", "base": {"ref": args[args.index("--base") + 1]},
-                               "head": {"ref": branch, "sha": self.branch_sha(branch)},
-                               "html_url": f"https://github.com/example/fork/pull/{number}"})
+                               "head": {"ref": branch, "sha": self.branch_sha(branch),
+                                        "repo": {"full_name": "example/fork"}},
+                               "html_url": f"https://github.com/example/fork/pull/{number}", "comments": []})
             return done(0, f"https://github.com/example/fork/pull/{number}\n")
-        assert args[:2] == ("pr", "merge") and "--admin" not in args, args
         pr = next(p for p in self.pulls if p["number"] == int(args[2]))
+        if args[:2] in (("pr", "comment"), ("pr", "close")):
+            assert args[3:5] == ("-R", "example/fork") and "--delete-branch" not in args, args
+            if args[1] in self.gh_fail:
+                return done(1, err=self.gh_fail[args[1]])
+            if args[1] == "comment":
+                pr["comments"].append(args[args.index("--body") + 1])
+            else:
+                pr["state"] = "closed"
+                if self.on_close:
+                    self.on_close(pr)
+            return done(0)
+        assert args[:2] == ("pr", "merge") and "--admin" not in args, args
         head = self.branch_sha(pr["head"]["ref"])
         if self.merge_error:
             return done(1, err=self.merge_error)
@@ -371,7 +392,7 @@ def test_protected_main_lands_through_a_pr_never_a_direct_push(world, capsys):
     assert gate(checkout, head, actions) == sync.LANDED, capsys.readouterr().out
     assert landed_by_merge(root, head, before)
     [pr] = actions.pulls
-    assert pr["head"] == {"ref": f"sync/upstream-{head}", "sha": head} and pr["base"]["ref"] == "main"
+    assert pr["head"]["ref"] == f"sync/upstream-{head}" and pr["head"]["sha"] == head and pr["base"]["ref"] == "main"
     [merge] = merges(actions)
     assert merge[merge.index("--match-head-commit") + 1] == head and "--merge" in merge and "--admin" not in merge
     assert not git(root / "origin.git", "branch", "--list", f"sync/upstream-{head}")  # cleaned up

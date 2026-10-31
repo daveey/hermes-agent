@@ -20,7 +20,9 @@ never change the verdict.
 
 Each call also lands any earlier staged candidate that went green (hosts that merged upstream at
 different times converge on one tested sync), keeps at most one candidate in CI, and stops staging
-for RED_BACKOFF_S after a red run so a broken upstream does not loop full suites.
+for RED_BACKOFF_S after a red run so a broken upstream does not loop full suites. Last, every call closes
+open sync PRs whose head's parents main already contains (scripts/ci/upstream_sync_superseded.py), with
+a comment naming that main; a fault there is printed and never changes the exit code.
 
 Exit codes: 0 landed (or already on main), 1 refused (red, conflict, protection refusal, error),
 2 not yet (staged, pending, throttled, landing PR waiting for its required check): run it again
@@ -342,8 +344,30 @@ def _explain_red(repo, cand: Candidate, main: str, gh_repo: str, request, gh) ->
         print(f"  diagnostics unavailable: {exc!r}")
 
 
+def _close_superseded(repo, gh_repo, request, gh) -> None:
+    """Close open sync PRs a landed sync made redundant (upstream_sync_superseded). Never changes the verdict."""
+    try:
+        if __package__:  # imported as scripts.ci.upstream_sync (tests)
+            from . import upstream_sync_superseded as superseded
+        else:  # run as a script: scripts/ci is sys.path[0]
+            import upstream_sync_superseded as superseded
+
+        superseded.close_superseded(repo, gh_repo, request, gh, run=_run, env=_gate_env("stage"), prefix=BRANCH_PREFIX)
+    except Exception as exc:  # health: allow BLE001 -- housekeeping only: any fault is printed, the verdict stands
+        print(f"  superseded sync PRs: cleanup failed: {exc!r}")
+
+
 def advance(repo: Path, head: str | None, *, gh_repo: str, request=github_pages, gh=gh_cli, now=None) -> int:
-    """Land green candidates, then report ``head``'s state or stage it (module doc, exit codes)."""
+    """Land green candidates, then report ``head``'s state or stage it (module doc, exit codes).
+
+    Every call then closes open sync PRs whose parents main already holds, including any this call's landing
+    made redundant."""
+    verdict = _advance(repo, head, gh_repo=gh_repo, request=request, gh=gh, now=now)
+    _close_superseded(repo, gh_repo, request, gh)
+    return verdict
+
+
+def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now) -> int:
     now = time.time() if now is None else now
     try:
         if head is not None:
