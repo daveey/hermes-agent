@@ -5,6 +5,10 @@ provider error echoes and tool prints land in this stream. The owner drains it o
 thread (an undrained pipe would block the child), redacts every line before it touches disk,
 and keeps ``<home>/logs/managed-worker.log`` private (0600) and capped at
 ``MAX_LOG_BYTES`` plus one rotated copy.
+
+Before a worker's first line the drain writes one header, ``[pid N] @ <ISO8601 UTC> core=<sha>``,
+so a crash block can be dated and matched to the core revision that produced it. Every other line
+keeps the plain ``[pid N] `` prefix.
 """
 import logging
 import os
@@ -20,6 +24,30 @@ MAX_LINE_BYTES = 64 * 1024
 KEPT_LINE_CHARS = 4096
 _locks = {}
 _locks_guard = threading.Lock()
+_core_sha = None
+
+
+def _core_short_sha():
+    """The revision the gateway booted on (``code_skew``'s snapshot, short form). Read from the
+    checkout files at most once per process when no snapshot exists; never runs git."""
+    global _core_sha
+    try:
+        from gateway import code_skew
+        fingerprint = code_skew._boot_fingerprint
+        if fingerprint:
+            return code_skew._short(fingerprint)
+        if _core_sha is None:
+            fingerprint = code_skew._process_boot_fingerprint() or code_skew._fingerprint()
+            _core_sha = code_skew._short(fingerprint) if fingerprint else 'unknown'
+        return _core_sha
+    except (ImportError, AttributeError, OSError, ValueError):  # an older tree, or an unreadable checkout
+        return 'unknown'
+
+
+def _header(pid):
+    from datetime import UTC, datetime
+    stamp = datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return f'[pid {pid}] @ {stamp} core={_core_short_sha()}\n'
 
 
 def worker_log_path(profile_id):
@@ -66,6 +94,7 @@ def drain_worker_stderr(stream, path, pid, scrub):
     (launch key, assignment secret) known so far. Never stops reading on a write failure."""
     skipping = False
     warned = False
+    header = True
     try:
         while True:
             chunk = stream.readline(MAX_LINE_BYTES)
@@ -78,7 +107,11 @@ def drain_worker_stderr(stream, path, pid, scrub):
             skipping = not whole
             try:
                 line = _redact(chunk.decode('utf-8', 'replace'), scrub)
-                _append(path, f'[pid {pid}] ' + (line if whole else line[:KEPT_LINE_CHARS] + ' [truncated]\n'))
+                text = f'[pid {pid}] ' + (line if whole else line[:KEPT_LINE_CHARS] + ' [truncated]\n')
+                if header:
+                    header = False
+                    text = _header(pid) + text
+                _append(path, text)
             except (OSError, ValueError) as exc:
                 # Keep draining regardless: a child blocked on a full stderr pipe would wedge.
                 if not warned:

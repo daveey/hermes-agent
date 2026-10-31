@@ -52,3 +52,27 @@ def test_worker_log_is_bounded_and_scrubs_the_workers_exact_secrets(tmp_path):
     assert not list(path.parent.glob(LOG_NAME + '.2'))
     text = ''.join(f.read_text() for f in files)
     assert assignment not in text and '[truncated]' in text and text.endswith('[pid 7] last\n')
+
+
+def test_each_worker_block_starts_with_one_utc_and_core_sha_header(tmp_path, monkeypatch):
+    """The first line a worker writes is preceded by ``[pid N] @ <ISO8601 UTC> core=<sha>`` (once
+    per pid), so crash storms in the log can be dated against deploys; other lines are unchanged."""
+    import re
+    from datetime import UTC, datetime
+    from gateway import code_skew
+    from gateway.session_managed_worker_log import LOG_NAME, drain_worker_stderr
+    monkeypatch.setattr(code_skew, '_boot_fingerprint', 'git:refs/heads/main:' + 'abcdef1234' + '0' * 30)
+    path = tmp_path / 'logs' / LOG_NAME
+    before = datetime.now(UTC).replace(microsecond=0)
+    drain_worker_stderr(io.BytesIO(b'Traceback\nboom\n'), path, 11, list)
+    drain_worker_stderr(io.BytesIO(b'other\n'), path, 12, list)
+    lines = path.read_text().splitlines()
+    header = re.compile(r'^\[pid (\d+)\] @ (\S+) core=(\S+)$')
+    heads = [header.match(line) for line in lines if header.match(line)]
+    assert [m.group(1) for m in heads] == ['11', '12']
+    for m in heads:
+        stamp = datetime.fromisoformat(m.group(2))
+        assert stamp.tzinfo is not None and stamp.utcoffset().total_seconds() == 0
+        assert before <= stamp <= datetime.now(UTC)
+        assert m.group(3) == 'abcdef1234'
+    assert lines == [lines[0], '[pid 11] Traceback', '[pid 11] boom', lines[3], '[pid 12] other']
