@@ -84,6 +84,7 @@ def test_options_a_new_client_carries_go_to_the_target(extra):
     ({"human_request": {"action": "x"}}, "human_request"),
     ({"tenant": "acme"}, "tenant"),
     ({"goal_mode": True, "tenant": "acme"}, "tenant"),
+    ({"max_retries": 5}, "max_retries"),  # hermes-hub create-task has no retry breaker option [daveey]
 ])
 def test_options_no_client_carries_stay_local(extra, why):
     d = decide({"title": "Fix the flaky test", **extra}, carries=True)
@@ -679,6 +680,25 @@ def test_pin_to_the_routed_target_that_the_hub_refuses_is_an_error_not_local(mac
     out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hub"}))
     assert not out.get("ok") and out["code"] == "placement_unavailable", out
     assert _local_count() == 0
+
+
+def test_max_retries_card_stays_local_with_its_breaker(mac):
+    """hermes-hub create-task cannot carry max_retries: the card is created here, breaker intact. [daveey]"""
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "max_retries": 5}))
+    assert out["ok"] and out["task_id"] and "placed" not in out, out
+    assert mac["calls"] == [] and _local_count() == 1
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect_closing() as conn:
+        assert conn.execute("SELECT max_retries FROM tasks WHERE id=?", (out["task_id"],)).fetchone()[0] == 5
+
+
+def test_max_retries_card_pinned_to_the_hub_is_refused_not_created(mac):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hub",
+                                        "max_retries": 5}))
+    assert not out.get("ok") and out["code"] == "placement_unavailable" and "max_retries" in out["error"], out
+    assert mac["calls"] == [] and _local_count() == 0
 
 
 @pytest.mark.parametrize("pin", ["local", "here", "macbook"])

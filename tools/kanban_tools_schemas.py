@@ -772,6 +772,10 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "dispatcher SIGTERMs the worker and re-queues the "
                 "task with outcome='timed_out'."
         )),
+        "max_retries": _prop("integer", (
+            "Retry circuit breaker for this card (1-10): the dispatcher blocks it on the Nth "
+            "consecutive failure instead of respawning. Omit for the config/default breaker."
+        )),
         "human_request": HUMAN_REQUEST,
         "initial_status": {
             "type": "string",

@@ -26,7 +26,7 @@ from tools.kanban_tools_placement import (_local_placement, _machine_placement, 
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg
 from hermes_cli.kanban_block_policy import ask_lint_check
-from tools import kanban_tools_completion as _kc
+from tools import kanban_tools_completion as _kc, kanban_tools_create_args as _ca
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
@@ -562,7 +562,6 @@ _COMMENT_FIELDS = ("author", "body", "created_at")
 _EVENT_FIELDS = ("kind", "payload", "created_at", "run_id")
 _ATTACHMENT_FIELDS = tuple(
     "id filename content_type size uploaded_by stored_path created_at".split())
-_CREATED_FIELDS = ("status", "workspace_kind", "workspace_path", "project_id", "human_request")
 
 
 def _fields(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
@@ -1659,6 +1658,7 @@ def _handle_create(args: dict, **kw) -> str:
         _parse_bool_arg(args, "goal_mode"))
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
+    max_retries = _ca.max_retries_arg(args)
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     # [daveey] Validate the origin binding BEFORE the card exists: a binding the origin gateway can never
     # read back is the silent "cards exist but the chat shows none" failure.
@@ -1766,7 +1766,7 @@ def _handle_create(args: dict, **kw) -> str:
             creator_task_id=self_tid,
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-            requires=args.get("requires"), runs_on=runs_on,
+            requires=args.get("requires"), runs_on=runs_on, max_retries=max_retries,
             require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
@@ -1778,7 +1778,7 @@ def _handle_create(args: dict, **kw) -> str:
             # Reject a worktree path the dispatcher could never resolve now, to the
             # creator, instead of burning spawn retries on it later. [daveey]
             validate_workspace=True, validate_skills=True)
-        landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
+        landed = _fields(kb.get_task(conn, new_tid), _ca.CREATED_FIELDS)
         wait = [e for e in kb.list_events(conn, new_tid) if e.kind == "dependency_wait"]
         gate = {"gated": True, "gated_by": wait[-1].payload["parent"]} if wait else {"gated": False}
         extra = {}
@@ -1802,7 +1802,7 @@ def _handle_create(args: dict, **kw) -> str:
             placed = preflight(conn, new_tid, board=args.get("board"))
             if placed:
                 extra["capability_placement"] = placed
-                landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
+                landed = _fields(kb.get_task(conn, new_tid), _ca.CREATED_FIELDS)
         if runs_on is not None:
             # Say where the card runs: a pin rewritten to runs_on otherwise reads like an ignored pin,
             # and a caller that archives and re-creates it makes a duplicate. [daveey]

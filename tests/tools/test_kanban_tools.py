@@ -833,6 +833,54 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def _max_retries_of(tid):
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        return conn.execute("SELECT max_retries FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_create_persists_max_retries(worker_env):
+    """kanban_create carries the retry breaker a worker could otherwise only get from the fenced CLI. [daveey]"""
+    from tools import kanban_tools as kt
+    d = json.loads(kt._handle_create({"title": "flaky runner card", "assignee": "peer", "max_retries": 5}))
+    assert d["ok"] is True, d
+    assert _max_retries_of(d["task_id"]) == 5
+
+
+def test_create_omitted_max_retries_is_null(worker_env):
+    from tools import kanban_tools as kt
+    d = json.loads(kt._handle_create({"title": "plain card", "assignee": "peer"}))
+    assert d["ok"] is True, d
+    assert _max_retries_of(d["task_id"]) is None
+
+
+@pytest.mark.parametrize("bad", [0, 11, -1, True, "five", 2.5])
+def test_create_refuses_out_of_range_max_retries(worker_env, bad):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    finally:
+        conn.close()
+    d = json.loads(kt._handle_create({"title": "bad breaker", "assignee": "peer", "max_retries": bad}))
+    assert d.get("ok") is not True and "max_retries must be an integer 1-10" in d.get("error", ""), d
+    conn = kbc.connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before  # nothing created
+    finally:
+        conn.close()
+
+
+def test_create_schema_declares_max_retries():
+    from tools.kanban_tools_schemas import KANBAN_CREATE_SCHEMA
+    props = KANBAN_CREATE_SCHEMA["parameters"]["properties"]
+    assert props["max_retries"]["type"] == "integer"
+
+
 @pytest.mark.parametrize("explicit", [{"workspace_kind": "scratch"}, {"project": ""}])
 @pytest.mark.parametrize("target_scoped", [False, True])
 def test_create_explicit_scratch_ignores_ambient_board_project(

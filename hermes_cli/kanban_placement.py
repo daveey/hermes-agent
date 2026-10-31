@@ -147,7 +147,8 @@ DEFAULT_HEAVY_MARKERS = (
 # The routed target's own host named in the card: that work belongs on the target, not a worker.
 TARGET_HOST_MARKERS = (r"\bhermes-hub\b", r"\bon the hub\b", r"\bthe hub's\b")
 # kanban_create options hermes-hub create-task cannot carry: a card using them stays local.
-UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "project", "project_id", "tenant")
+UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "project", "project_id", "tenant",
+                     "max_retries")  # hermes-hub create-task has no retry breaker option [daveey]
 # kanban_create options a hermes-hub client with `create-task --option KEY=JSON` carries to the card.
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
