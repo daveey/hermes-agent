@@ -824,7 +824,11 @@ export function requestSessionSearchFocus() {
   setSidebarOpen(true)
 
   if (typeof window !== 'undefined') {
-    window.setTimeout(() => window.dispatchEvent(new CustomEvent(SESSION_SEARCH_FOCUS_EVENT)), 0)
+    window.setTimeout(() => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent(SESSION_SEARCH_FOCUS_EVENT))
+      }
+    }, 0)
   }
 }
 

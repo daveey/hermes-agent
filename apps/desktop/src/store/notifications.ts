@@ -390,6 +390,14 @@ export function notifyError(
 }
 
 export function dismissNotification(id: string) {
+  // A queued auto-dismiss may outlive the renderer environment (e.g. jsdom teardown).
+  // Do not run consumer callbacks against a browser that no longer exists.
+  if (typeof window === 'undefined') {
+    timers.delete(id)
+
+    return
+  }
+
   window.clearTimeout(timers.get(id))
   timers.delete(id)
   const dismissed = $notifications.get().find(item => item.id === id)
