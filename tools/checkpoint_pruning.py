@@ -17,6 +17,12 @@ GC_STALE_AFTER_S = 48 * 3600
 GC_STALE_REPORTED: set[str] = set()  # stores already warned about, once per process
 
 
+# Seconds a maintenance ``git gc`` may run. It only runs off the tool-call path (periodic prune,
+# ``hermes checkpoints prune``), so it is sized for a multi-GB loose store on a loaded laptop: the
+# old 3x tool timeout (90 s) killed a 14 GB gc in its prune phase every time, so it never shrank.
+MAINTENANCE_GC_TIMEOUT = 1800
+
+
 def store_lock_path(base: Path) -> Path:
     base = base.resolve()
     return base.with_name(f".{base.name}.lock")
@@ -46,6 +52,8 @@ class Pruner:
     timeout: int
     dir_size: Callable[[Path], int]
     refs_prefix: str
+    # Maintenance callers (never the take path): the gc runs niced with MAINTENANCE_GC_TIMEOUT.
+    maintenance: bool = False
 
     def _git(self, args: list[str], **kwargs) -> str:
         ok, output, error = self.run_git(args, self.store, self.cwd, **kwargs)
@@ -57,7 +65,10 @@ class Pruner:
         """Full ``git gc`` — tens of seconds on a GB store, so only the periodic prune calls it.
         A ref rewrite that ran without it leaves a marker so the next prune reclaims."""
         self._git(["reflog", "expire", "--expire=now", "--all"])
-        self._git(["gc", "--prune=now", "--quiet"], timeout=self.timeout * 3)
+        if self.maintenance:
+            self._git(["gc", "--prune=now", "--quiet"], timeout=MAINTENANCE_GC_TIMEOUT, low_priority=True)
+        else:
+            self._git(["gc", "--prune=now", "--quiet"], timeout=self.timeout * 3)
         # Bare stores must remain usable when gc packs all refs.
         for name in ("refs/heads", "branches"):
             (self.store / name).mkdir(parents=True, exist_ok=True)
@@ -167,16 +178,25 @@ class Pruner:
         if self.dir_size(self.store) <= cap_bytes:
             return True
         refs = self._git(["for-each-ref", "--format=%(refname)", self.refs_prefix]).splitlines()
-        # Keep the existing round-robin policy, remeasure after EACH rewrite.
-        # Twenty rounds bound maintenance when many large histories remain.
+        # Round-robin, oldest snapshot per project. The size only moves after a gc, and a gc of a
+        # GB store takes minutes, so gc after 1, 2, 4, ... rewrites: O(log projects) gcs per round
+        # (one per rewrite held the store lock for hours over ~800 projects) and at most twice the
+        # needed drops. Twenty rounds bound maintenance when many large histories remain.
         for _ in range(20):
-            changed = False
+            changed, pending, batch = False, 0, 1
             for ref in refs:
                 commits = self._commits(ref)
                 if len(commits) <= 1:
                     continue
-                self._rewrite(ref, commits, commits[1:], gc=True)
-                changed = True
+                self._rewrite(ref, commits, commits[1:], gc=False)
+                changed, pending = True, pending + 1
+                if pending >= batch:
+                    self.reclaim()
+                    pending, batch = 0, batch * 2
+                    if self.dir_size(self.store) <= cap_bytes:
+                        return True
+            if pending:
+                self.reclaim()
                 if self.dir_size(self.store) <= cap_bytes:
                     return True
             if not changed:

@@ -363,14 +363,14 @@ def _run_git(
     allowed_returncodes: Optional[set[int]] = None,
     index_file: Optional[Path] = None,
     extra_env: Optional[dict[str, str]] = None,
-    input_text: Optional[str] = None,
+    input_text: Optional[str] = None, low_priority: bool = False,
 ) -> tuple[bool, str, str]:
     """Run a git command against the shared store.  Returns (ok, stdout, stderr).
 
     ``allowed_returncodes`` suppresses error logging for known/expected non-zero
     exits while preserving the normal ``ok = (returncode == 0)`` contract.
     Example: ``git diff --cached --quiet`` returns 1 when changes exist.
-    ``input_text`` is written to git's stdin (otherwise stdin is closed).
+    ``input_text`` is written to git's stdin (otherwise stdin is closed); ``low_priority`` = ``nice -n 10``.
     """
     normalized_working_dir = _normalize_path(working_dir)
     if not normalized_working_dir.exists():
@@ -389,7 +389,7 @@ def _run_git(
     git = shutil.which("git", path=env.get("PATH", ""))
     if git is None:
         return False, "", "git is not installed or not on PATH"
-    cmd = [git, *args]
+    cmd = [nice, "-n", "10", git, *args] if low_priority and (nice := shutil.which("nice")) else [git, *args]
     allowed_returncodes = allowed_returncodes or set()
 
     try:

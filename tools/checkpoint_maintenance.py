@@ -344,7 +344,8 @@ def _prune_checkpoints(
 
         from tools.checkpoint_pruning import Pruner, PruneError
 
-        pruner = Pruner(_run_git, store, str(base), _GIT_TIMEOUT, _dir_size_bytes, _REFS_PREFIX)
+        pruner = Pruner(_run_git, store, str(base), _GIT_TIMEOUT, _dir_size_bytes, _REFS_PREFIX,
+                        maintenance=True)
         try:
             if result["deleted_orphan"] + result["deleted_stale"] or pruner.gc_pending():
                 pruner.reclaim()
@@ -426,20 +427,78 @@ def auto_prune_from_config() -> dict[str, object]:
     """``maybe_auto_prune_checkpoints`` driven by the ``checkpoints:`` config section — the one
     startup/housekeeping entry point for the CLI and the gateway. ``delete_orphans`` is never
     honoured unattended: a missing workdir is ambiguous (deleted vs. unmounted share); orphan
-    cleanup is only via explicit ``hermes checkpoints prune``. Never raises."""
+    cleanup is only via explicit ``hermes checkpoints prune``. Never raises.
+
+    ``auto_prune: false`` turns off retention (deleting whole projects), not the size cap: the take
+    path only drops snapshots and defers the gc (``.gc-pending``), so with no periodic gc the store
+    never shrinks (a laptop sat at 15 GB against a 500 MB cap). A pending gc therefore still gets a
+    size-only run (retention_days=0) at most once per ``min_interval_hours``. Either way a store
+    stuck far over its cap logs one ERROR a day (``check_store_health``)."""
     try:
         from hermes_cli.config import load_config
+        from tools.checkpoint_pruning import GC_PENDING_NAME
+
         cfg = load_config().get("checkpoints") or {}
-        if not cfg.get("auto_prune", False):
-            return {"skipped": True}
-        return maybe_auto_prune_checkpoints(
-            retention_days=int(cfg.get("retention_days", 7)),
+        cap_mb = int(cfg.get("max_total_size_mb", 500))
+        retention_days = int(cfg.get("retention_days", 7))
+        if not cfg.get("auto_prune", True):
+            base = _resolve_checkpoint_base()
+            if not (_store_path(base) / GC_PENDING_NAME).exists():
+                check_store_health(base, cap_mb)
+                return {"skipped": True}
+            retention_days = 0  # size cap only: never delete a project when retention is off
+        out = maybe_auto_prune_checkpoints(
+            retention_days=retention_days,
             min_interval_hours=int(cfg.get("min_interval_hours", 24)),
             delete_orphans=False,
-            max_total_size_mb=int(cfg.get("max_total_size_mb", 500)))
+            max_total_size_mb=cap_mb)
+        check_store_health(_resolve_checkpoint_base(), cap_mb)
+        return out
     except Exception as exc:
         logger.debug("checkpoint auto-maintenance skipped: %s", exc)
         return {"skipped": True, "error": str(exc)}
+
+
+_HEALTH_MARKER_NAME = ".last_health_check"
+_HEALTH_INTERVAL_S = 24 * 3600
+_HEALTH_PRUNE_STALE_S = 48 * 3600
+
+
+def check_store_health(base: Path, cap_mb: float) -> bool:
+    """At most once a day: log an ERROR when the store is over twice its cap and no prune has run
+    for 48 h (or ever), so the self-heal lane files it. The size walk itself is gated by the daily
+    marker, so the housekeeping tick stays cheap. Returns whether it reported."""
+    if cap_mb <= 0:
+        return False
+    store = _store_path(base)
+    if not (store / "HEAD").exists():
+        return False
+    now = time.time()
+    marker = base / _HEALTH_MARKER_NAME
+    try:
+        if now - float(marker.read_text(encoding="utf-8-sig").strip()) < _HEALTH_INTERVAL_S:
+            return False
+    except (OSError, ValueError):
+        pass
+    try:
+        marker.write_text(str(now), encoding="utf-8")
+    except OSError:
+        pass
+    size = _dir_size_bytes(store)
+    cap_bytes = cap_mb * 1024 * 1024
+    if size <= 2 * cap_bytes:
+        return False
+    try:
+        last = float((base / _PRUNE_MARKER_NAME).read_text(encoding="utf-8-sig").strip())
+    except (OSError, ValueError):
+        last = None
+    if last is not None and now - last < _HEALTH_PRUNE_STALE_S:
+        return False
+    when = "never" if last is None else f"{(now - last) / 3600:.0f} h ago"
+    logger.error("checkpoint store over cap: %.2f GB / %g MB, last prune %s (%s); "
+                 "set checkpoints.auto_prune: true or run `hermes checkpoints prune`",
+                 size / 1024 ** 3, cap_mb, when, store)
+    return True
 
 
 def checkpoint_footprint_notice() -> Optional[str]:
