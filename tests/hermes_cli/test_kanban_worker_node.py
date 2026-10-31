@@ -161,18 +161,23 @@ def _tool_create(args):
     return json.loads(kanban_tools._handle_create(args))
 
 
-def test_tool_create_runs_on_and_placement_to_an_enrolled_machine(gws, monkeypatch):
+def test_tool_create_runs_on_and_placement_to_an_enrolled_machine(gws, monkeypatch, caplog):
     hub, _ = gws
     hub.enter()
     monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
-    out = _tool_create({"title": "on the worker", "assignee": "default", "placement": WORKER})
+    with caplog.at_level("INFO", logger="tools.kanban_tools_placement"):
+        out = _tool_create({"title": "on the worker", "assignee": "default", "placement": WORKER})
     assert out.get("ok", True) and "error" not in out, out
     tid = out["task_id"]
     row = hub.conn.execute("SELECT runs_on, created_on FROM tasks WHERE id = ?", (tid,)).fetchone()
     assert json.loads(row["runs_on"]) == ["machine:worker-1"]  # created here, runs only there
     # The response says so, so a caller doesn't read the pin as ignored and re-create the card.
     assert out["runs_on"] == ["machine:worker-1"]
-    assert out["placement"] == {"where": "local", "runs_on": ["machine:worker-1"], "machine": WORKER}
+    why = f"placement pinned to machine {WORKER} (runs there through the Board lease)"
+    assert out["placement"]["why"] == why
+    assert out["placement"] == {"where": "local", "runs_on": ["machine:worker-1"], "machine": WORKER, "why": why}
+    assert f"kanban placement: local, runs_on ['machine:worker-1'] ({why})" in caplog.messages
+    assert "nothing in the card names a machine-only need" not in out["note"]
     assert "runs on " + WORKER + " via the board lease" in out["note"] and tid in out["note"]
     out = _tool_create({"title": "explicit", "assignee": "default", "runs_on": ["linux"]})
     # No machine pin: no machine placement block, only the plain local reason every local card carries.

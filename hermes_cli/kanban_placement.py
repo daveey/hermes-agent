@@ -121,6 +121,11 @@ LOCAL_MARKER_REMEDY = (
 PINNED_LOCAL_WHY = "placement pinned local by the caller"
 
 
+def pinned_machine_why(machine: str) -> str:
+    """Explain a machine pin without implying that the card executes on the creating gateway."""
+    return f"placement pinned to machine {machine} (runs there through the Board lease)"
+
+
 def local_pin_note(target: str) -> str:
     """Result note for a placement='local' pin whose card would run on ``target`` without it. [daveey]"""
     return ("placement='local' was pinned, but nothing in the card names a machine-only need; without the pin "

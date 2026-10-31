@@ -21,7 +21,7 @@ from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
-from tools.kanban_tools_placement import (_local_placement, _marker_placement_fields, _persisted_session_id,
+from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _placement_refused, _runs_where)
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg
@@ -1808,7 +1808,7 @@ def _handle_create(args: dict, **kw) -> str:
             # and a caller that archives and re-creates it makes a duplicate. [daveey]
             extra["runs_on"] = runs_on
             if pinned_machine:
-                extra["placement"] = {"where": "local", "runs_on": runs_on, "machine": pinned_machine}
+                extra["placement"] = _machine_placement(pinned_machine, runs_on)
                 extra["note"] = (f"Created here as {new_tid}; it runs on {pinned_machine} via the board lease "
                                  f"(runs_on={runs_on}). The pin was honoured: do not re-create it.")
         # Every result says where the card runs (a caller that can't tell re-creates it or never learns it is stranded)

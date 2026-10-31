@@ -95,6 +95,15 @@ def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict
     return out
 
 
+def _machine_placement(machine: str, runs_on: list[str]) -> dict:
+    """Preserve the machine pin's reason when replacing the rewritten local-pin decision. [daveey]"""
+    from hermes_cli.kanban_placement import pinned_machine_why
+
+    why = pinned_machine_why(machine)
+    logger.info("kanban placement: local, runs_on %s (%s)", runs_on, why)
+    return {"where": "local", "runs_on": runs_on, "machine": machine, "why": why}
+
+
 def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
     """Where a card created on this board runs, for the kanban_create result. Never raises."""
     if runs_on is not None:
