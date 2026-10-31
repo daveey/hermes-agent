@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 from agent.api_error_summary import is_provider_stream_parse_error
 from agent.error_classifier import RETRYABLE_CLIENT_REASONS, FailoverReason, classify_api_error
+from agent.turn_offline_wait import wait_out_offline
 from agent.turn_overflow import recover_from_overflow
 from agent.turn_recovery import (
     _NONRETRYABLE_LABELS, abort_turn_on_interrupt, compute_error_backoff, free_tier_cooldown_ends_turn,
@@ -63,6 +64,10 @@ def handle_api_error(
     _provider_overflow_recovery_pending = False
 
     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> ApiErrorVerdict:
+        if isinstance(result, dict) and result.get("failed") is True:
+            # The provider's exception type, so callers that re-raise the failure (cron) keep it:
+            # a transient APIConnectionError must not turn into a bare RuntimeError (cron-b459306dea).
+            result.setdefault("error_type", type(api_error).__name__)
         return ApiErrorVerdict(
             action=action, thinking_spinner=thinking_spinner, messages=messages,
             active_system_prompt=active_system_prompt, conversation_history=conversation_history,
@@ -141,6 +146,15 @@ def handle_api_error(
         retry_count=retry_count, max_retries=max_retries, retryable=classified.retryable,
         reason=classified.reason.value,
     )
+
+    # This machine lost its network (DNS fails locally, e.g. a laptop's dark wake): wait for it to
+    # come back on awake time before consuming retry or credential-rotation recovery budgets.
+    _offline = wait_out_offline(
+        agent, api_error, _retry, messages=messages, conversation_history=conversation_history,
+        api_call_count=api_call_count,
+    )
+    if _offline is not None:
+        return _verdict(*_offline)
 
     _recovered, recovered_with_pool = recover_after_classification(
         agent, api_error, classified, _retry, status_code=status_code, error_context=error_context,

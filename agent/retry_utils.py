@@ -4,6 +4,7 @@ Jittered delays (vs. fixed exponential) prevent thundering-herd retry spikes
 when many sessions hit the same rate-limited provider concurrently.
 """
 
+import logging
 import random
 import re
 import threading
@@ -193,3 +194,159 @@ def provider_retry_after_seconds(error: Any) -> Optional[float]:
             nested = body.get("error")
             value = parse_retry_after_seconds((nested if isinstance(nested, dict) else body).get("retry_after"))
     return value if value is not None and value > 0 else None
+
+
+# ── Waiting out a local network loss ────────────────────────────────────────────────────────────
+# A laptop that sleeps mid-turn wakes briefly ("dark wake" on macOS) with no working network: every
+# retry fails DNS at once, so a retry budget counted in attempts or wall-clock seconds is gone in one
+# 3 s wake (self-heal cron-b459306dea). The retry loop calls ``wait_for_network`` instead of spending an
+# attempt when the error's cause chain shows a LOCAL resolution/network failure. Its budget is awake
+# time (``time.monotonic`` pauses while macOS/Linux sleep, see ``AwakeIdleMeter``).
+DEFAULT_OFFLINE_WAIT_SECONDS = 900.0
+OFFLINE_POLL_MIN_S = 5.0
+OFFLINE_POLL_MAX_S = 30.0
+# A host that resolves whenever the machine has working DNS: it tells "this machine is offline"
+# apart from "the provider's host name does not resolve" (a typo or a dead custom endpoint).
+NETWORK_CONTROL_HOST = "github.com"
+_RESOLVE_TIMEOUT_S = 5.0
+_OFFLINE_SLICE_S = 0.2
+_logger = logging.getLogger(__name__)
+
+
+def is_local_network_error(error: Any) -> bool:
+    """True when *error* or anything in its ``__cause__``/``__context__`` chain is a local DNS or
+    network-down failure (``socket.gaierror``, ENETUNREACH, or SDK text naming one). Refused or reset
+    connections and timeouts are the far end's doing and stay ordinary retryable errors."""
+    import errno as _errno
+    import socket as _socket
+    from agent.api_error_summary import _NETWORK_RESOLUTION_MARKERS
+
+    seen: set[int] = set()
+    current = error
+    while current is not None and id(current) not in seen and len(seen) < 16:
+        seen.add(id(current))
+        if isinstance(current, _socket.gaierror):
+            return True
+        if isinstance(current, OSError) and getattr(current, "errno", None) == _errno.ENETUNREACH:
+            return True
+        if any(marker in str(current).lower() for marker in _NETWORK_RESOLUTION_MARKERS):
+            return True
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return False
+
+
+# libc resolution is not cancellable. Bound abandoned probes process-wide so a stuck resolver
+# cannot accumulate a new native thread on every poll in every turn.
+_dns_slots = threading.BoundedSemaphore(8)
+
+
+def host_resolves(host: str, timeout: float = _RESOLVE_TIMEOUT_S, *, is_interrupted=None) -> bool:
+    """Bounded, interruptible DNS observation; timed-out native lookups retain their slot until exit."""
+    import socket as _socket
+
+    interrupted = is_interrupted or (lambda: False)
+    if interrupted() or timeout <= 0 or not _dns_slots.acquire(blocking=False):
+        return False
+    outcome: dict[str, bool] = {}
+    done = threading.Event()
+
+    def _lookup() -> None:
+        try:
+            outcome["ok"] = bool(_socket.getaddrinfo(host, 443, type=_socket.SOCK_STREAM))
+        except (OSError, UnicodeError):
+            outcome["ok"] = False
+        finally:
+            _dns_slots.release()
+            done.set()
+
+    worker = threading.Thread(target=_lookup, name="offline-dns-probe", daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        _dns_slots.release()
+        raise
+    deadline = time.monotonic() + timeout
+    while not done.is_set():
+        remaining = deadline - time.monotonic()
+        if interrupted() or remaining <= 0:
+            return False
+        done.wait(min(_OFFLINE_SLICE_S, remaining))
+    return bool(outcome.get("ok"))
+
+
+def provider_host(base_url: Any) -> str:
+    """The host name of *base_url* ("" when it has none)."""
+    from urllib.parse import urlparse
+
+    try:
+        return urlparse(str(base_url or "")).hostname or ""
+    except ValueError:
+        return ""
+
+
+def wait_for_network(
+    host: str, *, budget_s: float, is_interrupted: Any = None, on_tick: Any = None, on_wait: Any = None,
+    resolve: Any = None, control_host: str = NETWORK_CONTROL_HOST,
+) -> tuple[str, float]:
+    """Wait until *host* resolves again, for at most *budget_s* seconds of AWAKE time.
+
+    Returns ``(outcome, awake_seconds_spent)``; outcome is ``"online"`` (it resolves again: retry
+    without spending an attempt), ``"already_online"`` (it resolved at once: the failure is not the
+    network's, count the attempt), ``"misconfigured"`` (the control host resolves but the provider's
+    does not: logs an ERROR and returns at once), ``"interrupted"``, ``"exhausted"`` or ``"disabled"``.
+    Polls every OFFLINE_POLL_MIN_S..OFFLINE_POLL_MAX_S seconds in short slices so *is_interrupted*
+    is honoured promptly; *on_tick(awake_spent_s)* runs about every 30 s of waiting (liveness)."""
+    is_interrupted = is_interrupted or (lambda: False)
+    if not host or budget_s <= 0:
+        return "disabled", 0.0
+    if is_interrupted():
+        return "interrupted", 0.0
+    started = time.monotonic()
+
+    def elapsed():
+        return max(0.0, time.monotonic() - started)
+
+    def lookup(name):
+        if is_interrupted() or elapsed() >= budget_s:
+            return False
+        if resolve is not None:
+            return resolve(name)
+        return host_resolves(name, timeout=min(_RESOLVE_TIMEOUT_S, budget_s - elapsed()),
+                             is_interrupted=is_interrupted)
+
+    if lookup(host):
+        return "already_online", elapsed()
+    if control_host and control_host != host and lookup(control_host):
+        _logger.error(
+            "provider host does not resolve while network is up: %s (control host %s resolves) — "
+            "check the provider base_url", host, control_host,
+        )
+        return "misconfigured", elapsed()
+    _logger.warning(
+        "offline — waiting for network: %s and %s do not resolve; waiting up to %.0fs of awake time",
+        host, control_host, budget_s,
+    )
+    if on_wait is not None and not is_interrupted():
+        on_wait()
+    spent = elapsed()
+    delay = OFFLINE_POLL_MIN_S
+    next_tick = 30.0
+    while spent < budget_s:
+        slice_end = min(budget_s, spent + delay)
+        while spent < slice_end:
+            if is_interrupted():
+                return "interrupted", elapsed()
+            time.sleep(min(_OFFLINE_SLICE_S, slice_end - spent))
+            spent = elapsed()
+        if on_tick is not None and spent >= next_tick:
+            next_tick = spent + 30.0
+            on_tick(spent)
+        if is_interrupted():
+            return "interrupted", elapsed()
+        if lookup(host):
+            spent = elapsed()
+            _logger.info("network is back: %s resolves after %.0fs of awake waiting", host, spent)
+            return "online", spent
+        spent = elapsed()
+        delay = min(delay * 1.5, OFFLINE_POLL_MAX_S)
+    return "interrupted" if is_interrupted() else "exhausted", elapsed()

@@ -2144,6 +2144,22 @@ def _run_agent_with_watchdog(
     return result
 
 
+class AgentTurnFailed(RuntimeError):
+    """The agent's own failed result, re-raised by the cron run. ``error_type`` keeps the provider
+    exception's class name (``APIConnectionError``...) so the failure is booked and logged as that,
+    not as a bare ``RuntimeError`` (self-heal cron-b459306dea: the coach detector skips transient
+    connection errors by type, and the lost type made it file a laptop going offline as a defect)."""
+
+    def __init__(self, message: str, *, error_type: str = ""):
+        super().__init__(message)
+        self.error_type = error_type
+
+
+def _job_error_message(exc: BaseException) -> str:
+    """``"<type>: <message>"`` for a failed run, the agent's provider error type when it has one."""
+    return f"{getattr(exc, 'error_type', '') or type(exc).__name__}: {exc!s}"
+
+
 def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgent) -> str:
     """Deliverable final response from a ``run_conversation`` result. Raises RuntimeError on
     `failed=True`/`completed=False`: the error text may sit in `final_response` and would otherwise
@@ -2157,7 +2173,8 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
     final_response_text = (result.get("final_response") or "").strip()
     max_iteration_summary = is_max_iteration_handoff(result)
     if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
-        raise RuntimeError(result.get("error") or final_response_text or "agent reported failure")
+        raise AgentTurnFailed(result.get("error") or final_response_text or "agent reported failure",
+                              error_type=str(result.get("error_type") or ""))
     if max_iteration_summary:
         logger.warning(
             "Job '%s' reached the iteration limit but produced a final fallback response; "
@@ -2842,7 +2859,7 @@ def run_job(
         return True, output, final_response, None
 
     except (Exception, ConfigBackendUnavailable) as e:  # the plane being down fails THIS fire only
-        error_msg = f"{type(e).__name__}: {e!s}"
+        error_msg = _job_error_message(e)
         logger.exception("Job '%s' failed: %s", job_name, error_msg)
         # Cowork-style unreachable-model re-run (cron/unreachable_retry.py): flag failures where
         # the model was never reached (transient network/DNS, zero API calls) so the bookkeeping

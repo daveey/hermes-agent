@@ -48,6 +48,8 @@ class TurnRetryState:
     auth_failover_attempted: bool = False
     # Post-exhaustion auto-recovery cycles spent on this API call (agent.auto_recovery_cycles caps it).
     auto_recovery_cycles_used: int = 0
+    # Awake seconds this API call already waited for a lost local network (agent.offline_wait_seconds caps it).
+    offline_wait_spent_s: float = 0.0
 
     # Restart signals (read by the outer loop after the attempt)
     restart_with_compressed_messages: bool = False

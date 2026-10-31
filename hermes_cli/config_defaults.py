@@ -134,6 +134,11 @@ DEFAULT_CONFIG = {
         # visible "retrying automatically" countdown instead of ending the turn. Esc/interrupt stops
         # the wait; auth/format/billing/policy errors never enter. 0 disables.
         "auto_recovery_cycles": 5,
+        # When an API call fails because THIS machine has no network (DNS fails for the provider and
+        # a control host, e.g. a laptop waking briefly from sleep), wait up to this many seconds of
+        # awake time for the network to return before spending a retry attempt. Shows "offline —
+        # waiting for network"; Esc/interrupt stops it. 0 disables.
+        "offline_wait_seconds": 900,
         # Seconds the Codex/Responses stream may keep reading after its terminal frame so the relay
         # finalizer can run. Relays that never close the SSE socket after response.completed would
         # otherwise wedge the turn until the idle watchdog discards the already-billed response

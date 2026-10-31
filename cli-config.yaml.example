@@ -1346,6 +1346,13 @@ agent:
   # Set 0 to disable (default 5).
   # auto_recovery_cycles: 5
 
+  # When an API call fails because this machine has no network (DNS fails for
+  # the provider and for a control host, e.g. a laptop waking briefly from
+  # sleep), Hermes waits up to this many seconds of AWAKE time for the network
+  # to come back ("offline — waiting for network"), then re-sends the same
+  # request without spending a retry. Esc stops the wait. 0 disables.
+  # offline_wait_seconds: 900
+
   # After the agent edits code without fresh passing verification, nudge it to
   # verify before finishing. Off by default (false). Set true to force it on
   # everywhere, or "auto" for the surface-aware mode: on for interactive

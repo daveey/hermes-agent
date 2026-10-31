@@ -1319,6 +1319,12 @@ def _apply_agent_section(agent, _agent_cfg):
         agent._auto_recovery_cycles = max(int(_agent_section.get("auto_recovery_cycles", 5)), 0)
     except (TypeError, ValueError):
         agent._auto_recovery_cycles = 5
+    # Awake seconds an API call may wait for a lost LOCAL network (DNS fails on this machine, e.g. a
+    # laptop's dark wake) before its attempts are spent (agent/turn_offline_wait.py). 0 disables.
+    try:
+        agent._offline_wait_seconds = max(float(_agent_section.get("offline_wait_seconds", 900)), 0.0)
+    except (TypeError, ValueError):
+        agent._offline_wait_seconds = 900.0
 
 
 def _positive_int(raw: Any, *, reject: tuple = ()) -> Optional[int]:
