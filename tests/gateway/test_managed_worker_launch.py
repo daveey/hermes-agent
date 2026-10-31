@@ -81,6 +81,16 @@ for line in sys.stdin:
 '''
 
 
+def _background_exited(pid):
+    import psutil
+
+    # Existence checks cannot reserve a process: it may be reaped during status().
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
 def _model_saw_tool(request, name):
     """Direct definition or the tool_search deferred catalog (bridge description lists names)."""
     return any(name in json.dumps(t) for t in request.get('tools') or [])
@@ -248,8 +258,7 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
             # The next admission's worker adopts it from the profile checkpoint (process_manage).
             assert started['pid'] in [e['pid'] for e in json.loads((home / 'processes.json').read_text())]
             gate.touch()
-            await async_wait_until(lambda: not psutil.pid_exists(background.pid)
-                                   or psutil.Process(background.pid).status() == psutil.STATUS_ZOMBIE,
+            await async_wait_until(lambda: _background_exited(background.pid),
                                    timeout=10, interval=.05, what='background process exited')
         else:
             assert any(role == 'tool' and 'MANAGED_TOOL_EFFECT' in content for role, content in rows), rows
