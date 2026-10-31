@@ -270,9 +270,9 @@ def test_state_round_trips_and_rejects_unknown_report_versions(tmp_path):
 
 @pytest.mark.platforms("posix")
 def test_cli_board_skips_a_job_a_done_card_already_cites(tmp_path, monkeypatch):
+    """CliBoard.list_cards/comments on a real isolated board (through `hermes kanban`, not its DB)."""
     # These shell out to `hermes kanban`, which needs the repo env; a bare `uv run --with pytest` lacks python-dotenv.
     pytest.importorskip("dotenv", reason="needs the repo environment (hermes_cli imports python-dotenv)")
-    """CliBoard.list_cards/comments on a real isolated board (through `hermes kanban`, not its DB)."""
     home = tmp_path / "hermes-home"
     home.mkdir()
     for var in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_HOME", "HERMES_KANBAN_TASK",
