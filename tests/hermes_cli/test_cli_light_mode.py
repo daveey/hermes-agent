@@ -272,15 +272,13 @@ class TestOsc11DrainGuard:
         # loop exits fast — then a straggler payload lands during teardown.
         os.write(write_fd, b"\x1b[?62;22c")
 
-        import threading
-
-        def straggler():
-            import time
-            time.sleep(0.02)  # inside the 50ms drain window
+        # Deterministic: the straggler lands exactly when the terminal state
+        # is restored (TCSAFLUSH), i.e. after the main loop consumed DA1 and
+        # before the drain window opens.  No sleeps/threads to starve.
+        def flush_then_straggle(fd, when, attrs):
             os.write(write_fd, b"\x1b]11;rgb:0c0c/0c0c/0c0c\x1b\\")
 
-        t = threading.Thread(target=straggler, daemon=True)
-        t.start()
+        monkeypatch.setattr(termios, "tcsetattr", flush_then_straggle)
 
         result = cli_mod._query_osc11_background()
         assert result is None  # OSC 11 was swallowed; only DA1 answered
