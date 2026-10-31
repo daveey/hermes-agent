@@ -6,7 +6,11 @@ import { describe, expect, it } from 'vitest'
 import {
   attachPowerSettle,
   isBackgroundRead,
+  isConnectFailure,
   isPowerSettlingError,
+  POWER_CLOCK_GAP_MS,
+  POWER_CLOCK_TICK_MS,
+  POWER_RECONNECT_GRACE_MS,
   POWER_SETTLE_MS,
   PowerSettleGate
 } from './power-settle'
@@ -126,13 +130,118 @@ describe('PowerSettleGate', () => {
   })
 })
 
+const timeout = new Error('Timed out connecting to Hermes backend after 10000ms')
+
+// Stay awake for `ms`: advance in regular ticks, as the 5 s ticker does, so no clock gap is seen.
+function tickFor(h: ReturnType<typeof harness>, ms: number) {
+  for (let left = ms; left > 0; left -= POWER_CLOCK_TICK_MS) {
+    h.advance(Math.min(POWER_CLOCK_TICK_MS, left))
+    h.gate.observeClock()
+  }
+}
+
+describe('clock-gap wake (sleep without a powerMonitor event)', () => {
+  it('a tick gap longer than the threshold opens a settle window and logs one line', async () => {
+    const { gate, sleeps, advance } = harness()
+    const lines: string[] = []
+    gate.setLog(line => lines.push(line))
+    advance(POWER_CLOCK_GAP_MS + 1_000)
+    gate.observeClock()
+    expect(gate.settling()).toBe(true)
+    expect(lines).toEqual([expect.stringContaining('[power-settle] clock-gap wake: no tick for 31s')])
+    expect(lines[0]).not.toMatch(/Timed out connecting/)
+    void gate.admit(poll)
+    expect(sleeps).toHaveLength(1)
+  })
+
+  it('admit itself notices the gap (first read after the freeze is held, not dialed)', async () => {
+    const { gate, sleeps, advance } = harness()
+    advance(POWER_CLOCK_GAP_MS * 10)
+    void gate.admit(poll)
+    expect(sleeps).toHaveLength(1)
+  })
+
+  it('regular ticks are not a wake', () => {
+    const h = harness()
+    tickFor(h, 20 * POWER_CLOCK_TICK_MS)
+    expect(h.gate.settling()).toBe(false)
+  })
+})
+
+describe('absorbFailure', () => {
+  it('classifies connect-level failures only', () => {
+    expect(isConnectFailure(timeout)).toBe(true)
+    expect(isConnectFailure(new Error('Remote backend "conn:hermes-hub::default" is down (dispatch probe failed)'))).toBe(true)
+    expect(isConnectFailure(new Error('connect ECONNREFUSED 127.0.0.1:58232'))).toBe(true)
+    expect(isConnectFailure(new Error('500: internal error'))).toBe(false)
+  })
+
+  it('absorbs a background read that was in flight when the Mac froze (timer expired at the thaw)', () => {
+    const { gate, advance } = harness()
+    advance(POWER_CLOCK_GAP_MS + 10_000) // frozen; the request timeout fires on unfreeze, before any tick
+    expect(gate.absorbFailure(poll, timeout)).toBe(true)
+    expect(gate.settling()).toBe(true)
+  })
+
+  it('absorbs a read failing while suspended', () => {
+    const { gate } = harness()
+    gate.suspend()
+    expect(gate.absorbFailure(poll, timeout)).toBe(true)
+  })
+
+  it('absorbs remote-down failures during the reconnect grace after a wake, and logs one summary after it', () => {
+    const h = harness()
+    const { gate } = h
+    const lines: string[] = []
+    gate.setLog(line => lines.push(line))
+    gate.wake()
+    tickFor(h, 20_000)
+    const down = new Error('Remote backend "conn:hermes-hub::default" is down (dispatch probe failed: Timed out connecting)')
+    expect(gate.absorbFailure(poll, down)).toBe(true)
+    expect(lines).toEqual([])
+    tickFor(h, POWER_RECONNECT_GRACE_MS)
+    expect(lines).toEqual(['[power-settle] 1 background read(s) failed to connect across a sleep/wake; absorbed'])
+  })
+
+  it('does not absorb when awake past the grace, for foreground or writes, or for server errors', () => {
+    const h = harness()
+    const { gate } = h
+    gate.wake()
+    tickFor(h, POWER_RECONNECT_GRACE_MS + 1)
+    expect(gate.absorbFailure(poll, timeout)).toBe(false)
+    gate.wake()
+    expect(gate.absorbFailure({ ...poll, priority: 'foreground' }, timeout)).toBe(false)
+    expect(gate.absorbFailure({ ...poll, method: 'POST' }, timeout)).toBe(false)
+    expect(gate.absorbFailure(poll, new Error('500: boom'))).toBe(false)
+  })
+})
+
 describe('attachPowerSettle', () => {
+  it('starts an unref\'d clock ticker that drives observeClock', () => {
+    const monitor = { on: () => undefined }
+    const { gate, advance } = harness()
+    const ticks: Array<{ fn: () => void; ms: number }> = []
+    let unrefd = false
+    attachPowerSettle(gate, monitor, undefined, {
+      setInterval: (fn, ms) => {
+        ticks.push({ fn, ms })
+
+        return { unref: () => (unrefd = true) }
+      }
+    })
+    expect(ticks.map(t => t.ms)).toEqual([POWER_CLOCK_TICK_MS])
+    expect(unrefd).toBe(true)
+    advance(POWER_CLOCK_GAP_MS + 1)
+    ticks[0].fn()
+    expect(gate.settling()).toBe(true)
+  })
+
   it('wires suspend/resume/unlock-screen and logs the skipped count on resume', async () => {
     const listeners = new Map<string, () => void>()
     const monitor = { on: (event: string, fn: () => void) => listeners.set(event, fn) }
     const { gate } = harness()
     const lines: string[] = []
-    attachPowerSettle(gate, monitor, line => lines.push(line))
+    attachPowerSettle(gate, monitor, line => lines.push(line), { setInterval: () => ({}) })
 
     listeners.get('suspend')!()
     expect(gate.suspended).toBe(true)
@@ -162,9 +271,16 @@ describe('main.ts wiring', () => {
 
   it('does not write a failure line (stack) for a skipped background read', () => {
     const handler = main.slice(main.indexOf("ipcMain.handle('hermes:api'"))
-    const skip = handler.indexOf('if (isPowerSettlingError(error))')
+    const skip = handler.indexOf('if (isPowerSettlingError(error) ||')
     expect(skip).toBeGreaterThan(0)
     expect(skip).toBeLessThan(handler.indexOf('rememberLog(formatApiRequestFailure(request, error))'))
+  })
+
+  it('absorbs a sleep-crossing connect failure before writing the failure line', () => {
+    const handler = main.slice(main.indexOf("ipcMain.handle('hermes:api'"))
+    const absorb = handler.indexOf('powerSettleGate.absorbFailure(request, error)')
+    expect(absorb).toBeGreaterThan(0)
+    expect(absorb).toBeLessThan(handler.indexOf('rememberLog(formatApiRequestFailure(request, error))'))
   })
 
   it('attaches the gate to powerMonitor and clears a stale suspend on window focus', () => {

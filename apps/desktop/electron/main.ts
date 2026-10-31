@@ -438,7 +438,7 @@ import {
   undialedSshRouteSeeds
 } from './plugin-profile-routes'
 import { createPortalSession, resolvePortalBaseUrl } from './portal-session'
-import { attachPowerSettle, isPowerSettlingError, PowerSettleGate } from './power-settle'
+import { attachPowerSettle, isPowerSettlingError, PowerSettleGate, PowerSettlingError } from './power-settle'
 import { readPreUpdateBackupEnabled } from './pre-update-backup-config'
 import { registerPreparedSubmissions } from './prepared-submissions'
 import { capturePreviewContents } from './preview-capture'
@@ -16391,9 +16391,9 @@ ipcMain.handle('hermes:api', async (_event, request) => {
       return { [HERMES_API_EXPECTED_404]: String((error as any)?.message ?? error) }
     }
 
-    // A background read skipped while the Mac sleeps never dialed; the wake line in power-settle counts them.
-    if (isPowerSettlingError(error)) {
-      throw error
+    // Skipped while asleep, or a connect failure across a sleep/wake (power-settle.ts counts both): no stack line.
+    if (isPowerSettlingError(error) || powerSettleGate.absorbFailure(request, error)) {
+      throw isPowerSettlingError(error) ? error : new PowerSettlingError()
     }
 
     // Persist the failure (full stack) before the rejection crosses to the
