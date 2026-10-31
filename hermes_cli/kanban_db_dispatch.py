@@ -35,7 +35,7 @@ from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as 
 from hermes_cli import kanban_db_dispatch_quota as _kbq
 from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code_kind
 from hermes_cli.kanban_db_dispatch_allowlist import _dispatch_profile_allowlist, dispatch_profile_allowlist_summary
-from hermes_cli import kanban_worker_scope as _worker_scope
+from hermes_cli import kanban_worker_scope as _worker_scope, kanban_aggregate_scope as _aggregate_scope
 from hermes_cli import kanban_host_reboot as _host_reboot, kanban_owner_unavailable as _ou  # [daveey]
 from hermes_cli import kanban_owner_death as _owner_death  # [daveey]
 from hermes_cli.kanban_db_dispatch_crash_accounting import _account_crashes  # [daveey]
@@ -2974,8 +2974,8 @@ def _restart_safe_worker_argv(task: Task, command: list[str], board: Optional[st
         require_restart_safe_scope=True,
         outlives_parent=True,
     ).argv)
-    # Typed OOM recovery: a task whose last run(s) were OOM-killed gets a raised cap.
-    return _worker_scope.apply_oom_recovery(argv, task.id, board)
+    # OOM recovery raises the cap; bounded_scope adds the shared pool (kanban_aggregate_scope)
+    return _aggregate_scope.bounded_scope(_worker_scope.apply_oom_recovery(argv, task.id, board))
 
 
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:

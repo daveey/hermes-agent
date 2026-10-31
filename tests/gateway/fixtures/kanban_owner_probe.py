@@ -99,16 +99,21 @@ def main():
     env = dict(os.environ)
     receipt, clients = {}, []
     original_popen = subprocess.Popen
+    original_set_pid = dispatch._set_worker_pid
+    def set_pid(*args, **kwargs):
+        original_set_pid(*args, **kwargs)
+        if peer.mode == 'timeout':
+            # Model work now requires the published submitter PID to verify its
+            # cgroup. Gate after publication, never inside Popen before it returns.
+            assert peer.blocked.wait(55), 'managed worker did not reach loopback'
+            with closing(connect(board='owned')) as snapshot:
+                bound = snapshot.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='worker_bound' "
+                                         "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+                receipt['managed_pid'] = json.loads(bound[0])['pid'] if bound else None
     def spawn(*args, **kwargs):
         child = original_popen(*args, **kwargs)
         if 'hermes_cli.kanban_worker_client' in args[0]:
             clients.append(child)
-            if peer.mode == 'timeout':
-                assert peer.blocked.wait(55), 'managed worker did not reach loopback'
-                with closing(connect(board='owned')) as snapshot:
-                    bound = snapshot.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='worker_bound' "
-                                             "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
-                    receipt['managed_pid'] = json.loads(bound[0])['pid'] if bound else None
         return child
     def wait_for(predicate):
         deadline = time.monotonic() + 60
@@ -120,6 +125,7 @@ def main():
     try:
         with daemon(root, home, env, barrier=False) as (_proc, desc):
             subprocess.Popen = spawn
+            dispatch._set_worker_pid = set_pid
             try:
                 with closing(connect(board='owned')) as conn:
                     from contextlib import nullcontext
@@ -191,6 +197,7 @@ def main():
                         assert task.status == 'ready' and task.consecutive_failures == 1 and run['outcome'] == 'timed_out', receipt
             finally:
                 subprocess.Popen = original_popen
+                dispatch._set_worker_pid = original_set_pid
             if peer.mode != 'complete':
                 return
             assert receipt['client_exit'] == ('clean_exit', 0), receipt

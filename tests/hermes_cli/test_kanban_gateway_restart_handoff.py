@@ -14,6 +14,13 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
 
 
+@pytest.fixture(autouse=True)
+def _no_live_pool_budget(monkeypatch):
+    """The shared-slice budget mutates the live user manager; test_kanban_aggregate_scope covers it."""
+    from hermes_cli import kanban_aggregate_scope
+    monkeypatch.setattr(kanban_aggregate_scope, "configure_pool", lambda: None)
+
+
 @pytest.fixture
 def worker_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, kb.Task]:
     root = tmp_path / ".hermes"

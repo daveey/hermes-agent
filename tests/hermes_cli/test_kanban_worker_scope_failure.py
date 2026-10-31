@@ -64,6 +64,8 @@ def test_scope_failure_overrides_clean_exit_and_reaches_retry_context(kanban_hom
 
 def test_scope_retention_preserves_worker_arguments(monkeypatch):
     from types import SimpleNamespace
+    from hermes_cli import kanban_aggregate_scope
+    monkeypatch.setattr(kanban_aggregate_scope, "configure_pool", lambda: None)
     from tools import process_registry as pr
     command = ["python", "worker.py", "--collect"]
     monkeypatch.setattr(pr, "restart_safe_gateway_child_argv", lambda *a, **kw: SimpleNamespace(
