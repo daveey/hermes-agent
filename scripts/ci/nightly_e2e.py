@@ -716,6 +716,68 @@ def _settle_error(
         return False, f"{BOARD_FAILED}, kept pending: settle error {err!r}; filing the card: {board_err!r}"
 
 
+DEFAULT_CORE = Path.home() / ".hermes" / "hermes-agent"
+PIN_FILES = ("nightly_e2e.py", "flaky_kanban.py")
+
+
+def _pin_git(core: Path, *args: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(core), *args], capture_output=True, check=True, timeout=15
+    ).stdout
+
+
+def check_pin(board: Any, state: dict[str, Any], *, core: Path, now: float) -> str | None:
+    """Check immutable exports, not an in-checkout reporter. Never fetch in a cron tick."""
+    running = Path(__file__).resolve()
+    core = core.expanduser().resolve()
+    if running.is_relative_to(core):
+        return None
+    # Freeze the ref so an updater fetch cannot mix content, blob IDs and dates from different heads.
+    main = _pin_git(core, "rev-parse", "origin/main").decode().strip()
+    blobs, stale = [], []
+    for name in PIN_FILES:
+        path = f"scripts/ci/{name}"
+        content = _pin_git(core, "show", f"{main}:{path}")
+        blobs.append(_pin_git(core, "rev-parse", f"{main}:{path}").decode().strip())
+        if hashlib.sha256((running.parent / name).read_bytes()).digest() != hashlib.sha256(content).digest():
+            changed = int(_pin_git(core, "log", "-1", "--format=%ct", main, "--", path))
+            if now - changed > 2 * 3600:
+                stale.append(name)
+    if not stale:
+        return None
+    key = "nightly-e2e:stale-pin:" + ":".join(blobs)
+    body = (
+        f"Nightly reporter pin `{running.parent.name}` lags main `{main}`. "
+        f"Files changed more than 2 h ago: {', '.join(stale)}.\n\n"
+        f"On hermes-hub, export BOTH scripts/ci/nightly_e2e.py and scripts/ci/flaky_kanban.py "
+        f"from `{main}` in `{core}` to `~/.hermes/lib/nightly-e2e/{main[:12]}/` "
+        "using git show <sha>:scripts/ci/<file>. Point SCRIPT in BOTH "
+        "`~/.hermes/scripts/nightly_e2e_dispatch.py` and `~/.hermes/scripts/nightly_e2e_report.py` "
+        "there. Verify both pinned SHA-256 hashes against main and the real report cron is ok and silent. "
+        "Do not move the live core checkout."
+    )
+    # Separate from run cards: a green nightly must not imply that the deployment drift is repaired.
+    pins = state.setdefault("pin_cards", {})
+    if key in pins:
+        rec = pins[key]
+        card_id = rec["id"]
+        if rec["body"] != body and _is_open(board, card_id):
+            board.comment(card_id, body)
+            rec["body"] = body
+            return f"stale pin: updated {card_id} (main {main})"
+        return None
+    try:
+        card_id = board.create("Re-pin hermes-hub nightly e2e reporter", body, key)
+    except CreateRefused as refused:
+        card_id = board.create(
+            "Re-pin hermes-hub nightly e2e reporter", body, key,
+            distinct_from=[str(m["id"]) for m in refused.matches if m.get("id")],
+            distinct_reason="deployment drift for these main blobs, not a nightly test failure",
+        )
+    pins[key] = {"id": card_id, "body": body}
+    return f"stale pin: filed {card_id} (main {main})"
+
+
 def report(
     gh: GitHub,
     board: Any,
@@ -723,8 +785,16 @@ def report(
     *,
     now: float,
     acceptance: tuple[str, str] | None = None,
+    core: Path | None = None,
 ) -> list[str]:
     out: list[str] = []
+    try:
+        note = check_pin(board, state, core=core or DEFAULT_CORE, now=now)
+        if note:
+            out.append(note)
+    except Exception as err:  # health: allow BLE001 -- advisory failures must log one line and never skip settlement
+        # This advisory must never prevent pending runs from settling, even for a bug in the check itself.
+        out.append(f"pin check failed (continuing): {err!r}")
     still: list[dict[str, Any]] = []
     for entry in list(state["pending"]):
         # Label runs recorded before the flag existed, but never a production-main run: that incident stays real.
@@ -776,6 +846,7 @@ def main(argv: list[str] | None = None) -> int:
         default="main",
         help="dispatch: the ref whose nightly-e2e.yml runs (default main)",
     )
+    ap.add_argument("--core", type=Path, default=DEFAULT_CORE, help="core checkout for the pinned reporter freshness check")
     ap.add_argument("--state", type=Path, default=DEFAULT_STATE)
     ap.add_argument("--hermes", default="hermes")
     ap.add_argument(
@@ -801,7 +872,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"nightly-e2e: dispatched {entry['ref']} = {entry['sha']}: {entry['url'] or 'run not visible yet'}"
             )
             return 0
-        lines = report(gh, board, state, now=now, acceptance=acceptance)
+        lines = report(gh, board, state, now=now, acceptance=acceptance, core=args.core)
     if lines:  # silent when nothing is pending: a no-agent cron job with empty stdout stays quiet
         print("nightly-e2e:\n" + "\n".join(lines))
     return 1 if any(BOARD_FAILED in line for line in lines) else 0

@@ -116,6 +116,11 @@ class FakeBoard:
         self.cards[cid]["comments"].append(body)
 
 
+@pytest.fixture(autouse=True)
+def in_checkout(monkeypatch):
+    monkeypatch.setattr(ne, "DEFAULT_CORE", ROOT)
+
+
 @pytest.fixture
 def env():
     return FakeGitHub(), FakeBoard(), ne.load_state(Path("/nonexistent/state.json"))

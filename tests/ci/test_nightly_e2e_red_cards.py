@@ -21,6 +21,11 @@ from tests.ci.test_nightly_e2e import OWNER, T0, FakeBoard, FakeGitHub, _dispatc
 A, B, C, D = (f"tests/e2e/{n}.py::t" for n in "abcd")
 
 
+@pytest.fixture(autouse=True)
+def in_checkout(monkeypatch):
+    monkeypatch.setattr(ne, "DEFAULT_CORE", Path(__file__).resolve().parents[2])
+
+
 @pytest.fixture
 def env():
     return FakeGitHub(), FakeBoard(), ne.load_state(Path("/nonexistent/state.json"))
