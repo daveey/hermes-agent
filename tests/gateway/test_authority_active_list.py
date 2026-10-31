@@ -63,6 +63,22 @@ async def test_a_running_turn_reads_working_until_it_settles(owner):
 
 
 @pytest.mark.asyncio
+async def test_a_running_turn_reports_its_last_activity_not_the_session_start(owner):
+    # Desktop paints a working row stalled (red) once ``last_active`` is 5+ min old. Reporting the
+    # session's ``started_at`` made every turn in a chat older than 5 min read as quiet for days.
+    db = owner.authority.db
+    started = (await owner.active())['chat']['started_at']
+    old = started - 8 * 86400
+    db._write_sql('UPDATE sessions SET started_at = ? WHERE id = ?', (old, 'chat'))
+    await owner.submit('hi')
+    stamp = started + 30.0  # a tool heartbeat (``AIAgent._touch_activity``) mid-turn
+    db.touch_session_activity('chat', stamp, description='tool heartbeat')
+    row = (await owner.active())['chat']
+    assert (row['status'], row['started_at']) == ('working', pytest.approx(old)), row
+    assert row['last_active'] >= stamp, row
+
+
+@pytest.mark.asyncio
 async def test_a_row_names_its_source(owner):
     # Desktop's poll can see a messaging turn settle before its messaging row loads; the source
     # on the live row is what keeps that settle from reading as a Desktop completion.

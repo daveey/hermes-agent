@@ -36,8 +36,12 @@ async def active_list(connection, ref, params):
         if row.get('source') in INTERNAL_LISTING_SOURCES or entry.closed:
             continue
         sid, started = entry.session_id, float(row.get('started_at') or 0)
+        # [daveey] The freshest activity, not the session start: Desktop paints a working row stalled
+        # (red) once ``last_active`` is 5+ min old, so ``started_at`` turned every turn in a chat older
+        # than that into a days-quiet stall. Heartbeats land every <=60 s while a tool runs.
+        last = max(float(row.get('ended_at') or 0), float(row.get('last_active') or 0)) or started
         rows.append({'current': sid == current, 'id': sid, 'session_key': sid,
-                     'last_active': float(row.get('ended_at') or started), 'started_at': started,
+                     'last_active': last, 'started_at': started,
                      'message_count': int(row.get('message_count') or 0),
                      'model': str(row.get('model') or ''), 'preview': '', 'title': row.get('title') or '',
                      'source': row.get('source'), 'status': _status(entry.live, entry.handle, entry.pending)})
