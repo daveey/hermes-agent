@@ -114,13 +114,24 @@ def _invoke_hook_safely(name: str, logger: logging.Logger, **kwargs) -> list:
         return []
 
 
-def _guarded_cleanup(label: str, fn: Callable[[], Any], errors: list[str], logger) -> None:
+def _guarded_cleanup(
+    label: str, fn: Callable[[], Any], errors: list[str], logger, *, interrupted: bool = False,
+) -> None:
     """Post-loop cleanup must never lose the response: each step is guarded
-    independently and errors surface via ``cleanup_errors`` (#8049)."""
+    independently and errors surface via ``cleanup_errors`` (#8049).
+
+    An interrupted turn whose worker generation the owner retired (restart/update) gets the
+    store's ``stale_generation`` fence on every write: that is the planned shutdown, so it is a
+    one-line WARNING, still recorded in ``cleanup_errors``. Anything else stays an ERROR traceback."""
     try:
         fn()
     except Exception as err:
         errors.append(f"{label}: {err}")
+        if interrupted:
+            from agent.runtime_session_store import is_retired_generation_error
+            if is_retired_generation_error(err):
+                logger.warning("finalize_turn: _%s skipped: generation retired (interrupted turn)", label)
+                return
         logger.error("finalize_turn: _%s failed: %s", label, err, exc_info=True)
 
 
@@ -802,7 +813,7 @@ def finalize_turn(
             _micro_compact_after_turn(agent, messages, final_response, logger, effective_task_id)
         agent._persist_session(messages, conversation_history)
 
-    _guarded_cleanup("persist_session", _persist_step, _cleanup_errors, logger)
+    _guarded_cleanup("persist_session", _persist_step, _cleanup_errors, logger, interrupted=interrupted)
 
     # Keep the gateway's separate in-memory history snapshot current even on
     # cleanup error, so a later prompt isn't sent with a pre-turn snapshot.

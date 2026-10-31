@@ -8,6 +8,7 @@ for must still be returned.  Previously any of those raised straight out of
 traceback and lost the whole turn.
 """
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -207,3 +208,88 @@ def test_persist_disabled_turn_skips_session_end_hook(
     assert ("on_session_end" in calls) == ("on_session_end" in expected_calls)
 
 
+
+
+# --- a retired worker generation on an interrupted turn is an expected fence -----------------
+# A gateway restart/core update retires the Kanban worker's generation mid-turn; every later
+# write is refused ``stale_generation``. On an interrupted turn that is the planned shutdown, not
+# a persistence fault, so it must not log an ERROR traceback (the self-heal detector files those).
+
+
+class _StaleGenerationAgent(_StubAgent):
+    def __init__(self, error):
+        super().__init__(raise_in=())
+        self._error = error
+
+    def _persist_session(self, *a, **k):
+        raise self._error
+
+
+def _finalize(agent, *, interrupted):
+    messages = [{"role": "user", "content": "do a thing"}]
+    return finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=1,
+        interrupted=interrupted,
+        failed=False,
+        messages=messages,
+        conversation_history=None,
+        effective_task_id="task-1",
+        turn_id="turn-1",
+        user_message="do a thing",
+        original_user_message="do a thing",
+        _should_review_memory=False,
+        _turn_exit_reason="interrupted_by_user" if interrupted else "unknown",
+    )
+
+
+def _persist_records(caplog):
+    return [r for r in caplog.records if "_persist_session" in r.getMessage()]
+
+
+def test_interrupted_turn_stale_generation_is_a_warning_without_traceback(caplog):
+    from agent.runtime_session_store import WorkerPersistenceError
+
+    caplog.set_level(logging.DEBUG)
+    result = _finalize(_StaleGenerationAgent(WorkerPersistenceError("stale_generation")), interrupted=True)
+    records = _persist_records(caplog)
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert records[0].exc_info is None
+    assert "generation retired (interrupted turn)" in records[0].getMessage()
+    # Still recorded for the caller.
+    assert result["cleanup_errors"] == ["persist_session: stale_generation"]
+
+
+def test_interrupted_turn_runtime_store_stale_generation_is_a_warning(caplog):
+    from hermes_state_runtime import RuntimeStoreError
+
+    caplog.set_level(logging.DEBUG)
+    _finalize(_StaleGenerationAgent(RuntimeStoreError("stale_generation")), interrupted=True)
+    assert [r.levelno for r in _persist_records(caplog)] == [logging.WARNING]
+
+
+def test_uninterrupted_turn_stale_generation_stays_an_error(caplog):
+    from agent.runtime_session_store import WorkerPersistenceError
+
+    caplog.set_level(logging.DEBUG)
+    _finalize(_StaleGenerationAgent(WorkerPersistenceError("stale_generation")), interrupted=False)
+    records = _persist_records(caplog)
+    assert [r.levelno for r in records] == [logging.ERROR]
+    assert records[0].exc_info is not None
+
+
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        lambda: RuntimeError("sqlite database is locked"),
+        lambda: __import__("agent.runtime_session_store", fromlist=["x"]).WorkerPersistenceError("outbox_full"),
+        lambda: RuntimeError("stale_generation"),  # right text, wrong type: not a store fence
+    ],
+)
+def test_interrupted_turn_other_errors_stay_errors_with_traceback(caplog, error_factory):
+    caplog.set_level(logging.DEBUG)
+    _finalize(_StaleGenerationAgent(error_factory()), interrupted=True)
+    records = _persist_records(caplog)
+    assert [r.levelno for r in records] == [logging.ERROR]
+    assert records[0].exc_info is not None

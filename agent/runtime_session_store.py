@@ -48,6 +48,19 @@ class WorkerPersistenceError(RuntimeError):
     pass
 
 
+def is_retired_generation_error(exc) -> bool:
+    """True for the store's ``stale_generation`` fence: the owner retired this worker generation
+    (gateway restart / core update), so every later write is refused by design. Matches only the
+    store's own error types, never a bare string, so an unrelated error stays a fault."""
+    if isinstance(exc, WorkerPersistenceError):
+        return str(exc).strip() == 'stale_generation'
+    try:
+        from hermes_state_runtime import RuntimeStoreError
+    except ImportError:
+        return False
+    return isinstance(exc, RuntimeStoreError) and str(exc).strip() == 'stale_generation'
+
+
 def _receipt_timeout_s():
     from hermes_state_runtime import worker_receipt_timeout_s
     return worker_receipt_timeout_s()

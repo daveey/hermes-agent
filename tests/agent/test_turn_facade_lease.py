@@ -357,3 +357,45 @@ def test_refresh_after_a_lapse_retries_a_locked_renewal(tmp_path, monkeypatch):
         assert db.session_turn_lease_expires_at("s1", "h") > clock.time()
     finally:
         db.close()
+
+
+class _RefusingDb(_Db):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def release_session_turn_lease(self, session_id, holder):
+        raise self.error
+
+
+def _release_records(db, caplog, monkeypatch):
+    import logging
+    monkeypatch.setattr(
+        "agent.turn_liveness.resolve_turn_liveness_settings", lambda cfg: (None, 1.0)
+    )
+    agent = _agent(db)
+    lease = _admit(agent).lease
+    caplog.set_level(logging.DEBUG, logger="run_agent")
+    caplog.clear()
+    lease.release()
+    assert agent._active_session_turn_lease_holder is None
+    return [r for r in caplog.records if "release" in r.getMessage().lower()]
+
+
+def test_release_refused_by_a_retired_generation_is_a_warning(caplog, monkeypatch):
+    """The owner retired this worker generation (restart/update): the row is already its to drop."""
+    import logging
+    from agent.runtime_session_store import WorkerPersistenceError
+
+    records = _release_records(_RefusingDb(WorkerPersistenceError("stale_generation")), caplog, monkeypatch)
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert records[0].exc_info is None
+
+
+def test_release_other_failure_stays_an_error(caplog, monkeypatch):
+    import logging
+    from agent.runtime_session_store import WorkerPersistenceError
+
+    records = _release_records(_RefusingDb(WorkerPersistenceError("outbox_full")), caplog, monkeypatch)
+    assert [r.levelno for r in records] == [logging.ERROR]
+    assert records[0].exc_info is not None

@@ -172,6 +172,7 @@ class DurableTurnLease:
         abandoned (so this process's next turn can take the row) and a daemon thread retries the
         DELETE until the lease would have expired anyway, so other processes are not kept waiting."""
         from hermes_state_errors import classify_persistence_error
+        from agent.runtime_session_store import is_retired_generation_error
         agent = self.agent
         try:
             self.db.release_session_turn_lease(self.session_id, self.holder)
@@ -182,6 +183,11 @@ class DurableTurnLease:
                     self.session_id, exc,
                 )
                 self._start_release_retry()
+            elif is_retired_generation_error(exc):
+                # The owner retired this worker generation (restart/update) and drops its rows itself.
+                logger.warning(
+                    "Session turn lease release skipped: worker generation retired: %s", self.session_id,
+                )
             else:
                 logger.error("Failed to release session turn lease: %s", self.session_id, exc_info=True)
         if getattr(agent, "_active_session_turn_lease_holder", None) == self.holder:
