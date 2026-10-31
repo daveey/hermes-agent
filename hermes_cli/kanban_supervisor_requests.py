@@ -22,6 +22,9 @@ This module is the narrow contract between the two:
   A crash after acceptance leaves the row ``accepted``; the lease expiring (or the
   executor pid being gone on this host) puts it back up for redelivery, and ops are
   idempotent (an edge already present/absent counts as applied).
+* **reconcile_notify** ops (``kanban_notify_reconcile_exec``) retire a wrong-local refused-send tui
+  subscription. Their execution waits on the owner gateway's own receipt read (phase
+  ``awaiting_owner``), which ``drain`` polls without spending delivery attempts.
 * **Receipt**: every transition appends a ``supervisor_request_*`` event, and the
   terminal one a comment, on the requester's card. A requester parked ``scheduled`` is
   woken, also when it parks only after the result landed. A result never completes, unblocks or releases the requester; a rejected or
@@ -44,7 +47,9 @@ MAX_OPS = 20
 MAX_ATTEMPTS = 5
 LEASE_SECONDS = 120
 EXECUTOR_FRESH_SECONDS = 300
-OPS = ("link", "unlink")  # link: preview only (dry_run); a request carries unlink ops
+OPS = ("link", "unlink", "reconcile_notify")  # link: preview only (dry_run); a request carries unlink ops
+# reconcile_notify: retire a wrong-local refused-send tui subscription on owner-read receipts
+# (hermes_cli/kanban_notify_reconcile_exec.py). A request carries only those, or only edge ops.
 ACTIVE = ("pending", "accepted")
 TERMINAL = ("done", "rejected", "failed")
 COMMENT_AUTHOR = "kanban-supervisor"
@@ -108,6 +113,10 @@ def normalize_ops(ops: Any) -> list[dict]:
         if not isinstance(op, dict):
             raise SupervisorRequestError("invalid_ops", f"op {i} is not an object")
         kind = str(op.get("op") or "").strip()
+        if kind == "reconcile_notify":
+            from hermes_cli import kanban_notify_reconcile_exec as nrx
+            out.append(nrx.normalize_op(i, op))
+            continue
         parent = str(op.get("parent_id") or "").strip()
         child = str(op.get("child_id") or "").strip()
         if kind not in OPS:
@@ -115,7 +124,18 @@ def normalize_ops(ops: Any) -> list[dict]:
         if not parent or not child or parent == child:
             raise SupervisorRequestError("invalid_ops", f"op {i}: distinct parent_id and child_id are required")
         out.append({"op": kind, "parent_id": parent, "child_id": child})
+    if len({o["op"] == "reconcile_notify" for o in out}) > 1:
+        raise SupervisorRequestError("invalid_ops", "a request carries only reconcile_notify ops or only edge ops")
     return out
+
+
+def _is_reconcile(ops: list[dict]) -> bool:
+    return bool(ops) and ops[0].get("op") == "reconcile_notify"
+
+
+def op_label(op: dict) -> str:
+    from hermes_cli import kanban_notify_reconcile_exec as nrx
+    return nrx.label(op)
 
 
 def dedupe_key(requester: str, ops: list[dict]) -> str:
@@ -182,6 +202,11 @@ def preflight(conn: sqlite3.Connection, requester: str, ops: list[dict]) -> list
     """Per-op verdict: ``self`` (the worker may do it with kanban_link/unlink itself),
     ``supervisor`` (in scope, needs the executor), ``noop`` (already in that state) or
     ``refused`` with a reason. Ops are simulated in order on the current graph."""
+    if _is_reconcile(ops):
+        # No creator-scope rule: the owner-read receipt gate is the safety (it only retires a row the
+        # owner gateway proves delivered), and any worker may hit a phantom unseen row on any card.
+        from hermes_cli import kanban_notify_reconcile_exec as nrx
+        return [nrx.preflight_op(conn, op) for op in ops]
     edges = _edges(conn)
     verdicts = []
     for op in ops:
@@ -300,7 +325,7 @@ def submit(conn: sqlite3.Connection, *, env_task: Optional[str], env_run: Option
             "only unlinks")
     if refused:
         raise SupervisorRequestError(
-            "refused", "; ".join(f"{v['op']} {v['parent_id']} -> {v['child_id']}: {v['reason']}" for v in refused))
+            "refused", "; ".join(f"{op_label(v)}: {v['reason']}" for v in refused))
     own = [v for v in verdicts if v["verdict"] == "self"]
     if own:
         raise SupervisorRequestError(
@@ -383,9 +408,11 @@ def _accept_next(conn: sqlite3.Connection, executor: str, now: int,
 
     with kb.write_txn(conn):
         for r in conn.execute(
-                "SELECT id, status, executor, lease_expires FROM supervisor_requests "
+                "SELECT id, status, executor, lease_expires, result_json FROM supervisor_requests "
                 "WHERE status IN ('pending','accepted') ORDER BY id ASC").fetchall():
             rid, status, holder, lease = int(r[0]), r[1], r[2], r[3]
+            if status == "accepted" and _awaiting_owner(r[4]):
+                continue  # waiting on another gateway: polled (kanban_notify_reconcile_exec.poll), no attempt spent
             if status == "accepted" and lease and int(lease) > now and not _executor_dead(holder):
                 continue  # a live executor holds it: stays queued for that executor
             attempts = int(conn.execute("SELECT attempts FROM supervisor_requests WHERE id=?",
@@ -407,6 +434,13 @@ def _accept_next(conn: sqlite3.Connection, executor: str, now: int,
     return None
 
 
+def _awaiting_owner(raw: Optional[str]) -> bool:
+    try:
+        return isinstance(raw, str) and json.loads(raw).get("phase") == "awaiting_owner"
+    except (ValueError, AttributeError):
+        return False
+
+
 def _finish(conn: sqlite3.Connection, req: dict, executor: str, status: str, *,
             results: list[dict], error: Optional[str]) -> bool:
     from hermes_cli import kanban_db as kb
@@ -425,7 +459,7 @@ def _finish(conn: sqlite3.Connection, req: dict, executor: str, status: str, *,
             payload["error"] = error
         kb._append_event(conn, requester, f"supervisor_request_{status}", payload)
         lines = [f"Supervisor request #{rid} {status} (executor {executor})."]
-        lines += [f"- {r['op']} {r['parent_id']} -> {r['child_id']}: {r['outcome']}"
+        lines += [f"- {op_label(r)}: {r['outcome']}"
                   + (f" ({r['detail']})" if r.get("detail") else "") for r in results]
         if error:
             lines.append(f"Error: {error}")
@@ -475,6 +509,9 @@ def _rewake_late_parkers(conn: sqlite3.Connection) -> None:
 def _execute(conn: sqlite3.Connection, req: dict, executor: str, board: Optional[str]) -> str:
     requester = req["requester_task_id"]
     ops = req["ops"]
+    if _is_reconcile(ops):
+        from hermes_cli import kanban_notify_reconcile_exec as nrx
+        return nrx.start(conn, req, executor)
     # Scope is re-checked against the board as it is now, not as it was at submit time.
     gone = requester_refusal(conn, requester)
     verdicts = preflight(conn, requester, ops)
@@ -545,6 +582,8 @@ def drain(conn: sqlite3.Connection, *, board: Optional[str] = None, role: str = 
             _finish(conn, req, executor, "failed", results=[], error=f"{type(exc).__name__}: {exc}"[:500])
             status = "failed"
         processed.append((req["id"], status))
+    from hermes_cli import kanban_notify_reconcile_exec as nrx
+    processed += nrx.poll(conn, executor, now=now)
     return {"executor": executor, "processed": processed}
 
 
@@ -605,7 +644,7 @@ def cli_command(args) -> int:
     if processed is not None:
         print(f"executor {processed['executor']}: processed {processed['processed'] or 'nothing'}")
     for r in rows:
-        ops = ", ".join(f"{o['op']} {o['parent_id']}->{o['child_id']}" for o in r["ops"] or [])
+        ops = ", ".join(op_label(o) for o in r["ops"] or [])
         print(f"#{r['id']} {r['status']:<8} {r['requester_task_id']} [{ops}]"
               + (f" error: {r['error']}" if r.get("error") else ""))
     return 0

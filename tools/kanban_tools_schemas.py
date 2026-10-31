@@ -940,20 +940,28 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "(self), need the supervisor (supervisor), it is already so (noop), or it "
         "is refused (cards another task created, cycles), and whether an executor is live. After a real request, park "
         "with kanban_schedule (or kanban_block kind='time') naming the request id; "
-        "it wakes you on the result."
+        "it wakes you on the result. "
+        "Op reconcile_notify {task_id, chat_id, thread_id?} instead asks the executor to retire a "
+        "wrong-local platform='tui' send_refused notify subscription for a chat another gateway owns "
+        "(a phantom 'unseen' count): the executor asks the owner gateway itself which notices it holds and "
+        "removes the row only on its receipt, else keeps it. Pass no evidence; a request carries only "
+        "reconcile_notify ops or only edge ops."
     ),
     {
         "ops": {
             "type": "array",
-            "description": "Edge edits, applied in order (max 20).",
+            "description": "Edge edits applied in order, or reconcile_notify ops (max 20).",
             "items": {
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["link", "unlink"]},
+                    "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify"]},
                     "parent_id": {"type": "string"},
                     "child_id": {"type": "string"},
+                    "task_id": {"type": "string", "description": "reconcile_notify: the subscribed task."},
+                    "chat_id": {"type": "string", "description": "reconcile_notify: the tui row's chat (session id)."},
+                    "thread_id": {"type": "string", "description": "reconcile_notify: the row's thread, if any."},
                 },
-                "required": ["op", "parent_id", "child_id"],
+                "required": ["op"],
             },
         },
         "reason": _prop("string", "Why the graph must change (recorded on the request)."),
