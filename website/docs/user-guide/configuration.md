@@ -1190,6 +1190,27 @@ auxiliary:
 The summary model **must** have a context window at least as large as your main agent model's. The compressor sends the full middle section of the conversation to the summary model — if that model's context window is smaller than the main model's, the summarization call will fail with a context length error. When this happens, the middle turns are **dropped without a summary**, losing conversation context silently. If you override the model, verify its context length meets or exceeds your main model's.
 :::
 
+## Offline Model Retry Wait
+
+`agent.offline_wait_seconds` (default `900`, `0` disables) bounds the local-DNS
+recovery wait per model request. When a connection error contains a local network
+failure and both the provider hostname and a control hostname fail DNS resolution,
+Hermes shows **offline — waiting for network** and waits before spending another
+provider retry. The interruptible wait uses monotonic elapsed time; on macOS this
+excludes time asleep. Repeated outages within one request share the same budget.
+
+```yaml
+agent:
+  offline_wait_seconds: 900
+```
+
+Provider DNS recovery permits a normal retry; it does not prove that the provider
+is reachable. Cached DNS, proxies, and IP endpoints may therefore remain on ordinary
+retry handling. If the control hostname resolves while the provider does not,
+Hermes logs `provider host does not resolve while network is up` and returns to
+ordinary error handling rather than waiting out a presumed local outage. Budget
+exhaustion also returns to ordinary retry handling; cancellation interrupts the wait.
+
 ## Gateway Turn Lease Timeout
 
 The gateway serializes turns by their resolved session ID so two routing keys
