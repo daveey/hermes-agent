@@ -34,7 +34,6 @@ import logging
 import os
 import re
 import secrets
-import shutil
 import sqlite3
 import subprocess
 import time
@@ -150,7 +149,8 @@ def _hub_candidates(conn, op, self_gw) -> list[tuple[str, str]]:
 # --- hermes-hub boundary ---------------------------------------------------------------------------
 
 def _hub_bin() -> str:
-    return os.environ.get("HERMES_HUB_BIN") or shutil.which("hermes-hub") or str(Path.home() / ".local/bin/hermes-hub")
+    from hermes_cli.kanban_capability_registry import hub_cli_path
+    return hub_cli_path()
 
 
 def _run_hub(argv: list[str]) -> tuple[int, str, str]:

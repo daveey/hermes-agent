@@ -1,7 +1,7 @@
 """reconcile_notify supervisor requests: worker request -> non-worker executor -> owner-read receipt. [daveey]
 
 Every test runs on an isolated board, session stores and hub.db under ``tmp_path``. The hermes-hub CLI
-is replaced at its argv boundary (``_run_hub``, or a fake ``HERMES_HUB_BIN`` script for the cross-process
+is replaced at its argv boundary (``_run_hub``, or a fake ``hermes-hub`` script first on PATH for the cross-process
 test); owner answers are written into the hub.db ``sent`` table the way the courier's ``fetch_outcomes``
 writes them.
 """
@@ -473,7 +473,7 @@ sys.stdout.write(out); sys.stderr.write(err); sys.exit(rc)
 def _cli_drain(w, hub_bin):
     env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_KANBAN_")}
     env.update(HERMES_HOME=str(w["home"]), HOME=str(w["tmp"]), HERMES_KANBAN_DB=w["db"], PYTHONPATH=str(REPO),
-               HERMES_HUB_BIN=str(hub_bin))
+               PATH=str(Path(hub_bin).parent) + os.pathsep + env.get("PATH", ""))
     return subprocess.run([sys.executable, "-m", "hermes_cli.main", "kanban", "supervisor-requests", "--drain", "--json"],
                           cwd=str(REPO), env=env, capture_output=True, text=True, timeout=180, check=False)
 
@@ -482,7 +482,8 @@ def test_end_to_end_through_a_separate_executor_process_and_the_hub_cli(world, m
     from tools.registry import registry
     import tools.kanban_tools  # registers the tool
     w = world
-    hub_bin = w["tmp"] / "hermes-hub"
+    (w["tmp"] / "hubbin").mkdir()
+    hub_bin = w["tmp"] / "hubbin" / "hermes-hub"
     hub_bin.write_text(FAKE_HUB.format(py=sys.executable, tests=str(Path(__file__).parent), db=str(w["hub_db"])))
     hub_bin.chmod(0o755)
     out = json.loads(registry.dispatch("kanban_supervisor_request", {"ops": _ops(w)}))
