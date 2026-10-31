@@ -286,7 +286,9 @@ def remove_notify_sub(
     chat_id: str,
     thread_id: Optional[str] = None,
 ) -> bool:
-    with _kb.write_txn(conn):
+    # Pure composition primitive: reconciliation validates receipt + row snapshot
+    # and retires the subscription in one outer transaction.
+    with _kb.write_txn(conn, allow_nested=True):
         cur = conn.execute(
             "DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE,
             _sub_key(task_id, platform, chat_id, thread_id),
