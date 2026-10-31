@@ -1052,7 +1052,7 @@ export function ChatBar({
       if (busy && !awaitingInput) {
         event.preventDefault()
         triggerHaptic('cancel')
-        void Promise.resolve(haltRun())
+        void Promise.resolve(haltRun('esc'))
       }
     }
   }
