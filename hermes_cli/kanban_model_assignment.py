@@ -30,7 +30,7 @@ class ModelPinNotInRegistryError(ModelProviderMismatchError):
 def _assignee_config(assignee):
     """The config a worker for ``assignee`` reads; None for a non-profile lane (its executor decides)."""
     from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
-    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_cli.config_effective import load_profile_config_effective, load_user_config_effective
     from hermes_cli.profiles import resolve_profile_env
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
@@ -43,7 +43,7 @@ def _assignee_config(assignee):
     with ExitStack() as stack:
         stack.callback(reset_hermes_home_override, set_hermes_home_override(str(home)))
         stack.callback(reset_secret_scope, set_secret_scope(build_profile_secret_scope(home)))
-        return load_user_config_effective(home / 'config.yaml', fail_closed=True)
+        return load_profile_config_effective(home / 'config.yaml', fail_closed=True)
 
 
 def _check_managed_pin(model, provider, config):

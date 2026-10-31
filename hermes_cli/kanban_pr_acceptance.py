@@ -106,7 +106,7 @@ def _gh_command_prefix(profile_home: str | None) -> list[str]:
     """
     from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
     from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
-    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_cli.config_effective import load_profile_config_effective, load_user_config_effective
     from hermes_platform.resolver import locate_command
     from ruamel.yaml.error import YAMLError
 
@@ -115,7 +115,8 @@ def _gh_command_prefix(profile_home: str | None) -> list[str]:
     scope_token = None
     try:
         scope_token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
-        config = load_user_config_effective(home / "config.yaml", fail_closed=True)
+        config = (load_profile_config_effective(home / "config.yaml", fail_closed=True)
+                  if profile_home else load_user_config_effective(fail_closed=True))
         prefix = config.get("kanban", {}).get("pr_acceptance", {}).get("gh_command_prefix", [])
     except (OSError, ValueError, TypeError, AttributeError, YAMLError):
         # Parser/config errors can contain interpolated credentials. Persist no raw text.

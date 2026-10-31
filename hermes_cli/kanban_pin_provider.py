@@ -75,8 +75,9 @@ def _profile_scope(assignee: Optional[str], stack: ExitStack) -> Optional[Path]:
 
 def _configured_provider(home: Optional[Path]) -> str:
     try:
-        from hermes_cli.config_effective import load_user_config_effective
-        config = load_user_config_effective(home / "config.yaml") if home else load_user_config_effective()
+        from hermes_cli.config_effective import load_profile_config_effective, load_user_config_effective
+        config = (load_profile_config_effective(home / "config.yaml", fail_closed=True)
+                  if home else load_user_config_effective())
     except Exception as exc:
         logger.debug("kanban pin provider: config unreadable (%s)", exc)
         return ""
