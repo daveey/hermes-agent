@@ -30,7 +30,7 @@ _FORK_OS_LANE_TESTS = frozenset({
 
 
 
-def _fork_os_lane_failure(item, rep):
+def _fork_os_lane_failure(item, rep, call):
     """Recognize only the allowlisted upstream assertions' OS-only mismatch.
 
     Source, locals and arbitrary diagnostic mentions never grant a skip. Match
@@ -59,14 +59,20 @@ def _fork_os_lane_failure(item, rep):
         ):
             return True
     if name == "test_pull_requests_and_main_pushes_never_run_e2e":
-        # This predicate checks lane membership, not the values printed inside run.
+        # Pytest can truncate nested dict reprs with unbalanced delimiters. For
+        # the known compound predicate, verify the actual operand as well as
+        # the failed expression instead of trying to parse that lossy repr.
+        if (message.startswith("AssertionError: assert ('tests' in ") and
+                " and 'tests-os' in " in message and call.excinfo is not None):
+            run = call.excinfo.traceback[-1].frame.f_locals.get("run")
+            return isinstance(run, dict) and "tests" in run and "tests-os" not in run
+        # Simple OS membership still strips diagnostic container values.
         while True:
             stripped = _fork_re.sub(r"\[[^\[\]{}]*\]|\{[^\[\]{}]*\}", "", message)
             if stripped == message:
                 break
             message = stripped
-        return (bool(_fork_re.fullmatch(r"AssertionError: assert \('tests' in [\s},.]* and 'tests-os' in [\s},.]*\)", message)) or
-                bool(_fork_re.search(r"(?:^|\n|AssertionError: )assert 'tests-os' (?:not )?in *$", message)))
+        return bool(_fork_re.search(r"(?:^|\n|AssertionError: )assert 'tests-os' (?:not )?in *$", message))
     # Remaining allowlisted predicates are all(consumer_map.values()). Equality
     # diffs and membership failures aren't this assertion, even if they name OS.
     if not _fork_re.search(r"(?:^AssertionError: |\n)assert False\n \+  where False = all\(dict_values\(", message):
@@ -94,6 +100,6 @@ def pytest_runtest_makereport(item, call):
     # A fork_guard test asserts the fork's own wiring: its failure is real even when it names tests-os.
     if (_FORK_NO_OS_LANE and rep.when == "call" and rep.failed and not item.get_closest_marker("fork_guard")
             and item.nodeid.split("[")[0] in _FORK_OS_LANE_TESTS
-            and _fork_os_lane_failure(item, rep)):
+            and _fork_os_lane_failure(item, rep, call)):
         rep.outcome = "skipped"
         rep.longrepr = (str(item.path), item.location[1] or 0, "fork: asserts the macOS/Windows tests-os lane, which is off on daveey/hermes")

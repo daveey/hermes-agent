@@ -97,6 +97,19 @@ def test_assertion_about_the_os_lane_itself_still_becomes_a_skip(tmp_path):
     assert "fork: asserts the macOS/Windows tests-os lane" in p.stdout
 
 
+@pytest.mark.parametrize("linux_ok", [True, False])
+def test_compound_lane_membership_with_truncated_nested_repr(tmp_path, linux_ok):
+    p = _run(tmp_path, {"test_update_ci_routing.py": f"""
+        def {LANE_TEST}():
+            run = {{str(i): {{'body': {{'needs': ['detect', 'tests-os'], 'nested': {{'enabled': True}}}}}} for i in range(30)}}
+            if {linux_ok!r}:
+                run['tests'] = {{}}
+            assert 'tests' in run and 'tests-os' in run
+    """})
+    assert p.returncode == (0 if linux_ok else 1), p.stdout
+    assert ("skipped" in p.stdout) == linux_ok, p.stdout
+
+
 def test_lane_test_failing_for_another_reason_stays_a_failure(tmp_path):
     p = _run(tmp_path, {"test_update_ci_routing.py": f"""
         def {LANE_TEST}():
