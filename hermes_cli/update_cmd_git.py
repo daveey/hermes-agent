@@ -353,9 +353,26 @@ def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path, head: str = "HEAD") 
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"  ✗ Upstream sync gate failed to run: {exc}")
         return False
-    for line in (proc.stdout or proc.stderr or "").strip().splitlines()[-4:]:
+    for line in _gate_report(proc.stdout or proc.stderr or ""):
         print(f"    {line}")
     return proc.returncode == 0
+
+
+_GATE_VERDICTS = ("REFUSED", "NOT YET", "LANDED")
+_GATE_REPORT_LINES = 40
+
+
+def _gate_report(output: str) -> list[str]:
+    """The gate's tail: its last 4 lines, widened back to the last verdict line when the evidence lines a REFUSED
+    prints under it (upstream_sync_diagnostics) would push that verdict out of view; capped."""
+    lines = output.strip().splitlines()
+    verdicts = [i for i, line in enumerate(lines) if line.startswith(_GATE_VERDICTS)]
+    start = len(lines) - 4
+    if verdicts and verdicts[-1] < start:
+        start = verdicts[-1]
+    shown = lines[max(start, 0):][:_GATE_REPORT_LINES]
+    hidden = len(lines) - max(start, 0) - len(shown)
+    return shown + ([f"… {hidden} more line(s)"] if hidden > 0 else [])
 
 
 def _offer_upstream_remote(git_cmd: list[str], cwd: Path, *, assume_yes: bool, input_fn) -> bool:

@@ -398,26 +398,61 @@ def test_unavailable_candidate_log_makes_owner_lookup_unknown_not_no_owner(tmp_p
     assert "nightly owner lookup unknown" in out and "no open nightly-e2e card matches" not in out
 
 
-def test_corrupt_nightly_state_is_lookup_unavailable_not_no_owner(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("state_text", ["{not json", "[]", '{"cards": []}', '{"cards": {"KEY": "t_x"}}'])
+def test_corrupt_nightly_state_is_lookup_unavailable_not_no_owner(tmp_path, monkeypatch, capsys, state_text):
     out = _real_owner_explain(FakeGitHub(**nightly_at(BASE, "failure", log(A))), tmp_path, monkeypatch, capsys,
-                              "{not json")
+                              state_text.replace("KEY", failure_key([A])))
     assert "main-baseline failure" in out
     assert "nightly owner lookup unavailable" in out and "no open nightly-e2e card matches" not in out
 
 
-CRASH_SECTION = ("\n2026-10-30T16:48:05Z === 1 file where the interpreter CRASHED mid-run (native fault — a real bug, "
-                 "not a collection error; the tests that did run are not counted) ===\n"
-                 "2026-10-30T16:48:05Z   tests/e2e/core/test_session.py\n")
-TIMEOUT_SECTION = "\n2026-10-30T16:48:05Z (900s exceeded; process tree SIGKILL'd)\n"
+def test_timed_out_log_read_is_an_unavailable_log(tmp_path, monkeypatch, capsys):
+    github = FakeGitHub(**nightly_at(BASE, "failure", log(A)))
+    plain = github.gh
+
+    def gh(*args, reason=None):
+        if "/jobs/21/" in args[1]:
+            raise subprocess.TimeoutExpired(["gh", *args], 120)
+        return plain(*args, reason=reason)
+
+    github.gh = gh
+    out = explain(github, tmp_path, monkeypatch, capsys)
+    assert "diagnostics unavailable" not in out and "no failing test id parsed" in out
+    assert "main baseline:" in out  # the remaining evidence is still read
 
 
-@pytest.mark.parametrize("section", [CRASH_SECTION, TIMEOUT_SECTION])
-def test_baseline_whole_file_failure_never_yields_candidate_only(tmp_path, monkeypatch, capsys, section):
+WHOLE_FILE_HEADERS = [
+    "=== 1 file where the interpreter CRASHED mid-run (native fault — a real bug, not a collection error; "
+    "the tests that did run are not counted) ===",
+    "=== 2 files that FAILED AT IMPORT/COLLECTION (0 tests ran) ===",
+    "=== 1 file where no tests ran (timeout before collection, pytest usage error, etc.) ===",
+    "=== ✗ NO TESTS RAN — 0 collected across 3 files ===",
+    "(900s exceeded; process tree SIGKILL'd)",
+]
+
+
+@pytest.mark.parametrize("header", WHOLE_FILE_HEADERS)
+def test_baseline_whole_file_failure_never_yields_candidate_only(tmp_path, monkeypatch, capsys, header):
     """Main crashed/timed out in A's file (no per-test line) and failed B: A failing on the candidate is unknown."""
-    github = FakeGitHub(**nightly_at(BASE, "failure", log(B) + section))
+    github = FakeGitHub(**nightly_at(BASE, "failure", log(B) + f"\n2026-10-30T16:48:05Z {header}\n"))
     out = explain(github, tmp_path, monkeypatch, capsys)
     assert "candidate-only failure observed" not in out
     assert "e2e: baseline comparison unknown for 1 test(s)" in out
+
+
+@pytest.mark.parametrize("header", ["=== 1 file with test failures ===", "=== 1 file with pytest ERRORs (fixture "
+                                    "setup/teardown; grep '^ERROR ' in the failure output) ==="])
+def test_per_test_failure_sections_keep_the_id_set_complete(tmp_path, monkeypatch, capsys, header):
+    github = FakeGitHub(**nightly_at(BASE, "failure", log(B) + f"\n2026-10-30T16:48:05Z {header}\n"))
+    assert "candidate-only failure observed" in explain(github, tmp_path, monkeypatch, capsys)
+
+
+CRASH_SECTION = f"\n2026-10-30T16:48:05Z {WHOLE_FILE_HEADERS[0]}\n2026-10-30T16:48:05Z   tests/e2e/core/test_session.py\n"
+
+
+def test_no_required_failure_points_at_the_run(tmp_path, monkeypatch, capsys):
+    out = explain(FakeGitHub(cand_jobs=candidate_jobs(e2e="success")), tmp_path, monkeypatch, capsys)
+    assert "no required job failed (missing required job evidence or a non-required failure): see the run" in out
 
 
 def test_candidate_whole_file_failure_is_not_matched_to_an_owner(tmp_path, monkeypatch, capsys):

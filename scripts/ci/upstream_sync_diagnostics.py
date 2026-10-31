@@ -85,7 +85,10 @@ def _jobs(gh_repo, run_id, request) -> list[dict]:
 
 
 def _log(gh_repo, job_id, gh) -> str | None:
-    proc = gh("api", f"repos/{gh_repo}/actions/jobs/{job_id}/logs", reason="upstream sync gate: read a failed job log")
+    try:
+        proc = gh("api", f"repos/{gh_repo}/actions/jobs/{job_id}/logs", reason="upstream sync gate: read a failed job log")
+    except (OSError, subprocess.SubprocessError):  # a read that timed out is an unavailable log, like a 410
+        return None
     return proc.stdout if proc.returncode == 0 else None
 
 
@@ -157,9 +160,14 @@ def nightly_owner(ids, *, state_path: Path | None = None, board=None) -> str:
     ids = sorted(set(ids))
     key = failure_key(ids)
     state = json.loads(state_path.read_text(encoding="utf-8-sig"))  # corrupt/unreadable raises: never "no owner"
-    rec = (state.get("cards") or {}).get(key)
+    cards = state.get("cards", {}) if isinstance(state, dict) else None  # no key yet: nothing filed
+    if not isinstance(cards, dict):
+        raise ValueError(f"{state_path} has no nightly-e2e card map")
+    rec = cards.get(key)
     if not rec:
         return ""
+    if not isinstance(rec, dict) or not rec.get("id"):
+        raise ValueError(f"{state_path} card record for {key} is malformed: {rec!r}")
     card = (board or NightlyBoard("hermes")).card(rec["id"])
     if card is None:  # CliBoard.card answers None for a failed `hermes kanban show`: unknown, not "no owner"
         raise RuntimeError(f"nightly card {rec['id']} for {key} is unreadable on this host's board")
