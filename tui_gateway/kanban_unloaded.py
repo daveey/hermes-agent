@@ -132,12 +132,24 @@ def _board_slugs(_kb) -> list[str]:
     return list(unique.values())
 
 
+def build_failed(session: Any) -> bool:
+    """A record whose deferred agent build failed holds no agent and starts no notification poller
+    (``_wire_session_agent`` never ran), so it can neither claim nor wake anything. Counting its key as loaded
+    made the sweeper skip the chat for as long as the record lingered: hub chat 20261028_221818_fdf44b sat on a
+    completed card's FINAL SEND after "Exact pinned route cannot fail over". The sweeper owns such a chat: its
+    wake reports ``error`` and the full notice is written as a passive row, with no model call. [daveey]"""
+    return (isinstance(session, dict) and session.get("agent") is None and bool(session.get("agent_error"))
+            and session.get("agent_ready") is not None and session["agent_ready"].is_set())
+
+
 def live_session_ids() -> set[str]:
-    """Every id this process holds in memory: live sid, agent session_id, session_key."""
+    """Every id this process holds in memory: live sid, agent session_id, session_key (a failed build holds none)."""
     from tui_gateway import server
     ids: set[str] = set()
     with server._sessions_lock:
         for sid, session in server._sessions.items():
+            if build_failed(session):
+                continue
             cands = [sid]
             if isinstance(session, dict):
                 cands += [getattr(session.get("agent"), "session_id", None), session.get("session_key")]
