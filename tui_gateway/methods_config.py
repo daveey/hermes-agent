@@ -496,8 +496,10 @@ def _(rid, params: dict) -> dict:
             result.update(failure_kind="auth_missing", provider=requested or "", reset_at=None)
         return response
     except Exception as e:
-        return _ok(rid, {"ok": False, "error": str(e), "failure_kind": "auth_missing",
-                         "provider": str(params.get("provider") or ""), "reset_at": None})
+        from hermes_cli.runtime_readiness import readiness_failure
+        failure = readiness_failure(e)
+        failure.update(failure_kind="auth_missing", provider=str(params.get("provider") or ""), reset_at=None)
+        return _ok(rid, failure)
 
 
 def _redact_client_text(text: str, cap: int) -> str:

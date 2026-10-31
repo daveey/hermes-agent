@@ -1744,6 +1744,13 @@ def _normalize_reasoning_effort(value: Any) -> Optional[str]:
 
 # Normalizers for create_job (all fields) / update_job (present fields). Invalid values raise BEFORE
 # storing.
+def _normalize_catch_up(value: Any) -> Optional[bool]:
+    """``catch_up``: True runs one catch-up for missed slots, False skips them, None = default."""
+    if value is None or isinstance(value, bool):
+        return value
+    raise ValueError("catch_up must be true, false, or null (use the default).")
+
+
 _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "model": _normalize_job_optional_text,
     "provider": _normalize_job_optional_text,
@@ -1759,6 +1766,7 @@ _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "interpreter": _normalize_job_optional_text,
     "timezone": jobs_time.normalize_timezone,
     "grace_minutes": jobs_time.normalize_grace_minutes,
+    "catch_up": _normalize_catch_up,
 }
 _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     # [] is an explicit zero-tool allowlist and must survive the update path as [] too (#82010).
@@ -1772,6 +1780,7 @@ _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     # ``in {None, "", False}`` test — ``0 == False`` would silently clear it.
     "timezone": jobs_time.normalize_timezone,
     "grace_minutes": jobs_time.normalize_grace_minutes,
+    "catch_up": _normalize_catch_up,
 }
 
 
@@ -1819,6 +1828,7 @@ def create_job(
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str] = None,
+    catch_up: Optional[bool] = None,
     paused: bool = False,
     paused_reason: Optional[str] = None,
     pinned: bool = False,
@@ -1931,6 +1941,7 @@ def create_job(
         ("failure_deliver", f["failure_deliver"]), ("interpreter", f["interpreter"]),
         ("owner_session_id", (owner_session_id or "").strip() or None),
         ("timezone", f["timezone"]), ("grace_minutes", f["grace_minutes"]),
+        ("catch_up", f["catch_up"]),
     ):
         if value is not None:
             job[key] = value
@@ -1982,13 +1993,15 @@ def list_jobs(include_disabled: bool = False) -> list[dict[str, Any]]:
     if not include_disabled:
         jobs = [j for j in jobs if j.get("enabled", True)]
     try:
-        from cron.executions import latest_executions
+        from cron.executions import latest_executions, live_executions
 
-        latest = latest_executions([job.get("id", "") for job in jobs])
+        ids = [job.get("id", "") for job in jobs]
+        latest, live = latest_executions(ids), live_executions(ids)
     except Exception:
-        latest = {}
+        latest, live = {}, {}
     for job in jobs:
         job["latest_execution"] = latest.get(job.get("id", ""))
+        job["live_execution"] = live.get(job.get("id", ""))
     return jobs
 
 
@@ -2312,6 +2325,8 @@ def remove_job(job_id: str) -> bool:
         marker = _self_removal_delivery.get()
         if marker is not None and marker.job_id == canonical_id:
             marker.removed = True
+        else:  # someone else removed it: its live run must stop, not burn tokens to a discard
+            cancel_job_run(canonical_id, reason="job removed while running")
         if job_output_dir.exists():
             shutil.rmtree(job_output_dir)
         try:
@@ -2324,6 +2339,13 @@ def remove_job(job_id: str) -> bool:
         with _fire_fence_locks_guard:
             _fire_fence_locks.pop(_fence_key, None)
         return True
+
+
+def cancel_job_run(job_id: str, reason: Optional[str] = None) -> dict[str, Any]:
+    """Stop the job's live run (if any); its schedule is untouched. See ``cron.cancellation``."""
+    from cron.cancellation import cancel_run
+
+    return cancel_run(job_id, reason=reason)
 
 
 def _set_alert_flag(job_id: str, field: str, value: bool) -> bool:
@@ -2419,18 +2441,15 @@ def _record_run_outcome(
     # The transient manual-run context is single-fire: the run that just completed consumed it.
     job.pop("manual_run_prompt", None)
     delivery_failed = isinstance(delivery_error, str) and bool(delivery_error.strip())
-    # [daveey] A gated tick (agent suppressed) keeps the last real run's verdict; only a job with
-    # no verdict yet records it as ok.
+    cancelled = status == "cancelled"  # an operator stop is not a failure
+    # Gated ticks keep the last real verdict, except an infra-only failure streak.
     keep_verdict = agent_skipped and success and job.get("last_status") is not None
     if keep_verdict and job.get("last_error_kind") == "fire":
-        # [daveey] A streak made only of fire/infra refusals is no agent verdict to keep: it heals
-        # like a real success. Otherwise a monitor whose input never changes (so it never wakes
-        # the agent) held failure_streak >= threshold forever and self_heal never saw it fixed.
         keep_verdict = False
     if not keep_verdict:
         job["last_status"] = status or (
             "error" if not success else ("delivery_failed" if delivery_failed else "ok"))
-        job["last_error"] = None if success else error
+        job["last_error"] = None if success or cancelled else error
     if keep_verdict:
         job.pop("last_fire_error", None)
     elif success:
@@ -2440,7 +2459,7 @@ def _record_run_outcome(
         job.pop("last_fire_error", None)
         job["failure_streak"] = 0
         job.pop("last_error_kind", None)
-    else:
+    elif not cancelled:
         fire_only_so_far = (int(job.get("failure_streak") or 0) == 0
                             or job.get("last_error_kind") == "fire")
         job["last_error_kind"] = "fire" if fire_error and fire_only_so_far else "agent"
@@ -3152,40 +3171,6 @@ def _reanchor_stale_cron(d: _DueJob) -> bool:
     return False
 
 
-def _fast_forward_missed_recurring(d: _DueJob, grace: int) -> bool:
-    """Re-anchor accumulated misses; return whether catch-up was explicitly disabled.
-
-    The fast-forward is persisted immediately — NOT redundant with advance_next_run/mark_job_run:
-    it
-    protects the crash window before mark_job_run and covers the external fire_due path, which never
-    calls advance_next_run. mark_job_run re-anchors on completion, so the value is provisional.
-    """
-    if _elapsed_seconds(d.scan.now, d.next_run_dt) <= grace:
-        return False
-    new_next = d.recompute_next()
-    if not new_next:
-        return False
-    d.scan.persist(d.job["id"], next_run_at=new_next)
-    # An explicit per-job grace_minutes is the user's catch-up limit for THIS job: past it the
-    # miss is skipped even while the global cron.catch_up_missed default still runs it once.
-    if (_instant_after(_ensure_aware(datetime.fromisoformat(new_next)), d.scan.now)
-            and (jobs_time.grace_seconds_override(d.job.get("grace_minutes")) is not None
-                 or not _cron_config_number("catch_up_missed", True, lambda value: value is not False))):
-        logger.info(
-            "Job '%s' missed its scheduled time (%s, grace=%ds). "
-            "Skipping missed occurrence (grace_minutes or cron.catch_up_missed=false); next run: %s",
-            d.label, d.next_run, grace, new_next)
-        d.scan.on_saved.append(lambda job=d.job: record_cron_missed(job))
-        return True
-    logger.info(
-        "Job '%s' missed its scheduled time (%s, grace=%ds). "
-        "Running now; next run provisionally set to: %s (re-anchored on completion)",
-        d.label, d.next_run, grace, new_next)
-    from cron.occurrences import record_catch_up_occurrence
-    d.scan.on_saved.append(record_catch_up_occurrence)
-    return False
-
-
 def _oneshot_dispatch_limit_reached(job: dict[str, Any], scan: _DueScan) -> bool:
     """One-shot dispatch-limit guard; True when the job must not fire this tick.
 
@@ -3304,11 +3289,13 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     if not manual_run and kind == "cron" and _reanchor_stale_cron(d):
         return False
     grace = _compute_grace_seconds(d.schedule, job.get("grace_minutes"))
-    if not manual_run and recurring and _fast_forward_missed_recurring(d, grace):
+    from cron.missed_runs import fast_forward_missed_recurring, retire_expired_oneshot
+
+    if not manual_run and recurring and fast_forward_missed_recurring(d, grace):
         return False
     if kind == "once":
-        from cron.planned_pause import covers, retire_expired
-        if retire_expired(d) or _oneshot_dispatch_limit_reached(job, scan):
+        from cron.planned_pause import covers
+        if (not covers(job) and retire_expired_oneshot(d)) or _oneshot_dispatch_limit_reached(job, scan):
             return False
         # Durably claim the one-shot for the DURATION of its run: a second scheduler process on the
         # same HERMES_HOME must not re-dispatch it while in flight, and advancing next_run_at by a

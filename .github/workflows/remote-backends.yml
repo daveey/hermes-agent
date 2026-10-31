@@ -66,6 +66,8 @@ jobs:
       - name: Run the real-backend tests
         env:
           HERMES_TEST_DOCKER_IMAGE: ${{ env.HERMES_TEST_IMAGE_REF }}
+          # docker-ci jobs and the daemon share runner.temp, not /var/tmp.
+          HERMES_TEST_DOCKER_MOUNT_ROOT: ${{ runner.temp }}/docker-backend-real
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
@@ -73,6 +75,7 @@ jobs:
         # lane over zero coverage. --fail-on-skip fails the run on any skip, decided
         # from pytest's parsed counts rather than the progress line's display format.
         run: |
+          mkdir -p "$HERMES_TEST_DOCKER_MOUNT_ROOT"
           if ! scripts/run_tests.sh --fail-on-skip \
               tests/tools/test_ssh_environment.py tests/tools/test_docker_backend_real.py; then
             echo "::error::real-backend tests failed or skipped (a skip means the sshd or docker image was not wired through)"

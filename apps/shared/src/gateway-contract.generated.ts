@@ -651,6 +651,7 @@ export interface SetupRuntimeCheckResult {
   model?: string | null
   source?: string | null
   error?: string | null
+  error_code?: string | null
   free_tier_route?: boolean | null
   profile?: string | null
   failure_kind?: 'exhausted' | 'auth_missing' | null
@@ -1973,6 +1974,7 @@ export interface ClientCapabilitiesParams {
 export interface ClientCapabilitiesResult {
   server_requests: string[]
   declines_not_shown?: boolean
+  canonical_clarify_batch?: boolean
 }
 /** Client→server method params / server→client request params. Unknown keys are rejected. */
 export type Params = Record<string, never>

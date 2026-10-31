@@ -573,7 +573,8 @@ class Soak:
                 assert not ok_sent or ok_sent[0]["exec_in_text"], f"{label}: wrong body delivered"
         for exec_id, row in rows.items():
             if exec_id not in starts:  # attempts that never ran must say so truthfully
-                assert row["status"] in ("failed", "unknown", "skipped"), f"{where} ghost row {row}"
+                # "missed" is the ledger row cron/missed_runs.py books for collapsed/skipped slots.
+                assert row["status"] in ("failed", "unknown", "skipped", "missed"), f"{where} ghost row {row}"
         if hasattr(self, "long_run_exec"):
             row = rows[self.long_run_exec]
             assert (row["status"], H.effective_outcome(row, deliveries)) == ("completed", "delivered"), (

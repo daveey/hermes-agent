@@ -114,13 +114,35 @@ for _name in ("__getitem__", "__setitem__", "__delitem__", "__contains__", "__it
 del _name
 
 
+def install_config(config) -> None:
+    """Keep platform manifests lazy while the bundled provider catalog reads no config.
+
+    The facade owns monkeypatch seams; late reads preserve them and reload behavior.
+    Home initialization still occurs at import unless the worker supplied a snapshot.
+    """
+    from hermes_cli import config_provider_env as providers
+
+    def stages():
+        config._inject_profile_env_vars()
+        core = frozenset(dict.keys(config.OPTIONAL_ENV_VARS))
+        providers._PROVIDER_NAMES.update(core - providers._STATIC_NAMES)
+        yield "CORE_DECLARED_ENV_NAMES", core
+        yield "BUNDLED_PLATFORM_SECRET_ENVS", config._inject_platform_plugin_env_vars()
+
+    def ensure_home():
+        if config._worker_config_snapshot() is None:
+            config.ensure_hermes_home()
+
+    install(stages, ensure_home=ensure_home)
+
+
 def _inject_profile_env_vars() -> None:
     """Expose env_vars of every ``auth_type="api_key"`` provider in providers/ via OPTIONAL_ENV_VARS
     without editing this file."""
     from hermes_cli.config_defaults import OPTIONAL_ENV_VARS
     try:
-        from providers import list_providers
-        for _pp in list_providers():
+        from providers import bundled_profiles
+        for _pp in bundled_profiles():
             if _pp.auth_type != "api_key":
                 continue
             for _var in _pp.env_vars:
