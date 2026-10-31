@@ -582,11 +582,11 @@ def _ppid(pid: str) -> int | None:
 
 
 def _child_pidfds(parent: int) -> list[int]:
-    """pidfds of ``parent``'s children: bwrap's one child is the sandbox's PID 1.
+    """Pin the dedicated supervisor's adopted children without PID-reuse races.
 
-    Taken while bwrap is still alive. ``pidfd_open`` pins the pid; the ppid read
-    after it proves the pid was not reaped and reused in between (an exited child
-    is kept: its pidfd only ever reports that it exited).
+    ``pidfd_open`` pins the pid; the ppid read after it proves the pid was not
+    reaped and reused in between. This is a kill-target snapshot, NOT proof of
+    quiescence: only waitpid's ECHILD after reaping the monitor supplies that.
     """
     out = []
     for pid in (p for p in os.listdir("/proc") if p.isdigit() and _ppid(p) == parent):

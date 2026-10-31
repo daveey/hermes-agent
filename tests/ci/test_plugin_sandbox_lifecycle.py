@@ -88,7 +88,7 @@ def test_missing_quiescence_ack_retains_scratch(work):
             assert "--supervise" in argv
             return real_popen(["/bin/true"], **kwargs)
         mod.subprocess.Popen = lost_supervisor
-        sys.exit(mod.main(["--no-network", "--", "true"]))
+        sys.exit(mod.main(["--bwrap", "/bin/false", "--no-network", "--", "true"]))
     ''')
     result = subprocess.run([sys.executable, "-I", "-c", probe, str(helpers.SCRIPT)],
                             capture_output=True, text=True, timeout=60,

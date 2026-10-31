@@ -535,7 +535,8 @@ def _dead(pid: int) -> bool:
 
 
 @pytest.mark.parametrize("launch", ["wrapper", "timeout"])
-def test_scratch_is_removed_only_after_every_sandboxed_process_exits(work, launch):
+@pytest.mark.parametrize("signum", [2, 15], ids=["sigint", "sigterm"])
+def test_scratch_is_removed_only_after_every_sandboxed_process_exits(work, launch, signum):
     """Regression (CI job 124558089350): reaping bwrap does not mean the sandbox is
     gone. The kernel kills the rest of its PID namespace only after bwrap exits, so
     the overlay copy was removed while a sandboxed process still wrote into it and a
@@ -585,8 +586,8 @@ def test_scratch_is_removed_only_after_every_sandboxed_process_exits(work, launc
     try:
         wait_until(ready.exists, timeout=20, what="the sandboxed writer starting")
         writer = int(ready.read_text())
-        proc.send_signal(15)
-        assert proc.wait(timeout=60) == 128 + 15
+        proc.send_signal(signum)
+        assert proc.wait(timeout=60) == 128 + signum
         assert _dead(writer), "the wrapper exited while a sandboxed process still ran"
         assert not list(work.glob("plugin-sandbox-*"))
         assert list(home.iterdir()) == []
